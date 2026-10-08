@@ -1649,10 +1649,6 @@ impl InertiaResponse {
             },
             shared_keys,
         );
-        if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
-            recorder.page_rendered(collector.build(page.clone()));
-        }
-
         let response = if is_inertia_request {
             build_json_response(&page)?
         } else {
@@ -1682,6 +1678,14 @@ impl InertiaResponse {
                 None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())?,
             }
         };
+        // Inertia DevTools records the page only once the response that
+        // carries it was built: a JSON encoding, SSR dispatch or root
+        // template that fails returned above, and the entry then records
+        // the error response the client gets, with no page and no prop
+        // values (PAR-072, PAR-073).
+        if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
+            recorder.page_rendered(collector.build(page));
+        }
         staged_session.commit();
         Ok(response)
     }

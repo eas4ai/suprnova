@@ -113,6 +113,10 @@ The response body of a rendered page is its page object. Any other
 response records its text when its `Content-Type` is textual (JSON,
 `text/*`, XML or JavaScript), decoded when it is JSON, up to 256,000
 bytes; otherwise the reason is `non-textual`, `streamed` or `too-large`.
+A page is recorded only once its response is built, so when the page's
+document fails, such as a root template that fails to render, the entry
+records the error response the client got, with no `component` and no
+`props` or `propValues`.
 
 ## Headers and the id tag
 

@@ -1350,6 +1350,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `InertiaConfig::hooks` now takes its caller's location through
   `#[track_caller]`, and every hook-shared key names that call's file and
   line (DT-03).
+- **A page whose document fails is recorded as the error the client
+  got.** The render handed DevTools its page before the JSON encoding, the
+  SSR dispatch and the root template ran, so when the root template failed
+  to render the client got a `500` while the entry kept the component, the
+  page object as the response body and `propValues` the client never
+  received. The page is now handed over only once the response is built;
+  when any of those steps fails, the entry records the `500` and its body
+  as a response with no page, no `component` and no prop values (DT-03,
+  DT-04).
 
 ## 3.2.1 - 2026-10-05
 
