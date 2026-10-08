@@ -2997,7 +2997,15 @@ pub(crate) fn set_two_factor_pending_epoch(auth_epoch: Option<u64>) {
     });
 }
 
-/// The auth epoch recorded with the pending challenge, if any.
+/// The auth epoch recorded with the pending challenge, if any. Read by the
+/// two-factor challenge completion, which exists only with a database
+/// driver, so the function is gated the same way: the `suprnova` CLI builds
+/// the framework without default features and would see it unused.
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
 pub(crate) fn two_factor_pending_epoch() -> Option<u64> {
     session().and_then(|s| {
         s.data
