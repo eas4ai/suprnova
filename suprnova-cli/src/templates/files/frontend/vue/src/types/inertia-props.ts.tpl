@@ -3,20 +3,6 @@
 
 import '@inertiajs/core';
 
-export interface AppShared {
-  auth: Auth;
-}
-
-export interface Auth {
-  user: UserInfo | null;
-}
-
-export interface UserInfo {
-  id: number;
-  name: string;
-  email: string;
-}
-
 export interface DashboardProps {
   stats: Stats;
   recent_notes: Array<NoteSummary>;
@@ -74,6 +60,20 @@ export interface RegisterProps {
 
 export interface ResetPasswordProps {
   token: string;
+}
+
+export interface SharedData {
+  auth: Auth;
+}
+
+export interface Auth {
+  user: UserInfo | null;
+}
+
+export interface UserInfo {
+  id: number;
+  name: string;
+  email: string;
 }
 
 export interface VerifyEmailProps {

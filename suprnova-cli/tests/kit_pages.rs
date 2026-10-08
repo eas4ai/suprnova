@@ -510,6 +510,7 @@ mod vue {
         for needle in [
             "export interface Flash {\n  toast: Toast | null;\n}\n",
             "export interface Toast {\n  kind: string;\n  message: string;\n}\n",
+            "export interface SharedData {\n  auth: Auth;\n}\n",
             "export interface Auth {\n  user: UserInfo | null;\n}\n",
             "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}\n",
             "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}\n",
