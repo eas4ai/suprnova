@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-trusted-html-alias",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

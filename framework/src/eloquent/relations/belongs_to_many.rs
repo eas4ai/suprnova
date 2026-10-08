@@ -1,0 +1,1574 @@
+//! `BelongsToMany` - many-to-many through a first-class Pivot model.
+//!
+//! Mirrors Laravel's
+//! [`belongsToMany`](https://laravel.com/docs/12.x/eloquent-relationships#many-to-many)
+//! semantics: a join (pivot) table carries one FK to each side. The
+//! pivot in Suprnova is itself a `#[suprnova::model]` struct - own
+//! migrations, own accessors, own events. Extra columns and timestamps
+//! are surfaced on the loaded related rows via `__pivot`, accessed
+//! through the macro-emitted `r.pivot::<RoleUserPivot>()` accessor.
+//!
+//! Default key conventions:
+//!
+//! - `pivot_foreign_key` (pivot column → L): `<snake(parent_struct)>_id`
+//! - `pivot_related_key` (pivot column → R): `<snake(target_struct)>_id`
+//! - `pivot_table`: `<P as EloquentModel>::TABLE`
+//! - `parent_key` / `related_key`: the parent's and the related model's
+//!   primary keys
+//!
+//! All four customisable via the macro's `pivot_foreign_key = "..."` /
+//! `pivot_related_key = "..."` / `pivot_table = "..."` / `lk = "..."`
+//! options.
+//!
+//! Mutators:
+//!
+//! - [`attach`](BelongsToMany::attach) - INSERT a single pivot row.
+//! - [`attach_with`](BelongsToMany::attach_with) - INSERT with extra pivot
+//!   columns (and timestamps if `with_timestamps()` is set).
+//! - [`detach`](BelongsToMany::detach) - DELETE a single pivot row.
+//! - [`sync`](BelongsToMany::sync) - diff-and-apply against the current pivot
+//!   set; runs attach + detach inside a `DatabaseTransaction` so a
+//!   partial failure rolls back.
+//! - [`sync_without_detaching`](BelongsToMany::sync_without_detaching) -
+//!   the attach half of `sync`: adds the missing rows and leaves every
+//!   existing one untouched.
+//!
+//! Readers:
+//!
+//! - [`get`](BelongsToMany::get) - two-query strategy: fetch related rows via
+//!   `JOIN`, fetch pivot rows separately, zip via `(parent_id,
+//!   related_id)`, stamp `__pivot` on each clone.
+//! - [`first`](BelongsToMany::first) - `.get().into_iter().next()`.
+//! - [`count`](BelongsToMany::count) - `SELECT COUNT(*) FROM pivot WHERE
+//!   pivot_foreign_key = ?`.
+//! - [`where_pivot`](BelongsToMany::where_pivot) and family - constrain
+//!   the pivot side of a read. Applies to `get` / `first` / `count`;
+//!   the mutators refuse to run while a filter is set, because Suprnova
+//!   builds its pivot DELETE by hand and a read predicate silently not
+//!   narrowing a write is a difference the caller cannot see. Eager
+//!   loading (`User::with(["roles"])`) goes through the macro-emitted
+//!   `__eager_load` arm, which never constructs a `BelongsToMany` and
+//!   therefore carries no pivot filter - use the relation accessor for
+//!   a filtered read.
+//!
+//! Eager loading happens through the parent model's `__eager_load`
+//! match arm - emitted by `#[suprnova::model]` and exercised by
+//! `User::with(["roles"])`. The arm clones each loaded R per attached
+//! parent so multiple parents sharing one R each get their own copy
+//! of the pivot context.
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
+
+use crate::database::transaction::ExecutorChoice;
+use crate::eloquent::EloquentModel;
+use crate::eloquent::attrs::Attrs;
+use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
+use crate::eloquent::collection::Collection;
+use crate::eloquent::lazy_loading::LazyLoadGuard;
+use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
+use crate::eloquent::relations::{ColumnBinder, Relation, RelationKind};
+use crate::error::FrameworkError;
+
+/// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
+/// [`BelongsToMany::only_trashed`]. Aliased so the field declaration
+/// satisfies clippy's `type_complexity` lint and reads as one type.
+/// Same shape as [`super::belongs_to::ScopeRewrite`][crate::eloquent::relations::belongs_to] -
+/// the soft-delete bound is captured at closure construction time.
+type ScopeRewrite<R> = Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send>;
+
+/// Many-to-many relation from parent `L` to related `R` through pivot
+/// `P`. Constructed by the macro-emitted relation method
+/// (`fn roles(&self) -> BelongsToMany<Self, Role, RoleUserPivot>`);
+/// user code never calls [`BelongsToMany::__new`] directly.
+///
+/// The wrapper holds the FK / key / column metadata plus the parent's
+/// PK value, all paid up at construction time. Terminal methods
+/// (`attach`, `detach`, `sync`, `get`, `first`, `count`) issue the
+/// SQL.
+pub struct BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Parent row's local-key value, JSON-encoded. The macro emits
+    /// `serde_json::to_value(&self.id)` at the call site so the
+    /// runtime path stays homogeneous regardless of the PK type
+    /// (`i64`, `String`, `Uuid`-via-string, ...).
+    parent_key_value: serde_json::Value,
+    /// Pivot table name. Defaults to `<P as EloquentModel>::TABLE` -
+    /// the pivot's own `#[suprnova::model(table = "...")]` declaration
+    /// is the single source of truth. Override via the macro's
+    /// `pivot_table = "..."` option.
+    pivot_table: String,
+    /// Pivot column pointing at the parent (`L`). Default:
+    /// `<snake(parent_struct)>_id`. Override via `pivot_foreign_key`.
+    pivot_foreign_key: String,
+    /// Pivot column pointing at the related (`R`). Default:
+    /// `<snake(target_struct)>_id`. Override via `pivot_related_key`.
+    pivot_related_key: String,
+    /// Parent table's key column. Default: the parent model's primary
+    /// key. Honoured by the [`Relation`] impl.
+    parent_key: String,
+    /// Related table's key column. Default: the related model's
+    /// primary key. Used by the JOIN in [`Self::get`].
+    related_key: String,
+    /// Extra pivot columns to project into `__pivot`. Always includes
+    /// the two FK columns implicitly - `pivot_columns` is for the
+    /// "extras" (`assigned_at`, `notes`, custom data).
+    pivot_columns: Vec<String>,
+    /// When true, the attach path stamps `created_at` / `updated_at`
+    /// on the pivot row and the loader surfaces both columns in the
+    /// pivot context.
+    with_timestamps: bool,
+    /// Deferred soft-delete scope rewrite applied to the related-row
+    /// query at [`Self::get`] / [`Self::first`] time. Only ever set
+    /// by [`Self::with_trashed`] / [`Self::only_trashed`], both gated
+    /// on `R: SoftDeletes`. See
+    /// [`BelongsTo::scope_rewrite`](super::belongs_to::BelongsTo) for
+    /// the matching closure-erasure pattern.
+    scope_rewrite: Option<ScopeRewrite<R>>,
+    /// Pivot-side WHERE terms accumulated by the `where_pivot*` family.
+    /// Applied to the pivot scan in [`Self::get`] and to
+    /// [`Self::count`]; the mutators refuse to run while it is
+    /// non-empty. Empty by default, and an empty set renders no SQL at
+    /// all, so an unfiltered relation issues exactly the statements it
+    /// issued before pivot filtering existed.
+    pivot_filters: PivotFilters,
+    /// The lazy-loading check [`Self::get`] runs before its first query
+    /// ([`Self::first`] goes through it). The mutators do not run it: a
+    /// write is no lazy load. Set by the macro-emitted relation method.
+    lazy_load: LazyLoadGuard,
+    /// PhantomData carries `L`, `R`, `P` so the [`Relation`] impl can
+    /// name `type Parent = L` / `type Target = R` without runtime
+    /// fields. `fn() -> (L, R, P)` keeps the type covariant +
+    /// `Send + Sync` regardless of the parameters.
+    #[allow(clippy::type_complexity)]
+    _phantom: PhantomData<fn() -> (L, R, P)>,
+}
+
+impl<L, R, P> BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    // `P: 'static` is required because `set_pivot_arc` stores the
+    // pivot row inside `Arc<dyn Any + Send + Sync>`, which has a
+    // `'static` lifetime bound. Every `#[suprnova::model]`-generated
+    // struct is `'static` in practice (no borrowed fields), so this
+    // is purely a where-clause witness.
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Construct a `BelongsToMany`. Invoked by the macro-emitted
+    /// relation method.
+    #[doc(hidden)]
+    pub fn __new(
+        parent_key_value: serde_json::Value,
+        pivot_table: String,
+        pivot_foreign_key: String,
+        pivot_related_key: String,
+    ) -> Self {
+        Self {
+            parent_key_value,
+            pivot_table,
+            pivot_foreign_key,
+            pivot_related_key,
+            parent_key: L::PRIMARY_KEY.into(),
+            related_key: R::PRIMARY_KEY.into(),
+            pivot_columns: Vec::new(),
+            with_timestamps: false,
+            scope_rewrite: None,
+            pivot_filters: PivotFilters::default(),
+            lazy_load: LazyLoadGuard::default(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Attach the lazy-loading check of the row this relation was read
+    /// from. Invoked by the macro-emitted relation method; not part of
+    /// the public API.
+    #[doc(hidden)]
+    pub fn __lazy_load(mut self, guard: LazyLoadGuard) -> Self {
+        self.lazy_load = guard;
+        self
+    }
+
+    /// Declare extra pivot columns to surface on each loaded R via
+    /// `r.pivot::<P>()`. Mirrors Laravel's `->withPivot([...])`.
+    ///
+    /// The two FK columns (`pivot_foreign_key`, `pivot_related_key`)
+    /// are always loaded; this option is for "extras" - `assigned_at`,
+    /// `notes`, custom payloads.
+    pub fn with_pivot<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.pivot_columns
+            .extend(columns.into_iter().map(Into::into));
+        self
+    }
+
+    /// Touch `created_at` / `updated_at` on every pivot row written
+    /// by `attach` / `attach_with` / `sync`, and surface both columns
+    /// in the loaded pivot context. Mirrors Laravel's
+    /// `->withTimestamps()`.
+    pub fn with_timestamps(mut self) -> Self {
+        self.with_timestamps = true;
+        self
+    }
+
+    /// Override the pivot column pointing at the parent.
+    pub fn foreign_key(mut self, key: impl Into<String>) -> Self {
+        self.pivot_foreign_key = key.into();
+        self
+    }
+
+    /// Override the pivot column pointing at the related row.
+    pub fn related_key(mut self, key: impl Into<String>) -> Self {
+        self.pivot_related_key = key.into();
+        self
+    }
+
+    /// Override the parent's key column. Only updates the metadata
+    /// surface; the runtime parent value was extracted at construction.
+    pub fn local_key(mut self, key: impl Into<String>) -> Self {
+        self.parent_key = key.into();
+        self
+    }
+
+    /// Override the related-side primary-key COLUMN name used by
+    /// [`Self::get`]'s IN-set filter and the macro-emitted aggregate
+    /// JOIN (`__sn_r.<col> = __sn_p.<pivot_related_key>`). Defaults to
+    /// the related model's primary key. Set this when the pivot holds
+    /// another column of the related model, as the macro does for a
+    /// relation that declares `related_key = "..."`.
+    ///
+    /// Named `related_pk` (not `related_key`) so it doesn't collide
+    /// with the existing [`Self::related_key`] builder, which sets the
+    /// pivot-side related FK column.
+    pub fn related_pk(mut self, key: impl Into<String>) -> Self {
+        self.related_key = key.into();
+        self
+    }
+
+    pivot_filter_methods!(P);
+
+    /// Validate all three SQL identifiers that flow unquoted into every
+    /// raw-SQL statement this relation builds. Called at the top of
+    /// every terminal method so a misconfigured key (e.g. one set via
+    /// the public builder setters from untrusted input) is rejected
+    /// before any network I/O.
+    fn validate_meta(&self) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.pivot_table)?;
+        crate::database::validate_identifier(&self.pivot_foreign_key)?;
+        crate::database::validate_identifier(&self.pivot_related_key)?;
+        Ok(())
+    }
+
+    /// The pivot table as the pivot statements address it, with the
+    /// binders that type its columns.
+    fn pivot_target(&self) -> PivotTarget<'_> {
+        PivotTarget {
+            table: &self.pivot_table,
+            foreign_key: &self.pivot_foreign_key,
+            related_key: &self.pivot_related_key,
+            pivot: <P as EloquentModel>::bind_column,
+            parent: (<L as EloquentModel>::bind_column, &self.parent_key),
+            related: (<R as EloquentModel>::bind_column, &self.related_key),
+        }
+    }
+
+    /// Insert a pivot row linking the parent to `related_id`.
+    /// Equivalent to `attach_with(related_id, Attrs::new())`.
+    ///
+    /// Mirrors Laravel's `->attach($id)`. Idempotency is not
+    /// guaranteed - if the pivot has a UNIQUE constraint on
+    /// `(parent_id, related_id)`, a second `attach()` of the same
+    /// pair returns a database error. Use [`Self::sync`] to set a
+    /// full set without duplicate INSERTs.
+    pub async fn attach(
+        self,
+        related_id: impl Into<serde_json::Value>,
+    ) -> Result<(), FrameworkError> {
+        self.attach_with(related_id, Attrs::new()).await
+    }
+
+    /// Insert a pivot row with extra column values (and timestamps
+    /// when `with_timestamps()` is on). Mirrors Laravel's
+    /// `->attach($id, ['note' => '...'])`.
+    ///
+    /// Each extra the pivot model `P` declares is written through `P`'s
+    /// cast and mutator, as `Model::create` writes it: a column `P`
+    /// casts `AsEncrypted` is stored encrypted, and reads back through
+    /// `r.pivot::<P>()` as the plain value. A value that does not decode
+    /// into the field's type is a validation error. A key `P` does not
+    /// declare is written as it is, and an explicit `null` as SQL `NULL`.
+    ///
+    /// # Security
+    ///
+    /// Keys of `extra` are pivot column names - they interpolate
+    /// **raw** into the rendered `INSERT INTO pivot (...) VALUES (...)`
+    /// SQL (same SQL-identifier contract as
+    /// [`Builder::filter`](crate::eloquent::Builder::filter) - see the
+    /// builder module docs). The Fillable / Guarded mass-assignment
+    /// guard does NOT apply at this layer. **Never accept the key
+    /// names from untrusted input**; hardcode them via the
+    /// [`attrs!`](crate::attrs) macro (which stringifies identifier
+    /// keys at compile time) or pick from a known allowlist. The
+    /// values are parameterised binds and ARE safe to take from
+    /// untrusted input.
+    pub async fn attach_with(
+        self,
+        related_id: impl Into<serde_json::Value>,
+        extra: Attrs,
+    ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
+        self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.attach_with_inner(id, extra)
+        })
+        .await
+    }
+
+    /// The pivot insert and its advance, run under [`Self::attach_with`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn attach_with_inner(
+        self,
+        id: serde_json::Value,
+        extra: Attrs,
+    ) -> Result<(), FrameworkError> {
+        // Resolve through ExecutorChoice so the pivot INSERT lands on
+        // the ambient transaction connection when CURRENT_TX is active,
+        // and so the parent model's `#[model(connection = "...")]`
+        // default routes correctly outside a tx - pivot tables
+        // conventionally live on the parent's database.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        let extra = pivot_extras_through_casts::<P>(
+            extra,
+            &[&self.pivot_foreign_key, &self.pivot_related_key],
+        )?;
+        match &exec {
+            ExecutorChoice::Tx(t, _) => {
+                attach_one(
+                    t.as_ref(),
+                    &self.pivot_target(),
+                    &self.parent_key_value,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c, _) => {
+                attach_one(
+                    c.inner(),
+                    &self.pivot_target(),
+                    &self.parent_key_value,
+                    &id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await
+            }
+        }?;
+        // `resolve_write`'s first argument is hardcoded `None` above -
+        // this relation has no `with_tx`-style explicit override, only
+        // ambient `CURRENT_TX` or the pool, so the ambient-aware
+        // `after_bulk_write` (not an explicit-handle form) is always
+        // correct here. The pivot row's own key is composite
+        // (`pivot_foreign_key`, `pivot_related_key`), not a single value
+        // `DependencyIdentity::record` can address, so this advances the
+        // table only - over-invalidating a pivot table on every attach is
+        // the safe direction.
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
+    }
+
+    /// Delete pivot rows linking the parent to `related_id`. Mirrors
+    /// Laravel's `->detach($id)`.
+    pub async fn detach(
+        self,
+        related_id: impl Into<serde_json::Value>,
+    ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
+        self.validate_meta()?;
+        let id = related_id.into();
+        crate::render_cache::orm::atomic(L::default_connection_name(), || self.detach_inner(id))
+            .await
+    }
+
+    /// The pivot delete and its advance, run under [`Self::detach`]'s
+    /// atomic wrapper (CACHE-009).
+    async fn detach_inner(self, id: serde_json::Value) -> Result<(), FrameworkError> {
+        // Resolve through ExecutorChoice so the pivot DELETE lands on
+        // the ambient transaction connection when CURRENT_TX is active,
+        // and honours the parent model's `#[model(connection = "...")]`
+        // default outside a tx.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        match &exec {
+            ExecutorChoice::Tx(t, _) => {
+                detach_one(
+                    t.as_ref(),
+                    &self.pivot_target(),
+                    &self.parent_key_value,
+                    &id,
+                )
+                .await
+            }
+            ExecutorChoice::Pool(c, _) => {
+                detach_one(c.inner(), &self.pivot_target(), &self.parent_key_value, &id).await
+            }
+        }?;
+        // Same reasoning as `attach_with`: no explicit-tx override on
+        // this relation, and the pivot row's composite key can't address
+        // `DependencyIdentity::record`, so the table identity is correct.
+        crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
+    }
+
+    /// Replace the parent's full set of attached relations with the
+    /// given IDs. Mirrors Laravel's `->sync([...])`.
+    ///
+    /// 1. SELECT current pivot rows for this parent.
+    /// 2. Compute `attach_set = ids - current` and
+    ///    `detach_set = current - ids`.
+    /// 3. Execute the attaches + detaches inside a single
+    ///    `DatabaseTransaction` so a partial failure rolls back.
+    ///
+    /// IDs in `ids` are normalised by their JSON string form (matching
+    /// the framework-wide FK-key-as-string convention), so duplicates
+    /// in the input set collapse to one attach.
+    pub async fn sync<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<serde_json::Value>,
+    {
+        self.sync_ids(unique_pivot_ids(ids), true).await
+    }
+
+    /// Attach each of `ids` the relation does not hold yet, and leave
+    /// every pivot row it already has as it is. Mirrors Laravel's
+    /// `->syncWithoutDetaching([...])`.
+    ///
+    /// It is [`Self::sync`] without the detach half: an id already
+    /// attached is skipped, not rewritten, so that row's extra pivot
+    /// columns and its `created_at` / `updated_at` stay as they were. The
+    /// inserts run in one transaction, so one that fails rolls back the
+    /// others, and duplicate ids collapse to one attach as in `sync`.
+    /// Returns `()` like `sync`, not Laravel's attached / detached /
+    /// updated report.
+    pub async fn sync_without_detaching<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<serde_json::Value>,
+    {
+        self.sync_ids(unique_pivot_ids(ids), false).await
+    }
+
+    /// The checks and the atomic wrapper shared by [`Self::sync`] and
+    /// [`Self::sync_without_detaching`]. `detaching` says whether rows
+    /// missing from `target_ids` are deleted.
+    async fn sync_ids(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
+        self.validate_meta()?;
+        crate::render_cache::orm::atomic(L::default_connection_name(), || {
+            self.sync_inner(target_ids, detaching)
+        })
+        .await
+    }
+
+    /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
+    /// atomic wrapper (CACHE-009): inside the ambient transaction the
+    /// writes route through it and the advance joins it. Without
+    /// `detaching` nothing is deleted.
+    async fn sync_inner(
+        self,
+        target_ids: Vec<serde_json::Value>,
+        detaching: bool,
+    ) -> Result<(), FrameworkError> {
+        use std::collections::{HashMap, HashSet};
+
+        // Resolve through ExecutorChoice so the SELECT + INSERTs +
+        // DELETEs all run on the ambient transaction connection when
+        // CURRENT_TX is active, and honour the parent model's
+        // `#[model(connection = "...")]` default outside a tx. Outside
+        // a tx we still open an inner SeaORM transaction (below) for
+        // atomicity of the attach/detach loop; that inner tx is
+        // unnecessary when we already inherit one from the closure
+        // form.
+        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+        let backend = exec.backend();
+
+        // SELECT current pivot rows: only the related-key column is
+        // needed for the diff. Backend-aware placeholder for the
+        // single parent-key bind.
+        let target = self.pivot_target();
+        let parent = bind_pivot_comparison(
+            backend,
+            target.typed(
+                target.foreign_key,
+                Some(target.parent),
+                &self.parent_key_value,
+            ),
+            &self.parent_key_value,
+        );
+        let rows = match parent {
+            Some(parent) => {
+                let select_ph =
+                    crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
+                let select_sql = format!(
+                    "SELECT {related_key} AS __sn_related FROM {table} WHERE {fk} = {ph}",
+                    related_key = self.pivot_related_key,
+                    table = self.pivot_table,
+                    fk = self.pivot_foreign_key,
+                    ph = select_ph,
+                );
+                let select_stmt =
+                    Statement::from_sql_and_values(backend, &select_sql, vec![parent]);
+                exec.query_all(select_stmt)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?
+            }
+            None => Vec::new(),
+        };
+
+        // Pull each row's related-key as a JSON value so the diff
+        // matches by the same shape as the input set.
+        let mut current_map: HashMap<String, serde_json::Value> = HashMap::new();
+        for r in rows.iter() {
+            // The column may come back as i64, String, etc. - try the
+            // common shapes; falling back to the textual form covers
+            // exotic PKs. The key for the HashMap is always the JSON
+            // string form of whatever we recover.
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
+                current_map.insert(v.to_string(), v);
+            }
+        }
+        let current_keys: HashSet<String> = current_map.keys().cloned().collect();
+
+        let target_keys: HashSet<String> = target_ids.iter().map(|v| v.to_string()).collect();
+
+        // attach_set = target - current
+        let mut attach_set: Vec<serde_json::Value> = Vec::new();
+        for v in target_ids.into_iter() {
+            if !current_keys.contains(&v.to_string()) {
+                attach_set.push(v);
+            }
+        }
+        // detach_set = current - target, and nothing without `detaching`
+        let detach_set: Vec<serde_json::Value> = if detaching {
+            current_map
+                .into_iter()
+                .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Transactional attach + detach. Either all rows commit or
+        // none do. When we already inherit a tx via `CURRENT_TX` the
+        // ambient one provides atomicity - opening a nested SeaORM
+        // begin() inside a tx connection would silently degrade to a
+        // savepoint that the outer rollback would still discard, so we
+        // just write directly via the executor. Outside a tx we still
+        // wrap the writes in an inner SeaORM transaction so a partial
+        // failure rolls back.
+        match &exec {
+            ExecutorChoice::Tx(t, _) => {
+                for related_id in detach_set.iter() {
+                    detach_one(
+                        t.as_ref(),
+                        &self.pivot_target(),
+                        &self.parent_key_value,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    attach_one(
+                        t.as_ref(),
+                        &self.pivot_target(),
+                        &self.parent_key_value,
+                        related_id,
+                        Vec::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+            }
+            ExecutorChoice::Pool(c, _) => {
+                let txn = c
+                    .inner()
+                    .begin()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                for related_id in detach_set.iter() {
+                    detach_one(
+                        &txn,
+                        &self.pivot_target(),
+                        &self.parent_key_value,
+                        related_id,
+                    )
+                    .await?;
+                }
+                for related_id in attach_set.iter() {
+                    attach_one(
+                        &txn,
+                        &self.pivot_target(),
+                        &self.parent_key_value,
+                        related_id,
+                        Vec::new(),
+                        self.with_timestamps,
+                    )
+                    .await?;
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+            }
+        }
+        if !attach_set.is_empty() || !detach_set.is_empty() {
+            crate::render_cache::orm::after_bulk_write(&self.pivot_table).await?;
+        }
+        Ok(())
+    }
+
+    /// Fetch every related row currently attached to this parent.
+    /// Each row carries its pivot context via `__pivot`, accessible
+    /// through the macro-emitted `.pivot::<P>()` accessor.
+    ///
+    /// Strategy:
+    ///
+    /// 1. Fetch related rows via `Builder<R>` with
+    ///    `WHERE id IN (SELECT related_key FROM pivot WHERE fk = ?)`.
+    /// 2. Fetch pivot rows via `Builder<P>` with `WHERE fk = ?`.
+    /// 3. Build `HashMap<related_id, P>` from the second query.
+    /// 4. Walk the related rows; for each, stamp
+    ///    `__pivot = Some(Arc::new(pivot_row))`.
+    ///
+    /// The two-query split is intentional: a single `SELECT R.*, P.*
+    /// FROM ... JOIN ...` would require column-prefix splitting in
+    /// SeaORM's deserialisation path, which is not first-class on the
+    /// `FromQueryResult` derive. Two homogeneous queries each round-
+    /// trip the rows cleanly through each model's own deserialiser.
+    ///
+    /// Refused without a query when it is a lazy load that
+    /// [lazy-loading prevention](crate::eloquent::lazy_loading) catches.
+    pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
+        self.lazy_load.check()?;
+        self.validate_meta()?;
+        // Route the pivot-id SELECT through ExecutorChoice so it
+        // honours CURRENT_TX and the parent model's
+        // `#[model(connection = "...")]` default. The downstream
+        // `R::query()` / `P::query()` calls for the related and pivot
+        // rows already consult ExecutorChoice through their own
+        // `Builder::get` resolution with each model's own default.
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
+        let backend = exec.backend();
+
+        // Fetch the set of related IDs attached to this parent.
+        let id_ph = match backend {
+            DatabaseBackend::Postgres => "$1".to_string(),
+            _ => "?".to_string(),
+        };
+        let mut id_values: Vec<sea_orm::Value> =
+            vec![json_value_to_sea_value(&self.parent_key_value)];
+        // The parent key is bind 1; PostgreSQL placeholders are
+        // positional, so the filter renderer must continue from there.
+        let mut id_bind_index: usize = 1;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut id_values, &mut id_bind_index)?;
+        let id_sql = format!(
+            "SELECT {rk} AS __sn_related FROM {table} WHERE {fk} = {ph}{pivot_predicates}",
+            rk = self.pivot_related_key,
+            table = self.pivot_table,
+            fk = self.pivot_foreign_key,
+            ph = id_ph,
+            pivot_predicates = pivot_predicates,
+        );
+        let id_stmt = Statement::from_sql_and_values(backend, &id_sql, id_values);
+        let id_rows = exec
+            .query_all(id_stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let mut related_ids: Vec<serde_json::Value> = Vec::with_capacity(id_rows.len());
+        for r in id_rows.iter() {
+            if let Some(v) = pivot_key_json(r, "__sn_related") {
+                related_ids.push(v);
+            }
+        }
+        if related_ids.is_empty() {
+            return Ok(Collection::new());
+        }
+
+        // Fetch the related rows by IN-set on their PK column. Any
+        // pending scope rewrite (set by `with_trashed` / `only_trashed`
+        // on a soft-delete `R`) runs against the inner builder
+        // before `.get()`. Non-soft-delete `R`s never construct one,
+        // so this is a per-call indirection of a single `Option::map`.
+        let related_rows: Vec<R> = {
+            let mut q = R::query().filter_in(self.related_key.as_str(), related_ids.clone());
+            if let Some(rw) = self.scope_rewrite {
+                q = rw(q);
+            }
+            q.get().await?.into_vec()
+        };
+
+        // Fetch the pivot rows attached to this parent, from the table
+        // the id scan read and under the same predicates - otherwise a
+        // filtered read, or a relation that names its own pivot table,
+        // could stamp `__pivot` from a row the scan never saw.
+        let pivot_rows: Vec<P> = load_pivot_rows::<P>(
+            &self.pivot_table,
+            L::default_connection_name(),
+            vec![(
+                self.pivot_foreign_key.clone(),
+                PivotMatch::Eq(self.parent_key_value.clone()),
+            )],
+            &self.pivot_filters,
+        )
+        .await?;
+
+        // Index pivots by related_key value (JSON-string form).
+        use std::collections::HashMap;
+        let mut by_related: HashMap<String, P> = HashMap::new();
+        for p in pivot_rows.into_iter() {
+            let p_json = serde_json::to_value(&p).unwrap_or(serde_json::Value::Null);
+            let key = p_json
+                .get(&self.pivot_related_key)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            by_related.insert(key, p);
+        }
+
+        // Stamp the pivot context onto each related row via the
+        // `EagerLoadDispatch::set_pivot_arc` hook - the field
+        // (`row.__pivot`) isn't reachable from generic code, but
+        // every `#[suprnova::model]` struct ships the setter.
+        let mut out: Vec<R> = Vec::with_capacity(related_rows.len());
+        for r in related_rows.into_iter() {
+            let r_json = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
+            let key = r_json
+                .get(&self.related_key)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let mut row = r;
+            if let Some(pivot) = by_related.get(&key) {
+                row.set_pivot_arc(Some(Arc::new(pivot.clone())));
+            }
+            out.push(row);
+        }
+        Ok(Collection::from_vec(out))
+    }
+
+    /// Convenience over `get()` - drop everything after the first
+    /// related row.
+    pub async fn first(self) -> Result<Option<R>, FrameworkError> {
+        Ok(self.get().await?.into_vec().into_iter().next())
+    }
+
+    /// `SELECT COUNT(*) FROM pivot WHERE pivot_foreign_key = ?`.
+    /// Returns `i64` to match the [`crate::eloquent::HasMany::count`]
+    /// surface.
+    pub async fn count(self) -> Result<i64, FrameworkError> {
+        self.validate_meta()?;
+        // Read via ExecutorChoice so a count taken inside
+        // `DB::transaction { ... }` sees in-tx pivot
+        // attaches/detaches, and honour the parent model's
+        // `#[model(connection = "...")]` default outside a tx.
+        let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
+        let backend = exec.backend();
+        let ph = match backend {
+            DatabaseBackend::Postgres => "$1".to_string(),
+            _ => "?".to_string(),
+        };
+        let mut values: Vec<sea_orm::Value> = vec![json_value_to_sea_value(&self.parent_key_value)];
+        let mut bind_index: usize = 1;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut values, &mut bind_index)?;
+        let sql = format!(
+            "SELECT COUNT(*) AS __sn_count FROM {table} WHERE {fk} = {ph}{pivot_predicates}",
+            table = self.pivot_table,
+            fk = self.pivot_foreign_key,
+            ph = ph,
+            pivot_predicates = pivot_predicates,
+        );
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let row = exec
+            .query_one(stmt)
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        Ok(row
+            .and_then(|r| r.try_get::<i64>("", "__sn_count").ok())
+            .unwrap_or(0))
+    }
+}
+
+/// Soft-delete scope modifiers for `BelongsToMany<L, R, P>` when the
+/// related (`R`) side is soft-deletable. The pivot table itself is
+/// never filtered for `deleted_at` - pivot rows are a join artefact,
+/// not a domain object that gets archived. Matches Laravel's
+/// `withTrashed()` shape: applies to the related table, not the
+/// intermediate. Future tasks can layer a separate
+/// `with_trashed_pivot` if a custom pivot model declares its own
+/// `soft_deletes`.
+impl<L, R, P> BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model + crate::eloquent::SoftDeletes,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Widen the related-row lookup to include trashed `R` rows.
+    pub fn with_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<R>| b.with_trashed()));
+        self
+    }
+
+    /// Restrict the related-row lookup to *only* trashed `R` rows.
+    pub fn only_trashed(mut self) -> Self {
+        self.scope_rewrite = Some(Box::new(|b: Builder<R>| b.only_trashed()));
+        self
+    }
+}
+
+impl<L, R, P> Relation for BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    type Parent = L;
+    type Target = R;
+    const KIND: RelationKind = RelationKind::BelongsToMany;
+
+    fn parent_key(&self) -> &str {
+        &self.parent_key
+    }
+
+    fn foreign_key(&self) -> &str {
+        &self.pivot_foreign_key
+    }
+}
+
+// ---- Internal helpers ----------------------------------------------------
+
+/// `ids` as JSON values, each kept once. Ids are compared by their JSON
+/// string form, the framework-wide convention for foreign-key values, and
+/// the first occurrence keeps its place so inserts run in a deterministic
+/// order. Shared by the `sync` family here and on `MorphToMany`.
+pub(crate) fn unique_pivot_ids<I, V>(ids: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = V>,
+    V: Into<serde_json::Value>,
+{
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for raw in ids {
+        let value: serde_json::Value = raw.into();
+        if seen.insert(value.to_string()) {
+            unique.push(value);
+        }
+    }
+    unique
+}
+
+/// The pivot table a pivot statement addresses: its name, its two key
+/// columns, and how a value binds for each column.
+///
+/// A pivot write is a raw statement, so nothing types its values but this:
+/// the pivot model's column binder first, and for the two key columns the
+/// binder of the model whose key the column holds. A `u64` id then binds
+/// as the unsigned number it is, rather than as text, which SQLite stored
+/// as a rounded REAL and Postgres refused after the statement was sent.
+pub(crate) struct PivotTarget<'a> {
+    /// The pivot table.
+    pub(crate) table: &'a str,
+    /// The pivot column that holds the parent's key.
+    pub(crate) foreign_key: &'a str,
+    /// The pivot column that holds the related model's key.
+    pub(crate) related_key: &'a str,
+    /// The pivot model's column binder.
+    pub(crate) pivot: ColumnBinder,
+    /// The parent model's binder and the parent column `foreign_key` holds.
+    pub(crate) parent: (ColumnBinder, &'a str),
+    /// The related model's binder and the related column `related_key`
+    /// holds.
+    pub(crate) related: (ColumnBinder, &'a str),
+}
+
+impl PivotTarget<'_> {
+    /// How `value` binds for the pivot column `column`, as the pivot model
+    /// types the column, or else as the model whose key the column holds
+    /// (`key`) types that key; `None` when neither knows the column.
+    pub(crate) fn typed(
+        &self,
+        column: &str,
+        key: Option<(ColumnBinder, &str)>,
+        value: &serde_json::Value,
+    ) -> Option<sea_orm::Value> {
+        (self.pivot)(column, value)
+            .or_else(|| key.and_then(|(bind, key_column)| bind(key_column, value)))
+    }
+}
+
+/// Bind `value`, written to the pivot column `column` of `table`.
+///
+/// `typed` is the binding the models give the column. A `u64` above
+/// `i64::MAX` for a column Postgres or SQLite stores signed is refused
+/// before anything is sent, as a model's write is, naming the column: the
+/// drivers there cannot bind it, and SQLite would store a rounded REAL. A
+/// value whose column no model types binds by the column's own type
+/// (`bind_large_unsigned`), or as it is.
+pub(crate) async fn bind_pivot_write<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    column: &str,
+    typed: Option<sea_orm::Value>,
+    value: &serde_json::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use crate::eloquent::casts::unsigned::{bind_large_unsigned, exact_unsigned};
+
+    let backend = conn.get_database_backend();
+    match typed {
+        Some(bound) => checked_pivot_value(backend, table, column, bound),
+        None => match value.as_u64() {
+            Some(n) if n > i64::MAX as u64 => {
+                let mut bound = bind_large_unsigned(conn, table, &[(column.to_owned(), n)]).await?;
+                Ok(bound
+                    .remove(column)
+                    .unwrap_or_else(|| exact_unsigned(backend, n)))
+            }
+            _ => Ok(json_value_to_sea_value(value)),
+        },
+    }
+}
+
+/// `bound`, a typed value written to pivot column `column` of `table`, or
+/// the refusal of a `u64` above `i64::MAX` that Postgres or SQLite would
+/// write to a signed column: the drivers there cannot bind it, and SQLite
+/// would store a rounded REAL. The refusal names the column.
+pub(crate) fn checked_pivot_value(
+    backend: DatabaseBackend,
+    table: &str,
+    column: &str,
+    bound: sea_orm::Value,
+) -> Result<sea_orm::Value, FrameworkError> {
+    use crate::eloquent::casts::unsigned::{beyond_signed, refuse_unsigned_overflow};
+
+    if beyond_signed(backend, &bound) {
+        refuse_unsigned_overflow(backend, table, column, &bound)
+            .map_err(FrameworkError::database)?;
+    }
+    Ok(bound)
+}
+
+/// Bind `value`, compared with a pivot column in a pivot statement's
+/// `WHERE`, or `None` when no row can match: a `u64` above `i64::MAX` for a
+/// column Postgres stores signed, which holds only integers. SQLite
+/// compares the value's digits, as it does a literal, so a REAL an older
+/// write left is still found. A column no model types gets the exact
+/// number (`exact_unsigned`).
+pub(crate) fn bind_pivot_comparison(
+    backend: DatabaseBackend,
+    typed: Option<sea_orm::Value>,
+    value: &serde_json::Value,
+) -> Option<sea_orm::Value> {
+    match typed {
+        Some(sea_orm::Value::BigUnsigned(Some(n))) if n > i64::MAX as u64 => match backend {
+            DatabaseBackend::Postgres => None,
+            DatabaseBackend::Sqlite => Some(sea_orm::Value::String(Some(n.to_string()))),
+            _ => Some(sea_orm::Value::BigUnsigned(Some(n))),
+        },
+        Some(bound) => Some(bound),
+        None => Some(match value.as_u64() {
+            Some(n) if n > i64::MAX as u64 => {
+                crate::eloquent::casts::unsigned::exact_unsigned(backend, n)
+            }
+            _ => json_value_to_sea_value(value),
+        }),
+    }
+}
+
+/// A key a pivot row holds, read back as JSON in the shape the caller's ids
+/// have: a signed integer, an unsigned one (MySQL's `BIGINT UNSIGNED`,
+/// which decodes as neither `i64` nor text), or text. `None` for anything
+/// else.
+pub(crate) fn pivot_key_json(
+    row: &sea_orm::QueryResult,
+    column: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(n) = row.try_get::<i64>("", column) {
+        return Some(serde_json::Value::from(n));
+    }
+    if let Ok(n) = row.try_get::<u64>("", column) {
+        return Some(serde_json::Value::from(n));
+    }
+    row.try_get::<String>("", column)
+        .ok()
+        .map(serde_json::Value::from)
+}
+
+/// One pivot extra as the INSERT writes it: the column, and its value.
+pub(crate) type PivotExtra = (String, PivotExtraValue);
+
+/// The value of one pivot extra, as [`pivot_extras_through_casts`]
+/// encodes it.
+pub(crate) enum PivotExtraValue {
+    /// An explicit SQL `NULL`.
+    Null,
+    /// The value the pivot model stores for a column it declares.
+    Stored(sea_orm::Value),
+    /// The value given for a column the pivot model does not declare,
+    /// bound when it is written by the column's own type
+    /// ([`bind_pivot_write`]).
+    Undeclared(serde_json::Value),
+}
+
+/// Bind pivot extra `column`'s `value`, written to `table`: `None` for an
+/// explicit SQL `NULL`. A stored `u64` above `i64::MAX` is refused on
+/// Postgres and SQLite, as a key column's is, and an undeclared column's
+/// value binds by the column's type (see [`bind_pivot_write`]).
+pub(crate) async fn bind_pivot_extra<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    column: &str,
+    value: PivotExtraValue,
+) -> Result<Option<sea_orm::Value>, FrameworkError> {
+    match value {
+        PivotExtraValue::Null => Ok(None),
+        PivotExtraValue::Stored(stored) => {
+            checked_pivot_value(conn.get_database_backend(), table, column, stored).map(Some)
+        }
+        PivotExtraValue::Undeclared(given) => bind_pivot_write(conn, table, column, None, &given)
+            .await
+            .map(Some),
+    }
+}
+
+/// Encode `attach_with`'s extras the way pivot model `P` stores them.
+///
+/// The pivot is a `#[suprnova::model]` with its own casts, and reads go
+/// through them, so the write must too. A column `P` declares is passed
+/// through `P::active_model_from_attrs` - its cast, mutator and storage
+/// type - and the stored value read back off the active model: an
+/// `AsEncrypted` note is written as ciphertext, an `AsHashed` one as its
+/// hash. Binding the JSON as it came stored plaintext under an
+/// encryption cast, and every later read of the relation failed to
+/// decrypt it.
+///
+/// A column `P` does not declare has no cast to apply and binds as it
+/// is, as before. Every key is checked as an SQL identifier first,
+/// since the keys are interpolated into the INSERT and may carry caller
+/// input. A key in `framework_columns` (the pivot's own foreign keys) is
+/// dropped: the relation writes those itself.
+pub(crate) fn pivot_extras_through_casts<P>(
+    extra: Attrs,
+    framework_columns: &[&str],
+) -> Result<Vec<PivotExtra>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IdenStatic, Iterable};
+
+    let column_of = |name: &str| {
+        <<P::Entity as EntityTrait>::Column as Iterable>::iter().find(|c| c.as_str() == name)
+    };
+    let mut declared = Attrs::new();
+    let mut encoded: Vec<(String, PivotExtraValue, bool)> = Vec::new();
+    for (key, value) in extra.iter() {
+        if framework_columns.contains(&key) {
+            continue;
+        }
+        crate::database::validate_identifier(key)?;
+        if value.is_null() {
+            encoded.push((key.to_string(), PivotExtraValue::Null, false));
+        } else if column_of(key).is_some() {
+            declared.insert(key, value.clone());
+            encoded.push((key.to_string(), PivotExtraValue::Null, true));
+        } else {
+            encoded.push((
+                key.to_string(),
+                PivotExtraValue::Undeclared(value.clone()),
+                false,
+            ));
+        }
+    }
+    let active = if declared.is_empty() {
+        None
+    } else {
+        Some(P::active_model_from_attrs(declared)?)
+    };
+    encoded
+        .into_iter()
+        .map(|(key, value, through_cast)| {
+            if !through_cast {
+                return Ok((key, value));
+            }
+            let column = column_of(&key).ok_or_else(|| {
+                FrameworkError::internal(format!("pivot column `{key}` vanished while encoding"))
+            })?;
+            let stored = active.as_ref().map(|am| am.get(column));
+            match stored {
+                Some(ActiveValue::Set(stored) | ActiveValue::Unchanged(stored)) => {
+                    Ok((key, PivotExtraValue::Stored(stored)))
+                }
+                _ => Err(FrameworkError::internal(format!(
+                    "pivot column `{key}` was not encoded by the pivot model"
+                ))),
+            }
+        })
+        .collect()
+}
+
+/// How a pivot read matches one column.
+pub(crate) enum PivotMatch {
+    /// `column = value`.
+    Eq(serde_json::Value),
+    /// `column IN (values)`.
+    In(Vec<serde_json::Value>),
+}
+
+/// The pivot rows of a relation, hydrated through pivot model `P`.
+///
+/// They are read from `table`, the pivot table the relation names, which
+/// a `pivot_table = "..."` declaration can set apart from the table `P`
+/// is declared over. The relation's id scan, `count`, and pivot writes
+/// all use `table`; reading the pivot context from `P`'s own table
+/// instead stamped rows from another table onto the related models.
+///
+/// The read is the pivot table itself, on `connection` (the parent's,
+/// where the pivot writes go), hydrated through `P`'s casts. `P`'s own
+/// global scopes and soft-delete filter do not apply: they govern `P`
+/// queried as a model of its own, as Laravel's `using(Pivot)` relation
+/// reads the pivot table through a plain query. Applying them here
+/// dropped attachments the relation's id scan and `count` still saw,
+/// so a related row came back with no pivot context, or not at all.
+pub(crate) async fn load_pivot_rows<P>(
+    table: &str,
+    connection: Option<&'static str>,
+    conditions: Vec<(String, PivotMatch)>,
+    filters: &PivotFilters,
+) -> Result<Vec<P>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    crate::database::validate_identifier(table)?;
+    let exec = ExecutorChoice::resolve_read(None, None, connection).await?;
+    let backend = exec.backend();
+    let mut values: Vec<sea_orm::Value> = Vec::new();
+    let mut position: usize = 0;
+    let mut predicates: Vec<String> = Vec::with_capacity(conditions.len());
+    let mut bind = |column: &str, value: &serde_json::Value, values: &mut Vec<sea_orm::Value>| {
+        position += 1;
+        values
+            .push(P::bind_column(column, value).unwrap_or_else(|| json_value_to_sea_value(value)));
+        crate::database::__macro_support::placeholder(backend, position)
+    };
+    for (column, matched) in &conditions {
+        crate::database::validate_identifier(column)?;
+        match matched {
+            PivotMatch::Eq(value) => {
+                let placeholder = bind(column, value, &mut values)?;
+                predicates.push(format!("{column} = {placeholder}"));
+            }
+            PivotMatch::In(list) if list.is_empty() => predicates.push("1 = 0".to_string()),
+            PivotMatch::In(list) => {
+                let placeholders = list
+                    .iter()
+                    .map(|value| bind(column, value, &mut values))
+                    .collect::<Result<Vec<_>, _>>()?;
+                predicates.push(format!("{column} IN ({})", placeholders.join(", ")));
+            }
+        }
+    }
+    let mut sql = format!("SELECT * FROM {table}");
+    if !predicates.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&predicates.join(" AND "));
+    }
+    let mut next = position;
+    let filtered = filters.render_and(backend, &mut values, &mut next)?;
+    if predicates.is_empty() && !filtered.is_empty() {
+        sql.push_str(" WHERE 1 = 1");
+    }
+    sql.push_str(&filtered);
+
+    crate::render_cache::collector::observe_table_read(table);
+    let rows = exec
+        .statement_all::<<P::Entity as sea_orm::EntityTrait>::Model>(
+            Statement::from_sql_and_values(backend, &sql, values),
+        )
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    let mut pivots = rows
+        .into_iter()
+        .map(P::try_from_storage)
+        .collect::<Result<Vec<_>, _>>()?;
+    P::__mark_query_result(&mut pivots);
+    Ok(pivots)
+}
+
+/// The pivot rows an eager many-to-many load reads: those whose `column`
+/// is one of `keys`, and whose `type_column` holds `type_value` when a
+/// polymorphic relation passes one. Read from the relation's own pivot
+/// table, as [`BelongsToMany::get`] reads them - see
+/// `load_pivot_rows`.
+///
+/// **Not part of the public API.** It is `pub` because the
+/// `#[suprnova::model]` macro's eager arms call it.
+#[doc(hidden)]
+pub async fn __eager_pivot_rows<P>(
+    table: &str,
+    connection: Option<&'static str>,
+    column: &str,
+    keys: Vec<serde_json::Value>,
+    type_match: Option<(&str, &str)>,
+) -> Result<Vec<P>, FrameworkError>
+where
+    P: Model,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let mut conditions = vec![(column.to_string(), PivotMatch::In(keys))];
+    if let Some((type_column, type_value)) = type_match {
+        conditions.push((
+            type_column.to_string(),
+            PivotMatch::Eq(serde_json::Value::String(type_value.to_string())),
+        ));
+    }
+    load_pivot_rows::<P>(table, connection, conditions, &PivotFilters::default()).await
+}
+
+/// Shared INSERT path used by `attach` / `attach_with` / `sync`. The
+/// connection-or-transaction handle is taken as a generic `&C: ConnectionTrait`
+/// so the same routine runs against both `DatabaseConnection` and
+/// `DatabaseTransaction`.
+async fn attach_one<C: ConnectionTrait>(
+    conn: &C,
+    target: &PivotTarget<'_>,
+    parent_id: &serde_json::Value,
+    related_id: &serde_json::Value,
+    extra: Vec<PivotExtra>,
+    with_timestamps: bool,
+) -> Result<(), FrameworkError> {
+    let backend = conn.get_database_backend();
+    let pivot_table = target.table;
+    let pivot_foreign_key = target.foreign_key;
+    let pivot_related_key = target.related_key;
+    // Build the column / value lists deterministically:
+    //   FK columns first, then `extra` (already encoded through the
+    //   pivot model's casts by `pivot_extras_through_casts`, which drops
+    //   any FK column the caller passed so it is not written twice),
+    //   then timestamps if enabled.
+    let mut columns: Vec<String> =
+        vec![pivot_foreign_key.to_string(), pivot_related_key.to_string()];
+    // `None` represents an explicit JSON null from pivot extras. Framework-
+    // managed IDs and timestamps remain bound values.
+    let mut values: Vec<Option<sea_orm::Value>> = vec![
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                pivot_foreign_key,
+                target.typed(pivot_foreign_key, Some(target.parent), parent_id),
+                parent_id,
+            )
+            .await?,
+        ),
+        Some(
+            bind_pivot_write(
+                conn,
+                pivot_table,
+                pivot_related_key,
+                target.typed(pivot_related_key, Some(target.related), related_id),
+                related_id,
+            )
+            .await?,
+        ),
+    ];
+    for (column, value) in extra {
+        let bound = bind_pivot_extra(conn, pivot_table, &column, value).await?;
+        columns.push(column);
+        values.push(bound);
+    }
+    if with_timestamps {
+        let now = crate::clock::now();
+        if !columns.iter().any(|c| c == "created_at") {
+            columns.push("created_at".to_string());
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(now))));
+        }
+        if !columns.iter().any(|c| c == "updated_at") {
+            columns.push("updated_at".to_string());
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(now))));
+        }
+    }
+
+    // PostgreSQL cannot infer a non-text target type from the text-typed null
+    // produced by `json_value_to_sea_value`. Render explicit null extras as a
+    // constant and number only values that are actually bound.
+    let mut bound_values = Vec::with_capacity(values.len());
+    let mut bind_position = 0;
+    let value_expressions: Vec<String> = values
+        .into_iter()
+        .map(|value| match value {
+            Some(value) => {
+                bind_position += 1;
+                let ph = crate::database::placeholder::typed_placeholder(
+                    backend,
+                    bind_position,
+                    &value,
+                )?;
+                bound_values.push(value);
+                Ok(ph)
+            }
+            None => Ok("NULL".to_string()),
+        })
+        .collect::<Result<_, FrameworkError>>()?;
+
+    let sql = format!(
+        "INSERT INTO {table} ({cols}) VALUES ({phs})",
+        table = pivot_table,
+        cols = columns.join(", "),
+        phs = value_expressions.join(", "),
+    );
+    let stmt = Statement::from_sql_and_values(backend, &sql, bound_values);
+    conn.execute_raw(stmt)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    Ok(())
+}
+
+/// Shared DELETE path used by `detach` / `sync`. Same connection
+/// abstraction as [`attach_one`]. An id no pivot row can hold deletes
+/// nothing, and is not sent.
+async fn detach_one<C: ConnectionTrait>(
+    conn: &C,
+    target: &PivotTarget<'_>,
+    parent_id: &serde_json::Value,
+    related_id: &serde_json::Value,
+) -> Result<(), FrameworkError> {
+    let backend = conn.get_database_backend();
+    let parent = bind_pivot_comparison(
+        backend,
+        target.typed(target.foreign_key, Some(target.parent), parent_id),
+        parent_id,
+    );
+    let related = bind_pivot_comparison(
+        backend,
+        target.typed(target.related_key, Some(target.related), related_id),
+        related_id,
+    );
+    let (Some(parent), Some(related)) = (parent, related) else {
+        return Ok(());
+    };
+    let ph1 = crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
+    let ph2 = crate::database::placeholder::typed_placeholder(backend, 2, &related)?;
+    let sql = format!(
+        "DELETE FROM {table} WHERE {fk} = {ph1} AND {rk} = {ph2}",
+        table = target.table,
+        fk = target.foreign_key,
+        rk = target.related_key,
+    );
+    let stmt = Statement::from_sql_and_values(backend, &sql, vec![parent, related]);
+    conn.execute_raw(stmt)
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+    Ok(())
+}
+
+/// A scoped child through a `BelongsToMany` is a related row a pivot row
+/// of this parent points at. The pivot is read in a subquery, so the
+/// child's own query stays a query on its table alone.
+impl<L, R, P> super::RouteChildRelation<R> for BelongsToMany<L, R, P>
+where
+    L: EloquentModel,
+    R: Model,
+    R: From<<R::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <R::Entity as sea_orm::EntityTrait>::Model: From<R>
+        + sea_orm::IntoActiveModel<<R::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <R::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+    P: Model + 'static,
+    P: From<<P::Entity as sea_orm::EntityTrait>::Model>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + crate::eloquent::EagerLoadDispatch,
+    <P::Entity as sea_orm::EntityTrait>::Model: From<P>
+        + sea_orm::IntoActiveModel<<P::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + sea_orm::FromQueryResult
+        + serde::Serialize
+        + Send
+        + Sync,
+    <P::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<P::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    fn __route_child_query(self) -> Result<Builder<R>, FrameworkError> {
+        let (sql, values) = super::owned_through_table(
+            R::TABLE,
+            &self.related_key,
+            &self.pivot_table,
+            &self.pivot_related_key,
+            &[(
+                self.pivot_foreign_key.as_str(),
+                self.parent_key_value.clone(),
+            )],
+            "",
+        )?;
+        Ok(R::query().filter_raw(sql, values))
+    }
+}
