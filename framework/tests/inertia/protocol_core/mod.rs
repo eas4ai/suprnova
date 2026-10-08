@@ -8,6 +8,7 @@
 //! header detection on the type every middleware reads, the version
 //! middleware's 409) serve a router on a loopback socket.
 
+mod page_json;
 mod partial;
 mod request;
 mod support;

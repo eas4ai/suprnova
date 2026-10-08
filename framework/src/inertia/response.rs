@@ -2293,19 +2293,39 @@ fn build_json_response(page: &Value) -> HttpResponse {
         .header("Vary", "X-Inertia")
 }
 
-/// Writes JSON into a buffer with every `/` backslash-escaped, so a
-/// `</script>` inside a string field cannot close the page's script tag.
+/// Writes JSON into a buffer with `/` backslash-escaped and `<` and `>`
+/// written as `\u003c` and `\u003e`, so nothing inside a string field can
+/// end or change the state of the page's `<script>` element.
 ///
-/// Escaping byte by byte is sound: in UTF-8 the byte `0x2F` only ever
-/// encodes `/` itself, never part of a longer character.
+/// `/` keeps a `</script>` from closing the element. `<` and `>` keep a
+/// `<!--` or a `<script` from putting the HTML tokenizer into the escaped
+/// script states, where the real `</script>` no longer closes the element
+/// and the mount element after it becomes script text: what Laravel's
+/// `JSON_HEX_TAG` and Inertia 3.7.1's initial page JSON prevent. (The name
+/// is the first escape it wrote.)
+///
+/// The three characters are not JSON syntax, so they only occur inside
+/// strings, where both escapes are valid JSON. Escaping byte by byte is
+/// sound: in UTF-8 the bytes `0x2F`, `0x3C` and `0x3E` only ever encode
+/// those characters themselves, never part of a longer character. The
+/// escapes go straight into the one document buffer, with no copy of the
+/// page (MEM-003).
 struct SlashEscaping<'a>(&'a mut Vec<u8>);
 
 impl std::io::Write for SlashEscaping<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let mut rest = bytes;
-        while let Some(at) = rest.iter().position(|byte| *byte == b'/') {
+        while let Some(at) = rest
+            .iter()
+            .position(|byte| matches!(byte, b'/' | b'<' | b'>'))
+        {
+            let escape: &[u8] = match rest[at] {
+                b'<' => b"\\u003c",
+                b'>' => b"\\u003e",
+                _ => b"\\/",
+            };
             self.0.extend_from_slice(&rest[..at]);
-            self.0.extend_from_slice(b"\\/");
+            self.0.extend_from_slice(escape);
             rest = &rest[at + 1..];
         }
         self.0.extend_from_slice(rest);
@@ -2345,9 +2365,11 @@ fn build_html_response(
     //   produce duplicate IDs and break hydration.
     // - Non-SSR path: we emit the same shape ourselves with an empty
     //   mount div. Inside the script tag the JSON is raw (NOT
-    //   HTML-attribute-encoded) and every `/` is backslash-escaped so a
+    //   HTML-attribute-encoded): every `/` is backslash-escaped so a
     //   literal `</script>` substring inside a string field can't
-    //   terminate the tag - this matches `buildSSRBody`'s escape.
+    //   terminate the tag, and `<` and `>` are `\u003c` and `\u003e` so a
+    //   `<!--<script>` can't stop the real end tag from closing it - this
+    //   matches `buildSSRBody`'s escape and Laravel's `JSON_HEX_TAG`.
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
 
     // A page that renders its own `<title>` through Inertia's `Head`

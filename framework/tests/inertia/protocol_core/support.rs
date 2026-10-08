@@ -68,6 +68,18 @@ pub(super) async fn page_of(resp: HttpResponse) -> Value {
     serde_json::from_slice(&bytes).expect("an Inertia visit returns a JSON page object")
 }
 
+/// The body of a response, as text.
+pub(super) async fn body_of(resp: HttpResponse) -> String {
+    let bytes = resp
+        .into_hyper()
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("a UTF-8 body")
+}
+
 /// A counting resolver, so a test can prove a resolver did or did not run.
 pub(super) fn counted(counter: Arc<AtomicUsize>, value: Value) -> Prop {
     Prop::lazy(move || {

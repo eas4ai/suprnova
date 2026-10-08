@@ -522,6 +522,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Batch::progress` and `SseEvent::keep_alive` wrote their ranges with an
   en dash; they now read "8 to 15", "1 to 12", "0 to 100" and "15 to 30
   seconds".
+- **A prop holding `<!--<script>` no longer breaks the first Inertia
+  page.** The first visit's page JSON escaped `/` but left `<` and `>` raw
+  inside its `<script>` element, so a prop such as `<!--<script>` put the
+  HTML tokenizer into its escaped script state: the real `</script>` no
+  longer closed the element, the mount element `<div id="app">` became
+  script text, and jsdom found no `#app` and a page JSON it could not
+  parse. `<` and `>` are now written as `\u003c` and `\u003e` beside the `/`
+  escaping, in the same single buffer, as Laravel's `JSON_HEX_TAG` and
+  Inertia 3.7.1 do (JE-01, H02).
 
 ## 3.2.1 - 2026-10-05
 
