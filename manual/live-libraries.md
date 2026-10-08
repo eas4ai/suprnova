@@ -586,7 +586,9 @@ In a script, parsed as a JavaScript module:
   it is used, so it stops the prototype before it leaves the expression
   that reads it. Every write to a member of a prototype is refused, in any
   form (`=`, `+=`, `??=`, `++`, a destructuring or `for` loop target), and
-  so is `delete` of one.
+  so is `delete` of one. A method called on the prototype itself, such as
+  `Array.prototype.push(1)`, is refused too: it runs with the prototype as
+  `this` and changes it.
 - An attribute name given to `setAttribute` traces to constants and is not an
   event handler, `srcdoc` or `style`.
 - A URL given to `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,

@@ -388,12 +388,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key that traces to `prototype`, and from `getPrototypeOf`
   (`script-prototype`). The refusal of a write to a prototype's member
   covered only `=`; `??=`, `+=`, `++`, a destructuring or `for` loop
-  target and `delete` passed, and each is refused now. Ten bypass fixtures
-  pin it: `script-prototype-computed`, `script-prototype-template-key`,
+  target and `delete` passed, and each is refused now, as is a method
+  called on the prototype itself (`Array.prototype.push(1)`), which runs
+  with the prototype as `this`. Eleven bypass fixtures pin it:
+  `script-prototype-computed`, `script-prototype-template-key`,
   `script-prototype-alias`, `script-prototype-argument`,
   `script-prototype-getprototypeof`, `script-prototype-parameter`,
   `script-prototype-destructured`, `script-prototype-compound`,
-  `script-prototype-destructuring-target` and `script-prototype-delete`.
+  `script-prototype-destructuring-target`, `script-prototype-delete` and
+  `script-prototype-receiver`.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

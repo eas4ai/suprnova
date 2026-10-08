@@ -1581,6 +1581,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// Walks a callee's parts without treating the callee itself as a
     /// value that escapes.
     fn callee_walk(&mut self, callee: &'a Expression<'a>) {
+        self.prototype_receiver(callee);
         match unparen(callee) {
             Expression::Identifier(reference) => {
                 if self.lookup(reference.name.as_str()).is_none() {
@@ -2550,6 +2551,35 @@ impl<'a, 'c> Walker<'a, 'c> {
             "script-prototype",
             expr.span(),
             format!("{what} is used as a value; a script may read a prototype's members, as `Array.prototype.slice` does, but may not keep or pass on the prototype, because the scan cannot follow it to where it is changed"),
+        );
+    }
+
+    /// Refuses a method called on a prototype itself (REG-032): it runs
+    /// with the prototype as `this`, and `Array.prototype` is an array, so
+    /// `push`, `fill` or `splice` changes it. A method borrowed with `call`
+    /// runs on the value it is given instead, and stays admitted.
+    fn prototype_receiver(&mut self, callee: &'a Expression<'a>) {
+        if !self.check() {
+            return;
+        }
+        let member = match unparen(callee) {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            other => other.as_member_expression(),
+        };
+        let Some(member) = member else {
+            return;
+        };
+        if !self.prototype(member.object(), Reach::Itself, 0, &mut BTreeSet::new()) {
+            return;
+        }
+        let method = member
+            .static_property_name()
+            .map_or_else(|| "a method".to_string(), |name| format!("`{name}`"));
+        let what = prototype_text(member.object());
+        self.refuse(
+            "script-prototype",
+            callee.span(),
+            format!("{method} is called on {what} itself, so it runs with the prototype as `this` and can change it, as `push`, `fill` and `splice` do; borrow the method with `call` instead"),
         );
     }
 

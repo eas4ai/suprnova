@@ -565,6 +565,36 @@ fn reg_032_every_write_to_a_prototype_member_is_refused() {
     );
 }
 
+/// REG-032: a method called on a prototype itself runs with the prototype
+/// as `this`, and `Array.prototype` is an array, so `push`, `fill` and
+/// `splice` change it. Each such call is refused, a tagged template's
+/// included. A method borrowed with `call` runs on the value it is given
+/// and stays admitted.
+#[test]
+fn reg_032_a_method_called_on_a_prototype_itself_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("Array.prototype.push(1);\n", 1),
+        ("Array.prototype.fill(0, 0, 1);\n", 1),
+        ("Array[\"prototype\"].splice(0, 0, 1);\n", 1),
+        ("Array.prototype?.push(1);\n", 1),
+        ("(0, Array.prototype).push(1);\n", 1),
+        ("Array.prototype.push`polluted`;\n", 1),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let borrowed =
+        scan_widget_script("export const add = (xs) => Array.prototype.push.call(xs, 1);\n");
+    assert!(borrowed.accepted(), "{:?}", borrowed.findings);
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one
