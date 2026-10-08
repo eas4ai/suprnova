@@ -45,6 +45,7 @@ pub use hooks::{
     DefaultInertiaHooks, InertiaMiddleware, InertiaMiddlewareHooks, InertiaVisit, PageUrlResolver,
 };
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
+pub(crate) use pages::ensure_page_exists;
 pub(crate) use prop::header_is_truthy;
 pub use prop::{
     DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,

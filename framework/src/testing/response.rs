@@ -28,6 +28,14 @@ pub struct TestResponse {
     body: Bytes,
     session: Option<(Arc<dyn SessionStore>, String)>,
     report: Option<ErrorReport>,
+    /// The cookies the [`TestClient`](crate::testing::TestClient) that sent
+    /// the request holds after this response, as `(name, wire value)`
+    /// pairs. Empty for a response built any other way.
+    client_cookies: Vec<(String, String)>,
+    /// How the [`TestClient`](crate::testing::TestClient) that sent the
+    /// request replays a reload of this response's page. `None` for a
+    /// response built any other way.
+    reload: Option<super::inertia::Reloader>,
 }
 
 impl TestResponse {
@@ -54,7 +62,32 @@ impl TestResponse {
             body: body.into(),
             session: None,
             report: None,
+            client_cookies: Vec::new(),
+            reload: None,
         }
+    }
+
+    /// Replay this response's page through `reload`, the client's own, so
+    /// [`Self::assert_inertia`] gives a page that reloads with nothing
+    /// attached by hand.
+    pub(crate) fn with_reloader(mut self, reload: super::inertia::Reloader) -> Self {
+        self.reload = Some(reload);
+        self
+    }
+
+    /// Keep the error report the client took out of the response's
+    /// extensions before hyper wrote it to the in-memory connection.
+    pub(crate) fn with_error_report(mut self, report: Option<ErrorReport>) -> Self {
+        self.report = report;
+        self
+    }
+
+    /// Keep the cookies the client holds after this response, so a session
+    /// lookup still finds the session when this response set no cookie: a
+    /// request that only reads the session leaves the cookie as it was.
+    pub(crate) fn with_client_cookies(mut self, cookies: Vec<(String, String)>) -> Self {
+        self.client_cookies = cookies;
+        self
     }
 
     /// Build a `TestResponse` from the response [`crate::handle_request`]
@@ -330,14 +363,19 @@ impl TestResponse {
     /// Assert the session named by this response's session cookie has
     /// `key` set to `expected`.
     ///
-    /// Requires [`Self::with_session_store`] first. There is no honest
-    /// way to read server-side session state from a wire-level response
-    /// alone - the session lives in the store, keyed by the id inside
-    /// the (encrypted) session cookie, not in the response body. This
-    /// decrypts the cookie with the same [`crate::CryptPurpose::Cookie`]
+    /// Requires [`Self::with_session_store`] first, or a response from a
+    /// [`TestClient`](crate::testing::TestClient) given a store. There is no
+    /// honest way to read server-side session state from a wire-level
+    /// response alone - the session lives in the store, keyed by the id
+    /// inside the (encrypted) session cookie, not in the response body.
+    /// This decrypts the cookie with the same [`crate::CryptPurpose::Cookie`]
     /// purpose [`crate::SessionMiddleware`] writes it under, extracts
     /// the session id, and reads that row from the attached store - the
     /// same lookup the middleware itself performs on the next request.
+    ///
+    /// The cookie is the one this response sets, else, for a client
+    /// response, the one the client carries into its next request: a
+    /// request that leaves the session unchanged sets no cookie.
     ///
     /// # Panics
     ///
@@ -349,49 +387,13 @@ impl TestResponse {
         key: &str,
         expected: impl Into<serde_json::Value>,
     ) -> &Self {
-        let Some((store, cookie_name)) = self.session.as_ref() else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...) called without a session store - call \
-                 .with_session_store(store, cookie_name) first"
-            ));
-        };
-        let Some(raw) = self.cookie(cookie_name) else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): no {cookie_name:?} cookie in the response"
-            ));
-        };
-        let plaintext = Cookie::read_encrypted_for(CookiePrefix::strip(cookie_name), &raw)
-            .unwrap_or_else(|e| {
-                self.fail(format!(
-                    "assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}"
-                ))
-            });
-        let Some(session_id) = plaintext
-            .split('.')
-            .next()
-            .filter(|id| is_valid_session_id(id))
-        else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): decrypted cookie payload is not a valid \
-                 session id: {plaintext:?}"
-            ));
-        };
-        let stored = store.read(session_id).await.unwrap_or_else(|e| {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): store read failed: {e}"
-            ))
-        });
-        let Some(session_data) = stored else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): no session row for id {session_id}"
-            ));
-        };
+        let call = format!("assert_session_has({key:?}, ...)");
+        let (session_id, session_data) = self.session_data(&call).await;
         let expected = expected.into();
         let actual = session_data.data.get(key);
         if actual != Some(&expected) {
             self.fail(format!(
-                "assert_session_has({key:?}, ...)\n  Expected: {expected}\n  Received: {}\n  \
-                 session id: {session_id}",
+                "{call}\n  Expected: {expected}\n  Received: {}\n  session id: {session_id}",
                 actual
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "<missing key>".to_string())
@@ -400,32 +402,225 @@ impl TestResponse {
         self
     }
 
-    /// Build an [`AssertableInertia`](crate::testing::AssertableInertia)
-    /// from this response's JSON body and assert it as an Inertia page
-    /// object.
+    /// The session cookie this response names: the one it sets, else the
+    /// one the client that sent the request still holds. Percent-decoded,
+    /// as [`Self::cookie`] is.
+    fn session_cookie(&self, cookie_name: &str) -> Option<String> {
+        self.cookie(cookie_name).or_else(|| {
+            self.client_cookies
+                .iter()
+                .find(|(name, _)| name == cookie_name)
+                .and_then(|(name, value)| {
+                    crate::http::parse_cookies(&format!("{name}={value}")).remove(cookie_name)
+                })
+        })
+    }
+
+    /// The session this response's session cookie names, read from the
+    /// attached store. `call` names the assertion in every failure.
+    async fn session_data(&self, call: &str) -> (String, crate::SessionData) {
+        let Some((store, cookie_name)) = self.session.as_ref() else {
+            self.fail(format!(
+                "{call} called without a session store - call \
+                 .with_session_store(store, cookie_name) first"
+            ));
+        };
+        let Some(raw) = self.session_cookie(cookie_name) else {
+            self.fail(format!("{call}: no {cookie_name:?} cookie in the response"));
+        };
+        let plaintext = Cookie::read_encrypted_for(CookiePrefix::strip(cookie_name), &raw)
+            .unwrap_or_else(|e| {
+                self.fail(format!("{call}: session cookie failed to decrypt: {e}"))
+            });
+        let Some(session_id) = plaintext
+            .split('.')
+            .next()
+            .filter(|id| is_valid_session_id(id))
+        else {
+            self.fail(format!(
+                "{call}: decrypted cookie payload is not a valid session id: {plaintext:?}"
+            ));
+        };
+        let stored = store
+            .read(session_id)
+            .await
+            .unwrap_or_else(|e| self.fail(format!("{call}: store read failed: {e}")));
+        let Some(session_data) = stored else {
+            self.fail(format!("{call}: no session row for id {session_id}"));
+        };
+        (session_id.to_string(), session_data)
+    }
+
+    /// Read this response's Inertia page object and return it for
+    /// assertions. Laravel's `assertInertia()`.
     ///
-    /// Requires the response to actually be an Inertia visit response -
-    /// the request that produced it must have sent `X-Inertia: true`, or
-    /// there is no page object to parse (a hard navigation returns the
-    /// HTML shell instead; use
-    /// [`crate::testing::AssertableInertia::from_response`] directly on
-    /// the `HttpResponse` for that case, which handles both shapes).
+    /// Reads either shape a page response takes: the JSON page object of
+    /// an Inertia visit (the response carries `X-Inertia: true`), or the
+    /// HTML document of a first visit, whose `<script
+    /// type="application/json" data-page="...">` element holds the page,
+    /// so a plain `GET` of a page route is assertable as it is. A response
+    /// from a [`TestClient`](crate::testing::TestClient) gives the page the
+    /// client to reload through.
     ///
     /// # Panics
     ///
-    /// Panics if the response has no `X-Inertia` header, or if the body
-    /// isn't a valid Inertia page object.
+    /// Panics if the response holds neither shape, or if the page object
+    /// isn't a valid Inertia page.
     pub fn assert_inertia(&self) -> crate::testing::AssertableInertia {
-        if self.header("x-inertia") != Some("true") {
+        let page = if self.header("x-inertia") == Some("true") {
+            self.json()
+        } else {
+            let html = self.body_text();
+            match super::inertia::page_object_from_html(&html) {
+                Some(Ok(page)) => page,
+                Some(Err(e)) => self.fail(format!(
+                    "assert_inertia(): found the <script type=\"application/json\" \
+                     data-page=...> element, but its content is not valid JSON: {e}"
+                )),
+                None => self.fail(format!(
+                    "assert_inertia(): no Inertia page object in the response - got X-Inertia = \
+                     {:?} and no <script type=\"application/json\" data-page=...> element in \
+                     the body. An Inertia visit sends `X-Inertia: true` \
+                     (TestRequest::inertia()); a first visit gets the HTML document the page \
+                     renders.\n  status: {}\n  body: {}",
+                    self.header("x-inertia"),
+                    self.status,
+                    excerpt(&html)
+                )),
+            }
+        };
+        crate::testing::AssertableInertia::from_page(page, self.report.clone())
+            .with_reloader(self.reload.clone())
+    }
+
+    /// This response's whole Inertia page as a value:
+    /// [`AssertableInertia::to_page`](crate::testing::AssertableInertia::to_page)
+    /// of [`Self::assert_inertia`]. Laravel's `inertiaPage()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does.
+    pub fn inertia_page(&self) -> serde_json::Value {
+        self.assert_inertia().to_page()
+    }
+
+    /// The props of this response's Inertia page: all of them for `None`,
+    /// the value at a dot-separated path for `Some` (`Null` when the path
+    /// resolves to nothing). Laravel's `inertiaProps($propName)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does.
+    pub fn inertia_props(&self, path: Option<&str>) -> serde_json::Value {
+        let page = self.assert_inertia();
+        match path {
+            Some(path) => page.prop(path),
+            None => page.to_page()["props"].take(),
+        }
+    }
+
+    /// Assert the Inertia flash data the session holds has `key`,
+    /// optionally equal to `expected` (`None::<serde_json::Value>` checks
+    /// presence only). Laravel's `assertInertiaFlash`.
+    ///
+    /// A handler that flashes and redirects (`Inertia::flash`) leaves the
+    /// data in the session for the page after the redirect; the redirect
+    /// response itself carries no page. This reads the session the
+    /// response's session cookie names from the attached store, as
+    /// [`Self::assert_session_has`] does, and the Inertia flash data in
+    /// it: what the previous request left, overlaid with what this one
+    /// wrote. `key` is a dot path.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_session_has`] does without a store or a
+    /// session, when `key` is absent, or when it holds another value.
+    pub async fn assert_inertia_flash<V: Into<serde_json::Value>>(
+        &self,
+        key: &str,
+        expected: Option<V>,
+    ) -> &Self {
+        let call = format!("assert_inertia_flash({key:?}, ...)");
+        let flash = self.inertia_flash(&call).await;
+        let Some(actual) = json_path(&flash, key) else {
             self.fail(format!(
-                "assert_inertia(): expected an X-Inertia response (X-Inertia: true header), \
-                 got X-Inertia = {:?}. A hard navigation returns the HTML shell instead of a \
-                 page object - send `X-Inertia: true` with the request, or use \
-                 AssertableInertia::from_response(&http_response) directly.",
-                self.header("x-inertia")
+                "{call}\n  Inertia Flash Data is missing key [{key}].\n  flash: {flash}"
+            ));
+        };
+        if let Some(expected) = expected {
+            let expected = expected.into();
+            if *actual != expected {
+                self.fail(format!(
+                    "{call}\n  Inertia Flash Data [{key}] does not match expected value.\n  \
+                     Expected: {expected}\n  Received: {actual}"
+                ));
+            }
+        }
+        self
+    }
+
+    /// Assert the Inertia flash data the session holds has no `key`, read
+    /// as [`Self::assert_inertia_flash`] reads it. Laravel's
+    /// `assertInertiaFlashMissing`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_session_has`] does without a store or a
+    /// session, or when `key` is present.
+    pub async fn assert_inertia_flash_missing(&self, key: &str) -> &Self {
+        let call = format!("assert_inertia_flash_missing({key:?})");
+        let flash = self.inertia_flash(&call).await;
+        if let Some(actual) = json_path(&flash, key) {
+            self.fail(format!(
+                "{call}\n  Inertia Flash Data has unexpected key [{key}]: {actual}"
             ));
         }
-        crate::testing::AssertableInertia::from_page(self.json(), self.report.clone())
+        self
+    }
+
+    /// The Inertia flash data of the session this response names: the
+    /// previous request's (`_flash.old.inertia.flash_data`) overlaid with
+    /// this one's (`_flash.new.inertia.flash_data`), as the page that
+    /// shows it merges them.
+    async fn inertia_flash(&self, call: &str) -> serde_json::Value {
+        let (_, session) = self.session_data(call).await;
+        let mut flash = serde_json::Map::new();
+        for key in [
+            crate::inertia::flash::flash_data_old_key(),
+            crate::inertia::flash::flash_data_new_key(),
+        ] {
+            if let Some(serde_json::Value::Object(map)) = session.data.get(&key) {
+                flash.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        serde_json::Value::Object(flash)
+    }
+
+    /// Run `callback` over this response's Inertia page and return the
+    /// response, so response assertions chain after the page's. Laravel's
+    /// `assertInertia(fn (Assert $page) => ...)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does, and with any assertion the
+    /// callback fails.
+    pub fn assert_inertia_with(
+        &self,
+        callback: impl FnOnce(&crate::testing::AssertableInertia),
+    ) -> &Self {
+        let page = self.assert_inertia();
+        callback(&page);
+        self
+    }
+}
+
+/// The start of a body for a failure message: a page's whole HTML document
+/// buries the message it was printed for.
+fn excerpt(body: &str) -> String {
+    const LIMIT: usize = 500;
+    match body.char_indices().nth(LIMIT) {
+        Some((cut, _)) => format!("{}... ({} bytes)", &body[..cut], body.len()),
+        None => body.to_string(),
     }
 }
 
