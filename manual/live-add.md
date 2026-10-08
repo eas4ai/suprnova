@@ -156,7 +156,9 @@ terminal, `live:add` refuses unless you pass `--yes`.
 
 `--yes` confirms the plan and does nothing else. It never approves a
 capability, which takes `--allow`, and never pins or re-pins a key, which
-takes a terminal or a pin you write yourself.
+takes a terminal or a pin you write yourself. It does not skip a key's
+question either: on a terminal, `live:add` asks before it pins or re-pins a
+key, with `--yes` or without it.
 
 ## Trust on first use
 
@@ -165,9 +167,11 @@ The first install from a library pins the key its `library.json` names, in
 that library must be signed by the pinned key. A library whose key differs
 from its pin is refused, with both fingerprints named, unless the pinned key
 handed the library to the new key: then the plan shows both fingerprints, and
-`live:add` re-pins only when you confirm on a terminal. A re-pin keeps the
-former key in the library's pin table, under `previous_keys`, so the
-components you installed under the former key still verify.
+`live:add` asks on a terminal whether to re-pin. Yes re-pins the key; no
+refuses the install and writes nothing. Without a terminal the change is
+refused, even with `--yes`. A re-pin keeps the former key in the library's
+pin table, under `previous_keys`, so the components you installed under the
+former key still verify.
 
 To install without a terminal, pin the key yourself first. Add the library's
 table to `suprnova.toml`, with the key from its `library.json`:
