@@ -5097,7 +5097,7 @@ dependencies = [
 [[package]]
 name = "oxideav-bmp"
 version = "0.1.8"
-source = "git+file:///home/shawn/workspace2/oxideav-bmp?rev=fafe3f45b824b62bcecdbc2a9203f66488b77950#fafe3f45b824b62bcecdbc2a9203f66488b77950"
+source = "git+file:///home/shawn/workspace2/oxideav-bmp?rev=a640fa7e061c1897fdce020af3896e843a94f613#a640fa7e061c1897fdce020af3896e843a94f613"
 dependencies = [
  "oxideav-core",
 ]
@@ -5150,7 +5150,7 @@ dependencies = [
 [[package]]
 name = "oxideav-png"
 version = "0.1.12"
-source = "git+file:///home/shawn/workspace2/oxideav-png?rev=5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e#5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e"
+source = "git+file:///home/shawn/workspace2/oxideav-png?rev=d29d4b25d790e08c04e7d56b27726c58daac7cfd#d29d4b25d790e08c04e7d56b27726c58daac7cfd"
 dependencies = [
  "compcol",
  "oxideav-core",

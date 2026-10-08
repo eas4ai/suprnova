@@ -479,8 +479,8 @@ fn webp_peak(width: u64, height: u64, plan: &WebpPlan) -> u64 {
 /// 32. A four-byte plane becomes the RGBA plane where it lies; any other
 /// is converted into a new RGBA plane while it is held, so both are alive.
 /// The palette holds four bytes an entry, as many as the header declares
-/// and the space before the pixel data allows, and an embedded V5 profile
-/// is copied out of the file, at most the whole file.
+/// and the space before the pixel data allows. An embedded V5 profile stays
+/// in the file: the driver decodes with `copy_icc` off.
 fn bmp_peak(width: u64, height: u64, bmp: BmpLayout, input_len: u64) -> u64 {
     let pixels = mul(width, height);
     let rgba = mul(pixels, 4);
@@ -495,8 +495,7 @@ fn bmp_peak(width: u64, height: u64, bmp: BmpLayout, input_len: u64) -> u64 {
             .min(input_len / bmp.palette_entry_bytes.max(1)),
         4,
     );
-    let profile = bmp.embedded_profile.min(input_len);
-    add(add(add(rgba, native), palette), profile)
+    add(add(rgba, native), palette)
 }
 
 #[cfg(test)]

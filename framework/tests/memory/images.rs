@@ -500,10 +500,11 @@ fn bmp_of(
 }
 
 /// MEM-003 and IMG-002: `oxideav-bmp` decodes a BMP into the file's own
-/// layout and copies an embedded profile out of the file. A 32-bit plane
-/// becomes the RGBA plane where it lies; a narrower one is converted into a
-/// new RGBA plane while it is held. The estimate counts both planes and the
-/// profile's copy, so each of these decodes within its budget.
+/// layout, and the driver asks it to leave an embedded profile in the file.
+/// A 32-bit plane becomes the RGBA plane where it lies; a narrower one is
+/// converted into a new RGBA plane while it is held. The estimate counts
+/// both planes and no copy of the profile, so the file with a profile fails
+/// here if the decoder copies it again.
 #[tokio::test]
 async fn mem_audit_bmps_in_every_depth_decode_within_the_budget() {
     let _lock = exclusive().await;

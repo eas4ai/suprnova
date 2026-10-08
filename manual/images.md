@@ -489,7 +489,7 @@ bytes:
 | JPEG, progressive, or one component a scan | 1.5 (grey) to 2.5 (4:4:4) |
 | JPEG, lossless | 1.3 (grey) to 4 (RGB) |
 | WebP | 1.4 to 2.4 |
-| BMP | 1.0 to 2.1 |
+| BMP | 1.0 (32-bit) to 1.75 (24-bit) |
 
 An image that decoding turns by its EXIF orientation needs at least 2
 times width x height x 4 bytes, the decoded plane and the turned one,

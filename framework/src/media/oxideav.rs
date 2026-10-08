@@ -46,18 +46,20 @@
 //! *indices* as grey levels - a silently wrong image, the worst possible
 //! failure. So:
 //!
-//! - **PNG** goes through `oxideav_png::decode_rgba8`, the crate's own
-//!   entry point that resolves every colour type and bit depth (palette via
-//!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all.
+//! - **PNG** goes through `oxideav_png::decode_with` and the image's own
+//!   `to_rgba8`, which resolves every colour type and bit depth (palette via
+//!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all; see
+//!   `decode_png` for why not `decode_rgba8`.
 //! - **GIF** is decoded by the framework itself (see the `gif` module): the
 //!   first frame only, written straight onto the screen as RGBA, stopping
 //!   the moment the frame is complete.
 //! - **WebP** is decoded from the crate's own parts, its container parser,
 //!   lossless and lossy decoders and alpha decoder, into one packed RGBA
 //!   buffer; see `decode_webp` for why not `decode_rgba8`.
-//! - **BMP** goes through the crate's `decode`, which returns the file's
-//!   own layout; a 32-bit one is made RGBA where it lies, any other is
-//!   converted. `Canvas::packed` checks the length.
+//! - **BMP** goes through the crate's `decode_with`, which returns the
+//!   file's own layout without copying its embedded profile; a 32-bit one is
+//!   made RGBA where it lies, any other is converted. `Canvas::packed` checks
+//!   the length.
 //! - **JPEG** goes through zune-jpeg, which writes RGBA from YCbCr and grey
 //!   and RGB from RGB-coded files, into one buffer the driver allocates. A
 //!   lossless JPEG goes through oxideav-mjpeg, whose lossless output is one
@@ -382,8 +384,7 @@ impl OxideAvImageDriver {
                 // The crate's own all-colour-types entry point. See module
                 // docs for why PNG does not go through the registry.
                 check_png_inflate(contents, png)?;
-                let bitmap = oxideav_png::decode_rgba8(contents).map_err(png_error)?;
-                Canvas::packed(bitmap.width, bitmap.height, bitmap.data)
+                decode_png(contents)
             }
             Layout::Gif(first) => gif::decode_first_frame(contents, first, width, height),
             Layout::WebP(_) => decode_webp(contents),
@@ -1062,15 +1063,57 @@ fn decode_webp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
     Canvas::packed(width, height, rgba)
 }
 
+/// Decode a PNG to one packed RGBA plane, its metadata left compressed.
+///
+/// The crate's `decode_rgba8` inflates the file's `iCCP` profile and a
+/// compressed XMP packet before it returns the pixels, each up to 64 MiB
+/// whatever the image's size, and then drops them: a small file could make
+/// it hold many times `IMAGE_MAX_ALLOC_BYTES` (IMG-002). The driver reads
+/// those chunks itself, under the budget, so the pixels are decoded with
+/// `inflate_metadata` off. An 8-bit RGBA plane without padding is taken as
+/// it is, where `decode_rgba8` would copy it (MEM-003); every other layout
+/// is converted into a new plane, after the check `decode_rgba8` makes that
+/// every palette index names a `PLTE` entry, since the conversion alone
+/// would make such a pixel black and transparent.
+fn decode_png(contents: &[u8]) -> Result<Canvas, FrameworkError> {
+    use oxideav_png::PixelFormat;
+    let options = oxideav_png::DecodeOptions::default().with_inflate_metadata(false);
+    let image = oxideav_png::decode_with(contents, &options).map_err(png_error)?;
+    let (width, height) = (image.width, image.height);
+    if image.format == PixelFormat::Rgba && image.stride() == width as usize * 4 {
+        return Canvas::packed(width, height, image.into_raw());
+    }
+    if image.format == PixelFormat::Pal8 {
+        let entries = image.palette.as_ref().map_or(0, oxideav_png::Palette::len);
+        let rows = image.as_bytes().unwrap_or_default();
+        let past = rows
+            .chunks(image.stride().max(1))
+            .take(height as usize)
+            .flat_map(|row| row.iter().take(width as usize))
+            .find(|&&index| usize::from(index) >= entries);
+        if let Some(index) = past {
+            return Err(FrameworkError::param(format!(
+                "image decode failed: png: palette index {index} names no entry (PLTE has \
+                 {entries} entries)"
+            )));
+        }
+    }
+    Canvas::packed(width, height, image.to_rgba8())
+}
+
 /// Decode a BMP to one packed RGBA plane.
 ///
-/// The crate's `decode` returns the file's own layout. A 32-bit layout is
-/// made RGBA where it lies: an `Rgba` plane is taken as it is and a `Bgra`
-/// one has its red and blue swapped in place. Every narrower layout is
-/// converted into a new plane, as `decode_rgba8` would; converting a
-/// 32-bit one that way too would copy the whole plane (MEM-003).
+/// The crate's `decode_with` returns the file's own layout. It is asked not
+/// to copy an embedded profile into the image: the driver reads the profile
+/// where it lies in the file, so the copy, as large as the header says,
+/// would be held for nothing (MEM-003). A 32-bit layout is made RGBA where
+/// it lies: an `Rgba` plane is taken as it is and a `Bgra` one has its red
+/// and blue swapped in place. Every narrower layout is converted into a new
+/// plane, as `decode_rgba8` would; converting a 32-bit one that way too
+/// would copy the whole plane (MEM-003).
 fn decode_bmp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
-    let image = oxideav_bmp::decode(contents)
+    let options = oxideav_bmp::DecodeOptions::default().with_copy_icc(false);
+    let image = oxideav_bmp::decode_with(contents, &options)
         .map_err(|e| FrameworkError::param(format!("image decode failed: image/bmp: {e}")))?;
     let (width, height) = (image.width, image.height);
     let tight = image
@@ -1625,8 +1668,9 @@ pub(super) fn encode_png(
 /// straight into it: nothing grows or moves.
 ///
 /// With `profile`, the file is a V5 bitmap that embeds it, the one BMP
-/// layout that holds an ICC profile, at rendering intent 4
-/// (`LCS_GM_IMAGES`, perceptual, the ICC default).
+/// layout that holds an ICC profile, at the default rendering intent 4
+/// (`LCS_GM_IMAGES`, perceptual, the ICC default). The encoder borrows the
+/// profile and writes it once, into the same buffer.
 fn encode_bmp(
     canvas: Canvas,
     profile: Option<&[u8]>,
@@ -1644,19 +1688,22 @@ fn encode_bmp(
     )
     .map_err(failed)?;
     let options = oxideav_bmp::EncodeOptions::default();
-    let mut out = Vec::new();
-    match profile {
-        None => {
-            let size = oxideav_bmp::encoded_size_bound(&image, &options).map_err(failed)?;
-            out.reserve_exact(size.saturating_add(reserve));
-            oxideav_bmp::encode_into(&image, &options, &mut out).map_err(failed)?;
-        }
+    let size = match profile {
+        None => oxideav_bmp::encoded_size_bound(&image, &options),
         Some(profile) => {
-            out = oxideav_bmp::encode_bmp_with_icc_profile(&image, profile, 4, options)
-                .map_err(failed)?;
-            out.reserve_exact(reserve);
+            oxideav_bmp::encoded_size_bound_with_icc_profile(&image, &options, profile)
         }
     }
+    .map_err(failed)?;
+    let mut out = Vec::new();
+    out.reserve_exact(size.saturating_add(reserve));
+    match profile {
+        None => oxideav_bmp::encode_into(&image, &options, &mut out),
+        Some(profile) => {
+            oxideav_bmp::encode_into_with_icc_profile(&image, &options, profile, &mut out)
+        }
+    }
+    .map_err(failed)?;
     Ok(out)
 }
 
@@ -1943,6 +1990,22 @@ mod tests {
         oxideav_png::chunk::write_chunk(&mut png, b"IEND", &[]);
         let err = check_png_inflate(&png, &png_layout(&png)).expect_err("not zlib");
         assert!(err.to_string().contains("does not inflate"), "got: {err}");
+    }
+
+    #[test]
+    fn a_png_palette_index_past_its_plte_is_refused() {
+        // Eight-bit indices against the sixteen-entry palette: 15 names the
+        // last entry, 16 names none. Converted alone it would be a black,
+        // transparent pixel.
+        let png = png_with_pixel_data(ihdr(2, 1, 3, 8, 0), &[0, 15, 16]);
+        let err = OxideAvImageDriver::new()
+            .process(&png, &ImagePipeline::default())
+            .expect_err("index 16 names no entry");
+        assert!(err.to_string().contains("palette index 16"), "got: {err}");
+        let png = png_with_pixel_data(ihdr(2, 1, 3, 8, 0), &[0, 15, 15]);
+        OxideAvImageDriver::new()
+            .process(&png, &ImagePipeline::default())
+            .expect("every index names an entry");
     }
 
     #[test]

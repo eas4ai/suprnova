@@ -224,8 +224,15 @@ ammonia = "4.1.4"
 # copies its bitstream into the container once. The lossless WebP encoder
 # chooses its transforms in one pass rather than by exhaustive search: a
 # 1024 x 1024 photo encodes in 0.48 s instead of 47.8 s in a release
-# build, into a file at most 8.7 percent larger (MEM-003's exception). Each
-# revision is the tip of the fork's integration branch. The forks follow
+# build, into a file at most 8.7 percent larger (MEM-003's exception).
+# Three more commits on the integration branches, each written to go
+# upstream as a pull request of its own, serve the driver's decode budget
+# and the BMP profile: `DecodeOptions::inflate_metadata` decodes a PNG
+# without inflating its `iCCP` profile or XMP packet (IMG-002 counts what
+# the driver inflates itself), `DecodeOptions::copy_icc` decodes a BMP
+# without copying its embedded profile, and `encode_into_with_icc_profile`
+# writes a BMP with a borrowed profile. Each revision is the tip of the
+# fork's integration branch. The forks follow
 # upstream master (png 0.1.12, bmp 0.1.8, webp 0.3.1), whose code needs
 # `oxideav-core` 0.1.37 or later (`ColorSignal`) although their manifests
 # ask for any 0.1, so `oxideav-core` is pinned to 0.1.39, the version their
@@ -251,10 +258,10 @@ oxideav-core = { version = "=0.1.39", optional = true }
 oxideav-image-filter = { version = "=0.1.2", optional = true }
 oxideav-pixfmt = { version = "=0.1.7", optional = true }
 oxideav-mjpeg = { version = "=0.1.8", optional = true }
-oxideav-png = { git = "file:///home/shawn/workspace2/oxideav-png", rev = "5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e", optional = true }
+oxideav-png = { git = "file:///home/shawn/workspace2/oxideav-png", rev = "d29d4b25d790e08c04e7d56b27726c58daac7cfd", optional = true }
 oxideav-webp = { git = "file:///home/shawn/workspace2/oxideav-webp", rev = "65a9c8ad5d6ce945cd4f3aac5b3279936eb42629", optional = true }
 oxideav-gif = { version = "=0.0.12", optional = true, default-features = false }
-oxideav-bmp = { git = "file:///home/shawn/workspace2/oxideav-bmp", rev = "fafe3f45b824b62bcecdbc2a9203f66488b77950", optional = true }
+oxideav-bmp = { git = "file:///home/shawn/workspace2/oxideav-bmp", rev = "a640fa7e061c1897fdce020af3896e843a94f613", optional = true }
 # JPEG decoding, except lossless frames. oxideav-mjpeg (0.1.8 to 0.1.11)
 # refuses any frame of more than 64 Mi samples (width x height x
 # components), about 22 megapixels in colour, whatever the caller allows,
