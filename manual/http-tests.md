@@ -593,8 +593,12 @@ Laravel's `Inertia\Testing\AssertableInertia`.
 `TestResponse::assert_inertia()` reads the page from either shape a page
 response takes: the JSON page object of an Inertia visit, which carries
 `X-Inertia: true`, or the HTML document of a first visit, whose
-`<script type="application/json" data-page=...>` element holds the page
-whatever id `InertiaConfig::mount_id` gave it (`app` by default). The
+`<script>` element with `type="application/json"` and `data-page` holds
+the page whatever id `InertiaConfig::mount_id` gave it (`app` by
+default). The two attributes can come in either order, with others
+between them, so the document of a server-rendered first visit reads the
+same way: Inertia's `buildSSRBody` writes it as
+`<script data-page="app" type="application/json">`. The
 `inertia()` request method sends the headers an Inertia visit sends:
 `X-Inertia: true`, its `Accept`, and `X-Inertia-Version` set to the
 installed configuration's asset version, or the empty string with none

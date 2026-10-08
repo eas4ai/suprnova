@@ -10,10 +10,11 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
-use suprnova::testing::{TestClient, TestContainer};
+use suprnova::testing::{AssertableInertia, TestClient, TestContainer};
 use suprnova::{
-    Cookie, FrameworkError, HttpResponse, Inertia, InertiaConfig, InertiaResponse, Middleware,
-    MiddlewareRegistry, Next, Request, Response, Router,
+    App, Cookie, FrameworkError, HttpResponse, Inertia, InertiaConfig, InertiaRequestExt,
+    InertiaResponse, Middleware, MiddlewareRegistry, Next, Request, Response, Router, SsrConfig,
+    SsrGateway, SsrResponse,
 };
 
 /// A session store that keeps every session in memory.
@@ -333,6 +334,70 @@ async fn intt_assert_inertia_reads_the_first_visit_html_document() {
     );
     response
         .assert_inertia()
+        .component("Dashboard")
+        .url("/dashboard")
+        .where_("count", 3);
+}
+
+/// A gateway that renders every first visit and writes the page the way
+/// Inertia 3.8's `buildSSRBody` does (`packages/core/src/ssrUtils.ts`):
+/// `data-page` before `type`, every `/` as `\/` and every `<` as
+/// `\u003c`, then the server-rendered mount element. The framework injects
+/// that body into the document unchanged.
+struct BuildSsrBody;
+
+#[suprnova::async_trait]
+impl SsrGateway for BuildSsrBody {
+    async fn dispatch(
+        &self,
+        _config: &SsrConfig,
+        _request: &dyn InertiaRequestExt,
+        page: &Value,
+    ) -> Result<Option<SsrResponse>, FrameworkError> {
+        let json = page.to_string().replace('/', "\\/").replace('<', "\\u003c");
+        Ok(Some(SsrResponse {
+            head: Vec::new(),
+            body: format!(
+                "<script data-page=\"app\" type=\"application/json\">{json}</script>\
+                 <div data-server-rendered=\"true\" id=\"app\"><p>rendered</p></div>"
+            ),
+        }))
+    }
+}
+
+/// A first visit to `/dashboard` rendered through [`BuildSsrBody`], with
+/// a check that the document is the server-rendered one.
+async fn ssr_first_visit() -> suprnova::testing::TestResponse {
+    App::bind::<dyn SsrGateway>(Arc::new(BuildSsrBody));
+    let client = TestClient::new(dashboard_routes(), MiddlewareRegistry::new());
+    let response = client.get("/dashboard").send().await;
+    let document = response.body_text();
+    assert!(
+        document.contains("<script data-page=\"app\" type=\"application/json\">")
+            && document.contains("data-server-rendered=\"true\""),
+        "the first visit must be the SSR document: {document}"
+    );
+    response
+}
+
+#[tokio::test]
+async fn intt_assert_inertia_reads_an_ssr_first_visit() {
+    let _container = TestContainer::fake();
+    let response = ssr_first_visit().await;
+
+    response
+        .assert_inertia()
+        .component("Dashboard")
+        .url("/dashboard")
+        .where_("count", 3);
+}
+
+#[tokio::test]
+async fn intt_from_response_reads_an_ssr_first_visit() {
+    let _container = TestContainer::fake();
+    let response = ssr_first_visit().await;
+
+    AssertableInertia::from_response(&HttpResponse::html(response.body_text()))
         .component("Dashboard")
         .url("/dashboard")
         .where_("count", 3);

@@ -987,7 +987,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `AssertableInertia::from_response` on an `HttpResponse`. It now reads the
   page from the document's `data-page` element as well, and
   `assert_inertia_with(callback)` runs a callback over the page and returns
-  the response for chaining, as Laravel's `assertInertia(fn)` does (TS-01).
+  the response for chaining, as Laravel's `assertInertia(fn)` does. Both
+  entry points find that element by its `type="application/json"` and
+  `data-page` attributes in either order, with others between them or in
+  single quotes, and skip the text of any other script. They looked for
+  `<script type="application/json" data-page="` only, so the document of a
+  server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
+  `<script data-page="app" type="application/json">`, failed with "no
+  Inertia page object" (TS-01).
 
 ### Fixed
 
