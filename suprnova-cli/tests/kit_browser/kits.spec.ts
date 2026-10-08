@@ -329,6 +329,38 @@ test('PAR-079/080: notes Form creates a note with processing state and toast', a
   await expect(page.getByRole('status')).toHaveText('Note saved.');
 });
 
+test('PAR-079/080: creating a note preserves the active search and matching rows', async ({ page }) => {
+  await filledNotes(page);
+  const term = 'Kit note 00';
+  const search = page.locator('#search');
+  const filtered = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === '/notes' && url.searchParams.get('search') === term;
+  });
+  await search.fill(term);
+  await search.press('Tab');
+  await filtered;
+  await expect(rows(page)).toHaveCount(1);
+  await expect(rows(page).filter({ hasText: term })).toHaveCount(1);
+
+  const form = page.locator('form').filter({ has: page.locator('#title') });
+  const delayed = await hold(page, '**/notes', request => request.method() === 'POST');
+  await page.locator('#title').fill('Created outside the search');
+  await page.locator('#body').fill('A real filtered submission');
+  await form.getByRole('button').click();
+  const route = await delayed.requested;
+  expect(route.request().headers()['x-inertia']).toBe('true');
+  await expect(form.getByRole('button')).toBeDisabled();
+  await delayed.release(route);
+  await expect(page.getByRole('status')).toHaveText('Note saved.');
+  await expect(page).toHaveURL(url => url.pathname === '/notes'
+    && url.searchParams.get('search') === term);
+  await expect(search).toHaveValue(term);
+  await expect(rows(page)).toHaveCount(1);
+  await expect(rows(page).filter({ hasText: term })).toHaveCount(1);
+  await expect(rows(page).filter({ hasText: 'Created outside the search' })).toHaveCount(0);
+});
+
 test('PAR-077/078: sign-out Link posts and lands on Home with a toast', async ({ page }) => {
   await dashboard(page);
   // K06/PAR-077 and K17/PAR-078: layout's POST Link and flash.

@@ -1,8 +1,0 @@
-<section class="acme-feed">
-<h2>{{ headline }}</h2>
-<p data-posted="{{ component.posted() }}">Posted {{ component.posted() }}</p>
-<label>Search <input type="search" live:model.debounce.250ms="query"></label>
-<label>Picture <input type="file" live:upload="picture"></label>
-<button type="button" live:click="refresh">Refresh</button>
-<button type="button" live:click="save">Save</button>
-</section>
