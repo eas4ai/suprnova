@@ -5097,7 +5097,7 @@ dependencies = [
 [[package]]
 name = "oxideav-bmp"
 version = "0.1.8"
-source = "git+file:///home/shawn/workspace2/oxideav-bmp?rev=a640fa7e061c1897fdce020af3896e843a94f613#a640fa7e061c1897fdce020af3896e843a94f613"
+source = "git+https://github.com/eas4ai/oxideav-bmp?rev=a640fa7e061c1897fdce020af3896e843a94f613#a640fa7e061c1897fdce020af3896e843a94f613"
 dependencies = [
  "oxideav-core",
 ]
@@ -5150,7 +5150,7 @@ dependencies = [
 [[package]]
 name = "oxideav-png"
 version = "0.1.12"
-source = "git+file:///home/shawn/workspace2/oxideav-png?rev=d29d4b25d790e08c04e7d56b27726c58daac7cfd#d29d4b25d790e08c04e7d56b27726c58daac7cfd"
+source = "git+https://github.com/eas4ai/oxideav-png?rev=d29d4b25d790e08c04e7d56b27726c58daac7cfd#d29d4b25d790e08c04e7d56b27726c58daac7cfd"
 dependencies = [
  "compcol",
  "oxideav-core",
@@ -5168,7 +5168,7 @@ dependencies = [
 [[package]]
 name = "oxideav-webp"
 version = "0.3.1"
-source = "git+file:///home/shawn/workspace2/oxideav-webp?rev=65a9c8ad5d6ce945cd4f3aac5b3279936eb42629#65a9c8ad5d6ce945cd4f3aac5b3279936eb42629"
+source = "git+https://github.com/eas4ai/oxideav-webp?rev=65a9c8ad5d6ce945cd4f3aac5b3279936eb42629#65a9c8ad5d6ce945cd4f3aac5b3279936eb42629"
 dependencies = [
  "oxideav-core",
  "oxideav-vp8",

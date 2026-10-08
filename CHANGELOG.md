@@ -144,7 +144,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   half a second instead of 47.8 s in a release build, and processing a
   64 x 64 image to lossless WebP allocates 0.76 MB in all instead of
   1.23 GB. Its files are at most 8.7 percent larger. The forks carry
-  three fixes of their own, each offered upstream: a PNG is decoded
+  three fixes of their own, each offered upstream (oxideav-png #26,
+  oxideav-bmp #18 and #19): a PNG is decoded
   without inflating its `iCCP` profile or XMP packet, which
   `oxideav-png` 0.1.11 and later inflated, up to 64 MiB each, before
   `IMAGE_MAX_ALLOC_BYTES` could count them (a crafted profile held
