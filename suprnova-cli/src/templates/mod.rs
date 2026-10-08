@@ -425,10 +425,20 @@ pub fn config_mail() -> &'static str {
 /// The scaffolded `src/bootstrap.rs`. Takes the frontend because the
 /// generated `Inertia::install` call pins it: left to the environment, the
 /// framework falls back to Svelte, and a React project rendering Svelte's
-/// entry point is a blank page with nothing in the log.
-pub fn bootstrap(frontend: Frontend) -> String {
+/// entry point is a blank page with nothing in the log. Takes the project's
+/// title for the config's default title, which every page without a title
+/// of its own is otherwise named `Suprnova` by.
+pub fn bootstrap(frontend: Frontend, project_title: &str) -> String {
     include_str!("files/backend/bootstrap.rs.tpl")
         .replace("{frontend_variant}", frontend.variant_name())
+        .replace("{project_title}", project_title)
+}
+
+/// The scaffolded `templates/app.html`: the root document every Inertia
+/// first visit renders into, in place of a `frontend/index.html` the server
+/// never served.
+pub fn app_root_template() -> &'static str {
+    include_str!("files/backend/templates/app.html.tpl")
 }
 
 // Migrations templates
@@ -541,10 +551,6 @@ pub mod react {
     pub fn tsconfig() -> &'static str {
         include_str!("files/frontend/react/tsconfig.json.tpl")
     }
-    pub fn index_html(project_title: &str) -> String {
-        include_str!("files/frontend/react/index.html.tpl")
-            .replace("{project_title}", project_title)
-    }
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/react/src/main.tsx.tpl")
     }
@@ -612,10 +618,6 @@ pub mod svelte {
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/svelte/src/app.css.tpl")
     }
-    pub fn index_html(project_title: &str) -> String {
-        include_str!("files/frontend/svelte/index.html.tpl")
-            .replace("{project_title}", project_title)
-    }
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/svelte/src/main.ts.tpl")
     }
@@ -671,9 +673,6 @@ pub mod vue {
     pub fn shims_dts() -> &'static str {
         include_str!("files/frontend/vue/src/shims-vue.d.ts.tpl")
     }
-    pub fn index_html(project_title: &str) -> String {
-        include_str!("files/frontend/vue/index.html.tpl").replace("{project_title}", project_title)
-    }
     pub fn main_file() -> &'static str {
         include_str!("files/frontend/vue/src/main.ts.tpl")
     }
@@ -723,7 +722,6 @@ pub mod vue {
 pub fn scaffold_frontend(
     project_path: &Path,
     project_name: &str,
-    project_title: &str,
     frontend: Frontend,
 ) -> Result<(), String> {
     let fe = project_path.join("frontend");
@@ -768,57 +766,52 @@ pub fn scaffold_frontend(
         ),
     };
 
-    let (pkg, vite, ts, index, main_src, ssr_src, home, dash, login, reg, props, css) =
-        match frontend {
-            Frontend::React => (
-                react::package_json(project_name),
-                react::vite_config().to_string(),
-                react::tsconfig().to_string(),
-                react::index_html(project_title),
-                react::main_file().to_string(),
-                react::ssr_file().to_string(),
-                react::home_page().to_string(),
-                react::dashboard_page().to_string(),
-                react::login_page().to_string(),
-                react::register_page().to_string(),
-                react::inertia_props_types().to_string(),
-                react::app_css().to_string(),
-            ),
-            Frontend::Svelte => (
-                svelte::package_json(project_name),
-                svelte::vite_config().to_string(),
-                svelte::tsconfig().to_string(),
-                svelte::index_html(project_title),
-                svelte::main_file().to_string(),
-                svelte::ssr_file().to_string(),
-                svelte::home_page().to_string(),
-                svelte::dashboard_page().to_string(),
-                svelte::login_page().to_string(),
-                svelte::register_page().to_string(),
-                svelte::inertia_props_types().to_string(),
-                svelte::app_css().to_string(),
-            ),
-            Frontend::Vue => (
-                vue::package_json(project_name),
-                vue::vite_config().to_string(),
-                vue::tsconfig().to_string(),
-                vue::index_html(project_title),
-                vue::main_file().to_string(),
-                vue::ssr_file().to_string(),
-                vue::home_page().to_string(),
-                vue::dashboard_page().to_string(),
-                vue::login_page().to_string(),
-                vue::register_page().to_string(),
-                vue::inertia_props_types().to_string(),
-                vue::app_css().to_string(),
-            ),
-        };
+    let (pkg, vite, ts, main_src, ssr_src, home, dash, login, reg, props, css) = match frontend {
+        Frontend::React => (
+            react::package_json(project_name),
+            react::vite_config().to_string(),
+            react::tsconfig().to_string(),
+            react::main_file().to_string(),
+            react::ssr_file().to_string(),
+            react::home_page().to_string(),
+            react::dashboard_page().to_string(),
+            react::login_page().to_string(),
+            react::register_page().to_string(),
+            react::inertia_props_types().to_string(),
+            react::app_css().to_string(),
+        ),
+        Frontend::Svelte => (
+            svelte::package_json(project_name),
+            svelte::vite_config().to_string(),
+            svelte::tsconfig().to_string(),
+            svelte::main_file().to_string(),
+            svelte::ssr_file().to_string(),
+            svelte::home_page().to_string(),
+            svelte::dashboard_page().to_string(),
+            svelte::login_page().to_string(),
+            svelte::register_page().to_string(),
+            svelte::inertia_props_types().to_string(),
+            svelte::app_css().to_string(),
+        ),
+        Frontend::Vue => (
+            vue::package_json(project_name),
+            vue::vite_config().to_string(),
+            vue::tsconfig().to_string(),
+            vue::main_file().to_string(),
+            vue::ssr_file().to_string(),
+            vue::home_page().to_string(),
+            vue::dashboard_page().to_string(),
+            vue::login_page().to_string(),
+            vue::register_page().to_string(),
+            vue::inertia_props_types().to_string(),
+            vue::app_css().to_string(),
+        ),
+    };
 
     let writes: &[(std::path::PathBuf, &str)] = &[
         (fe.join("package.json"), &pkg),
         (fe.join("vite.config.ts"), &vite),
         (fe.join("tsconfig.json"), &ts),
-        (fe.join("index.html"), &index),
         (main, &main_src),
         (ssr_entry, &ssr_src),
         (src.join("app.css"), &css),

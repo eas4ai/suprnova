@@ -19,6 +19,7 @@ mod prop;
 mod providers;
 mod response;
 mod root_share;
+mod root_template;
 mod shared;
 pub(crate) mod ssr;
 mod validation_redirect_middleware;
@@ -44,6 +45,10 @@ pub(crate) use response::escape_html_attr;
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
 pub use shared::SharedOnceProp;
+pub use root_template::{
+    InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts, InertiaRootTemplate,
+    InertiaRootTitle, InertiaViewData, InertiaViewValue,
+};
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use ssr::SsrResponse;
 pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;

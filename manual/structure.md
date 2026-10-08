@@ -50,11 +50,13 @@ my-app/
 │   └── models/
 │       ├── mod.rs
 │       └── user.rs                 # `#[suprnova::model]` User model
+├── templates/
+│   └── app.html                    # the Inertia root document every first visit
+│                                   # renders into, `AppDocument` in bootstrap.rs
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── tsconfig.json
-│   ├── index.html                  # Vite entry; mounts the SPA
 │   └── src/
 │       ├── main.{tsx,ts}           # Inertia client setup (per-framework)
 │       ├── app.css                 # global styles + Tailwind
@@ -313,12 +315,38 @@ a controller would have exactly one method and you'd rather call it
 "Action" than wrap it. The scaffold ships an example you can delete or
 adapt. See [Actions](actions.md).
 
+### `templates/`
+
+Askama templates, which the Rust build reads at compile time. The scaffold
+ships `app.html`, the Inertia root document every first visit renders
+into: the place for your favicon, fonts and meta tags around the parts the
+framework hands it (`title`, `head`, `body`, `lang`). `src/bootstrap.rs`
+declares it and installs it on the Inertia config:
+
+```rust
+use suprnova::{Inertia, InertiaConfig, InertiaRootTemplate};
+
+#[suprnova::inertia_root(path = "app.html")]
+pub struct AppDocument;
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new().root_template(InertiaRootTemplate::of::<AppDocument>()),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+`suprnova live:make` adds Live component views under `templates/live/`.
+See [Inertia Responses](frontend-inertia-responses.md#the-root-template).
+
 ### `frontend/`
 
 The Vite + Inertia SPA. This is a normal frontend project - `package.json`,
-`vite.config.ts`, `tsconfig.json`, an `index.html` Vite entry, source
-under `src/`. The Inertia client setup lives in `src/main.{tsx,ts}` and
-the page components in `src/pages/`. TypeScript types for your Rust
+`vite.config.ts`, `tsconfig.json`, source under `src/`. Vite builds from
+the entry module `src/main.{tsx,ts}`, which holds the Inertia client
+setup; the page components live in `src/pages/`, and the first-load HTML
+comes from `templates/app.html`. TypeScript types for your Rust
 `#[derive(InertiaProps)]` props are regenerated into
 `src/types/inertia-props.ts` by `suprnova generate-types`.
 

@@ -28,12 +28,23 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
-    EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig, LocaleMiddleware,
-    LocaleShare, OriginPolicy, RootShare, SessionConfig, SessionMiddleware, DB,
+    EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig,
+    InertiaRootTemplate, LocaleMiddleware, LocaleShare, OriginPolicy, RootShare, SessionConfig,
+    SessionMiddleware, DB,
 };
 
 use crate::middleware;
 use crate::models::user::User;
+
+/// The document every Inertia first visit renders into: `templates/app.html`.
+///
+/// The framework hands the template its parts - `title`, `head` (the CSRF
+/// tag and the Vite tags), `body` (the page data and the mount element),
+/// `lang`, `csrf_token`, `nonce`, `ssr` and the response's `view` data - and
+/// Askama checks at compile time that it names nothing else. Put the
+/// application's own head content there: a favicon, fonts, meta tags.
+#[suprnova::inertia_root(path = "app.html")]
+pub struct AppDocument;
 
 /// Register process-wide services.
 ///
@@ -158,6 +169,9 @@ pub fn register_http_stack() {
     //
     // Everything set on this config reaches every page: `Inertia::install`
     // retains it as the default each `InertiaResponse` starts from.
+    // `.root_template` renders every first visit through `AppDocument`
+    // (`templates/app.html`), and `.default_title` names every page that
+    // sets no title of its own.
     // `.error_page` names the page every framework error response renders
     // through - a 403 from an authorization check, a 404 for an unknown
     // route, a 500. Without it those reach the Inertia client as a JSON
@@ -179,6 +193,8 @@ pub fn register_http_stack() {
     Inertia::install(
         &InertiaConfig::new()
             .frontend(Frontend::{frontend_variant})
+            .default_title("{project_title}")
+            .root_template(InertiaRootTemplate::of::<AppDocument>())
             .error_page("Error"),
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");

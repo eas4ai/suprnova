@@ -31,9 +31,9 @@ use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
     App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
-    Inertia, InertiaConfig, InertiaRequestExt, InertiaSharedData, LocaleMiddleware, LocaleShare,
-    Prop, SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
-    UserProvider, bind, global_middleware,
+    Inertia, InertiaConfig, InertiaRequestExt, InertiaRootTemplate, InertiaSharedData,
+    LocaleMiddleware, LocaleShare, Prop, SessionBlock, SessionConfig, SessionMiddleware, Storage,
+    SupervisorRegistry, UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -231,13 +231,22 @@ pub async fn register() {
         .expect("feature-flag chain wired");
 }
 
+/// The document every Inertia first visit renders into:
+/// `templates/app.html`, which places the framework's parts and the
+/// `description` view data a page sets for link previews.
+#[suprnova::inertia_root(path = "app.html")]
+pub struct AppDocument;
+
 /// The Inertia configuration this app installs.
 ///
 /// One function rather than an inline literal at the install site so the
 /// version the server advertises and the version a protocol test sends
-/// can never drift apart - both read it from here.
+/// can never drift apart - both read it from here. Every first visit
+/// renders through [`AppDocument`].
 pub fn inertia_config() -> InertiaConfig {
     InertiaConfig::new()
+        .default_title("Suprnova App")
+        .root_template(InertiaRootTemplate::of::<AppDocument>())
 }
 
 /// The Inertia asset version this app advertises.

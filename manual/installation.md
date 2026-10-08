@@ -144,11 +144,12 @@ my-app/
 │   ├── middleware/     # logging, authenticate
 │   ├── migrations/     # SeaORM migrators (users, sessions, etc.)
 │   └── models/         # `#[suprnova::model]` structs (user)
+├── templates/
+│   └── app.html        # the Inertia root document (`AppDocument` in bootstrap.rs)
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── tsconfig.json
-│   ├── index.html
 │   └── src/
 │       ├── main.{tsx,ts}
 │       ├── app.css

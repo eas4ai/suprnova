@@ -928,6 +928,7 @@ const KNOWN_TEMPLATE_KEYS: &[&str] = &[
     "app_key",
     "frontend",
     "frontend_variant",
+    "project_title",
 ];
 
 /// The tag in a scaffold on disk must be the tag this build would release.
@@ -1714,7 +1715,7 @@ fn scaffolding_writes_the_error_page_for_every_frontend() {
         (suprnova_cli::templates::Frontend::Vue, "vue"),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
-        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", frontend)
             .expect("scaffold frontend");
         let page = dir
             .path()
@@ -1993,7 +1994,7 @@ fn every_page_the_scaffold_controllers_render_is_scaffolded_for_every_frontend()
         (suprnova_cli::templates::Frontend::Vue, "vue"),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
-        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", frontend)
             .expect("scaffold frontend");
         let pages = dir.path().join("frontend/src/pages");
         for component in &components {
@@ -2224,8 +2225,7 @@ fn pfx_005_every_vite_config_sets_the_relative_base() {
 
 /// PFX-005: no scaffold frontend module imports a stylesheet or a module by a
 /// path that starts with `/`, which would resolve against the host root
-/// instead of the entry script's URL. `index.html.tpl` is the development
-/// entry, which no server under a prefix ever serves.
+/// instead of the entry script's URL.
 #[test]
 fn pfx_005_no_frontend_template_imports_by_a_root_absolute_path() {
     let frontend = cli_root().join("src/templates/files/frontend");
@@ -2245,9 +2245,6 @@ fn pfx_005_no_frontend_template_imports_by_a_root_absolute_path() {
     let mut offenders = Vec::new();
     let mut seen = 0usize;
     visit(&frontend, &mut |path, body| {
-        if path.file_name().and_then(|name| name.to_str()) == Some("index.html.tpl") {
-            return;
-        }
         seen += 1;
         for (index, line) in body.lines().enumerate() {
             if refused.iter().any(|needle| line.contains(needle)) {
@@ -2373,4 +2370,170 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
     }
     assert_eq!(pages, 21, "seven pages for each of the three frontends");
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// RDOC-006: no frontend scaffolds an `index.html`. The server never served
+/// it: the first visit is written through the root template under
+/// `templates/`, and Vite builds from the entry module.
+#[test]
+fn rdoc_006_no_frontend_scaffolds_an_index_html() {
+    let mut shipped = Vec::new();
+    visit(&cli_root().join("src/templates/files"), &mut |path, _| {
+        if path.file_name().and_then(|name| name.to_str()) == Some("index.html.tpl") {
+            shipped.push(path.display().to_string());
+        }
+    });
+    assert!(shipped.is_empty(), "index.html templates: {shipped:?}");
+
+    for frontend in [
+        suprnova_cli::templates::Frontend::React,
+        suprnova_cli::templates::Frontend::Svelte,
+        suprnova_cli::templates::Frontend::Vue,
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", frontend)
+            .expect("scaffold frontend");
+        assert!(
+            !dir.path().join("frontend/index.html").exists(),
+            "{frontend:?} still writes frontend/index.html"
+        );
+    }
+}
+
+/// RDOC-006: the scaffold's root template places every part, and the
+/// bootstrap declares it, renders every first visit through it and sets
+/// the project's title as the default title in place of `Suprnova`.
+#[test]
+fn rdoc_006_the_scaffold_bootstrap_renders_through_its_root_template() {
+    let template = suprnova_cli::templates::app_root_template();
+    for part in ["{{ lang }}", "{{ title }}", "{{ head }}", "{{ body }}"] {
+        assert!(
+            template.contains(part),
+            "the root template lacks {part}:\n{template}"
+        );
+    }
+
+    let bootstrap =
+        suprnova_cli::templates::bootstrap(suprnova_cli::templates::Frontend::Svelte, "My App");
+    for expected in [
+        "#[suprnova::inertia_root(path = \"app.html\")]",
+        "pub struct AppDocument;",
+        ".root_template(InertiaRootTemplate::of::<AppDocument>())",
+        ".default_title(\"My App\")",
+    ] {
+        assert!(
+            bootstrap.contains(expected),
+            "the scaffold bootstrap lacks {expected}:\n{bootstrap}"
+        );
+    }
+}
+
+/// RDOC-006: the Dockerfile copies `templates/` into the stage that
+/// compiles the application, before it compiles it, and `.dockerignore`
+/// keeps the directory in the build context: Askama reads the root
+/// template at compile time.
+#[test]
+fn rdoc_006_the_dockerfile_copies_templates_before_the_build() {
+    let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
+    let stage = dockerfile
+        .split_once("AS backend-builder")
+        .and_then(|(_, rest)| rest.split_once("AS runtime"))
+        .expect("a backend-builder stage before the runtime stage")
+        .0;
+    let lines: Vec<&str> = stage
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    let copies = lines
+        .iter()
+        .position(|line| {
+            line.starts_with("COPY ") && !line.contains("--from=") && line.contains("template")
+        })
+        .unwrap_or_else(|| panic!("the backend stage copies no templates:\n{stage}"));
+    let builds = lines
+        .iter()
+        .rposition(|line| line.contains("cargo build --release"))
+        .expect("the backend stage builds the application");
+    assert!(
+        copies < builds,
+        "templates are copied after the build:\n{stage}"
+    );
+
+    let dockerignore = read("src/templates/files/docker/dockerignore.tpl");
+    for line in dockerignore.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        assert!(
+            !"templates/app.html".starts_with(line.trim_end_matches('/')),
+            ".dockerignore excludes `{line}`, which takes templates/ out of the build context"
+        );
+    }
+}
+
+/// RDOC-006: the Inertia responses chapter documents the root template:
+/// its declaration, each part, the per-request chooser, view data and the
+/// mount id, in a section of its own.
+#[test]
+fn rdoc_006_the_manual_documents_the_root_template() {
+    let chapter = read_from_repo("manual/frontend-inertia-responses.md");
+    let section = chapter
+        .split_once("\n## The root template\n")
+        .map(|(_, rest)| {
+            rest.split_once("\n## ")
+                .map_or(rest, |(section, _)| section)
+        })
+        .expect("manual/frontend-inertia-responses.md has a `## The root template` section");
+    for named in [
+        "#[suprnova::inertia_root(path = ",
+        ".root_template(InertiaRootTemplate::of::<",
+        "- `title`:",
+        "- `head`:",
+        "- `body`:",
+        "- `lang`:",
+        "- `csrf_token`:",
+        "- `nonce`:",
+        "- `ssr`:",
+        "- `view`:",
+        "root_template_with",
+        ".with_view_data(",
+        "view.get(",
+        ".mount_id(",
+    ] {
+        assert!(
+            section.contains(named),
+            "the root template section does not name {named}"
+        );
+    }
+}
+
+/// RDOC-006: the chapters that draw the scaffold's tree list the root
+/// template `templates/app.html` and no `frontend/index.html`, which the
+/// scaffold no longer writes, and the directory tour names the
+/// `AppDocument` declaration.
+#[test]
+fn rdoc_006_the_manual_draws_the_scaffold_with_its_root_template() {
+    for chapter in ["manual/structure.md", "manual/installation.md"] {
+        let text = read_from_repo(chapter);
+        assert!(
+            !text.contains("index.html"),
+            "{chapter} still lists an index.html the scaffold does not write"
+        );
+        assert!(
+            text.contains("├── templates/") && text.contains("app.html"),
+            "{chapter} does not list templates/app.html in the scaffold's tree"
+        );
+    }
+    let structure = read_from_repo("manual/structure.md");
+    for named in [
+        "### `templates/`",
+        "#[suprnova::inertia_root(path = \"app.html\")]",
+        "pub struct AppDocument;",
+    ] {
+        assert!(
+            structure.contains(named),
+            "manual/structure.md does not name {named}"
+        );
+    }
 }

@@ -73,7 +73,7 @@ fn expand_view_filter_inner(args: TokenStream2, item: TokenStream) -> syn::Resul
     })
 }
 
-fn parse_view_path(args: TokenStream2) -> syn::Result<syn::LitStr> {
+pub(crate) fn parse_view_path(args: TokenStream2) -> syn::Result<syn::LitStr> {
     let entries = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(args)?;
     let mut path = None;
 

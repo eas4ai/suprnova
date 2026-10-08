@@ -1,6 +1,6 @@
 //! `AssertableInertia` - fluent assertions over an Inertia page object,
 //! parsed from either an Inertia XHR response body or the `<script
-//! type="application/json" data-page="app">` element embedded in a
+//! type="application/json" data-page="...">` element embedded in a
 //! hard-navigation HTML shell (see `framework/src/inertia/response.rs`
 //! `build_json_response` / `build_html_response`). Laravel's
 //! `Inertia\Testing\AssertableInertia` equivalent: assertions panic with
@@ -92,10 +92,12 @@ impl AssertableInertia {
     /// Handles both shapes a resolved Inertia response can take: when the
     /// response carries an `X-Inertia` header, the body is the JSON page
     /// object directly; otherwise the body is the HTML shell and the page
-    /// object is read out of its `<script type="application/json"
-    /// data-page="app">` element (a server-rendered/SSR body embeds a
-    /// different shape via `buildSSRBody` and is not covered here - no
-    /// test in this codebase asserts against one today).
+    /// object is read out of its first `<script type="application/json"
+    /// data-page="...">` element, whatever id
+    /// [`InertiaConfig::mount_id`](crate::InertiaConfig::mount_id) gave it
+    /// (a server-rendered/SSR body embeds a different shape via
+    /// `buildSSRBody` and is not covered here - no test in this codebase
+    /// asserts against one today).
     ///
     /// # Panics
     ///
@@ -123,7 +125,7 @@ impl AssertableInertia {
                 Some(Err(e)) => fail_with_report(
                     format!(
                         "AssertableInertia::from_response(...): found the <script \
-                         type=\"application/json\" data-page=\"app\"> element, but its content \
+                         type=\"application/json\" data-page=...> element, but its content \
                          is not valid JSON: {e}"
                     ),
                     report.as_ref(),
@@ -131,7 +133,7 @@ impl AssertableInertia {
                 None => fail_with_report(
                     "AssertableInertia::from_response(...): no Inertia page object found - no \
                      X-Inertia header and no <script type=\"application/json\" \
-                     data-page=\"app\"> element in the body"
+                     data-page=...> element in the body"
                         .to_string(),
                     report.as_ref(),
                 ),
@@ -456,8 +458,9 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     Some(current)
 }
 
-/// Extract the JSON page object from a hard-navigation HTML shell's
-/// `<script type="application/json" data-page="app">` element. The
+/// Extract the JSON page object from a hard-navigation HTML shell's first
+/// `<script type="application/json" data-page="...">` element, whatever its
+/// id: the attribute carries the configured mount id, `app` by default. The
 /// element's content is standard JSON with every `/` escaped as `\/`
 /// (`framework/src/inertia/response.rs` `build_html_response`) - a
 /// valid JSON escape `serde_json` parses natively, so no unescaping is
@@ -470,8 +473,10 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 /// the real cause instead of misreporting a found-but-broken element as
 /// absent.
 fn page_object_from_html(html: &str) -> Option<Result<Value, serde_json::Error>> {
-    const OPEN: &str = r#"<script type="application/json" data-page="app">"#;
-    let start = html.find(OPEN)? + OPEN.len();
+    const OPEN: &str = r#"<script type="application/json" data-page=""#;
+    let id_at = html.find(OPEN)? + OPEN.len();
+    // The id is written attribute-escaped, so the first `">` closes the tag.
+    let start = html[id_at..].find("\">")? + id_at + 2;
     let end = html[start..].find("</script>")? + start;
     Some(serde_json::from_str(&html[start..end]))
 }

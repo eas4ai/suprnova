@@ -55,6 +55,16 @@ RUN cargo build --release \
 COPY cmd/ ./cmd/
 COPY src/ ./src/
 
+# Askama templates - the Inertia root document `templates/app.html` and any
+# Live views - which the Rust build reads at compile time. `template[s]`
+# matches nothing in a project without the directory, and Cargo.toml gives
+# the COPY a source either way.
+COPY Cargo.toml template[s] ./templates-context/
+RUN mkdir -p templates \
+    && rm templates-context/Cargo.toml \
+    && cp -R templates-context/. templates/ \
+    && rm -rf templates-context
+
 # Schema dumps (`suprnova schema:dump`), when the project has any, for the
 # runtime stage. `databas[e]` matches nothing in a project without a
 # database directory, and Cargo.toml gives the COPY a source either way;
