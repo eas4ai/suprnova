@@ -1783,7 +1783,10 @@ error report, and the page renders for it. A panic in a middleware
 registered *outside* it reaches the boundary around the whole chain, and
 that `500` reaches your callback, or the default callback, at the server,
 after the whole stack - without the request scopes the stack opened, as
-[Where the page is rendered](#where-the-page-is-rendered) describes.
+[Where the page is rendered](#where-the-page-is-rendered) describes. A
+callback that panics is a bug the same boundary reports: the client gets
+the sanitized `500` with the panic's error report, whether the callback
+panicked inside the stack or at the server, and no page renders for it.
 
 If the page itself fails to render - the component cannot be resolved,
 SSR is down, a shared prop errors - the framework logs a `warn` with the

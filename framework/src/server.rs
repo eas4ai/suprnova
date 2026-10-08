@@ -1316,10 +1316,21 @@ async fn dispatch_chain(
             return response;
         };
         // Boxed: deciding may render a page, a large future, which only
-        // the requests that reach this line pay for.
-        let decided = crate::logging::REQUEST_ID
-            .scope(request_id.clone(), Box::pin(decision.decide(response)))
-            .await;
+        // the requests that reach this line pay for. Caught: the callback
+        // is application code, and a panic in it is a bug the boundary
+        // reports as the same 500 `execute_chain_safely` answers a
+        // handler's with, instead of unwinding the connection's task and
+        // closing the connection on the client.
+        let decided = match crate::logging::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                crate::error::catch_panic(Box::pin(decision.decide(response))),
+            )
+            .await
+        {
+            Ok(decided) => decided,
+            Err(panic) => panic_into_response(panic, method.as_str(), path, request_id.as_str()),
+        };
         if decided.header_value("X-Request-Id").is_some() {
             decided
         } else {
