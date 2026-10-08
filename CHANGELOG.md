@@ -156,6 +156,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   adjusts the request sent to the worker through the new `SsrRequest`
   (headers, a bearer token, the timeout), so a worker that needs a token can
   be reached (RF-11, RF-12, RF-13).
+- **`Inertia::location(url or redirect)`**, Laravel's `Inertia::location`,
+  beside `InertiaResponse::location`, both taking a URL or a `Redirect`
+  through the new `InertiaLocation` (RF-16, HM-04).
 
 ### Changed
 
@@ -411,6 +414,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   either end of a pattern are now ignored, `*` matches any characters
   including `/`, the path is decoded first, and each pattern is also tried
   against the full URL; `**` keeps working (RF-12).
+- **`InertiaResponse::location` answers a hard navigation with a redirect.**
+  It always answered `409` + `X-Inertia-Location`, which a browser that did
+  not send `X-Inertia` cannot follow, so an OAuth or SSO bounce started
+  outside the SPA dead-ended on a blank page. Under the Inertia middleware it
+  now answers an Inertia visit with the `409` and anything else with a `302`
+  + `Location`, or the `Redirect` it was given, as Laravel's does;
+  `location_for(&req, url)` stays for routes without the middleware (RF-16).
 
 ### Fixed
 

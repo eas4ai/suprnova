@@ -44,7 +44,8 @@
 //! middleware and sees every response, including the `409` that
 //! [`InertiaVersionMiddleware`](crate::InertiaVersionMiddleware) returns
 //! without ever calling the handler. It also scopes the facts of the
-//! request for [`Inertia::back`](crate::Inertia::back).
+//! request for [`Inertia::back`](crate::Inertia::back) and
+//! [`Inertia::location`](crate::Inertia::location).
 
 use std::sync::Arc;
 

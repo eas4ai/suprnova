@@ -40,7 +40,7 @@ pub use prop::{
     Visibility,
 };
 pub(crate) use response::escape_html_attr;
-pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
+pub use response::{InertiaLocation, InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use ssr::{SsrRequest, SsrResponse};

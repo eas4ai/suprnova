@@ -320,12 +320,13 @@ pub use http_client::{
 pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferOptions, EncryptHistoryMiddleware, FlashKey, Frontend, Inertia, Inertia303Middleware,
-    InertiaConfig, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaRegistry,
-    InertiaRequestExt, InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
-    InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
-    MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
-    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata,
-    SsrConfig, SsrRequest, SsrResponse, VersionResolver, Visibility, ViteManifest,
+    InertiaConfig, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaLocation,
+    InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
+    InertiaValidationRedirectMiddleware, InertiaVersionMiddleware, IntoInertiaData,
+    MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
+    PartialFilter, Prop, PropEntry, PropFuture, PropResolver, ProvidesScrollMetadata,
+    ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest, SsrResponse, VersionResolver,
+    Visibility, ViteManifest,
 };
 pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]

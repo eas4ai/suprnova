@@ -1,11 +1,12 @@
 //! What the Inertia middleware knows about the request it is handling,
 //! kept for the code that runs inside it.
 //!
-//! Laravel's `Inertia::back()` reads the current request from the
-//! container. A Rust handler has no ambient request, so
+//! Laravel's `Inertia::back()` and `Inertia::location()` read the current
+//! request from the container. A Rust handler has no ambient request, so
 //! [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) scopes the
-//! few facts such calls need - the `Referer` and the origin it is checked
-//! against - into a task-local for the rest of the chain. The page render writes back which component it
+//! few facts those calls need - whether this is an Inertia visit, the
+//! `Referer` and the origin it is checked against - into a task-local for
+//! the rest of the chain. The page render writes back which component it
 //! rendered, which the middleware reads to tell a partial reload of the same
 //! page from a navigation.
 
@@ -19,6 +20,8 @@ tokio::task_local! {
 
 /// The facts of one request, captured before the handler consumes it.
 pub(crate) struct Visit {
+    /// The request is an Inertia visit.
+    pub(crate) is_inertia: bool,
     /// The `Referer` header as sent.
     referer: Option<String>,
     /// The host as the trust rule gives it, which a `Referer` must name.
@@ -33,6 +36,7 @@ impl Visit {
     /// Capture the facts of `request`.
     pub(crate) fn capture(request: &Request) -> Self {
         Self {
+            is_inertia: request.is_inertia(),
             referer: request.header("Referer").map(str::to_string),
             http_host: request.http_host(),
             public_root: request.public_root().to_string(),

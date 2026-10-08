@@ -13,6 +13,7 @@ pub mod flash_session;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 pub mod inertia;
+pub mod location;
 pub mod merge_paths;
 pub mod middleware;
 #[path = "../support/own_process.rs"]

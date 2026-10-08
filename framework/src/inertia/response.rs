@@ -1008,29 +1008,62 @@ impl InertiaResponse {
         self
     }
 
-    /// Build a `409 Conflict` external-redirect response. The client
-    /// performs `window.location = url`, doing a full page navigation
-    /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
+    /// An external redirect: a full page navigation the client performs
+    /// with `window.location = url` rather than an Inertia visit - Laravel's
+    /// `Inertia::location($url)`, also reachable as
+    /// [`Inertia::location`](crate::Inertia::location).
+    ///
+    /// The answer depends on the request, which it reads from the
+    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) the
+    /// route runs under:
+    ///
+    /// - an Inertia visit gets `409` + `X-Inertia-Location`, the only form
+    ///   the client follows out of the app;
+    /// - anything else gets a `302` + `Location`, or, when `target` is a
+    ///   [`Redirect`](crate::Redirect), that redirect as it is, its status,
+    ///   flash and cookies included - a hard navigation into an OAuth or SSO
+    ///   bounce has no use for a `409` and would dead-end on it.
+    ///
+    /// Without the Inertia middleware on the route nothing tells it which
+    /// the request was, and it answers the `409`, as it always did; use
+    /// [`location_for`](Self::location_for) there.
     ///
     /// **When to use which redirect form:**
     /// - [`Redirect::to`](crate::Redirect::to) - standard 302/303 with
     ///   `Location` header. The normal case for redirects after form
     ///   submission inside the Inertia app.
     /// - [`InertiaResponse::redirect`](Self::redirect) - 409 +
-    ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; use
-    ///   when the redirect must carry a `#fragment` (server `Location`
-    ///   headers can't carry fragments through Inertia XHR).
-    /// - [`InertiaResponse::location`](Self::location) - 409 +
-    ///   `X-Inertia-Location` for full-page reload via
-    ///   `window.location`; use to leave the Inertia app entirely.
-    ///   Always returns the 409 form, so only reach for it where the
-    ///   request is already known to be an Inertia visit - otherwise use
-    ///   [`location_for`](Self::location_for), which falls back to a plain
-    ///   `302` for a hard navigation.
-    pub fn location(url: impl AsRef<str>) -> HttpResponse {
+    ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; a redirect
+    ///   with a `#fragment` on an Inertia visit becomes this on its own.
+    /// - [`InertiaResponse::location`](Self::location) - to leave the
+    ///   Inertia app entirely.
+    pub fn location(target: impl Into<InertiaLocation>) -> HttpResponse {
+        let target = target.into();
+        let is_inertia = super::visit::current().is_none_or(|visit| visit.is_inertia);
+        match (target.0, is_inertia) {
+            (LocationTarget::Url(url), true) => Self::inertia_location(&url),
+            (LocationTarget::Url(url), false) => {
+                HttpResponse::new().status(302).header("Location", url)
+            }
+            (LocationTarget::Redirect(response), false) => response,
+            (LocationTarget::Redirect(response), true) => {
+                let url = response.header_value("Location").unwrap_or("/").to_string();
+                let carried: Vec<(String, String)> = response
+                    .headers()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("Set-Cookie"))
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect();
+                Self::inertia_location(&url).with_headers(carried)
+            }
+        }
+    }
+
+    /// The `409` + `X-Inertia-Location` an Inertia visit follows out of
+    /// the app.
+    fn inertia_location(url: &str) -> HttpResponse {
         HttpResponse::new()
             .status(409)
-            .header("X-Inertia-Location", url.as_ref())
+            .header("X-Inertia-Location", url)
     }
 
     /// Request-aware external redirect - Laravel's `Inertia::location($url)`.
@@ -1039,18 +1072,15 @@ impl InertiaResponse {
     ///   which the client turns into `window.location = url`.
     /// - Anything else → a plain `302` + `Location`.
     ///
-    /// Prefer this over [`location`](Self::location) in a handler. A hard
-    /// navigation into an OAuth or SSO bounce carries no `X-Inertia`
-    /// header, and a bare `409` with no `Location` gives that browser
-    /// nowhere to go: the flow dead-ends on a blank page. Reach for
-    /// [`location`](Self::location) only where the request is already
-    /// known to be an Inertia visit.
+    /// The same answer as [`location`](Self::location), decided from the
+    /// request given rather than the one the Inertia middleware is
+    /// handling, so it works on a route without that middleware.
     pub fn location_for<R: InertiaRequestExt + ?Sized>(
         req: &R,
         url: impl AsRef<str>,
     ) -> HttpResponse {
         if req.is_inertia() {
-            Self::location(url)
+            Self::inertia_location(url.as_ref())
         } else {
             HttpResponse::new()
                 .status(302)
@@ -1411,6 +1441,50 @@ impl InertiaResponse {
         HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", new_url)
+    }
+}
+
+/// Where [`InertiaResponse::location`] sends the visitor: a URL, or a
+/// [`Redirect`](crate::Redirect) whose target an Inertia visit follows and a
+/// plain visit receives as it is - Laravel's `location($url)` takes a
+/// string or a `RedirectResponse` the same way.
+pub struct InertiaLocation(LocationTarget);
+
+enum LocationTarget {
+    Url(String),
+    /// The redirect as a response, converted when the location was built so
+    /// its flash data reaches the session either way.
+    Redirect(HttpResponse),
+}
+
+impl From<&str> for InertiaLocation {
+    fn from(url: &str) -> Self {
+        Self(LocationTarget::Url(url.to_string()))
+    }
+}
+
+impl From<String> for InertiaLocation {
+    fn from(url: String) -> Self {
+        Self(LocationTarget::Url(url))
+    }
+}
+
+impl From<&String> for InertiaLocation {
+    fn from(url: &String) -> Self {
+        Self(LocationTarget::Url(url.clone()))
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for InertiaLocation {
+    fn from(url: std::borrow::Cow<'_, str>) -> Self {
+        Self(LocationTarget::Url(url.into_owned()))
+    }
+}
+
+impl From<crate::http::Redirect> for InertiaLocation {
+    fn from(redirect: crate::http::Redirect) -> Self {
+        let response: crate::http::Response = redirect.into();
+        Self(LocationTarget::Redirect(response.unwrap_or_else(|e| e)))
     }
 }
 

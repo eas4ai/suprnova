@@ -244,6 +244,22 @@ impl Inertia {
             .set_component_transformer(Arc::new(transformer));
     }
 
+    /// An external redirect, answered as the request needs - Laravel's
+    /// `Inertia::location($url)`: `409` + `X-Inertia-Location` to an
+    /// Inertia visit, and to anything else a `302` to the URL or the
+    /// [`Redirect`] given as it is. See [`InertiaResponse::location`].
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, Response};
+    ///
+    /// async fn portal() -> Response {
+    ///     Ok(Inertia::location("https://billing.example/portal"))
+    /// }
+    /// ```
+    pub fn location(target: impl Into<super::InertiaLocation>) -> crate::HttpResponse {
+        InertiaResponse::location(target)
+    }
+
     /// Turn SSR off, or on, for every request - Laravel's
     /// `Inertia::disableSsr($bool)`.
     ///

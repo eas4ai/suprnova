@@ -887,21 +887,29 @@ to repopulate. And it never touches a Precognition response: a dry-run
 `422` is exactly what the client asked for.
 
 To send the visitor **out** of the Inertia app - a payment provider, an
-OAuth authorize endpoint, a hosted billing portal - use `location_for`:
+OAuth authorize endpoint, a hosted billing portal - use `location`:
 
 ```rust
-use suprnova::{InertiaResponse, Request, Response};
+use suprnova::{Inertia, Redirect, Response};
 
-pub async fn checkout(req: Request) -> Response {
-    Ok(InertiaResponse::location_for(&req, "https://billing.example/checkout"))
+pub async fn checkout() -> Response {
+    Ok(Inertia::location("https://billing.example/checkout"))
+}
+
+pub async fn portal() -> Response {
+    // A redirect works too: a hard navigation gets it as it is.
+    Ok(Inertia::location(Redirect::away("https://billing.example/portal").status(303)))
 }
 ```
 
 An Inertia XHR gets `409` + `X-Inertia-Location` (the client runs
-`window.location = url`); a hard navigation gets a plain `302` + `Location`.
-The bare `InertiaResponse::location(url)` always returns the 409 form - use
-it only where the request is already known to be an Inertia visit, because
-a browser that follows a `409` with no `Location` header has nowhere to go.
+`window.location = url`); a hard navigation gets a plain `302` + `Location`,
+or the redirect you passed, status, flash and cookies included - Laravel's
+`Inertia::location`. `InertiaResponse::location` is the same call. It reads
+which kind of request it is answering from the Inertia middleware, so on a
+route without that middleware it answers the `409`; there, use
+`InertiaResponse::location_for(&req, url)`, which decides from the request
+you pass.
 
 ## Version detection
 
@@ -1627,12 +1635,6 @@ Other Rust-shaped choices worth flagging:
   does, so a typo in `inertia_response!("Dashbaord", …)` fails the
   build with a "did you mean Dashboard?" suggestion instead of
   surfacing as a runtime "component not found" later.
-- **`Inertia::location($url)` is two methods here, not one.** `location(url)`
-  keeps Laravel's always-`409` contract - it predates the request-aware
-  form and pinned-tag consumers depend on that shape not changing.
-  `location_for(&req, url)` is the newer, request-aware form: `409` for an
-  Inertia XHR, plain `302` for a hard navigation. Reach for `location_for`
-  in new code.
 - **`Inertia::clearHistory()` has a response-local form too.**
   `App::clear_history()` and `Inertia::clear_history()` are Laravel's call:
   the flag lives in the session until a page emits it. `.clear_history()` on
