@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::recorder::RenderPayload;
 use super::redact::UNSERIALIZABLE;
-use crate::http::{HttpResponse, Request};
+use crate::http::{BodyRead, HttpResponse, Request};
 use crate::inertia::prop::header_is_truthy;
 
 /// The largest textual response body an entry keeps, and the largest
@@ -59,6 +59,9 @@ enum RequestBody {
     TooLarge,
     /// A body of unknown length, left unread for the handler.
     Streamed,
+    /// A body that failed to arrive; the handler meets the failure when
+    /// it reads the body.
+    Unreadable,
     /// The body, with the content type and query it is read with.
     Read {
         content_type: Option<String>,
@@ -97,14 +100,10 @@ impl RequestFacts {
     /// enough to read before the handler.
     ///
     /// The handler reads a body that was read here from the copy kept on
-    /// the request, as it reads one the CSRF middleware read.
-    ///
-    /// # Errors
-    ///
-    /// The response reading the body would have answered, when the body
-    /// fails to arrive: the request is then gone, and the handler would
-    /// have failed to read it the same way.
-    pub(crate) async fn capture(request: Request) -> Result<(Request, Self), HttpResponse> {
+    /// the request, as it reads one the CSRF middleware read. A body that
+    /// fails to arrive is kept failed on the request, so the handler meets
+    /// the failure only if it reads the body, as it would unrecorded.
+    pub(crate) async fn capture(mut request: Request) -> (Request, Self) {
         let started = Instant::now();
         let is_inertia = request.is_inertia();
         let mut headers = Map::new();
@@ -148,10 +147,10 @@ impl RequestFacts {
             body: RequestBody::NonInertiaWrite,
         };
         if is_write(request.method()) && !is_inertia {
-            return Ok((request, facts));
+            return (request, facts);
         }
-        let (request, body) = read_body(request).await?;
-        Ok((request, Self { body, ..facts }))
+        let body = read_body(&mut request).await;
+        (request, Self { body, ..facts })
     }
 
     /// The tab the extension recorded this request in.
@@ -173,7 +172,7 @@ impl RequestFacts {
 /// The body of `request`, read now when its length is declared and at
 /// most [`BODY_LIMIT`]; a body already read by an earlier middleware is
 /// taken from the request.
-async fn read_body(request: Request) -> Result<(Request, RequestBody), HttpResponse> {
+async fn read_body(request: &mut Request) -> RequestBody {
     let content_type = request.content_type().map(str::to_string);
     let query = request.query().map(str::to_string);
     let read = |bytes: Bytes| RequestBody::Read {
@@ -182,25 +181,22 @@ async fn read_body(request: Request) -> Result<(Request, RequestBody), HttpRespo
         query: query.clone(),
     };
     if let Some(bytes) = request.cached_body() {
-        let body = read(bytes.clone());
-        return Ok((request, body));
+        return read(bytes.clone());
     }
     let length = request
         .header("content-length")
         .and_then(|value| value.trim().parse::<usize>().ok());
     let chunked = request.header("transfer-encoding").is_some();
     match length {
-        Some(length) if length > BODY_LIMIT => Ok((request, RequestBody::TooLarge)),
-        Some(0) => Ok((request, read(Bytes::new()))),
-        Some(length) => match request.buffer_body(length).await {
-            Ok(request) => {
-                let bytes = request.cached_body().cloned().unwrap_or_default();
-                Ok((request, read(bytes)))
-            }
-            Err(error) => Err(HttpResponse::from(error)),
+        Some(length) if length > BODY_LIMIT => RequestBody::TooLarge,
+        Some(0) => read(Bytes::new()),
+        Some(length) => match request.read_body_up_to(length).await {
+            BodyRead::Whole(bytes) => read(bytes),
+            BodyRead::TooLarge => RequestBody::TooLarge,
+            BodyRead::Failed => RequestBody::Unreadable,
         },
-        None if chunked => Ok((request, RequestBody::Streamed)),
-        None => Ok((request, read(Bytes::new()))),
+        None if chunked => RequestBody::Streamed,
+        None => read(Bytes::new()),
     }
 }
 
@@ -280,6 +276,7 @@ async fn request_body(body: RequestBody) -> Value {
         RequestBody::NonInertiaWrite => return omitted("non-inertia-request"),
         RequestBody::TooLarge => return omitted("too-large"),
         RequestBody::Streamed => return omitted("streamed"),
+        RequestBody::Unreadable => return omitted("unreadable"),
         RequestBody::Read {
             content_type,
             bytes,

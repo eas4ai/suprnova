@@ -275,10 +275,7 @@ impl Middleware for DevToolsMiddleware {
         if !self.records || self.is_excepted(&request) {
             return next(request).await;
         }
-        let (request, facts) = match RequestFacts::capture(request).await {
-            Ok(captured) => captured,
-            Err(response) => return Err(response),
-        };
+        let (request, facts) = RequestFacts::capture(request).await;
         let recorder = Arc::new(Recorder::default());
         let response = recorder::scope(Arc::clone(&recorder), next(request)).await;
         let was_ok = response.is_ok();
@@ -297,10 +294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let middleware =
             DevToolsMiddleware::new(DevToolsConfig::new().enabled(true).storage_path(dir.path()));
-        let Ok((_, facts)) = RequestFacts::capture(Request::for_test("GET", "/report")).await
-        else {
-            panic!("a GET with no body is read");
-        };
+        let (_, facts) = RequestFacts::capture(Request::for_test("GET", "/report")).await;
         let response = HttpResponse::text("the handler's body")
             .status(201)
             .header("X-Handler", "yes");

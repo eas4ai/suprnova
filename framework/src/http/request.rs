@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
 /// State of the request body - either still streaming from the wire,
-/// already buffered into memory, or fully consumed.
+/// already buffered into memory, fully consumed, or failed to arrive.
 ///
 /// Buffering happens when middleware needs to inspect the body and
 /// still hand the request to downstream handlers (e.g. the CSRF
@@ -28,6 +28,23 @@ pub enum BodyState {
     Buffered(Bytes),
     /// Body was consumed without buffering. Subsequent reads error.
     Consumed,
+    /// A middleware that only observes the request, as Inertia DevTools
+    /// does, read the body and the stream failed. Every later read returns
+    /// this error, the one the read itself would have returned, so the
+    /// handler meets the failure it would have met with no middleware in
+    /// the way, and a handler that never reads the body never meets it.
+    Failed(FrameworkError),
+}
+
+/// What [`Request::read_body_up_to`] found.
+pub(crate) enum BodyRead {
+    /// The whole body, now kept on the request for the handler.
+    Whole(Bytes),
+    /// A body declared longer than the limit, left unread for the handler.
+    TooLarge,
+    /// The body failed to arrive, or a middleware consumed it before; the
+    /// request keeps the failure for whoever reads the body next.
+    Failed,
 }
 
 /// HTTP Request wrapper providing Laravel-like access to request data.
@@ -1581,6 +1598,7 @@ impl Request {
                      downstream.",
                 ));
             }
+            BodyState::Failed(error) => return Err(error),
         };
 
         Ok((
@@ -1621,9 +1639,54 @@ impl Request {
                     "Request body cannot be buffered: it was already consumed",
                 ));
             }
+            BodyState::Failed(error) => return Err(error),
         };
         self.body = BodyState::Buffered(bytes);
         Ok(self)
+    }
+
+    /// Read the body into the request's cache, as
+    /// [`buffer_body`](Self::buffer_body) does, but keep the request
+    /// whatever the read finds: for a middleware that only observes the
+    /// request and must hand it on as the handler would have received it.
+    ///
+    /// A body whose declared length is over `max_bytes` is left unread. A
+    /// read that fails, or a body of undeclared length that runs past
+    /// `max_bytes`, leaves the body [`BodyState::Failed`] with the error
+    /// [`body_bytes_with_cap`](Self::body_bytes_with_cap) would return, so
+    /// the handler's own read returns it too; a body a middleware consumed
+    /// before stays consumed.
+    pub(crate) async fn read_body_up_to(&mut self, max_bytes: usize) -> BodyRead {
+        let content_length = super::body::parse_content_length(&self.parts.headers);
+        match std::mem::replace(&mut self.body, BodyState::Consumed) {
+            BodyState::Buffered(bytes) => {
+                self.body = BodyState::Buffered(bytes.clone());
+                BodyRead::Whole(bytes)
+            }
+            BodyState::Streaming(incoming)
+                if content_length.is_some_and(|length| length > max_bytes as u64) =>
+            {
+                self.body = BodyState::Streaming(incoming);
+                BodyRead::TooLarge
+            }
+            BodyState::Streaming(incoming) => {
+                match collect_body_with_cap(incoming, content_length, max_bytes).await {
+                    Ok(bytes) => {
+                        self.body = BodyState::Buffered(bytes.clone());
+                        BodyRead::Whole(bytes)
+                    }
+                    Err(error) => {
+                        self.body = BodyState::Failed(error);
+                        BodyRead::Failed
+                    }
+                }
+            }
+            BodyState::Consumed => BodyRead::Failed,
+            BodyState::Failed(error) => {
+                self.body = BodyState::Failed(error);
+                BodyRead::Failed
+            }
+        }
     }
 
     /// Read the cached body bytes set by [`Request::buffer_body`].

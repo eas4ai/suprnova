@@ -11,7 +11,9 @@ use suprnova::{
     Response, Router,
 };
 
-use super::{app_env, client, devtools, entry_ids, entry_of, inertia, raw_send, read_entry};
+use super::{
+    app_env, client, devtools, entry_ids, entry_of, inertia, raw_request, raw_send, read_entry,
+};
 use crate::protocol_harness::serve;
 
 /// The line `render` builds its response on, beside the response.
@@ -74,6 +76,10 @@ fn router() -> Router {
             Ok(Inertia::location("https://billing.example/portal"))
         })
         .post("/upload", |_req: Request| async { text("uploaded") })
+        .post("/echo", |req: Request| async move {
+            let (_, bytes) = req.body_bytes().await?;
+            Ok(HttpResponse::bytes_body(bytes, "text/plain"))
+        })
         .get("/upper", |req: Request| {
             first_visit_document(req, "<html><BODY><p>x</p></BODY></html>")
         })
@@ -481,6 +487,49 @@ async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
         read_entry(dir.path(), &binary.headers["x-inertia-devtools-id"])["http"]["requestBody"],
         json!({"status": "omitted", "reason": "binary"})
     );
+}
+
+/// The head of an Inertia `POST` to `path` that declares a body of
+/// `length` bytes.
+fn inertia_post_head(path: &str, length: usize) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nX-Inertia: true\r\n\
+         Content-Type: text/plain\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+    )
+}
+
+#[tokio::test]
+async fn indt_a_body_that_fails_to_arrive_leaves_the_answer_to_the_handler() {
+    let dir = tempfile::tempdir().unwrap();
+    let recording = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+
+    // Ten bytes declared and none sent before the client closes: the
+    // first poll of the body fails.
+    let ignored = raw_request(recording, &inertia_post_head("/upload", 10), b"", true).await;
+    assert_eq!(ignored.status, 200, "the handler ignores its body");
+    assert_eq!(ignored.body, "uploaded");
+    assert_eq!(
+        read_entry(dir.path(), &ignored.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "omitted", "reason": "unreadable"})
+    );
+
+    // A handler that reads its body meets the failure it would meet with
+    // recording off.
+    let quiet = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(
+            suprnova::DevToolsConfig::new().enabled(false),
+        ))),
+    )
+    .await;
+    let read = raw_request(recording, &inertia_post_head("/echo", 10), b"abc", true).await;
+    let unrecorded = raw_request(quiet, &inertia_post_head("/echo", 10), b"abc", true).await;
+    assert_eq!(read.status, 500);
+    assert_eq!(read.status, unrecorded.status);
 }
 
 #[tokio::test]

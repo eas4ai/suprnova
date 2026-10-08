@@ -105,8 +105,7 @@ pub async fn collect_body_with_cap(
     // long as the handler keeps it.
     let mut buf: Vec<u8> = Vec::new();
     while let Some(frame) = body.frame().await {
-        let frame = frame
-            .map_err(|e| FrameworkError::internal(format!("Failed to read request body: {e}")))?;
+        let frame = frame.map_err(read_failure)?;
         // Frames may carry data OR trailers; we only count + buffer data.
         // `into_data` returns `Ok(Bytes)` for data frames and `Err(Frame)`
         // for trailer frames (which we ignore).
@@ -123,8 +122,15 @@ pub async fn collect_body_with_cap(
     Ok(Bytes::from(buf))
 }
 
+/// The error a read of the body answers when the stream fails: the one
+/// [`Request::body_bytes`](crate::http::Request::body_bytes) returns, and
+/// the one a middleware that read the body first keeps for the handler.
+pub(crate) fn read_failure(error: hyper::Error) -> FrameworkError {
+    FrameworkError::internal(format!("Failed to read request body: {error}"))
+}
+
 #[inline]
-fn over_limit(max_bytes: usize) -> FrameworkError {
+pub(crate) fn over_limit(max_bytes: usize) -> FrameworkError {
     FrameworkError::Domain {
         message: format!("request body exceeds {max_bytes} bytes (cap)"),
         status_code: 413,

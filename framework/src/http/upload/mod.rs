@@ -855,6 +855,7 @@ where
                 status_code: 400,
             });
         }
+        crate::http::BodyState::Failed(error) => return Err(error),
     };
     // SEC-05: cap the RAW stream, not just the bytes that reach a part.
     //
