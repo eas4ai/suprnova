@@ -364,6 +364,12 @@ impl TestRequest {
         self
     }
 
+    /// Request live validation with `Precognition: true`, so a route
+    /// carrying `Precognitive` validates without running its handler body.
+    pub fn with_precognition(self) -> Self {
+        self.header("Precognition", "true")
+    }
+
     /// Send `body` serialized as JSON, with `Content-Type:
     /// application/json`, the body a handler reads with `req.json()`.
     ///

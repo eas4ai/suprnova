@@ -171,7 +171,7 @@ Laravel / Inertia-compatible error bag:
 HTTP 422 Unprocessable Entity
 
 {
-    "message": "The given data was invalid.",
+    "message": "Please provide a valid email address (and 1 more error)",
     "errors": {
         "email": ["Please provide a valid email address"],
         "password": ["Password must be at least 8 characters"]
@@ -181,6 +181,8 @@ HTTP 422 Unprocessable Entity
 
 The `errors` shape matches what `@inertiajs/*` clients read from
 `usePage().props.errors` directly.
+The `message` summarises the first error and the count of the rest.
+See [Precognition](precognition.md) for the same body during live validation.
 
 ### Nested fields
 
@@ -191,7 +193,7 @@ full path, the same notation Laravel uses. A nested struct contributes
 
 ```json
 {
-    "message": "The given data was invalid.",
+    "message": "Validation failed for field 'shipping_address.street' (and 1 more error)",
     "errors": {
         "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
         "items.1.name": ["Validation failed for field 'items.1.name'"]
@@ -482,7 +484,7 @@ answers with both:
 
 ```json
 {
-    "message": "The given data was invalid.",
+    "message": "The title field is required. (and 1 more error)",
     "errors": {
         "title": ["The title field is required."],
         "count": ["The count field must be an integer."]
@@ -527,17 +529,18 @@ pub async fn update(form: UpdateProfile) -> Response {
   of its name, where PHP keeps the last. The extractor checks a file while
   the body streams, before it knows whether a later part of the same name
   follows, so it decides on the first one.
-- The `#[validate(...)]` rules run only once every field parses, so a
-  request with a field that doesn't parse hears about the parse failures
-  alone. Laravel checks every rule at once. A struct can't be built while a
+- On a real request, the `#[validate(...)]` rules run only once every
+  field parses, so a request with a field that doesn't parse hears about
+  the parse failures alone. Laravel checks every rule at once. A struct can't be built while a
   field has no value of its type, and the rules run on the struct.
 - A JSON object nested in the body, or a nested object in a form
   (`shipping_address[street]`), reports its first missing field, and a
   field after that object is checked once the object reads. Missing fields
   at the top of the body are all reported at once.
-- A Precognition request that asks about a field which parses, while
-  another field doesn't, gets those other fields' errors rather than a
-  `204`: the rules for the field it asked about haven't run.
+- [Precognition](precognition.md) parses and validates only the listed
+  fields, through every validation stage. An unlisted field that does not
+  parse does not block the listed fields' answer. The typed struct is
+  built only for the real request.
 
 ## Nested names and lists
 
@@ -1218,6 +1221,12 @@ what this means for per-address limits and
 for the variable.
 
 ### Headers and method
+
+`req.is_precognitive()` is true after the `Precognitive` middleware marks
+the request. `req.is_attempting_precognition()` reads the header alone,
+so it can be true on a route without the middleware. Use the marked state
+to skip side effects or change live-validation rules. See
+[Precognition](precognition.md) for route opt-in and narrowed validation.
 
 | Method | Returns |
 |--------|---------|

@@ -17,6 +17,7 @@ mod own_process_async;
 pub mod assertable_inertia;
 pub mod clock;
 pub mod clock_reads;
+pub mod precognition;
 pub mod registry_clears;
 pub mod request_diagnostics;
 pub mod test_client;

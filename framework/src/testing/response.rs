@@ -242,6 +242,25 @@ impl TestResponse {
         self
     }
 
+    /// Assert live validation passed: `204` with `Precognition-Success:
+    /// true`. The header distinguishes it from an ordinary empty response.
+    ///
+    /// # Panics
+    ///
+    /// Panics with the expected and received values when either differs.
+    pub fn assert_successful_precognition(&self) -> &Self {
+        let success = self.header("Precognition-Success");
+        if self.status != 204 || success != Some("true") {
+            self.fail(format!(
+                "assert_successful_precognition()\n  Expected: 204 with Precognition-Success: \
+                 true\n  Received: {} with Precognition-Success: {success:?}\n  body: {}",
+                self.status,
+                self.body_text()
+            ));
+        }
+        self
+    }
+
     /// Assert the response is a redirect: a 3xx status carrying a
     /// `Location` header. When `target` is `Some`, also asserts
     /// `Location` equals it exactly.
