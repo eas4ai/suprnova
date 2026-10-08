@@ -149,6 +149,11 @@ pub struct InertiaResponse {
     /// error page the application's error callback rendered without
     /// `with_shared_data()` (PAR-062).
     shared_data: bool,
+    /// Where in the application's code the response was built, which
+    /// Inertia DevTools shows as the render source: the caller of
+    /// [`new`](Self::new), through `#[track_caller]`, or the route
+    /// definition of a `Router::inertia` page.
+    render_source: &'static std::panic::Location<'static>,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -353,6 +358,7 @@ impl InertiaResponse {
     /// [`InertiaConfig::default`] when nothing was installed, so an app or
     /// a test that never calls `install` needs no config of its own.
     /// Override for one response with [`with_config`](Self::with_config).
+    #[track_caller]
     pub fn new(component: impl Into<String>) -> Self {
         Self {
             component: component.into(),
@@ -377,7 +383,19 @@ impl InertiaResponse {
             providers: Vec::new(),
             view_data: super::root_template::InertiaViewData::default(),
             shared_data: true,
+            render_source: std::panic::Location::caller(),
         }
+    }
+
+    /// Name `location` as where this response was rendered, for a page
+    /// whose render call is the framework's own: a `Router::inertia`
+    /// route is rendered where the route was defined.
+    pub(crate) fn with_render_source(
+        mut self,
+        location: &'static std::panic::Location<'static>,
+    ) -> Self {
+        self.render_source = location;
+        self
     }
 
     /// Leave the shared props out of this page: the shared registry and the
@@ -615,6 +633,7 @@ impl InertiaResponse {
     /// - `Eager` → inserted directly via the internal prop map (equivalent to `.with(key, value)`).
     /// - `LazyOwned` → routed through `prop_lazy_with_owner` so the
     ///   `?include=` + allowlist gate applies at resolution time.
+    #[track_caller]
     pub fn from_data_props(component: &'static str, props: Vec<(String, PropEntry)>) -> Self {
         let mut r = Self::new(component);
         r.put_data_props(props);
@@ -1372,10 +1391,30 @@ impl InertiaResponse {
             providers,
             view_data,
             shared_data,
+            render_source,
         } = self;
         // For the Inertia middleware, which tells a partial reload of this
         // page from a navigation by it when it records the previous URL.
         super::visit::record_rendered_component(&component);
+        // Inertia DevTools records what this render resolved when its
+        // middleware scoped a recorder for the request; otherwise none of
+        // the collection below runs.
+        let recorder = super::devtools::current_recorder();
+        let mut collector = recorder.as_ref().map(|_| {
+            let mut collector = super::devtools::Collector::new(
+                &component,
+                Some(super::devtools::SourceLocation::of(render_source)),
+            );
+            collector.component_path(super::pages::find_page_file(&config, &component).map(
+                |path| {
+                    std::fs::canonicalize(&path)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string()
+                },
+            ));
+            collector
+        });
 
         // Page URL: path AND query, or the app's resolver. The client
         // writes this into `history.state`, so a bare path silently
@@ -1507,6 +1546,34 @@ impl InertiaResponse {
             // and uses `sharedProps` only as a key list.
             merged.insert(k, v);
         }
+        // Inertia DevTools: which keys the shared props supplied and where
+        // each was shared, and the metadata of every prop, read from the
+        // flags before resolution consumes the props (PAR-073).
+        if let Some(collector) = collector.as_mut() {
+            let mut keys = vec![ERRORS_KEY.to_string()];
+            keys.extend(shared_keys.iter().filter(|k| *k != ERRORS_KEY).cloned());
+            collector.shared_keys(keys);
+            if shared_data {
+                for (key, location) in registry.share_sources() {
+                    collector.share_source(&key, super::devtools::SourceLocation::of(location));
+                }
+                if let Some(visit) = visit.as_ref()
+                    && let Some(hooks) = visit.hooks_name()
+                {
+                    let source = super::devtools::SourceLocation::of_type(hooks);
+                    for key in visit.shared().keys() {
+                        collector.share_source(key, source);
+                    }
+                }
+            }
+            let classify_request = super::devtools::ClassifyRequest::of(req);
+            if !merged.contains_key(ERRORS_KEY) {
+                collector.prop(ERRORS_KEY, super::devtools::errors_meta());
+            }
+            for (key, prop) in &merged {
+                collector.prop(key, super::devtools::classify(key, prop, &classify_request));
+            }
+        }
         // Every response shares the validation errors, as Laravel's
         // middleware does with `'errors' => Inertia::always(...)`, so
         // `errors` heads the list; with `expose_shared_props` off there is
@@ -1534,6 +1601,11 @@ impl InertiaResponse {
             req,
         )
         .await?;
+        if let Some(collector) = collector.as_mut() {
+            for key in &metadata.rescued {
+                collector.rescued(key);
+            }
+        }
 
         // Combine flash from three sources, in precedence order
         // (later writes override earlier so same-request entries win
@@ -1577,6 +1649,9 @@ impl InertiaResponse {
             },
             shared_keys,
         );
+        if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
+            recorder.page_rendered(collector.build(page.clone()));
+        }
 
         let response = if is_inertia_request {
             build_json_response(&page)?
@@ -1662,6 +1737,7 @@ impl InertiaResponse {
             providers: _,
             view_data: _,
             shared_data: _,
+            render_source: _,
         } = self;
         let (mut materialized, metadata) = resolve_props(
             props,

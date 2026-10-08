@@ -8,6 +8,7 @@
 
 mod config;
 mod conversion_middleware;
+mod devtools;
 mod dotted;
 mod encrypt_middleware;
 mod error_page_middleware;
@@ -34,6 +35,7 @@ pub(crate) mod visit;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
+pub use devtools::{DevToolsConfig, DevToolsMiddleware};
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;
 pub(crate) use error_page_middleware::ServerErrorDecision;

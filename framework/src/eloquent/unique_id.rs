@@ -152,12 +152,12 @@ fn generate_ulid_lowercase() -> String {
 /// is deterministic and testable against known vectors - the
 /// timestamp + random source in `generate_ulid_lowercase` is not.
 ///
-/// ULID encodes 128 bits into 26 base32 characters; the leading char
-/// carries only the top 2 bits of `buf[0]` (the remaining 3 bits would
-/// overflow a 130-bit space). Matches the canonical ULID spec and
+/// ULID encodes 128 bits into 26 base32 characters, which hold 130: the
+/// leading char carries only the top 3 bits of `buf[0]`, and its other 2
+/// bits are always zero. Matches the canonical ULID spec and
 /// every mainstream implementation (`ulid-go`, `ulid.js`,
 /// Laravel `Str::ulid()`).
-fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
+pub(crate) fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
     let mut out = String::with_capacity(26);
     out.push(CROCKFORD[((buf[0] & 0xE0) >> 5) as usize] as char);
     out.push(CROCKFORD[(buf[0] & 0x1F) as usize] as char);
@@ -195,7 +195,7 @@ fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
 /// (case-insensitive - Laravel emits lowercase but lib readers may
 /// accept either). Twenty-six characters carry 130 bits and a ULID is
 /// 128, so the first character carries three bits and stops at `7`.
-fn is_valid_ulid(value: &str) -> bool {
+pub(crate) fn is_valid_ulid(value: &str) -> bool {
     if value.len() != 26 {
         return false;
     }
@@ -234,7 +234,7 @@ mod tests {
 
     /// All-ones payload encodes to `"7zzzzzzzzzzzzzzzzzzzzzzzzz"` - the
     /// canonical maximum ULID per the spec. The leading char is `'7'`
-    /// (not `'Z'`) because the first character carries only the top 2
+    /// (not `'Z'`) because the first character carries only the top 3
     /// bits of `buf[0]`; the remaining 25 chars each span a full 5-bit
     /// slice of all-ones, which is Crockford index 31 = `'Z'`.
     #[test]

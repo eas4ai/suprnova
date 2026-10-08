@@ -7,6 +7,8 @@
 //! cannot resolve. With the check on, such a render is an error naming the
 //! component and the directory, which the error page shows the developer.
 
+use std::path::PathBuf;
+
 use super::config::InertiaConfig;
 use crate::FrameworkError;
 
@@ -20,18 +22,7 @@ pub(crate) fn ensure_page_exists(
     config: &InertiaConfig,
     component: &str,
 ) -> Result<(), FrameworkError> {
-    let stays_inside = !component.contains('\\')
-        && component
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
-    let found = stays_inside
-        && config.page_extensions.iter().any(|extension| {
-            config
-                .pages_dir
-                .join(format!("{component}.{extension}"))
-                .is_file()
-        });
-    if found {
+    if find_page_file(config, component).is_some() {
         return Ok(());
     }
     Err(FrameworkError::internal(format!(
@@ -41,4 +32,23 @@ pub(crate) fn ensure_page_exists(
         config.page_extensions.join(","),
         config.pages_dir.display()
     )))
+}
+
+/// The page file of `component` under the configured directory with the
+/// first configured extension that has one, Laravel's view finder; `None`
+/// when there is none, or the name would leave the directory. Inertia
+/// DevTools records it as the entry's `componentPath`.
+pub(crate) fn find_page_file(config: &InertiaConfig, component: &str) -> Option<PathBuf> {
+    let stays_inside = !component.contains('\\')
+        && component
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    if !stays_inside {
+        return None;
+    }
+    config
+        .page_extensions
+        .iter()
+        .map(|extension| config.pages_dir.join(format!("{component}.{extension}")))
+        .find(|path| path.is_file())
 }

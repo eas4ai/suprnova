@@ -36,6 +36,9 @@ pub(crate) struct Visit {
     rendered_component: Mutex<Option<String>>,
     /// The application's middleware hooks, when it installed any.
     hooks: Option<Arc<dyn InertiaMiddlewareHooks>>,
+    /// The type name of the hooks, the share source Inertia DevTools
+    /// names for the props they shared.
+    hooks_name: Option<&'static str>,
     /// The `version` hook's answer for this request.
     version: Option<String>,
     /// The `share` and `share_once` hooks' props for this request.
@@ -52,6 +55,7 @@ impl Visit {
             public_root: request.public_root().to_string(),
             rendered_component: Mutex::new(None),
             hooks: None,
+            hooks_name: None,
             version: None,
             shared: IndexMap::new(),
         }
@@ -63,12 +67,19 @@ impl Visit {
     pub(crate) fn capture_with_hooks(
         request: &Request,
         hooks: Arc<dyn InertiaMiddlewareHooks>,
+        hooks_name: Option<&'static str>,
     ) -> Self {
         let mut visit = Self::capture(request);
         visit.version = hooks.version(request);
         visit.shared = super::hooks::hook_shares(hooks.as_ref(), request);
         visit.hooks = Some(hooks);
+        visit.hooks_name = hooks_name;
         visit
+    }
+
+    /// The type name of the application's hooks, when it installed any.
+    pub(crate) fn hooks_name(&self) -> Option<&'static str> {
+        self.hooks_name
     }
 
     /// The application's hooks, when it installed any.

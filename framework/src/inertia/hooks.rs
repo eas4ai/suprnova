@@ -269,7 +269,9 @@ impl Middleware for VersionChangeHook {
 /// what Laravel's `HandleInertiaRequests` is on a group.
 ///
 /// Built by [`Inertia::middleware`](crate::Inertia::middleware) from an
-/// [`InertiaConfig`]: the headers middleware (`Vary`, the redirect rules,
+/// [`InertiaConfig`]: the DevTools recorder when DevTools is enabled
+/// ([`DevToolsMiddleware`](crate::DevToolsMiddleware)), the headers
+/// middleware (`Vary`, the redirect rules,
 /// the previous URL and the hooks), the version check, the `302 → 303`
 /// rule, the error-response middleware, and the validation redirect, in
 /// the order [`Inertia::install`](crate::Inertia::install)
@@ -289,9 +291,16 @@ impl InertiaMiddleware {
     }
 }
 
-/// The Inertia middlewares for `config`, outermost first.
+/// The Inertia middlewares for `config`, outermost first: the DevTools
+/// recorder when DevTools is enabled, so an entry sees the response the
+/// rest of the stack produced, then the protocol middlewares.
 pub(crate) fn stack(config: &InertiaConfig) -> Vec<BoxedMiddleware> {
-    vec![
+    let devtools = config.devtools_config();
+    let mut stack = Vec::with_capacity(6);
+    if devtools.is_enabled() {
+        stack.push(into_boxed(super::DevToolsMiddleware::new(devtools)));
+    }
+    stack.extend([
         into_boxed(super::InertiaHeadersMiddleware::from_config(config)),
         version_middleware(config),
         into_boxed(super::Inertia303Middleware::new()),
@@ -304,7 +313,8 @@ pub(crate) fn stack(config: &InertiaConfig) -> Vec<BoxedMiddleware> {
             config.error_page.clone(),
         )),
         into_boxed(super::InertiaValidationRedirectMiddleware::new()),
-    ]
+    ]);
+    stack
 }
 
 /// The version middleware for `config`, comparing against the `version`

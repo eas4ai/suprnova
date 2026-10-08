@@ -63,6 +63,7 @@ use async_trait::async_trait;
 pub struct InertiaHeadersMiddleware {
     store_previous_url: bool,
     hooks: Option<Arc<dyn InertiaMiddlewareHooks>>,
+    hooks_name: Option<&'static str>,
 }
 
 impl InertiaHeadersMiddleware {
@@ -72,6 +73,7 @@ impl InertiaHeadersMiddleware {
         Self {
             store_previous_url: true,
             hooks: None,
+            hooks_name: None,
         }
     }
 
@@ -87,6 +89,7 @@ impl InertiaHeadersMiddleware {
         Self {
             store_previous_url: config.store_previous_url,
             hooks: config.hooks.clone(),
+            hooks_name: config.hooks_name,
         }
     }
 }
@@ -252,7 +255,7 @@ impl Middleware for InertiaHeadersMiddleware {
         // Capture before `next` consumes the request.
         let facts = RequestFacts::capture(&request);
         let visit = Arc::new(match &self.hooks {
-            Some(hooks) => Visit::capture_with_hooks(&request, hooks.clone()),
+            Some(hooks) => Visit::capture_with_hooks(&request, hooks.clone(), self.hooks_name),
             None => Visit::capture(&request),
         });
         // What an `on_*` hook is handed; only an Inertia visit reaches one,
