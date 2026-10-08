@@ -278,137 +278,123 @@ pub(crate) async fn render(
     }
 }
 
-/// Process-global hyper client shared across all SSR calls.
+/// The client every SSR call shares, built once for the process: one
+/// connection pool, and rustls for a worker at an `https` URL (SS-14).
 ///
-/// Constructing a `Client` is expensive - it sets up a connection pool
-/// and an HTTP/1.1 handshake state. A per-request `Client` resets the
-/// pool every time, so we keep one for the lifetime of the process.
-/// `hyper_util::client::legacy::Client` is `Clone`-cheap (`Arc` inside)
-/// and `Send + Sync`, so a `OnceLock` works.
-fn shared_client() -> &'static hyper_util::client::legacy::Client<
-    hyper_util::client::legacy::connect::HttpConnector,
-    http_body_util::Full<bytes::Bytes>,
-> {
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
-    use std::sync::OnceLock;
-
-    static SSR_CLIENT: OnceLock<
-        Client<
-            hyper_util::client::legacy::connect::HttpConnector,
-            http_body_util::Full<bytes::Bytes>,
-        >,
-    > = OnceLock::new();
-    SSR_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+/// It follows no redirects and uses no proxy from the environment, as the
+/// plain HTTP client it replaced did not: the worker's address is the
+/// configuration's, and a proxy variable set for outbound traffic must
+/// not capture a loopback worker.
+fn shared_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| {
+                    format!(
+                        "build the SSR client: {}",
+                        crate::error::render_error_chain(&e)
+                    )
+                })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
-/// POST JSON to the SSR worker and deserialize the response. Uses
-/// `hyper` directly - we already depend on it, so no extra crate.
+/// The status and body the worker answered one call with.
+struct Exchange {
+    status: reqwest::StatusCode,
+    body: Vec<u8>,
+}
+
+/// Send `request` to the worker, a `POST` of `body` as JSON or a `GET`
+/// without one, and read the whole answer.
 ///
-/// Domain 20 audit D20-D: response body is read through
-/// [`http_body_util::Limited`] so a misconfigured or compromised
-/// loopback worker can't return arbitrarily large data and exhaust
-/// memory. The cap is propagated from `SsrConfig::max_response_bytes`
-/// (default 8 MiB). When the body exceeds the cap the Limited wrapper
-/// returns an error which is surfaced as `Err("read body: ...")`;
-/// `render()` then either falls back to CSR or propagates depending on
-/// `throw_on_error`.
-///
-/// Content-Length pre-check: if the worker is honest enough to set
-/// the header but reports a value larger than the cap, the request is
-/// rejected before any body bytes are read.
-///
-/// T31 fix round 1: one `deadline`, computed once, bounds the *whole*
-/// call - awaiting the response headers and reading the response body
-/// both draw down the same shared deadline, rather than each getting a
-/// fresh copy of `timeout`. Before this fix, only the headers phase was
-/// bounded (`tokio::time::timeout` wrapped `client.request(req)` alone);
-/// a worker that accepted the connection, sent headers, then stalled
-/// mid-body could hang `render()` forever, since `Limited::collect()`
-/// has no timeout of its own - `Limited` only bounds body *size*, not
-/// time. `SsrConfig::timeout`'s own doc calls this "the SSR call"'s
-/// timeout, singular, and a per-phase reset would let a pathological
-/// worker (slow headers, then a slow-trickling body) consume up to `2 ×
-/// timeout` in the worst case - exactly the "a hung worker shouldn't
-/// block real users" guarantee that doc promises.
+/// One deadline, computed once, bounds the whole call: awaiting the
+/// response headers and reading the body draw down the same timeout, so a
+/// worker that sends headers and then stalls mid-body cannot hold the
+/// visit past it (T31). The body is capped at `max_response_bytes`
+/// (`SsrConfig::max_response_bytes`, 8 MiB by default), so a misconfigured
+/// or compromised worker cannot exhaust memory: a `Content-Length` over
+/// the cap is refused before any body byte is read, and a body that grows
+/// past it while streaming is abandoned (D20-D).
+async fn exchange(
+    request: &SsrRequest,
+    body: Option<Vec<u8>>,
+    max_response_bytes: usize,
+) -> Result<Exchange, String> {
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let client = shared_client()?;
+    let mut builder = match body {
+        Some(body) => client
+            .post(&request.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
+        None => client.get(&request.url),
+    };
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let mut response = tokio::time::timeout_at(deadline, builder.send())
+        .await
+        .map_err(|_| {
+            format!(
+                "timeout after {:?} awaiting response headers",
+                request.timeout
+            )
+        })?
+        .map_err(|e| crate::error::render_error_chain(&e))?;
+    let status = response.status();
+
+    if let Some(length) = response.content_length()
+        && length > max_response_bytes as u64
+    {
+        return Err(format!(
+            "ssr response Content-Length {length} exceeds cap of \
+             {max_response_bytes} bytes (configure via \
+             InertiaConfig::ssr_max_response_bytes)"
+        ));
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .map_err(|_| format!("timeout after {:?} reading response body", request.timeout))?
+            .map_err(|e| format!("read body: {}", crate::error::render_error_chain(&e)))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if bytes.len() + chunk.len() > max_response_bytes {
+            return Err(format!(
+                "ssr response exceeds cap of {max_response_bytes} bytes \
+                 (configure via InertiaConfig::ssr_max_response_bytes)"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Exchange {
+        status,
+        body: bytes,
+    })
+}
+
+/// POST the page to the worker and read its rendered answer.
 async fn post_json(
     request: &SsrRequest,
     body: Vec<u8>,
     max_response_bytes: usize,
 ) -> Result<SsrResponse, String> {
-    let url = request.url.as_str();
-    let timeout = request.timeout;
-    use http_body_util::{BodyExt, Full, Limited};
-    use hyper::Request;
-    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
-
-    // One deadline for the whole call, shared by both phases below -
-    // see the T31 fix-round-1 note on this function's doc comment.
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
-
-    // Pick the default port from the URI scheme - defaulting to 80
-    // on every URL (including `https://...`) sent the wrong Host
-    // header for TLS-backed SSR endpoints, which some reverse
-    // proxies reject. When the URI carries an explicit port, use it;
-    // otherwise pick 443 for https and 80 for everything else.
-    let scheme_default_port = match parsed.scheme_str() {
-        Some("https") => 443,
-        _ => 80,
-    };
-    let host_port = format!(
-        "{}:{}",
-        parsed.host().ok_or("missing host")?,
-        parsed.port_u16().unwrap_or(scheme_default_port)
-    );
-
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(url)
-        .header(CONTENT_TYPE, "application/json")
-        .header(CONTENT_LENGTH, body.len())
-        .header("Host", host_port);
-    for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
+    let answer = exchange(request, Some(body), max_response_bytes).await?;
+    if !answer.status.is_success() {
+        return Err(format!("ssr worker returned {}", answer.status));
     }
-    let req = builder
-        .body(Full::new(bytes::Bytes::from(body)))
-        .map_err(|e| format!("request build: {e}"))?;
-
-    let client = shared_client();
-    let fut = client.request(req);
-    let resp = tokio::time::timeout_at(deadline, fut)
-        .await
-        .map_err(|_| format!("timeout after {:?} awaiting response headers", timeout))?
-        .map_err(|e| format!("hyper: {e}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("ssr worker returned {}", status));
-    }
-
-    if let Some(cl) = resp
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        && cl > max_response_bytes
-    {
-        return Err(format!(
-            "ssr response Content-Length {cl} exceeds cap of \
-             {max_response_bytes} bytes (configure via \
-             InertiaConfig::ssr_max_response_bytes)"
-        ));
-    }
-
-    let limited = Limited::new(resp.into_body(), max_response_bytes);
-    let collected = tokio::time::timeout_at(deadline, limited.collect())
-        .await
-        .map_err(|_| format!("timeout after {:?} reading response body", timeout))?
-        .map_err(|e| format!("read body: {e}"))?;
-    let bytes = collected.to_bytes();
-    serde_json::from_slice::<SsrResponse>(&bytes).map_err(|e| format!("deserialize response: {e}"))
+    serde_json::from_slice::<SsrResponse>(&answer.body)
+        .map_err(|e| format!("deserialize response: {e}"))
 }
 
 #[cfg(test)]

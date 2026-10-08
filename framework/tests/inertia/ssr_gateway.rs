@@ -415,3 +415,45 @@ async fn inssr_development_without_a_dev_server_listening_takes_the_worker_path(
     assert_eq!(worker.seen().len(), 1);
     assert_eq!(worker.seen()[0].path, "/render");
 }
+
+// ---- PAR-059: https workers ----
+
+#[tokio::test]
+async fn inssr_an_https_worker_url_is_spoken_to_in_tls() {
+    use tokio::io::AsyncReadExt;
+    // No certificate is needed to see which protocol arrived: a TLS client
+    // opens with a handshake record (content type 0x16, version 0x03 ..),
+    // a plain HTTP client with the request line. The listener closes the
+    // connection once it has read two bytes, which is what ends the visit.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let first_bytes = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut bytes = [0u8; 2];
+        stream.read_exact(&mut bytes).await.unwrap();
+        bytes
+    });
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(format!("https://{addr}"))
+        .ssr_ensure_bundle_exists(false);
+
+    let document = first_visit(&config)
+        .await
+        .expect("a worker failure renders on the client");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    // The visit ends only after the listener read and closed, so a task
+    // still waiting means no connection was ever made.
+    assert!(
+        first_bytes.is_finished(),
+        "the client never connected to the https worker"
+    );
+    let bytes = first_bytes.await.unwrap();
+    assert_eq!(
+        bytes,
+        [0x16, 0x03],
+        "the worker received {:?}, not a TLS handshake",
+        String::from_utf8_lossy(&bytes)
+    );
+}
