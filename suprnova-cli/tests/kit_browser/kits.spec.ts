@@ -329,7 +329,7 @@ test('PAR-079/080: notes Form creates a note with processing state and toast', a
   await expect(page.getByRole('status')).toHaveText('Note saved.');
 });
 
-test('PAR-077/078: sign-out Link posts and lands on sign-in with a toast', async ({ page }) => {
+test('PAR-077/078: sign-out Link posts and lands on Home with a toast', async ({ page }) => {
   await dashboard(page);
   // K06/PAR-077 and K17/PAR-078: layout's POST Link and flash.
   const answer = page.waitForResponse(response => new URL(response.url()).pathname === '/logout');
@@ -338,8 +338,10 @@ test('PAR-077/078: sign-out Link posts and lands on sign-in with a toast', async
   expect(response.request().method()).toBe('POST');
   expect(response.request().headers()['x-inertia']).toBe('true');
   await expect(page.getByRole('status')).toHaveText('Signed out.');
-  await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByRole('heading', { name: 'Sign in to your account', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(new URL('/', process.env.KIT_BASE_URL!).href);
+  await expect(page.getByRole('heading', { name: /Welcome to/ })).toBeVisible();
+  await expect(page.locator('nav').getByRole('link', { name: /sign in/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: /sign out/i })).toHaveCount(0);
 });
 
 test('PAR-079/080: failed sign-in Form shows errors without reloading; endpoints require auth', async ({ page }) => {

@@ -713,9 +713,9 @@ mod backend {
                 "export interface UserInfo {\n  id: number;\n  name: string;\n  email: string;\n}",
                 "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}",
                 "export interface Stats {\n  notes: number;\n  written_today: number;\n}",
-                "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string | null;\n}",
+                "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string;\n}",
                 "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}",
-                "export interface NoteView {\n  id: number;\n  title: string;\n  body: string | null;\n  created_at: string | null;\n}",
+                "export interface NoteView {\n  id: number;\n  title: string;\n  body: string | null;\n  created_at: string;\n}",
                 "export interface NotesShowProps {\n  note: NoteView;\n}",
                 r#"  "Notes/Show": NotesShowProps;"#,
             ] {
