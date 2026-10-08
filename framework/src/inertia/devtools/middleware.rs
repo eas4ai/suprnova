@@ -1,5 +1,6 @@
-//! The middleware that records requests for the extension: Laravel's
-//! `RequestRecorder` and `EntryStore::flush`.
+//! The middleware that records requests for the extension and answers its
+//! entry endpoints: Laravel's `RequestRecorder`, `EntryStore::flush` and
+//! the routes `DevToolsServiceProvider` registers.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use futures::FutureExt;
 use serde_json::Value;
 
 use super::config::DevToolsConfig;
+use super::endpoints;
 use super::entry::{self, RequestFacts, Stamp};
 use super::recorder::{self, Recorder, RenderPayload};
 use super::redact::Redactor;
@@ -27,13 +29,16 @@ pub(crate) const PARENT_OUT_HEADER: &str = "X-Inertia-Devtools-Parent-Out";
 /// under, when it is not the host's root.
 pub(crate) const BASE_PATH_HEADER: &str = "X-Inertia-Devtools-Base-Path";
 
-/// Records each request for the Inertia DevTools browser extension.
+/// Records each request for the Inertia DevTools browser extension and
+/// answers the extension's `GET /_inertia/devtools/entries` and
+/// `GET /_inertia/devtools/entries/{id}`.
 ///
 /// [`Inertia::install`](crate::Inertia::install) and
 /// [`Inertia::middleware`](crate::Inertia::middleware) put it outermost in
 /// the Inertia stack when [`DevToolsConfig::is_enabled`] says so, inside
 /// the session, so an entry sees the response the rest of the stack
-/// produced.
+/// produced and the endpoints can reflash the session and ask the gate
+/// about the signed-in user.
 ///
 /// Recording never changes the response beyond the DevTools headers and,
 /// on the first visit of a page, the id tag: a failure while recording
@@ -44,6 +49,9 @@ pub struct DevToolsMiddleware {
     config: Arc<DevToolsConfig>,
     repository: Arc<EntriesRepository>,
     redactor: Arc<Redactor>,
+    /// Whether this instance records requests, or only answers the
+    /// endpoints.
+    records: bool,
 }
 
 impl DevToolsMiddleware {
@@ -56,6 +64,18 @@ impl DevToolsMiddleware {
             config: Arc::new(config),
             repository: Arc::new(repository),
             redactor: Arc::new(redactor),
+            records: true,
+        }
+    }
+
+    /// The middleware that answers the entry endpoints and records
+    /// nothing: the global one [`Inertia::install`](crate::Inertia::install)
+    /// registers when the Inertia stack goes on route groups, which record
+    /// their own routes.
+    pub(crate) fn endpoints_only(config: DevToolsConfig) -> Self {
+        Self {
+            records: false,
+            ..Self::new(config)
         }
     }
 
@@ -209,7 +229,10 @@ fn tag_first_visit(
 #[async_trait]
 impl Middleware for DevToolsMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        if self.is_excepted(&request) {
+        if let Some(endpoint) = endpoints::Endpoint::of(&request) {
+            return endpoints::answer(&self.config, &self.repository, endpoint, &request).await;
+        }
+        if !self.records || self.is_excepted(&request) {
             return next(request).await;
         }
         let (request, facts) = match RequestFacts::capture(request).await {

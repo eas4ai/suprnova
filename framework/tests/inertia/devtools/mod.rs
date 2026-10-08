@@ -1,25 +1,30 @@
-//! Inertia DevTools server support (PAR-071 to PAR-073, PAR-075):
-//! recording each request for the browser extension, the entry it stores,
-//! the classification of the props of a rendered page, and the store
-//! behind them.
+//! Inertia DevTools server support (PAR-071 to PAR-075): recording each
+//! request for the browser extension, the entry it stores, the
+//! classification of the props of a rendered page, the endpoints the
+//! extension reads entries from, and the store behind them.
 //!
 //! Every test records into its own temporary directory, through a
-//! `TestClient` over a router with `Inertia::middleware`. Recording is
-//! switched on with `DevToolsConfig::enabled(true)`; the tests of the
-//! `local` default set `APP_ENV` under the shared environment lock.
+//! `TestClient` over a router with `Inertia::middleware` and, where the
+//! session matters, a real `SessionMiddleware`. Recording is switched on
+//! with `DevToolsConfig::enabled(true)`; the tests of the `local` default
+//! and of the endpoints' authorization set `APP_ENV` under the shared
+//! environment lock.
 
+pub mod endpoints;
 pub mod entry;
 pub mod gate;
 pub mod props;
 pub mod storage;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use suprnova::testing::TestClient;
-use suprnova::{DevToolsConfig, Inertia, InertiaConfig, MiddlewareRegistry, Router};
+use suprnova::{DevToolsConfig, Inertia, InertiaConfig, MiddlewareRegistry, Router, SessionMiddleware};
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
+use crate::protocol_harness::MemoryStore;
 
 /// DevTools on, storing into `dir`.
 pub fn devtools(dir: &Path) -> DevToolsConfig {
@@ -42,6 +47,24 @@ pub fn client(router: impl Into<Router>, devtools: DevToolsConfig) -> TestClient
         router,
         MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools))),
     )
+}
+
+/// A client for `router` behind a real session over a memory store, then
+/// the Inertia stack built for `devtools`.
+pub fn session_client(
+    router: impl Into<Router>,
+    devtools: DevToolsConfig,
+) -> (TestClient, Arc<MemoryStore>) {
+    suprnova::testing::install_test_encryption_key();
+    let store = Arc::new(MemoryStore::default());
+    let registry = MiddlewareRegistry::new()
+        .append(SessionMiddleware::with_store(
+            crate::protocol_harness::session_config(),
+            store.clone(),
+        ))
+        .append(Inertia::middleware(&inertia(devtools)));
+    let client = TestClient::new(router, registry).with_session_store(store.clone(), "suprnova_session");
+    (client, store)
 }
 
 /// The entry files stored in `dir`, by id.

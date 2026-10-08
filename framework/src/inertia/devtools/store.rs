@@ -78,7 +78,6 @@ impl EntriesRepository {
 
     /// The entry stored under `id`, or `None` for an id that is not a ULID,
     /// names no entry, or names a file that is not JSON.
-    #[cfg(test)]
     pub(crate) fn get(&self, id: &str) -> Option<Value> {
         if !is_ulid(id) {
             return None;
@@ -90,7 +89,6 @@ impl EntriesRepository {
     }
 
     /// Every entry's metadata, newest first.
-    #[cfg(test)]
     pub(crate) fn all(&self) -> Vec<Value> {
         let mut index = self.read_index();
         sort_newest_first(&mut index);

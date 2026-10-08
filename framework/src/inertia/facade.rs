@@ -793,6 +793,13 @@ impl Inertia {
             // such a group gets nothing of Inertia's.
             let stack = InertiaMiddleware::new(config);
             crate::middleware::register_middleware_alias(MIDDLEWARE_NAME, move || stack.clone());
+            // The group stack records the requests of its routes; the
+            // extension's entry endpoints belong to no group, so they are
+            // answered by a global DevTools middleware that records
+            // nothing.
+            if devtools_enabled {
+                register_global_middleware(DevToolsMiddleware::endpoints_only(devtools));
+            }
             return Ok(());
         }
         // Outermost of the Inertia layer, inside the session registered
