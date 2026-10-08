@@ -5,9 +5,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use serde_json::Value;
 
 use suprnova::{
     HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse, MiddlewareRegistry, Request,
@@ -32,6 +34,10 @@ impl MockReq {
         self.headers.insert(name.to_string(), value.to_string());
         self
     }
+
+    pub(super) fn inertia(self) -> Self {
+        self.header("X-Inertia", "true")
+    }
 }
 
 impl InertiaRequestExt for MockReq {
@@ -41,6 +47,18 @@ impl InertiaRequestExt for MockReq {
     fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)
     }
+}
+
+/// The JSON page object an Inertia visit answers with.
+pub(super) async fn page_of(resp: HttpResponse) -> Value {
+    let bytes = resp
+        .into_hyper()
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("an Inertia visit returns a JSON page object")
 }
 
 /// A config whose manifest does not exist, so the default version source

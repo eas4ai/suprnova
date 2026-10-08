@@ -205,9 +205,9 @@ impl Inertia {
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
         register_global_middleware(InertiaHeadersMiddleware::new());
-        let version = config.version.clone();
+        let version_source = config.clone();
         register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
-            version.resolve()
+            version_source.resolved_version()
         }));
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
@@ -309,7 +309,7 @@ mod tests {
         // global registry, and `response.rs`'s
         // `build_page_object_eager_only` - same binary, running in
         // parallel - would see `version = "test-version"` where it
-        // asserts `"1.0"`. The guard gives this test its own registry,
+        // asserts an empty version. The guard gives this test its own registry,
         // cleared when it drops.
         let _guard = crate::testing::TestContainer::fake();
         let before = get_global_middleware().len();

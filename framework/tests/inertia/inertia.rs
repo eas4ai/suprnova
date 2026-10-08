@@ -14,10 +14,7 @@
 
 use std::collections::HashMap;
 use suprnova::testing::{AssertableInertia, ReloadRequest};
-use suprnova::{
-    Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, MANIFEST_VERSION_FALLBACK,
-    VersionResolver,
-};
+use suprnova::{Frontend, InertiaConfig, InertiaRequestExt, InertiaResponse, VersionResolver};
 
 /// Minimal `InertiaRequestExt` impl for tests.
 struct MockReq {
@@ -115,12 +112,12 @@ async fn inertia_xhr_visit_returns_json_page_object() {
         .await
         .unwrap();
 
-    // No manifest is configured in this test, so the version resolves to
-    // the documented fallback, not a hardcoded "1.0".
+    // No manifest is configured in this test, so the version is empty,
+    // as Laravel's is with nothing to hash.
     AssertableInertia::from_response(&resp)
         .component("Users")
         .url("/users")
-        .version(MANIFEST_VERSION_FALLBACK)
+        .version("")
         .has("users")
         .has("errors")
         .missing("nonexistent")
@@ -4736,7 +4733,7 @@ async fn without_an_install_the_response_uses_the_default_config() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        page["version"], "1.0",
+        page["version"], "",
         "with nothing installed the response must fall back to \
          InertiaConfig::default()"
     );
@@ -4767,7 +4764,7 @@ async fn a_failed_install_retains_nothing() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        page["version"], "1.0",
+        page["version"], "",
         "a failed install must retain no config"
     );
 }
@@ -4878,8 +4875,9 @@ fn manifest_version_falls_back_when_the_file_is_missing() {
     let resolver = VersionResolver::from_manifest("/definitely/not/a/real/manifest.json");
     assert_eq!(
         resolver.resolve(),
-        "1.0",
-        "a missing manifest must not error - dev has no build"
+        "",
+        "a missing manifest must not error - dev has no build, and the \
+         version is empty as Laravel's is"
     );
 }
 
@@ -4895,8 +4893,8 @@ fn default_config_resolves_its_version_from_the_configured_manifest() {
 
     assert_eq!(resolved, expected);
     assert_ne!(
-        resolved, "1.0",
-        "a present manifest must not use the fallback"
+        resolved, "",
+        "a present manifest must not resolve to the empty version"
     );
 }
 

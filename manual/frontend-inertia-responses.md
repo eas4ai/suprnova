@@ -860,13 +860,21 @@ away before the destination page can read it, and the user loses their error
 message purely because a deploy landed mid-submit. This needs
 `SessionMiddleware` registered ahead of the version middleware.
 
-By default you set nothing: `InertiaConfig` hashes your Vite build
-manifest (`manifest_path`, default `public/assets/.vite/manifest.json`)
-and uses the first 16 bytes of its SHA-256, hex-encoded. The manifest is
-the one file that changes on every build and on no other occasion, so
-the version bumps itself. When there is no manifest to read - local
-development, where Vite serves from memory - it falls back to the static
-string `"1.0"` and logs at `debug`.
+By default you set nothing. The version resolves in the order Laravel's
+`Middleware::version` uses:
+
+1. When the config names an `asset_url` - the URL the built assets are
+   published under when it changes with each deploy, such as a CDN path
+   that carries a build id - the version is a hash of that URL.
+2. Otherwise `InertiaConfig` hashes your Vite build manifest
+   (`manifest_path`, default `public/assets/.vite/manifest.json`). The
+   manifest is the one file that changes on every build and on no other
+   occasion, so the version bumps itself.
+3. When there is no manifest to read - local development, where Vite
+   serves from memory - the version is the empty string, as Laravel's is,
+   and a `debug` line is logged.
+
+Both hashes are the first 16 bytes of a SHA-256, hex-encoded.
 
 Override it when you want something else:
 
@@ -875,6 +883,9 @@ use suprnova::{InertiaConfig, VersionResolver};
 
 // Default - hash the build manifest. Nothing to write.
 let cfg = InertiaConfig::new();
+
+// Assets published under a per-deploy URL: the version follows the URL.
+let cfg = InertiaConfig::new().asset_url("https://cdn.example.com/build-42");
 
 // A different manifest location; the version follows it.
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");

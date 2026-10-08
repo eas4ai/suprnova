@@ -2034,7 +2034,7 @@ fn build_page_object(
     page.insert("url".to_string(), Value::String(url));
     page.insert(
         "version".to_string(),
-        Value::String(config.version.resolve()),
+        Value::String(config.resolved_version()),
     );
 
     // Per spec, `encryptHistory` / `clearHistory` / `preserveFragment`
@@ -2748,7 +2748,7 @@ mod tests {
         let obj = page.as_object().unwrap();
         assert_eq!(obj["component"], Value::String("Home".into()));
         assert_eq!(obj["url"], Value::String("/home".into()));
-        assert_eq!(obj["version"], Value::String("1.0".into()));
+        assert_eq!(obj["version"], Value::String(String::new()));
 
         let props = obj["props"].as_object().unwrap();
         assert_eq!(props["title"], Value::String("Welcome".into()));

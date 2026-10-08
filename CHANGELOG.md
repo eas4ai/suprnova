@@ -337,6 +337,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   does: every value but an empty one and `0` is an Inertia visit, and JSON
   responses still carry `X-Inertia: true`. Every middleware that asks
   `is_inertia` follows the same rule (HD-01).
+- **The Inertia asset version follows Laravel's order and is empty by
+  default.** With no Vite manifest to hash, the page carried the version
+  `1.0`; Laravel's carries an empty one. The version now resolves from the
+  new `InertiaConfig::asset_url` setting when it is set (a hash of the URL,
+  as Laravel's `app.asset_url`), else from the manifest's hash, else to the
+  empty string. An explicit `.version(...)` or `.version_with(...)` still
+  wins. `MANIFEST_VERSION_FALLBACK` stays exported, but no resolver returns
+  it now, and a client that holds `1.0` from before the upgrade is
+  bounced once (MW-11).
 
 ### Fixed
 
