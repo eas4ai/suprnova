@@ -2359,9 +2359,9 @@ suprnova ssr:start
 `suprnova ssr:check` asks the SSR gateway's health check whether the
 worker is answering: the HTTP gateway sends `GET /health`, which every
 `createServer()` bundle answers without any extra code. `suprnova ssr:stop`
-stops the worker. The application binary has the same three commands,
-reading the configuration you installed, as in
-`cargo run --bin <app> -- ssr:start`; see
+stops the worker. Each of the three runs the application binary's command
+of the same name, as `cargo run --bin <app> -- ssr:start` does, so it
+reads the configuration you installed; see
 [Console](console.md#ssr-commands).
 
 ### Why Suprnova diverges

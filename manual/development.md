@@ -188,11 +188,12 @@ suprnova serve
 suprnova ssr:start
 ```
 
-`ssr:start` runs the bundled SSR worker under Node, Bun, or Deno
-(`--runtime`), after it stops a worker that is still running.
-`ssr:check` checks that a running worker answers its health check, and
-`ssr:stop` stops it. The application binary has the same three commands,
-which read the Inertia configuration your app installed - see
+`suprnova ssr:start` runs the application binary's `ssr:start`, which
+reads the Inertia configuration your app installed and runs the bundled
+SSR worker under Node, Bun, or Deno (`--runtime`), after it stops a worker
+that is still running. `suprnova ssr:check` and `suprnova ssr:stop` run
+the application binary's `ssr:check`, which checks that a running worker
+answers its health check, and its `ssr:stop`, which stops it - see
 [Console](console.md#ssr-commands). The SSR setup is documented under the
 frontend chapter - see [Frontend](frontend.md).
 
