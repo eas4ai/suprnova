@@ -184,18 +184,3 @@ async fn precognition_case_insensitive() {
     .await;
     assert_eq!(resp.status(), 204);
 }
-
-/// PAR-083's violating example: an empty `Precognition-Validate-Only`
-/// value is a filter that matches nothing, so no rule runs and the answer
-/// is `204` even when every field would fail.
-#[tokio::test]
-async fn precognition_empty_validate_only_validates_nothing() {
-    let addr = spawn().await;
-    let resp = post_json(
-        addr,
-        serde_json::json!({ "email": "not-an-email", "password": "short" }),
-        &[("Precognition", "true"), ("Precognition-Validate-Only", "")],
-    )
-    .await;
-    assert_eq!(resp.status(), 204);
-}

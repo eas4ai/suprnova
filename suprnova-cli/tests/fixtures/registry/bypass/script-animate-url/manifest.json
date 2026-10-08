@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-animate-url",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
