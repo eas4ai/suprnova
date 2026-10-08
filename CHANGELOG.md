@@ -1000,7 +1000,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   pages that build URLs from `root` read it with a bare `usePage()` in
   place of `usePage<{ root: string }>()`, typed by the augmentation. The
   `Error` page keeps its inline props, since no handler renders it with a
-  struct (T06).
+  struct. A project upgrading with its own `declare module
+  '@inertiajs/core'` block, in a `.ts` or `.d.ts` file under
+  `frontend/src` such as `global.d.ts`, keeps it: `generate-types` and
+  `serve` then write `inertia-props.ts` without the augmentation or its
+  `import '@inertiajs/core'` and print a notice naming that file (`serve`
+  once, not on every save), since two augmentations merge key by key and
+  fail the type check on any key they set to different types. Delete the
+  hand-written block and regenerate to get the generated augmentation, with
+  `root` and the shared struct typed (T06).
 - **`TestResponse::assert_inertia()` reads a first visit.** It refused any
   response without `X-Inertia: true`, so the HTML document a plain `GET` of
   a page route returns could only be asserted through

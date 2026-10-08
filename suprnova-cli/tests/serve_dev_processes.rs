@@ -1351,3 +1351,91 @@ fn intt_serve_big_integers_widens_the_startup_and_the_watched_regeneration() {
 
     child.terminate();
 }
+
+/// PAR-068: `serve` names a project's own `@inertiajs/core` augmentation
+/// once, on the start-up generation, and a regeneration on save that finds
+/// the same file repeats nothing, so the notice does not bury the
+/// `[types]` lines of every later save.
+#[test]
+fn intt_serve_names_the_project_augmentation_once() {
+    const NOTICE: &str = "frontend/src/global.d.ts declares module '@inertiajs/core'";
+
+    let fx = Fixture::new();
+    fx.write_backend_project("fixture-app");
+    fx.shim("cargo", CARGO_WATCH_SHIM);
+    let props = fx.root().join("src/props.rs");
+    fs::write(
+        &props,
+        "#[derive(InertiaProps)]\npub struct Counts {\n    pub total: u32,\n}\n",
+    )
+    .expect("write src/props.rs");
+    fs::create_dir_all(fx.root().join("frontend/src")).expect("mkdir frontend/src");
+    fs::write(
+        fx.root().join("frontend/src/global.d.ts"),
+        "import '@inertiajs/core'\n\ndeclare module '@inertiajs/core' {\n  \
+         export interface InertiaConfig {\n    sharedPageProps: { root: string }\n  }\n}\n",
+    )
+    .expect("write frontend/src/global.d.ts");
+    let types = fx.root().join("frontend/src/types/inertia-props.ts");
+    let read_types = || fs::read_to_string(&types).unwrap_or_default();
+
+    let (mut child, out_path, err_path) =
+        fx.spawn_serve_split_full(&["--backend-only", "--no-migrate"]);
+    let stdout = || fs::read_to_string(&out_path).unwrap_or_default();
+    let output = || {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            stdout(),
+            fs::read_to_string(&err_path).unwrap_or_default()
+        )
+    };
+
+    // The start-up generation prints before the watcher starts, and the
+    // watcher announces itself once its watch on `src/` is in place.
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            stdout().contains("Watching for Rust file changes to regenerate types")
+        }),
+        "the type watcher must start; {}",
+        output()
+    );
+    assert_eq!(
+        stdout().matches(NOTICE).count(),
+        1,
+        "the start-up generation names the file; {}",
+        output()
+    );
+    assert!(
+        read_types().contains("export interface Counts {")
+            && !read_types().contains("declare module"),
+        "the start-up generation leaves the augmentation to the project:\n{}",
+        read_types()
+    );
+
+    fs::write(
+        &props,
+        "#[derive(InertiaProps)]\npub struct Counts {\n    pub total: u32,\n    pub largest: u32,\n}\n",
+    )
+    .expect("edit src/props.rs");
+
+    // A regeneration prints its notice, if any, before its own line.
+    assert!(
+        wait_until(Duration::from_secs(30), || stdout()
+            .contains("Regenerated 1 type(s)")),
+        "the save must regenerate the types; {}",
+        output()
+    );
+    assert_eq!(
+        stdout().matches(NOTICE).count(),
+        1,
+        "a regeneration that finds the same file repeats nothing; {}",
+        output()
+    );
+    assert!(
+        read_types().contains("  largest: number;") && !read_types().contains("declare module"),
+        "{}",
+        read_types()
+    );
+
+    child.terminate();
+}
