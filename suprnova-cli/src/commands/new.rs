@@ -675,6 +675,11 @@ pub(crate) fn create_project(
         templates::flash_props(),
     )
     .map_err(|e| format!("Failed to write src/props/flash.rs: {}", e))?;
+    fs::write(
+        project_path.join("src/props/shared.rs"),
+        templates::shared_props(),
+    )
+    .map_err(|e| format!("Failed to write src/props/shared.rs: {}", e))?;
 
     // Write src/migrations/mod.rs
     fs::write(

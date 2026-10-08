@@ -12,8 +12,8 @@ use suprnova::{
     attrs, handler,
 };
 
-use super::dashboard::UserInfo;
 use crate::models::user::User;
+use crate::props::shared::UserInfo;
 
 /// The name form's one field. A missing field reads as empty, so it fails
 /// the rule below rather than the parse.

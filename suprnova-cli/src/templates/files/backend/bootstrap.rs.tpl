@@ -234,4 +234,10 @@ pub fn register_http_stack() {
     // to fetch its Fluent catalog), which the frontend kit's `lib/lang.ts`
     // wrapper reads via `initLang(page)`.
     App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
+
+    // The signed-in user, or none, on every page under `auth`, read from
+    // the request's session each time a response sends it. A layout shows
+    // the user's name and the sign-out link from it. `SharedData` in
+    // `src/props/shared.rs` types it for `suprnova generate-types`.
+    App::inertia_share_lazy("auth", crate::props::shared::Auth::current);
 }

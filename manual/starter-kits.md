@@ -105,9 +105,9 @@ kit pages, all of it over the signed-in user's own data:
 - A `notes` table and a `Note` model (`src/models/note.rs`) that belongs to
   a user, with `Note::owned_by(user_id)` as the one way the handlers read
   notes.
-- `GET /dashboard`, which sends `user` with the page, `stats` deferred (the
-  user's note count and the notes written today), and `recent_notes`
-  optional (the user's five newest notes).
+- `GET /dashboard`, which sends `stats` deferred (the user's note count
+  and the notes written today) and `recent_notes` optional (the user's
+  five newest notes).
 - `GET /notes`, which lists the user's notes 10 at a time with
   `cursor_paginate` through `Inertia::paginate`, filtered by the `search`
   query parameter in title or body without regard to case, and sends
@@ -121,16 +121,25 @@ kit pages, all of it over the signed-in user's own data:
   answers `200` with `{"user": {...}}` or `422` with the framework's
   validation body.
 
+Every page receives the signed-in user, or `null` for a guest, under the
+shared `auth` prop: `bootstrap.rs` shares it with `App::inertia_share_lazy`,
+which reads the request's session for each response that sends it, and
+`SharedData` in `src/props/shared.rs`, marked `#[inertia_props(shared)]`,
+adds `auth` to the generated `SharedProps`. A layout reads
+`usePage().props.auth.user`.
+
 Sign-in, registration, a reset-link request, a password reset, email
 verification, a verification resend, sign-out, and a saved note each flash a
-`Toast` (`src/props/flash.rs`) under the key `toast`. The struct is marked
-`#[inertia_props(flash)]`, so `suprnova generate-types` names it as Inertia's
-`flashDataType` and `page.flash.toast` is typed in every page. The routes
-carry the names Laravel's kits give them: `dashboard`, `notes.index`,
-`notes.show`, `notes.store`, `profile.name`, `login`, `register`,
-`password.request`, `password.email`, `password.reset`, `password.update`,
-`verification.notice`, `verification.send`, `verification.verify`, and
-`logout`.
+`Toast` (`src/props/flash.rs`) under the key `toast`. The `Flash` struct
+beside it holds that toast and is marked `#[inertia_props(flash)]`, so
+`suprnova generate-types` names it as Inertia's `flashDataType` and
+`page.flash.toast` is typed in every page.
+
+The routes carry the names Laravel's kits give them: `dashboard`,
+`notes.index`, `notes.show`, `notes.store`, `profile.name`, `login`,
+`register`, `password.request`, `password.email`, `password.reset`,
+`password.update`, `verification.notice`, `verification.send`,
+`verification.verify`, and `logout`.
 
 The dashboard handler shows how each prop travels:
 
@@ -143,7 +152,6 @@ pub async fn index(req: Request) -> Response {
     let user_id = user.id;
 
     Ok(InertiaResponse::new("Dashboard")
-        .with("user", UserInfo::from(user))
         .defer("stats", move || note_stats(user_id))
         .optional("recent_notes", move || recent_notes(user_id))
         .resolve(&req)

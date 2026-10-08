@@ -5,16 +5,21 @@
 //! carries it as `page.flash.toast` and removes it, so the layout shows it
 //! once and the page after that does not. Flash data never enters the
 //! browser's history, so going back does not show it again.
-//!
-//! `#[inertia_props(flash)]` makes `suprnova generate-types` name this
-//! struct as Inertia's `flashDataType`, which types `page.flash` on every
-//! page.
 
 use suprnova::InertiaProps;
 
-/// A one-time message for the page a redirect lands on.
+/// What `page.flash` holds. The marker makes `suprnova generate-types` name
+/// this struct as Inertia's `flashDataType`, which types `page.flash` on
+/// every page. Handlers never build it: each flashes its `toast` alone.
 #[derive(InertiaProps)]
 #[inertia_props(flash)]
+pub struct Flash {
+    /// The message the page a redirect lands on shows, if one was flashed.
+    pub toast: Option<Toast>,
+}
+
+/// A one-time message for the page a redirect lands on.
+#[derive(InertiaProps)]
 pub struct Toast {
     /// How the layout styles the message: `"success"`, `"info"` or
     /// `"error"`. A string rather than an enum, because `generate-types`

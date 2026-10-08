@@ -23,17 +23,36 @@ use crate::props::flash::Toast;
 /// How many notes each page of the list holds.
 const NOTES_PER_PAGE: u64 = 10;
 
-/// A note as the pages show it. The list sends whole notes, so a row's
-/// link can render `Notes/Show` from the row before the server answers.
+/// A note as a list shows it: the notes list's rows and the dashboard's
+/// recent notes. A row's link renders `Notes/Show` from it before the
+/// server answers, and the body arrives with that answer.
 #[derive(InertiaProps)]
-pub struct NoteProps {
+pub struct NoteSummary {
+    pub id: u64,
+    pub title: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+impl From<Note> for NoteSummary {
+    fn from(note: Note) -> Self {
+        Self {
+            id: note.id,
+            title: note.title,
+            created_at: note.created_at,
+        }
+    }
+}
+
+/// A whole note, as `Notes/Show` shows it.
+#[derive(InertiaProps)]
+pub struct NoteView {
     pub id: u64,
     pub title: String,
     pub body: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
 }
 
-impl From<Note> for NoteProps {
+impl From<Note> for NoteView {
     fn from(note: Note) -> Self {
         Self {
             id: note.id,
@@ -44,10 +63,19 @@ impl From<Note> for NoteProps {
     }
 }
 
+/// The `Notes/Index` page's props, for `suprnova generate-types`. The
+/// handler sends them through `Inertia::paginate`, which puts each page's
+/// rows under `notes` and their cursors in the scroll metadata.
+#[derive(InertiaProps)]
+pub struct NotesIndexProps {
+    pub notes: Vec<NoteSummary>,
+    pub search: String,
+}
+
 /// The `Notes/Show` page's props.
 #[derive(InertiaProps)]
-pub struct NoteShowProps {
-    pub note: NoteProps,
+pub struct NotesShowProps {
+    pub note: NoteView,
 }
 
 /// The note form's fields. A missing field reads as empty, so it fails
@@ -129,12 +157,12 @@ pub async fn index(req: Request) -> Response {
     }
     let page = notes.cursor_paginate(NOTES_PER_PAGE).await?;
 
-    // Send each row as `NoteProps`. The cursors stay valid: they hold a
+    // Send each row as a `NoteSummary`. The cursors stay valid: they hold a
     // row's id, which the projection keeps. The scroll metadata reads the
     // current cursor from the request's `cursor` parameter, the one
     // `cursor_paginate` reads.
     let rows = CursorPaginator::new(
-        page.data.into_iter().map(NoteProps::from).collect(),
+        page.data.into_iter().map(NoteSummary::from).collect(),
         page.per_page,
         page.next_cursor,
         page.prev_cursor,
@@ -154,7 +182,7 @@ pub async fn show(req: Request, id: u64) -> Response {
         .filter("id", id)
         .first_or_fail()
         .await?;
-    inertia_response!(&req, "Notes/Show", NoteShowProps { note: note.into() })
+    inertia_response!(&req, "Notes/Show", NotesShowProps { note: note.into() })
 }
 
 /// `POST /notes` - write a note for the signed-in user and return to the

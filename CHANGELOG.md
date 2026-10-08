@@ -541,10 +541,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   handler reads notes through `Note::owned_by`, and none lists accounts
   (K12, K14).
 - **The scaffold's dashboard defers `stats` and leaves `recent_notes`
-  optional.** The dashboard sends the user with the page, the user's note
-  count and the notes written today as a deferred `stats`, and the user's
-  five newest notes as an optional `recent_notes` the page asks for when it
-  scrolls them into view (K14).
+  optional.** The dashboard sends the user's note count and the notes
+  written today as a deferred `stats`, and the user's five newest notes as
+  an optional `recent_notes` the page asks for when it scrolls them into
+  view (K14).
+- **The signed-in user on every page of the scaffold.** A layout had no
+  way to name the signed-in user outside the dashboard. The scaffold now
+  shares `auth`, the signed-in user or `null`, with
+  `App::inertia_share_lazy`, read from the request's session for each
+  response that sends it, and `SharedData` in `src/props/shared.rs`, marked
+  `#[inertia_props(shared)]`, adds `auth` to the generated `SharedProps`
+  (K12).
 - **A JSON handler for the display name.** `POST /profile/name` takes
   `{"name": ...}`, saves it on the signed-in user, and answers `200` with
   `{"user": {...}}`, or `422` with the framework's validation body for an
@@ -552,11 +559,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form (K21).
 - **Flashed toasts after every account action.** Nothing a new
   application did told the user it worked: the server sends `page.flash`,
-  but the scaffold flashed nothing. A `Toast` in `src/props/flash.rs`,
-  marked `#[inertia_props(flash)]` so `suprnova generate-types` names it as
-  Inertia's `flashDataType`, is now flashed under `toast` after sign-in,
-  registration, a reset-link request, a password reset, email
-  verification, a verification resend, sign-out and a saved note (K17).
+  but the scaffold flashed nothing. A `Toast` in `src/props/flash.rs` is
+  now flashed under `toast` after sign-in, registration, a reset-link
+  request, a password reset, email verification, a verification resend,
+  sign-out and a saved note, and the `Flash` struct beside it, marked
+  `#[inertia_props(flash)]`, makes `suprnova generate-types` type
+  `page.flash.toast` as Inertia's `flashDataType` (K17).
 - **Laravel's route names in the scaffold.** The scaffold's routes carry
   the names Laravel's kits give them: `dashboard`, `notes.index`,
   `notes.show`, `notes.store`, `profile.name`, `login`, `register`,

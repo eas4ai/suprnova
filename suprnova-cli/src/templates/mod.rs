@@ -405,11 +405,18 @@ pub fn props_mod() -> &'static str {
     include_str!("files/backend/props/mod.rs.tpl")
 }
 
-/// The scaffolded `src/props/flash.rs`: the `Toast` every account flow and
-/// the notes form flash, marked `#[inertia_props(flash)]` so the generated
-/// types name it as Inertia's `flashDataType` (PAR-078).
+/// The scaffolded `src/props/flash.rs`: the `Flash` the generated types
+/// name as Inertia's `flashDataType`, and the `Toast` every account flow
+/// and the notes form flash under it (PAR-078).
 pub fn flash_props() -> &'static str {
     include_str!("files/backend/props/flash.rs.tpl")
+}
+
+/// The scaffolded `src/props/shared.rs`: the `auth` prop every page
+/// receives, the signed-in user or none, and the struct that types it in
+/// the generated `SharedProps`.
+pub fn shared_props() -> &'static str {
+    include_str!("files/backend/props/shared.rs.tpl")
 }
 
 // Actions templates

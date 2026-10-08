@@ -264,9 +264,10 @@ mod backend {
         });
     }
 
-    /// PAR-080 and PAR-079: the dashboard sends the user with the page,
-    /// `stats` deferred and `recent_notes` optional, both over the user's
-    /// own notes.
+    /// PAR-080 and PAR-079: the dashboard sends `stats` deferred and
+    /// `recent_notes` optional, both over the user's own notes. The user
+    /// reaches every page through the shared `auth` prop, so the dashboard
+    /// does not send it again.
     #[test]
     fn kit_dashboard_defers_stats_and_leaves_recent_notes_optional() {
         each_kit(|app| {
@@ -274,7 +275,6 @@ mod backend {
             let index = function(&dashboard, "index");
             for needle in [
                 r#"InertiaResponse::new("Dashboard")"#,
-                r#".with("user", "#,
                 r#".defer("stats", "#,
                 r#".optional("recent_notes", "#,
             ] {
@@ -284,12 +284,18 @@ mod backend {
                     app.kit
                 );
             }
+            assert!(
+                !contains(index, r#".with("user", "#),
+                "{}: the dashboard must leave the user to the shared `auth` prop; got:\n{index}",
+                app.kit
+            );
             for needle in [
-                "pub struct UserInfo {",
-                "pub struct NoteStats {",
+                "#[derive(InertiaProps)]\npub struct DashboardProps {",
+                "pub stats: Stats,",
+                "pub recent_notes: Vec<NoteSummary>,",
+                "#[derive(InertiaProps)]\npub struct Stats {",
                 "pub notes: i64,",
                 "pub written_today: i64,",
-                "pub struct RecentNote {",
             ] {
                 assert!(
                     contains(&dashboard, needle),
@@ -333,10 +339,23 @@ mod backend {
                 ".cursor_paginate(NOTES_PER_PAGE)",
                 r#"Inertia::paginate("Notes/Index", "notes", "#,
                 r#".with("search", "#,
+                ".map(NoteSummary::from)",
             ] {
                 assert!(
                     contains(index, needle),
                     "{}: the notes index must contain `{needle}`; got:\n{index}",
+                    app.kit
+                );
+            }
+            for needle in [
+                "#[derive(InertiaProps)]\npub struct NotesIndexProps {",
+                "pub notes: Vec<NoteSummary>,",
+                "pub search: String,",
+                "#[derive(InertiaProps)]\npub struct NoteSummary {",
+            ] {
+                assert!(
+                    contains(&notes, needle),
+                    "{}: notes.rs must declare `{needle}`; got:\n{notes}",
                     app.kit
                 );
             }
@@ -378,7 +397,7 @@ mod backend {
                 "Note::owned_by(user.id)",
                 r#".filter("id", id)"#,
                 ".first_or_fail()",
-                r#"inertia_response!(&req, "Notes/Show", NoteShowProps"#,
+                r#"inertia_response!(&req, "Notes/Show", NotesShowProps"#,
             ] {
                 assert!(
                     contains(show, needle),
@@ -386,7 +405,12 @@ mod backend {
                     app.kit
                 );
             }
-            for needle in ["pub struct NoteShowProps {", "pub note: NoteProps,"] {
+            for needle in [
+                "#[derive(InertiaProps)]\npub struct NotesShowProps {",
+                "pub note: NoteView,",
+                "#[derive(InertiaProps)]\npub struct NoteView {",
+                "pub body: Option<String>,",
+            ] {
                 assert!(
                     contains(&notes, needle),
                     "{}: notes.rs must declare `{needle}`; got:\n{notes}",
@@ -465,8 +489,9 @@ mod backend {
         });
     }
 
-    /// PAR-078: one flash struct, marked for the generator, and a toast
-    /// flashed after each of the eight actions the requirement names.
+    /// PAR-078: one flash struct, marked for the generator, holding the
+    /// toast, and a toast flashed after each of the eight actions the
+    /// requirement names.
     #[test]
     fn kit_flash_struct_is_marked_and_every_action_flashes_a_toast() {
         each_kit(|app| {
@@ -483,8 +508,19 @@ mod backend {
                 app.kit
             );
             let flash = app.read("src/props/flash.rs");
+            assert_eq!(
+                flash
+                    .lines()
+                    .filter(|line| line.trim() == "#[inertia_props(flash)]")
+                    .count(),
+                1,
+                "{}: one struct is the flash data; got:\n{flash}",
+                app.kit
+            );
             for needle in [
-                "#[derive(InertiaProps)]\n#[inertia_props(flash)]\npub struct Toast {",
+                "#[derive(InertiaProps)]\n#[inertia_props(flash)]\npub struct Flash {",
+                "pub toast: Option<Toast>,",
+                "#[derive(InertiaProps)]\npub struct Toast {",
                 "pub kind: String,",
                 "pub message: String,",
                 "pub fn success(",
@@ -570,6 +606,47 @@ mod backend {
         });
     }
 
+    /// PAR-077 and PAR-080: every page carries the signed-in user, or
+    /// none, under the shared `auth` prop, resolved for each response, and
+    /// the struct that types it is marked for the generator.
+    #[test]
+    fn kit_shared_auth_carries_the_signed_in_user_on_every_page() {
+        each_kit(|app| {
+            let props = app.read("src/props/mod.rs");
+            assert!(
+                contains(&props, "pub mod shared;"),
+                "{}: props/mod.rs must declare the shared module; got:\n{props}",
+                app.kit
+            );
+            let shared = app.read("src/props/shared.rs");
+            for needle in [
+                "#[derive(InertiaProps)]\n#[inertia_props(shared)]\npub struct SharedData {",
+                "pub auth: Auth,",
+                "#[derive(InertiaProps)]\npub struct Auth {",
+                "pub user: Option<UserInfo>,",
+                "#[derive(InertiaProps)]\npub struct UserInfo {",
+                "pub async fn current() -> Result<Self, FrameworkError>",
+                "suprnova::Auth::user_as::<User>()",
+            ] {
+                assert!(
+                    contains(&shared, needle),
+                    "{}: props/shared.rs must contain `{needle}`; got:\n{shared}",
+                    app.kit
+                );
+            }
+            let bootstrap = app.read("src/bootstrap.rs");
+            let http_stack = function(&bootstrap, "register_http_stack");
+            assert!(
+                contains(
+                    http_stack,
+                    r#"App::inertia_share_lazy("auth", crate::props::shared::Auth::current);"#
+                ),
+                "{}: the HTTP stack must share `auth` per response; got:\n{http_stack}",
+                app.kit
+            );
+        });
+    }
+
     /// PAR-079's last sentence: no handler lists accounts, and no handler
     /// reads a note except through the signed-in user's own notes.
     #[test]
@@ -601,8 +678,8 @@ mod backend {
     }
 
     /// PAR-078: `suprnova generate-types` on a fresh scaffold names the
-    /// flash struct as `flashDataType`, types the note pages, and warns
-    /// about no prop type.
+    /// flash struct as `flashDataType`, adds `auth` to the shared props,
+    /// types the note pages, and warns about no prop type.
     #[test]
     fn kit_generated_types_name_the_flash_struct_and_the_note_pages() {
         each_kit(|app| {
@@ -628,13 +705,19 @@ mod backend {
             );
             let types = app.read("frontend/src/types/inertia-props.ts");
             for needle in [
+                "export interface Flash {\n  toast: Toast | null;\n}",
                 "export interface Toast {\n  kind: string;\n  message: string;\n}",
-                "    flashDataType: Toast;",
-                r#"  "Notes/Show": NoteShowProps;"#,
-                "export interface NoteProps {",
-                "export interface NoteStats {",
-                "export interface RecentNote {",
-                "export interface UserInfo {",
+                "    flashDataType: Flash;",
+                "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}",
+                "export interface Auth {\n  user: UserInfo | null;\n}",
+                "export interface UserInfo {\n  id: number;\n  name: string;\n  email: string;\n}",
+                "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}",
+                "export interface Stats {\n  notes: number;\n  written_today: number;\n}",
+                "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string | null;\n}",
+                "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}",
+                "export interface NoteView {\n  id: number;\n  title: string;\n  body: string | null;\n  created_at: string | null;\n}",
+                "export interface NotesShowProps {\n  note: NoteView;\n}",
+                r#"  "Notes/Show": NotesShowProps;"#,
             ] {
                 assert!(
                     types.contains(needle),
