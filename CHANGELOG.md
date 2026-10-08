@@ -773,7 +773,44 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `script-builtin-reflect-set`, `script-builtin-window`,
   `script-prototype-member-alias` and
   `script-prototype-member-parameter`), and the `own-members` accepted
-  fixture pins what stays admitted.
+  fixture pins what stays admitted. Two ways past the rule stayed open and
+  are closed. `(0).toPrecision.call = f` was admitted, because a member
+  read off a value counted as a built-in method only under a name the
+  scan's lists hold, and `toPrecision` is not one; the same held for
+  `"".anchor`, `[].copyWithin` and `/x/.compile`. A member read off a
+  literal, an operator's result (`-1`, `"a" + b`), a constant that holds
+  one, or a class that extends a built-in and does not declare that static
+  is now the built-in it inherits, whatever its name, and `call`, `apply`
+  and `bind`, through which every script borrows a built-in method, may be
+  written only on a value the script made, which also refuses
+  `Math.random().toPrecision.call = f` and an element's
+  `requestFullscreen.call = f`. `document.getRootNode().createElement = f`
+  was admitted, because what a call returns traced to nothing, though a
+  document's root node is itself. `getRootNode()` on any node is now the
+  page, as `ownerDocument` is, `Object(value)` is the value, and a method
+  of the page whose name is never ordinary data (62 of them, from
+  `createElement` and `querySelector` to `addEventListener` and
+  `pushState`) may be assigned only on a value the script made, which also
+  refuses it through a `parentNode`, an event's `currentTarget`, an array,
+  a promise, a function that returns `document`, and `this` in a method the
+  page calls as a listener. The window `window.open` returns is a global
+  object too, so `window.open("/x").JSON.parse = f` is refused. Writing
+  `call` on a value the scan cannot trace (`api.call = f` on a parameter,
+  `this.state.call = c`) is refused as well, since the scan cannot tell it
+  from a built-in method's. Eighteen bypass fixtures pin the closed ways
+  (`script-builtin-literal-number`, `script-builtin-literal-string`,
+  `script-builtin-literal-template`, `script-builtin-literal-regexp`,
+  `script-builtin-literal-array`, `script-builtin-literal-name`,
+  `script-builtin-literal-held`, `script-builtin-class-static`,
+  `script-builtin-borrowed-call`, `script-builtin-borrowed-call-element`,
+  `script-builtin-root-node`, `script-builtin-root-node-this`,
+  `script-builtin-object-of-page`, `script-builtin-page-method-held`,
+  `script-builtin-page-method-parent-node`,
+  `script-builtin-page-method-listener-this`,
+  `script-builtin-opened-window` and
+  `script-builtin-opened-window-name`), and the `ordinary-writes` accepted
+  fixture pins what an ordinary component still writes: `textContent`,
+  `value`, `classList`, `this.state.open`, `o.call` on its own object.
 
 - **A handler panic reaches the Inertia error page.** The panic boundary
   wraps the whole middleware chain, so a panic unwound past the error-page

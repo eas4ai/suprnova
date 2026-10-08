@@ -119,6 +119,80 @@ pub const GLOBAL_OBJECTS: &[&str] = &["window", "self", "globalThis"];
 /// on the page calls, so a script may not assign one (REG-032).
 pub const PAGE_OBJECTS: &[&str] = &["document", "location", "history"];
 
+/// The page's own methods whose names no script's data shares: those of
+/// `document` (its own, and the ones it has as a node, a parent node and an
+/// event target) and of `history`. The page reaches a script through more
+/// paths than the scan follows (`getRootNode()` and a `parentNode` may
+/// return `document`, an event's `currentTarget` may be it), so a member of
+/// one of these names may be written only on a value the script made
+/// (REG-032). A method whose name is also ordinary data (`open`, `close`,
+/// `append`, `contains`, `back`) is left to the rule for a page object the
+/// scan follows to the write.
+pub const PAGE_METHODS: &[&str] = &[
+    "addEventListener",
+    "adoptNode",
+    "appendChild",
+    "captureEvents",
+    "caretPositionFromPoint",
+    "caretRangeFromPoint",
+    "cloneNode",
+    "compareDocumentPosition",
+    "createCDATASection",
+    "createComment",
+    "createDocumentFragment",
+    "createElement",
+    "createElementNS",
+    "createEvent",
+    "createExpression",
+    "createNSResolver",
+    "createNodeIterator",
+    "createProcessingInstruction",
+    "createRange",
+    "createTextNode",
+    "createTreeWalker",
+    "dispatchEvent",
+    "elementFromPoint",
+    "elementsFromPoint",
+    "exitFullscreen",
+    "exitPictureInPicture",
+    "exitPointerLock",
+    "getAnimations",
+    "getElementById",
+    "getElementsByClassName",
+    "getElementsByName",
+    "getElementsByTagName",
+    "getElementsByTagNameNS",
+    "getRootNode",
+    "getSelection",
+    "hasChildNodes",
+    "hasStorageAccess",
+    "hasUnpartitionedCookieAccess",
+    "importNode",
+    "insertBefore",
+    "isDefaultNamespace",
+    "isEqualNode",
+    "isSameNode",
+    "lookupNamespaceURI",
+    "lookupPrefix",
+    "moveBefore",
+    "pushState",
+    "queryCommandEnabled",
+    "queryCommandIndeterm",
+    "queryCommandState",
+    "queryCommandSupported",
+    "queryCommandValue",
+    "querySelector",
+    "querySelectorAll",
+    "releaseEvents",
+    "removeChild",
+    "removeEventListener",
+    "replaceChild",
+    "replaceChildren",
+    "replaceState",
+    "requestStorageAccess",
+    "startViewTransition",
+];
+
 /// Built-in methods a script may read but not call, beyond
 /// [`ADMITTED_METHODS`]: the ones every object inherits from
 /// `Object.prototype`, and `toJSON`, which `JSON.stringify` calls on a

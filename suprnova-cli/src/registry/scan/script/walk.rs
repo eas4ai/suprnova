@@ -13,8 +13,9 @@ use super::super::Finding;
 use super::super::url::{check_constant, srcset_urls};
 use super::lists::{
     ADMITTED_CONSTRUCTORS, ADMITTED_GLOBALS, ADMITTED_METHODS, GLOBAL_OBJECTS, IMPLICITLY_CALLED,
-    INHERITED_METHODS, PAGE_OBJECTS, READ_ONLY_PROPERTIES, REFUSED_ELEMENTS, REFUSED_PROPERTIES,
-    Rule, URL_ATTRIBUTES, URL_CSS_PROPERTIES, URL_PROPERTIES, constructor_rule_for, rule_for,
+    INHERITED_METHODS, PAGE_METHODS, PAGE_OBJECTS, READ_ONLY_PROPERTIES, REFUSED_ELEMENTS,
+    REFUSED_PROPERTIES, Rule, URL_ATTRIBUTES, URL_CSS_PROPERTIES, URL_PROPERTIES,
+    constructor_rule_for, rule_for,
 };
 
 /// How many constant values a traced expression may stand for before the
@@ -3149,7 +3150,13 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// method of the page (REG-032). Either changes, for every script on the
     /// page, a function or object the browser provides: `Object.keys = f`,
     /// `p.call = g` where `p` holds `Object.keys`, `document.createElement
-    /// = f`.
+    /// = f`. A built-in of a window `open` returns counts as one of this
+    /// window's. Two kinds of name are refused on every value the script did
+    /// not make, because the scan cannot follow every path to what they
+    /// change: a method of the page, which `getRootNode()`, a `parentNode`
+    /// or an event's `currentTarget` may hand over as `document`, and
+    /// `call`, `apply` and `bind`, through which every script borrows a
+    /// built-in method that any value may hold (`Math.random().toPrecision`).
     fn builtin_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
         let object = member.object();
         if self.reaches(Root::Method, object, 0, &mut BTreeSet::new()) {
@@ -3178,6 +3185,153 @@ impl<'a, 'c> Walker<'a, 'c> {
                 span,
                 format!("{verb} `{name}` on {page} replaces a built-in function every script on the page calls"),
             );
+            return;
+        }
+        if let Some(name) = names.iter().find(|name| builtin_global(name))
+            && self.opened_window(object, 0, &mut BTreeSet::new())
+        {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on the window `open` returns replaces that window's built-in, which a page of the application opened there keeps"),
+            );
+            return;
+        }
+        let page = names
+            .iter()
+            .find(|name| PAGE_METHODS.contains(&name.as_str()));
+        let borrowing = names.iter().find(|name| borrowing_method(name));
+        if (page.is_none() && borrowing.is_none())
+            || self.made_by_script(object, 0, &mut BTreeSet::new())
+        {
+            return;
+        }
+        if let Some(name) = page {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on a value the script did not make may replace the page's own `{name}`: the page reaches a script through calls, elements and events the scan does not follow (`getRootNode()` returns `document`), so only an object the script made may take a member of that name"),
+            );
+            return;
+        }
+        if let Some(name) = borrowing
+            && !self.instance_this(object)
+        {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on a value the script did not make may change the `{name}` every script borrows a built-in method with, and any value may hold one (`Math.random().toPrecision`), so only an object or function the script made may take a member of that name"),
+            );
+        }
+    }
+
+    /// Whether an expression is `this` in a class, its own instance, whose
+    /// members are its own to write (REG-032).
+    fn instance_this(&self, expr: &Expression<'a>) -> bool {
+        matches!(unparen(expr), Expression::ThisExpression(this)
+            if self.facts.this_class.contains_key(&this.span.start))
+    }
+
+    /// Whether an expression always evaluates to a value the script made,
+    /// never one the browser hands it (REG-032): an object, array, function
+    /// or class literal, a function or class it declares, a new instance of
+    /// a standard constructor, or a name every value of which is one, a
+    /// parameter included when every call of its function by name passes
+    /// one. An instance of a class of the script's own does not count: its
+    /// constructor may return any object.
+    fn made_by_script(
+        &self,
+        expr: &Expression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(expr) {
+            Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_) => true,
+            Expression::NewExpression(new) => matches!(unparen(&new.callee),
+                Expression::Identifier(callee)
+                    if self.bound(callee).is_none()
+                        && ADMITTED_CONSTRUCTORS.contains(&callee.name.as_str())),
+            Expression::Identifier(reference) => self
+                .bound(reference)
+                .is_some_and(|id| self.binding_made(id, depth + 1, seen)),
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.made_by_script(last, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.made_by_script(&conditional.consequent, depth + 1, seen)
+                    && self.made_by_script(&conditional.alternate, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.made_by_script(&logical.left, depth + 1, seen)
+                    && self.made_by_script(&logical.right, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                assignment.operator == AssignmentOperator::Assign
+                    && self.made_by_script(&assignment.right, depth + 1, seen)
+            }
+            _ => false,
+        }
+    }
+
+    /// [`Self::made_by_script`] for a binding: a function or class the
+    /// script declares and never reassigns, a variable every value of which
+    /// is made, or a parameter every call of whose function by name passes
+    /// one made. A binding met again inside its own values adds none.
+    fn binding_made(&self, id: Bid, depth: usize, seen: &mut BTreeSet<Bid>) -> bool {
+        if !seen.insert(id) {
+            return true;
+        }
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        if binding.opaque || binding.numeric_updates {
+            return false;
+        }
+        match binding.kind {
+            Kind::Function | Kind::Class => binding.assignments.is_empty(),
+            Kind::Const | Kind::Let | Kind::Var => {
+                let mut values = binding
+                    .init
+                    .into_iter()
+                    .chain(binding.assignments.iter().copied())
+                    .peekable();
+                values.peek().is_some()
+                    && values.all(|value| self.made_by_script(value, depth, seen))
+            }
+            Kind::Param => {
+                let Some(function) = binding.param_of.and_then(|owner| self.binding(owner)) else {
+                    return false;
+                };
+                if function.escapes || function.calls.is_empty() {
+                    return false;
+                }
+                if let Some(default) = binding.param_default
+                    && !self.made_by_script(default, depth, seen)
+                {
+                    return false;
+                }
+                function
+                    .calls
+                    .iter()
+                    // An omitted argument is the default, checked above, or
+                    // `undefined`, which has no member to write.
+                    .all(|arguments| match arguments.get(binding.param_index) {
+                        None => true,
+                        Some(Argument::SpreadElement(_)) => false,
+                        Some(argument) => argument
+                            .as_expression()
+                            .is_some_and(|value| self.made_by_script(value, depth, seen)),
+                    })
+            }
+            Kind::Import | Kind::Catch | Kind::Implicit => false,
         }
     }
 
@@ -3189,8 +3343,10 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// `history`. A name is followed to its initializer, default and
     /// assignments, and a parameter to the arguments each call of its
     /// function by name passes; a value the scan does not follow (a
-    /// destructured name, an import, what a call returns) is not, because
-    /// [`Self::held_builtin`] stops a built-in before it enters one. Past
+    /// destructured name, an import, what most calls return) is not,
+    /// because [`Self::held_builtin`] stops a built-in before it enters one.
+    /// Two calls are followed ([`Self::call_reaches`]): `Object(value)`
+    /// returns the value, and `getRootNode()` the page. Past
     /// [`MAX_TRACE_DEPTH`] the answer is yes, so a chain too long to follow
     /// is refused rather than admitted.
     fn reaches(
@@ -3245,13 +3401,193 @@ impl<'a, 'c> Walker<'a, 'c> {
             Expression::AwaitExpression(await_expr) => {
                 self.reaches(root, &await_expr.argument, depth + 1, seen)
             }
-            Expression::ChainExpression(chain) => chain
-                .expression
-                .as_member_expression()
-                .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            Expression::CallExpression(call) => self.call_reaches(root, call, depth, seen),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => self.call_reaches(root, call, depth, seen),
+                other => other
+                    .as_member_expression()
+                    .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            },
             other => other
                 .as_member_expression()
                 .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+        }
+    }
+
+    /// [`Self::reaches`] for what a call returns (REG-032). `Object(value)`
+    /// returns the value itself, so it reaches what the value reaches.
+    /// `getRootNode()` returns the document for any node in it, as
+    /// `ownerDocument` does, whatever node it is called on, so it is the
+    /// page: `document.getRootNode()` is `document`. Any other call returns
+    /// a value the scan does not follow.
+    fn call_reaches(
+        &self,
+        root: Root,
+        call: &CallExpression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if let Expression::Identifier(callee) = unparen(&call.callee)
+            && callee.name == "Object"
+            && self.bound(callee).is_none()
+        {
+            return call
+                .arguments
+                .first()
+                .and_then(Argument::as_expression)
+                .is_some_and(|value| self.reaches(root, value, depth + 1, seen));
+        }
+        root == Root::Page
+            && self.invokes(
+                &call.callee,
+                "getRootNode",
+                &|_| true,
+                depth + 1,
+                &mut BTreeSet::new(),
+            )
+    }
+
+    /// Whether a callee may invoke the method `name` read off a receiver
+    /// `receiver` admits, or the global function of that name: the method
+    /// itself, borrowed with `call` or `apply`, bound with `bind`, or held
+    /// in a name (REG-032). Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn invokes(
+        &self,
+        callee: &Expression<'a>,
+        name: &str,
+        receiver: &dyn Fn(&Expression<'a>) -> bool,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let member = match unparen(callee) {
+            Expression::Identifier(reference) => {
+                return match self.bound(reference) {
+                    None => reference.name == name && ADMITTED_GLOBALS.contains(&name),
+                    Some(id) => {
+                        if !seen.insert(id) {
+                            return false;
+                        }
+                        let Some(binding) = self.binding(id) else {
+                            return false;
+                        };
+                        binding
+                            .init
+                            .into_iter()
+                            .chain(binding.param_default)
+                            .chain(binding.assignments.iter().copied())
+                            .chain(self.passed_arguments(binding))
+                            .any(|value| self.invokes(value, name, receiver, depth + 1, seen))
+                    }
+                };
+            }
+            Expression::SequenceExpression(sequence) => {
+                return sequence
+                    .expressions
+                    .last()
+                    .is_some_and(|last| self.invokes(last, name, receiver, depth + 1, seen));
+            }
+            Expression::ConditionalExpression(conditional) => {
+                return self.invokes(&conditional.consequent, name, receiver, depth + 1, seen)
+                    || self.invokes(&conditional.alternate, name, receiver, depth + 1, seen);
+            }
+            Expression::LogicalExpression(logical) => {
+                return self.invokes(&logical.left, name, receiver, depth + 1, seen)
+                    || self.invokes(&logical.right, name, receiver, depth + 1, seen);
+            }
+            // `f.bind(...)` returns `f` bound.
+            Expression::CallExpression(call) => {
+                return unparen(&call.callee)
+                    .as_member_expression()
+                    .filter(|member| member.static_property_name() == Some("bind"))
+                    .is_some_and(|member| {
+                        self.invokes(member.object(), name, receiver, depth + 1, seen)
+                    });
+            }
+            Expression::ChainExpression(chain) => match chain.expression.as_member_expression() {
+                Some(member) => member,
+                None => return false,
+            },
+            other => match other.as_member_expression() {
+                Some(member) => member,
+                None => return false,
+            },
+        };
+        let named = self
+            .member_names(member)
+            .is_some_and(|names| names.iter().any(|candidate| candidate == name));
+        if named && receiver(member.object()) {
+            return true;
+        }
+        // `f.call(...)` and `f.apply(...)` invoke `f`.
+        matches!(member.static_property_name(), Some("call" | "apply"))
+            && self.invokes(member.object(), name, receiver, depth + 1, seen)
+    }
+
+    /// Whether an expression may evaluate to the window `open` returns,
+    /// called on the global object or by its global name, directly or
+    /// through a name that holds what it returns (REG-032). That window is
+    /// a global object: a page of the application opened there over its
+    /// first blank document keeps that document's realm, built-ins
+    /// included. Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn opened_window(&self, expr: &Expression<'a>, depth: usize, seen: &mut BTreeSet<Bid>) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let opens = |call: &CallExpression<'a>| {
+            self.invokes(
+                &call.callee,
+                "open",
+                &|object| self.is_global_object(object),
+                depth + 1,
+                &mut BTreeSet::new(),
+            )
+        };
+        match unparen(expr) {
+            Expression::CallExpression(call) => opens(call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => opens(call),
+                _ => false,
+            },
+            Expression::Identifier(reference) => {
+                let Some(id) = self.bound(reference) else {
+                    return false;
+                };
+                if !seen.insert(id) {
+                    return false;
+                }
+                let Some(binding) = self.binding(id) else {
+                    return false;
+                };
+                binding
+                    .init
+                    .into_iter()
+                    .chain(binding.param_default)
+                    .chain(binding.assignments.iter().copied())
+                    .chain(self.passed_arguments(binding))
+                    .any(|value| self.opened_window(value, depth + 1, seen))
+            }
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.opened_window(last, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.opened_window(&conditional.consequent, depth + 1, seen)
+                    || self.opened_window(&conditional.alternate, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.opened_window(&logical.left, depth + 1, seen)
+                    || self.opened_window(&logical.right, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                self.opened_window(&assignment.right, depth + 1, seen)
+            }
+            Expression::AwaitExpression(await_expr) => {
+                self.opened_window(&await_expr.argument, depth + 1, seen)
+            }
+            _ => false,
         }
     }
 
@@ -3308,11 +3644,18 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .as_ref()
                 .is_some_and(|names| names.iter().any(|name| test(name)))
         };
+        let names_global = match root {
+            Root::BuiltIn | Root::Method => named(&builtin_global),
+            Root::Page => named(&|name| PAGE_OBJECTS.contains(&name)),
+        };
         if self.is_global_object(object) {
-            return match root {
-                Root::BuiltIn | Root::Method => named(&builtin_global),
-                Root::Page => named(&|name| PAGE_OBJECTS.contains(&name)),
-            };
+            return names_global;
+        }
+        // A window `open` returns is a global object too, but the answer
+        // only adds to what the rest of the rule finds, so a trace too deep
+        // to follow still counts as reaching.
+        if names_global && self.opened_window(object, depth + 1, &mut BTreeSet::new()) {
+            return true;
         }
         match root {
             Root::BuiltIn | Root::Method => {
@@ -3331,6 +3674,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                                 inherited_method(name) && !self.own_member(object, name)
                             })
                         }))
+                    || names.as_ref().is_some_and(|names| {
+                        self.literal_inherits(object, names, depth + 1, &mut BTreeSet::new())
+                    })
             }
             Root::Page => {
                 named(&|name| name == "ownerDocument")
@@ -3352,6 +3698,145 @@ impl<'a, 'c> Walker<'a, 'c> {
                 Some(vec![format!("#{}", member.field.name)])
             }
         }
+    }
+
+    /// Whether a member read off `object` under one of `names` may be a
+    /// method the value inherits from a built-in because the value is a
+    /// literal or an operator's result, whose kind the scan knows
+    /// (REG-032). Whatever the name, a member that a primitive, an array or
+    /// a regular expression does not hold itself is its prototype's, a
+    /// built-in every script shares: `(0).toPrecision`, `(-1).toPrecision`,
+    /// `"".anchor`, `[].copyWithin`, `/x/.compile`. What each holds itself
+    /// is data: a string's or an array's `length` and indices, a regular
+    /// expression's `lastIndex`, `source` and flags. A class inherits the
+    /// statics of the class it extends, so one it does not declare is its
+    /// parent's, and a built-in's at the root (`class A extends Promise {}`
+    /// hands over `Promise.withResolvers`). A name counts only when it can
+    /// hold nothing else: a constant initialized with the literal, or a
+    /// class never reassigned. A parameter or a variable is not followed,
+    /// because the scan reads no `typeof` test: `typeof o === "string" ? o :
+    /// o.label` reads `label` only off an object, though a call passes `o` a
+    /// string. An object or function literal inherits only from
+    /// `Object.prototype` and `Function.prototype`, whose methods' names the
+    /// lists already hold. Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn literal_inherits(
+        &self,
+        object: &Expression<'a>,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let inherited =
+            |own: &dyn Fn(&str) -> bool| names.iter().any(|name| !index_name(name) && !own(name));
+        match unparen(object) {
+            Expression::ArrayExpression(_) => inherited(&|name| name == "length"),
+            Expression::RegExpLiteral(_) => inherited(&regexp_data),
+            Expression::ClassExpression(class) => self.class_inherits(class, names, depth, seen),
+            Expression::Identifier(reference) => self
+                .bound(reference)
+                .is_some_and(|id| self.binding_literal_inherits(id, names, depth + 1, seen)),
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.literal_inherits(last, names, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.literal_inherits(&conditional.consequent, names, depth + 1, seen)
+                    || self.literal_inherits(&conditional.alternate, names, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.literal_inherits(&logical.left, names, depth + 1, seen)
+                    || self.literal_inherits(&logical.right, names, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => match assignment.operator {
+                AssignmentOperator::Assign => {
+                    self.literal_inherits(&assignment.right, names, depth + 1, seen)
+                }
+                // `a ||= b` yields `a`, which is not followed, or `b`.
+                AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::LogicalNullish => {
+                    self.literal_inherits(&assignment.right, names, depth + 1, seen)
+                }
+                // `a += b` and the other arithmetic forms yield a primitive.
+                _ => inherited(&|name| name == "length"),
+            },
+            Expression::AwaitExpression(await_expr) => {
+                self.literal_inherits(&await_expr.argument, names, depth + 1, seen)
+            }
+            other if primitive_result(other) => inherited(&|name| name == "length"),
+            _ => false,
+        }
+    }
+
+    /// [`Self::literal_inherits`] for a name that can hold only one value:
+    /// a class the script declares and never reassigns, or a constant
+    /// initialized with a literal, an operator's result or a class.
+    fn binding_literal_inherits(
+        &self,
+        id: Bid,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        if binding.opaque || !binding.assignments.is_empty() {
+            return false;
+        }
+        match binding.kind {
+            Kind::Class => binding
+                .class
+                .is_some_and(|class| self.class_inherits(class, names, depth, seen)),
+            Kind::Const => binding.init.is_some_and(|init| {
+                let value = unparen(init);
+                (primitive_result(value)
+                    || matches!(
+                        value,
+                        Expression::ArrayExpression(_)
+                            | Expression::RegExpLiteral(_)
+                            | Expression::ClassExpression(_)
+                    ))
+                    && self.literal_inherits(value, names, depth, seen)
+            }),
+            _ => false,
+        }
+    }
+
+    /// [`Self::literal_inherits`] for a class: a static it does not declare
+    /// is the one the class it extends has, which is inherited when that
+    /// class is a built-in or inherits it in turn. A class's `prototype`,
+    /// `length` and `name` are its own, and a constant's name
+    /// (`ELEMENT_NODE`) is a number.
+    fn class_inherits(
+        &self,
+        class: &Class<'a>,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        let undeclared: Vec<String> = names
+            .iter()
+            .filter(|name| {
+                !index_name(name)
+                    && !constant_name(name)
+                    && !matches!(name.as_str(), "prototype" | "length" | "name")
+                    && !declares_static(class, name)
+            })
+            .cloned()
+            .collect();
+        let Some(parent) = &class.super_class else {
+            return false;
+        };
+        !undeclared.is_empty()
+            && (self.reaches(Root::BuiltIn, parent, depth + 1, &mut BTreeSet::new())
+                || self.literal_inherits(parent, &undeclared, depth + 1, seen))
     }
 
     /// Whether a member is one the script gave the object itself, so a
@@ -3534,13 +4019,18 @@ impl<'a, 'c> Walker<'a, 'c> {
             && is_callback(self.member_rules(callee).into_iter().next(), index)
     }
 
-    /// How a refusal names a built-in.
+    /// How a refusal names a built-in: by its path, or, read off a literal
+    /// or what a call returns, by the member read (`(0).toPrecision` is
+    /// `.toPrecision`).
     fn builtin_text(&self, expr: &Expression<'a>) -> String {
         match (unparen(expr), path_text(expr)) {
             (Expression::Identifier(reference), Some(path)) if self.bound(reference).is_some() => {
                 format!("`{path}`, which holds a built-in,")
             }
             (_, Some(path)) => format!("`{path}`"),
+            (Expression::StaticMemberExpression(member), None) => {
+                format!("`.{}`", member.property.name)
+            }
             (_, None) => "a built-in".to_string(),
         }
     }
@@ -3759,6 +4249,65 @@ fn constant_name(name: &str) -> bool {
 /// did not make inherits.
 fn inherited_method(name: &str) -> bool {
     ADMITTED_METHODS.contains(&name) || INHERITED_METHODS.contains(&name)
+}
+
+/// Whether a member name is one of the three through which every script
+/// borrows a built-in method: `Array.prototype.slice.call(list)` runs the
+/// `call` that `slice` holds (REG-032).
+fn borrowing_method(name: &str) -> bool {
+    matches!(name, "call" | "apply" | "bind")
+}
+
+/// Whether a member name is an index, which names an element or a
+/// character, never a method.
+fn index_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether a member name is data a regular expression holds itself or
+/// reads from its flags, rather than a method it inherits.
+fn regexp_data(name: &str) -> bool {
+    matches!(
+        name,
+        "lastIndex"
+            | "source"
+            | "flags"
+            | "global"
+            | "ignoreCase"
+            | "multiline"
+            | "dotAll"
+            | "unicode"
+            | "unicodeSets"
+            | "sticky"
+            | "hasIndices"
+    )
+}
+
+/// Whether an expression always yields a primitive: a literal other than a
+/// regular expression, or what an operator returns. Its members are the
+/// methods its type's prototype holds.
+fn primitive_result(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr,
+        Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::UnaryExpression(_)
+            | Expression::BinaryExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::PrivateInExpression(_)
+    )
+}
+
+/// Whether a class declares a static member of this name.
+fn declares_static(class: &Class<'_>, name: &str) -> bool {
+    class
+        .body
+        .body
+        .iter()
+        .any(|element| element.r#static() && element.static_name().is_some_and(|key| key == name))
 }
 
 /// Whether the parameter at `index` is a plain name, which the scan

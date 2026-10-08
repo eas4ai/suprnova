@@ -1061,6 +1061,400 @@ fn reg_032_a_built_in_method_reached_through_any_value_or_the_page_is_refused() 
     );
 }
 
+/// Each script of `scripts` that a scan refuses, described with every
+/// finding the scan made.
+fn refused_scripts(scripts: &[&str]) -> Vec<String> {
+    scripts
+        .iter()
+        .filter_map(|script| {
+            let report = scan_widget_script(script);
+            (!report.accepted()).then(|| {
+                format!(
+                    "{script:?} was refused: {}",
+                    report
+                        .findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            })
+        })
+        .collect()
+}
+
+/// REG-032: a member read off a literal is the built-in method the literal
+/// inherits, whatever its name, so the scan needs no list of names for it:
+/// `(0).toPrecision` is `Number.prototype.toPrecision`, `"".anchor` and
+/// `[].copyWithin` are the string's and the array's, and an operator's
+/// result (`-1`, `"a" + 1`, `typeof x`) is a primitive like a literal. A
+/// write to any member of one is refused, and so is passing one where the
+/// scan stops following it, read off the literal or off a constant that
+/// holds it. A class that extends a built-in inherits its statics the same
+/// way, so a static the class does not declare is the built-in's. What a
+/// literal holds itself (a string's or an array's `length` and indices, a
+/// regular expression's `lastIndex`, `source` and flags) and a class's own
+/// statics stay admitted, and so does a parameter that is a string in one
+/// call and an object in another: the scan reads no `typeof` test, so it
+/// follows no literal into a parameter or a variable.
+#[test]
+fn reg_032_a_member_read_off_a_literal_is_the_built_in_method_it_inherits() {
+    let cases: &[(&str, &str, u32)] = &[
+        ("(0).toPrecision.call = () => \"\";\n", "script-builtin", 1),
+        ("(0).toPrecision.label = \"x\";\n", "script-builtin", 1),
+        ("(1.5).toExponential.label = \"x\";\n", "script-builtin", 1),
+        ("\"\".anchor.label = \"x\";\n", "script-builtin", 1),
+        ("`${1}`.substr.label = \"x\";\n", "script-builtin", 1),
+        ("true.x.label = 1;\n", "script-builtin", 1),
+        ("(1n).x.label = 1;\n", "script-builtin", 1),
+        ("/x/.compile.label = 1;\n", "script-builtin", 1),
+        ("[].copyWithin.label = 1;\n", "script-builtin", 1),
+        ("[1, 2].toSpliced.label = 1;\n", "script-builtin", 1),
+        ("(0)[\"toPrecision\"].label = 1;\n", "script-builtin", 1),
+        ("(0).toPrecision.call.label = 1;\n", "script-builtin", 1),
+        ("(-1).toPrecision.label = 1;\n", "script-builtin", 1),
+        ("(\"a\" + 1).anchor.label = 1;\n", "script-builtin", 1),
+        ("(typeof 0).big.label = 1;\n", "script-builtin", 1),
+        ("delete \"\".anchor.label;\n", "script-builtin", 1),
+        (
+            "const n = 0;\nn.toPrecision.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const re = /x/;\nre.compile.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        ("export const p = (0).toPrecision;\n", "script-builtin", 1),
+        (
+            "const n = 0;\nexport const p = n.toPrecision;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "Promise.resolve([].copyWithin).then((m) => {\n  m.label = 1;\n});\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "(class extends Array {}).of.label = 1;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "class A extends Promise {}\nA.withResolvers.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "class A extends Map {}\nclass B extends A {}\nB.groupBy.label = 1;\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "class A extends Array {\n  of = 1;\n}\nA.of.label = 1;\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "const A = class extends Array {};\nexport const of = A.of;\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "export const n = (s) => Math.max(\"abc\".length, [1, 2].length, s);\n",
+        "export const re = [/x/g.source, /x/g.flags, /x/g.lastIndex, \"ab\"[1]];\n",
+        "const label = \"x\";\nexport const size = [label.length, label[0]];\n",
+        "const cells = [];\nexport const fill = (text) => {\n  cells[0].textContent = text;\n};\n",
+        "export class A extends HTMLElement {\n  static config = {};\n}\nA.config.open = true;\n",
+        "export const trimmed = (s) => \" a \".trim() + `${s}`.toUpperCase();\n",
+        "function labelOf(option) {\n  return typeof option === \"string\" ? option : option.label;\n}\nexport const labels = [labelOf(\"x\"), labelOf({ label: \"y\" })];\n",
+        "function highlight(target) {\n  const el = typeof target === \"string\" ? document.querySelector(target) : target;\n  el.style.outline = \"1px solid\";\n}\nhighlight(\"#x\");\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: `getRootNode()` returns the document for a node in it, as
+/// `ownerDocument` does, whatever node it is called on, and `Object(value)`
+/// returns the value itself, so the result of either is the page to the
+/// rule that refuses assigning a method of the page: assigning `open` on
+/// `document.getRootNode()` is refused as `document.open = f` is.
+#[test]
+fn reg_032_the_root_node_and_the_object_of_the_page_are_the_page() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "document.getRootNode().open = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    this.getRootNode().close = () => {};\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export function f(el) {\n  el.getRootNode().append = () => {};\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const root = document.body.getRootNode();\nroot.open = () => null;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "document.body.getRootNode.call(document).open = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    const root = this.getRootNode.bind(this);\n    root().open = () => null;\n  }\n}\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "document[\"getRootNode\"]().contains = () => true;\n",
+            "script-builtin",
+            1,
+        ),
+        ("Object(document).open = () => null;\n", "script-builtin", 1),
+        ("Object(location).reload = () => {};\n", "script-builtin", 1),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "export class A extends HTMLElement {\n  connectedCallback() {\n    this.getRootNode().title = \"x\";\n    this.getRootNode().body.hidden = false;\n  }\n}\n",
+        "const o = {};\nObject(o).open = true;\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: the page reaches a script through more paths than the scan
+/// follows: `getRootNode()`, `parentNode`, an event's `currentTarget`, an
+/// array, an object, a promise or a function that hands it back, and `this`
+/// in a method the page calls as a listener. A method of the page
+/// (`createElement`, `querySelector`, `addEventListener`, `pushState` and
+/// the rest of the page's own methods) written on any of them replaces the
+/// page's, so writing one is refused on every value but one the script
+/// made: an object, array, function or class literal, or a new instance of
+/// a standard constructor. An instance of a class of the script's own does
+/// not count, because its constructor may return `document`.
+#[test]
+fn reg_032_a_page_method_written_on_a_value_the_script_did_not_make_is_refused() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "document.getRootNode().createElement = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "[document][0].getElementById = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "({ d: document }).d.querySelector = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "function doc() {\n  return document;\n}\ndoc().createElement = () => null;\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "(() => document)().createTextNode = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "Promise.resolve(document).then((d) => {\n  d.querySelectorAll = () => [];\n});\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "document.documentElement.parentNode.createElement = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export function f(event) {\n  event.currentTarget.addEventListener = () => {};\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const o = {};\no.d = history;\no.d.pushState = () => {};\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    document.addEventListener(\"click\", this.onClick);\n  }\n  onClick() {\n    this.createElement = () => null;\n  }\n}\n",
+            "script-builtin",
+            6,
+        ),
+        (
+            "delete document.getRootNode().createElement;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export function f(n) {\n  n[\"getElementById\"] = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "class Shim {\n  constructor() {\n    return document;\n  }\n  querySelector() {}\n}\nconst shim = new Shim();\nshim.querySelector = () => null;\n",
+            "script-builtin",
+            8,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const api = { createElement() {} };\napi.createElement = () => null;\n",
+        "const shim = new Map();\nshim.querySelector = () => null;\n",
+        "({ addEventListener: null }).addEventListener = () => {};\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: other scripts reach a built-in function's code through its
+/// `call`, `apply` and `bind` (`Array.prototype.slice.call(list)`), and a
+/// value the script did not make may hold any built-in method under any
+/// name: a number from `Math.random()` inherits `toPrecision`, a string
+/// from an input's `value` inherits `anchor`, an element inherits
+/// `requestFullscreen`. Writing one of those three names is refused on
+/// every value but one the script made: an object, array, function or
+/// class literal, a function or class it declares, a new instance of a
+/// standard constructor, or a name that holds only those. A `this` in a
+/// class is its instance, and its `call` stays its own.
+#[test]
+fn reg_032_call_apply_or_bind_written_on_a_value_the_script_did_not_make_is_refused() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "Math.random().toPrecision.call = () => \"\";\n",
+            "script-builtin",
+            1,
+        ),
+        ("(-1).toPrecision.call = () => \"\";\n", "script-builtin", 1),
+        (
+            "export function f(input) {\n  input.value.anchor.apply = () => \"\";\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(el) {\n  el.requestFullscreen.bind = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    this.requestFullscreen.call = () => null;\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "const s = new Set();\ns.union.call = () => s;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(p) {\n  p.call = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "let o = {};\nexport function f(p) {\n  o = p;\n  o.call = () => null;\n}\n",
+            "script-builtin",
+            4,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const o = {};\no.call = 1;\n",
+        "const xs = [];\nxs.apply = true;\n",
+        "function f() {}\nf.bind = null;\n",
+        "const m = new Map();\nm.call = 1;\n",
+        "let o;\no = { call: 0 };\no.call = 1;\n",
+        "function f(p) {\n  p.call = 1;\n}\nf({});\n",
+        "export class A extends HTMLElement {\n  connectedCallback() {\n    this.call = null;\n  }\n}\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: the window `open` returns is a global object, of a page of the
+/// application, which keeps the realm's built-ins when it loads over the
+/// window's first blank document. A built-in of that window, or a method
+/// of its page, is refused written or passed on as this window's is,
+/// through the call itself or a name that holds the window. Using the
+/// window (`focus()`, its `location.href`, its `name`) stays admitted.
+#[test]
+fn reg_032_a_built_in_of_the_window_open_returns_is_a_built_in() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "window.open(\"/x\").JSON.parse = () => ({});\n",
+            "script-builtin",
+            1,
+        ),
+        ("open(\"/x\").Math.random = () => 0;\n", "script-builtin", 1),
+        (
+            "const w = window.open(\"/x\");\nw.Object.keys = () => [];\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "window.open(\"/x\").fetch = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "const w = self.open(\"/x\");\nw.document.open = () => null;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export const parse = window.open(\"/x\").JSON.parse;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "function f(w) {\n  w.customElements.define = () => {};\n}\nf(window.open(\"/x\"));\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const w = window.open(\"/x\");\nw.focus();\nw.location.href = \"/y\";\nw.name = \"x\";\nw.document.title = \"x\";\nexport const closed = () => w.closed;\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: the scan follows a built-in only through names: a variable, and
 /// a parameter of a function the script calls by name. Anywhere else it
 /// would leave for code the scan cannot follow (a destructured name, an
@@ -1312,18 +1706,20 @@ fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
     );
 }
 
-/// The admitted fixtures' directory, under `accepted/`, that pins what the
-/// built-in rule leaves open (REG-032).
-fn own_members() -> PathBuf {
-    accepted().join("own-members")
-}
+/// The admitted fixtures, under `accepted/`, that pin what the built-in
+/// rule leaves open (REG-032): writes to the script's own objects and
+/// functions, and the writes an ordinary component makes on the page, its
+/// elements and the values it builds.
+const BUILT_IN_RULE_ADMITS: &[&str] = &["own-members", "ordinary-writes"];
 
 /// REG-032: writing a member of an object or function the script made stays
 /// admitted, its own object, a parameter given one and its own function
 /// included, and so do calling, reading, comparing and feature-testing a
 /// built-in, handing a built-in function to a browser API that calls it
 /// back, a constant such as `Number.MAX_SAFE_INTEGER` used as a value, and
-/// the page's own properties (`document.title`, `location.hash`).
+/// the page's own properties (`document.title`, `location.hash`), and what an
+/// ordinary component writes on its elements (`textContent`, `value`,
+/// `this.state.open`).
 #[test]
 fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
     let admitted = [
@@ -1363,17 +1759,19 @@ fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
             ));
         }
     }
-    let fixture = scan_fixture(&own_members());
-    if !fixture.accepted() {
-        failures.push(format!(
-            "accepted/own-members was refused: {}",
-            fixture
-                .findings
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" | ")
-        ));
+    for name in BUILT_IN_RULE_ADMITS {
+        let fixture = scan_fixture(&accepted().join(name));
+        if !fixture.accepted() {
+            failures.push(format!(
+                "accepted/{name} was refused: {}",
+                fixture
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
     }
     assert!(
         failures.is_empty(),

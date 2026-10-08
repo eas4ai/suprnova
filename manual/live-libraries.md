@@ -616,6 +616,29 @@ In a script, parsed as a JavaScript module:
   shares one is: `form.search.value = ""` is refused, and
   `form.querySelector("[name=search]").value = ""` is admitted. Reading
   such a member stays admitted.
+- A member read off a literal is the built-in method the literal inherits,
+  whatever its name: `(0).toPrecision`, `"".anchor`, `[].copyWithin` and
+  `/x/.compile`, and the same read off an operator's result such as `-1`
+  or `"a" + b`, or off a constant that holds a literal
+  (`const n = 0; n.toPrecision`). Writing a member of one is refused, and
+  so is passing one on. A string's or an array's `length` and indices, and
+  a regular expression's `lastIndex`, `source` and flags, are the literal's
+  own and stay admitted. A class that extends a built-in inherits its
+  statics, so `class A extends Promise {}` hands over
+  `Promise.withResolvers` as `A.withResolvers`, unless the class declares
+  a static of that name. A parameter or a variable that may hold a literal
+  is not treated as one, because the scan reads no `typeof` test.
+- `call`, `apply` and `bind` are how every script borrows a built-in
+  method, and any value may hold one under any name: the number
+  `Math.random()` returns holds `toPrecision`, an input's `value` holds
+  `anchor`, an element holds `requestFullscreen`. So a member of one of
+  these three names may be written only on a value the script made: an
+  object, array, function or class literal, a function or class it
+  declares, a new instance of a standard constructor such as `new Map()`,
+  or a name that holds only those. `const o = {}; o.call = 1` and
+  `this.call = c` in a class stay admitted; `api.call = f` on a parameter
+  the scan cannot trace is refused, and so is `this.state.call = c`, whose
+  `state` the scan does not follow.
 - Where the scan stops following a built-in, it is refused: passed to
   anything but a function the script calls by name or a browser API that
   only calls it back (`list.map(Number)` is admitted), put in an array or
@@ -634,7 +657,23 @@ In a script, parsed as a JavaScript module:
   them, such as `document.body`, stay under the other rules. Their methods
   are built-in functions every script on the page calls, so assigning one
   (`document.createElement = f`, `location.assign = f`) is refused, however
-  the script reaches the object, `this.ownerDocument` included.
+  the script reaches the object: `this.ownerDocument`, what `getRootNode()`
+  returns, which is the document for any node in it
+  (`document.getRootNode().open = f`), and `Object(document)` included.
+  The page also reaches a script through paths the scan does not follow:
+  an element's `parentNode`, an event's `currentTarget`, and an array, a
+  promise or a function that hands `document` back. So a method of the page
+  whose name is never ordinary data (`createElement`, `querySelector`,
+  `getElementById`, `addEventListener`, `pushState` and the rest of the
+  page's own) may be assigned only on a value the script made, as above.
+  An instance of the script's own class does not count, because its
+  constructor may return `document`.
+- The window `window.open` returns is a global object like `window`, so a
+  built-in read from it, or a method of its `document`, is refused written
+  or passed on as this window's is: `window.open("/x").JSON.parse = f`, and
+  `popup.Object.keys = f` after `const popup = window.open("/x")`. Using
+  the window, as `popup.focus()` and `popup.location.href = "/y"` do,
+  stays admitted.
 - A name a script writes on the global object (`window.AcmeState = {}`)
   is a global of its own, which it may read back, only when the name starts
   with a capital and the browser defines no property of that name; a
