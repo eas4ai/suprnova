@@ -985,18 +985,20 @@ Status: Agreed 2026-10-08
 refuses when SSR is disabled, finds the bundle as PAR-057 does (failing
 when none exists, warning when the configured one is missing and a
 conventional one is used), refuses a runtime (`SsrConfig::runtime`, default
-`node`) that cannot be found when `ensure_runtime_exists` is set, stops a
-running worker first, and runs the worker in the foreground, forwarding
-`SIGINT` and `SIGTERM` to it and reporting its stderr as errors;
-`ssr:stop` MUST `GET {url}/shutdown`, succeeding when the worker closed the
-connection and, with `--graceful`, when none was running; `ssr:check` MUST
-fail when the gateway has no health check or the worker is unhealthy. The
-`suprnova` CLI's `ssr:start`, `ssr:stop` and `ssr:check` MUST share that
-implementation, with the configuration from flags and the `SUPRNOVA_SSR_*`
-environment, where the installed configuration is out of reach.
-Falsifier: `ssr:start` starts a worker with SSR disabled, with no bundle, or with a missing runtime under `ensure_runtime_exists`, or leaves a running worker's `/shutdown` uncalled; `ssr:stop` fails with `--graceful` when no worker runs, or succeeds when the worker is running and did not close; `ssr:check` succeeds against a worker whose `/health` fails; or the CLI's commands behave differently from the binary's for the same configuration.
+`node`) that cannot be found when `ensure_runtime_exists` is set, asks a
+running worker to shut down first and refuses to start when it did not
+stop, and runs the worker in the foreground, forwarding the `SIGINT` or
+`SIGTERM` it receives and reporting its stderr as errors; `ssr:stop` MUST
+`GET {url}/shutdown`, succeeding when the worker closed the connection
+and, with `--graceful`, when none was running; `ssr:check` MUST fail when
+the gateway has no health check or the worker is unhealthy. The `suprnova`
+CLI's `ssr:start`, `ssr:stop` and `ssr:check` MUST run the project's
+application binary's command of the same name, flags passed through, the
+way `suprnova serve` runs the backend, so the installed configuration
+decides; the CLI MUST NOT depend on the framework crate.
+Falsifier: `ssr:start` starts a worker with SSR disabled, with no bundle, or with a missing runtime under `ensure_runtime_exists`, or starts beside a worker whose `/shutdown` answered without stopping; `ssr:stop` fails with `--graceful` when no worker runs, or succeeds when the worker is running and did not close; `ssr:check` succeeds against a worker whose `/health` fails; the CLI's `ssr:start` runs anything but the application binary's `ssr:start` with the flags given, or runs it from a directory that is not the project; or `suprnova-cli/Cargo.toml` names the `suprnova` crate among its dependencies.
 Mechanism: `par-inertia-ssr`.
-Rationale: Rows CM-01, CM-02 and CM-03; Laravel's `inertia:start-ssr`, `inertia:stop-ssr` and `inertia:check-ssr` run inside the application and read its configuration, which only the application binary can here.
+Rationale: Rows CM-01, CM-02 and CM-03; Laravel's `inertia:start-ssr`, `inertia:stop-ssr` and `inertia:check-ssr` run inside the application and read its configuration, which only the application binary can here, and the developer ruled on 2026-10-08 10:58 that compiling the framework into the CLI for them is nonsense, after the second round had the CLI link the framework crate to share the code.
 Status: Agreed 2026-10-08
 
 [PAR-062] `Inertia::handle_exceptions_using(callback)` MUST let the
@@ -1114,18 +1116,24 @@ interfaces, a `Pages` interface mapping each component name to the props
 interface the handler renders it with, read from `inertia_response!` and
 `InertiaResponse::new` with a typed props struct; a `SharedProps`
 interface holding the framework's `root: string` and the fields of the
-struct `Inertia::share` is given or of the one marked
-`#[inertia_props(shared)]`; `Errors` as `Record<string, string>`;
+struct `Inertia::share_data` is given or of the one marked
+`#[inertia_props(shared)]`; `Errors` as `Record<string, string>`, or
+`Record<string, string[]>` when the project turns `with_all_errors(true)`
+on (a call under `src/`, read as `preserve_big_integers` is);
 `PageProps<C extends keyof Pages>` as `Pages[C] & SharedProps & { errors:
 Errors }`; and a `declare module '@inertiajs/core'` augmentation setting
-`sharedPageProps` to `SharedProps`, `errorValueType` to `string` and
-`flashDataType` to the struct marked `#[inertia_props(flash)]` when one
-exists. The `InertiaProps` derive MUST accept those two markers, and the
+`sharedPageProps` to `SharedProps`, `errorValueType` to `string`, or to
+`string[]` under `with_all_errors(true)`, and `flashDataType` to the
+struct marked `#[inertia_props(flash)]` when one exists; when a file
+under `frontend/src` other than the generated one already declares that
+module, the generator MUST write no augmentation and say so, naming the
+file, so a project with a hand-written one upgrades without a conflicting
+merge. The `InertiaProps` derive MUST accept those two markers, and the
 starter kits MUST declare `@inertiajs/core`, ship the generated file in
 that shape, and read `root` through the augmentation.
-Falsifier: a project rendering `Home` with `HomeProps` gets no `Pages` entry `Home: HomeProps`; `SharedProps` lacks `root` or a field of the shared struct; the augmentation is missing or names another `sharedPageProps`; a struct marked `#[inertia_props(flash)]` is not the `flashDataType`; `#[inertia_props(shared)]` fails to compile; a kit's `package.json` lacks `@inertiajs/core`; a kit page types `root` by hand; or a kit's `inertia-props.ts` differs from the generator's output for the kit.
+Falsifier: a project rendering `Home` with `HomeProps` gets no `Pages` entry `Home: HomeProps`; a project with its own `declare module '@inertiajs/core'` in `frontend/src/global.d.ts` gets a second augmentation in the generated file, or gets none without a notice naming that file; `SharedProps` lacks `root` or a field of the struct `Inertia::share_data` is given; the augmentation is missing or names another `sharedPageProps`; with `.with_all_errors(true)` under `src/` the `errorValueType` is `string` or `Errors` is not `Record<string, string[]>`, or without it either is the array form; a struct marked `#[inertia_props(flash)]` is not the `flashDataType`; `#[inertia_props(shared)]` fails to compile; a kit's `package.json` lacks `@inertiajs/core`; a kit page types `root` by hand; or a kit's `inertia-props.ts` differs from the generator's output for the kit.
 Mechanism: `par-inertia-testing`.
-Rationale: Rows T01, T02 and T06; Inertia's `Page<SharedProps>.props` is `PageProps & SharedProps & { errors }` and its `InertiaConfig` merging types `usePage()`, and the kits reach `@inertiajs/core` today only by hoisting.
+Rationale: Rows T01, T02 and T06; Inertia's `Page<SharedProps>.props` is `PageProps & SharedProps & { errors }` and its `InertiaConfig` merging types `usePage()`, the kits reach `@inertiajs/core` today only by hoisting, the struct form of sharing is `Inertia::share_data` (the third round's wording said `Inertia::share`, whose arguments are a key and a value), `with_all_errors(true)` sends every message per field as an array, and a project upgrading with its own augmentation would otherwise merge two declarations of one key (the developer's heads-up of 2026-10-08 11:10).
 Status: Agreed 2026-10-08
 
 [PAR-069] The generator MUST map `i64`, `u64`, `i128`, `u128`, `isize` and
@@ -1145,4 +1153,119 @@ component, named in `inertia_response!`, `InertiaResponse::new` or
 Falsifier: the helper of a handler calling `inertia_response!(&req, "Users/Index", ..)` lacks `component: 'Users/Index'`; a handler naming two components gets one of them; a `Router::inertia("/about", "About", ..)` route's helper lacks `About`; or `RouteConfig` has no `component`.
 Mechanism: `par-inertia-testing`.
 Rationale: Row T05; Inertia's `UrlMethodPair.component` lets an instant visit resolve the page without a round trip, which the helper can name since the handler's component is a literal.
+Status: Agreed 2026-10-08
+
+## Inertia DevTools server support
+
+The fourth parity round the developer ordered on 2026-10-07 (17:35), ruled
+build at 17:23 ("roll back my ruling... Build it"): the server side of the
+Inertia DevTools browser extension, inertia-laravel 3.5.1's `DevTools`
+namespace (rows DT-01 to DT-10) and the Precognition request type row
+of the Precognition group (row 057), about 2,700 lines of PHP upstream. References cite
+`reference/inertia-laravel-3.5.1/src/DevTools/`. The round also carries
+the third round's three next-feature items: PAR-061 revised so the CLI
+delegates to the application binary (the developer, 2026-10-08 10:58), and
+PAR-068 revised to name `Inertia::share_data` and to type the errors under
+`with_all_errors(true)`.
+
+[PAR-071] DevTools recording MUST be gated by `InertiaConfig::devtools`:
+`enabled` unset records in the `Local` environment only, `true` and
+`false` decide outright; a request whose path matches one of the `except`
+patterns (Laravel's `Request::is` rule: `*` matches any characters, the
+leading slash dropped; default `_inertia/devtools*` and `_suprnova/*`) is
+not recorded. Recording MUST never change the response the request gets:
+a failure anywhere in recording (an unserializable value, a misconfigured
+redaction list, a storage error) is swallowed and the entry dropped, a
+storage write failure is logged once at warn and suppresses recording for
+30 seconds, and with devtools off no header, tag or entry is produced.
+Falsifier: with `enabled` unset a `Local` request leaves no entry or a `Production` request leaves one; with `enabled(false)` a `Local` request leaves an entry, or with `enabled(true)` a `Production` request leaves none; a request to `/_inertia/devtools/entries` or `/_suprnova/health` is recorded; a request under an `except` pattern of its own is recorded; a prop value that cannot be serialized, or a storage path that cannot be written, changes the status, body or headers of the response beyond the devtools headers; or a write failure is logged on every request.
+Mechanism: `par-inertia-devtools`.
+Rationale: Rows DT-01 and DT-10; Laravel's `DevTools::enabled` defaults to the `local` environment, `devtools.except` skips its own and other tooling's paths, and `RequestRecorder::respondedWith` swallows every failure so a passive observer cannot turn the user's response into a 500.
+Status: Agreed 2026-10-08
+
+[PAR-072] Every recorded request MUST produce one entry: a ULID `id`; the
+`tabUuid`, `batchId` and `visitId` read from the `X-Inertia-Devtools-Tab`,
+`-Parent` (an Inertia request's only) and `-Visit` request headers; the
+UTC timestamp; the method and full URL; the status; the redirect
+location (`X-Inertia-Location`, else `Location` on a 3xx); the server
+time in milliseconds; the request type, in this precedence: a request
+with a `Precognition` header is `precognition`; one without `X-Inertia`
+is `initial` when it rendered an Inertia page, else `http`; then
+`X-Inertia-Devtools-Deferred` is `deferred`, `X-Inertia-Devtools-Poll` is
+`poll`, `X-Inertia-Partial-Component` is `partial`, a prefetch (`Purpose`
+or `Sec-Purpose` of `prefetch`) is `prefetch`, else `navigate`; the
+request and response headers; the request body (omitted with reason
+`non-inertia-request` for a non-Inertia write, else the JSON or form
+input with uploads summarized as name, size and MIME type, else the raw
+text, `empty` when none, `binary` when not UTF-8); the response body (the
+page object for an Inertia render, else a textual body up to 256,000
+bytes, omitted with reason `non-textual`, `streamed` or `too-large`
+otherwise); the component, its page file when found, the route (name,
+pattern, handler name) and the render source (the file and line of the
+render call). Every recorded response MUST carry `X-Inertia-Devtools-Id`
+(the entry id) and `X-Inertia-Devtools-Parent-Out` (the incoming parent
+of an Inertia request, else the entry id; a prefetch's own id), and
+`X-Inertia-Devtools-Base-Path` when the public root is not empty; a `200`
+HTML response that rendered a page for a non-Inertia request MUST carry
+`<script data-inertia-devtools-id type="application/json">"<id>"</script>`
+before `</body>`, with `data-inertia-devtools-base-path` when the root is
+not empty.
+Falsifier: two recorded requests share an id, or an id is not a ULID; a request with `Precognition: true` and `X-Inertia: true` is recorded as anything but `precognition`; a plain `GET` that rendered a page is not `initial`, or one that rendered none is not `http`; a partial reload with `X-Inertia-Devtools-Deferred` is `partial`; a `Purpose: prefetch` visit is `navigate`; the entry of a non-Inertia `POST` carries its body; an entry lacks the request headers, the status, the component of a rendered page or the render call's file; a recorded response lacks `X-Inertia-Devtools-Id` or `-Parent-Out`, or carries `-Base-Path` at the host root; `-Parent-Out` of an Inertia request with `X-Inertia-Devtools-Parent: p` is not `p`; or a first visit's `200` document lacks the id tag, or an Inertia visit's JSON carries one.
+Mechanism: `par-inertia-devtools`.
+Rationale: Rows DT-02, DT-04 and the Precognition group's row 057; Laravel's `IncomingEntryBuilder`, `RequestRecorder::recordResponse` and `DevToolsHeader`, which the extension reads to attach entries to tabs, batches and visits.
+Status: Agreed 2026-10-08
+
+[PAR-073] An entry of a rendered page MUST classify each resolved prop
+path: `inertiaType` one of `always`, `defer` (a deferred prop delivered
+on an `X-Inertia-Devtools-Deferred` request, with its `deferGroup`),
+`optional`, `merge`, `scroll` or `once`, in that precedence for a prop
+whose flags compose, or none; `reset` when the path is in
+`X-Inertia-Reset`; `once`; `mergeDirection` `append` or `prepend`;
+`deepMerge` for a deep merge or a `match_on`; `rescued` for a deferred
+resolver that failed and was rescued; `shared` for a top-level key the
+shared props supplied, with its `shareSource` (the file and line of the
+`Inertia::share`, `share_data` or `share_once` call, or of the hook, that
+supplied it) and, for a render prop, its `renderSource`. Deep paths with
+no metadata MUST be pruned while every top-level key is kept, and
+`propValues` MUST hold the value of each kept path as the client received
+it, redacted.
+Falsifier: `Inertia::always` is not `always`; a deferred prop delivered on an `X-Inertia-Devtools-Deferred` reload is not `defer` with its group, or one delivered on a manual partial reload is `defer`; a prepend merge has `mergeDirection: append`; a `match_on` prop lacks `deepMerge`; a key `Inertia::share` supplied lacks `shared` or a `shareSource` naming the file of the call; a path in `X-Inertia-Reset` lacks `reset`; a rescued deferred prop lacks `rescued`; a nested path with no metadata survives, or a top-level key is pruned; or `propValues` carries a value the client did not receive.
+Mechanism: `par-inertia-devtools`.
+Rationale: Row DT-03; Laravel's `PropClassifier` and `Collector`, which the extension renders as type pills and source links; Suprnova's `Prop` composes the flags one PHP class each carries, so the precedence picks the pill.
+Status: Agreed 2026-10-08
+
+[PAR-074] With devtools enabled the application MUST answer
+`GET /_inertia/devtools/entries` with the entries' metadata newest first,
+filtered by `component`, `type` and `exclude` (comma lists of request
+types), `offset` and `limit`, and `GET /_inertia/devtools/entries/{id}`
+with the stored entry, `404 {"message": "Not found."}` for an id that is
+not a ULID or names no entry; a request is allowed in the `Local`
+environment always and elsewhere only when the configured
+`devtools.gate` ability allows the request's user (a guest when none),
+else `403 {"message": "Forbidden."}`; the endpoints MUST run inside the
+Inertia middleware stack with the session in scope, reflash the session,
+count as XHR so they never become the previous URL, and never be
+recorded.
+Falsifier: `entries` lists oldest first or ignores `component=Home`, `type=navigate,partial`, `exclude=poll`, `offset` or `limit`; `entries/not-a-ulid` or an unknown ULID answers anything but `404 {"message": "Not found."}`; a `Production` request with no gate configured, or one the gate denies, answers anything but `403 {"message": "Forbidden."}`, or a `Local` request is denied; an entry request ages the flash a `POST` left, or becomes the previous URL; or an entry request leaves an entry.
+Mechanism: `par-inertia-devtools`.
+Rationale: Rows DT-05, DT-06 and DT-09; Laravel's `EntriesController`, `Authorize`, `PreserveFlashData` and `PreventPreviousUrlTracking`, since the extension fetches an entry the moment the headers arrive, racing the redirect the app is about to follow.
+Status: Agreed 2026-10-08
+
+[PAR-075] Entries MUST be stored one JSON file each under
+`devtools.storage.path` (default `storage_path("inertia-devtools")`) with
+an index of their metadata; entries older than `storage.ttl` hours
+(default 24) MUST be pruned when a request ends and the last prune is
+older than `storage.prune_interval` seconds (default 300); a tab MUST
+keep its newest `storage.limit` entries (default 100, `0` unlimited).
+Before storage the configured `redact.keys` (default `password`,
+`password_confirmation`, `current_password`, `token`, `_token`,
+`access_token`, `refresh_token`, `secret`, `client_secret`, `api_key`),
+`redact.headers` (default `cookie`, `set-cookie`, `authorization`,
+`proxy-authorization`, `x-xsrf-token`, `x-csrf-token`) and the URL query
+parameters named by the keys MUST be replaced by `[REDACTED]` in headers,
+bodies, prop values and URLs, case-insensitively, and a leaf that cannot
+be serialized by `[UNSERIALIZABLE]`.
+Falsifier: an entry file is missing or unreadable as JSON, or the index does not list it; an entry 25 hours old survives a request after the prune interval, or one 1 hour old is pruned; a tab with 101 entries at the default limit keeps the oldest; a stored entry carries a `password` value, a `Cookie` header's value, or `?token=abc` unredacted, or a `Password` key escapes by case; or an unserializable prop leaf drops the entry.
+Mechanism: `par-inertia-devtools`.
+Rationale: Rows DT-07 and DT-08; Laravel's `EntriesRepository`, `EntryStore` and `RedactsSensitiveData`, and the extension reads the index for its list and the files for detail.
 Status: Agreed 2026-10-08

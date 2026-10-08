@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: inertia-testing-and-types
+Current: inertia-devtools
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -549,6 +549,40 @@ Requirements: PAR-063, PAR-064, PAR-065, PAR-066, PAR-067, PAR-068, PAR-069, PAR
    PAR-058's revised text.
    Done when both pass on a committed tree, the manual passages are in
    place, and the review is recorded.
+
+## inertia-devtools
+
+Requirements: PAR-071, PAR-072, PAR-073, PAR-074, PAR-075, PAR-061, PAR-068
+
+39. inertia-devtools - the fourth of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build at 17:23: the server side of
+   the Inertia DevTools extension, the eleven build rows of the fourth
+   group (DT-01 to DT-10 and the Precognition group's row 057), with the three next-feature items
+   the third round left: PAR-061 revised so the `suprnova` CLI's `ssr:*`
+   commands run the application binary and the CLI drops the framework
+   crate (the developer, 2026-10-08 10:58), and PAR-068 revised to name
+   `Inertia::share_data`, to type the errors under `with_all_errors(true)`
+   and to skip the augmentation beside a hand-written one (the developer's
+   heads-up of 11:10).
+   Delivery: PAR-071 to PAR-075 in `framework/src/inertia/devtools/` (the
+   gate, the recorder and collector, the prop classifier, the file
+   repository, redaction, the entries endpoints as middleware the stack
+   carries) with `InertiaConfig::devtools` and `DevToolsConfig`, the
+   `X-Inertia-Devtools-*` headers and the first-visit tag in the Inertia
+   middleware and response, `#[track_caller]` share and render sources;
+   the PAR-061 delegation in `suprnova-cli/src/commands/ssr_*.rs` with the
+   framework dependency removed from `suprnova-cli/Cargo.toml` and the
+   `ssr_e2e` tests rewritten against a fake application binary; the
+   PAR-068 revisions in `suprnova-cli/src/commands/generate_types.rs`; the
+   dogfood application recording in its tests; a new manual chapter
+   `manual/frontend-inertia-devtools.md` linked from
+   `manual/documentation.md` and `manual/frontend.md`, the console and
+   types chapters updated; the changelog.
+   Mechanisms: `par-inertia-devtools` (the `indt_` tests of the inertia
+   binary and the unit tests), `par-inertia-ssr` rebound on PAR-061's
+   revised text, `par-inertia-testing` rebound on PAR-068's.
+   Done when the three pass on a committed tree, the manual passages are
+   in place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
