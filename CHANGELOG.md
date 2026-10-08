@@ -386,6 +386,59 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `acme-ui/x/`) is refused for the same reason: the browser resolves it
   outside the prefix, while the scan used to drop the extra step and
   compare the rest as if it had stayed inside.
+- **A component's script can no longer reach a built-in prototype through
+  a computed key or a name.** The `live:add` scan refused
+  `Array.prototype.map = ...` but admitted `Array["prototype"].polluted = 1`
+  and `const p = Array.prototype; p.polluted = 1;`, and each of them adds
+  a property to every array on the page. A script may now read a member of
+  a prototype (`Array.prototype.slice.call(list)`) but not keep or pass on
+  the prototype: the scan refuses it in every position where it is a value
+  (an initializer, an assignment, an argument, a `return`, an array or
+  object element, a default, a template substitution), under a computed
+  key that traces to `prototype`, and from `getPrototypeOf`
+  (`script-prototype`). The refusal of a write to a prototype's member
+  covered only `=`; `??=`, `+=`, `++`, a destructuring or `for` loop
+  target and `delete` passed, and each is refused now, as is a method
+  called on the prototype itself (`Array.prototype.push(1)`), which runs
+  with the prototype as `this`, and destructuring `prototype` out of an
+  object (`const { prototype: p } = Array`). Twelve bypass fixtures pin
+  it: `script-prototype-computed`, `script-prototype-template-key`,
+  `script-prototype-alias`, `script-prototype-argument`,
+  `script-prototype-getprototypeof`, `script-prototype-parameter`,
+  `script-prototype-destructured`, `script-prototype-compound`,
+  `script-prototype-destructuring-target`, `script-prototype-delete`,
+  `script-prototype-receiver` and `script-prototype-destructured-key`.
+- **A destructuring assignment's defaults, nested keys and shorthand
+  targets are scanned.** The `live:add` script scan never walked the
+  default in `[a = eval("alert(1)")] = []` or `({ a = ... } = {})`, nor
+  the keys of a nested target, so `eval`, a prototype or any other refused
+  expression passed there. It now walks every key and default of the
+  target at any depth, as it walks any value, and a nested or shorthand
+  key gets the property checks a top-level key gets (`({ constructor } =
+  [])` is refused as `script-eval`). A shorthand target (`u` in
+  `({ u } = o)`) was not treated as a target at all: the scan still traced
+  `u` to its earlier constant, so `img.src = u` passed with any URL after
+  it, and `({ location } = { location: "javascript:alert(1)" })` wrote the
+  global `location` unchecked. It is now a target like any other: the name
+  holds a value the scan does not follow, and a name the script does not
+  declare is a global write (`script-url` for `location`, `script-global`
+  otherwise). Four bypass fixtures pin it:
+  `script-destructuring-default-eval`,
+  `script-prototype-assignment-default`,
+  `script-destructuring-shorthand-url` and
+  `script-destructuring-shorthand-global`.
+- **The script scan follows a value by the names it was written with.**
+  To check a URL, a timer handler or a computed key, the `live:add` scan
+  follows a name to its initializer, its assignments and the arguments of
+  its function's calls, but it looked up each name it met there where the
+  value was used, so a shadowing name stood in for the real one:
+  `const y = "https://evil.example/x"; const x = y;` followed by
+  `function show() { const y = "/ok"; img.src = x; }` passed the URL rule,
+  and a timer could be handed a string the same way. Each name in a
+  followed value now names the binding it had where it is written, so that
+  input is refused (`script-url`), and the reverse, a constant shadowed by
+  a remote URL where it is used, is no longer refused by mistake. The
+  `script-trace-shadowed-initializer` fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

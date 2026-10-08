@@ -27,6 +27,10 @@ const MAX_TRACE_DEPTH: usize = 12;
 /// How deep the walker follows nested expressions.
 const MAX_DEPTH: usize = 200;
 
+/// Why destructuring `prototype` out of an object is refused (REG-032).
+const DESTRUCTURED_PROTOTYPE: &str =
+    "destructuring `prototype` puts a prototype in a name the scan does not follow";
+
 pub(super) type Bid = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,11 @@ pub(super) struct Facts<'a> {
     pub private_methods: BTreeSet<&'a str>,
     pub tainted: BTreeSet<&'a str>,
     pub written_globals: BTreeSet<String>,
+    /// The binding each name the walk resolved had where it is written, by
+    /// the name's offset, or `None` for a global: a value followed from
+    /// elsewhere names these bindings, not the ones the same names have
+    /// where the value is used (REG-032).
+    pub resolved: HashMap<u32, Option<Bid>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +91,16 @@ enum Pos {
     Object,
     Typeof,
     Comparison,
+}
+
+/// How far from a prototype an expression may stand and still count as
+/// one (REG-032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The prototype itself: what a script may not keep or pass on.
+    Itself,
+    /// The prototype or a value read from it: what a write may not change.
+    Through,
 }
 
 /// The facts a component gives the script scan.
@@ -206,6 +225,28 @@ impl<'a, 'c> Walker<'a, 'c> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
+    }
+
+    /// Resolves a name where the walk stands, and records the binding it
+    /// names there for [`Self::bound`].
+    fn resolve(&mut self, reference: &IdentifierReference<'a>) -> Option<Bid> {
+        let id = self.lookup(reference.name.as_str());
+        if self.phase == Phase::Collect {
+            self.facts.resolved.insert(reference.span.start, id);
+        }
+        id
+    }
+
+    /// The binding a name had where it is written, which is what a value
+    /// followed from an initializer, an assignment or a call's argument
+    /// must use: the name may be shadowed where the value is used. A name
+    /// the walk has not reached yet, which only the first phase meets,
+    /// resolves where the walk stands.
+    fn bound(&self, reference: &IdentifierReference<'a>) -> Option<Bid> {
+        match self.facts.resolved.get(&reference.span.start) {
+            Some(id) => *id,
+            None => self.lookup(reference.name.as_str()),
+        }
     }
 
     fn declare_pattern(
@@ -711,6 +752,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                     } else if let Some(name) = property.key.static_name() {
                         self.property_name(&name, property.span, false);
                     }
+                    self.destructured_prototype(&property.key, property.computed, property.span);
                     self.pattern_defaults(&property.value);
                 }
                 if let Some(rest) = &object.rest {
@@ -970,7 +1012,7 @@ impl<'a, 'c> Walker<'a, 'c> {
 
     fn identifier(&mut self, reference: &'a IdentifierReference<'a>, pos: Pos) {
         let name = reference.name.as_str();
-        match self.lookup(name) {
+        match self.resolve(reference) {
             Some(id) => {
                 if self.phase == Phase::Collect
                     && let Some(binding) = self.facts.bindings.get_mut(id)
@@ -1013,6 +1055,9 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn expr(&mut self, expr: &'a Expression<'a>, pos: Pos) {
         if !self.enter(expr.span()) {
             return;
+        }
+        if pos == Pos::Value {
+            self.held_prototype(expr);
         }
         self.expr_inner(expr, pos);
         self.leave();
@@ -1137,6 +1182,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Expression::UnaryExpression(unary) => {
+                if unary.operator == UnaryOperator::Delete {
+                    self.prototype_delete(unary);
+                }
                 let inner = if unary.operator == UnaryOperator::Typeof {
                     Pos::Typeof
                 } else {
@@ -1229,8 +1277,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn is_global_object(&self, expr: &Expression<'a>) -> bool {
         match unparen(expr) {
             Expression::Identifier(reference) => {
-                GLOBAL_OBJECTS.contains(&reference.name.as_str())
-                    && self.lookup(reference.name.as_str()).is_none()
+                GLOBAL_OBJECTS.contains(&reference.name.as_str()) && self.bound(reference).is_none()
             }
             _ => false,
         }
@@ -1375,7 +1422,14 @@ impl<'a, 'c> Walker<'a, 'c> {
         // does not follow.
         let mut targets = Vec::new();
         collect_targets(target, &mut targets);
-        for simple in targets {
+        for target in targets {
+            let simple = match target {
+                Target::Simple(simple) => simple,
+                Target::Shorthand(identifier) => {
+                    self.identifier_target(identifier, None, true, false);
+                    continue;
+                }
+            };
             self.simple_target(simple, None, true, false);
             if let Some(member) = simple.as_member_expression()
                 && let Some(name) = self.member_name(member)
@@ -1388,18 +1442,77 @@ impl<'a, 'c> Walker<'a, 'c> {
                 );
             }
         }
-        if let AssignmentTarget::ObjectAssignmentTarget(object) = target {
-            for property in &object.properties {
-                if let AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) =
-                    property
-                {
-                    if property.computed
-                        && let Some(key) = property.name.as_expression()
-                    {
-                        self.computed_key(key, property.span);
-                    } else if let Some(name) = property.name.static_name() {
-                        self.property_name(&name, property.span, false);
+        self.destructuring_target(target);
+    }
+
+    /// Walks what a destructuring assignment's target evaluates itself, at
+    /// every depth: each key gets the property checks, a `prototype` key is
+    /// refused (REG-032), and each default is walked as a value. Left
+    /// unwalked, a default or a nested key could hold `eval` or a
+    /// prototype that no rule sees.
+    fn destructuring_target(&mut self, target: &'a AssignmentTarget<'a>) {
+        match target {
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                            let name = shorthand.binding.name.as_str();
+                            self.property_name(name, shorthand.span, false);
+                            if self.check() && prototype_name(name) {
+                                self.refuse(
+                                    "script-prototype",
+                                    shorthand.span,
+                                    DESTRUCTURED_PROTOTYPE.to_string(),
+                                );
+                            }
+                            if let Some(init) = &shorthand.init {
+                                self.expr(init, Pos::Value);
+                            }
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            if property.computed
+                                && let Some(key) = property.name.as_expression()
+                            {
+                                self.computed_key(key, property.span);
+                            } else if let Some(name) = property.name.static_name() {
+                                self.property_name(&name, property.span, false);
+                            }
+                            self.destructured_prototype(
+                                &property.name,
+                                property.computed,
+                                property.span,
+                            );
+                            self.destructuring_default(&property.binding);
+                        }
                     }
+                }
+                if let Some(rest) = &object.rest {
+                    self.destructuring_target(&rest.target);
+                }
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.destructuring_default(element);
+                }
+                if let Some(rest) = &array.rest {
+                    self.destructuring_target(&rest.target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Self::destructuring_target`] for a target that may carry a
+    /// default.
+    fn destructuring_default(&mut self, target: &'a AssignmentTargetMaybeDefault<'a>) {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+                self.destructuring_target(&with_default.binding);
+                self.expr(&with_default.init, Pos::Value);
+            }
+            other => {
+                if let Some(target) = other.as_assignment_target() {
+                    self.destructuring_target(target);
                 }
             }
         }
@@ -1414,41 +1527,23 @@ impl<'a, 'c> Walker<'a, 'c> {
     ) {
         match target {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                let name = identifier.name.as_str();
-                match self.lookup(name) {
-                    Some(id) => {
-                        if self.phase == Phase::Collect
-                            && let Some(binding) = self.facts.bindings.get_mut(id)
-                        {
-                            match (value, update) {
-                                (_, true) => binding.numeric_updates = true,
-                                (Some(value), false) if !opaque => binding.assignments.push(value),
-                                _ => binding.opaque = true,
-                            }
-                        }
-                    }
-                    None if name == "location" => match value {
-                        Some(value) if !opaque => {
-                            self.url_value(value, identifier.span, "`location`")
-                        }
-                        _ => self.refuse(
-                            "script-url",
-                            identifier.span,
-                            "`location` is assigned a value the scan cannot check".to_string(),
-                        ),
-                    },
-                    None => self.refuse(
-                        "script-global",
-                        identifier.span,
-                        format!(
-                            "assigning `{name}`, which the script does not declare, writes a global"
-                        ),
-                    ),
-                }
+                self.identifier_target(identifier, value, opaque, update);
             }
             other => {
                 if let Some(member) = other.as_member_expression() {
                     self.member_access(member, true);
+                    // Every member write reaches this arm: an assignment of
+                    // any operator, `++` or `--`, a destructuring target and
+                    // a `for` loop's target (REG-032).
+                    if self.check()
+                        && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+                    {
+                        self.refuse(
+                            "script-prototype",
+                            member.span(),
+                            "assigning a member of a prototype changes it".to_string(),
+                        );
+                    }
                     if let Some(name) = self.member_name(member) {
                         if opaque && checked_write(&name) {
                             self.refuse(
@@ -1469,6 +1564,46 @@ impl<'a, 'c> Walker<'a, 'c> {
                     );
                 }
             }
+        }
+    }
+
+    /// A write to a name: a binding the script declares records the value
+    /// it receives (or that it receives one the scan does not follow), and
+    /// a name it does not declare is a global, which only `location` may be
+    /// assigned, and then only a URL the scan admits.
+    fn identifier_target(
+        &mut self,
+        identifier: &'a IdentifierReference<'a>,
+        value: Option<&'a Expression<'a>>,
+        opaque: bool,
+        update: bool,
+    ) {
+        let name = identifier.name.as_str();
+        match self.lookup(name) {
+            Some(id) => {
+                if self.phase == Phase::Collect
+                    && let Some(binding) = self.facts.bindings.get_mut(id)
+                {
+                    match (value, update) {
+                        (_, true) => binding.numeric_updates = true,
+                        (Some(value), false) if !opaque => binding.assignments.push(value),
+                        _ => binding.opaque = true,
+                    }
+                }
+            }
+            None if name == "location" => match value {
+                Some(value) if !opaque => self.url_value(value, identifier.span, "`location`"),
+                _ => self.refuse(
+                    "script-url",
+                    identifier.span,
+                    "`location` is assigned a value the scan cannot check".to_string(),
+                ),
+            },
+            None => self.refuse(
+                "script-global",
+                identifier.span,
+                format!("assigning `{name}`, which the script does not declare, writes a global"),
+            ),
         }
     }
 
@@ -1522,13 +1657,6 @@ impl<'a, 'c> Walker<'a, 'c> {
                 format!("`{name}` is called by the browser itself, so its value must be a function the script defines"),
             );
         }
-        if prototype_chain(member.object()) {
-            self.refuse(
-                "script-prototype",
-                span,
-                "assigning a member of a prototype changes it".to_string(),
-            );
-        }
         if URL_PROPERTIES.contains(&name.as_str()) {
             let list = matches!(name.as_str(), "srcset" | "imageSrcset" | "ping");
             self.url_value_in(value, span, &format!("`{name}`"), list);
@@ -1560,9 +1688,10 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// Walks a callee's parts without treating the callee itself as a
     /// value that escapes.
     fn callee_walk(&mut self, callee: &'a Expression<'a>) {
+        self.prototype_receiver(callee);
         match unparen(callee) {
             Expression::Identifier(reference) => {
-                if self.lookup(reference.name.as_str()).is_none() {
+                if self.resolve(reference).is_none() {
                     self.global(reference.name.as_str(), reference.span, Pos::Value);
                 }
             }
@@ -1581,7 +1710,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn call(&mut self, call: &'a CallExpression<'a>) {
         let callee = unparen(&call.callee);
         if let Expression::Identifier(reference) = callee
-            && let Some(id) = self.lookup(reference.name.as_str())
+            && let Some(id) = self.resolve(reference)
             && self.phase == Phase::Collect
             && let Some(binding) = self.facts.bindings.get_mut(id)
         {
@@ -1657,7 +1786,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// logical expression, a bound function's target.
     fn callee_rules(&self, callee: &Expression<'a>) -> Vec<Rule> {
         match unparen(callee) {
-            Expression::Identifier(reference) if self.lookup(reference.name.as_str()).is_none() => {
+            Expression::Identifier(reference) if self.bound(reference).is_none() => {
                 rule_for(reference.name.as_str()).into_iter().collect()
             }
             Expression::SequenceExpression(sequence) => sequence
@@ -1724,7 +1853,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .last()
                 .is_some_and(|class| self.class_defines(class, name)),
             Expression::Identifier(reference) => {
-                let Some(id) = self.lookup(reference.name.as_str()) else {
+                let Some(id) = self.bound(reference) else {
                     return false;
                 };
                 let Some(binding) = self.binding(id) else {
@@ -1736,7 +1865,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 match binding.init.map(unparen) {
                     Some(Expression::NewExpression(new)) => match unparen(&new.callee) {
                         Expression::Identifier(class) => self
-                            .lookup(class.name.as_str())
+                            .bound(class)
                             .and_then(|class_id| self.binding(class_id))
                             .and_then(|class_binding| class_binding.class)
                             .is_some_and(|class| self.class_defines(class, name)),
@@ -1766,7 +1895,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         match unparen(callee) {
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.bound(reference) {
                     Some(id) => self.binding_callable(id, depth + 1),
                     None => {
                         ADMITTED_GLOBALS.contains(&name)
@@ -1937,7 +2066,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             | Expression::ClassExpression(_) => true,
             Expression::NullLiteral(_) => true,
             Expression::Identifier(reference)
-                if reference.name == "undefined" && self.lookup("undefined").is_none() =>
+                if reference.name == "undefined" && self.bound(reference).is_none() =>
             {
                 true
             }
@@ -1970,7 +2099,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             return;
         }
         let name = match callee {
-            Expression::Identifier(reference) if self.lookup(reference.name.as_str()).is_none() => {
+            Expression::Identifier(reference) if self.bound(reference).is_none() => {
                 Some(reference.name.as_str())
             }
             other => other
@@ -1993,7 +2122,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         match callee {
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.resolve(reference) {
                     Some(id) => {
                         if self.check() && !self.binding_callable(id, 0) {
                             self.refuse(
@@ -2378,10 +2507,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         let Expression::Identifier(reference) = unparen(object) else {
             return false;
         };
-        let Some(binding) = self
-            .lookup(reference.name.as_str())
-            .and_then(|id| self.binding(id))
-        else {
+        let Some(binding) = self.bound(reference).and_then(|id| self.binding(id)) else {
             return false;
         };
         binding.kind == Kind::Const
@@ -2515,6 +2641,212 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    // ----- prototypes ----------------------------------------------------
+
+    /// Refuses a prototype used as a value (REG-032). A script may read a
+    /// prototype's members, but once it keeps the prototype in a name or
+    /// passes it on, the scan cannot follow it to where it is changed, so
+    /// it is stopped where it would leave. A parenthesized, sequence,
+    /// conditional, logical or assignment expression is not refused
+    /// itself: the walk visits the part that yields the prototype as a
+    /// value of its own and refuses it there.
+    fn held_prototype(&mut self, expr: &'a Expression<'a>) {
+        if !self.check()
+            || matches!(
+                expr,
+                Expression::ParenthesizedExpression(_)
+                    | Expression::SequenceExpression(_)
+                    | Expression::ConditionalExpression(_)
+                    | Expression::LogicalExpression(_)
+                    | Expression::AssignmentExpression(_)
+            )
+            || !self.prototype(expr, Reach::Itself, 0, &mut BTreeSet::new())
+        {
+            return;
+        }
+        let what = prototype_text(expr);
+        self.refuse(
+            "script-prototype",
+            expr.span(),
+            format!("{what} is used as a value; a script may read a prototype's members, as `Array.prototype.slice` does, but may not keep or pass on the prototype, because the scan cannot follow it to where it is changed"),
+        );
+    }
+
+    /// Refuses a method called on a prototype itself (REG-032): it runs
+    /// with the prototype as `this`, and `Array.prototype` is an array, so
+    /// `push`, `fill` or `splice` changes it. A method borrowed with `call`
+    /// runs on the value it is given instead, and stays admitted.
+    fn prototype_receiver(&mut self, callee: &'a Expression<'a>) {
+        if !self.check() {
+            return;
+        }
+        let member = match unparen(callee) {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            other => other.as_member_expression(),
+        };
+        let Some(member) = member else {
+            return;
+        };
+        if !self.prototype(member.object(), Reach::Itself, 0, &mut BTreeSet::new()) {
+            return;
+        }
+        let method = member
+            .static_property_name()
+            .map_or_else(|| "a method".to_string(), |name| format!("`{name}`"));
+        let what = prototype_text(member.object());
+        self.refuse(
+            "script-prototype",
+            callee.span(),
+            format!("{method} is called on {what} itself, so it runs with the prototype as `this` and can change it, as `push`, `fill` and `splice` do; borrow the method with `call` instead"),
+        );
+    }
+
+    /// Refuses destructuring `prototype` out of an object (REG-032): the
+    /// target receives the prototype, and a destructured name is one the
+    /// scan does not follow.
+    fn destructured_prototype(&mut self, key: &PropertyKey<'a>, computed: bool, span: Span) {
+        if !self.check() {
+            return;
+        }
+        let named = if computed {
+            key.as_expression()
+                .and_then(|key| self.trace(key, 0))
+                .is_some_and(|keys| keys.iter().any(|key| prototype_name(key)))
+        } else {
+            key.static_name().is_some_and(|name| prototype_name(&name))
+        };
+        if named {
+            self.refuse("script-prototype", span, DESTRUCTURED_PROTOTYPE.to_string());
+        }
+    }
+
+    /// Refuses `delete` of a member of a prototype or of a value read from
+    /// one, which changes it as a write does (REG-032).
+    fn prototype_delete(&mut self, unary: &'a UnaryExpression<'a>) {
+        if !self.check() {
+            return;
+        }
+        let member = match unparen(&unary.argument) {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            other => other.as_member_expression(),
+        };
+        if let Some(member) = member
+            && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+        {
+            self.refuse(
+                "script-prototype",
+                unary.span,
+                "deleting a member of a prototype changes it".to_string(),
+            );
+        }
+    }
+
+    /// Whether an expression may evaluate to a prototype, or, with
+    /// [`Reach::Through`], to a prototype or a value read from one: a
+    /// member named `prototype` or `__proto__`, by a static name or a
+    /// computed key that traces to one; what `getPrototypeOf` returns; a
+    /// sequence, conditional, logical or assignment expression that may
+    /// yield one; or a binding the script initializes, defaults or assigns
+    /// from one. A value the scan cannot see, a parameter's argument or a
+    /// destructured name, is not followed: [`Self::held_prototype`] refuses
+    /// a prototype where it would enter one.
+    fn prototype(
+        &self,
+        expr: &Expression<'a>,
+        reach: Reach,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(expr) {
+            Expression::CallExpression(call) => self.returns_prototype(call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => self.returns_prototype(call),
+                other => other
+                    .as_member_expression()
+                    .is_some_and(|member| self.prototype_member(member, reach, depth, seen)),
+            },
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.prototype(last, reach, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.prototype(&conditional.consequent, reach, depth + 1, seen)
+                    || self.prototype(&conditional.alternate, reach, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.prototype(&logical.left, reach, depth + 1, seen)
+                    || self.prototype(&logical.right, reach, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                assignment.operator == AssignmentOperator::Assign
+                    && self.prototype(&assignment.right, reach, depth + 1, seen)
+            }
+            Expression::Identifier(reference) => {
+                let Some(id) = self.bound(reference) else {
+                    return false;
+                };
+                if !seen.insert(id) {
+                    return false;
+                }
+                let Some(binding) = self.binding(id) else {
+                    return false;
+                };
+                binding
+                    .init
+                    .into_iter()
+                    .chain(binding.param_default)
+                    .chain(binding.assignments.iter().copied())
+                    .any(|value| self.prototype(value, reach, depth + 1, seen))
+            }
+            other => other
+                .as_member_expression()
+                .is_some_and(|member| self.prototype_member(member, reach, depth, seen)),
+        }
+    }
+
+    /// [`Self::prototype`] for a member expression.
+    fn prototype_member(
+        &self,
+        member: &MemberExpression<'a>,
+        reach: Reach,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        let named = match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                prototype_name(member.property.name.as_str())
+            }
+            MemberExpression::ComputedMemberExpression(member) => self
+                .trace(&member.expression, 0)
+                .is_some_and(|keys| keys.iter().any(|key| prototype_name(key))),
+            MemberExpression::PrivateFieldExpression(_) => false,
+        };
+        named
+            || (reach == Reach::Through && self.prototype(member.object(), reach, depth + 1, seen))
+    }
+
+    /// Whether a call is `getPrototypeOf` on any receiver but an object
+    /// whose own method of that name the script defines: the scan cannot
+    /// tell `Object` or `Reflect` from a name that holds one.
+    fn returns_prototype(&self, call: &CallExpression<'a>) -> bool {
+        let Some(member) = unparen(&call.callee).as_member_expression() else {
+            return false;
+        };
+        let named = match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                member.property.name == "getPrototypeOf"
+            }
+            MemberExpression::ComputedMemberExpression(member) => self
+                .trace(&member.expression, 0)
+                .is_some_and(|names| names.iter().any(|name| name == "getPrototypeOf")),
+            MemberExpression::PrivateFieldExpression(_) => false,
+        };
+        named && !self.script_method(member, "getPrototypeOf")
+    }
+
     // ----- tracing -------------------------------------------------------
 
     /// The constant strings an expression can evaluate to, when the scan
@@ -2560,7 +2892,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::CallExpression(call)
                 if matches!(unparen(&call.callee), Expression::Identifier(callee)
-                    if callee.name == "String" && self.lookup("String").is_none()) =>
+                    if callee.name == "String" && self.bound(callee).is_none()) =>
             {
                 match call.arguments.first() {
                     Some(argument) => self.trace(argument.as_expression()?, depth + 1)?,
@@ -2569,7 +2901,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.bound(reference) {
                     None if name == "undefined" => vec!["undefined".to_string()],
                     None => return None,
                     Some(id) => self.trace_binding(id, depth + 1)?,
@@ -2667,10 +2999,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .last()
                 .is_some_and(|last| self.numeric(last, depth + 1)),
             Expression::Identifier(reference) => {
-                let Some(binding) = self
-                    .lookup(reference.name.as_str())
-                    .and_then(|id| self.binding(id))
-                else {
+                let Some(binding) = self.bound(reference).and_then(|id| self.binding(id)) else {
                     return false;
                 };
                 if binding.opaque || !matches!(binding.kind, Kind::Const | Kind::Let | Kind::Var) {
@@ -2699,16 +3028,31 @@ fn is_function_expression(expr: &Expression<'_>) -> bool {
     )
 }
 
-/// Whether a member write's object is reached through a `prototype`.
-fn prototype_chain(object: &Expression<'_>) -> bool {
-    match unparen(object) {
-        Expression::StaticMemberExpression(member) => {
-            member.property.name == "prototype"
-                || member.property.name == "__proto__"
-                || prototype_chain(&member.object)
+/// Whether a property name reads an object's prototype.
+fn prototype_name(name: &str) -> bool {
+    name == "prototype" || name == "__proto__"
+}
+
+/// How a refusal names an expression that yields a prototype.
+fn prototype_text(expr: &Expression<'_>) -> String {
+    let member = match unparen(expr) {
+        Expression::Identifier(reference) => {
+            return format!("`{}`, which holds a prototype,", reference.name);
         }
-        Expression::ComputedMemberExpression(member) => prototype_chain(&member.object),
-        _ => false,
+        Expression::CallExpression(_) => {
+            return "the prototype `getPrototypeOf` returns".to_string();
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(_) => {
+                return "the prototype `getPrototypeOf` returns".to_string();
+            }
+            other => other.as_member_expression(),
+        },
+        other => other.as_member_expression(),
+    };
+    match member.map(|member| unparen(member.object())) {
+        Some(Expression::Identifier(owner)) => format!("the prototype of `{}`", owner.name),
+        _ => "a prototype".to_string(),
     }
 }
 
@@ -2742,12 +3086,19 @@ fn pattern_names<'a>(pattern: &'a BindingPattern<'a>, out: &mut Vec<&'a str>) {
     }
 }
 
-fn collect_targets<'a>(
-    target: &'a AssignmentTarget<'a>,
-    out: &mut Vec<&'a SimpleAssignmentTarget<'a>>,
-) {
+/// One target a destructuring assignment writes.
+enum Target<'a> {
+    /// A name, a member or TypeScript syntax.
+    Simple(&'a SimpleAssignmentTarget<'a>),
+    /// A shorthand property's name (`u` in `({ u } = o)`), which is both
+    /// the key read and the name written.
+    Shorthand(&'a IdentifierReference<'a>),
+}
+
+/// Every target a destructuring assignment writes, at any depth.
+fn collect_targets<'a>(target: &'a AssignmentTarget<'a>, out: &mut Vec<Target<'a>>) {
     if let Some(simple) = target.as_simple_assignment_target() {
-        out.push(simple);
+        out.push(Target::Simple(simple));
         return;
     }
     match target {
@@ -2762,8 +3113,8 @@ fn collect_targets<'a>(
         AssignmentTarget::ObjectAssignmentTarget(object) => {
             for property in &object.properties {
                 match property {
-                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => {
-                        let _ = identifier;
+                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                        out.push(Target::Shorthand(&shorthand.binding));
                     }
                     AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
                         collect_maybe_default(&property.binding, out);
@@ -2780,7 +3131,7 @@ fn collect_targets<'a>(
 
 fn collect_maybe_default<'a>(
     target: &'a AssignmentTargetMaybeDefault<'a>,
-    out: &mut Vec<&'a SimpleAssignmentTarget<'a>>,
+    out: &mut Vec<Target<'a>>,
 ) {
     match target {
         AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
