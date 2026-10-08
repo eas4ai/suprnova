@@ -1147,3 +1147,48 @@ fn intt_a_conflict_leaves_the_written_file_alone() {
         "the last complete output stays"
     );
 }
+
+#[test]
+fn intt_a_page_rendered_with_a_plain_struct_is_typed_by_it() {
+    let ts = generated(&[(
+        "controllers/report.rs",
+        r#"
+#[derive(serde::Serialize)]
+pub struct ReportProps {
+    pub total: u32,
+}
+
+pub async fn show(req: Request) -> Response {
+    inertia_response!(&req, "Report", ReportProps { total: 3 })
+}
+"#,
+    )]);
+    assert!(
+        ts.contains("export interface ReportProps {\n  total: number;\n}"),
+        "a struct that derives only Serialize is emitted once a page renders it:\n{ts}"
+    );
+    assert!(ts.contains("  \"Report\": ReportProps;\n"), "{ts}");
+}
+
+#[test]
+fn intt_a_generic_props_struct_gets_no_pages_entry() {
+    let ts = generated(&[(
+        "controllers/list.rs",
+        r#"
+#[derive(suprnova::InertiaProps)]
+pub struct Listing<T> {
+    pub items: Vec<T>,
+}
+
+pub async fn index(req: Request) -> Response {
+    inertia_response!(&req, "Listing", Listing::<String> { items: Vec::new() })
+}
+"#,
+    )]);
+    assert!(ts.contains("export interface Listing<T> {"), "{ts}");
+    assert_eq!(
+        declaration(&ts, "export interface Pages {"),
+        "export interface Pages {\n}\n",
+        "`Pages` cannot name `Listing` without its type arguments:\n{ts}"
+    );
+}
