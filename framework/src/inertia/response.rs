@@ -1178,9 +1178,10 @@ impl InertiaResponse {
     /// `Inertia::location($url)`, also reachable as
     /// [`Inertia::location`](crate::Inertia::location).
     ///
-    /// The answer depends on the request, which it reads from the
-    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) the
-    /// route runs under:
+    /// The answer depends on the request, whose facts the server scopes for
+    /// every request it dispatches (the
+    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) refines
+    /// them with the application's hooks):
     ///
     /// - an Inertia visit gets `409` + `X-Inertia-Location`, the only form
     ///   the client follows out of the app;
@@ -1189,9 +1190,9 @@ impl InertiaResponse {
     ///   flash and cookies included - a hard navigation into an OAuth or SSO
     ///   bounce has no use for a `409` and would dead-end on it.
     ///
-    /// Without the Inertia middleware on the route nothing tells it which
-    /// the request was, and it answers the `409`, as it always did; use
-    /// [`location_for`](Self::location_for) there.
+    /// Outside a dispatched request, in a unit test for one, no visit is in
+    /// scope and the answer is the `302`; [`location_for`](Self::location_for)
+    /// decides from a request given explicitly.
     ///
     /// **When to use which redirect form:**
     /// - [`Redirect::to`](crate::Redirect::to) - standard 302/303 with
@@ -1204,7 +1205,7 @@ impl InertiaResponse {
     ///   Inertia app entirely.
     pub fn location(target: impl Into<InertiaLocation>) -> HttpResponse {
         let target = target.into();
-        let is_inertia = super::visit::current().is_none_or(|visit| visit.is_inertia);
+        let is_inertia = super::visit::current().is_some_and(|visit| visit.is_inertia);
         match (target.0, is_inertia) {
             (LocationTarget::Url(url), true) => Self::inertia_location(&url),
             (LocationTarget::Url(url), false) => {

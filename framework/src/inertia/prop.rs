@@ -1775,7 +1775,6 @@ impl PartialFilter {
         }
         match value {
             Value::Object(map) => {
-                let had_children = !map.is_empty();
                 let mut kept = serde_json::Map::new();
                 for (child, nested) in map {
                     let child_path = format!("{path}.{child}");
@@ -1784,7 +1783,9 @@ impl PartialFilter {
                         kept.insert(child, nested);
                     }
                 }
-                if had_children && kept.is_empty() {
+                // Nothing under the entry's path, an empty object included:
+                // Laravel's walk finds no value and sends `[]`.
+                if kept.is_empty() {
                     Value::Array(Vec::new())
                 } else {
                     Value::Object(kept)

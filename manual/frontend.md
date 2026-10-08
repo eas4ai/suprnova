@@ -176,7 +176,7 @@ Inertia::share("appName", "Suprnova")?;
 Inertia::share("user.locale", "es")?;              // nests: user = { locale: "es" }
 Inertia::share_many([("plan", "pro"), ("region", "eu")])?;
 Inertia::share_data(SiteMeta { name: "Suprnova".into(), build: 7 })?;
-Inertia::share_provider(Arc::new(AppSharedData));
+Inertia::share_provider(TenantShare);              // a ProvidesInertiaProperties value
 
 Inertia::get_shared("user.locale", serde_json::Value::Null); // "es"
 Inertia::get_shared("missing", 7);                            // 7
@@ -187,9 +187,13 @@ A dotted key nests when it is shared, as Laravel's `Arr::set` does, so a
 later `share("user", ...)` replaces the whole `user` object, child included.
 `App::inertia_share` shares the same way. A Data object shares its eager
 fields; its lazy fields stay out, since a shared prop has no `?include=`
-gate. `share_provider` is the same registration as
-`App::register_inertia_shared`. `get_shared` reads what is registered without
-resolving it, so a lazy share reads as the default.
+gate. `share_provider` takes a `ProvidesInertiaProperties` value, the same
+registration as `InertiaRegistry::share_provider`: any number of providers,
+each expanded once per render with a `RenderContext` of the request and the
+component, and `App::flush_inertia_shared` clears them with the other shares.
+`App::register_inertia_shared` is the one-slot async provider
+(`InertiaSharedData`) and stays beside it. `get_shared` reads what is
+registered without resolving it, so a lazy share reads as the default.
 
 The framework ships `RootShare`, a provider that gives every page the
 public root as the `root` prop: the empty string at the host root,

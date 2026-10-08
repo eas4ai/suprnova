@@ -1173,8 +1173,15 @@ async fn handle_request_inner(
             //    handlers / logs see the wire-level verb (HEAD vs GET);
             //    middleware that needs to discriminate the two can still
             //    check `request.method()`.
-            let http_response =
-                execute_chain_safely(chain, request, handler, &method, path, request_id).await;
+            // The visit's facts for `Inertia::location` and `Inertia::back`, on
+            // every dispatched request; the Inertia middleware refines them with
+            // the application's hooks inside this scope.
+            let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
+            let http_response = crate::inertia::visit::scope(
+                visit,
+                execute_chain_safely(chain, request, handler, &method, path, request_id),
+            )
+            .await;
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
@@ -1207,13 +1214,20 @@ async fn handle_request_inner(
                 chain.extend(fallback_middleware);
 
                 // 3. Execute chain with fallback handler, catching panics.
-                let http_response = execute_chain_safely(
-                    chain,
-                    request,
-                    fallback_handler,
-                    &method,
-                    path,
-                    request_id,
+                // The visit's facts for `Inertia::location` and `Inertia::back`, on
+                // every dispatched request; the Inertia middleware refines them with
+                // the application's hooks inside this scope.
+                let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
+                let http_response = crate::inertia::visit::scope(
+                    visit,
+                    execute_chain_safely(
+                        chain,
+                        request,
+                        fallback_handler,
+                        &method,
+                        path,
+                        request_id,
+                    ),
                 )
                 .await;
 
@@ -1250,9 +1264,15 @@ async fn handle_request_inner(
                             >
                     }));
 
-                let http_response =
-                    execute_chain_safely(chain, request, not_found, &method, path, request_id)
-                        .await;
+                // The visit's facts for `Inertia::location` and `Inertia::back`, on
+                // every dispatched request; the Inertia middleware refines them with
+                // the application's hooks inside this scope.
+                let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
+                let http_response = crate::inertia::visit::scope(
+                    visit,
+                    execute_chain_safely(chain, request, not_found, &method, path, request_id),
+                )
+                .await;
 
                 #[cfg(feature = "otel")]
                 if http_response.status_code() >= 500 {

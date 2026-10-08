@@ -835,19 +835,17 @@ where
     // trailer frames and yields `Result<Bytes, hyper::Error>` directly,
     // which is exactly what multer wants.
     //
-    // Multipart bodies are never pre-buffered by middleware (CSRF only
-    // buffers form-urlencoded). If we somehow see a buffered body here
-    // it's a programming error - return a clear 400 rather than
-    // silently truncating.
-    let incoming = match body {
-        crate::http::BodyState::Streaming(inc) => inc,
-        crate::http::BodyState::Buffered(_) => {
-            return Err(FrameworkError::Domain {
-                message: "multipart upload received a pre-buffered body - this is a \
-                          framework bug; multipart bodies must arrive as streams"
-                    .into(),
-                status_code: 400,
-            });
+    // A middleware that read the body first (a body-keyed rate limit, for
+    // one) hands it over buffered; it is read as a one-chunk stream, so a
+    // form behind such a middleware decodes like any other (PAR-055).
+    type RawBody =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+    let incoming: RawBody = match body {
+        crate::http::BodyState::Streaming(inc) => {
+            Box::pin(BodyDataStream::new(inc).map(|chunk| chunk.map_err(std::io::Error::other)))
+        }
+        crate::http::BodyState::Buffered(bytes) => {
+            Box::pin(futures::stream::once(async move { Ok(bytes) }))
         }
         crate::http::BodyState::Consumed => {
             return Err(FrameworkError::Domain {
@@ -880,7 +878,7 @@ where
         let tripped = raw_cap_tripped.clone();
         let cap = max_body_bytes as u64;
         let mut raw_seen: u64 = 0;
-        BodyDataStream::new(incoming).map(move |chunk| match chunk {
+        incoming.map(move |chunk| match chunk {
             Ok(bytes) => {
                 raw_seen = raw_seen.saturating_add(bytes.len() as u64);
                 if raw_seen > cap {
@@ -895,7 +893,7 @@ where
                     Ok(bytes)
                 }
             }
-            Err(e) => Err(std::io::Error::other(e)),
+            Err(e) => Err(e),
         })
     };
     let mut multipart = Multipart::new(counted, boundary);

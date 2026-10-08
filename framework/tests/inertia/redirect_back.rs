@@ -291,6 +291,31 @@ fn inp_a_prefetch_is_read_from_x_moz_purpose_or_sec_purpose() {
 // ---- the previous URL an Inertia visit records ----
 
 #[tokio::test]
+async fn inp_an_empty_200_on_an_inertia_get_records_its_url_after_the_redirect_chose_its_target() {
+    // PAR-048 names no exemption for the empty response: the visit is
+    // recorded. The redirect back is chosen first, so without a Referer it
+    // goes to the page before this one rather than to this one.
+    let slot = new_session_slot_for_test();
+    slot.lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .set_previous_url("/older");
+    let addr = serve(router(), stack(&slot)).await;
+    let reply = Client::new(addr)
+        .send("GET", "/empty", &[("X-Inertia", "true")])
+        .await;
+
+    assert_eq!(reply.status, 302, "{reply:?}");
+    assert_eq!(reply.header("location"), Some("/older"));
+    assert_eq!(
+        previous_url(&slot).as_deref(),
+        Some("/empty"),
+        "the empty GET is recorded like any other Inertia GET"
+    );
+}
+
+#[tokio::test]
 async fn inp_an_inertia_get_records_the_previous_url() {
     // Laravel's session middleware skips XHRs, so its Inertia middleware
     // records the visit itself; without it `back()` and a failed validation

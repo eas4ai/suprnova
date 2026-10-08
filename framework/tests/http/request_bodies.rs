@@ -424,6 +424,54 @@ async fn inp_a_form_request_reads_a_multipart_body_with_bracketed_and_indexed_na
     assert_eq!(reply.error_fields(), ["user.email", "user.name"]);
 }
 
+/// A middleware that reads the whole body first, as the rate limiter's
+/// body-keyed limits do.
+struct Buffering;
+
+#[async_trait::async_trait]
+impl suprnova::middleware::Middleware for Buffering {
+    async fn handle(
+        &self,
+        request: Request,
+        next: suprnova::middleware::Next,
+    ) -> suprnova::Response {
+        let request = request
+            .buffer_body(1 << 20)
+            .await
+            .map_err(HttpResponse::from)?;
+        next(request).await
+    }
+}
+
+#[tokio::test]
+async fn inp_request_input_reads_a_multipart_body_a_middleware_buffered() {
+    // The multipart reader took a streaming body only and answered a
+    // buffered one with a 400 naming a framework bug; a form behind a
+    // middleware that read the body is an ordinary request (PAR-055).
+    let router: Router = Router::new()
+        .group("/buffered", |r| {
+            r.post("/echo", |req: Request| async move {
+                let input: Value = req.input().await?;
+                Ok(HttpResponse::json(input))
+            })
+        })
+        .middleware(Buffering)
+        .into();
+    let reply = send(
+        router,
+        "POST",
+        "/buffered/echo",
+        Some(&multipart()),
+        multipart_body(&[("user[name]", None, b"Ada"), ("photos[0]", None, b"a")]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(
+        reply.json(),
+        json!({ "user": { "name": "Ada" }, "photos": ["a"] })
+    );
+}
+
 #[tokio::test]
 async fn inp_a_multipart_part_that_is_not_text_fails_under_its_path() {
     // A file where text belongs, and text that is not UTF-8.
