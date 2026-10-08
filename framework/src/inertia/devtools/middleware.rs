@@ -94,6 +94,21 @@ impl DevToolsMiddleware {
         payload: Option<RenderPayload>,
         response: HttpResponse,
     ) -> HttpResponse {
+        self.record_with(facts, payload, response, |entry| {
+            self.redactor.redact_entry(entry);
+        })
+        .await
+    }
+
+    /// [`record`](Self::record) with `redact` as the storage pass, so a
+    /// test can hand it one that fails.
+    async fn record_with(
+        &self,
+        facts: RequestFacts,
+        payload: Option<RenderPayload>,
+        response: HttpResponse,
+        redact: impl FnOnce(&mut Value),
+    ) -> HttpResponse {
         let now = crate::clock::now();
         let now_ms = now.timestamp_millis();
         let id = ulid::new_id(u64::try_from(now_ms).unwrap_or_default());
@@ -112,19 +127,22 @@ impl DevToolsMiddleware {
             response = response.with_static_body(tagged);
         }
         let tab = facts.tab().map(str::to_string);
-        let built = AssertUnwindSafe(entry::build(
-            facts,
-            payload,
-            &response,
-            Stamp { id: &id, at: now },
-        ))
+        // Building the entry and redacting it run under one guard: a panic
+        // in either drops the entry and leaves the response as it is.
+        let built = AssertUnwindSafe(async {
+            let mut entry =
+                entry::build(facts, payload, &response, Stamp { id: &id, at: now }).await;
+            redact(&mut entry);
+            entry
+        })
         .catch_unwind()
         .await;
-        let Ok(mut entry) = built else {
-            tracing::debug!("Inertia DevTools: building an entry panicked; the entry is dropped");
+        let Ok(entry) = built else {
+            tracing::debug!(
+                "Inertia DevTools: building or redacting an entry panicked; the entry is dropped"
+            );
             return response;
         };
-        self.redactor.redact_entry(&mut entry);
         self.store(id, entry, tab, now).await;
         response
     }
@@ -245,5 +263,40 @@ impl Middleware for DevToolsMiddleware {
         let http = response.unwrap_or_else(|response| response);
         let http = self.record(facts, recorder.take(), http).await;
         if was_ok { Ok(http) } else { Err(http) }
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn indt_a_redaction_that_panics_leaves_the_response_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let middleware =
+            DevToolsMiddleware::new(DevToolsConfig::new().enabled(true).storage_path(dir.path()));
+        let Ok((_, facts)) = RequestFacts::capture(Request::for_test("GET", "/report")).await
+        else {
+            panic!("a GET with no body is read");
+        };
+        let response = HttpResponse::text("the handler's body")
+            .status(201)
+            .header("X-Handler", "yes");
+
+        let recorded = middleware
+            .record_with(facts, None, response, |_| panic!("the redaction failed"))
+            .await;
+
+        assert_eq!(recorded.status_code(), 201);
+        assert_eq!(recorded.body(), b"the handler's body");
+        assert_eq!(recorded.header_value("X-Handler"), Some("yes"));
+        assert!(
+            recorded.header_value(ID_HEADER).is_some(),
+            "the headers still go out"
+        );
+        let stored = std::fs::read_dir(dir.path())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(stored, 0, "the entry is dropped, nothing is stored");
     }
 }
