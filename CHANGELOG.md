@@ -289,14 +289,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `connection` and the transport error. It is dispatched before the visit
   falls back to the client, and only when something listens or a fake
   records it (SS-08).
-- **SSR through the Vite dev server in development.** In development a first
-  visit is posted to `{hot_url}/__inertia_ssr`, `SsrConfig::hot_url` when
-  set (`InertiaConfig::ssr_hot_url`) and else the Vite dev server's URL,
-  without the bundle check, so no SSR bundle or worker process is needed
-  while developing. Production ignores the hot URL. When nothing accepts a
-  connection at the hot address the dev server is not running, and the
-  visit takes the worker path at `{url}/render` as Laravel's does without
-  its hot file (SS-05).
+- **SSR through the Vite dev server in development.** While the Vite hot
+  file exists, a first visit in development is posted to the dev server's
+  `/__inertia_ssr` without the bundle check, so no SSR bundle or worker
+  process is needed while developing. `suprnova serve` writes the dev
+  server's URL to `public/hot` when it starts Vite and removes the file when
+  Vite stops or `serve` exits, as Laravel's Vite plugin does, and the
+  full-stack scaffold ignores `/public/hot`. `SsrConfig::hot_url`
+  (`InertiaConfig::ssr_hot_url`) sends every first visit in development to
+  another address, and `SsrConfig::hot_file` (`InertiaConfig::ssr_hot_file`,
+  default `public/hot`) names another file; the address is the hot URL,
+  else the file's content, else the `vite_dev_server` URL. Without the file
+  the visit takes the worker path, whatever listens at the dev server's
+  port, and production never goes hot. A `404` from the dev server, which
+  serves no SSR without the Inertia Vite plugin, renders on the client
+  quietly (SS-05).
 - **SSR runtime settings.** `SsrConfig::runtime` (`node` by default, or
   `bun`, `deno` or a path) and `ensure_runtime_exists` (off by default), set
   with `InertiaConfig::ssr_runtime` and `ssr_ensure_runtime_exists`, are
@@ -873,9 +880,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   or an object without a `body`, was inlined as an empty body, so the first
   visit's document had neither the page data element nor the mount element
   and the client could not start. An answer whose JSON is empty, `null`,
-  `false` or not an object, or that has no non-empty `body` string, now
-  renders on the client from the page data, as Laravel returns `null` for
-  it, and is not reported as a failure (SS-02).
+  `false` or not an object, that has no non-empty `body` string, or that is
+  not JSON at all, now renders on the client from the page data, as
+  Laravel returns `null` for it, and is not reported as a failure (SS-02).
 - **SSR workers at `https` URLs are reached.** The SSR client was hyper's
   plain-HTTP connector, which refused an `https` URL, so a worker behind TLS
   was never contacted and every first visit fell back to the client. The
