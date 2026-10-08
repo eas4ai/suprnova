@@ -27,6 +27,10 @@ pub(crate) const PARENT_OUT_HEADER: &str = "X-Inertia-Devtools-Parent-Out";
 /// The response header carrying the path the application is served
 /// under, when it is not the host's root.
 pub(crate) const BASE_PATH_HEADER: &str = "X-Inertia-Devtools-Base-Path";
+/// The response headers recording adds. Every recorded response carries
+/// them (PAR-072), so a page that replaces the response outside the
+/// chain, as the development error page does, keeps them.
+pub(crate) const RESPONSE_HEADERS: [&str; 3] = [ID_HEADER, PARENT_OUT_HEADER, BASE_PATH_HEADER];
 
 /// Records each request for the Inertia DevTools browser extension and
 /// answers the extension's `GET /_inertia/devtools/entries` and

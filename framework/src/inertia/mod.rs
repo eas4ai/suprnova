@@ -35,7 +35,7 @@ pub(crate) mod visit;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
-pub(crate) use devtools::MultipartReport;
+pub(crate) use devtools::{DEVTOOLS_RESPONSE_HEADERS, MultipartReport};
 pub use devtools::{DevToolsConfig, DevToolsMiddleware};
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;

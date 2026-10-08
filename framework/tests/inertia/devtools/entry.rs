@@ -676,6 +676,49 @@ fn one_chunk(data: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn indt_the_development_error_page_keeps_the_devtools_headers() {
+    // Debug mode on and a public root, under the environment lock: the
+    // development error page replaces a 5xx, and the root adds the base
+    // path header.
+    let _lock = crate::env_lock::lock_env_async().await;
+    let _env = crate::env_snapshot::EnvSnapshot::capture(&["APP_DEBUG", "APP_URL"]);
+    crate::env_snapshot::set_env("APP_DEBUG", Some("true"));
+    crate::env_snapshot::set_env("APP_URL", Some("http://localhost/billing"));
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+
+    // A handler that reads a body that never arrives answers 500.
+    let reply = raw_request(addr, &inertia_post_head("/echo", 10), b"abc", true).await;
+    assert_eq!(reply.status, 500);
+    assert!(
+        reply.headers["content-type"].starts_with("text/html"),
+        "the development error page: {:?}",
+        reply.headers
+    );
+    let id = reply
+        .headers
+        .get("x-inertia-devtools-id")
+        .unwrap_or_else(|| panic!("no X-Inertia-Devtools-Id on {:?}", reply.headers));
+    assert_eq!(read_entry(dir.path(), id)["__meta"]["id"], id.as_str());
+    assert_eq!(
+        reply.headers.get("x-inertia-devtools-parent-out"),
+        Some(id),
+        "a request with no parent is its own"
+    );
+    assert_eq!(
+        reply
+            .headers
+            .get("x-inertia-devtools-base-path")
+            .map(String::as_str),
+        Some("/billing")
+    );
+}
+
+#[tokio::test]
 async fn indt_a_request_body_longer_than_a_response_body_may_be_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let client = client(router(), devtools(dir.path()));
