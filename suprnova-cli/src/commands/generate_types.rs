@@ -7,7 +7,7 @@ use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{
-    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaNameValue,
+    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaNameValue, Pat,
     PathArguments, Token, Type,
 };
 use walkdir::WalkDir;
@@ -812,12 +812,26 @@ pub(crate) struct RenderSite {
 /// `.with_data(..)` or `.try_with_data(..)`), and by the facade's
 /// `Inertia::data("Name", dto)`, `Inertia::try_data` and
 /// `Inertia::paginate`. Props are a struct when the expression is a struct
-/// literal, a call through the struct's path (`Props::new(..)`), or a bare
-/// path that may name a unit struct.
+/// literal, a call through the struct's path (`Props::new(..)`), a bare
+/// path that may name a unit struct, or a local name that holds one.
+///
+/// A local name holds a struct when a `let` or a parameter declares it
+/// (`let props: HomeProps = ..`, `props: HomeProps`) or when its `let`
+/// builds it (`let props = HomeProps::new(..)`). The visitor walks a
+/// function in source order and follows Rust's scoping: a later `let`
+/// shadows an earlier one, a block's names end with the block, and a name
+/// whose struct the scan cannot tell (a match arm's binding, `let props =
+/// load()`) hides the outer name rather than leaving it in force, so a
+/// page is never typed by a binding the macro does not render.
 #[derive(Default)]
 pub(crate) struct InertiaCallVisitor {
     pub(crate) renders: Vec<RenderSite>,
     pub(crate) shared_data: Vec<String>,
+    /// The local names in force where the visitor stands, one map per
+    /// scope, innermost last. A name maps to the struct it holds, or to
+    /// `None` when the scan cannot tell. A function starts a fresh stack,
+    /// since an item inside a function cannot see the function's locals.
+    scopes: Vec<HashMap<String, Option<String>>>,
 }
 
 /// The last two segments of a path expression, as `(type, function)`:
@@ -857,6 +871,65 @@ fn props_struct_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// The name `path` reads when it is a lone local name: one segment, not
+/// written like a type, a unit struct or a constant, which start with a
+/// capital.
+fn local_name(path: &syn::ExprPath) -> Option<String> {
+    let segment = match (&path.qself, path.path.segments.first()) {
+        (None, Some(segment))
+            if path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && segment.arguments.is_none() =>
+        {
+            segment
+        }
+        _ => return None,
+    };
+    let name = segment.ident.to_string();
+    is_local_name(&name).then_some(name)
+}
+
+/// Whether `name` can be a local binding: a capitalized name in a pattern
+/// is a unit struct, a variant or a constant.
+fn is_local_name(name: &str) -> bool {
+    !name.starts_with(|first: char| first.is_ascii_uppercase())
+}
+
+/// The struct a declared type names: `HomeProps`, `&HomeProps` or
+/// `props::HomeProps`. A type that wraps it (`Option<HomeProps>`) names
+/// the wrapper, which no scanned struct matches.
+fn declared_struct(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(path) if path.qself.is_none() => type_segment(&path.path),
+        Type::Reference(reference) => declared_struct(&reference.elem),
+        Type::Paren(inner) => declared_struct(&inner.elem),
+        Type::Group(inner) => declared_struct(&inner.elem),
+        _ => None,
+    }
+}
+
+/// Every name `pat` binds.
+fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
+    let nested: Vec<&Pat> = match pat {
+        Pat::Ident(ident) => {
+            names.push(ident.ident.to_string());
+            ident.subpat.iter().map(|(_, sub)| &**sub).collect()
+        }
+        Pat::Or(or) => or.cases.iter().collect(),
+        Pat::Paren(inner) => vec![&*inner.pat],
+        Pat::Reference(inner) => vec![&*inner.pat],
+        Pat::Slice(slice) => slice.elems.iter().collect(),
+        Pat::Struct(fields) => fields.fields.iter().map(|field| &*field.pat).collect(),
+        Pat::Tuple(tuple) => tuple.elems.iter().collect(),
+        Pat::TupleStruct(tuple) => tuple.elems.iter().collect(),
+        Pat::Type(typed) => vec![&*typed.pat],
+        _ => Vec::new(),
+    };
+    for pat in nested {
+        pattern_names(pat, names);
+    }
+}
+
 /// The last segment of `path` written like a type: in PascalCase, so not a
 /// module or function (`snake_case`) and not a constant (`SCREAMING_CASE`).
 /// `Self` names no struct the scan can see.
@@ -874,28 +947,106 @@ fn type_segment(path: &syn::Path) -> Option<String> {
 
 /// Parse an `inertia_response!` input the way the macro does: a request,
 /// the component, then props, which are typed when they start with an
-/// identifier and JSON-like when they start with a brace.
-fn inertia_response_site(tokens: proc_macro2::TokenStream) -> Option<RenderSite> {
-    let parser = |input: syn::parse::ParseStream| -> syn::Result<RenderSite> {
+/// identifier and JSON-like when they start with a brace. Returns the
+/// component and the typed props expression.
+fn inertia_response_args(tokens: proc_macro2::TokenStream) -> Option<(Expr, Option<Expr>)> {
+    let parser = |input: syn::parse::ParseStream| -> syn::Result<(Expr, Option<Expr>)> {
         input.parse::<Expr>()?;
         input.parse::<Token![,]>()?;
         let component = input.parse::<Expr>()?;
         input.parse::<Token![,]>()?;
         let props = if input.peek(syn::Ident) {
-            props_struct_name(&input.parse::<Expr>()?)
+            Some(input.parse::<Expr>()?)
         } else {
             None
         };
         input.parse::<proc_macro2::TokenStream>()?;
-        Ok(RenderSite {
-            component: string_literal(&component),
-            props,
-        })
+        Ok((component, props))
     };
     syn::parse::Parser::parse2(parser, tokens).ok()
 }
 
 impl InertiaCallVisitor {
+    /// The struct `expr` is: what [`props_struct_name`] reads from its
+    /// spelling, or, for a lone local name, the struct the binding in force
+    /// holds.
+    fn props_struct(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Paren(inner) => self.props_struct(&inner.expr),
+            Expr::Reference(inner) => self.props_struct(&inner.expr),
+            Expr::Path(path) => match local_name(path) {
+                Some(name) => self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&name))
+                    .cloned()
+                    .flatten(),
+                None => props_struct_name(expr),
+            },
+            _ => props_struct_name(expr),
+        }
+    }
+
+    /// Bind the names `pat` introduces in the innermost scope. A lone name
+    /// holds `holds`, or the struct its type declares; every other name
+    /// holds nothing the scan can tell.
+    fn bind_pattern(&mut self, pat: &Pat, holds: Option<String>) {
+        match pat {
+            Pat::Type(typed) => {
+                let declared = declared_struct(&typed.ty).or(holds);
+                self.bind_pattern(&typed.pat, declared);
+            }
+            Pat::Ident(ident) if ident.subpat.is_none() => {
+                self.bind(ident.ident.to_string(), holds);
+            }
+            _ => {
+                let mut names = Vec::new();
+                pattern_names(pat, &mut names);
+                for name in names {
+                    self.bind(name, None);
+                }
+            }
+        }
+    }
+
+    /// Bind `name` in the innermost scope. A capitalized name in a pattern
+    /// matches a unit struct, a variant or a constant, and binds nothing.
+    fn bind(&mut self, name: String, holds: Option<String>) {
+        if is_local_name(&name)
+            && let Some(scope) = self.scopes.last_mut()
+        {
+            scope.insert(name, holds);
+        }
+    }
+
+    /// Visit a function, method or closure body with a scope holding its
+    /// parameters, each a pattern and the struct its type declares. A
+    /// function starts a fresh stack; a closure, which sees the names
+    /// around it, does not.
+    fn visit_function<'ast>(
+        &mut self,
+        inputs: impl IntoIterator<Item = (&'ast Pat, Option<String>)>,
+        fresh: bool,
+        body: impl FnOnce(&mut Self),
+    ) {
+        let outer = if fresh {
+            std::mem::take(&mut self.scopes)
+        } else {
+            Vec::new()
+        };
+        self.scopes.push(HashMap::new());
+        for (pat, declared) in inputs {
+            self.bind_pattern(pat, declared);
+        }
+        body(self);
+        if fresh {
+            self.scopes = outer;
+        } else {
+            self.scopes.pop();
+        }
+    }
+
     /// Record an `InertiaResponse::new(..)` chain whose outermost call is
     /// `top`, and visit what the chain's calls are given. `false` when
     /// `top` is not such a chain.
@@ -923,7 +1074,7 @@ impl InertiaCallVisitor {
         let structs: BTreeSet<String> = calls
             .iter()
             .filter(|call| call.method == "with_data" || call.method == "try_with_data")
-            .filter_map(|call| call.args.first().and_then(props_struct_name))
+            .filter_map(|call| call.args.first().and_then(|arg| self.props_struct(arg)))
             .collect();
         // A page built from two structs has no one interface to name.
         let props = match structs.len() {
@@ -965,10 +1116,14 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
                 }
                 ("Inertia", "data" | "try_data") => self.renders.push(RenderSite {
                     component: component_literal(node.args.first()),
-                    props: node.args.iter().nth(1).and_then(props_struct_name),
+                    props: node
+                        .args
+                        .iter()
+                        .nth(1)
+                        .and_then(|arg| self.props_struct(arg)),
                 }),
                 ("Inertia", "share_data") => {
-                    if let Some(name) = node.args.first().and_then(props_struct_name) {
+                    if let Some(name) = node.args.first().and_then(|arg| self.props_struct(arg)) {
                         self.shared_data.push(name);
                     }
                 }
@@ -984,12 +1139,112 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
             .segments
             .last()
             .is_some_and(|segment| segment.ident == "inertia_response")
-            && let Some(site) = inertia_response_site(node.tokens.clone())
+            && let Some((component, props)) = inertia_response_args(node.tokens.clone())
         {
-            self.renders.push(site);
+            let props = props.and_then(|props| self.props_struct(&props));
+            self.renders.push(RenderSite {
+                component: string_literal(&component),
+                props,
+            });
         }
         syn::visit::visit_macro(self, node);
     }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.visit_function(typed_inputs(&node.sig), true, |this| {
+            syn::visit::visit_item_fn(this, node);
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.visit_function(typed_inputs(&node.sig), true, |this| {
+            syn::visit::visit_impl_item_fn(this, node);
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.visit_function(typed_inputs(&node.sig), true, |this| {
+            syn::visit::visit_trait_item_fn(this, node);
+        });
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let inputs = node.inputs.iter().map(|pat| (pat, None));
+        self.visit_function(inputs, false, |this| this.visit_expr(&node.body));
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.scopes.push(HashMap::new());
+        syn::visit::visit_block(self, node);
+        self.scopes.pop();
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // The initializer runs before the name exists, so it reads the
+        // name it may shadow: `let props = props.into_published()`.
+        let holds = node
+            .init
+            .as_ref()
+            .and_then(|init| self.props_struct(&init.expr));
+        if let Some(init) = &node.init {
+            self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
+        }
+        self.bind_pattern(&node.pat, holds);
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        self.scopes.push(HashMap::new());
+        self.bind_pattern(&node.pat, None);
+        if let Some((_, guard)) = &node.guard {
+            self.visit_expr(guard);
+        }
+        self.visit_expr(&node.body);
+        self.scopes.pop();
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        let holds = self.props_struct(&node.expr);
+        self.visit_expr(&node.expr);
+        self.bind_pattern(&node.pat, holds);
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        // An `if let` name holds in the `then` block only.
+        self.scopes.push(HashMap::new());
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.then_branch);
+        self.scopes.pop();
+        if let Some((_, else_branch)) = &node.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.scopes.push(HashMap::new());
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.body);
+        self.scopes.pop();
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(&node.expr);
+        self.scopes.push(HashMap::new());
+        self.bind_pattern(&node.pat, None);
+        self.visit_block(&node.body);
+        self.scopes.pop();
+    }
+}
+
+/// Each typed parameter of a signature, its pattern and the struct its type
+/// declares; a `self` receiver holds no props struct the scan can name.
+fn typed_inputs(sig: &syn::Signature) -> impl Iterator<Item = (&Pat, Option<String>)> {
+    sig.inputs.iter().filter_map(|input| match input {
+        syn::FnArg::Typed(typed) => Some((&*typed.pat, declared_struct(&typed.ty))),
+        syn::FnArg::Receiver(_) => None,
+    })
 }
 
 /// Turn every [`RustType::WideInteger`] into [`RustType::Number`]: in a

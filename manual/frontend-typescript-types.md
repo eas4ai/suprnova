@@ -147,6 +147,28 @@ entry when it is rendered with a struct:
   `.try_with_data(..)` in the same chain.
 - `Inertia::data("Users/Show", UserDto { .. })` and `Inertia::try_data`.
 
+In any of those positions, a local name counts when the generator can
+tell which struct it holds: a `let` or a parameter that declares the type,
+or a `let` that builds the struct:
+
+```rust
+#[handler]
+pub async fn index(req: Request) -> Response {
+    let props: HomeProps = load_home(&req);
+    inertia_response!(&req, "Home", props)
+}
+
+// A parameter typed with the struct counts the same way.
+pub async fn render_dashboard(req: &Request, props: DashboardProps) -> Response {
+    InertiaResponse::new("Dashboard").with_data(props).resolve(req).await
+}
+```
+
+The generator follows Rust's scoping: a later `let` of the same name
+replaces the earlier one, and a block's names end with the block. A name
+it cannot type, such as a `match` arm's binding or `let props = load();`,
+leaves the page without an entry.
+
 A component rendered with JSON-like props
 (`inertia_response!(&req, "About", { "team_size": 4 })`) or only through
 `.with(..)` has no entry, and props a chain adds with `.with(..)` beside

@@ -1196,3 +1196,186 @@ pub async fn index(req: Request) -> Response {
         "`Pages` cannot name `Listing` without its type arguments:\n{ts}"
     );
 }
+
+// A page rendered with a local binding or a parameter is typed by the
+// struct the binding holds, which is what the macro renders.
+
+/// The `Pages` declaration of a project holding one controller.
+fn pages_of(controller: &str) -> String {
+    declaration(
+        &generated(&[("controllers/pages.rs", controller)]),
+        "export interface Pages {",
+    )
+}
+
+#[test]
+fn intt_a_typed_local_binding_at_a_render_site_types_the_page() {
+    let pages = pages_of(
+        r#"
+use suprnova::{handler, inertia_response, InertiaProps, InertiaResponse, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct HomeProps { pub title: String }
+
+#[derive(InertiaProps)]
+pub struct AboutProps { pub team_size: u32 }
+
+#[derive(InertiaProps)]
+pub struct ContactProps { pub email: String }
+
+fn load_about() -> AboutProps { AboutProps { team_size: 4 } }
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    let props: HomeProps = HomeProps { title: "Hi".into() };
+    inertia_response!(&req, "Home", props)
+}
+
+#[handler]
+pub async fn welcome(req: Request) -> Response {
+    let props: HomeProps = HomeProps { title: "Hi".into() };
+    InertiaResponse::new("Welcome").with_data(props).resolve(&req).await
+}
+
+#[handler]
+pub async fn about(req: Request) -> Response {
+    let props: AboutProps = load_about();
+    inertia_response!(&req, "About", props)
+}
+
+#[handler]
+pub async fn contact(req: Request) -> Response {
+    let props = ContactProps::new();
+    inertia_response!(&req, "Contact", props)
+}
+"#,
+    );
+    assert_eq!(
+        pages,
+        "export interface Pages {\n  \"About\": AboutProps;\n  \"Contact\": ContactProps;\n  \
+         \"Home\": HomeProps;\n  \"Welcome\": HomeProps;\n}\n",
+        "a binding is typed by its declared type, or else by the struct its \
+         initializer builds"
+    );
+}
+
+#[test]
+fn intt_a_typed_parameter_at_a_render_site_types_the_page() {
+    let pages = pages_of(
+        r#"
+use suprnova::{inertia_response, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct HomeProps { pub title: String }
+
+#[derive(InertiaProps)]
+pub struct DashboardProps { pub visits: u32 }
+
+#[derive(InertiaProps)]
+pub struct SettingsProps { pub theme: String }
+
+pub async fn show(req: Request, props: HomeProps) -> Response {
+    inertia_response!(&req, "Home", props)
+}
+
+pub struct Renderer;
+
+impl Renderer {
+    pub fn dashboard(&self, req: &Request, props: &DashboardProps) -> Response {
+        inertia_response!(req, "Dashboard", props)
+    }
+}
+
+pub async fn settings(req: Request) -> Response {
+    let render = |props: SettingsProps| inertia_response!(&req, "Settings", props);
+    render(SettingsProps { theme: "dark".into() })
+}
+"#,
+    );
+    assert_eq!(
+        pages,
+        "export interface Pages {\n  \"Dashboard\": DashboardProps;\n  \
+         \"Home\": HomeProps;\n  \"Settings\": SettingsProps;\n}\n",
+        "a function, method or closure parameter is typed by its declared type"
+    );
+}
+
+#[test]
+fn intt_a_shadowed_name_is_typed_by_the_binding_in_force() {
+    let pages = pages_of(
+        r#"
+use suprnova::{inertia_response, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct DraftProps { pub body: String }
+
+#[derive(InertiaProps)]
+pub struct PreviewProps { pub body: String }
+
+#[derive(InertiaProps)]
+pub struct PublishedProps { pub url: String }
+
+pub async fn draft(req: Request) -> Response {
+    let props = DraftProps { body: String::new() };
+    if req.query("preview").is_some() {
+        let props = PreviewProps { body: String::new() };
+        return inertia_response!(&req, "Preview", props);
+    }
+    inertia_response!(&req, "Draft", props)
+}
+
+pub async fn publish(req: Request) -> Response {
+    let props = DraftProps { body: String::new() };
+    let props = PublishedProps { url: String::new() };
+    inertia_response!(&req, "Published", props)
+}
+
+pub async fn reload(req: Request) -> Response {
+    let props = DraftProps { body: String::new() };
+    let props = props.into_published();
+    inertia_response!(&req, "Reloaded", props)
+}
+
+pub async fn cached(req: Request, cached: Option<PublishedProps>) -> Response {
+    let props = DraftProps { body: String::new() };
+    match cached {
+        Some(props) => inertia_response!(&req, "Cached", props),
+        None => inertia_response!(&req, "Fresh", props),
+    }
+}
+"#,
+    );
+    assert_eq!(
+        pages,
+        "export interface Pages {\n  \"Draft\": DraftProps;\n  \"Fresh\": DraftProps;\n  \
+         \"Preview\": PreviewProps;\n  \"Published\": PublishedProps;\n}\n",
+        "an inner block's binding holds inside the block only, a later `let` \
+         shadows an earlier one, and a binding the scan cannot type (`Reloaded`, \
+         `Cached`) leaves the page untyped rather than typed by the name it hides"
+    );
+}
+
+#[test]
+fn intt_a_typed_binding_given_to_share_data_types_the_shared_props() {
+    let ts = generated(&[(
+        "bootstrap.rs",
+        r#"
+use suprnova::{Data, Inertia};
+
+#[derive(Data)]
+pub struct AppShared {
+    pub app_name: String,
+}
+
+pub fn register() {
+    let shared = AppShared { app_name: "Suprnova".into() };
+    Inertia::share_data(shared).expect("shared");
+}
+"#,
+    )]);
+    assert_eq!(
+        declaration(&ts, "export interface SharedProps {"),
+        "export interface SharedProps {\n  root: string;\n  app_name: string;\n}\n",
+        "{ts}"
+    );
+}

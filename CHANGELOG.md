@@ -368,13 +368,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `import '@inertiajs/core'` and ends with `Pages`, which maps each
   component to the struct a handler renders it with (read from
   `inertia_response!`, `InertiaResponse::new(..).with_data(..)` and
-  `Inertia::data`), `SharedProps` (`root` and the fields of the struct
-  `Inertia::share_data` is given or marked `#[inertia_props(shared)]`),
-  `Errors`, `PageProps<C>`, and a `declare module '@inertiajs/core'` block
-  setting `sharedPageProps`, `errorValueType` and, for a struct marked
-  `#[inertia_props(flash)]`, `flashDataType`, so `usePage()` is typed with
-  no argument. The `InertiaProps` derive takes the two markers and refuses
-  any other form. A component rendered with two structs, two shared or two
+  `Inertia::data`, given the struct itself or a local binding or parameter
+  that declares or builds it, with Rust's shadowing applied), `SharedProps`
+  (`root` and the fields of the struct `Inertia::share_data` is given or
+  marked `#[inertia_props(shared)]`), `Errors`, `PageProps<C>`, and a
+  `declare module '@inertiajs/core'` block setting `sharedPageProps`,
+  `errorValueType` and, for a struct marked `#[inertia_props(flash)]`,
+  `flashDataType`, so `usePage()` is typed with no argument. The
+  `InertiaProps` derive takes the two markers and refuses any other form.
+  A component rendered with two structs, two shared or two
   flash structs, or a struct named like a generated declaration fails the
   command with every conflict named and leaves the file as it was (T01,
   T02).
