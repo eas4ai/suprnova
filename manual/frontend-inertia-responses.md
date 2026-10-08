@@ -1347,23 +1347,25 @@ with it.
    when client and server disagree on the asset version.
 4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
    Inertia redirects.
-5. Registers `InertiaValidationRedirectMiddleware` - turns a `422` on an
-   Inertia visit into a `303` back to the form page with the errors
-   flashed. See [Validation failures](#validation-failures).
-6. Registers `InertiaErrorPageMiddleware` - hands the framework's own
+5. Registers `InertiaErrorPageMiddleware` - hands the framework's own
    error responses to your error callback, or turns them into the page
    `cfg` names with `.error_page(...)`. With neither, it changes nothing.
    See [Error pages](#error-pages). If you registered one yourself,
    further out, yours keeps its position and the component it names, and
    this step is skipped - see
    [Where the page is rendered](#where-the-page-is-rendered).
+6. Registers `InertiaValidationRedirectMiddleware` - turns a `422` on an
+   Inertia visit into a `303` back to the form page with the errors
+   flashed. See [Validation failures](#validation-failures).
 
 Order matters: the headers middleware is registered first, so it is the
 outermost and sees every response - including the `409` the version
 middleware returns before the handler ever runs. The validation-redirect
 middleware is registered last, so it is innermost - closest to the
-handler - and sees a `422` before the other three middlewares get a
-chance to touch it.
+handler - and sees a `422` before the other four middlewares get a
+chance to touch it. The error-response middleware sits just outside it,
+so an Inertia visit's validation failure reaches it as the `303` back to
+the form, never as a `422`.
 
 Two render-time settings Laravel apps reach for at boot:
 
@@ -1568,22 +1570,32 @@ yourself, see [Deciding each error yourself](#deciding-each-error-yourself).
 
 ### Where the page is rendered
 
-`Inertia::install` registers `InertiaErrorPageMiddleware` **innermost** of
-the Inertia layer, so it sees the response the handler and the route
-middleware actually produced. Everything you register *after* that call is
-covered too - which is why the scaffold puts `CsrfMiddleware` below it.
+`Inertia::install` registers `InertiaErrorPageMiddleware` inside the rest
+of the Inertia layer, just outside the validation redirect, so it sees the
+response the handler and the route middleware actually produced.
+Everything you register *after* that call is covered too, inside your
+session and locale - which is why the scaffold puts `CsrfMiddleware` below
+it.
 
-Anything registered **above** the call is not covered. A middleware that
-answers without calling `next` hands its response to nothing registered
-inside it, so its rejection never reaches the Inertia layer at all. The
-case that bites is a lapsed session posting a form: `CsrfMiddleware`
-answers `419` with `{"message":"CSRF token mismatch."}`, and if it sits
-above `Inertia::install` the user gets the crash modal on the one flow
-they are most likely to hit. An outer rate limiter's `429` and an auth
-guard's `401` behave the same way.
+Anything registered **above** the call is covered only at the server. A
+middleware that answers without calling `next` hands its response to
+nothing registered inside it, so its rejection never reaches the Inertia
+layer. The server runs the same decision after the whole stack for every
+error response nothing inside the stack decided, so that rejection still
+becomes the page - but every request scope a middleware opened has closed
+by then. The page keeps the shared registry and the shared providers, and
+loses the rest: no session data, the app's default locale rather than the
+visitor's, and none of the `share` and `share_once`
+[middleware hooks](#middleware-hooks). The case that shows it is a lapsed
+session posting a form: `CsrfMiddleware` answers `419` with
+`{"message":"CSRF token mismatch."}`, and if it sits above
+`Inertia::install` the user gets that bare page on the one flow they are
+most likely to hit. An outer rate limiter's `429` and an auth guard's
+`401` behave the same way.
 
 Register the middleware yourself when that is your shape, outside the
-middleware whose rejections it should cover. This worked in 1.3.6 as a
+middleware whose rejections it should cover, so the page is built inside
+the visitor's session and locale. This worked in 1.3.6 as a
 side effect - the type was public and global registration is idempotent
 per type, so an earlier registration kept its place - but nothing said so.
 It is a documented contract from 1.3.7: `install` checks for your
@@ -1615,7 +1627,7 @@ the config optional here: keep it or drop it, nothing else reads it. It is
 still what makes `install` register a middleware for an app that does not
 place one itself.
 
-Two ordering rules come with placing it yourself.
+Three ordering rules come with placing it yourself.
 
 **After `SessionMiddleware` and [`LocaleMiddleware`](localization.md).**
 The page carries your shared props - `auth.user`, flash, the locale share -
@@ -1630,6 +1642,12 @@ props read.
 further out than that. Every response that passes through it is one more
 body it has to classify, and a middleware outside it can still answer
 before it runs.
+
+**Before `Inertia::install`.** That keeps it outside
+`InertiaValidationRedirectMiddleware`, which `install` registers
+innermost. Registered after the call, it sees an Inertia visit's
+validation failure as a `422` before the redirect back is built, and a
+callback of yours that replaced it would break the form.
 
 If you register nothing yourself, `Inertia::install` does all of this for
 you - and the scaffolded `bootstrap.rs` already has `SessionMiddleware`
@@ -1762,8 +1780,10 @@ A handler that **panics** is covered too. The middleware runs the rest
 of the chain inside it under the panic boundary's rule, so the panic
 becomes the same sanitized `500` the boundary sends, with the panic's
 error report, and the page renders for it. A panic in a middleware
-registered *outside* it still reaches the boundary around the whole
-chain and its JSON `500`.
+registered *outside* it reaches the boundary around the whole chain, and
+that `500` reaches your callback, or the default callback, at the server,
+after the whole stack - without the request scopes the stack opened, as
+[Where the page is rendered](#where-the-page-is-rendered) describes.
 
 If the page itself fails to render - the component cannot be resolved,
 SSR is down, a shared prop errors - the framework logs a `warn` with the

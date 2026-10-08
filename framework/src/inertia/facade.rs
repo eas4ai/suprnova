@@ -679,12 +679,15 @@ impl Inertia {
     /// With [`InertiaConfig::hooks`] set, the headers middleware and the
     /// version check run them.
     ///
-    /// One call wires all four, so an app cannot end up carrying two of
-    /// them and silently missing the third - each closes a failure mode
-    /// that surfaces only in production: cache poisoning across the two
-    /// representations of a URL, a stale bundle after a deploy, a
-    /// method-preserving redirect, and a form that reports its own
-    /// validation errors as a crash.
+    /// One call wires all five, in their order - the headers middleware,
+    /// the version check, the `302 → 303` conversion, the error-response
+    /// middleware, then the validation redirect innermost - so an app
+    /// cannot end up carrying some of them and silently missing the rest.
+    /// Each closes a failure mode that surfaces only in production: cache
+    /// poisoning across the two representations of a URL, a stale bundle
+    /// after a deploy, a method-preserving redirect, an error response the
+    /// client shows as its plain-JSON modal, and a form that reports its
+    /// own validation errors as a crash.
     ///
     /// Call once at boot. The config is **cloned and retained** as the
     /// default that every [`InertiaResponse`] starts from, so a response
