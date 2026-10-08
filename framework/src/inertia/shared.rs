@@ -26,8 +26,11 @@
 //! `App::inertia_share("user.name", "Todd")` and
 //! `App::inertia_share("user.locale", "es")` both land under one `user`
 //! object in `props`, not two literal `"user.name"` / `"user.locale"`
-//! keys. The unpacking happens once, in `InertiaResponse::resolve`, over
-//! the fully resolved prop bag - see `framework/src/inertia/dotted.rs`.
+//! keys. A value shared directly nests when it is shared, as Laravel's
+//! does, so a later share of `user` replaces the whole object; a lazy
+//! share has no value yet and keeps its dotted key until
+//! `InertiaResponse::resolve` unpacks the fully resolved prop bag - see
+//! `framework/src/inertia/dotted.rs`.
 //! `App::inertia_shared(key)` reads the static registry back with the
 //! same dot notation (Laravel's `Inertia::getShared`);
 //! `App::flush_inertia_shared()` clears it (`Inertia::flushShared`).
@@ -35,6 +38,7 @@
 use super::config::InertiaConfig;
 use super::dotted;
 use super::prop::{InertiaRequestExt, Prop, PropResolver};
+use super::runtime::InertiaRuntime;
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
@@ -94,6 +98,9 @@ pub struct InertiaRegistry {
     /// `Inertia::install` is legitimately called more than once (tests,
     /// and apps that re-bootstrap) - last write wins.
     config: RwLock<Option<InertiaConfig>>,
+    /// The settings the `Inertia` facade changes at run time, kept here so
+    /// they follow the container's lookup like the shares above.
+    runtime: InertiaRuntime,
 }
 
 impl InertiaRegistry {
@@ -104,11 +111,18 @@ impl InertiaRegistry {
             shares: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
             config: RwLock::new(None),
+            runtime: InertiaRuntime::default(),
         }
     }
 
+    /// The run-time settings of this registry.
+    pub(crate) fn runtime(&self) -> &InertiaRuntime {
+        &self.runtime
+    }
+
     /// Add or replace a synchronous shared prop. Maps to
-    /// `Inertia::share($k, $v)`.
+    /// `Inertia::share($k, $v)`; a dotted key nests at share time (see
+    /// [`share_nested`](Self::share_nested)).
     ///
     /// # Panics
     ///
@@ -128,7 +142,45 @@ impl InertiaRegistry {
     pub fn share_value<V: Serialize>(&self, key: impl Into<String>, value: V) {
         let v =
             serde_json::to_value(&value).expect("App::inertia_share value must serialize cleanly");
-        self.upsert(key.into(), Prop::eager(v));
+        self.share_nested(key.into(), v);
+    }
+
+    /// Share an already-serialized value, nesting a dotted key at share
+    /// time as Laravel's `Arr::set` does: `user.age` is set inside the
+    /// `user` entry, so a later share of `user` replaces the whole object,
+    /// child included, where a literal `user.age` entry would have been
+    /// layered back over it at render. An entry under the root that holds
+    /// no plain object (a lazy one, a scalar) is replaced, as `Arr::set`
+    /// replaces a non-array.
+    pub(crate) fn share_nested(&self, key: String, value: Value) {
+        let Some((root, rest)) = key.split_once('.') else {
+            self.upsert(key, Prop::eager(value));
+            return;
+        };
+        match lock::write(&self.shares, "inertia share registry") {
+            Ok(mut reg) => {
+                let existing = reg.iter_mut().find(|entry| entry.key == root);
+                let mut tree = match existing.as_ref().and_then(|entry| entry.prop.as_value()) {
+                    Some(Value::Object(map)) => map.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                dotted::arr_set(&mut tree, rest, value);
+                let prop = Prop::eager(Value::Object(tree));
+                match existing {
+                    Some(entry) => entry.prop = prop,
+                    None => reg.push(StaticEntry {
+                        key: root.to_string(),
+                        prop,
+                    }),
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    %key,
+                    "Inertia share registry lock poisoned; skipping share."
+                );
+            }
+        }
     }
 
     /// Add or replace an async lazy shared prop. Maps to
@@ -279,24 +331,33 @@ impl InertiaRegistry {
     /// `installed_config`): on lock poison, returns `None` and logs a
     /// `tracing::error!` rather than propagating.
     pub(crate) fn shared_value(&self, key: &str) -> Option<Value> {
+        dotted::arr_get(&Value::Object(self.shared_tree()), key)
+    }
+
+    /// Every eager shared value, nested by dotted key - Laravel's
+    /// `Inertia::getShared()` with no key. A lazy entry has no value to
+    /// offer and is left out, as in [`shared_value`](Self::shared_value).
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A, matching
+    /// `installed_config`): on lock poison, returns an empty map and logs a
+    /// `tracing::error!` rather than propagating.
+    pub(crate) fn shared_tree(&self) -> serde_json::Map<String, Value> {
+        let mut tree = serde_json::Map::new();
         match lock::read(&self.shares, "inertia share registry") {
             Ok(reg) => {
-                let mut tree = serde_json::Map::new();
                 for entry in reg.iter() {
                     if let Some(v) = entry.prop.as_value() {
                         dotted::arr_set(&mut tree, &entry.key, v.clone());
                     }
                 }
-                dotted::arr_get(&Value::Object(tree), key)
             }
             Err(_) => {
                 tracing::error!(
-                    %key,
-                    "Inertia share registry lock poisoned; inertia_shared returning None."
+                    "Inertia share registry lock poisoned; reading shared data as empty."
                 );
-                None
             }
         }
+        tree
     }
 
     /// Clear every entry from the static share registry - Laravel's

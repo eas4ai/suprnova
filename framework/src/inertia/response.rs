@@ -1098,9 +1098,11 @@ impl InertiaResponse {
     ///   mount node - the Inertia 3 contract that `getInitialPageFromDOM`
     ///   reads.
     pub async fn resolve<R: InertiaRequestExt>(
-        self,
+        mut self,
         req: &R,
     ) -> Result<HttpResponse, FrameworkError> {
+        self.prepare_component()
+            .map_err(reflash_session_values_after_eager_error)?;
         let staged_session = StagedInertiaSessionValues::stage();
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
@@ -1308,6 +1310,22 @@ impl InertiaResponse {
         };
         staged_session.commit();
         Ok(response)
+    }
+
+    /// The steps of Laravel's `ResponseFactory::render` that settle the
+    /// component before the page is built: the transformer
+    /// [`Inertia::transform_component_using`](crate::Inertia::transform_component_using)
+    /// installed, then the [`InertiaConfig::ensure_pages_exist`] check on
+    /// the name it gives.
+    fn prepare_component(&mut self) -> Result<(), FrameworkError> {
+        let component = std::mem::take(&mut self.component);
+        self.component = App::inertia_registry()
+            .runtime()
+            .transform_component(component);
+        if self.config.ensure_pages_exist {
+            super::pages::ensure_page_exists(&self.config, &self.component)?;
+        }
+        Ok(())
     }
 
     /// Build the page object without producing an HTTP response - used by

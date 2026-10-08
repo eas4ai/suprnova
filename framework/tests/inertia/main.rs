@@ -7,6 +7,7 @@ mod env_lock;
 mod env_snapshot;
 pub mod error_page;
 pub mod error_page_placement;
+pub mod facade_runtime;
 pub mod flash_commit_boundary;
 pub mod flash_session;
 #[path = "../support/http_wire.rs"]

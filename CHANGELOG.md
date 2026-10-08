@@ -139,6 +139,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   trait, such as an application's enum of toast kinds; `get_flashed(&req)`
   returns exactly what `pull_flashed(&req)` removes (RF-17, RF-19, RF-08,
   RF-09).
+- **Shared data and render settings on the `Inertia` facade.**
+  `Inertia::share(key, value)`, `share_many`, `share_data` (a
+  `#[derive(Data)]` object's eager fields) and `share_provider` take the
+  forms Laravel's `Inertia::share` takes; `get_shared(key, default)` and
+  `get_shared_all()` read shared data back. `transform_component_using`
+  renames components before they render, and
+  `InertiaConfig::ensure_pages_exist` (with `pages_dir` and
+  `page_extensions`) makes a component with no page file an error naming the
+  component and the directory, for a name given as a string too (RF-02,
+  RF-03, RF-07, RF-15).
 
 ### Changed
 
@@ -381,6 +391,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `inertia.clear_history` and `inertia.preserve_fragment`, which last until a
   page emits them; a flag an earlier release flashed is still read (RF-08,
   RF-09).
+- **A dotted shared key nests when it is shared.** `App::inertia_share`
+  stored `user.age` as a literal key and nested it at render, so
+  `share("user", {"name": "A"})`, `share("user.age", 3)`, then
+  `share("user", {"name": "B"})` rendered `{"name": "B", "age": 3}`. It now
+  nests at share time as Laravel's `Arr::set` does, and renders
+  `{"name": "B"}` (RF-02).
 
 ### Fixed
 

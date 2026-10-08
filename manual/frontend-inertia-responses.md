@@ -1037,6 +1037,30 @@ middleware is registered last, so it is innermost - closest to the
 handler - and sees a `422` before the other three middlewares get a
 chance to touch it.
 
+Two render-time settings Laravel apps reach for at boot:
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+// Rename components before they render; `None` keeps the name.
+Inertia::transform_component_using(|component| {
+    component.strip_prefix("Old/").map(|rest| format!("New/{rest}"))
+});
+
+// Make a component with no page file an error instead of a blank page.
+let cfg = InertiaConfig::new()
+    .ensure_pages_exist(true)
+    .pages_dir("frontend/src/pages")              // the default
+    .page_extensions(["svelte", "tsx", "jsx", "vue"]); // the default
+```
+
+The transformer runs for every response, whatever built it. With
+`ensure_pages_exist` on, a render looks for `<pages_dir>/<Component>.<ext>`
+and answers an error naming the component and the directory when there is no
+such file - Laravel's `inertia.pages.ensure_pages_exist`. `inertia_response!`
+already checks its component at compile time; this catches a name given as a
+string to `InertiaResponse::new` or `Router::inertia`.
+
 `install` also **retains the config**. Every `InertiaResponse` built
 afterwards starts from it, so `.frontend(...)`, `.version(...)`,
 `.default_title(...)`, `.ssr(...)` and `.encrypt_history(...)` set here

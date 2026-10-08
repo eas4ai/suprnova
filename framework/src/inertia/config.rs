@@ -321,6 +321,23 @@ pub struct InertiaConfig {
     /// route records unless it is a prefetch, a Precognition request or a
     /// partial reload of the page it rendered.
     pub store_previous_url: bool,
+    /// When `true`, rendering a component with no page file under
+    /// [`pages_dir`](Self::pages_dir) is an error. Default `false`.
+    ///
+    /// `inertia_response!` checks its component at compile time, but a name
+    /// handed to `InertiaResponse::new` or `Router::inertia` as a string is
+    /// only a string, and a typo in it reaches the browser as a blank page
+    /// the client cannot resolve. Laravel's `inertia.pages.ensure_pages_exist`.
+    pub ensure_pages_exist: bool,
+    /// The directory the page files live under, relative to the process's
+    /// working directory unless absolute. Default `frontend/src/pages`,
+    /// where a `suprnova new` project keeps them. Read only with
+    /// [`ensure_pages_exist`](Self::ensure_pages_exist).
+    pub pages_dir: PathBuf,
+    /// The page file extensions [`ensure_pages_exist`](Self::ensure_pages_exist)
+    /// accepts. Default `svelte`, `tsx`, `jsx` and `vue`, the ones
+    /// `inertia_response!` looks for.
+    pub page_extensions: Vec<String>,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -537,6 +554,12 @@ impl Default for InertiaConfig {
             // exact error bodies it had. Opting in is one builder call.
             error_page: None,
             store_previous_url: true,
+            ensure_pages_exist: false,
+            pages_dir: PathBuf::from("frontend/src/pages"),
+            page_extensions: ["svelte", "tsx", "jsx", "vue"]
+                .iter()
+                .map(|ext| ext.to_string())
+                .collect(),
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
         }
@@ -817,6 +840,40 @@ impl InertiaConfig {
     /// recorded and why. On by default.
     pub fn store_previous_url(mut self, on: bool) -> Self {
         self.store_previous_url = on;
+        self
+    }
+
+    /// Make rendering a component with no page file an error; see
+    /// [`ensure_pages_exist`](Self::ensure_pages_exist). Off by default.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new()
+    ///     .ensure_pages_exist(true)
+    ///     .pages_dir("frontend/src/pages");
+    /// # let _ = cfg;
+    /// ```
+    pub fn ensure_pages_exist(mut self, on: bool) -> Self {
+        self.ensure_pages_exist = on;
+        self
+    }
+
+    /// Set the directory page files live under; see
+    /// [`pages_dir`](Self::pages_dir).
+    pub fn pages_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.pages_dir = dir.into();
+        self
+    }
+
+    /// Set the page file extensions the existence check accepts, without
+    /// the dot; see [`page_extensions`](Self::page_extensions).
+    pub fn page_extensions<I, S>(mut self, extensions: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.page_extensions = extensions.into_iter().map(Into::into).collect();
         self
     }
 

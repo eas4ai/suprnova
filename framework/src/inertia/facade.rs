@@ -6,6 +6,10 @@ use crate::http::{Redirect, Request};
 use crate::pagination::IntoInertiaScroll;
 
 use super::flash::{self, FlashKey};
+use super::response::PropEntry;
+use super::shared::InertiaSharedData;
+use serde_json::Value;
+use std::sync::Arc;
 
 use super::config::InertiaConfig;
 use super::response::{IntoInertiaData, reflash_session_values_after_eager_error};
@@ -103,6 +107,139 @@ impl Inertia {
             None => super::visit::back_target(None, None, "", fallback),
         };
         Redirect::to(target).status(status)
+    }
+
+    /// Share a value with every Inertia response - Laravel's
+    /// `Inertia::share($key, $value)`.
+    ///
+    /// A dotted key nests when it is shared, as Laravel's `Arr::set` does:
+    /// `share("user.name", "Todd")` sets `name` inside the shared `user`
+    /// object, and a later `share("user", ...)` replaces that object whole.
+    /// The value is serialized now; for one that has to be computed per
+    /// response use [`App::inertia_share_lazy`](crate::App::inertia_share_lazy).
+    /// Shares are process-wide (on the active container), not per request:
+    /// call this at boot, or from a provider for per-request data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `value`'s `Serialize` impl fails;
+    /// nothing is shared then.
+    pub fn share<V: serde::Serialize>(
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<(), FrameworkError> {
+        Self::share_many([(key, value)])
+    }
+
+    /// Share several values at once - Laravel's `Inertia::share([...])`.
+    /// Each entry is shared as [`share`](Self::share) shares it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the key whose value fails to
+    /// serialize; nothing is shared then.
+    pub fn share_many<I, K, V>(entries: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: serde::Serialize,
+    {
+        let mut values = Vec::new();
+        for (key, value) in entries {
+            let key = key.into();
+            let value = serde_json::to_value(&value).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "Inertia shared value for '{key}' failed to serialize: {e}"
+                ))
+            })?;
+            values.push((key, value));
+        }
+        let registry = crate::App::inertia_registry();
+        for (key, value) in values {
+            registry.share_nested(key, value);
+        }
+        Ok(())
+    }
+
+    /// Share the fields of a `#[derive(Data)]` object - Laravel's
+    /// `Inertia::share($arrayable)`.
+    ///
+    /// Each eager field becomes a shared value under its name. A lazy field
+    /// (`#[data(lazy)]` and its variants) is left out, as it is left out of
+    /// a Data object's array form until a request includes it: a shared
+    /// prop has no `?include=` gate, so sharing it would send it on every
+    /// page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the field whose value fails to
+    /// serialize; nothing is shared then.
+    pub fn share_data<T: IntoInertiaData>(data: T) -> Result<(), FrameworkError> {
+        let entries = data.__try_into_inertia_props()?;
+        let registry = crate::App::inertia_registry();
+        for (key, entry) in entries {
+            if let PropEntry::Eager(value) = entry {
+                registry.share_nested(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Share the props a provider produces for each response - Laravel's
+    /// `Inertia::share($provider)`. The provider receives the request and
+    /// the component being rendered.
+    ///
+    /// The same registration as
+    /// [`App::register_inertia_shared`](crate::App::register_inertia_shared):
+    /// one provider at a time, so a second call replaces the first.
+    pub fn share_provider(provider: Arc<dyn InertiaSharedData>) {
+        crate::App::inertia_registry().register_trait(provider);
+    }
+
+    /// Read a shared value back - Laravel's `Inertia::getShared($key,
+    /// $default)`. A dotted key walks into nested values (a numeric segment
+    /// indexes a list); `default` comes back when nothing is shared there.
+    ///
+    /// Reads what is registered, without resolving anything: a lazy share
+    /// has no value yet and reads as `default`, as Laravel hands back the
+    /// unresolved closure.
+    pub fn get_shared(key: &str, default: impl Into<Value>) -> Value {
+        crate::App::inertia_registry()
+            .shared_value(key)
+            .unwrap_or_else(|| default.into())
+    }
+
+    /// Every shared value, nested - Laravel's `Inertia::getShared()` with
+    /// no key. Lazy shares are left out, as in [`get_shared`](Self::get_shared).
+    pub fn get_shared_all() -> Value {
+        Value::Object(crate::App::inertia_registry().shared_tree())
+    }
+
+    /// Rename components before they render - Laravel's
+    /// `Inertia::transformComponentUsing($closure)`.
+    ///
+    /// `transformer` receives the name a response was built with and
+    /// returns the name to render, or `None` to keep it. It runs for every
+    /// response, whether the name came from `inertia_response!`,
+    /// `InertiaResponse::new` or `Router::inertia`, before the
+    /// [`ensure_pages_exist`](crate::InertiaConfig::ensure_pages_exist)
+    /// check, which then checks the new name. A later call replaces it.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Inertia;
+    ///
+    /// // Pages moved under `Legacy/` without touching every handler.
+    /// Inertia::transform_component_using(|component| {
+    ///     component.starts_with("Billing/").then(|| format!("Legacy/{component}"))
+    /// });
+    /// ```
+    pub fn transform_component_using<F>(transformer: F)
+    where
+        F: Fn(&str) -> Option<String> + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_component_transformer(Arc::new(transformer));
     }
 
     /// Flash a value for the next page response - Laravel's
