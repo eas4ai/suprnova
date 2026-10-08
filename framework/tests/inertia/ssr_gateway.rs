@@ -516,9 +516,11 @@ async fn inssr_production_posts_to_the_worker_and_never_the_hot_url() {
 }
 
 #[tokio::test]
-async fn inssr_a_404_from_the_hot_endpoint_renders_on_the_client_quietly() {
-    // A dev server without the Inertia Vite plugin serves no SSR and
-    // answers 404: that is no failure, so no event and no hook.
+async fn inssr_a_404_from_the_hot_endpoint_is_a_reported_failure() {
+    // A dev server without the Inertia Vite plugin answers
+    // `/__inertia_ssr` with a bare 404. That is the SSR target's error
+    // answer like any other, as in Laravel's `HttpGateway::dispatch`: the
+    // event, the hook, and a failure under throw_on_error.
     let _events = EventFacade::fake();
     let dev_server = Worker::answering(404, "Not Found").await;
     let (_dir, file) = hot_file(&dev_server.url());
@@ -533,25 +535,46 @@ async fn inssr_a_404_from_the_hot_endpoint_renders_on_the_client_quietly() {
 
     assert!(renders_on_the_client(&document), "{document}");
     assert_eq!(dev_server.seen().len(), 1, "the dev server was asked");
-    assert!(
-        suprnova::events::dispatched::<SsrRenderFailed>(|_| true).is_empty(),
-        "a 404 from the hot endpoint is not a failure"
-    );
-    assert!(
-        errors.lock().unwrap().is_empty(),
-        "{:?}",
-        errors.lock().unwrap()
-    );
+    let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].error_type, SsrErrorType::Unknown);
+    assert_eq!(failures[0].component, "Dashboard");
+    assert_eq!(failures[0].error, "the SSR worker answered 404 Not Found");
+    {
+        let errors = errors.lock().unwrap();
+        assert_eq!(errors.len(), 1, "the hook fires once: {errors:?}");
+        assert!(
+            errors[0].contains(&format!("{}/__inertia_ssr", dev_server.url())),
+            "the hook names the hot endpoint: {errors:?}"
+        );
+    }
 
-    // Not even under throw_on_error.
-    let thrown = first_visit(&config.ssr_throw_on_error(true)).await;
-    assert!(thrown.is_ok(), "{thrown:?}");
+    let error = first_visit(&config.ssr_throw_on_error(true))
+        .await
+        .expect_err("the visit fails under throw_on_error");
+    assert!(
+        error.to_string().contains(
+            "SSR render failed for component [Dashboard]: the SSR worker answered 404 Not Found"
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        suprnova::events::dispatched::<SsrRenderFailed>(|_| true).len(),
+        2,
+        "the event is dispatched before the visit fails"
+    );
+    assert_eq!(
+        errors.lock().unwrap().len(),
+        1,
+        "a visit that fails does not also call the hook"
+    );
 }
 
 #[tokio::test]
 async fn inssr_other_error_answers_stay_reported() {
-    // Only the hot endpoint's 404 is quiet: a 500 from it, and a 404 from
-    // the worker, are failures.
+    // A 500 from the hot endpoint carries the worker's error JSON, and a
+    // 404 from the worker's `/render` is an unknown failure: both are
+    // reported, as the hot endpoint's 404 is.
     let _events = EventFacade::fake();
     let dev_server = Worker::answering(500, browser_api_error().to_string()).await;
     let (_dir, file) = hot_file(&dev_server.url());
@@ -568,43 +591,11 @@ async fn inssr_other_error_answers_stay_reported() {
     let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
     assert_eq!(failures.len(), 2, "{failures:?}");
     assert_eq!(failures[0].error_type, SsrErrorType::BrowserApi);
+    assert_eq!(failures[0].error, "window is not defined");
     assert_eq!(failures[1].error_type, SsrErrorType::Unknown);
     assert!(failures[1].error.contains("404"), "{:?}", failures[1]);
-}
-
-/// The child of [`inssr_a_hot_404_prints_nothing`]: a first visit whose
-/// hot endpoint answers 404, with no error hook.
-#[tokio::test]
-async fn inssr_a_hot_404_prints_nothing_child() {
-    if !crate::own_process::is_child() {
-        return;
-    }
-    let dev_server = Worker::answering(404, "Not Found").await;
-    let (_dir, file) = hot_file(&dev_server.url());
-    let config = InertiaConfig::new().development(true).ssr_hot_file(&file);
-    let document = first_visit(&config).await.expect("the visit renders");
-    assert!(renders_on_the_client(&document), "{document}");
-    assert_eq!(dev_server.seen().len(), 1);
-}
-
-#[tokio::test]
-async fn inssr_a_hot_404_prints_nothing() {
-    let child = {
-        let _env = crate::env_lock::lock_env_async().await;
-        crate::own_process::child_command("ssr_gateway::inssr_a_hot_404_prints_nothing_child")
-            .spawn()
-            .expect("spawn the child process")
-    };
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output())
-        .await
-        .expect("the wait did not panic")
-        .expect("wait for the child process");
-    crate::own_process::assert_child_passed(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("[inertia]"),
-        "the child printed:\n{stderr}"
-    );
+    assert_eq!(dev_server.seen()[0].path, "/__inertia_ssr");
+    assert_eq!(worker.seen()[0].path, "/render");
 }
 
 // ---- PAR-059: https workers ----
