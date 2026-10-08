@@ -9,6 +9,7 @@
 //! middleware's 409) serve a router on a loopback socket.
 
 mod page_json;
+mod page_url;
 mod partial;
 mod request;
 mod support;

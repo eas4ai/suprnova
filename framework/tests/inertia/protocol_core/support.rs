@@ -20,6 +20,7 @@ use suprnova::{
 /// A request the test builds field by field.
 pub(super) struct MockReq {
     path: String,
+    query: Option<String>,
     headers: HashMap<String, String>,
 }
 
@@ -27,8 +28,15 @@ impl MockReq {
     pub(super) fn new(path: &str) -> Self {
         Self {
             path: path.to_string(),
+            query: None,
             headers: HashMap::new(),
         }
+    }
+
+    /// Attach a query string (no leading `?`).
+    pub(super) fn query(mut self, query: &str) -> Self {
+        self.query = Some(query.to_string());
+        self
     }
 
     pub(super) fn header(mut self, name: &str, value: &str) -> Self {
@@ -50,6 +58,12 @@ impl MockReq {
 impl InertiaRequestExt for MockReq {
     fn path(&self) -> &str {
         &self.path
+    }
+    fn path_and_query(&self) -> String {
+        match &self.query {
+            Some(q) => format!("{}?{}", self.path, q),
+            None => self.path.clone(),
+        }
     }
     fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)

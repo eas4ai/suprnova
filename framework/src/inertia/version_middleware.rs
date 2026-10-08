@@ -143,10 +143,13 @@ impl Middleware for InertiaVersionMiddleware {
 /// page it bounces to name the same path whenever the page object uses the
 /// default derivation; a configured `url_resolver` changes only the page
 /// object, because the bounce has to name a URL the browser can fetch. The
-/// path carries the public root (PFX-005). A request that names no host
-/// keeps the root-relative URL rather than inventing one.
+/// path carries the public root (PFX-005), and the query is normalised as
+/// the page `url`'s is (PAR-056). A request that names no host keeps the
+/// root-relative URL rather than inventing one.
 fn absolute_location(request: &Request) -> String {
-    let path = crate::routing::root::prefixed(&request.path_and_query());
+    let path = crate::routing::root::prefixed(&super::query_string::normalize_path_and_query(
+        request.path_and_query(),
+    ));
     match request.scheme_and_http_host() {
         Some(origin) => format!("{origin}{path}"),
         None => path,

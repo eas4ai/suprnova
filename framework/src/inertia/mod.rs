@@ -16,6 +16,7 @@ pub(crate) mod flash;
 mod headers_middleware;
 mod manifest;
 mod prop;
+mod query_string;
 mod response;
 mod root_share;
 mod shared;

@@ -1513,6 +1513,17 @@ finished document to correct it.
 (`/users?page=2&sort=name`). The client writes it into `history.state`, so
 it is what back/forward navigation and `router.reload()` replay - drop the
 query and every paginated or filtered page silently resets to page one.
+
+The query is normalised the way Laravel's `fullUrl()` normalises it
+through Symfony, so the client compares the same page URLs it would get
+from Laravel: the pairs are parsed as PHP parses a query string, sorted by
+key, and re-encoded per RFC 3986. `/s?b=2&a=1%20x` becomes
+`/s?a=1%20x&b=2`, a `+` becomes `%20`, reserved characters stay
+percent-encoded (`a=%2Fx` is not turned into `a=/x`), a key without a
+value gains an `=` (`?flag` becomes `?flag=`), a repeated key keeps its
+last value, and bracketed keys are written with their indexes
+(`tags[]=a&tags[]=b` becomes `tags%5B0%5D=a&tags%5B1%5D=b`). A query
+already in that form is left as it is.
 `InertiaVersionMiddleware` derives its `X-Inertia-Location` from the
 request's path and query too, made absolute with the request's scheme and
 host, so by default a 409 asset-version bounce lands the browser on

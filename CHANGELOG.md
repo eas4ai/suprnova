@@ -412,6 +412,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   entry sends the whole prop with no instruction, and a held once prop
   that is not deferred sends its `onceProps` entry alone. A scroll prop
   keeps its `scrollProps` cursor in both cases (PR-12, PR-13).
+- **The Inertia page `url` carries the query as Laravel normalises it.**
+  `page.url` repeated the query as the request sent it, so
+  `/s?b=2&a=1%20x` stayed `/s?b=2&a=1%20x` where Laravel's `fullUrl()`
+  sends `/s?a=1%20x&b=2`, and the client's comparisons of page URLs
+  differed between the two. The query is now parsed as PHP parses it,
+  sorted by key and re-encoded per RFC 3986, as Symfony's
+  `Request::normalizeQueryString` does: `+` becomes `%20`, reserved
+  characters stay percent-encoded (`a=%2Fx` stays `a=%2Fx`), a bare key
+  gains an `=`, a repeated key keeps its last value, and `a[]=x` becomes
+  `a%5B0%5D=x`. The version 409's `X-Inertia-Location` carries the same
+  query. A `url_resolver`'s URL is left as it returns it (RS-07).
 
 ### Fixed
 

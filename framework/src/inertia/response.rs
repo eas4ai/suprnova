@@ -2716,13 +2716,19 @@ fn render_prod_head(config: &InertiaConfig) -> String {
 ///
 /// The default derivation is an application path and always gets the root;
 /// a resolver's root-relative path gets it unless it is already under the
-/// root. Either `String` is owned here and becomes the URL itself when it
-/// keeps its bytes, as it does at the host root, so the first page does not
-/// copy its URL a second time (MEM-003).
+/// root. Its query is normalised as Laravel's `fullUrl()` normalises it
+/// through Symfony - pairs parsed, sorted by key, re-encoded per RFC 3986 -
+/// so the client compares the same page URLs Laravel sends (PAR-056); a
+/// resolver's URL is the application's own and is left as it returns it.
+/// Either `String` is owned here and becomes the URL itself when it keeps
+/// its bytes, as it does at the host root with a query already in that
+/// form, so the first page does not copy its URL a second time (MEM-003).
 fn page_url(resolver: Option<&super::config::UrlResolver>, req: &dyn InertiaRequestExt) -> String {
     match resolver {
         Some(resolve_url) => crate::routing::root::rooted_owned(resolve_url(req)),
-        None => crate::routing::root::prefixed_owned(req.path_and_query()),
+        None => crate::routing::root::prefixed_owned(
+            super::query_string::normalize_path_and_query(req.path_and_query()),
+        ),
     }
 }
 
