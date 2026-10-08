@@ -33,7 +33,9 @@ pub mod schedule_work;
 pub mod schema_dump;
 pub mod serve;
 pub mod ssr_check;
+pub mod ssr_config;
 pub mod ssr_start;
+pub mod ssr_stop;
 // Every item inside is `pub(crate)`; a `pub mod` would only add an
 // empty module to the lib's public rustdoc.
 pub(crate) mod watcher;
