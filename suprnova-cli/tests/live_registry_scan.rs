@@ -630,6 +630,68 @@ fn reg_032_destructuring_a_prototype_out_of_an_object_is_refused() {
     );
 }
 
+/// REG-032: a destructuring assignment's defaults and keys are expressions
+/// the script evaluates, so the scan walks them at every depth as it walks
+/// any value: a prototype there is refused, and so is `eval`, and a nested
+/// key gets the property checks a top-level key gets.
+#[test]
+fn reg_032_every_key_and_default_of_a_destructuring_assignment_is_checked() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "let p;\n[p = Array.prototype] = [];\np.polluted = 1;\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let p;\n({ p = Array.prototype } = {});\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let p;\n({ a: p = Array.prototype } = {});\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let q;\n({ a: { [Array.prototype]: q } } = { a: {} });\n",
+            "script-prototype",
+            2,
+        ),
+        ("let a;\n[a = eval(\"1\")] = [];\n", "script-eval", 2),
+        ("let a;\n({ a = eval(\"1\") } = {});\n", "script-eval", 2),
+        (
+            "let a;\n({ x: [a = eval(\"1\")] } = { x: [] });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let q;\n({ a: { [eval(\"k\")]: q } } = { a: {} });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let c;\n({ a: { constructor: c } } = { a: [] });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let constructor;\n({ constructor } = []);\n",
+            "script-eval",
+            2,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one

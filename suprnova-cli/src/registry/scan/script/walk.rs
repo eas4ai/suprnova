@@ -1409,22 +1409,80 @@ impl<'a, 'c> Walker<'a, 'c> {
                 );
             }
         }
-        if let AssignmentTarget::ObjectAssignmentTarget(object) = target {
-            for property in &object.properties {
-                if let AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) =
-                    property
-                {
-                    if property.computed
-                        && let Some(key) = property.name.as_expression()
-                    {
-                        self.computed_key(key, property.span);
-                    } else if let Some(name) = property.name.static_name() {
-                        self.property_name(&name, property.span, false);
+        self.destructuring_target(target);
+    }
+
+    /// Walks what a destructuring assignment's target evaluates itself, at
+    /// every depth: each key gets the property checks, a `prototype` key is
+    /// refused (REG-032), and each default is walked as a value. Left
+    /// unwalked, a default or a nested key could hold `eval` or a
+    /// prototype that no rule sees.
+    fn destructuring_target(&mut self, target: &'a AssignmentTarget<'a>) {
+        match target {
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                            let name = shorthand.binding.name.as_str();
+                            self.property_name(name, shorthand.span, false);
+                            if self.check() && prototype_name(name) {
+                                self.refuse(
+                                    "script-prototype",
+                                    shorthand.span,
+                                    DESTRUCTURED_PROTOTYPE.to_string(),
+                                );
+                            }
+                            if let Some(init) = &shorthand.init {
+                                self.expr(init, Pos::Value);
+                            }
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            if property.computed
+                                && let Some(key) = property.name.as_expression()
+                            {
+                                self.computed_key(key, property.span);
+                            } else if let Some(name) = property.name.static_name() {
+                                self.property_name(&name, property.span, false);
+                            }
+                            self.destructured_prototype(
+                                &property.name,
+                                property.computed,
+                                property.span,
+                            );
+                            self.destructuring_default(&property.binding);
+                        }
                     }
+                }
+                if let Some(rest) = &object.rest {
+                    self.destructuring_target(&rest.target);
+                }
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.destructuring_default(element);
+                }
+                if let Some(rest) = &array.rest {
+                    self.destructuring_target(&rest.target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Self::destructuring_target`] for a target that may carry a
+    /// default.
+    fn destructuring_default(&mut self, target: &'a AssignmentTargetMaybeDefault<'a>) {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+                self.destructuring_target(&with_default.binding);
+                self.expr(&with_default.init, Pos::Value);
+            }
+            other => {
+                if let Some(target) = other.as_assignment_target() {
+                    self.destructuring_target(target);
                 }
             }
         }
-        self.target_prototype_keys(target);
     }
 
     fn simple_target(
@@ -2605,62 +2663,6 @@ impl<'a, 'c> Walker<'a, 'c> {
         };
         if named {
             self.refuse("script-prototype", span, DESTRUCTURED_PROTOTYPE.to_string());
-        }
-    }
-
-    /// [`Self::destructured_prototype`] for every key of a destructuring
-    /// assignment's target, at any depth.
-    fn target_prototype_keys(&mut self, target: &'a AssignmentTarget<'a>) {
-        match target {
-            AssignmentTarget::ObjectAssignmentTarget(object) => {
-                for property in &object.properties {
-                    match property {
-                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
-                            if self.check() && prototype_name(shorthand.binding.name.as_str()) {
-                                self.refuse(
-                                    "script-prototype",
-                                    shorthand.span,
-                                    DESTRUCTURED_PROTOTYPE.to_string(),
-                                );
-                            }
-                        }
-                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
-                            self.destructured_prototype(
-                                &property.name,
-                                property.computed,
-                                property.span,
-                            );
-                            self.target_default_prototype_keys(&property.binding);
-                        }
-                    }
-                }
-                if let Some(rest) = &object.rest {
-                    self.target_prototype_keys(&rest.target);
-                }
-            }
-            AssignmentTarget::ArrayAssignmentTarget(array) => {
-                for element in array.elements.iter().flatten() {
-                    self.target_default_prototype_keys(element);
-                }
-                if let Some(rest) = &array.rest {
-                    self.target_prototype_keys(&rest.target);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// [`Self::target_prototype_keys`] for a target that may carry a default.
-    fn target_default_prototype_keys(&mut self, target: &'a AssignmentTargetMaybeDefault<'a>) {
-        match target {
-            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
-                self.target_prototype_keys(&with_default.binding);
-            }
-            other => {
-                if let Some(target) = other.as_assignment_target() {
-                    self.target_prototype_keys(target);
-                }
-            }
         }
     }
 
