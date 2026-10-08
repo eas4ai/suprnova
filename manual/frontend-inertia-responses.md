@@ -915,6 +915,27 @@ For async or fallible version resolution (e.g. read a manifest hash
 from S3), do the read once at boot and pass the cached `String` to
 `.version(...)`.
 
+### Setting the version at run time
+
+`Inertia::version` sets the version while the app runs, as Laravel's
+`Inertia::version` does, and `Inertia::get_version` reads it:
+
+```rust
+use suprnova::Inertia;
+
+Inertia::version(deployment_id());     // a string
+Inertia::version(|| read_build_id());  // a function, called on every read
+Inertia::version(None::<String>);      // the empty version, Laravel's null
+
+let current = Inertia::get_version();
+```
+
+The value replaces the version of the installed config, so every page
+built after the call advertises it, and the version middleware that
+`Inertia::install` registers compares the client's `X-Inertia-Version`
+against it. A later `Inertia::install` replaces it again, and a response
+given its own config with `with_config(...)` keeps that config's version.
+
 ## Bootstrap: `Inertia::install`
 
 Most apps install the protocol middlewares in one call, from

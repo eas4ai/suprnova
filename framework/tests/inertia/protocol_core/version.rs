@@ -1,10 +1,17 @@
 //! PAR-046: the asset version resolves from the asset URL setting, else the
 //! Vite manifest's hash, else the empty string.
 
-use sha2::{Digest, Sha256};
-use suprnova::{InertiaConfig, InertiaResponse};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::support::{MockReq, no_manifest, page_of};
+use sha2::{Digest, Sha256};
+use suprnova::testing::TestContainer;
+use suprnova::{
+    Inertia, InertiaConfig, InertiaResponse, InertiaVersionMiddleware, MiddlewareRegistry,
+};
+
+use super::support::{MockReq, no_manifest, page_of, page_router, spawn_server};
+use crate::http_wire::request;
 
 /// The version a source of `bytes` hashes to: the first 16 bytes of its
 /// SHA-256, hex-encoded.
@@ -63,4 +70,70 @@ async fn inp_the_version_prefers_the_asset_url_then_the_manifest_hash() {
         "a configured asset URL comes first, as in Laravel's Middleware::version"
     );
     assert_eq!(explicit, "pinned");
+}
+
+#[tokio::test]
+async fn inp_inertia_version_sets_what_get_version_reads_and_the_409_compares() {
+    // Laravel's `Inertia::version` / `Inertia::getVersion`, and the version
+    // middleware compares against what they hold.
+    let _guard = TestContainer::fake();
+    Inertia::install(&InertiaConfig::new().version("installed").development(true))
+        .expect("dev-mode install must not require a manifest");
+    assert_eq!(Inertia::get_version(), "installed");
+
+    Inertia::version("v9");
+    assert_eq!(Inertia::get_version(), "v9");
+
+    let resp = InertiaResponse::new("Home")
+        .resolve(&MockReq::new("/").inertia())
+        .await
+        .expect("a page");
+    assert_eq!(
+        page_of(resp).await["version"],
+        "v9",
+        "the page advertises the version the middleware compares against"
+    );
+
+    let registry = MiddlewareRegistry::new().append(InertiaVersionMiddleware::with_resolver(
+        Inertia::get_version,
+    ));
+    let addr = spawn_server(page_router(), registry, 2).await;
+    let (stale, _, _) = request(
+        addr,
+        "GET",
+        "/page",
+        &[("X-Inertia", "true"), ("X-Inertia-Version", "installed")],
+    )
+    .await;
+    assert_eq!(stale, 409, "the version set at run time is the current one");
+    let (current, _, _) = request(
+        addr,
+        "GET",
+        "/page",
+        &[("X-Inertia", "true"), ("X-Inertia-Version", "v9")],
+    )
+    .await;
+    assert_eq!(current, 200);
+}
+
+#[test]
+fn inp_inertia_version_takes_a_function_or_none() {
+    let _guard = TestContainer::fake();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    Inertia::version(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        "from-a-function".to_string()
+    });
+    assert_eq!(Inertia::get_version(), "from-a-function");
+    assert_eq!(Inertia::get_version(), "from-a-function");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the function runs on every read"
+    );
+
+    // Laravel casts `null` to "".
+    Inertia::version(None::<String>);
+    assert_eq!(Inertia::get_version(), "");
 }

@@ -4,7 +4,7 @@
 use crate::FrameworkError;
 use crate::pagination::IntoInertiaScroll;
 
-use super::config::InertiaConfig;
+use super::config::{InertiaConfig, VersionResolver};
 use super::response::{IntoInertiaData, reflash_session_values_after_eager_error};
 use super::{
     Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaResponse,
@@ -70,6 +70,43 @@ impl Inertia {
         Ok(InertiaResponse::from_data_props(component, props))
     }
 
+    /// Set the asset version at run time. Laravel's `Inertia::version`.
+    ///
+    /// Takes a string, a function that returns one (called on every read,
+    /// as Laravel calls a version closure), a [`VersionResolver`], or
+    /// `None::<String>` for the empty version (Laravel casts `null` to
+    /// `""`). The version replaces the one on the config
+    /// [`install`](Self::install) retained, or on the default config when
+    /// nothing is installed, so [`get_version`](Self::get_version), every
+    /// response built after the call, and the version middleware `install`
+    /// registers all read it. A later `install` replaces it in turn, and a
+    /// response given its own config with
+    /// [`InertiaResponse::with_config`] keeps that config's version.
+    ///
+    /// The config lives on the active container's Inertia registry, so a
+    /// version set under [`crate::testing::TestContainer::fake`] stays in
+    /// that test.
+    pub fn version(version: impl Into<VersionResolver>) {
+        let registry = crate::App::inertia_registry();
+        let mut config = registry.installed_config().unwrap_or_default();
+        config.version = version.into();
+        registry.set_installed_config(config);
+    }
+
+    /// The current asset version. Laravel's `Inertia::getVersion`.
+    ///
+    /// What [`version`](Self::version) set, else the installed config's
+    /// version in Laravel's order: the asset URL's hash, the Vite
+    /// manifest's hash, or the empty string. This is the value the version
+    /// middleware [`install`](Self::install) registers compares a client's
+    /// `X-Inertia-Version` against, and that the 409 sends back.
+    pub fn get_version() -> String {
+        crate::App::inertia_registry()
+            .installed_config()
+            .unwrap_or_default()
+            .resolved_version()
+    }
+
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// Registers four global middlewares in order:
@@ -79,7 +116,8 @@ impl Inertia {
     ///    the `409` the version middleware returns below.
     /// 2. [`InertiaVersionMiddleware`] - emits `409 Conflict` +
     ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
-    ///    header doesn't match the server's configured version.
+    ///    header doesn't match [`get_version`](Self::get_version), read
+    ///    per request.
     ///    Without it, asset-version mismatches are silent and stale
     ///    clients keep hitting the new server with the old bundle.
     /// 3. [`Inertia303Middleware`] - converts `302` redirects on
@@ -205,10 +243,12 @@ impl Inertia {
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
         register_global_middleware(InertiaHeadersMiddleware::new());
-        let version_source = config.clone();
-        register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
-            version_source.resolved_version()
-        }));
+        // The middleware reads the version per request, so a later
+        // `Inertia::version` call is what a stale client is compared
+        // against, the same value the page object advertises.
+        register_global_middleware(InertiaVersionMiddleware::with_resolver(
+            Inertia::get_version,
+        ));
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
         // Innermost, and only when the app named a component. It has to

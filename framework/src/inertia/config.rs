@@ -99,6 +99,23 @@ impl From<&str> for VersionResolver {
     }
 }
 
+/// `None` is the empty version, as Laravel casts a `null` version to `""`.
+impl From<Option<String>> for VersionResolver {
+    fn from(version: Option<String>) -> Self {
+        Self::Static(version.unwrap_or_default())
+    }
+}
+
+/// A function is called on every read, as Laravel calls a version closure.
+impl<F> From<F> for VersionResolver
+where
+    F: Fn() -> String + Send + Sync + 'static,
+{
+    fn from(f: F) -> Self {
+        Self::Dynamic(Arc::new(f))
+    }
+}
+
 impl std::fmt::Debug for VersionResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

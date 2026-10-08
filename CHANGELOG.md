@@ -127,6 +127,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`HasRoles::rbac_model_types()`** names every `model_type` a model's
   role and permission assignments are read under: its `morph_type`, its
   aliases and the Rust type path an earlier release stored.
+- **`Inertia::version` and `Inertia::get_version`.** Laravel's runtime
+  setter and getter for the asset version. `Inertia::version` takes a
+  string, a function called on every read, or `None::<String>` for the
+  empty version (Laravel's `null`), and replaces the installed config's
+  version; `Inertia::get_version` returns the current one. Every page built
+  after the call advertises it, and the version middleware
+  `Inertia::install` registers now reads `Inertia::get_version` per request
+  instead of the version captured at install (RF-05).
 
 ### Changed
 
