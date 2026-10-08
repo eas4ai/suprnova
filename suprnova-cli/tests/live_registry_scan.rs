@@ -392,6 +392,464 @@ fn reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
     }
 }
 
+/// Scans `script` as the only script of a component, under `widget.js`.
+fn scan_widget_script(script: &str) -> ScanReport {
+    let files = vec![
+        ("widget.html".to_string(), b"<div>x</div>".to_vec()),
+        ("widget.js".to_string(), script.as_bytes().to_vec()),
+    ];
+    let component = ComponentFiles {
+        namespace: "acme",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &[],
+        importable_views: &[],
+        importable_scripts: &[],
+    };
+    scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
+}
+
+/// Each of `lines` of `widget.js` that a scan of `script` does not refuse
+/// with `check`, described with every finding the scan made.
+fn missing_refusals(script: &str, check: &str, lines: &[u32]) -> Vec<String> {
+    let report = scan_widget_script(script);
+    lines
+        .iter()
+        .filter(|line| {
+            !report.findings.iter().any(|finding| {
+                finding.check == check
+                    && finding.file == "widget.js"
+                    && finding.line == Some(**line)
+            })
+        })
+        .map(|line| {
+            format!(
+                "{script:?}: no `{check}` at widget.js:{line}; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+        })
+        .collect()
+}
+
+/// REG-032: a built-in prototype is refused however the script reaches it:
+/// under a computed key that traces to `prototype` (a string, a template
+/// literal, a concatenation), through a name that holds it, from
+/// `getPrototypeOf`, or handed to a function that changes it. Each case
+/// names the lines refused with `script-prototype`; a destructured name
+/// the scan cannot follow is stopped where the prototype enters it.
+#[test]
+fn reg_032_a_prototype_reached_by_a_constant_key_an_alias_or_a_call_is_refused() {
+    let cases: &[(&str, &[u32])] = &[
+        ("Array[\"prototype\"].polluted = 1;\n", &[1]),
+        ("Array[`prototype`].polluted = 1;\n", &[1]),
+        (
+            "const key = \"proto\" + \"type\";\nArray[key].polluted = 1;\n",
+            &[2],
+        ),
+        ("const p = Array.prototype;\np.polluted = 1;\n", &[1, 2]),
+        ("let p;\np = Array.prototype;\np.polluted = 1;\n", &[2, 3]),
+        ("(0, Array.prototype).polluted = 1;\n", &[1]),
+        (
+            "const slice = Array.prototype.slice;\nslice.call = () => 1;\n",
+            &[2],
+        ),
+        ("Object.getPrototypeOf([]).polluted = 1;\n", &[1]),
+        ("Reflect.getPrototypeOf([]).x = 1;\n", &[1]),
+        (
+            "Object.defineProperty(Array.prototype, \"x\", { value: 1 });\n",
+            &[1],
+        ),
+        ("Object.assign(Array.prototype, { x: 1 });\n", &[1]),
+        ("Object.setPrototypeOf(Array.prototype, null);\n", &[1]),
+        ("Object.freeze(Array.prototype);\n", &[1]),
+        ("Reflect.set(Array.prototype, \"x\", 1);\n", &[1]),
+        (
+            "Reflect.defineProperty(Array.prototype, \"x\", { value: 1 });\n",
+            &[1],
+        ),
+        (
+            "function pollute(p) {\n  p.x = 1;\n}\npollute(Array.prototype);\n",
+            &[4],
+        ),
+        ("const [p] = [Array.prototype];\np.x = 1;\n", &[1]),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, lines)| missing_refusals(script, "script-prototype", lines))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a prototype may not be kept or passed on, so it is refused in
+/// every position where the script uses it as a value.
+#[test]
+fn reg_032_a_prototype_used_as_a_value_is_refused_in_every_position() {
+    let cases: &[(&str, u32)] = &[
+        ("export const p = Array.prototype;\n", 1),
+        ("let p;\np = Array.prototype;\n", 2),
+        ("const xs = [];\nxs.push(Array.prototype);\n", 2),
+        ("const xs = [];\nxs.push(...Array.prototype);\n", 2),
+        ("export const s = new Set(Array.prototype);\n", 1),
+        ("export function f() {\n  return Array.prototype;\n}\n", 2),
+        ("export function* g() {\n  yield Array.prototype;\n}\n", 2),
+        (
+            "export async function a() {\n  await Array.prototype;\n}\n",
+            2,
+        ),
+        ("export const a = () => Array.prototype;\n", 1),
+        ("export const xs = [Array.prototype];\n", 1),
+        ("export const xs = [...Array.prototype];\n", 1),
+        ("export const o = { p: Array.prototype };\n", 1),
+        ("export const o = { ...Array.prototype };\n", 1),
+        (
+            "export function f(p = Array.prototype) {\n  return p;\n}\n",
+            1,
+        ),
+        ("export const t = `${Array.prototype}`;\n", 1),
+        ("export const c = (x) => (x ? Array.prototype : null);\n", 1),
+        ("export const l = (x) => x ?? Array.prototype;\n", 1),
+        ("export const s = (0, Array.prototype);\n", 1),
+        ("export const p = Array?.prototype;\n", 1),
+        ("export class A {\n  p = Array.prototype;\n}\n", 2),
+        ("export default Array.prototype;\n", 1),
+        ("const p = Array.prototype;\nexport const q = p;\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: every way a script writes a member of a prototype changes the
+/// prototype, so each is refused, not only a plain assignment: a compound
+/// or logical assignment, `++` and `--`, a destructuring target, a `for`
+/// loop's target, and `delete`.
+#[test]
+fn reg_032_every_write_to_a_prototype_member_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("Array.prototype.polluted ??= 1;\n", 1),
+        ("Array.prototype.polluted ||= 1;\n", 1),
+        ("Array.prototype.count += 1;\n", 1),
+        ("Array.prototype.count++;\n", 1),
+        ("--Array.prototype.count;\n", 1),
+        ("[Array.prototype.polluted] = [1];\n", 1),
+        ("({ a: Array.prototype.polluted } = { a: 1 });\n", 1),
+        ("for (Array.prototype.polluted of [1]) {\n}\n", 1),
+        ("for (Array.prototype.polluted in { a: 1 }) {\n}\n", 1),
+        (
+            "const slice = Array.prototype.slice;\nslice.count += 1;\n",
+            2,
+        ),
+        ("delete Array.prototype.map;\n", 1),
+        ("delete Array[\"prototype\"].map;\n", 1),
+        ("const p = Array.prototype;\ndelete p.map;\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a method called on a prototype itself runs with the prototype
+/// as `this`, and `Array.prototype` is an array, so `push`, `fill` and
+/// `splice` change it. Each such call is refused, a tagged template's
+/// included. A method borrowed with `call` runs on the value it is given
+/// and stays admitted.
+#[test]
+fn reg_032_a_method_called_on_a_prototype_itself_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("Array.prototype.push(1);\n", 1),
+        ("Array.prototype.fill(0, 0, 1);\n", 1),
+        ("Array[\"prototype\"].splice(0, 0, 1);\n", 1),
+        ("Array.prototype?.push(1);\n", 1),
+        ("(0, Array.prototype).push(1);\n", 1),
+        ("Array.prototype.push`polluted`;\n", 1),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let borrowed =
+        scan_widget_script("export const add = (xs) => Array.prototype.push.call(xs, 1);\n");
+    assert!(borrowed.accepted(), "{:?}", borrowed.findings);
+}
+
+/// REG-032: destructuring `prototype` out of an object puts the prototype
+/// in a name the scan does not follow, so it is refused in a declaration,
+/// a parameter, a `catch` clause, a `for` loop and a destructuring
+/// assignment, by a static or computed key, shorthand or nested.
+#[test]
+fn reg_032_destructuring_a_prototype_out_of_an_object_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("const { prototype: p } = Array;\np.polluted = 1;\n", 1),
+        ("const { prototype } = Array;\nprototype.polluted = 1;\n", 1),
+        ("const { [\"proto\" + \"type\"]: p } = Array;\n", 1),
+        ("const { a: { prototype: p } } = { a: Array };\n", 1),
+        (
+            "function pollute({ prototype }) {\n  prototype.polluted = 1;\n}\npollute(Array);\n",
+            1,
+        ),
+        ("for (const { prototype } of [Array]) {\n}\n", 1),
+        ("try {\n} catch ({ prototype }) {\n}\n", 2),
+        ("let p;\n({ prototype: p } = Array);\n", 2),
+        ("let prototype;\n({ prototype } = Array);\n", 2),
+        ("let p;\n({ [`prototype`]: p } = Array);\n", 2),
+        ("let p;\n({ a: { prototype: p } } = { a: Array });\n", 2),
+        ("let p;\n[{ prototype: p }] = [Array];\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a destructuring assignment's defaults and keys are expressions
+/// the script evaluates, so the scan walks them at every depth as it walks
+/// any value: a prototype there is refused, and so is `eval`, and a nested
+/// key gets the property checks a top-level key gets.
+#[test]
+fn reg_032_every_key_and_default_of_a_destructuring_assignment_is_checked() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "let p;\n[p = Array.prototype] = [];\np.polluted = 1;\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let p;\n({ p = Array.prototype } = {});\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let p;\n({ a: p = Array.prototype } = {});\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "let q;\n({ a: { [Array.prototype]: q } } = { a: {} });\n",
+            "script-prototype",
+            2,
+        ),
+        ("let a;\n[a = eval(\"1\")] = [];\n", "script-eval", 2),
+        ("let a;\n({ a = eval(\"1\") } = {});\n", "script-eval", 2),
+        (
+            "let a;\n({ x: [a = eval(\"1\")] } = { x: [] });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let q;\n({ a: { [eval(\"k\")]: q } } = { a: {} });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let c;\n({ a: { constructor: c } } = { a: [] });\n",
+            "script-eval",
+            2,
+        ),
+        (
+            "let constructor;\n({ constructor } = []);\n",
+            "script-eval",
+            2,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a shorthand target in a destructuring assignment (`({ u } =
+/// o)`) receives a value the scan does not follow, like any other target:
+/// the binding it writes is no longer traced to its earlier constant, and
+/// a name the script does not declare is a global write, checked as one.
+#[test]
+fn reg_032_a_shorthand_destructuring_target_is_a_target_like_any_other() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "let u = \"/ok\";\n({ u } = { u: \"https://evil.example/x\" });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\n({ a: { u } } = { a: { u: \"https://evil.example/x\" } });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\n({ u = \"/fine\" } = { u: \"https://evil.example/x\" });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\nfor ({ u } of [{ u: \"https://evil.example/x\" }]) {\n}\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            5,
+        ),
+        (
+            "let f = () => 1;\n({ f } = { f: \"alert(1)\" });\nsetTimeout(f, 1);\n",
+            "script-timer",
+            3,
+        ),
+        (
+            "({ location } = { location: \"javascript:alert(1)\" });\n",
+            "script-url",
+            1,
+        ),
+        (
+            "({ onerror } = { onerror: () => 1 });\n",
+            "script-global",
+            1,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let declared = scan_widget_script("let a = 0;\n({ a } = { a: 1 });\nexport const b = a;\n");
+    assert!(declared.accepted(), "{:?}", declared.findings);
+}
+
+/// REG-032: a value the scan follows from elsewhere (an initializer, an
+/// assignment, a call's argument) names the binding each of its names had
+/// where it was written, not the binding the same name has where the value
+/// is used, so a shadowing name cannot stand in for the real value.
+#[test]
+fn reg_032_a_traced_value_resolves_each_name_where_it_is_written() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "const y = \"https://evil.example/x\";\nconst x = y;\nexport function show() {\n  const y = \"/ok\";\n  const img = new Image();\n  img.src = x;\n}\n",
+            "script-url",
+            6,
+        ),
+        (
+            "let x = \"/ok\";\nexport function set() {\n  const y = \"https://evil.example/x\";\n  x = y;\n}\nconst y = \"/fine\";\nexport function show() {\n  const img = new Image();\n  img.src = x;\n}\n",
+            "script-url",
+            9,
+        ),
+        (
+            "function load(u) {\n  const img = new Image();\n  img.src = u;\n}\nconst v = \"/ok\";\nexport function go() {\n  const v = \"https://evil.example/x\";\n  load(v);\n}\n",
+            "script-url",
+            3,
+        ),
+        (
+            "const k = \"constructor\";\nconst n = k;\nexport function read(o) {\n  const k = 1;\n  return o[n];\n}\n",
+            "script-eval",
+            5,
+        ),
+        (
+            "const g = \"alert(1)\";\nconst f = g;\nexport function later() {\n  function g() {}\n  setTimeout(f, 1);\n}\n",
+            "script-timer",
+            5,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let shadowed = scan_widget_script(
+        "const y = \"/ok\";\nconst x = y;\nexport function show() {\n  const y = \"https://evil.example/x\";\n  const img = new Image();\n  img.src = x;\n}\n",
+    );
+    assert!(shadowed.accepted(), "{:?}", shadowed.findings);
+}
+
+/// REG-032: reading a prototype's member is admitted, so the usual ways of
+/// borrowing a built-in method stay open. A member read from a prototype is
+/// a value, but not the prototype itself, so a script may keep one
+/// (`const has = Object.prototype.hasOwnProperty`). `hasOwnProperty`
+/// itself is not an admitted method, so calling it is refused by the call
+/// rule, but not as a prototype.
+#[test]
+fn reg_032_a_prototype_read_through_a_member_is_admitted() {
+    let admitted = [
+        "export const copy = (xs) => Array.prototype.slice.call(xs);\n",
+        "export const kind = (x) => Object.prototype.toString.call(x);\n",
+        "export const isList = (x) => Array.isArray(x);\n",
+        "export const isArray = (x) => x instanceof Array;\n",
+        "export class A {\n  static of() {}\n}\n",
+        "export const count = (o) => Object.keys(o).length;\n",
+        "export const has = Object.prototype.hasOwnProperty;\n",
+        "export const same = (x) => x === Array.prototype;\n",
+        "export const kindOf = typeof Array.prototype;\n",
+    ];
+    for script in admitted {
+        let report = scan_widget_script(script);
+        assert!(
+            report.accepted(),
+            "{script:?} was refused: {}",
+            report
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    }
+    let borrowed = scan_widget_script(
+        "export const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);\n",
+    );
+    assert!(
+        borrowed
+            .findings
+            .iter()
+            .all(|finding| finding.check != "script-prototype"),
+        "{:?}",
+        borrowed.findings
+    );
+}
+
 /// REG-031: a view calls nothing the scan cannot show carries no
 /// capability, so a call into a dependency's Rust, whose functions this
 /// scan does not read, is refused.
