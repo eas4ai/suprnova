@@ -1,24 +1,37 @@
 //! `ssr:start`, `ssr:stop` and `ssr:check` (PAR-061): the shared
-//! implementation in `suprnova::console::ssr`.
+//! implementation in `suprnova::console::ssr`, and the application binary's
+//! commands, which run it with the Inertia configuration the application
+//! installed.
 //!
 //! A fake worker is a TCP listener the test drives: `/shutdown` closes the
 //! connection without an answer, answers 200, or holds the connection open,
 //! and `/health` answers with a status. A fake runtime is a shell script
 //! written to a temporary directory and run as `runtime bundle`, as the
 //! command runs `node ssr.js`.
+//!
+//! The application binary's commands run in a child process: the child is
+//! this test binary running [`ssr_app_child`], which builds an `Application`
+//! from its environment and runs one subcommand with `run_with_args`. A child
+//! has a stdout, a stderr, an exit status and a process id of its own, so the
+//! tests read the command's output and send it signals without touching the
+//! process the test runs in.
 
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
 use suprnova::console::ssr;
 use suprnova::testing::TestContainer;
-use suprnova::{FrameworkError, InertiaRequestExt, SsrConfig, SsrGateway, SsrResponse};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use suprnova::{
+    App, FrameworkError, Inertia, InertiaConfig, InertiaRequestExt, SsrConfig, SsrGateway,
+    SsrResponse,
+};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing_test::traced_test;
 
 // ---------------------------------------------------------------------------
@@ -215,8 +228,8 @@ impl SsrGateway for NoHealthCheck {
     }
 }
 
-/// A gateway whose health check answers `healthy`, and records the worker
-/// URL it was asked about.
+/// A gateway whose health check answers `healthy`, and records (and prints,
+/// for a child process's parent) the worker URL it was asked about.
 struct Health {
     healthy: bool,
     asked: Mutex<Vec<String>>,
@@ -243,6 +256,7 @@ impl SsrGateway for Health {
     }
 
     async fn is_healthy(&self, config: &SsrConfig) -> Option<bool> {
+        println!("gateway asked about {}", config.url);
         self.asked.lock().unwrap().push(config.url.clone());
         Some(self.healthy)
     }
@@ -623,4 +637,453 @@ async fn inssr_check_succeeds_when_the_worker_is_healthy() {
         vec!["http://ssr.internal:4000".to_owned()],
         "the gateway was asked about the configured worker"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The application binary's commands
+// ---------------------------------------------------------------------------
+
+/// What the child prints before a failure `run_with_args` returned to it.
+const RETURNED: &str = "run_with_args returned: ";
+
+/// The child half of every application-binary test: an `Application` built
+/// from the `INSSR_CHILD_*` environment runs `INSSR_CHILD_ARGS`. It does
+/// nothing unless a parent started it.
+///
+/// - `INSSR_CHILD_INSTALL`: `http` installs Inertia in the HTTP hook, as the
+///   scaffold does, `bootstrap` in the process-wide hook, `none` not at all.
+/// - `INSSR_CHILD_SSR`: the worker URL, or `disabled`.
+/// - `INSSR_CHILD_BUNDLE`, `INSSR_CHILD_RUNTIME`: the bundle path and the
+///   runtime; `INSSR_CHILD_ENSURE_RUNTIME=1` sets `ensure_runtime_exists`.
+/// - `INSSR_CHILD_GATEWAY`: `healthy`, `unhealthy` or `none` binds that
+///   gateway in the process-wide hook.
+#[test]
+fn ssr_app_child() {
+    let Ok(args) = std::env::var("INSSR_CHILD_ARGS") else {
+        return;
+    };
+    suprnova::boot::load_env().expect("load the configuration");
+    let var = |name: &str| std::env::var(name).ok();
+
+    let mut inertia = InertiaConfig::new();
+    match var("INSSR_CHILD_SSR").as_deref() {
+        Some("disabled") | None => inertia = inertia.ssr_disabled(),
+        Some(url) => inertia = inertia.ssr(url),
+    }
+    if let Some(bundle) = var("INSSR_CHILD_BUNDLE") {
+        inertia = inertia.ssr_bundle_path(bundle);
+    }
+    if let Some(runtime) = var("INSSR_CHILD_RUNTIME") {
+        inertia = inertia.ssr_runtime(runtime);
+    }
+    if var("INSSR_CHILD_ENSURE_RUNTIME").as_deref() == Some("1") {
+        inertia = inertia.ssr_ensure_runtime_exists(true);
+    }
+    let install = var("INSSR_CHILD_INSTALL").unwrap_or_else(|| "http".to_owned());
+    let gateway = var("INSSR_CHILD_GATEWAY");
+
+    let in_bootstrap = (install == "bootstrap").then(|| inertia.clone());
+    let in_http = (install == "http").then_some(inertia);
+    let argv: Vec<String> = std::iter::once("app".to_owned())
+        .chain(args.split_whitespace().map(str::to_owned))
+        .collect();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let outcome = runtime.block_on(async move {
+        suprnova::Application::new()
+            .bootstrap(move || async move {
+                match gateway.as_deref() {
+                    Some("healthy") => App::bind::<dyn SsrGateway>(Arc::new(Health::new(true))),
+                    Some("unhealthy") => App::bind::<dyn SsrGateway>(Arc::new(Health::new(false))),
+                    Some("none") => App::bind::<dyn SsrGateway>(Arc::new(NoHealthCheck)),
+                    _ => {}
+                }
+                if let Some(config) = in_bootstrap {
+                    Inertia::install(&config).expect("install Inertia");
+                }
+            })
+            .http_bootstrap(move || async move {
+                if let Some(config) = in_http {
+                    Inertia::install(&config).expect("install Inertia");
+                }
+            })
+            .run_with_args(argv)
+            .await
+    });
+    // The executable boundary: the failure came back to this caller, which
+    // prints it and exits non-zero, as `Application::run` does.
+    if let Err(e) = outcome {
+        if e.is_silent() {
+            eprintln!("{RETURNED}(silent)");
+        } else {
+            eprintln!("{RETURNED}{}", e.message());
+        }
+        std::process::exit(1);
+    }
+}
+
+/// A child process running the application binary's `args`.
+fn app(args: &str, env: &[(&str, &str)]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "ssr::ssr_app_child", "--nocapture"])
+        .env("INSSR_CHILD_ARGS", args)
+        .env("APP_ENV", "testing")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command
+}
+
+/// Run the child to the end.
+async fn run_app(args: &str, env: &[(&str, &str)]) -> Ran {
+    finish(&mut app(args, env)).await
+}
+
+/// Run `command` to the end and read what it printed.
+async fn finish(command: &mut tokio::process::Command) -> Ran {
+    let output = command.output().await.expect("run the child");
+    Ran {
+        code: output.status.code().expect("the child exited"),
+        out: String::from_utf8_lossy(&output.stdout).into_owned(),
+        err: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[tokio::test]
+async fn inssr_app_check_reads_the_installed_configuration() {
+    // Installed in the HTTP hook, where the scaffold installs Inertia.
+    let ran = run_app(
+        "ssr:check",
+        &[
+            ("INSSR_CHILD_SSR", "http://ssr.internal:4000"),
+            ("INSSR_CHILD_GATEWAY", "healthy"),
+        ],
+    )
+    .await;
+
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
+    assert!(
+        ran.out
+            .contains("gateway asked about http://ssr.internal:4000"),
+        "the gateway was asked about the installed worker: {}",
+        ran.out
+    );
+    assert!(
+        ran.out.contains("Inertia SSR server is running."),
+        "{}",
+        ran.out
+    );
+}
+
+#[tokio::test]
+async fn inssr_app_check_fails_when_the_installed_worker_is_unhealthy() {
+    for (gateway, message) in [
+        ("unhealthy", "Inertia SSR server is not running."),
+        ("none", "The SSR gateway does not support health checks."),
+    ] {
+        let ran = run_app(
+            "ssr:check",
+            &[
+                ("INSSR_CHILD_SSR", "http://127.0.0.1:13714"),
+                ("INSSR_CHILD_INSTALL", "bootstrap"),
+                ("INSSR_CHILD_GATEWAY", gateway),
+            ],
+        )
+        .await;
+
+        assert_eq!(ran.code, 1, "{gateway}: out: {} err: {}", ran.out, ran.err);
+        assert!(ran.err.contains(message), "{gateway}: {}", ran.err);
+    }
+}
+
+#[tokio::test]
+async fn inssr_app_ssr_commands_need_an_installed_inertia_configuration() {
+    for args in ["ssr:start", "ssr:stop", "ssr:check"] {
+        let ran = run_app(args, &[("INSSR_CHILD_INSTALL", "none")]).await;
+
+        assert_eq!(ran.code, 1, "{args}: out: {} err: {}", ran.out, ran.err);
+        assert!(
+            ran.err.contains(RETURNED) && ran.err.contains("Inertia::install"),
+            "{args}: the failure says what is missing: {}",
+            ran.err
+        );
+    }
+}
+
+#[tokio::test]
+async fn inssr_app_stop_calls_the_installed_workers_shutdown() {
+    let worker = FakeWorker::start(OnShutdown::Close, 200, None).await;
+
+    let ran = run_app("ssr:stop", &[("INSSR_CHILD_SSR", &worker.url)]).await;
+
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
+    assert!(
+        ran.out.contains("Inertia SSR server stopped."),
+        "{}",
+        ran.out
+    );
+    assert_eq!(worker.paths(), vec!["/shutdown".to_owned()]);
+}
+
+#[tokio::test]
+async fn inssr_app_stop_with_graceful_succeeds_when_no_worker_runs() {
+    let url = refusing_url();
+
+    let graceful = run_app("ssr:stop --graceful", &[("INSSR_CHILD_SSR", &url)]).await;
+    assert_eq!(
+        graceful.code, 0,
+        "out: {} err: {}",
+        graceful.out, graceful.err
+    );
+    assert!(
+        graceful.out.contains("Inertia SSR server is not running."),
+        "{}",
+        graceful.out
+    );
+
+    let plain = run_app("ssr:stop", &[("INSSR_CHILD_SSR", &url)]).await;
+    assert_eq!(plain.code, 1, "out: {} err: {}", plain.out, plain.err);
+    assert!(
+        plain
+            .err
+            .contains("Unable to connect to Inertia SSR server."),
+        "{}",
+        plain.err
+    );
+}
+
+#[tokio::test]
+async fn inssr_app_start_refuses_when_ssr_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let runtime = script(
+        dir.path(),
+        "runtime",
+        &format!("touch '{}'", marker.display()),
+    );
+    let bundle = bundle(dir.path());
+
+    let ran = run_app(
+        "ssr:start",
+        &[
+            ("INSSR_CHILD_SSR", "disabled"),
+            ("INSSR_CHILD_BUNDLE", &path_str(&bundle)),
+            ("INSSR_CHILD_RUNTIME", &path_str(&runtime)),
+        ],
+    )
+    .await;
+
+    assert_eq!(ran.code, 1, "out: {} err: {}", ran.out, ran.err);
+    assert!(
+        ran.err.contains("Inertia SSR is not enabled."),
+        "{}",
+        ran.err
+    );
+    assert!(!marker.exists(), "no worker started with SSR disabled");
+}
+
+#[tokio::test]
+async fn inssr_app_start_runs_the_installed_runtime_after_stopping_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("started");
+    let worker = FakeWorker::start(OnShutdown::Close, 200, Some(marker.clone())).await;
+    let runtime = script(
+        dir.path(),
+        "runtime",
+        &format!(
+            "touch '{}'\necho \"rendering $1\"\nexit 7",
+            marker.display()
+        ),
+    );
+    let bundle = bundle(dir.path());
+
+    let ran = run_app(
+        "ssr:start",
+        &[
+            ("INSSR_CHILD_SSR", &worker.url),
+            ("INSSR_CHILD_BUNDLE", &path_str(&bundle)),
+            ("INSSR_CHILD_RUNTIME", &path_str(&runtime)),
+            ("INSSR_CHILD_ENSURE_RUNTIME", "1"),
+        ],
+    )
+    .await;
+
+    assert!(
+        ran.out.contains(&format!("rendering {}", bundle.display())),
+        "the installed runtime ran the installed bundle: {}",
+        ran.out
+    );
+    assert_eq!(worker.paths(), vec!["/shutdown".to_owned()]);
+    assert!(
+        !worker.seen()[0].marker_existed,
+        "stopped before it started"
+    );
+    assert_eq!(ran.code, 1, "out: {} err: {}", ran.out, ran.err);
+    assert!(
+        ran.err
+            .contains(&format!("{RETURNED}the command exited with status 7")),
+        "run_with_args reports the worker's exit status: {}",
+        ran.err
+    );
+}
+
+#[tokio::test]
+async fn inssr_app_start_takes_the_runtime_flag_over_the_installed_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let configured = script(dir.path(), "configured", "echo configured");
+    let flagged = script(dir.path(), "flagged", "echo flagged");
+    let bundle = bundle(dir.path());
+
+    let ran = run_app(
+        &format!("ssr:start --runtime {}", path_str(&flagged)),
+        &[
+            ("INSSR_CHILD_SSR", &refusing_url()),
+            ("INSSR_CHILD_BUNDLE", &path_str(&bundle)),
+            ("INSSR_CHILD_RUNTIME", &path_str(&configured)),
+        ],
+    )
+    .await;
+
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
+    assert!(ran.out.contains("flagged"), "{}", ran.out);
+    assert!(!ran.out.contains("configured"), "{}", ran.out);
+}
+
+#[tokio::test]
+async fn inssr_app_start_warns_and_uses_a_conventional_bundle_when_the_configured_one_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let conventional = dir.path().join("frontend/bootstrap/ssr");
+    std::fs::create_dir_all(&conventional).unwrap();
+    std::fs::write(conventional.join("ssr.mjs"), "// the SSR bundle\n").unwrap();
+    let runtime = script(dir.path(), "runtime", "echo \"rendering $1\"");
+
+    let ran = finish(
+        app(
+            "ssr:start",
+            &[
+                ("INSSR_CHILD_SSR", &refusing_url()),
+                ("INSSR_CHILD_BUNDLE", "build/missing-ssr.js"),
+                ("INSSR_CHILD_RUNTIME", &path_str(&runtime)),
+            ],
+        )
+        .current_dir(dir.path()),
+    )
+    .await;
+
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
+    assert!(
+        ran.err.contains(
+            "Inertia SSR bundle not found at the configured path: \"build/missing-ssr.js\""
+        ) && ran
+            .err
+            .contains("Using a default bundle instead: \"frontend/bootstrap/ssr/ssr.mjs\""),
+        "both warnings name their path: {}",
+        ran.err
+    );
+    assert!(
+        ran.out.contains("rendering frontend/bootstrap/ssr/ssr.mjs"),
+        "the conventional bundle ran: {}",
+        ran.out
+    );
+}
+
+/// Start `ssr:start` in a child, wait until the worker says it is ready,
+/// send the child `signal`, and return what the child printed.
+async fn signal_a_running_start(signal: nix::sys::signal::Signal) -> Ran {
+    let dir = tempfile::tempdir().unwrap();
+    // `wait` returns when a trapped signal arrives; the sleeper is killed so
+    // nothing keeps the worker's output pipes open after it exits.
+    let runtime = script(
+        dir.path(),
+        "runtime",
+        "trap 'echo \"worker got TERM\"; kill $sleeper; exit 0' TERM\n\
+         trap 'echo \"worker got INT\"; kill $sleeper; exit 0' INT\n\
+         sleep 1000 >/dev/null 2>&1 &\n\
+         sleeper=$!\n\
+         echo ready\n\
+         wait $sleeper",
+    );
+    let bundle = bundle(dir.path());
+    let url = refusing_url();
+    let mut child = app(
+        "ssr:start",
+        &[
+            ("INSSR_CHILD_SSR", &url),
+            ("INSSR_CHILD_BUNDLE", &path_str(&bundle)),
+            ("INSSR_CHILD_RUNTIME", &path_str(&runtime)),
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn the child");
+
+    let mut stderr = child.stderr.take().expect("the child's stderr");
+    let errors = tokio::spawn(async move {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text).await;
+        text
+    });
+    let mut lines = BufReader::new(child.stdout.take().expect("the child's stdout")).lines();
+    let mut out = String::new();
+    while let Some(line) = lines.next_line().await.expect("read the child's stdout") {
+        out.push_str(&line);
+        out.push('\n');
+        if line == "ready" {
+            break;
+        }
+    }
+    assert!(
+        out.contains("ready\n"),
+        "the worker never said it was ready: {out} {}",
+        errors.await.unwrap()
+    );
+
+    let pid = nix::unistd::Pid::from_raw(child.id().expect("the child runs") as i32);
+    nix::sys::signal::kill(pid, signal).expect("signal the child");
+
+    while let Some(line) = lines.next_line().await.expect("read the child's stdout") {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let status = child.wait().await.expect("wait for the child");
+    Ran {
+        code: status
+            .code()
+            .expect("the child exited, not killed by the signal"),
+        out,
+        err: errors.await.unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn inssr_app_start_forwards_sigterm_to_the_worker() {
+    let ran = signal_a_running_start(nix::sys::signal::Signal::SIGTERM).await;
+
+    assert!(
+        ran.out.contains("worker got TERM"),
+        "the worker was sent SIGTERM: {} {}",
+        ran.out,
+        ran.err
+    );
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
+}
+
+#[tokio::test]
+async fn inssr_app_start_forwards_sigint_to_the_worker() {
+    let ran = signal_a_running_start(nix::sys::signal::Signal::SIGINT).await;
+
+    assert!(
+        ran.out.contains("worker got TERM"),
+        "the worker was asked to stop: {} {}",
+        ran.out,
+        ran.err
+    );
+    assert_eq!(ran.code, 0, "out: {} err: {}", ran.out, ran.err);
 }
