@@ -25,6 +25,7 @@ the long form.
 | `crypto::testing::encrypt_string_under` | A value encrypted under an old key, for a rotation test |
 | `console::test` | Run a console command, read what it printed, and answer what it asks - see [Console](console.md#testing-a-command) |
 | Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP - see [Mocking](mocking.md) |
+| `TestClient` | Sends requests through your router and middleware over an in-memory connection, carrying cookies between them - see [HTTP Tests](http-tests.md#the-test-client) |
 | `TestResponse` | Fluent assertions over an HTTP test's `(status, headers, body)` triple - see [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
 | `AssertableInertia` | Fluent assertions over an Inertia page object - see [HTTP Tests](http-tests.md#testing-inertia-responses) |
 
@@ -626,6 +627,7 @@ matcher is a build error, not a flaky test.
 | `encrypt_string_under`, `encrypt_string_for_under` | `framework/src/crypto/testing.rs` |
 | `console::test`, `ConsoleRun` | `framework/src/console/testing.rs` |
 | Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
+| `TestClient`, `TestRequest` | `framework/src/testing/client.rs` |
 | `TestResponse` | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 

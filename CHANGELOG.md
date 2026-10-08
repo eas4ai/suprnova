@@ -351,6 +351,65 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   does when it exits, or, with `--graceful`, when no worker can be
   connected to. An answer, or a connection still open after the timeout
   (2000 ms by default), fails (CM-02).
+- **`suprnova::testing::TestClient`, one in-process test client.** Every
+  HTTP test copied its own loopback harness - a port, a hyper client and
+  hand-carried session cookies - because `handle_request` takes a body only
+  hyper builds. `TestClient::new(router, registry)` sends `get`, `post`,
+  `put`, `patch`, `delete` and `send(method, path)` requests with
+  `header`, `json`, `form` and `inertia()` (an Inertia visit's headers with
+  the installed asset version) over an in-memory connection, never a port,
+  in the task that awaits it, so a `TestContainer` scope still applies. It
+  carries every cookie a response sets to the next request and drops the
+  ones a response expires, keeps each response's error report, gives every
+  `TestResponse` the session store `with_session_store` names, and fails a
+  request that has not answered after 10 seconds, naming its method and
+  path. See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01,
+  TS-10).
+- **Laravel's prop assertions and scopes on `AssertableInertia`.** It had
+  `has`, `missing`, `where_` and `count` only. It now has `has_all`,
+  `has_any`, `missing_all`, `count_between`, `where_not`, `where_null`,
+  `where_not_null`, `where_all`, `where_type` (`string`, `integer`,
+  `double`, `boolean`, `array` and `null`, joined by `|`; an unknown name
+  fails), `where_all_type` and `where_contains`, and `count` counts an
+  object as well. `scope`, `first`, `each`, `has_with` and `has_count_with`
+  run a callback over a nested object or array whose failures name the full
+  dotted path (`user.name`). A scope fails when it ends with a prop no
+  assertion touched, unless `etc()` was called in it; the page's top level
+  never checks, as Laravel's `assertInertia` does not (TS-06).
+- **Inertia reloads through the client, full and by deferred group.** A
+  reload needed a `with_reload` closure wired to the test's own harness. A
+  page from a `TestClient` response now reloads through that client with
+  its cookies, and `with_reload` still replaces it for a custom harness.
+  `reload()` replays the page with no partial-reload header and asserts the
+  same component, url and version; `load_deferred_props_of(groups)`
+  requests the props of the named groups only, every group for an empty
+  list, and fails naming a group the page does not defer instead of
+  requesting nothing. `reload_with`, `reload_only_with`,
+  `reload_except_with` and `load_deferred_props_with` run a callback over
+  the reloaded page (TS-07, TS-08).
+- **Inertia page readers, the flash a redirect leaves, and big integers in
+  tests.** `AssertableInertia` gains `missing_flash`, `to_page()` (with
+  `encryptHistory` and `clearHistory` only when the page set them),
+  `encrypt_history()` and `clear_history()`, and `TestResponse` gains
+  `inertia_page()` and `inertia_props(path)`. A handler that flashes and
+  redirects leaves its Inertia flash in the session, and the redirect
+  carries no page to assert it on; `assert_inertia_flash(key, expected)`
+  and `assert_inertia_flash_missing(key)` read it through the attached
+  session store. A page with `preserveBigIntegers` sends integers beyond
+  2^53 - 1 as `{"$bigint": "<digits>"}` markers, so
+  `where_("id", 9007199254740993_i64)` failed against the page the handler
+  built; the markers in props and flash are now decoded before any
+  assertion or reader sees them (TS-12, TS-13, TS-14, TS-15, TS-16).
+- **`InertiaConfig::testing_ensure_pages_exist`, on by default.**
+  `AssertableInertia::component(name)` passed for a component with no page
+  file, so a test stayed green while the browser showed a blank page. With
+  an Inertia configuration installed it now also looks for the file under
+  `pages_dir` with one of `page_extensions`, the lookup
+  `ensure_pages_exist` does at render time, and fails with
+  `Inertia page component file [Name] does not exist.`, the directory and
+  the extensions it tried. `component_exists(name, bool)` decides the check
+  for one assertion, and with no configuration installed nothing is
+  checked (TS-03).
 
 ### Changed
 
@@ -875,6 +934,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prints Laravel's messages: `Inertia SSR server is running.`, `Inertia SSR
   server is not running.`, or `The SSR gateway does not support health
   checks.`, exiting 0 or 1 (CM-03, SS-10).
+- **`TestResponse::assert_inertia()` reads a first visit.** It refused any
+  response without `X-Inertia: true`, so the HTML document a plain `GET` of
+  a page route returns could only be asserted through
+  `AssertableInertia::from_response` on an `HttpResponse`. It now reads the
+  page from the document's `data-page` element as well, and
+  `assert_inertia_with(callback)` runs a callback over the page and returns
+  the response for chaining, as Laravel's `assertInertia(fn)` does (TS-01).
 
 ### Fixed
 
