@@ -2967,7 +2967,7 @@ fn build_html_response<P: Serialize + ?Sized>(
         html.extend_from_slice(b"\">");
         serde_json::to_writer(SlashEscaping(&mut html), page)
             .map_err(|error| page_encoding_error(&error))?;
-        html.extend_from_slice(b"</script>\n\n<div id=\"");
+        html.extend_from_slice(b"</script>\n<div id=\"");
         html.extend_from_slice(mount_id.as_bytes());
         html.extend_from_slice(b"\"></div>\n</body>\n</html>");
         // Only UTF-8 was written: the JSON serializer's output and ASCII.

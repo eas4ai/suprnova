@@ -1,0 +1,23 @@
+@layer suprnova-ui {
+  .sn-card {
+    display: grid;
+    gap: var(--sn-space-3);
+    padding: var(--sn-space-4);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-lg);
+    background: var(--sn-color-surface);
+    color: var(--sn-color-text);
+  }
+
+  .sn-card-title {
+    margin: 0;
+    font-size: var(--sn-font-size-lg);
+    font-weight: var(--sn-font-weight-semibold);
+  }
+
+  .sn-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sn-space-2);
+  }
+}
