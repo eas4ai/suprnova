@@ -1011,3 +1011,39 @@ fn intt_a_scope_keeps_the_page_level_fields() {
         user.component("Home").url("/").version("").etc();
     });
 }
+
+// ── PAR-066: `reload` asserts the replay ─────────────────────────────
+
+#[tokio::test]
+#[should_panic(expected = "AssertableInertia::component")]
+async fn intt_reload_panics_when_the_replay_lands_on_another_component() {
+    let response = HttpResponse::json(full_users_page()).header("X-Inertia", "true");
+    let assertable = AssertableInertia::from_response(&response).with_reload(|reload| async move {
+        assert!(
+            reload.only.is_none() && reload.except.is_none(),
+            "a full reload"
+        );
+        let elsewhere = json!({
+            "component": "Wrong/Component",
+            "props": {},
+            "url": "/users",
+            "version": MANIFEST_VERSION_FALLBACK,
+        });
+        AssertableInertia::from_response(&HttpResponse::json(elsewhere).header("X-Inertia", "true"))
+    });
+
+    assertable.reload().await;
+}
+
+#[test]
+fn intt_a_full_reload_request_sends_no_partial_headers() {
+    let full = ReloadRequest {
+        url: "/users".to_string(),
+        component: "Users/Index".to_string(),
+        version: "v1".to_string(),
+        only: None,
+        except: None,
+    };
+    let names: Vec<String> = full.headers().into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["X-Inertia", "X-Inertia-Version"]);
+}

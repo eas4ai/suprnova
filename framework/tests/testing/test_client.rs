@@ -357,3 +357,182 @@ async fn intt_assert_inertia_with_runs_the_callback_and_returns_the_response() {
 
     assert_eq!(seen, Some(json!(3)), "the callback must have run");
 }
+
+// ── PAR-066: reloads through the client ─────────────────────────────
+
+/// The partial-reload headers of one request: `X-Inertia-Partial-Component`
+/// and `X-Inertia-Partial-Data`, each `None` when not sent.
+type PartialHeaders = (Option<String>, Option<String>);
+
+/// What the server saw on each request to `/users`.
+#[derive(Clone, Default)]
+struct Seen(Arc<Mutex<Vec<PartialHeaders>>>);
+
+impl Seen {
+    fn last(&self) -> PartialHeaders {
+        self.0
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a request reached /users")
+    }
+}
+
+fn users_routes(seen: Seen) -> Router {
+    Router::new()
+        .get("/users", move |req: Request| {
+            let seen = seen.clone();
+            async move {
+                seen.0.lock().unwrap().push((
+                    req.header("X-Inertia-Partial-Component")
+                        .map(str::to_string),
+                    req.header("X-Inertia-Partial-Data").map(str::to_string),
+                ));
+                InertiaResponse::new("Users/Index")
+                    .with("users", json!([{"id": 1, "name": "Ada"}]))
+                    .with("filters", json!({"q": ""}))
+                    .defer_with(
+                        "stats",
+                        suprnova::DeferOptions::default().group("stats"),
+                        || async { Ok::<_, FrameworkError>(json!({"total": 1})) },
+                    )
+                    .defer("permissions", || async {
+                        Ok::<_, FrameworkError>(json!(["read"]))
+                    })
+                    .resolve(&req)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
+        })
+        .into()
+}
+
+async fn users_page(seen: &Seen) -> suprnova::testing::AssertableInertia {
+    let client = TestClient::new(users_routes(seen.clone()), MiddlewareRegistry::new());
+    client.get("/users").inertia().send().await.assert_inertia()
+}
+
+#[tokio::test]
+async fn intt_a_client_response_reloads_with_nothing_attached() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+
+    let reloaded = page.reload_only(["users"]).await;
+
+    reloaded.has("users").missing("filters");
+    assert_eq!(
+        seen.last(),
+        (Some("Users/Index".to_string()), Some("users".to_string()))
+    );
+    // The reloaded page carries the client forward.
+    reloaded.reload_except(["filters"]).await.has("users");
+}
+
+#[tokio::test]
+async fn intt_load_deferred_props_of_requests_only_the_named_groups() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+    page.missing("stats").missing("permissions");
+
+    let reloaded = page.load_deferred_props_of(["stats"]).await;
+
+    assert_eq!(seen.last().1.as_deref(), Some("stats"));
+    reloaded.where_("stats.total", 1).missing("permissions");
+}
+
+#[tokio::test]
+async fn intt_load_deferred_props_of_no_group_requests_every_group() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+
+    let reloaded = page.load_deferred_props_of(Vec::<String>::new()).await;
+
+    let mut requested: Vec<String> = seen
+        .last()
+        .1
+        .expect("a partial reload")
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    requested.sort();
+    assert_eq!(requested, ["permissions", "stats"]);
+    reloaded.has("stats").has("permissions");
+}
+
+#[tokio::test]
+async fn intt_load_deferred_props_of_an_unknown_group_fails_naming_it() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+
+    let failure = tokio::spawn(async move {
+        page.load_deferred_props_of(["nope"]).await;
+    })
+    .await
+    .expect_err("an unknown group must fail");
+    let message = failure.into_panic();
+    let message = message
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(message.contains("\"nope\""), "{message}");
+}
+
+#[tokio::test]
+async fn intt_load_deferred_props_with_runs_its_callback() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+    let mut ran = false;
+
+    page.load_deferred_props_with(["default"], |reloaded| {
+        reloaded.where_("permissions", json!(["read"]));
+        ran = true;
+    })
+    .await;
+
+    assert!(ran);
+    assert_eq!(seen.last().1.as_deref(), Some("permissions"));
+}
+
+#[tokio::test]
+async fn intt_a_full_reload_sends_no_partial_header() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+
+    let reloaded = page.reload().await;
+
+    assert_eq!(
+        seen.last(),
+        (None, None),
+        "a full reload is not a partial one"
+    );
+    reloaded
+        .component("Users/Index")
+        .has("users")
+        .has("filters");
+}
+
+#[tokio::test]
+async fn intt_reload_only_with_and_the_other_callbacks_run() {
+    let seen = Seen::default();
+    let page = users_page(&seen).await;
+    let mut ran = Vec::new();
+
+    page.reload_only_with(["users"], |reloaded| {
+        reloaded.has("users");
+        ran.push("only");
+    })
+    .await;
+    page.reload_except_with(["users"], |reloaded| {
+        reloaded.missing("users").has("filters");
+        ran.push("except");
+    })
+    .await;
+    page.reload_with(|reloaded| {
+        reloaded.has("filters");
+        ran.push("full");
+    })
+    .await;
+
+    assert_eq!(ran, ["only", "except", "full"]);
+}

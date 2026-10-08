@@ -25,6 +25,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
 
+use super::inertia::{ReloadRequest, Reloader};
 use super::response::TestResponse;
 use crate::{ErrorReport, Method, MiddlewareRegistry, Router, SessionStore};
 
@@ -141,6 +142,22 @@ impl TestClient {
             headers: Vec::new(),
             body: Bytes::new(),
         }
+    }
+
+    /// Replay a page reload through this client, with its cookies: an
+    /// Inertia visit to the page's url carrying the reload's headers.
+    fn reloader(&self) -> Reloader {
+        let client = self.clone();
+        Arc::new(move |reload: ReloadRequest| {
+            let client = client.clone();
+            Box::pin(async move {
+                let mut request = client.get(reload.url.clone()).inertia();
+                for (name, value) in reload.headers() {
+                    request = request.header(name, value);
+                }
+                request.send().await.assert_inertia()
+            })
+        })
     }
 
     /// The cookies the client holds, as `(name, wire value)` pairs, in the
@@ -356,8 +373,10 @@ impl TestRequest {
     ///
     /// The response keeps the error report the framework attached to it
     /// ([`TestResponse::error_report`]) and, when the client was given one,
-    /// the session store. Every cookie the response sets is kept for the
-    /// client's next request.
+    /// the session store; its Inertia page
+    /// ([`TestResponse::assert_inertia`]) reloads through this client.
+    /// Every cookie the response sets is kept for the client's next
+    /// request.
     ///
     /// # Panics
     ///
@@ -386,7 +405,8 @@ impl TestRequest {
         client.remember_cookies(&exchanged.headers);
         let mut response = TestResponse::new(exchanged.status, exchanged.headers, exchanged.body)
             .with_error_report(exchanged.report)
-            .with_client_cookies(client.cookie_pairs());
+            .with_client_cookies(client.cookie_pairs())
+            .with_reloader(client.reloader());
         if let Some((store, cookie_name)) = &client.session {
             response = response.with_session_store(store.clone(), cookie_name.clone());
         }

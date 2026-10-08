@@ -9,35 +9,30 @@
 //! [`crate::testing::Expect`].
 //!
 //! Two ways to build one:
+//! - [`crate::testing::TestResponse::assert_inertia`] - the entry point
+//!   for a test holding a [`crate::testing::TestResponse`], most often one
+//!   a [`crate::testing::TestClient`] returned. Reads the JSON page of an
+//!   Inertia visit and the HTML document of a first visit alike.
 //! - [`AssertableInertia::from_response`] - works directly on a
 //!   [`crate::HttpResponse`], the type `InertiaResponse::resolve`
 //!   returns, for a test that drives the response pipeline without a
-//!   socket. Handles both response shapes.
-//! - [`crate::testing::TestResponse::assert_inertia`] - the entry point
-//!   for a loopback-socket test already holding a
-//!   [`crate::testing::TestResponse`]. It only handles the JSON shape (a
-//!   real Inertia visit sends `X-Inertia: true` and gets JSON back), and
-//!   panics with an actionable message if the response isn't one.
+//!   request. Handles both response shapes.
 //!
 //! ## Reloading for partial-reload / deferred-props assertions
 //!
-//! [`AssertableInertia::reload_only`],
-//! [`reload_except`](AssertableInertia::reload_except), and
-//! [`load_deferred_props`](AssertableInertia::load_deferred_props) mirror
-//! Inertia's client-side partial reload: they build the request headers a
-//! real follow-up XHR would send ([`ReloadRequest::headers`]) and replay
-//! them. Unlike Laravel, where `ReloadRequest` reissues the request
-//! through the same in-process PHP kernel the original test used,
-//! Suprnova's HTTP tests cross a real hyper/TCP wire and every test file
-//! owns its own `spawn_server` / `request` harness (see
-//! `manual/http-tests.md`) - there is no single "the test client" to
-//! reach for. So these methods carry no built-in transport: attach one
-//! with [`AssertableInertia::with_reload`], a closure from a
-//! [`ReloadRequest`] to a future producing the reloaded
-//! [`AssertableInertia`], wired to whatever harness the test already
-//! uses. Calling a reload method without one attached panics with that
-//! instruction. See `manual/http-tests.md#testing-inertia-responses` for
-//! a worked example.
+//! [`AssertableInertia::reload`], [`reload_only`](AssertableInertia::reload_only),
+//! [`reload_except`](AssertableInertia::reload_except) and
+//! [`load_deferred_props_of`](AssertableInertia::load_deferred_props_of)
+//! mirror the Inertia client's reloads: they build the headers a real
+//! follow-up visit sends ([`ReloadRequest::headers`]) and replay them, as
+//! Laravel's `ReloadRequest` reissues the request through the same
+//! application. A page from a [`crate::testing::TestClient`] response
+//! replays through that client, with its cookies. A page built any other
+//! way replays through the closure [`AssertableInertia::with_reload`]
+//! attaches, from a [`ReloadRequest`] to a future producing the reloaded
+//! [`AssertableInertia`], wired to whatever harness the test uses; without
+//! either, a reload panics with that instruction. See
+//! `manual/http-tests.md#testing-inertia-responses` for worked examples.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -49,9 +44,9 @@ use super::response::fail_with_report;
 use crate::{ErrorReport, HttpResponse};
 
 /// Closure that replays a [`ReloadRequest`] and returns the reloaded
-/// page's assertions. See the module docs for why this is a
-/// caller-supplied closure rather than a built-in HTTP client.
-type Reloader = Arc<
+/// page's assertions: a [`crate::testing::TestClient`]'s own, or one a test
+/// attached with [`AssertableInertia::with_reload`].
+pub(crate) type Reloader = Arc<
     dyn Fn(ReloadRequest) -> Pin<Box<dyn Future<Output = AssertableInertia> + Send>> + Send + Sync,
 >;
 
@@ -218,15 +213,28 @@ impl AssertableInertia {
         fail_with_report(message, self.report.as_ref())
     }
 
-    /// Attach the closure [`Self::reload_only`], [`Self::reload_except`],
-    /// and [`Self::load_deferred_props`] replay a [`ReloadRequest`]
-    /// through. See the module docs.
+    /// Attach the closure every reload ([`Self::reload`],
+    /// [`Self::reload_only`], [`Self::reload_except`],
+    /// [`Self::load_deferred_props_of`]) replays a [`ReloadRequest`]
+    /// through, replacing the client's own on a page from a
+    /// [`crate::testing::TestClient`]. For a test that drives requests
+    /// through its own harness; see the module docs.
     pub fn with_reload<F, Fut>(mut self, reloader: F) -> Self
     where
         F: Fn(ReloadRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = AssertableInertia> + Send + 'static,
     {
         self.reload = Some(Arc::new(move |request| Box::pin(reloader(request))));
+        self
+    }
+
+    /// Replay through `reload` when there is one, keeping whatever was
+    /// attached otherwise. [`crate::testing::TestResponse::assert_inertia`]
+    /// hands over the client's reloader this way.
+    pub(crate) fn with_reloader(mut self, reload: Option<Reloader>) -> Self {
+        if reload.is_some() {
+            self.reload = reload;
+        }
         self
     }
 
@@ -794,13 +802,40 @@ impl AssertableInertia {
         self
     }
 
+    /// Replay this page as a full reload and assert it lands on the same
+    /// component, url and version: the page a browser gets when the
+    /// visitor reloads it. No partial-reload header is sent. Laravel's
+    /// `reload()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page has no client or attached reloader (see
+    /// [`Self::with_reload`]), or the replay lands elsewhere.
+    pub async fn reload(&self) -> AssertableInertia {
+        let reloaded = self.replay(None, None).await;
+        self.assert_same_page(&reloaded);
+        reloaded
+    }
+
+    /// [`Self::reload`], then `callback` over the reloaded page. Laravel's
+    /// `reload($callback)`.
+    pub async fn reload_with(
+        &self,
+        callback: impl FnOnce(&AssertableInertia),
+    ) -> AssertableInertia {
+        let reloaded = self.reload().await;
+        callback(&reloaded);
+        reloaded
+    }
+
     /// Replay this page as a partial reload requesting only `only`, and
     /// assert the reload landed on the same component/url/version and
     /// that every requested key is present.
     ///
     /// # Panics
     ///
-    /// Panics if no reloader is attached (see [`Self::with_reload`]).
+    /// Panics if the page has no client or attached reloader (see
+    /// [`Self::with_reload`]).
     pub async fn reload_only<I, S>(&self, only: I) -> AssertableInertia
     where
         I: IntoIterator<Item = S>,
@@ -808,12 +843,26 @@ impl AssertableInertia {
     {
         let only: Vec<String> = only.into_iter().map(Into::into).collect();
         let reloaded = self.replay(Some(only.clone()), None).await;
-        reloaded.assert_component("component", &self.component, Some(false));
-        reloaded.url(&self.url);
-        reloaded.version(&self.version);
+        self.assert_same_page(&reloaded);
         for key in &only {
             reloaded.has(key);
         }
+        reloaded
+    }
+
+    /// [`Self::reload_only`], then `callback` over the reloaded page.
+    /// Laravel's `reloadOnly($only, $callback)`.
+    pub async fn reload_only_with<I, S>(
+        &self,
+        only: I,
+        callback: impl FnOnce(&AssertableInertia),
+    ) -> AssertableInertia
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let reloaded = self.reload_only(only).await;
+        callback(&reloaded);
         reloaded
     }
 
@@ -822,7 +871,8 @@ impl AssertableInertia {
     ///
     /// # Panics
     ///
-    /// Panics if no reloader is attached (see [`Self::with_reload`]).
+    /// Panics if the page has no client or attached reloader (see
+    /// [`Self::with_reload`]).
     pub async fn reload_except<I, S>(&self, except: I) -> AssertableInertia
     where
         I: IntoIterator<Item = S>,
@@ -830,32 +880,104 @@ impl AssertableInertia {
     {
         let except: Vec<String> = except.into_iter().map(Into::into).collect();
         let reloaded = self.replay(None, Some(except.clone())).await;
-        reloaded.assert_component("component", &self.component, Some(false));
-        reloaded.url(&self.url);
-        reloaded.version(&self.version);
+        self.assert_same_page(&reloaded);
         for key in &except {
             reloaded.missing(key);
         }
         reloaded
     }
 
+    /// [`Self::reload_except`], then `callback` over the reloaded page.
+    /// Laravel's `reloadExcept($except, $callback)`.
+    pub async fn reload_except_with<I, S>(
+        &self,
+        except: I,
+        callback: impl FnOnce(&AssertableInertia),
+    ) -> AssertableInertia
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let reloaded = self.reload_except(except).await;
+        callback(&reloaded);
+        reloaded
+    }
+
     /// Replay every group named in this page's `deferredProps` as one
     /// partial reload - the follow-up XHR the Inertia client issues
     /// right after the initial visit to resolve every deferred prop at
-    /// once.
+    /// once. [`Self::load_deferred_props_of`] with no group.
     ///
     /// # Panics
     ///
-    /// Panics if no reloader is attached (see [`Self::with_reload`]).
+    /// Panics if the page has no client or attached reloader (see
+    /// [`Self::with_reload`]).
     pub async fn load_deferred_props(&self) -> AssertableInertia {
-        let keys: Vec<String> = self
-            .deferred_props
-            .values()
+        self.load_deferred_props_of(Vec::<String>::new()).await
+    }
+
+    /// Replay a partial reload requesting the props of the deferred
+    /// `groups` only, as the client does for the groups a page shows; no
+    /// group means every group. Laravel's `loadDeferredProps($groups)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a group is not in the page's `deferredProps` (a typo would
+    /// otherwise request nothing and pass), or if the page has no client or
+    /// attached reloader.
+    pub async fn load_deferred_props_of<I, S>(&self, groups: I) -> AssertableInertia
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let groups: Vec<String> = groups.into_iter().map(|g| g.as_ref().to_string()).collect();
+        let selected: Vec<&Value> = if groups.is_empty() {
+            self.deferred_props.values().collect()
+        } else {
+            groups
+                .iter()
+                .map(|group| {
+                    self.deferred_props.get(group).unwrap_or_else(|| {
+                        self.fail(format!(
+                            "AssertableInertia::load_deferred_props_of({groups:?})\n  the page \
+                             defers no group {group:?}\n  deferredProps: {}",
+                            Value::Object(self.deferred_props.clone())
+                        ))
+                    })
+                })
+                .collect()
+        };
+        let keys: Vec<String> = selected
+            .into_iter()
             .filter_map(Value::as_array)
             .flatten()
             .filter_map(|k| k.as_str().map(str::to_string))
             .collect();
         self.reload_only(keys).await
+    }
+
+    /// [`Self::load_deferred_props_of`], then `callback` over the reloaded
+    /// page. Laravel's `loadDeferredProps($groups, $callback)`.
+    pub async fn load_deferred_props_with<I, S>(
+        &self,
+        groups: I,
+        callback: impl FnOnce(&AssertableInertia),
+    ) -> AssertableInertia
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let reloaded = self.load_deferred_props_of(groups).await;
+        callback(&reloaded);
+        reloaded
+    }
+
+    /// Assert `reloaded` is this page again: the component (by name, the
+    /// original assertion decided the page-file check), url and version.
+    fn assert_same_page(&self, reloaded: &AssertableInertia) {
+        reloaded.assert_component("component", &self.component, Some(false));
+        reloaded.url(&self.url);
+        reloaded.version(&self.version);
     }
 
     async fn replay(
@@ -865,8 +987,8 @@ impl AssertableInertia {
     ) -> AssertableInertia {
         let Some(reload) = self.reload.clone() else {
             self.fail(
-                "AssertableInertia::reload_only/reload_except/load_deferred_props: no reloader \
-                 attached - call `.with_reload(...)` first; see \
+                "AssertableInertia reload: no reloader attached - assert a response a \
+                 TestClient returned, or call `.with_reload(...)` first; see \
                  manual/http-tests.md#testing-inertia-responses"
                     .to_string(),
             );
@@ -957,12 +1079,13 @@ pub(crate) fn page_object_from_html(html: &str) -> Option<Result<Value, serde_js
     Some(serde_json::from_str(&html[start..end]))
 }
 
-/// A recorded partial-reload request, built by
+/// A recorded reload request, built by [`AssertableInertia::reload`],
 /// [`AssertableInertia::reload_only`],
-/// [`AssertableInertia::reload_except`], and
-/// [`AssertableInertia::load_deferred_props`] and handed to the closure
-/// attached with [`AssertableInertia::with_reload`]. Mirrors what the
-/// Inertia client sends on a follow-up XHR against the same page.
+/// [`AssertableInertia::reload_except`] and
+/// [`AssertableInertia::load_deferred_props_of`] and replayed through the
+/// page's [`crate::testing::TestClient`] or the closure attached with
+/// [`AssertableInertia::with_reload`]. Mirrors what the Inertia client
+/// sends on a follow-up XHR against the same page.
 #[derive(Debug, Clone)]
 pub struct ReloadRequest {
     /// The page's URL - the same request path (and query) to reissue.

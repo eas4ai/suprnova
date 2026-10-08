@@ -32,6 +32,10 @@ pub struct TestResponse {
     /// the request holds after this response, as `(name, wire value)`
     /// pairs. Empty for a response built any other way.
     client_cookies: Vec<(String, String)>,
+    /// How the [`TestClient`](crate::testing::TestClient) that sent the
+    /// request replays a reload of this response's page. `None` for a
+    /// response built any other way.
+    reload: Option<super::inertia::Reloader>,
 }
 
 impl TestResponse {
@@ -59,7 +63,16 @@ impl TestResponse {
             session: None,
             report: None,
             client_cookies: Vec::new(),
+            reload: None,
         }
+    }
+
+    /// Replay this response's page through `reload`, the client's own, so
+    /// [`Self::assert_inertia`] gives a page that reloads with nothing
+    /// attached by hand.
+    pub(crate) fn with_reloader(mut self, reload: super::inertia::Reloader) -> Self {
+        self.reload = Some(reload);
+        self
     }
 
     /// Keep the error report the client took out of the response's
@@ -477,6 +490,7 @@ impl TestResponse {
             }
         };
         crate::testing::AssertableInertia::from_page(page, self.report.clone())
+            .with_reloader(self.reload.clone())
     }
 
     /// Run `callback` over this response's Inertia page and return the
