@@ -33,6 +33,16 @@ pub trait InertiaRequestExt: Send + Sync {
     fn path_and_query(&self) -> String {
         self.path().to_string()
     }
+    /// The request's absolute URL, scheme and host included, with its query
+    /// string - Laravel's `Request::fullUrl()`.
+    ///
+    /// SSR exclusion patterns are tried against it as well as the path, as
+    /// Laravel's `ExcludesPaths` does. Provided so a test mock that knows
+    /// only its path keeps compiling; the default is
+    /// [`path_and_query`](Self::path_and_query). Real requests override it.
+    fn full_url(&self) -> String {
+        self.path_and_query()
+    }
     /// Look up an HTTP header value by name (case-insensitive per HTTP spec).
     fn header(&self, name: &str) -> Option<&str>;
     /// Whether this request is an Inertia visit: `X-Inertia` holds any
@@ -43,14 +53,14 @@ pub trait InertiaRequestExt: Send + Sync {
             .is_some_and(|value| header_is_truthy(value.as_bytes()))
     }
     /// Whether this is a prefetch visit. The Inertia client sets
-    /// `Purpose: prefetch` on hover/intent prefetches; handlers can
-    /// use this to skip expensive side effects (logging, analytics
-    /// counters, cache warmups) on a request that may never become a
-    /// real navigation.
+    /// `Purpose: prefetch` on hover/intent prefetches, and browsers send
+    /// `Sec-Purpose: prefetch` (Firefox `X-Moz: prefetch`) for their own;
+    /// any of the three counts, as Laravel's `Request::prefetch()` reads
+    /// them. Handlers can use this to skip expensive side effects
+    /// (logging, analytics counters, cache warmups) on a request that may
+    /// never become a real navigation.
     fn is_prefetch(&self) -> bool {
-        self.header("Purpose")
-            .map(|v| v.eq_ignore_ascii_case("prefetch"))
-            .unwrap_or(false)
+        super::visit::is_prefetch(|name| self.header(name))
     }
 }
 
@@ -66,6 +76,9 @@ impl InertiaRequestExt for crate::http::Request {
             .path_and_query()
             .map(|pq| pq.as_str().to_string())
             .unwrap_or_else(|| crate::http::Request::path(self).to_string())
+    }
+    fn full_url(&self) -> String {
+        crate::http::Request::full_url(self)
     }
     fn header(&self, name: &str) -> Option<&str> {
         crate::http::Request::header(self, name)
@@ -83,6 +96,9 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     }
     fn path_and_query(&self) -> String {
         (**self).path_and_query()
+    }
+    fn full_url(&self) -> String {
+        (**self).full_url()
     }
     fn header(&self, name: &str) -> Option<&str> {
         (**self).header(name)

@@ -319,15 +319,16 @@ pub use http_client::{
 };
 pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
-    DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware, InertiaConfig,
-    InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt,
+    DefaultInertiaHooks, DeferOptions, EncryptHistoryMiddleware, FlashKey, Frontend, Inertia,
+    Inertia303Middleware, InertiaConfig, InertiaErrorPageMiddleware, InertiaHeadersMiddleware,
+    InertiaLocation, InertiaMiddleware, InertiaMiddlewareHooks, InertiaRegistry, InertiaRequestExt,
     InertiaResponse, InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts,
     InertiaRootTemplate, InertiaRootTitle, InertiaSharedData, InertiaValidationRedirectMiddleware,
-    InertiaVersionMiddleware, InertiaViewData, InertiaViewValue, IntoInertiaData,
+    InertiaVersionMiddleware, InertiaViewData, InertiaViewValue, InertiaVisit, IntoInertiaData,
     MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
-    PartialFilter, Prop, PropEntry, PropFuture, PropResolver, ProvidesScrollMetadata,
-    ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver, Visibility,
-    ViteManifest,
+    PageUrlResolver, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
+    ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest,
+    SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
 // The PAR-051 and PAR-052 prop types (providers, merge paths, once and
 // scroll options), kept on their own line so the list above stays stable.

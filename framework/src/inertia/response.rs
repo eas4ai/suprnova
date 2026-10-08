@@ -154,6 +154,13 @@ pub struct InertiaResponse {
 /// delete them. This guard selectively reflashes the values on every
 /// uncommitted exit, including cancellation, and removes them only after the
 /// complete response has been built.
+///
+/// Three kinds of entry are staged: the aged one-shot values (`_flash.old.*`,
+/// validation bags and the Inertia flash data among them), the Inertia flash
+/// data this request wrote (`_flash.new.inertia.flash_data`), and the two
+/// history flags, which are plain session entries that last until a page
+/// emits them. The page pulls all three; only the aged values need moving
+/// back when it fails, since the others stay where they are.
 struct StagedInertiaSessionValues {
     entries: Vec<(String, Value)>,
     committed: bool,
@@ -162,18 +169,32 @@ struct StagedInertiaSessionValues {
 impl StagedInertiaSessionValues {
     const OLD_PREFIX: &'static str = "_flash.old.";
     const NEW_PREFIX: &'static str = "_flash.new.";
-    const PRESERVE_FRAGMENT: &'static str = "_inertia.preserve_fragment";
-    const CLEAR_HISTORY: &'static str = "_inertia.clear_history";
+    /// The flashed preserve-fragment flag an earlier release wrote. Read
+    /// beside [`flash::PRESERVE_FRAGMENT`] so a session that holds it across
+    /// an upgrade still delivers it.
+    const LEGACY_PRESERVE_FRAGMENT: &'static str = "_inertia.preserve_fragment";
+    /// The flashed clear-history flag an earlier release wrote, read beside
+    /// [`flash::CLEAR_HISTORY`] for the same reason: a logout in flight
+    /// across an upgrade must still clear the history.
+    const LEGACY_CLEAR_HISTORY: &'static str = "_inertia.clear_history";
 
     fn stage() -> Self {
+        let new_flash_data = flash::flash_data_new_key();
         let entries = crate::session::session()
             .map(|session| {
                 session
                     .data
                     .iter()
                     .filter_map(|(key, value)| {
-                        let name = key.strip_prefix(Self::OLD_PREFIX)?;
-                        Self::is_inertia_value(name).then(|| (key.clone(), value.clone()))
+                        let staged = match key.strip_prefix(Self::OLD_PREFIX) {
+                            Some(name) => Self::is_inertia_value(name),
+                            None => {
+                                *key == new_flash_data
+                                    || key == flash::CLEAR_HISTORY
+                                    || key == flash::PRESERVE_FRAGMENT
+                            }
+                        };
+                        staged.then(|| (key.clone(), value.clone()))
                     })
                     .collect()
             })
@@ -185,18 +206,34 @@ impl StagedInertiaSessionValues {
     }
 
     fn is_inertia_value(name: &str) -> bool {
-        !name.starts_with('_') || name == Self::PRESERVE_FRAGMENT || name == Self::CLEAR_HISTORY
+        !name.starts_with('_')
+            || name == Self::LEGACY_PRESERVE_FRAGMENT
+            || name == Self::LEGACY_CLEAR_HISTORY
     }
 
-    fn value(&self, name: &str) -> Option<&Value> {
-        let full_key = format!("{}{name}", Self::OLD_PREFIX);
+    fn value_at(&self, full_key: &str) -> Option<&Value> {
         self.entries
             .iter()
-            .find_map(|(key, value)| (key == &full_key).then_some(value))
+            .find_map(|(key, value)| (key == full_key).then_some(value))
     }
 
-    fn bool_value(&self, name: &str) -> bool {
-        self.value(name).and_then(Value::as_bool).unwrap_or(false)
+    /// Whether a history flag is pending: the session entry Laravel's key
+    /// names, or the flash an earlier release wrote.
+    fn flag(&self, key: &str, legacy: &str) -> bool {
+        let legacy_key = format!("{}{legacy}", Self::OLD_PREFIX);
+        [key, legacy_key.as_str()]
+            .iter()
+            .any(|key| self.value_at(key).and_then(Value::as_bool) == Some(true))
+    }
+
+    /// The pending clear-history flag, emitted as `clearHistory: true`.
+    fn clear_history(&self) -> bool {
+        self.flag(flash::CLEAR_HISTORY, Self::LEGACY_CLEAR_HISTORY)
+    }
+
+    /// The pending preserve-fragment flag, emitted as `preserveFragment: true`.
+    fn preserve_fragment(&self) -> bool {
+        self.flag(flash::PRESERVE_FRAGMENT, Self::LEGACY_PRESERVE_FRAGMENT)
     }
 
     fn error_bags(&self) -> serde_json::Map<String, Value> {
@@ -210,18 +247,33 @@ impl StagedInertiaSessionValues {
             .collect()
     }
 
+    /// The session's part of `page.flash`: the plain session flashes the
+    /// previous request left, then the Inertia flash data, each only while
+    /// the session still holds what was staged (a handler that pulled the
+    /// flash data before the render sends none).
     fn page_flash(&self) -> serde_json::Map<String, Value> {
         let visible = flash::drain_session_flash_for_page();
-        self.entries
+        let mut out: serde_json::Map<String, Value> = self
+            .entries
             .iter()
             .filter_map(|(key, value)| {
                 let name = key.strip_prefix(Self::OLD_PREFIX)?;
                 (!name.starts_with('_')
                     && !name.starts_with("errors.")
+                    && name != flash::FLASH_DATA
                     && visible.get(name) == Some(value))
                 .then(|| (name.to_string(), value.clone()))
             })
-            .collect()
+            .collect();
+        let held = crate::session::session();
+        for key in [flash::flash_data_old_key(), flash::flash_data_new_key()] {
+            if let Some(Value::Object(data)) = self.value_at(&key)
+                && held.as_ref().and_then(|session| session.data.get(&key)) == self.value_at(&key)
+            {
+                out.extend(data.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        out
     }
 
     fn commit(mut self) {
@@ -252,10 +304,21 @@ impl StagedInertiaSessionValues {
                 };
                 session.data.remove(old_key);
                 let new_key = format!("{}{name}", Self::NEW_PREFIX);
-                session
-                    .data
-                    .entry(new_key)
-                    .or_insert_with(|| staged_value.clone());
+                match (session.data.get_mut(&new_key), staged_value) {
+                    // Inertia flash data this request added to: keep both,
+                    // what it added winning.
+                    (Some(Value::Object(newer)), Value::Object(older))
+                        if name == flash::FLASH_DATA =>
+                    {
+                        for (k, v) in older {
+                            newer.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                    (Some(_), _) => {}
+                    (None, _) => {
+                        session.data.insert(new_key, staged_value.clone());
+                    }
+                }
                 session.dirty = true;
             }
         });
@@ -945,10 +1008,26 @@ impl InertiaResponse {
     /// Attach a flash value to this response. Appears under the
     /// top-level `flash` field of the page object (not under `props`).
     /// Use for one-shot toasts / success messages.
+    ///
+    /// Laravel's `Response::flash`: with a session in scope the value goes
+    /// into the session's Inertia flash data at once, like
+    /// [`Inertia::flash`](crate::Inertia::flash), so it reaches the next
+    /// page response even when this one is never sent, and
+    /// [`Inertia::get_flashed`](crate::Inertia::get_flashed) sees it.
+    /// Without a session it rides on this response alone.
     pub fn flash<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.flash.insert(key.into(), v);
+        self.put_flash(key.into(), v);
         self
+    }
+
+    /// Put one flash entry where [`flash`](Self::flash) documents it goes.
+    fn put_flash(&mut self, key: String, value: Value) {
+        let mut entry = serde_json::Map::new();
+        entry.insert(key.clone(), value.clone());
+        if !flash::put_in_session(entry) {
+            self.flash.insert(key, value);
+        }
     }
 
     // ---- Fallible (try_*) prop builders -------------------------------
@@ -1039,7 +1118,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.flash.insert(key, v);
+        self.put_flash(key, v);
         Ok(self)
     }
 
@@ -1094,29 +1173,62 @@ impl InertiaResponse {
         self
     }
 
-    /// Build a `409 Conflict` external-redirect response. The client
-    /// performs `window.location = url`, doing a full page navigation
-    /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
+    /// An external redirect: a full page navigation the client performs
+    /// with `window.location = url` rather than an Inertia visit - Laravel's
+    /// `Inertia::location($url)`, also reachable as
+    /// [`Inertia::location`](crate::Inertia::location).
+    ///
+    /// The answer depends on the request, which it reads from the
+    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) the
+    /// route runs under:
+    ///
+    /// - an Inertia visit gets `409` + `X-Inertia-Location`, the only form
+    ///   the client follows out of the app;
+    /// - anything else gets a `302` + `Location`, or, when `target` is a
+    ///   [`Redirect`](crate::Redirect), that redirect as it is, its status,
+    ///   flash and cookies included - a hard navigation into an OAuth or SSO
+    ///   bounce has no use for a `409` and would dead-end on it.
+    ///
+    /// Without the Inertia middleware on the route nothing tells it which
+    /// the request was, and it answers the `409`, as it always did; use
+    /// [`location_for`](Self::location_for) there.
     ///
     /// **When to use which redirect form:**
     /// - [`Redirect::to`](crate::Redirect::to) - standard 302/303 with
     ///   `Location` header. The normal case for redirects after form
     ///   submission inside the Inertia app.
     /// - [`InertiaResponse::redirect`](Self::redirect) - 409 +
-    ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; use
-    ///   when the redirect must carry a `#fragment` (server `Location`
-    ///   headers can't carry fragments through Inertia XHR).
-    /// - [`InertiaResponse::location`](Self::location) - 409 +
-    ///   `X-Inertia-Location` for full-page reload via
-    ///   `window.location`; use to leave the Inertia app entirely.
-    ///   Always returns the 409 form, so only reach for it where the
-    ///   request is already known to be an Inertia visit - otherwise use
-    ///   [`location_for`](Self::location_for), which falls back to a plain
-    ///   `302` for a hard navigation.
-    pub fn location(url: impl AsRef<str>) -> HttpResponse {
+    ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; a redirect
+    ///   with a `#fragment` on an Inertia visit becomes this on its own.
+    /// - [`InertiaResponse::location`](Self::location) - to leave the
+    ///   Inertia app entirely.
+    pub fn location(target: impl Into<InertiaLocation>) -> HttpResponse {
+        let target = target.into();
+        let is_inertia = super::visit::current().is_none_or(|visit| visit.is_inertia);
+        match (target.0, is_inertia) {
+            (LocationTarget::Url(url), true) => Self::inertia_location(&url),
+            (LocationTarget::Url(url), false) => {
+                HttpResponse::new().status(302).header("Location", url)
+            }
+            (LocationTarget::Redirect(response), false) => response,
+            (LocationTarget::Redirect(response), true) => {
+                let url = response.header_value("Location").unwrap_or("/").to_string();
+                let carried: Vec<(String, String)> = response
+                    .headers()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("Set-Cookie"))
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect();
+                Self::inertia_location(&url).with_headers(carried)
+            }
+        }
+    }
+
+    /// The `409` + `X-Inertia-Location` an Inertia visit follows out of
+    /// the app.
+    fn inertia_location(url: &str) -> HttpResponse {
         HttpResponse::new()
             .status(409)
-            .header("X-Inertia-Location", url.as_ref())
+            .header("X-Inertia-Location", url)
     }
 
     /// Request-aware external redirect - Laravel's `Inertia::location($url)`.
@@ -1125,18 +1237,15 @@ impl InertiaResponse {
     ///   which the client turns into `window.location = url`.
     /// - Anything else → a plain `302` + `Location`.
     ///
-    /// Prefer this over [`location`](Self::location) in a handler. A hard
-    /// navigation into an OAuth or SSO bounce carries no `X-Inertia`
-    /// header, and a bare `409` with no `Location` gives that browser
-    /// nowhere to go: the flow dead-ends on a blank page. Reach for
-    /// [`location`](Self::location) only where the request is already
-    /// known to be an Inertia visit.
+    /// The same answer as [`location`](Self::location), decided from the
+    /// request given rather than the one the Inertia middleware is
+    /// handling, so it works on a route without that middleware.
     pub fn location_for<R: InertiaRequestExt + ?Sized>(
         req: &R,
         url: impl AsRef<str>,
     ) -> HttpResponse {
         if req.is_inertia() {
-            Self::location(url)
+            Self::inertia_location(url.as_ref())
         } else {
             HttpResponse::new()
                 .status(302)
@@ -1184,9 +1293,11 @@ impl InertiaResponse {
     ///   mount node - the Inertia 3 contract that `getInitialPageFromDOM`
     ///   reads. Both carry [`InertiaConfig::mount_id`], `app` by default.
     pub async fn resolve<R: InertiaRequestExt>(
-        self,
+        mut self,
         req: &R,
     ) -> Result<HttpResponse, FrameworkError> {
+        self.prepare_component()
+            .map_err(reflash_session_values_after_eager_error)?;
         let staged_session = StagedInertiaSessionValues::stage();
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
@@ -1244,6 +1355,9 @@ impl InertiaResponse {
             providers,
             view_data,
         } = self;
+        // For the Inertia middleware, which tells a partial reload of this
+        // page from a navigation by it when it records the previous URL.
+        super::visit::record_rendered_component(&component);
 
         // Page URL: path AND query, or the app's resolver. The client
         // writes this into `history.state`, so a bare path silently
@@ -1266,28 +1380,25 @@ impl InertiaResponse {
             .or_else(flash::encrypt_history_flag)
             .unwrap_or(config.encrypt_history_default);
 
-        // preserve-fragment precedence: per-response override > session
-        // flash (set by `Redirect::preserve_fragment()`) > false. The
-        // session lookup is a no-op outside a `SessionMiddleware` scope.
-        // The staged session guard commits its removal only after the
-        // complete response has been constructed, so the flag is one-shot
-        // without being lost on a later response error.
-        let flashed_preserve_fragment =
-            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT);
-        let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
+        // preserve-fragment precedence: per-response override > the session
+        // entry `Redirect::preserve_fragment()` sets > false. The session
+        // lookup is a no-op outside a `SessionMiddleware` scope. The entry
+        // lasts until a page emits it, however many redirects come first;
+        // the staged session guard removes it only after the complete
+        // response has been constructed, so a response error keeps it.
+        let resolved_preserve_fragment =
+            preserve_fragment.unwrap_or_else(|| staged_session.preserve_fragment());
 
         // clear-history precedence: per-response override OR the session
-        // flash set by `App::clear_history()`. Either alone is enough -
+        // entry `App::clear_history()` sets. Either alone is enough -
         // unlike `preserve_fragment` there is no "force off" case, because
         // the only reason to ask for a history clear is that the previous
-        // session must stop being readable. The staged session guard makes
-        // the flag survive exactly one successful hop; a flag that stuck
-        // around would rotate the key on every navigation and defeat
-        // encrypted history entirely. No-op outside a
-        // `SessionMiddleware` scope.
-        let flashed_clear_history =
-            staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
-        let resolved_clear_history = clear_history || flashed_clear_history;
+        // session must stop being readable. The entry lasts until a page
+        // emits it, so a logout followed by two redirects still clears; the
+        // page that emits it removes it, since a flag that stuck around
+        // would rotate the key on every navigation and defeat encrypted
+        // history entirely. No-op outside a `SessionMiddleware` scope.
+        let resolved_clear_history = clear_history || staged_session.clear_history();
 
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
@@ -1344,6 +1455,15 @@ impl InertiaResponse {
         }
         for provider in &providers {
             merged.extend(provider.to_inertia_properties(&context)?);
+        }
+        // The `share` and `share_once` middleware hooks, run for this
+        // request before the handler (Laravel's middleware `share()`).
+        let visit = super::visit::current();
+        if let Some(visit) = &visit {
+            for (k, v) in visit.shared() {
+                track_shared(&mut shared_keys, k);
+                merged.insert(k.clone(), v.clone());
+            }
         }
         for (k, v) in props {
             // Note: when user props override a shared key, we keep the
@@ -1428,7 +1548,13 @@ impl InertiaResponse {
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
-            let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
+            // The `root_view` middleware hook chooses the configuration the
+            // document is written with.
+            let config = match visit.as_ref().and_then(|visit| visit.hooks()) {
+                Some(hooks) => hooks.root_view(req, config),
+                None => config,
+            };
+            let ssr_result = super::ssr::render(&config.ssr, req, &page).await?;
             match config.root_template_for(req).application() {
                 Some(template) => build_template_response(
                     template,
@@ -1443,6 +1569,34 @@ impl InertiaResponse {
         };
         staged_session.commit();
         Ok(response)
+    }
+
+    /// The steps of Laravel's `ResponseFactory::render` that settle the
+    /// component before the page is built: the transformer
+    /// [`Inertia::transform_component_using`](crate::Inertia::transform_component_using)
+    /// installed, then the [`InertiaConfig::ensure_pages_exist`] check on
+    /// the name it gives.
+    fn prepare_component(&mut self) -> Result<(), FrameworkError> {
+        // The request hooks of the Inertia middleware: a `version` answer
+        // replaces the configured version for this page, as the version
+        // check compares against it, and a `url_resolver` the configured
+        // one.
+        if let Some(visit) = super::visit::current() {
+            if let Some(version) = visit.version() {
+                self.config.version = super::config::VersionResolver::Static(version.to_string());
+            }
+            if let Some(resolver) = visit.hooks().and_then(|hooks| hooks.url_resolver()) {
+                self.config.url_resolver = Some(resolver);
+            }
+        }
+        let component = std::mem::take(&mut self.component);
+        self.component = App::inertia_registry()
+            .runtime()
+            .transform_component(component);
+        if self.config.ensure_pages_exist {
+            super::pages::ensure_page_exists(&self.config, &self.component)?;
+        }
+        Ok(())
     }
 
     /// Build the page object without producing an HTTP response - used by
@@ -1489,11 +1643,9 @@ impl InertiaResponse {
         // override. Tests that DO drive a session scope via
         // `session_scope_for_test` pick up `_flash.old.*` via the
         // shared session-flash merge below.
-        let resolved_preserve_fragment = preserve_fragment.unwrap_or_else(|| {
-            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT)
-        });
-        let resolved_clear_history =
-            clear_history || staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
+        let resolved_preserve_fragment =
+            preserve_fragment.unwrap_or_else(|| staged_session.preserve_fragment());
+        let resolved_clear_history = clear_history || staged_session.clear_history();
         // The test helper does not exercise the shared-data registry.
         let shared_keys: Vec<String> = Vec::new();
 
@@ -1548,6 +1700,50 @@ impl InertiaResponse {
             .status(409)
             .header("X-Inertia-Location", new_url)
             .header("X-Inertia-Version", crate::Inertia::get_version())
+    }
+}
+
+/// Where [`InertiaResponse::location`] sends the visitor: a URL, or a
+/// [`Redirect`](crate::Redirect) whose target an Inertia visit follows and a
+/// plain visit receives as it is - Laravel's `location($url)` takes a
+/// string or a `RedirectResponse` the same way.
+pub struct InertiaLocation(LocationTarget);
+
+enum LocationTarget {
+    Url(String),
+    /// The redirect as a response, converted when the location was built so
+    /// its flash data reaches the session either way.
+    Redirect(HttpResponse),
+}
+
+impl From<&str> for InertiaLocation {
+    fn from(url: &str) -> Self {
+        Self(LocationTarget::Url(url.to_string()))
+    }
+}
+
+impl From<String> for InertiaLocation {
+    fn from(url: String) -> Self {
+        Self(LocationTarget::Url(url))
+    }
+}
+
+impl From<&String> for InertiaLocation {
+    fn from(url: &String) -> Self {
+        Self(LocationTarget::Url(url.clone()))
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for InertiaLocation {
+    fn from(url: std::borrow::Cow<'_, str>) -> Self {
+        Self(LocationTarget::Url(url.into_owned()))
+    }
+}
+
+impl From<crate::http::Redirect> for InertiaLocation {
+    fn from(redirect: crate::http::Redirect) -> Self {
+        let response: crate::http::Response = redirect.into();
+        Self(LocationTarget::Redirect(response.unwrap_or_else(|e| e)))
     }
 }
 
@@ -1714,6 +1910,34 @@ fn collapse_error_bags(
 /// than needing an explicit `.merge()` flag - and its per-key `reset`
 /// flag is read straight from `reset_keys` too, independent of the
 /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header.
+/// The `errors` prop the session's validation errors make, Laravel's
+/// `Middleware::resolveValidationErrors` (inertia-laravel 3.5.1):
+///
+/// - with `X-Inertia-Error-Bag`, `{<bag>: <default bag>}` when the session
+///   holds a `default` bag;
+/// - without it, the `default` bag flat (`{field: message}`), which is what
+///   the client binds `page.props.errors.field` to;
+/// - otherwise every bag the session holds, keyed by name, which is `{}`
+///   when it holds none.
+///
+/// A bag the validation redirect flashed under the header's name is a named
+/// bag, so a form that sent `X-Inertia-Error-Bag: login` reads its errors
+/// back as `errors.login` either way.
+fn session_errors_prop(
+    mut session_errors: serde_json::Map<String, Value>,
+    error_bag: Option<&str>,
+) -> Value {
+    match (session_errors.remove("default"), error_bag) {
+        (Some(default_bag), Some(bag)) => {
+            let mut wrapped = serde_json::Map::new();
+            wrapped.insert(bag.to_string(), default_bag);
+            Value::Object(wrapped)
+        }
+        (Some(default_bag), None) => default_bag,
+        (None, _) => Value::Object(session_errors),
+    }
+}
+
 /// The one prop key the Inertia v3 contract guarantees on every page
 /// object. Named rather than spelled out at each site because three
 /// separate rules key off it: the session seed, the `X-Inertia-Error-Bag`
@@ -1758,27 +1982,15 @@ async fn resolve_props(
     // The caller supplies a single staged bag-prefix snapshot. It is empty
     // outside a `SessionMiddleware` scope and is committed only after the
     // complete response succeeds.
-    // Resolve it to the Inertia shape, mirroring Laravel's
-    // `resolveValidationErrors`:
-    //  - `X-Inertia-Error-Bag` header → that bag's errors, flat; the
-    //    post-pass below re-wraps them (and any handler-injected errors)
-    //    under the bag name.
-    //  - no header, `default` bag present → that bag's errors, flat
-    //    (`{field: [...]}`) - what the Inertia client binds to directly
-    //    (`page.props.errors.field`), not nested under `"default"`.
-    //  - no header, no default bag → every bag, keyed by name.
+    // Resolve it to the Inertia shape, Laravel's `resolveValidationErrors`
+    // (see `session_errors_prop`). A handler or shared `errors` prop
+    // replaces it below; only that one is wrapped by the post-pass.
+    let errors_supplied = props.contains_key(ERRORS_KEY);
     let session_errors = collapse_error_bags(session_errors, with_all_errors);
-    let seeded_errors = match error_bag {
-        Some(bag) => session_errors
-            .get(bag)
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
-        None => match session_errors.get("default") {
-            Some(default_bag) => default_bag.clone(),
-            None => Value::Object(session_errors),
-        },
-    };
-    materialized.insert(ERRORS_KEY.to_string(), seeded_errors);
+    materialized.insert(
+        ERRORS_KEY.to_string(),
+        session_errors_prop(session_errors, error_bag),
+    );
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
     let now = crate::clock::now();
@@ -2198,14 +2410,13 @@ async fn resolve_props(
     ordered.extend(materialized);
     let mut materialized = ordered;
 
-    // `X-Inertia-Error-Bag` scoping. Apply AFTER all props have
-    // resolved so a handler-provided `errors` prop (via
-    // `.with("errors", {...})`) gets correctly wrapped. Without this
-    // post-pass, the seeded empty object would be wrapped here but
-    // overwritten by the user prop, silently losing the bag. The value is
-    // wrapped in place: moving the key would move another prop out of
-    // registration order.
-    if let Some(bag) = error_bag
+    // `X-Inertia-Error-Bag` scoping of a handler-provided `errors` prop
+    // (via `.with("errors", {...})`), applied AFTER all props have resolved
+    // so the prop the handler set is the one wrapped. The session's errors
+    // were shaped when they were seeded. The value is wrapped in place:
+    // moving the key would move another prop out of registration order.
+    if errors_supplied
+        && let Some(bag) = error_bag
         && let Some(errors_val) = materialized.get_mut(ERRORS_KEY)
     {
         let mut wrapper = serde_json::Map::new();

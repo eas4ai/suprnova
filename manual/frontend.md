@@ -165,6 +165,32 @@ The flavours, in order of precedence (later wins at the same key):
 Per-page props attached on the response builder always overwrite shared
 data at the same key.
 
+The `Inertia` facade takes every form Laravel's `Inertia::share` does - a
+key and a value, a map, a `#[derive(Data)]` object or a provider - and reads
+shared data back with `get_shared`:
+
+```rust
+use suprnova::Inertia;
+
+Inertia::share("appName", "Suprnova")?;
+Inertia::share("user.locale", "es")?;              // nests: user = { locale: "es" }
+Inertia::share_many([("plan", "pro"), ("region", "eu")])?;
+Inertia::share_data(SiteMeta { name: "Suprnova".into(), build: 7 })?;
+Inertia::share_provider(Arc::new(AppSharedData));
+
+Inertia::get_shared("user.locale", serde_json::Value::Null); // "es"
+Inertia::get_shared("missing", 7);                            // 7
+Inertia::get_shared_all();                                    // every shared value, nested
+```
+
+A dotted key nests when it is shared, as Laravel's `Arr::set` does, so a
+later `share("user", ...)` replaces the whole `user` object, child included.
+`App::inertia_share` shares the same way. A Data object shares its eager
+fields; its lazy fields stay out, since a shared prop has no `?include=`
+gate. `share_provider` is the same registration as
+`App::register_inertia_shared`. `get_shared` reads what is registered without
+resolving it, so a lazy share reads as the default.
+
 The framework ships `RootShare`, a provider that gives every page the
 public root as the `root` prop: the empty string at the host root,
 `/billing` behind a reverse proxy that serves the application under
@@ -234,8 +260,8 @@ asset path. See [Development vs production](#development-vs-production)
 below.
 
 That registers, in order: `InertiaHeadersMiddleware` (sets `Vary: X-Inertia`
-on every response and turns an empty `200` on an Inertia visit into a `303`
-back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
+on every response and turns an empty `200` on an Inertia visit into a
+redirect back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
 asset-version mismatch so stale clients reload), `Inertia303Middleware`
 (rewrites 302 → 303 on non-GET Inertia visits so the follow-up is
 unambiguously a GET), and `InertiaValidationRedirectMiddleware` (turns a
@@ -298,6 +324,50 @@ elsewhere:
   React first; the Suprnova scaffolder defaults to Svelte 5 (runes-on).
   React 19 and Vue 3.5 are first-class, not afterthoughts - same
   protocol, same prop pipeline, same generator output.
+
+## Working with a coding assistant
+
+A coding assistant that learned Inertia from Laravel projects carries
+assumptions that are wrong here. Laravel's own guideline set for assistants
+(the Inertia section of Laravel Boost) covers this ground for a PHP project;
+this is the Suprnova version. Paste it, or point the assistant at this
+chapter, before it touches a page:
+
+- **Pages live in `frontend/src/pages/`**, one component per file. A handler
+  renders one with `inertia_response!` or `InertiaResponse::new`, never with
+  a server template. The first visit's document is `templates/app.html`, the
+  root template, and the page is never written into it.
+- **Props are typed on the server.** Each page has a `#[derive(InertiaProps)]`
+  struct, and `suprnova generate-types` (or `suprnova serve`, which runs it
+  on change) writes `frontend/src/types/inertia-props.ts`. After a Rust field
+  changes, regenerate and let the TypeScript compiler name every component to
+  update. The generated file is never edited by hand.
+- **Every Inertia 3 feature is available**: deferred props, infinite scroll,
+  merging props, polling, prefetching, once props and flash data, and the
+  Inertia 3 additions, standalone HTTP requests (`useHttp`), optimistic
+  updates with rollback, layout props (`useLayoutProps`), instant visits and
+  SSR through the Vite plugin. The server side of each is a method on the
+  `InertiaResponse` builder; [Inertia Responses](frontend-inertia-responses.md)
+  lists them. Prop types (`optional`, `defer`, `merge`) take dot-notation
+  paths, and a dotted partial reload narrows literal values only.
+- **Names that moved.** Inertia 3 removed `Inertia::lazy()`: use
+  `.optional()` for a prop skipped on the first visit. Suprnova's `.lazy()` is
+  a plain callable prop that resolves on every visit that selects it (see the
+  divergence callout in Inertia Responses). On the client, Axios is gone and
+  the built-in XHR client with interceptors replaces it, `router.cancel()` is
+  `router.cancelAll()`, the `invalid` event is `httpException` and `exception`
+  is `networkError`, and the `future` configuration namespace no longer
+  exists.
+- **Deferred props need an empty state.** The page renders before they
+  arrive, so a component that shows one carries a skeleton or a placeholder
+  for the gap.
+- **Tests drive the server in process.** A test calls `handle_request` and
+  reads the page object with `AssertableInertia`, from a JSON visit or from
+  the first-load HTML ([HTTP Tests](http-tests.md#testing-inertia-responses)).
+  A page change lands with such a test.
+- **Check the version.** An assistant's training data describes Inertia 1 and
+  2 as often as 3. Have it read the Inertia 3 documentation and this manual
+  for anything protocol-level rather than recall it.
 
 ## Next
 

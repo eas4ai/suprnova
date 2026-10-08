@@ -2,14 +2,23 @@
 //! common Inertia helpers.
 
 use crate::FrameworkError;
+use crate::http::{Redirect, Request};
 use crate::pagination::IntoInertiaScroll;
 
 use super::config::{InertiaConfig, VersionResolver};
+use super::flash::{self, FlashKey};
+use super::hooks::{InertiaMiddleware, VersionChangeHook};
+use super::providers::ProvidesInertiaProperties;
+use super::response::PropEntry;
 use super::response::{IntoInertiaData, reflash_session_values_after_eager_error};
+use super::runtime::SsrCondition;
+use super::ssr::SsrRequest;
 use super::{
     Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaResponse,
     InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
 };
+use serde_json::Value;
+use std::sync::Arc;
 
 /// Static facade. Today it exposes `Inertia::paginate`; future helpers
 /// (render, location, etc.) will land here.
@@ -107,13 +116,401 @@ impl Inertia {
             .resolved_version()
     }
 
+    /// A redirect to the previous location - Laravel's
+    /// `Inertia::back($status, $headers, $fallback)`.
+    ///
+    /// The target is chosen in Laravel's order: the request's `Referer`
+    /// when it passes the same-origin check the validation redirect applies
+    /// (a path on this host, under the public root), else the session's
+    /// previous URL, else `fallback`, else `/`. The `Referer` is client-set
+    /// and lands in `Location`, which is why it is checked rather than
+    /// followed.
+    ///
+    /// The `Referer` is read from the request the Inertia middleware is
+    /// handling, so the first leg needs
+    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) on the
+    /// route; [`Inertia::install`] puts it on every route. Without it the
+    /// target starts at the previous URL. Add headers or flash data to the
+    /// returned [`Redirect`] as to any other.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, Response};
+    ///
+    /// async fn update() -> Response {
+    ///     Inertia::back(302, Some("/settings")).with("status", "Saved").into()
+    /// }
+    /// ```
+    pub fn back(status: u16, fallback: Option<&str>) -> Redirect {
+        let target = match super::visit::current() {
+            Some(visit) => visit.back_target(fallback),
+            None => super::visit::back_target(None, None, "", fallback),
+        };
+        Redirect::to(target).status(status)
+    }
+
+    /// Share a value with every Inertia response - Laravel's
+    /// `Inertia::share($key, $value)`.
+    ///
+    /// A dotted key nests when it is shared, as Laravel's `Arr::set` does:
+    /// `share("user.name", "Todd")` sets `name` inside the shared `user`
+    /// object, and a later `share("user", ...)` replaces that object whole.
+    /// The value is serialized now; for one that has to be computed per
+    /// response use [`App::inertia_share_lazy`](crate::App::inertia_share_lazy).
+    /// Shares are process-wide (on the active container), not per request:
+    /// call this at boot, or from a provider for per-request data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `value`'s `Serialize` impl fails;
+    /// nothing is shared then.
+    pub fn share<V: serde::Serialize>(
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<(), FrameworkError> {
+        Self::share_many([(key, value)])
+    }
+
+    /// Share several values at once - Laravel's `Inertia::share([...])`.
+    /// Each entry is shared as [`share`](Self::share) shares it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the key whose value fails to
+    /// serialize; nothing is shared then.
+    pub fn share_many<I, K, V>(entries: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: serde::Serialize,
+    {
+        let mut values = Vec::new();
+        for (key, value) in entries {
+            let key = key.into();
+            let value = serde_json::to_value(&value).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "Inertia shared value for '{key}' failed to serialize: {e}"
+                ))
+            })?;
+            values.push((key, value));
+        }
+        let registry = crate::App::inertia_registry();
+        for (key, value) in values {
+            registry.share_nested(key, value);
+        }
+        Ok(())
+    }
+
+    /// Share the fields of a `#[derive(Data)]` object - Laravel's
+    /// `Inertia::share($arrayable)`.
+    ///
+    /// Each eager field becomes a shared value under its name. A lazy field
+    /// (`#[data(lazy)]` and its variants) is left out, as it is left out of
+    /// a Data object's array form until a request includes it: a shared
+    /// prop has no `?include=` gate, so sharing it would send it on every
+    /// page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the field whose value fails to
+    /// serialize; nothing is shared then.
+    pub fn share_data<T: IntoInertiaData>(data: T) -> Result<(), FrameworkError> {
+        let entries = data.__try_into_inertia_props()?;
+        let registry = crate::App::inertia_registry();
+        for (key, entry) in entries {
+            if let PropEntry::Eager(value) = entry {
+                registry.share_nested(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Share the props a provider produces for each response - Laravel's
+    /// `Inertia::share($provider)`. The provider receives a
+    /// [`RenderContext`](crate::RenderContext) of the request and the
+    /// component being rendered, and its keys count as shared keys.
+    ///
+    /// The same registration as
+    /// [`InertiaRegistry::share_provider`](crate::InertiaRegistry::share_provider):
+    /// any number of providers, each expanded once per render, and
+    /// [`App::flush_inertia_shared`](crate::App::flush_inertia_shared)
+    /// clears them with the other shares.
+    pub fn share_provider(provider: impl ProvidesInertiaProperties + 'static) {
+        crate::App::inertia_registry().share_provider(provider);
+    }
+
+    /// Read a shared value back - Laravel's `Inertia::getShared($key,
+    /// $default)`. A dotted key walks into nested values (a numeric segment
+    /// indexes a list); `default` comes back when nothing is shared there.
+    ///
+    /// Reads what is registered, without resolving anything: a lazy share
+    /// has no value yet and reads as `default`, as Laravel hands back the
+    /// unresolved closure.
+    pub fn get_shared(key: &str, default: impl Into<Value>) -> Value {
+        crate::App::inertia_registry()
+            .shared_value(key)
+            .unwrap_or_else(|| default.into())
+    }
+
+    /// Every shared value, nested - Laravel's `Inertia::getShared()` with
+    /// no key. Lazy shares are left out, as in [`get_shared`](Self::get_shared).
+    pub fn get_shared_all() -> Value {
+        Value::Object(crate::App::inertia_registry().shared_tree())
+    }
+
+    /// Rename components before they render - Laravel's
+    /// `Inertia::transformComponentUsing($closure)`.
+    ///
+    /// `transformer` receives the name a response was built with and
+    /// returns the name to render, or `None` to keep it. It runs for every
+    /// response, whether the name came from `inertia_response!`,
+    /// `InertiaResponse::new` or `Router::inertia`, before the
+    /// [`ensure_pages_exist`](crate::InertiaConfig::ensure_pages_exist)
+    /// check, which then checks the new name. A later call replaces it.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Inertia;
+    ///
+    /// // Pages moved under `Legacy/` without touching every handler.
+    /// Inertia::transform_component_using(|component| {
+    ///     component.starts_with("Billing/").then(|| format!("Legacy/{component}"))
+    /// });
+    /// ```
+    pub fn transform_component_using<F>(transformer: F)
+    where
+        F: Fn(&str) -> Option<String> + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_component_transformer(Arc::new(transformer));
+    }
+
+    /// An external redirect, answered as the request needs - Laravel's
+    /// `Inertia::location($url)`: `409` + `X-Inertia-Location` to an
+    /// Inertia visit, and to anything else a `302` to the URL or the
+    /// [`Redirect`] given as it is. See [`InertiaResponse::location`].
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, Response};
+    ///
+    /// async fn portal() -> Response {
+    ///     Ok(Inertia::location("https://billing.example/portal"))
+    /// }
+    /// ```
+    pub fn location(target: impl Into<super::InertiaLocation>) -> crate::HttpResponse {
+        InertiaResponse::location(target)
+    }
+
+    /// Turn SSR off, or on, for every request - Laravel's
+    /// `Inertia::disableSsr($bool)`.
+    ///
+    /// `disable_ssr(true)` keeps the worker out even where the
+    /// configuration enables SSR; `disable_ssr(false)` sends every first
+    /// visit to it even where the configuration has SSR off (the worker URL
+    /// still comes from the configuration). The setting replaces the
+    /// configuration's switch until it is set again. Excluded paths and
+    /// [`App::disable_ssr_for_request`](crate::App::disable_ssr_for_request)
+    /// still keep a request out.
+    pub fn disable_ssr(disabled: bool) {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_condition(SsrCondition::Always(disabled));
+    }
+
+    /// Decide per request whether SSR is off - Laravel's
+    /// `Inertia::disableSsr($closure)`. The condition runs for every first
+    /// visit and its answer replaces the configuration's switch, so it can
+    /// turn SSR on as well as off.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, InertiaRequestExt};
+    ///
+    /// // Render the admin area on the client only.
+    /// Inertia::disable_ssr_if(|request: &dyn InertiaRequestExt| {
+    ///     request.path().starts_with("/admin")
+    /// });
+    /// ```
+    pub fn disable_ssr_if<F>(condition: F)
+    where
+        F: Fn(&dyn super::InertiaRequestExt) -> bool + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_condition(SsrCondition::When(Arc::new(condition)));
+    }
+
+    /// Exclude paths from SSR - Laravel's `Inertia::withoutSsr($paths)`.
+    ///
+    /// The patterns join [`InertiaConfig::ssr_exclude`]'s and follow
+    /// Laravel's `ExcludesPaths` rules: slashes at either end are ignored,
+    /// `*` matches any characters including `/`, and each pattern is tried
+    /// against the path and the full URL. `admin/*` keeps `/admin/users`
+    /// and `/admin/users/edit` out, not `/adminx`.
+    pub fn without_ssr<I, S>(patterns: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .add_ssr_exclusions(patterns.into_iter().map(Into::into));
+    }
+
+    /// Adjust the request sent to the SSR worker - Laravel's
+    /// `Inertia::configureSsrRequestUsing($closure)`. A worker that needs a
+    /// token, another header or a longer timeout is reached through it; a
+    /// later call replaces it.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Inertia;
+    ///
+    /// Inertia::configure_ssr_request_using(|request| {
+    ///     request.bearer_token(std::env::var("SSR_TOKEN").unwrap_or_default())
+    /// });
+    /// ```
+    pub fn configure_ssr_request_using<F>(configure: F)
+    where
+        F: Fn(SsrRequest) -> SsrRequest + Send + Sync + 'static,
+    {
+        crate::App::inertia_registry()
+            .runtime()
+            .set_ssr_request_configurator(Arc::new(configure));
+    }
+
+    /// Flash a value for the next page response - Laravel's
+    /// `Inertia::flash($key, $value)`.
+    ///
+    /// The value lives in the session under `inertia.flash_data`, is
+    /// emitted as `page.flash` by the next Inertia page response and
+    /// removed by it. Unlike a prop it never enters the browser's history
+    /// state, which is what one-shot toasts and highlights want. It does
+    /// not depend on what this request answers, and the Inertia middleware
+    /// keeps it across any number of redirects before a page shows it.
+    ///
+    /// `key` is a string or a type implementing [`FlashKey`], such as an
+    /// application's enum of toast kinds. Without a session in scope the
+    /// value rides on this request's own page response only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `value`'s `Serialize` impl fails;
+    /// nothing is flashed then.
+    pub fn flash<K: FlashKey, V: serde::Serialize>(key: K, value: V) -> Result<(), FrameworkError> {
+        Self::flash_many([(key, value)])
+    }
+
+    /// Flash several values at once - Laravel's `Inertia::flash([...])`.
+    /// See [`flash`](Self::flash).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the key whose value fails to
+    /// serialize; nothing is flashed then.
+    pub fn flash_many<I, K, V>(entries: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: FlashKey,
+        V: serde::Serialize,
+    {
+        let mut map = serde_json::Map::new();
+        for (key, value) in entries {
+            let key = key.flash_key();
+            let value = serde_json::to_value(&value).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "Inertia flash value for '{key}' failed to serialize: {e}"
+                ))
+            })?;
+            map.insert(key, value);
+        }
+        if !flash::put_in_session(map.clone()) {
+            for (key, value) in map {
+                flash::push(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// The Inertia flash data waiting for the next page response -
+    /// Laravel's `Inertia::getFlashed($request)`.
+    ///
+    /// Reads the session of `request`, the one in scope while it is
+    /// handled; empty without a session. What it returns is exactly what
+    /// [`pull_flashed`](Self::pull_flashed) would remove.
+    pub fn get_flashed(_request: &Request) -> serde_json::Map<String, serde_json::Value> {
+        flash::get_from_session()
+    }
+
+    /// Remove and return the Inertia flash data - Laravel's
+    /// `Inertia::pullFlashed($request)`. A page rendered afterwards shows
+    /// none of it. Empty without a session.
+    pub fn pull_flashed(_request: &Request) -> serde_json::Map<String, serde_json::Value> {
+        flash::pull_from_session()
+    }
+
+    /// Clear the client's history state on the next page - Laravel's
+    /// `Inertia::clearHistory()`. The same as
+    /// [`App::clear_history`](crate::App::clear_history): the flag lives in
+    /// the session until a page response emits it as `clearHistory: true`,
+    /// however many redirects come first, which is what a logout that
+    /// redirects needs.
+    pub fn clear_history() {
+        crate::App::clear_history();
+    }
+
+    /// Keep the URL fragment across the next redirect - Laravel's
+    /// `Inertia::preserveFragment()`, the session form of
+    /// [`Redirect::preserve_fragment`]. The flag lives in the session until
+    /// a page response emits it as `preserveFragment: true`. A no-op
+    /// without a session in scope.
+    pub fn preserve_fragment() {
+        flash::set_history_flag(flash::PRESERVE_FRAGMENT);
+    }
+
+    /// The Inertia middleware stack as one middleware, for a route group -
+    /// the way a Laravel app registers `HandleInertiaRequests` on its `web`
+    /// group and keeps it off `api`.
+    ///
+    /// The stack is the one [`install`](Self::install) registers globally
+    /// (headers and redirect rules, version check, `302 → 303`, validation
+    /// redirect, and the error page when `config` names one), with
+    /// `config`'s settings and [`hooks`](InertiaConfig::hooks). Install
+    /// with [`InertiaConfig::register_globally`] off so the stack is not
+    /// also on every route; `install` then registers it as the named
+    /// middleware `inertia`, which a group can name instead of holding this
+    /// value.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, InertiaConfig, Router};
+    /// # use suprnova::{Request, Response, text};
+    /// # async fn dashboard(_r: Request) -> Response { text("ok") }
+    /// # async fn users(_r: Request) -> Response { text("ok") }
+    ///
+    /// # fn routes() -> Result<Router, suprnova::FrameworkError> {
+    /// let cfg = InertiaConfig::new().register_globally(false);
+    /// Inertia::install(&cfg)?;
+    ///
+    /// let router: Router = Router::new()
+    ///     .group("/", |r| r.get("/dashboard", dashboard))
+    ///     .middleware(Inertia::middleware(&cfg))
+    ///     .into();
+    /// // No Inertia stack on the API: no `Vary: X-Inertia`, no 303.
+    /// let router: Router = router.group("/api", |r| r.get("/users", users)).into();
+    /// # Ok(router) }
+    /// ```
+    pub fn middleware(config: &InertiaConfig) -> InertiaMiddleware {
+        InertiaMiddleware::new(config)
+    }
+
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// Registers four global middlewares in order:
     /// 1. [`InertiaHeadersMiddleware`] - sets `Vary: X-Inertia` on every
-    ///    response and turns an empty `200` on an Inertia visit into a
-    ///    `303` back. Registered first, so it wraps everything, including
-    ///    the `409` the version middleware returns below.
+    ///    response; on an Inertia visit it turns an empty `200` into a
+    ///    redirect back (`302`, `303` for `PUT`, `PATCH` and `DELETE`), a
+    ///    redirect with a `#fragment` into `409` + `X-Inertia-Redirect`, and
+    ///    records the visit as the session's previous URL
+    ///    ([`InertiaConfig::store_previous_url`]). Registered first, so it
+    ///    wraps everything, including the `409` the version middleware
+    ///    returns below.
     /// 2. [`InertiaVersionMiddleware`] - emits `409 Conflict` +
     ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
     ///    header doesn't match [`get_version`](Self::get_version), read
@@ -150,6 +547,13 @@ impl Inertia {
     /// own, leaving both the app's placement and the component the app
     /// named intact. `error_page` on the config is then optional. See that
     /// type's documentation for where it may sit.
+    ///
+    /// With [`InertiaConfig::register_globally`] off, none of them is
+    /// registered globally: `install` registers the whole stack as the
+    /// named middleware `inertia` for route groups instead (see
+    /// [`middleware`](Self::middleware)), and retains the config as below.
+    /// With [`InertiaConfig::hooks`] set, the headers middleware and the
+    /// version check run them.
     ///
     /// One call wires all four, so an app cannot end up carrying two of
     /// them and silently missing the third - each closes a failure mode
@@ -242,13 +646,28 @@ impl Inertia {
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
-        register_global_middleware(InertiaHeadersMiddleware::new());
-        // The middleware reads the version per request, so a later
+        if !config.register_globally {
+            // The stack for route groups instead: named, so a group takes
+            // it with `middleware_named("inertia")`, and a route outside
+            // such a group gets nothing of Inertia's.
+            let stack = InertiaMiddleware::new(config);
+            crate::middleware::register_middleware_alias(MIDDLEWARE_NAME, move || stack.clone());
+            return Ok(());
+        }
+        register_global_middleware(InertiaHeadersMiddleware::from_config(config));
+        // The middleware reads the version per request: the `version` hook's
+        // answer when it gave one, else `Inertia::get_version`, so a later
         // `Inertia::version` call is what a stale client is compared
         // against, the same value the page object advertises.
-        register_global_middleware(InertiaVersionMiddleware::with_resolver(
-            Inertia::get_version,
-        ));
+        let version_check = InertiaVersionMiddleware::with_resolver(|| {
+            super::visit::scoped_version().unwrap_or_else(Inertia::get_version)
+        });
+        match config.hooks.clone() {
+            Some(hooks) => {
+                register_global_middleware(VersionChangeHook::new(version_check, hooks));
+            }
+            None => register_global_middleware(version_check),
+        }
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
         // Innermost, and only when the app named a component. It has to
@@ -275,6 +694,10 @@ impl Inertia {
         Ok(())
     }
 }
+
+/// The name [`Inertia::install`] registers the stack under when it is not
+/// registered globally, for `GroupBuilder::middleware_named`.
+const MIDDLEWARE_NAME: &str = "inertia";
 
 /// What [`Inertia::install`] does about the error-page middleware.
 #[derive(Debug, PartialEq, Eq)]

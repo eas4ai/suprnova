@@ -183,7 +183,7 @@ pub async fn show(req: Request) -> Response {
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine with existing client state on partial reloads | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Client caches across navigations | `Inertia::once(…)` |
 | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.scroll_lazy` / `.scroll_lazy_with` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
-| `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
+| `.flash(k, v)` | One-shot value under `page.flash` (not `props`), kept in the session until a page shows it | `Inertia::render(…)->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
 | `.clear_history()` | Force history key rotation on **this** page | `Inertia::clearHistory()` |
@@ -199,11 +199,12 @@ you'd rather handle the failure explicitly.
 `.clear_history()` marks the response you are building. A logout handler
 redirects, and the browser discards the redirect's response - so the login
 page, not the logout response, is the one that has to carry the flag.
-`App::clear_history()` is the fix for that case - it's a free function, not
-a builder method, so it isn't in the table above. It flashes a one-shot
-session flag that the next Inertia page object turns into
-`clearHistory: true`. It needs a session scope, and it survives exactly
-one hop.
+`App::clear_history()` (also `Inertia::clear_history()`) is the fix for that
+case - it's a free function, not a builder method, so it isn't in the table
+above. It sets the session entry `inertia.clear_history`, which the next
+Inertia page object turns into `clearHistory: true` and removes. It needs a
+session scope, and it lasts until a page emits it, however many redirects
+come first, so a logout that bounces through two redirects still clears.
 
 Call it **after** `Auth::logout()` / `Auth::logout_and_invalidate()`, not
 before - invalidation flushes the whole session, and the flag lives in
@@ -990,34 +991,65 @@ dotted `only` entry does not narrow it.
 
 Flash data is one-shot state that should appear on the next render and
 disappear after - toast messages, "just created" IDs, validation summaries.
-Suprnova surfaces it under `page.flash` on every Inertia response. There
-are three writers:
+Suprnova surfaces it under `page.flash`, outside `props`, so it never enters
+the browser's history state. Laravel's `Inertia::flash` is the main writer:
 
 ```rust
-// 1. Push into the current request's flash bag.
-App::flash("toast", "Saved");
+use suprnova::{FlashKey, Inertia, InertiaResponse, Redirect, Response};
 
-// 2. Attach to a specific response (same effect on this response only).
-InertiaResponse::new("Posts/Show").flash("toast", "Saved")
+pub async fn store() -> Response {
+    // A key and a value, or several at once.
+    Inertia::flash("toast", "Saved")?;
+    Inertia::flash_many([("created_id", 42), ("count", 3)])?;
+    Redirect::to("/posts").into()
+}
 
-// 3. Carry across a redirect via the Redirect facade.
-use suprnova::Redirect;
+// An enum key, as a Laravel app flashes with an enum case.
+enum Toast {
+    Success,
+}
 
-Redirect::to("/posts").with("toast", "Created")
+impl FlashKey for Toast {
+    fn flash_key(&self) -> String {
+        match self {
+            Toast::Success => "success".to_string(),
+        }
+    }
+}
 ```
 
-The `Redirect::with(key, value)` form is the cross-handler path: the
-value lands in the session under `_flash.new.*`, the next request's
-[`SessionMiddleware`](csrf.md) ages it into `_flash.old.*`, and the
-destination's `InertiaResponse` surfaces it under `page.flash`.
+`Inertia::flash`, `App::flash` (the same call with a string key) and
+`InertiaResponse::new("Posts/Show").flash("toast", "Saved")` all write the
+session entry `inertia.flash_data`, Laravel's key. The next Inertia page
+response emits it under `page.flash` and removes it, whatever the request that
+set it answered: a handler that flashes and returns plain JSON still gets its
+toast on the next page. A redirect keeps it for one more request, so it
+reaches the page at the end of any number of redirects. Without a session in
+scope the value rides on the current response only.
 
-Same-request flash (the task-local bag) wins over inherited session
-flash on key collision, so a destination handler can override an
-inbound value just by re-flashing the key.
+Read or take the pending data with `Inertia::get_flashed(&req)` and
+`Inertia::pull_flashed(&req)` - Laravel's `getFlashed` and `pullFlashed`.
+`get_flashed` returns exactly what `pull_flashed` would remove, and a page
+rendered after a pull shows none of it.
+
+`Redirect::to("/posts").with("toast", "Created")` is a plain session flash:
+it lands under `_flash.new.*`, the next request's
+[`SessionMiddleware`](csrf.md) ages it into `_flash.old.*`, and that page
+surfaces it under `page.flash` too, below the Inertia flash data. It lasts one
+request, so a second redirect drops it.
+
+Same-request flash wins over inherited session flash on key collision, so a
+destination handler can override an inbound value just by re-flashing the key.
 
 Internal session keys (anything prefixed `_`) are filtered out of
-`page.flash` - `_old_input` for form repopulation and `_inertia.*`
-protocol flags don't leak to the client.
+`page.flash` - `_old_input` for form repopulation doesn't leak to the client.
+
+The two history flags work the same way: `App::clear_history()` (or
+`Inertia::clear_history()`), `Inertia::preserve_fragment()` and
+`Redirect::preserve_fragment()` set the session entries
+`inertia.clear_history` and `inertia.preserve_fragment`, which last until a
+page response emits them as `clearHistory: true` and `preserveFragment: true`,
+however many redirects come first.
 
 ### Redirect helpers
 
@@ -1027,6 +1059,7 @@ protocol flags don't leak to the client.
 Redirect::to("/dashboard")                       // 302 to a path
 Redirect::route("posts.show").with("id", "42")   // named route, route params
 Redirect::back("/")                              // session-recorded previous URL
+Inertia::back(302, Some("/"))                    // Referer, previous URL, fallback
 Redirect::refresh()                              // same URL, fresh GET
 Redirect::guest(&req, "/login")                  // stashes intended URL
 Redirect::intended("/dashboard")                 // pops the stashed URL
@@ -1038,6 +1071,29 @@ All `Redirect` variants accept `.with(k, v)`, `.with_input(map)`,
 `.with_errors(map)`, `.with_errors_bag(name, map)`, `.cookie(c)`,
 `.header(k, v)`, `.permanent()`, `.status(303)`, etc. The full chain
 mirrors Laravel's `RedirectResponse`.
+
+`Inertia::back(status, fallback)` is Laravel's `back()`: it tries the
+request's `Referer` first, when that is a path on this host under the public
+root (the check the validation redirect applies, so a foreign `Referer` is
+never followed), then the session's previous URL, then `fallback`, then `/`.
+It reads the `Referer` from the request `InertiaHeadersMiddleware` is
+handling, which `Inertia::install` puts on every route; `Redirect::back`
+reads the previous URL only.
+
+The previous URL is recorded twice over: `SessionMiddleware` records every
+successful page load that is not an Inertia visit, a prefetch or a JSON call,
+and the Inertia middleware records an Inertia `GET` that matched a route,
+unless it is a prefetch (`X-Moz`, `Purpose` or `Sec-Purpose` set to
+`prefetch`), a Precognition request or a partial reload of the component it
+rendered - deferred props, polling and infinite scroll reload the page the
+visitor is on, which is no page they came from. Turn the Inertia half off
+with `InertiaConfig::store_previous_url(false)`.
+
+A redirect with a `#fragment` on an Inertia visit becomes `409` with
+`X-Inertia-Redirect` holding the target, which the client visits itself so
+the fragment survives; the fragment of a `Location` is lost inside the XHR
+that follows it. A prefetch keeps its plain redirect, since it is never
+shown. `InertiaResponse::redirect(url)` builds the same `409` by hand.
 
 For non-GET Inertia visits, the framework auto-converts the response to
 `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
@@ -1086,6 +1142,10 @@ declare module '@inertiajs/core' {
 Multiple forms on one page stay isolated: send
 `X-Inertia-Error-Bag: <name>` with the visit and the errors are flashed
 under that bag and read back under it, arriving as `errors.<name>.<field>`.
+The `errors` prop takes Laravel's shape: with the header, a session `default`
+bag (from `Redirect::with_errors`) arrives as `{<name>: {...}}`, the named
+bags arrive as they are when there is no `default` bag, and no errors at all
+arrive as `{}`; without the header the `default` bag arrives flat.
 
 The `errors` prop is always-visible by default, so a partial reload
 never filters or narrows it. `only: ['users']` still ships the bag, and
@@ -1107,21 +1167,29 @@ to repopulate. And it never touches a Precognition response: a dry-run
 `422` is exactly what the client asked for.
 
 To send the visitor **out** of the Inertia app - a payment provider, an
-OAuth authorize endpoint, a hosted billing portal - use `location_for`:
+OAuth authorize endpoint, a hosted billing portal - use `location`:
 
 ```rust
-use suprnova::{InertiaResponse, Request, Response};
+use suprnova::{Inertia, Redirect, Response};
 
-pub async fn checkout(req: Request) -> Response {
-    Ok(InertiaResponse::location_for(&req, "https://billing.example/checkout"))
+pub async fn checkout() -> Response {
+    Ok(Inertia::location("https://billing.example/checkout"))
+}
+
+pub async fn portal() -> Response {
+    // A redirect works too: a hard navigation gets it as it is.
+    Ok(Inertia::location(Redirect::away("https://billing.example/portal").status(303)))
 }
 ```
 
 An Inertia XHR gets `409` + `X-Inertia-Location` (the client runs
-`window.location = url`); a hard navigation gets a plain `302` + `Location`.
-The bare `InertiaResponse::location(url)` always returns the 409 form - use
-it only where the request is already known to be an Inertia visit, because
-a browser that follows a `409` with no `Location` header has nowhere to go.
+`window.location = url`); a hard navigation gets a plain `302` + `Location`,
+or the redirect you passed, status, flash and cookies included - Laravel's
+`Inertia::location`. `InertiaResponse::location` is the same call. It reads
+which kind of request it is answering from the Inertia middleware, so on a
+route without that middleware it answers the `409`; there, use
+`InertiaResponse::location_for(&req, url)`, which decides from the request
+you pass.
 
 ## Version detection
 
@@ -1269,7 +1337,12 @@ with it.
    guard: a production boot with an unbuilt frontend errors loudly
    instead of silently falling back to a legacy hardcoded asset path.
 2. Registers `InertiaHeadersMiddleware` - sets `Vary: X-Inertia` on every
-   response and turns an empty `200` on an Inertia visit into a `303` back.
+   response. On an Inertia visit it turns an empty `200` into a redirect
+   back (to the same-origin `Referer`, else the previous URL, else `/`; `302`,
+   or `303` for `PUT`, `PATCH` and `DELETE`), turns a redirect with a
+   `#fragment` into `409` + `X-Inertia-Redirect`, and records an Inertia
+   `GET` as the session's previous URL - see
+   [Redirect helpers](#redirect-helpers).
 3. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
 4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
@@ -1290,6 +1363,30 @@ middleware returns before the handler ever runs. The validation-redirect
 middleware is registered last, so it is innermost - closest to the
 handler - and sees a `422` before the other three middlewares get a
 chance to touch it.
+
+Two render-time settings Laravel apps reach for at boot:
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+// Rename components before they render; `None` keeps the name.
+Inertia::transform_component_using(|component| {
+    component.strip_prefix("Old/").map(|rest| format!("New/{rest}"))
+});
+
+// Make a component with no page file an error instead of a blank page.
+let cfg = InertiaConfig::new()
+    .ensure_pages_exist(true)
+    .pages_dir("frontend/src/pages")              // the default
+    .page_extensions(["svelte", "tsx", "jsx", "vue"]); // the default
+```
+
+The transformer runs for every response, whatever built it. With
+`ensure_pages_exist` on, a render looks for `<pages_dir>/<Component>.<ext>`
+and answers an error naming the component and the directory when there is no
+such file - Laravel's `inertia.pages.ensure_pages_exist`. `inertia_response!`
+already checks its component at compile time; this catches a name given as a
+string to `InertiaResponse::new` or `Router::inertia`.
 
 `install` also **retains the config**. Every `InertiaResponse` built
 afterwards starts from it, so `.frontend(...)`, `.version(...)`,
@@ -1328,6 +1425,94 @@ calling `next` hands its response to nothing inside it. If your
 `CsrfMiddleware`, rate limiter, or auth guard has to sit above the
 install, register the error-page middleware yourself between them - see
 [Where the page is rendered](#where-the-page-is-rendered).
+
+### Middleware hooks
+
+A Laravel app changes what its `HandleInertiaRequests` middleware decides by
+overriding its methods. Here those decisions are the methods of
+`InertiaMiddlewareHooks`, each defaulting to the framework's behaviour, so an
+implementation overrides only what it changes and installs with
+`InertiaConfig::hooks`:
+
+```rust
+use suprnova::{
+    DefaultInertiaHooks, HttpResponse, Inertia, InertiaConfig, InertiaMiddlewareHooks,
+    InertiaRequestExt, InertiaVisit, Prop, indexmap::IndexMap,
+};
+
+struct Hooks;
+
+impl InertiaMiddlewareHooks for Hooks {
+    // Shared with every page this middleware serves, per request.
+    fn share(&self, request: &dyn InertiaRequestExt) -> IndexMap<String, Prop> {
+        let mut props = IndexMap::new();
+        props.insert("path".into(), Prop::eager(serde_json::json!(request.path())));
+        props
+    }
+
+    // A handler that answers nothing means "done": 204, not a redirect back.
+    fn on_empty_response(&self, _visit: &InertiaVisit, _response: HttpResponse) -> HttpResponse {
+        HttpResponse::new().status(204)
+    }
+
+    // Start from the framework's 409 and add to it.
+    fn on_version_change(&self, visit: &InertiaVisit, response: HttpResponse) -> HttpResponse {
+        DefaultInertiaHooks
+            .on_version_change(visit, response)
+            .header("X-Deploy", "2026-10")
+    }
+}
+
+Inertia::install(&InertiaConfig::new().hooks(Hooks))?;
+```
+
+| Hook | Laravel | Default |
+|---|---|---|
+| `version(request)` | `version()` | `None`: the configured version; an answer is what the client is compared against and what the page carries |
+| `share(request)` | `share()` | nothing beyond the framework's `errors` |
+| `share_once(request)` | `shareOnce()` | nothing; each value becomes a once prop |
+| `root_view(request, config)` | `rootView()` | the config as it is; return a changed one to change this request's first-visit document |
+| `url_resolver()` | `urlResolver()` | `None`: `InertiaConfig::url_resolver` |
+| `on_empty_response(visit, response)` | `onEmptyResponse()` | the redirect back; a `302` it returns becomes `303` for `PUT`, `PATCH` and `DELETE` |
+| `on_version_change(visit, response)` | `onVersionChange()` | the `409` with `X-Inertia-Location` |
+| `on_redirect_with_fragment(visit, response)` | `onRedirectWithFragment()` | the `409` with `X-Inertia-Redirect` |
+
+The request hooks run once per request, before the handler; the `on_*`
+hooks run on an Inertia visit only and receive the response the framework
+would send. `InertiaVisit` carries the request's method, path, URL and
+headers, and `back_target(fallback)`, where a redirect back would go.
+
+### The stack on a route group
+
+`Inertia::install` puts the stack on every route, so an API route answers
+with `Vary: X-Inertia` and has its `302` turned into `303` for an Inertia
+`PUT`. To keep it to the groups that serve pages - Laravel's
+`HandleInertiaRequests` on the `web` group only - install with
+`register_globally(false)` and put the stack on those groups:
+
+```rust
+use suprnova::{Inertia, InertiaConfig, Router};
+
+let cfg = InertiaConfig::new()
+    .version(env!("CARGO_PKG_VERSION"))
+    .register_globally(false);
+Inertia::install(&cfg)?;           // retains the config, registers "inertia"
+
+let router: Router = Router::new()
+    .group("/", |r| r.get("/dashboard", dashboard))
+    .middleware(Inertia::middleware(&cfg))  // or .middleware_named("inertia")
+    .into();
+let router: Router = router
+    .group("/api", |r| r.get("/users", users)) // no Inertia stack here
+    .into();
+```
+
+`Inertia::middleware(&cfg)` is the whole stack as one middleware, in the
+order `install` registers it globally, with the error page when `cfg` names
+one and with `cfg`'s hooks. With `register_globally(false)`, `install`
+registers it as the named middleware `inertia` instead of globally, so a group
+can name it. `SessionMiddleware` stays global, outside the group's stack, as
+the Inertia layer reads the session it opens.
 
 Skip the call only if you genuinely don't want one of these middlewares
 (rare; each of them closes a real failure mode - cache poisoning across
@@ -1851,6 +2036,40 @@ Inertia::install(
 )?;
 ```
 
+`.ssr_exclude(pattern)` follows Laravel's `ExcludesPaths` rules, so a
+pattern copied from a Laravel app excludes the same requests: slashes at
+either end are ignored, `*` matches any characters including `/`, and each
+pattern is tried against the path and the full URL. `admin/*` keeps
+`/admin/users` and `/admin/users/edit` on the client, not `/adminx`.
+
+The `Inertia` facade changes SSR at run time, as Laravel's does:
+
+```rust
+use suprnova::{Inertia, InertiaRequestExt};
+
+// A switch for every request; `false` turns SSR on even where the
+// configuration has it off (the worker URL still comes from the config).
+Inertia::disable_ssr(true);
+
+// Or decide per request. The answer replaces the configuration's switch.
+Inertia::disable_ssr_if(|request: &dyn InertiaRequestExt| {
+    request.path().starts_with("/admin")
+});
+
+// More exclusions, with the same rules as `ssr_exclude`.
+Inertia::without_ssr(["admin/*", "https://app.test/reports*"]);
+
+// Adjust the request sent to the worker: headers, a token, the timeout.
+Inertia::configure_ssr_request_using(|request| {
+    request
+        .bearer_token(std::env::var("SSR_TOKEN").unwrap_or_default())
+        .header("X-Tenant", "acme")
+});
+```
+
+`App::disable_ssr_for_request()` still turns SSR off for the one request it
+runs in, whatever the switch says.
+
 `suprnova new` scaffolds `frontend/src/ssr.{ts,tsx}` and a `build:ssr`
 npm script for every starter. Build it, then boot the worker:
 
@@ -2026,25 +2245,11 @@ Other Rust-shaped choices worth flagging:
   does, so a typo in `inertia_response!("Dashbaord", …)` fails the
   build with a "did you mean Dashboard?" suggestion instead of
   surfacing as a runtime "component not found" later.
-- **An empty `200` on an Inertia visit becomes a `303`, not a `302`.**
-  Laravel's `onEmptyResponse` returns `redirect()->back()` (a 302) and
-  relies on its later `302 → 303` conversion for PUT/PATCH/DELETE only. A
-  substituted redirect is never a continuation of the original method - the
-  client has to issue a GET - so Suprnova says `303` directly instead of
-  leaving GET visits on a 302 the client would follow with the original
-  verb.
-- **`Inertia::location($url)` is two methods here, not one.** `location(url)`
-  keeps Laravel's always-`409` contract - it predates the request-aware
-  form and pinned-tag consumers depend on that shape not changing.
-  `location_for(&req, url)` is the newer, request-aware form: `409` for an
-  Inertia XHR, plain `302` for a hard navigation. Reach for `location_for`
-  in new code.
-- **`Inertia::clearHistory()` is two methods here, not one, either.**
-  `.clear_history()` on the builder marks a single response; `App::clear_history()`
-  flashes the flag into the session so it survives a redirect. Laravel gets
-  away with one method because it's already session-backed - Suprnova
-  keeps the response-local form as the default (no session dependency) and
-  makes the cross-redirect case an explicit opt-in instead.
+- **`Inertia::clearHistory()` has a response-local form too.**
+  `App::clear_history()` and `Inertia::clear_history()` are Laravel's call:
+  the flag lives in the session until a page emits it. `.clear_history()` on
+  the builder marks a single response with no session dependency, for the
+  case where the response you are returning is the page that should clear.
 - **`.lazy()` isn't Laravel's `Inertia::lazy()`.** Laravel's method is
   deprecated and behaves like `optional()` - `LazyProp` is a straight
   alias for `OptionalProp`, skipped entirely on the initial visit

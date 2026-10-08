@@ -136,7 +136,7 @@ fn back_target(referer: Option<&str>, host: Option<&str>, root: &str, current: &
 /// path has to be under the public root: a `Referer` from another
 /// application on the same host is foreign, as one from another host is
 /// (PFX-005). Everything else falls through.
-fn same_origin_path(referer: &str, host: Option<&str>, root: &str) -> Option<String> {
+pub(super) fn same_origin_path(referer: &str, host: Option<&str>, root: &str) -> Option<String> {
     let referer = referer.trim();
     if referer.starts_with('/') {
         return root_relative_or_none(referer)

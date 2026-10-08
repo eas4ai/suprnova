@@ -755,10 +755,10 @@ pub struct Redirect {
     location: String,
     query_params: Vec<(String, String)>,
     status: u16,
-    /// When `true`, on conversion to `Response` we flash
-    /// `_inertia.preserve_fragment = true` into the session so the
-    /// destination's `InertiaResponse` emits `preserveFragment: true`
-    /// in its page object. Maps to Laravel's
+    /// When `true`, on conversion to `Response` we set
+    /// `inertia.preserve_fragment = true` in the session so the next page
+    /// response emits `preserveFragment: true` in its page object, however
+    /// many redirects come first. Maps to Laravel's
     /// `redirect(...)->preserveFragment()`.
     preserve_fragment: bool,
     /// Flash payload to write into the session when this redirect is
@@ -824,8 +824,11 @@ impl Redirect {
     /// the previous URL from
     /// [`SessionData::previous_url`](crate::session::SessionData::previous_url),
     /// which [`SessionMiddleware`](crate::session::SessionMiddleware)
-    /// writes on every successful GET request (Inertia partials and
-    /// JSON-API responses are skipped).
+    /// writes on every successful GET page load (prefetches and JSON-API
+    /// responses are skipped) and the Inertia middleware writes on an
+    /// Inertia `GET` ([`InertiaConfig::store_previous_url`](crate::InertiaConfig::store_previous_url)).
+    /// [`Inertia::back`](crate::Inertia::back) tries the request's
+    /// same-origin `Referer` first, as Laravel's `back()` does.
     ///
     /// Use this in form-submit handlers to bounce the user back to
     /// where they came from after a successful POST, or in validation-
@@ -1155,10 +1158,10 @@ impl Redirect {
 
     /// Carry the URL fragment from the originating request across this
     /// redirect to the destination. On conversion to a `Response`, this
-    /// flashes `_inertia.preserve_fragment = true` into the session;
-    /// the next Inertia response (which is the redirect destination)
-    /// picks up the flag and emits `preserveFragment: true` in its
-    /// page object, telling the client to keep the URL hash.
+    /// sets `inertia.preserve_fragment = true` in the session; the next
+    /// Inertia page response picks up the flag, however many redirects
+    /// come first, and emits `preserveFragment: true` in its page object,
+    /// telling the client to keep the URL hash.
     ///
     /// Requires `SessionMiddleware` to be active (it normally is).
     /// Without a session scope, the flag is silently dropped.
@@ -1221,16 +1224,15 @@ where
     out
 }
 
-/// Flash `_inertia.preserve_fragment = true` into the session when the
-/// redirect's preserve-fragment flag is set. Shared between the
-/// `From<Redirect>` and `From<RedirectRouteBuilder>` impls so they
-/// can't drift on flash behavior. No-op outside a `SessionMiddleware`
-/// scope (silently dropped - by design, for tests / partial setups).
+/// Set the session entry `inertia.preserve_fragment` when the redirect's
+/// preserve-fragment flag is set; it lasts until a page response emits it,
+/// however many redirects come first. Shared between the `From<Redirect>`
+/// and `From<RedirectRouteBuilder>` impls so they can't drift. No-op
+/// outside a `SessionMiddleware` scope (silently dropped - by design, for
+/// tests / partial setups).
 fn flash_preserve_fragment_if_set(preserve: bool) {
     if preserve {
-        crate::session::session_mut(|s| {
-            s.flash("_inertia.preserve_fragment", true);
-        });
+        crate::inertia::flash::set_history_flag(crate::inertia::flash::PRESERVE_FRAGMENT);
     }
 }
 
@@ -1523,7 +1525,7 @@ impl From<RedirectRouteBuilder> for Response {
         // Route lookup runs first; if the named route is missing OR if
         // any required path parameter is absent, we return a 500 and
         // intentionally skip the flash - otherwise a stray
-        // `_inertia.preserve_fragment` would land on whatever page the
+        // `inertia.preserve_fragment` would land on whatever page the
         // user navigates to next, and a `Location` header containing
         // a raw `{placeholder}` is unsafe to ship to a browser.
         let url = match redirect.build_url() {

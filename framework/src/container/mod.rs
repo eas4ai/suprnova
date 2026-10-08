@@ -1362,20 +1362,17 @@ impl App {
         Self::inertia_registry().flush_shared();
     }
 
-    /// Push a value into the current request's flash bag. Drained by
-    /// the next Inertia response and emitted under `page.flash`. The
-    /// flash bag is scoped per request via `tokio::task_local!` and is
-    /// silently a no-op if called outside an HTTP request (e.g. from
-    /// a background worker).
+    /// Add a value to the Inertia flash data, emitted under `page.flash`
+    /// by the next Inertia page response and removed by it - the same as
+    /// [`Inertia::flash`](crate::Inertia::flash) with a string key.
     ///
-    /// **Cross-redirect persistence**: when the handler returns a
-    /// [`Redirect`](crate::http::Redirect) and a session scope is
-    /// active, the flash bag is transferred into the session on
-    /// conversion to [`Response`](crate::http::Response) and surfaces
-    /// on the receiving request's Inertia response under `page.flash`.
-    /// Without a session scope the values still appear on the *current*
-    /// response but cannot survive the redirect. Same-request flashes
-    /// win over inherited session flashes on key collision.
+    /// With a session scope the value goes into the session under
+    /// `inertia.flash_data` at once, so it reaches the next page whatever
+    /// this request answers, and the Inertia middleware keeps it across
+    /// any number of redirects. Without a session scope it goes into the
+    /// current request's flash bag and appears on the *current* response
+    /// only; outside an HTTP request (e.g. from a background worker) it is
+    /// silently a no-op. A later write of the same key wins.
     pub fn flash<V: serde::Serialize>(key: impl Into<String>, value: V) {
         let key = key.into();
         // Soft-fail on serialise error to match the sibling
@@ -1398,11 +1395,13 @@ impl App {
     }
 
     /// Clear the client's history state on the **next** page - Laravel's
-    /// `Inertia::clearHistory()`.
+    /// `Inertia::clearHistory()`, also reachable as
+    /// [`Inertia::clear_history`](crate::Inertia::clear_history).
     ///
-    /// Flashes a one-shot session flag that the next Inertia response
-    /// turns into `clearHistory: true`. That indirection is the whole
-    /// point: the canonical caller is a logout handler, which redirects.
+    /// Sets the session entry `inertia.clear_history`, which the next page
+    /// response turns into `clearHistory: true` and removes; it lasts until
+    /// then, however many redirects come first. That indirection is the
+    /// whole point: the canonical caller is a logout handler, which redirects.
     /// Its own response is discarded by the browser following the
     /// `Location` header, so the flag has to ride the redirect and land on
     /// the login page - the page that actually renders. Setting it on the
@@ -1414,7 +1413,7 @@ impl App {
     /// **Call this after [`Auth::logout`](crate::Auth::logout) or
     /// [`Auth::logout_and_invalidate`](crate::Auth::logout_and_invalidate),
     /// not before.** Invalidation flushes the whole session, and this
-    /// flag lives in the session - flash it first and the flush erases
+    /// flag lives in the session - set it first and the flush erases
     /// it before it ever reaches the login page, so the clear silently
     /// never happens.
     ///
@@ -1435,10 +1434,8 @@ impl App {
     /// # }
     /// ```
     pub fn clear_history() {
-        let flashed = crate::session::session_mut(|session| {
-            session.flash("_inertia.clear_history", true);
-        });
-        if flashed.is_none() {
+        let set = crate::inertia::flash::set_history_flag(crate::inertia::flash::CLEAR_HISTORY);
+        if !set {
             tracing::warn!(
                 "App::clear_history called with no active session scope; the \
                  history-clear flag was dropped. This typically means \
@@ -1448,10 +1445,11 @@ impl App {
         }
     }
 
-    /// Disable Inertia SSR for the remainder of this request. Equivalent
-    /// to Laravel's `Inertia::disable_ssr()`. The response falls back
-    /// to client-side rendering even when `InertiaConfig::ssr.enabled`
-    /// is `true`. Idempotent; no-op outside a request scope.
+    /// Disable Inertia SSR for the remainder of this request. The response
+    /// falls back to client-side rendering even when SSR is on by the
+    /// configuration or by [`Inertia::disable_ssr`](crate::Inertia::disable_ssr),
+    /// which sets the switch for every request rather than this one.
+    /// Idempotent; no-op outside a request scope.
     pub fn disable_ssr_for_request() {
         crate::inertia::ssr::disable_ssr_for_request();
     }

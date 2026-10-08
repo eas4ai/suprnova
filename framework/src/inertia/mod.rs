@@ -14,24 +14,32 @@ mod error_page_middleware;
 mod facade;
 pub(crate) mod flash;
 mod headers_middleware;
+mod hooks;
 mod manifest;
+mod pages;
 mod prop;
 mod providers;
 mod query_string;
 mod response;
 mod root_share;
 mod root_template;
+mod runtime;
 mod shared;
 pub(crate) mod ssr;
 mod validation_redirect_middleware;
 mod version_middleware;
+mod visit;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;
 pub use facade::Inertia;
+pub use flash::FlashKey;
 pub use headers_middleware::InertiaHeadersMiddleware;
+pub use hooks::{
+    DefaultInertiaHooks, InertiaMiddleware, InertiaMiddlewareHooks, InertiaVisit, PageUrlResolver,
+};
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub(crate) use prop::header_is_truthy;
 pub use prop::{
@@ -44,7 +52,7 @@ pub use providers::{
     PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty, RenderContext,
 };
 pub(crate) use response::escape_html_attr;
-pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
+pub use response::{InertiaLocation, InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
 pub use root_template::{
     InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts, InertiaRootTemplate,
@@ -52,7 +60,7 @@ pub use root_template::{
 };
 pub use shared::SharedOnceProp;
 pub use shared::{InertiaRegistry, InertiaSharedData};
-pub use ssr::SsrResponse;
+pub use ssr::{SsrRequest, SsrResponse};
 pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;
 pub use version_middleware::InertiaVersionMiddleware;
 

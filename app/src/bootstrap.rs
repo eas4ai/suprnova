@@ -328,7 +328,8 @@ pub fn inertia_version() -> String {
 /// 6. Inertia protocol, four middlewares registered together by
 ///    `Inertia::install`: `Vary: X-Inertia` on every response (outermost
 ///    of the four, so it also covers the `409` below); an empty `200`
-///    on an Inertia visit substituted with a `303` back; `409` +
+///    on an Inertia visit substituted with a redirect back (`302`, or
+///    `303` for `PUT`, `PATCH` and `DELETE`); `409` +
 ///    `X-Inertia-Location` on an `X-Inertia-Version` mismatch, re-flashing
 ///    the session first so a flashed error survives the client's
 ///    follow-up full-page GET; `302` → `303` on non-GET Inertia
