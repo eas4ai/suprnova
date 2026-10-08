@@ -1359,6 +1359,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   when any of those steps fails, the entry records the `500` and its body
   as a response with no page, no `component` and no prop values (DT-03,
   DT-04).
+- **Every render prop has a `renderSource`.** A render prop's source was
+  the line below the render call that names its key, and the prop had none
+  when no such line existed: a page rendered with
+  `InertiaResponse::new("Home").with_data(props)` whose struct is defined
+  in another file, or a deployment without its Rust sources. Such a prop
+  now names the render call's own file and line (DT-03).
 
 ## 3.2.1 - 2026-10-05
 

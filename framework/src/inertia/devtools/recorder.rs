@@ -147,9 +147,11 @@ impl Collector {
     /// Every prop path the render recorded is listed only when the client
     /// received it (or it was rescued), every top-level key of the page's
     /// props is listed, and a deep path is kept only when it carries
-    /// metadata. A render prop gets the line that names it in the render
-    /// call. `propValues` holds the value of each kept path from the page
-    /// object, which is what the client received.
+    /// metadata. A render prop gets the line that names it below the
+    /// render call, or the render call's own line when no line there names
+    /// it: a typed props struct defined elsewhere, or a source file that
+    /// is not on disk. `propValues` holds the value of each kept path from
+    /// the page object, which is what the client received.
     pub(crate) fn build(self, page: Value) -> RenderPayload {
         let delivered = page.get("props").cloned().unwrap_or(Value::Null);
         let mut entries: Vec<(String, PropMeta)> = self
@@ -176,12 +178,16 @@ impl Collector {
             let mut object = meta.to_json(shared, share_source.map(SourceLocation::to_json));
             if !shared
                 && share_source.is_none()
-                && let (Some(source), Some(text)) = (self.render_source, render_text.as_deref())
-                && let Some(line) = source.find_key_line_in(text, &path)
+                && let Some(source) = self.render_source
                 && let Value::Object(map) = &mut object
             {
                 let mut at = source.to_json();
-                at["line"] = Value::from(line);
+                if let Some(line) = render_text
+                    .as_deref()
+                    .and_then(|text| source.find_key_line_in(text, &path))
+                {
+                    at["line"] = Value::from(line);
+                }
                 map.insert("renderSource".to_string(), at);
             }
             if let Some(value) = value_at(&delivered, &path) {
@@ -254,6 +260,29 @@ mod tests {
         assert_eq!(payload.props["auth"]["shared"], true);
         assert_eq!(payload.prop_values["auth.user.permissions"], json!(["x"]));
         assert_eq!(payload.prop_values["stats"], json!({"count": 3}));
+    }
+
+    #[test]
+    fn indt_a_render_prop_keeps_the_render_call_when_its_key_is_not_found() {
+        // The render call's file is not on disk, as in a deployment
+        // without the Rust sources, so no line naming a key can be found.
+        let render = SourceLocation::for_test("nowhere/indt-missing-source.rs", 12);
+        let mut collector = Collector::new("Home", Some(render));
+        collector.shared_keys(vec!["errors".to_string()]);
+        let payload = collector.build(json!({
+            "component": "Home",
+            "props": {"title": "Hi", "errors": {}},
+        }));
+        assert_eq!(
+            payload.props["title"]["renderSource"],
+            json!({"file": "nowhere/indt-missing-source.rs", "line": 12}),
+            "{:?}",
+            payload.props
+        );
+        assert!(
+            payload.props["errors"].get("renderSource").is_none(),
+            "a shared prop has no render source"
+        );
     }
 
     #[test]

@@ -37,6 +37,13 @@ impl SourceLocation {
         }
     }
 
+    /// A location at `file` and `line` as given, for a test that needs one
+    /// the compiler did not hand over, such as a file that is not on disk.
+    #[cfg(test)]
+    pub(crate) fn for_test(file: &'static str, line: u32) -> Self {
+        Self { file, line }
+    }
+
     /// The same file at `line`.
     fn at(self, line: u32) -> Self {
         Self { line, ..self }

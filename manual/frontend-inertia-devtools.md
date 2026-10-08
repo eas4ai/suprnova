@@ -167,7 +167,9 @@ Each prop of a rendered page is listed under `props` with `shared` and
   shared it.
 - `renderSource` - for any other prop, the line that names its key below
   the render call: `"users":` in `inertia_response!`, or `("users",` in a
-  builder call.
+  builder call. When no line there names the key, as for a typed props
+  struct defined in another file or a source file that is not on disk, it
+  is the render call's own file and line.
 
 A prop your middleware hooks share has the `InertiaConfig::hooks` call
 that installed them as its `shareSource`: Rust has no reflection that
