@@ -616,6 +616,10 @@ Requirements: PAR-076, PAR-077, PAR-078, PAR-079, PAR-080, PAR-071, PAR-074
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 
+## precognition
+
+Requirements: PAR-081, PAR-082, PAR-083, PAR-084, PAR-085, PAR-086, PAR-087, PAR-088
+
 41. precognition - the sixth of the parity rounds the developer ordered on
    2026-10-07 (17:35), ruled build by the parity default: the thirty-one
    build rows of the Precognition group (rows 002, 003, 006,
@@ -624,8 +628,6 @@ Requirements: PAR-076, PAR-077, PAR-078, PAR-079, PAR-080, PAR-071, PAR-074
    034, 035, 036, 037, 039, 040, 043, 047,
    049, 061 and 063; row 057 met by PAR-072 already), with
    rows 001 and 017 kept as the developer listed them.
-   Requirements: PAR-081, PAR-082, PAR-083, PAR-084, PAR-085, PAR-086,
-   PAR-087, PAR-088.
    Delivery: PAR-081 to PAR-084 in `framework/src/http/precognition.rs`
    (the middleware, the request marks and predicates, the helper, the
    validate-only match), `framework/src/http/form_request.rs` and
@@ -640,6 +642,8 @@ Requirements: PAR-076, PAR-077, PAR-078, PAR-079, PAR-080, PAR-071, PAR-074
    middleware where a kit page validates live; the changelog.
    Mechanisms: `par-precognition` (the `precognition` tests of the
    `http`, `session` and `testing` suites).
+   Done when it passes on a committed tree, the manual chapter is in
+   place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
