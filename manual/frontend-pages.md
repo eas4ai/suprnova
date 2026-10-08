@@ -683,9 +683,10 @@ const page = usePage<{ auth: { user?: { name: string } } }>()
 
 ## Layouts
 
-A layout is just a regular component that takes a slot / children / template
-content. There's no special Suprnova API - you import a layout and render
-your page content inside it.
+The kits apply their layouts through `createInertiaApp`'s `layout` option.
+Pages render their own content inside the layout selected there. The
+layout stays mounted across visits between pages that share it, so its
+state survives navigation.
 
 ### Svelte 5
 
