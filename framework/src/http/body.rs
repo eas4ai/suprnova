@@ -92,10 +92,24 @@ pub async fn collect_body_with_cap(
     {
         return Err(over_limit(max_bytes));
     }
+    collect_after(Bytes::new(), body, max_bytes).await
+}
 
+/// Collect `rest`, the stream after the bytes `read` a middleware already
+/// read, onto them, the whole capped at `max_bytes` as
+/// [`collect_body_with_cap`] caps it. For a body a middleware stopped
+/// reading at its own limit ([`BodyState::Partial`](crate::http::BodyState::Partial)).
+pub(crate) async fn collect_after(
+    read: Bytes,
+    rest: Incoming,
+    max_bytes: usize,
+) -> Result<Bytes, FrameworkError> {
+    if read.len() > max_bytes {
+        return Err(over_limit(max_bytes));
+    }
     // `Incoming: Unpin`, so `body.frame()` is callable on `&mut body` without
     // pinning.
-    let mut body = body;
+    let mut body = rest;
     // Each frame is copied as it arrives and dropped, so what the body
     // holds tracks its bytes, whatever number of frames the client chose to
     // send them in; a frame also shares the connection's read buffer, which
@@ -103,7 +117,7 @@ pub async fn collect_body_with_cap(
     // never with a declared length a client need not send, and the room
     // left over is released once, so the body is held at its length for as
     // long as the handler keeps it.
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: Vec<u8> = read.to_vec();
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(read_failure)?;
         // Frames may carry data OR trailers; we only count + buffer data.

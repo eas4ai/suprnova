@@ -856,6 +856,10 @@ where
             });
         }
         crate::http::BodyState::Failed(error) => return Err(error),
+        crate::http::BodyState::Partial { read, rest } => Box::pin(
+            futures::stream::once(async move { Ok(read) })
+                .chain(BodyDataStream::new(rest).map(|chunk| chunk.map_err(std::io::Error::other))),
+        ),
     };
     // SEC-05: cap the RAW stream, not just the bytes that reach a part.
     //

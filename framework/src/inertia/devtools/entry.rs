@@ -11,9 +11,10 @@ use super::redact::UNSERIALIZABLE;
 use crate::http::{BodyRead, HttpResponse, Request};
 use crate::inertia::prop::header_is_truthy;
 
-/// The largest textual response body an entry keeps, and the largest
-/// request body read for one, in bytes.
-pub(crate) const BODY_LIMIT: usize = 256_000;
+/// The largest textual response body an entry keeps, in bytes. A request
+/// body has no limit of its own: it is read up to the framework's request
+/// body cap, the most the handler could read.
+pub(crate) const RESPONSE_BODY_LIMIT: usize = 256_000;
 
 /// The request header carrying the extension's id of the browser tab.
 pub(crate) const TAB_HEADER: &str = "X-Inertia-Devtools-Tab";
@@ -55,10 +56,10 @@ pub(crate) struct RequestFacts {
 enum RequestBody {
     /// A write that is not an Inertia visit: its body is not kept.
     NonInertiaWrite,
-    /// A body longer than [`BODY_LIMIT`], left unread for the handler.
+    /// A body longer than the request body cap, which the handler would
+    /// refuse with 413 unless it has a larger cap of its own; the request
+    /// keeps it for the handler.
     TooLarge,
-    /// A body of unknown length, left unread for the handler.
-    Streamed,
     /// A body that failed to arrive; the handler meets the failure when
     /// it reads the body.
     Unreadable,
@@ -96,13 +97,12 @@ fn truthy(request: &Request, name: &str) -> bool {
 }
 
 impl RequestFacts {
-    /// Read the facts of `request`, and its body when it is kept and short
-    /// enough to read before the handler.
+    /// Read the facts of `request`, and its body when it is kept.
     ///
     /// The handler reads a body that was read here from the copy kept on
-    /// the request, as it reads one the CSRF middleware read. A body that
-    /// fails to arrive is kept failed on the request, so the handler meets
-    /// the failure only if it reads the body, as it would unrecorded.
+    /// the request, as it reads one the CSRF middleware read. A body over
+    /// the request body cap, and one that fails to arrive, stay on the
+    /// request for the handler, which answers as it would unrecorded.
     pub(crate) async fn capture(mut request: Request) -> (Request, Self) {
         let started = Instant::now();
         let is_inertia = request.is_inertia();
@@ -169,34 +169,24 @@ impl RequestFacts {
     }
 }
 
-/// The body of `request`, read now when its length is declared and at
-/// most [`BODY_LIMIT`]; a body already read by an earlier middleware is
-/// taken from the request.
+/// The body of `request`, read now up to the framework's request body
+/// cap, the limit the extractors enforce, whether or not its length is
+/// declared; a body already read by an earlier middleware is taken from
+/// the request.
 async fn read_body(request: &mut Request) -> RequestBody {
     let content_type = request.content_type().map(str::to_string);
     let query = request.query().map(str::to_string);
-    let read = |bytes: Bytes| RequestBody::Read {
-        content_type: content_type.clone(),
-        bytes,
-        query: query.clone(),
-    };
-    if let Some(bytes) = request.cached_body() {
-        return read(bytes.clone());
-    }
-    let length = request
-        .header("content-length")
-        .and_then(|value| value.trim().parse::<usize>().ok());
-    let chunked = request.header("transfer-encoding").is_some();
-    match length {
-        Some(length) if length > BODY_LIMIT => RequestBody::TooLarge,
-        Some(0) => read(Bytes::new()),
-        Some(length) => match request.read_body_up_to(length).await {
-            BodyRead::Whole(bytes) => read(bytes),
-            BodyRead::TooLarge => RequestBody::TooLarge,
-            BodyRead::Failed => RequestBody::Unreadable,
+    match request
+        .read_body_up_to(crate::http::body::global_max_request_body_bytes())
+        .await
+    {
+        BodyRead::Whole(bytes) => RequestBody::Read {
+            content_type,
+            bytes,
+            query,
         },
-        None if chunked => RequestBody::Streamed,
-        None => read(Bytes::new()),
+        BodyRead::TooLarge => RequestBody::TooLarge,
+        BodyRead::Failed => RequestBody::Unreadable,
     }
 }
 
@@ -275,7 +265,6 @@ async fn request_body(body: RequestBody) -> Value {
     let (content_type, bytes, query) = match body {
         RequestBody::NonInertiaWrite => return omitted("non-inertia-request"),
         RequestBody::TooLarge => return omitted("too-large"),
-        RequestBody::Streamed => return omitted("streamed"),
         RequestBody::Unreadable => return omitted("unreadable"),
         RequestBody::Read {
             content_type,
@@ -330,7 +319,7 @@ fn is_textual(content_type: &str) -> bool {
 
 /// The response body an entry carries, Laravel's `captureResponseBody`:
 /// the page object of a rendered page; else a textual body, decoded when
-/// it is JSON, of at most [`BODY_LIMIT`] bytes.
+/// it is JSON, of at most [`RESPONSE_BODY_LIMIT`] bytes.
 fn response_body(payload: Option<&RenderPayload>, response: &HttpResponse) -> Value {
     if let Some(payload) = payload {
         return match &payload.page {
@@ -352,7 +341,7 @@ fn response_body(payload: Option<&RenderPayload>, response: &HttpResponse) -> Va
     if body.is_empty() {
         return empty();
     }
-    if body.len() > BODY_LIMIT {
+    if body.len() > RESPONSE_BODY_LIMIT {
         return omitted("too-large");
     }
     if content_type.contains("json")

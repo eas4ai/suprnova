@@ -80,6 +80,12 @@ fn router() -> Router {
             let (_, bytes) = req.body_bytes().await?;
             Ok(HttpResponse::bytes_body(bytes, "text/plain"))
         })
+        .post("/echo-large", |req: Request| async move {
+            // A cap of its own, above the global one, as a `FormRequest`
+            // with `max_body_bytes` has.
+            let (_, bytes) = req.body_bytes_with_cap(1024 * 1024).await?;
+            Ok(HttpResponse::bytes_body(bytes, "text/plain"))
+        })
         .get("/upper", |req: Request| {
             first_visit_document(req, "<html><BODY><p>x</p></BODY></html>")
         })
@@ -530,6 +536,130 @@ async fn indt_a_body_that_fails_to_arrive_leaves_the_answer_to_the_handler() {
     let unrecorded = raw_request(quiet, &inertia_post_head("/echo", 10), b"abc", true).await;
     assert_eq!(read.status, 500);
     assert_eq!(read.status, unrecorded.status);
+}
+
+/// The head of a chunked Inertia `POST` to `path`.
+fn chunked_inertia_post_head(path: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nX-Inertia: true\r\n\
+         Content-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+    )
+}
+
+/// `data` as one chunk of a chunked body, then the last chunk.
+fn one_chunk(data: &[u8]) -> Vec<u8> {
+    let mut body = format!("{:x}\r\n", data.len()).into_bytes();
+    body.extend_from_slice(data);
+    body.extend_from_slice(b"\r\n0\r\n\r\n");
+    body
+}
+
+#[tokio::test]
+async fn indt_a_request_body_longer_than_a_response_body_may_be_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+    let text = "x".repeat(300_000);
+    let response = client
+        .post("/page")
+        .inertia()
+        .json(&json!({"text": text}))
+        .send()
+        .await;
+    response.assert_ok();
+    assert_eq!(
+        entry_of(dir.path(), &response)["http"]["requestBody"],
+        json!({"status": "present", "value": {"text": text}})
+    );
+}
+
+#[tokio::test]
+async fn indt_a_chunked_body_is_recorded_and_still_reaches_the_handler() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    let reply = raw_request(
+        addr,
+        &chunked_inertia_post_head("/echo"),
+        b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+        false,
+    )
+    .await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.body, "hello world", "the handler read the whole body");
+    assert_eq!(
+        read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "present", "value": "hello world"})
+    );
+}
+
+#[tokio::test]
+async fn indt_a_body_over_the_request_body_cap_is_too_large_and_the_handler_answers() {
+    // The cap is one value for the whole process; this test lowers it.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "indt_a_body_over_the_request_body_cap_is_too_large_and_the_handler_answers",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::http::body::set_global_max_request_body_bytes(1024);
+    let dir = tempfile::tempdir().unwrap();
+    let too_large = json!({"status": "omitted", "reason": "too-large"});
+    let body = "y".repeat(2048);
+
+    // A declared length over the cap: the handler refuses the body itself,
+    // and one with a larger cap of its own reads it whole.
+    let client = client(router(), devtools(dir.path()));
+    let refused = client.post("/echo").inertia().json(&body).send().await;
+    assert_eq!(refused.status(), 413);
+    assert_eq!(
+        entry_of(dir.path(), &refused)["http"]["requestBody"],
+        too_large
+    );
+    let taken = client
+        .post("/echo-large")
+        .inertia()
+        .json(&body)
+        .send()
+        .await;
+    taken.assert_ok();
+    assert_eq!(taken.body_text().len(), body.len() + 2, "the JSON string");
+    assert_eq!(
+        entry_of(dir.path(), &taken)["http"]["requestBody"],
+        too_large
+    );
+
+    // A chunked body: the recorder reads past the cap before it knows, and
+    // the handler still gets the whole stream.
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    let chunked = one_chunk(body.as_bytes());
+    let refused = raw_request(addr, &chunked_inertia_post_head("/echo"), &chunked, false).await;
+    assert_eq!(refused.status, 413);
+    assert_eq!(
+        read_entry(dir.path(), &refused.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        too_large
+    );
+    let taken = raw_request(
+        addr,
+        &chunked_inertia_post_head("/echo-large"),
+        &chunked,
+        false,
+    )
+    .await;
+    assert_eq!(taken.status, 200);
+    assert_eq!(taken.body, body, "the handler read the whole stream");
+    assert_eq!(
+        read_entry(dir.path(), &taken.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        too_large
+    );
 }
 
 #[tokio::test]
