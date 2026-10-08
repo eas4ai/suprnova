@@ -1189,7 +1189,7 @@ impl InertiaResponse {
             merged.insert(k, v);
         }
 
-        let (materialized, metadata) = resolve_props(
+        let (mut materialized, metadata) = resolve_props(
             merged,
             &filter,
             &except_once,
@@ -1223,7 +1223,6 @@ impl InertiaResponse {
         // values Laravel's `encodeBigIntegersWhenEnabled` sees.
         let resolved_preserve_big_integers =
             preserve_big_integers.unwrap_or(config.preserve_big_integers);
-        let mut materialized = materialized;
         if resolved_preserve_big_integers {
             encode_big_integers_in(&mut materialized);
             encode_big_integers_in(&mut flash);
@@ -1280,7 +1279,7 @@ impl InertiaResponse {
             preserve_big_integers,
             lazy_owned,
         } = self;
-        let (materialized, metadata) = resolve_props(
+        let (mut materialized, metadata) = resolve_props(
             props,
             filter,
             &[],
@@ -1321,7 +1320,6 @@ impl InertiaResponse {
 
         let resolved_preserve_big_integers =
             preserve_big_integers.unwrap_or(config.preserve_big_integers);
-        let mut materialized = materialized;
         if resolved_preserve_big_integers {
             encode_big_integers_in(&mut materialized);
             encode_big_integers_in(&mut flash);

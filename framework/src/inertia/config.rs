@@ -241,8 +241,10 @@ pub struct InertiaConfig {
     pub entry_point: String,
     /// Asset version source for cache busting / version-mismatch
     /// detection. Defaults to [`VersionResolver::Manifest`], hashing
-    /// [`manifest_path`](Self::manifest_path); see [`VersionResolver`]
-    /// for the static and dynamic alternatives.
+    /// [`manifest_path`](Self::manifest_path), with the
+    /// [`asset_url`](Self::asset_url) setting's hash ahead of it when one is
+    /// set and the empty string when neither is there; see
+    /// [`VersionResolver`] for the static and dynamic alternatives.
     pub version: VersionResolver,
     /// `true` during local development (loads via the Vite dev server);
     /// `false` for production (loads built assets from `/assets/`).

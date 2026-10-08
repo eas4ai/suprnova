@@ -1311,7 +1311,6 @@ impl PartialFilter {
                 }
             }
             Value::Array(items) => {
-                let count = items.len();
                 let mut kept: Vec<(usize, Value)> = Vec::new();
                 for (index, nested) in items.into_iter().enumerate() {
                     let child_path = format!("{path}.{index}");
@@ -1319,11 +1318,11 @@ impl PartialFilter {
                         kept.push((index, self.narrow_at(&child_path, nested)));
                     }
                 }
-                let still_a_list = kept.len() == count
-                    || kept
-                        .iter()
-                        .enumerate()
-                        .all(|(position, (index, _))| position == *index);
+                // Kept items that still run 0, 1, 2, ... are a list.
+                let still_a_list = kept
+                    .iter()
+                    .enumerate()
+                    .all(|(position, (index, _))| position == *index);
                 if still_a_list {
                     Value::Array(kept.into_iter().map(|(_, nested)| nested).collect())
                 } else {
