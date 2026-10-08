@@ -4,7 +4,7 @@
 #![cfg(feature = "media")]
 
 use oxideav_gif::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
-use oxideav_png::{PngEncoderOptions, PngImage, PngPixelFormat};
+use oxideav_png::PngPixelFormat;
 use suprnova::ImageConfig;
 use suprnova::media::{
     ImageDriver, ImagePipeline, OutputFormat, OxideAvImageDriver, Transformation,
@@ -140,14 +140,15 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// a `width x height` RGBA image, `height * (1 + width * 4)` bytes inflated.
 fn png_declaring_one_pixel(width: u32, height: u32) -> Vec<u8> {
     let stride = width as usize * 4;
-    let large = oxideav_png::encode_png_image(&PngImage {
+    let large = oxideav_png::encode_plane(
         width,
         height,
-        pixel_format: PngPixelFormat::Rgba,
+        PngPixelFormat::Rgba,
         stride,
-        data: vec![0u8; stride * height as usize],
-        palette: Vec::new(),
-    })
+        &vec![0u8; stride * height as usize],
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the large image encodes");
     let mut idat = Vec::new();
     let mut pos = PNG_SIGNATURE.len();
@@ -359,19 +360,14 @@ fn encode_png(
     interlace: bool,
 ) -> Vec<u8> {
     let stride = width as usize * channels;
-    oxideav_png::encode_png_image_with_options(
-        &PngImage {
-            width,
-            height,
-            pixel_format,
-            stride,
-            data: noise(width, height, channels),
-            palette: Vec::new(),
-        },
-        &PngEncoderOptions {
-            interlace,
-            ..PngEncoderOptions::default()
-        },
+    oxideav_png::encode_plane(
+        width,
+        height,
+        pixel_format,
+        stride,
+        &noise(width, height, channels),
+        None,
+        &oxideav_png::EncodeOptions::default().with_interlace(interlace),
     )
     .expect("the PNG encodes")
 }
@@ -453,14 +449,15 @@ async fn mem_audit_jpeg_webp_and_bmp_decode_within_the_budget() {
         .chunks(3)
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
-    let source = oxideav_png::encode_png_image(&PngImage {
-        width: 256,
-        height: 256,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 256 * 4,
-        data: opaque,
-        palette: Vec::new(),
-    })
+    let source = oxideav_png::encode_plane(
+        256,
+        256,
+        PngPixelFormat::Rgba,
+        256 * 4,
+        &opaque,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the PNG encodes");
     for (name, format) in [
         ("JPEG", OutputFormat::Jpeg),
@@ -469,6 +466,61 @@ async fn mem_audit_jpeg_webp_and_bmp_decode_within_the_budget() {
         ("BMP", OutputFormat::Bmp),
     ] {
         assert_the_budget_holds(name, &convert(&source, format), 256, 256);
+    }
+}
+
+/// A `side x side` BMP of noise in `format`, `channels` bytes a pixel, with
+/// a 256-colour palette for `Pal8`, embedding `profile` in a V5 header when
+/// one is given.
+fn bmp_of(
+    side: u32,
+    format: oxideav_bmp::PixelFormat,
+    channels: usize,
+    profile: Option<Vec<u8>>,
+) -> Vec<u8> {
+    let image = oxideav_bmp::BmpImage::new(
+        side,
+        side,
+        format,
+        vec![oxideav_bmp::Plane::new(
+            side as usize * channels,
+            noise(side, side, channels),
+        )],
+    )
+    .expect("the BMP image")
+    .with_palette((format == oxideav_bmp::PixelFormat::Pal8).then(|| {
+        oxideav_bmp::Palette::new(
+            (0..=255u8)
+                .map(|level| [level, 255 - level, level / 2, 255])
+                .collect(),
+        )
+    }))
+    .with_metadata(oxideav_bmp::Metadata::new().with_icc(profile));
+    oxideav_bmp::encode(&image, &oxideav_bmp::EncodeOptions::default()).expect("the BMP encodes")
+}
+
+/// MEM-003 and IMG-002: `oxideav-bmp` decodes a BMP into the file's own
+/// layout and copies an embedded profile out of the file. A 32-bit plane
+/// becomes the RGBA plane where it lies; a narrower one is converted into a
+/// new RGBA plane while it is held. The estimate counts both planes and the
+/// profile's copy, so each of these decodes within its budget.
+#[tokio::test]
+async fn mem_audit_bmps_in_every_depth_decode_within_the_budget() {
+    let _lock = exclusive().await;
+    use oxideav_bmp::PixelFormat as F;
+    for (name, format, channels, profile) in [
+        ("24-bit BMP", F::Bgr24, 3, None),
+        ("16-bit BMP", F::Rgb565, 2, None),
+        ("8-bit BMP", F::Pal8, 1, None),
+        ("32-bit BMP", F::Bgra, 4, None),
+        (
+            "32-bit BMP with a profile",
+            F::Bgra,
+            4,
+            Some(p3_profile_of(256 * 1024)),
+        ),
+    ] {
+        assert_the_budget_holds(name, &bmp_of(256, format, channels, profile), 256, 256);
     }
 }
 
@@ -677,14 +729,15 @@ fn lossy_webp_with_a_many_group_alpha_plane() -> Vec<u8> {
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
     let lossy = convert(
-        &oxideav_png::encode_png_image(&PngImage {
-            width: 4,
-            height: 4,
-            pixel_format: PngPixelFormat::Rgba,
-            stride: 4 * 4,
-            data: opaque,
-            palette: Vec::new(),
-        })
+        &oxideav_png::encode_plane(
+            4,
+            4,
+            PngPixelFormat::Rgba,
+            4 * 4,
+            &opaque,
+            None,
+            &oxideav_png::EncodeOptions::default(),
+        )
         .expect("the PNG encodes"),
         OutputFormat::WebP,
     );
@@ -924,14 +977,15 @@ async fn img_001_an_oriented_decode_stays_within_its_estimate() {
         .chunks(3)
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
-    let source = oxideav_png::encode_png_image(&PngImage {
-        width: 256,
-        height: 128,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 256 * 4,
-        data: opaque,
-        palette: Vec::new(),
-    })
+    let source = oxideav_png::encode_plane(
+        256,
+        128,
+        PngPixelFormat::Rgba,
+        256 * 4,
+        &opaque,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the PNG encodes");
     let tiff = orientation_tiff(6);
     let mut app1 = vec![0xFF, 0xE1];
@@ -2294,36 +2348,40 @@ async fn mem_audit_an_encoded_image_is_not_copied_out_of_its_encoder() {
     let plane = (SIDE * SIDE * 4) as usize;
     let png = encode_png(SIDE, SIDE, PngPixelFormat::Rgba, 4, false);
     let bmp = convert(&png, OutputFormat::Bmp);
-    let pixels = oxideav_png::decode_png_to_rgba(&png)
+    let pixels = oxideav_png::decode_rgba8(&png)
         .expect("the PNG decodes")
         .data;
     assert_eq!(pixels.len(), plane);
     type ByHand = fn(Vec<u8>) -> Vec<u8>;
     let by_hand: [(&str, &[u8], ByHand); 2] = [
+        // At deflate level 6, the level the driver keeps from the
+        // `oxideav-png` releases before the crate's default became 2.
         ("PNG", &png, |pixels| {
-            oxideav_png::encode_png_image(&PngImage {
-                width: SIDE,
-                height: SIDE,
-                pixel_format: PngPixelFormat::Rgba,
-                stride: SIDE as usize * 4,
-                data: pixels,
-                palette: Vec::new(),
-            })
+            oxideav_png::encode(
+                &oxideav_png::PngImage::packed(
+                    SIDE,
+                    SIDE,
+                    PngPixelFormat::Rgba,
+                    SIDE as usize * 4,
+                    pixels,
+                )
+                .expect("the PNG image"),
+                &oxideav_png::EncodeOptions::default().with_compression_level(6),
+            )
             .expect("the PNG encodes")
         }),
         ("BMP", &bmp, |pixels| {
-            oxideav_bmp::encode_bmp_plane(
-                &oxideav_bmp::BmpPlane {
-                    stride: SIDE as usize * 4,
-                    data: pixels,
-                },
-                oxideav_bmp::BmpPixelFormat::Rgba,
-                None,
-                SIDE,
-                SIDE,
+            oxideav_bmp::encode(
+                &oxideav_bmp::BmpImage::new(
+                    SIDE,
+                    SIDE,
+                    oxideav_bmp::PixelFormat::Rgba,
+                    vec![oxideav_bmp::Plane::new(SIDE as usize * 4, pixels)],
+                )
+                .expect("the BMP image"),
+                &oxideav_bmp::EncodeOptions::default(),
             )
             .expect("the BMP encodes")
-            .0
         }),
     ];
     let pipeline = ImagePipeline::default();

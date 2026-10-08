@@ -130,6 +130,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The built-in image driver's PNG, BMP and WebP codecs come from the
+  eas4ai forks** of `oxideav-png`, `oxideav-bmp` and `oxideav-webp` while
+  the upstream pull requests are open (OxideAV/oxideav-png #18 to #25,
+  oxideav-bmp #11 to #17, oxideav-webp #35 to #43). The encoders copy
+  less: a PNG is written into a buffer with room for the metadata added
+  after it, so keeping an orientation tag on a 512 x 512 noise PNG no
+  longer moves its 1 MiB file once more, and a BMP into a buffer reserved
+  at the file's exact size; lossy WebP is encoded from the converted
+  planes where they lie, and lossless WebP from the pixels, instead of
+  from a copy of each. Lossless WebP chooses its transforms in one pass
+  rather than by exhaustive search: a 1024 x 1024 photo encodes in about
+  half a second instead of 47.8 s in a release build, and processing a
+  64 x 64 image to lossless WebP allocates 0.76 MB in all instead of
+  1.23 GB. Its files are at most 8.7 percent larger, and an image with
+  transparency is written in the simple lossless layout, its alpha
+  declared in the `VP8L` header, rather than behind a `VP8X` header.
 - **The project file is `suprnova.toml`, all lowercase.** `suprnova serve`
   reads its extra dev processes from `suprnova.toml`, and `live:add` keeps
   its records there. A project that holds a `Suprnova.toml` must rename it:

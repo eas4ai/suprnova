@@ -46,14 +46,18 @@
 //! *indices* as grey levels - a silently wrong image, the worst possible
 //! failure. So:
 //!
-//! - **PNG** goes through `oxideav_png::decode_png_to_rgba`, the crate's own
+//! - **PNG** goes through `oxideav_png::decode_rgba8`, the crate's own
 //!   entry point that resolves every colour type and bit depth (palette via
 //!   `PLTE`/`tRNS`, 16-bit, grey+alpha) to RGBA. No inference at all.
 //! - **GIF** is decoded by the framework itself (see the `gif` module): the
 //!   first frame only, written straight onto the screen as RGBA, stopping
 //!   the moment the frame is complete.
-//! - **WebP** and **BMP** go through `decode_webp_image` and `decode_bmp`,
-//!   which return one packed RGBA buffer; `Canvas::packed` checks its length.
+//! - **WebP** is decoded from the crate's own parts, its container parser,
+//!   lossless and lossy decoders and alpha decoder, into one packed RGBA
+//!   buffer; see `decode_webp` for why not `decode_rgba8`.
+//! - **BMP** goes through the crate's `decode`, which returns the file's
+//!   own layout; a 32-bit one is made RGBA where it lies, any other is
+//!   converted. `Canvas::packed` checks the length.
 //! - **JPEG** goes through zune-jpeg, which writes RGBA from YCbCr and grey
 //!   and RGB from RGB-coded files, into one buffer the driver allocates. A
 //!   lossless JPEG goes through oxideav-mjpeg, whose lossless output is one
@@ -256,16 +260,12 @@ pub struct OxideAvImageDriver {
 
 impl OxideAvImageDriver {
     /// Register the supported registry codecs into a fresh runtime context.
-    ///
-    /// Note `oxideav_bmp::register` takes the two sub-registries separately
-    /// rather than the `RuntimeContext` its siblings take - an upstream
-    /// inconsistency, not a mistake here.
     pub fn new() -> Self {
         let mut context = RuntimeContext::new();
         oxideav_png::register(&mut context);
         oxideav_mjpeg::register(&mut context);
         oxideav_webp::register(&mut context);
-        oxideav_bmp::register(&mut context.codecs, &mut context.containers);
+        oxideav_bmp::register(&mut context);
         Self { context }
     }
 
@@ -382,16 +382,11 @@ impl OxideAvImageDriver {
                 // The crate's own all-colour-types entry point. See module
                 // docs for why PNG does not go through the registry.
                 check_png_inflate(contents, png)?;
-                let bitmap = oxideav_png::decode_png_to_rgba(contents).map_err(png_error)?;
+                let bitmap = oxideav_png::decode_rgba8(contents).map_err(png_error)?;
                 Canvas::packed(bitmap.width, bitmap.height, bitmap.data)
             }
             Layout::Gif(first) => gif::decode_first_frame(contents, first, width, height),
-            Layout::WebP(_) => {
-                let image = oxideav_webp::decode_webp_image(contents).map_err(|e| {
-                    FrameworkError::param(format!("image decode failed: image/webp: {e}"))
-                })?;
-                Canvas::packed(image.width, image.height, image.rgba)
-            }
+            Layout::WebP(_) => decode_webp(contents),
             Layout::Bmp(_) => decode_bmp(contents),
             Layout::Jpeg(JpegLayout::Zune(zune)) => {
                 decode_jpeg(contents, zune, config.max_dimension)
@@ -588,7 +583,7 @@ impl OxideAvImageDriver {
         let mut output = match (target, &kept.icc) {
             // The BMP encoder embeds the profile itself.
             (OutputFormat::Bmp, Some(IccData::Profile(profile))) => {
-                encode_bmp_with_profile(canvas, profile)?
+                encode_bmp(canvas, Some(profile), additions.len())?
             }
             _ => self.encode(canvas, target, quality, additions.len())?,
         };
@@ -632,17 +627,19 @@ impl OxideAvImageDriver {
             // mandatory rather than an optimisation. See `jpeg_frame` for why
             // it is YCbCr.
             OutputFormat::Jpeg => ("mjpeg", jpeg_frame(canvas)?, PixelFormat::Yuv444P),
-            // PNG and BMP are written by their crates' own encoders, the
-            // pixels moved or lent to them: the registry encoders clone the
-            // frame they are lent, `oxideav-png`'s twice and `oxideav-bmp`'s
-            // once, a whole copy of the pixels each (MEM-003).
-            OutputFormat::Png => return encode_png(canvas, reserve),
-            OutputFormat::Bmp => return encode_bmp(canvas, reserve),
-            // The VP8L (lossless) encoder is the only WebP encoder in the
-            // registry; codec id "webp" has a decoder but no encoder. `WebP`
-            // reaches this arm only when `webp_is_lossy` says no.
+            // PNG, BMP and lossless WebP are written by their crates' own
+            // encoders, which read the pixels where they lie: the registry
+            // encoders copy the frame they are lent into an image of their
+            // own first, a whole copy of the pixels (MEM-003). `WebP`
+            // reaches the WebP arm only when `webp_is_lossy` says no.
+            OutputFormat::Png => {
+                return encode_png(canvas.width, canvas.height, canvas.pixels, reserve).map_err(
+                    |e| FrameworkError::internal(format!("image encode failed: png: {e}")),
+                );
+            }
+            OutputFormat::Bmp => return encode_bmp(canvas, None, reserve),
             OutputFormat::WebP | OutputFormat::WebPLossless => {
-                ("webp_vp8l", canvas.into_frame(), PixelFormat::Rgba)
+                return encode_lossless_webp(canvas, reserve);
             }
             OutputFormat::Gif => return encode_gif(canvas),
         };
@@ -1007,24 +1004,97 @@ fn decode_jpeg(
     Canvas::packed(zune.frame.width, zune.frame.height, rgba)
 }
 
-/// Decode a BMP through the crate's own entry point, which always returns
-/// one tight RGBA plane.
-fn decode_bmp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
-    let image = oxideav_bmp::decode_bmp(contents)
-        .map_err(|e| FrameworkError::param(format!("image decode failed: image/bmp: {e}")))?;
-    let plane = image
-        .planes
-        .into_iter()
-        .next()
-        .ok_or_else(|| FrameworkError::param("image decode produced no planes"))?;
-    if image.pixel_format != oxideav_bmp::image::BmpPixelFormat::Rgba
-        || plane.stride != image.width as usize * 4
+/// Decode a still WebP to one packed RGBA plane.
+///
+/// The crate's `decode_rgba8` copies the file's `ICCP`, `EXIF` and `XMP `
+/// chunks into the image it returns, then copies its pixels again into
+/// RGBA: a whole copy of a profile the driver reads where it stands, and a
+/// second plane (MEM-003). This takes the same parts that function uses,
+/// as the crate's earlier `decode_webp_image` did: the first `VP8L` chunk
+/// anywhere in the file, or failing that the first `VP8 `, with the first
+/// `ALPH` chunk replacing the alpha. That is also the bitstream
+/// [`webp::plan`] measures and the gate sizes.
+fn decode_webp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
+    use oxideav_webp::container::{self, fourcc};
+    let failed = |e: &dyn std::fmt::Display| {
+        FrameworkError::param(format!("image decode failed: image/webp: {e}"))
+    };
+    let file = container::parse(contents).map_err(|e| failed(&e))?;
+    let alpha = |width: u32, height: u32| {
+        file.first_chunk_with_fourcc(fourcc::ALPH)
+            .map(|chunk| oxideav_webp::alph::decode_alpha(chunk.payload(contents), width, height))
+            .transpose()
+            .map_err(|e| failed(&e))
+            // A plane of another size is ignored, as the decoder ignores it.
+            .map(|plane| plane.filter(|plane| plane.len() == width as usize * height as usize))
+    };
+    if let Some(chunk) =
+        oxideav_webp::vp8l_chunk::extract_lossless(contents, &file).map_err(|e| failed(&e))?
     {
-        return Err(FrameworkError::param(
-            "image decode produced an unsupported pixel layout (expected packed RGBA)",
-        ));
+        let (width, height) = (chunk.width(), chunk.height());
+        let image = oxideav_webp::vp8l_transform::decode_lossless(chunk.bitstream(), width, height)
+            .map_err(|e| failed(&e))?;
+        let plane = alpha(width, height)?;
+        let mut alpha_values = plane.as_deref().map(<[u8]>::iter);
+        let mut rgba = vec![0u8; image.pixels().len() * 4];
+        for (out, &argb) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(image.pixels()) {
+            let [a, r, g, b] = argb.to_be_bytes();
+            let a = alpha_values
+                .as_mut()
+                .and_then(Iterator::next)
+                .copied()
+                .unwrap_or(a);
+            *out = [r, g, b, a];
+        }
+        return Canvas::packed(width, height, rgba);
     }
-    Canvas::packed(image.width, image.height, plane.data)
+    let vp8 = file
+        .first_chunk_with_fourcc(fourcc::VP8)
+        .ok_or_else(|| failed(&"the file has no VP8L or VP8 image data"))?;
+    let (width, height, mut rgba) =
+        oxideav_webp::vp8_decode::decode_lossy_rgba(vp8.payload(contents))
+            .map_err(|e| failed(&e))?;
+    if let Some(plane) = alpha(width, height)? {
+        for (pixel, value) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(plane) {
+            pixel[3] = value;
+        }
+    }
+    Canvas::packed(width, height, rgba)
+}
+
+/// Decode a BMP to one packed RGBA plane.
+///
+/// The crate's `decode` returns the file's own layout. A 32-bit layout is
+/// made RGBA where it lies: an `Rgba` plane is taken as it is and a `Bgra`
+/// one has its red and blue swapped in place. Every narrower layout is
+/// converted into a new plane, as `decode_rgba8` would; converting a
+/// 32-bit one that way too would copy the whole plane (MEM-003).
+fn decode_bmp(contents: &[u8]) -> Result<Canvas, FrameworkError> {
+    let image = oxideav_bmp::decode(contents)
+        .map_err(|e| FrameworkError::param(format!("image decode failed: image/bmp: {e}")))?;
+    let (width, height) = (image.width, image.height);
+    let tight = image
+        .planes
+        .first()
+        .is_some_and(|plane| plane.stride == width as usize * 4);
+    let format = image.format;
+    match format {
+        oxideav_bmp::PixelFormat::Rgba | oxideav_bmp::PixelFormat::Bgra if tight => {
+            let mut pixels = image
+                .planes
+                .into_iter()
+                .next()
+                .map(|plane| plane.data)
+                .unwrap_or_default();
+            if format == oxideav_bmp::PixelFormat::Bgra {
+                for pixel in pixels.as_chunks_mut::<4>().0 {
+                    pixel.swap(0, 2);
+                }
+            }
+            Canvas::packed(width, height, pixels)
+        }
+        _ => Canvas::packed(width, height, image.to_rgba8()),
+    }
 }
 
 // ───────────────────────── transformation helpers ─────────────────────────
@@ -1382,27 +1452,64 @@ fn webp_is_lossy(width: u32, height: u32, opaque: bool) -> bool {
 }
 
 /// Encode an opaque canvas as lossy WebP: a simple container around one
-/// `VP8 ` bitstream, at `quality` on the `0..=100` WebP scale.
+/// `VP8 ` bitstream, at `quality` on the `0..=100` WebP scale, with
+/// `reserve` bytes of room after the file.
 ///
-/// Upstream reserves the `webp_vp8` codec id but registers no factory under
-/// it, so the encoder is built directly instead of looked up in the
-/// registry. It is built before the pixels are converted, so a parameter
-/// the factory refuses costs no conversion.
+/// `Vp8LossyEncoder` reads the converted planes where they lie and copies
+/// its bitstream into the container once. The `webp_vp8` framework encoder
+/// writes the same bytes for the same picture and quality, but first
+/// copies each plane of the frame it is lent into a buffer of its own
+/// (MEM-003). `webp_is_lossy` has already kept the sides within what a VP8
+/// frame holds, the one thing the encoder refuses here.
 fn encode_lossy_webp(
     canvas: Canvas,
     quality: u8,
     reserve: usize,
 ) -> Result<Vec<u8>, FrameworkError> {
-    let codec = oxideav_webp::CODEC_ID_VP8;
-    let mut params = CodecParameters::video(CodecId::new(codec));
-    params.width = Some(canvas.width);
-    params.height = Some(canvas.height);
-    params.pixel_format = Some(PixelFormat::Yuv420P);
-    let mut encoder =
-        oxideav_webp::encoder_vp8::make_encoder_with_quality(&params, f32::from(quality))
-            .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
+    let failed = |e: &dyn std::fmt::Display| {
+        FrameworkError::internal(format!(
+            "image encode failed: {}: {e}",
+            oxideav_webp::CODEC_ID_VP8
+        ))
+    };
+    let (width, height) = (canvas.width, canvas.height);
     let frame = yuv420_frame(canvas)?;
-    encode_frame(encoder.as_mut(), frame, codec, reserve)
+    let [y, u, v] = frame.planes.as_slice() else {
+        return Err(failed(&"the converter produced no 4:2:0 planes"));
+    };
+    if u.stride != v.stride {
+        return Err(failed(
+            &"the converter produced chroma planes of two strides",
+        ));
+    }
+    let mut out = oxideav_webp::encoder_vp8::Vp8LossyEncoder::with_quality(f32::from(quality))
+        .encode_yuv420(width, height, &y.data, y.stride, &u.data, &v.data, u.stride)
+        .map_err(|e| failed(&e))?;
+    out.reserve_exact(reserve);
+    Ok(out)
+}
+
+/// Encode a canvas as lossless WebP (`VP8L`) with the crate's own encoder
+/// at its default effort, with `reserve` bytes of room after the file.
+///
+/// `encode_rgba8` reads the pixels where they lie. The `webp_vp8l`
+/// registry encoder writes the same bytes with the same default options,
+/// after copying the frame it is lent into an image of its own (MEM-003).
+fn encode_lossless_webp(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError> {
+    let mut out = oxideav_webp::encode_rgba8(
+        canvas.width,
+        canvas.height,
+        &canvas.pixels,
+        &oxideav_webp::EncodeOptions::default(),
+    )
+    .map_err(|e| {
+        FrameworkError::internal(format!(
+            "image encode failed: {}: {e}",
+            oxideav_webp::CODEC_ID_VP8L
+        ))
+    })?;
+    out.reserve_exact(reserve);
+    Ok(out)
 }
 
 /// Convert the canvas to the planar 4:2:0 layout the VP8 encoder takes.
@@ -1469,70 +1576,88 @@ fn edge_extended_frame(
     })
 }
 
-/// Write a canvas as a PNG with `oxideav_png`'s own encoder, the pixels
-/// moved into it, with `reserve` bytes of room after the file. The
-/// registry encoder calls this same function, with the default options it
-/// applies when given none, so the file is the same; only the two copies
-/// of the pixels it makes first are gone.
-fn encode_png(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError> {
-    let image = oxideav_png::PngImage {
-        width: canvas.width,
-        height: canvas.height,
-        pixel_format: oxideav_png::PngPixelFormat::Rgba,
-        stride: canvas.width as usize * 4,
-        data: canvas.pixels,
-        palette: Vec::new(),
-    };
-    let mut out = oxideav_png::encode_png_image(&image)
-        .map_err(|e| FrameworkError::internal(format!("image encode failed: png: {e}")))?;
+/// The deflate level of the PNG pixel data; see [`encode_png`].
+const PNG_LEVEL: u8 = 6;
+
+/// Write `width x height` packed RGBA `pixels` as a PNG with
+/// `oxideav_png`'s own encoder, with `reserve` bytes of room after the
+/// file. The `magick` driver writes the PNG it hands from one ImageMagick
+/// run to the next through this too.
+///
+/// The pixel data is deflated at level 6, the level every earlier
+/// `oxideav-png` used. The crate's default is now level 2, which writes
+/// other, larger files from the same pixels (MEM-003).
+///
+/// `encode_into` appends to a buffer the caller sized, and keeps it when
+/// it has the room the encoder would reserve itself: 1 KiB and a third of
+/// the raw plane. The buffer starts with that room and `reserve` more, so
+/// a file that fits leaves the room for the metadata added after it, and
+/// adding that moves nothing. A file that grows past it grows the buffer
+/// as the encoder writes, and the room is then made at the end; it costs a
+/// move only when the grown buffer has none.
+pub(super) fn encode_png(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    reserve: usize,
+) -> Result<Vec<u8>, oxideav_png::PngError> {
+    let stride = width as usize * 4;
+    let estimate = (stride.saturating_mul(height as usize) / 3).saturating_add(1024);
+    let image = oxideav_png::PngImage::packed(
+        width,
+        height,
+        oxideav_png::PixelFormat::Rgba,
+        stride,
+        pixels,
+    )?;
+    let mut out = Vec::with_capacity(estimate.saturating_add(reserve));
+    let options = oxideav_png::EncodeOptions::default().with_compression_level(PNG_LEVEL);
+    oxideav_png::encode_into(&image, &options, &mut out)?;
     out.reserve_exact(reserve);
     Ok(out)
 }
 
 /// Write a canvas as a BMP with `oxideav_bmp`'s own encoder, the pixels
-/// lent to it in a plane that owns them, with `reserve` bytes of room
-/// after the file. The registry encoder clones the plane it is lent and
-/// then calls this same function with the same arguments, so the file is
-/// the same.
-fn encode_bmp(canvas: Canvas, reserve: usize) -> Result<Vec<u8>, FrameworkError> {
-    let plane = oxideav_bmp::BmpPlane {
-        stride: canvas.width as usize * 4,
-        data: canvas.pixels,
+/// moved into it, with `reserve` bytes of room after the file.
+///
+/// The encoder states the file's exact size before it writes, so the one
+/// buffer is reserved once, with the room, and the encoder writes each row
+/// straight into it: nothing grows or moves.
+///
+/// With `profile`, the file is a V5 bitmap that embeds it, the one BMP
+/// layout that holds an ICC profile, at rendering intent 4
+/// (`LCS_GM_IMAGES`, perceptual, the ICC default).
+fn encode_bmp(
+    canvas: Canvas,
+    profile: Option<&[u8]>,
+    reserve: usize,
+) -> Result<Vec<u8>, FrameworkError> {
+    let failed = |e: oxideav_bmp::BmpError| {
+        FrameworkError::internal(format!("image encode failed: bmp: {e}"))
     };
-    let (mut out, _) = oxideav_bmp::encode_bmp_plane(
-        &plane,
-        oxideav_bmp::BmpPixelFormat::Rgba,
-        None,
+    let stride = canvas.width as usize * 4;
+    let image = oxideav_bmp::BmpImage::new(
         canvas.width,
         canvas.height,
+        oxideav_bmp::PixelFormat::Rgba,
+        vec![oxideav_bmp::Plane::new(stride, canvas.pixels)],
     )
-    .map_err(|e| FrameworkError::internal(format!("image encode failed: bmp: {e}")))?;
-    out.reserve_exact(reserve);
+    .map_err(failed)?;
+    let options = oxideav_bmp::EncodeOptions::default();
+    let mut out = Vec::new();
+    match profile {
+        None => {
+            let size = oxideav_bmp::encoded_size_bound(&image, &options).map_err(failed)?;
+            out.reserve_exact(size.saturating_add(reserve));
+            oxideav_bmp::encode_into(&image, &options, &mut out).map_err(failed)?;
+        }
+        Some(profile) => {
+            out = oxideav_bmp::encode_bmp_with_icc_profile(&image, profile, 4, options)
+                .map_err(failed)?;
+            out.reserve_exact(reserve);
+        }
+    }
     Ok(out)
-}
-
-/// Write a canvas as a V5 bitmap that embeds `profile`, the one BMP layout
-/// that holds an ICC profile.
-fn encode_bmp_with_profile(canvas: Canvas, profile: &[u8]) -> Result<Vec<u8>, FrameworkError> {
-    let image = oxideav_bmp::BmpImage {
-        width: canvas.width,
-        height: canvas.height,
-        pixel_format: oxideav_bmp::BmpPixelFormat::Rgba,
-        planes: vec![oxideav_bmp::BmpPlane {
-            stride: canvas.width as usize * 4,
-            data: canvas.pixels,
-        }],
-        palette: None,
-        pts: None,
-    };
-    // Rendering intent 4: LCS_GM_IMAGES, perceptual, the ICC default.
-    oxideav_bmp::encode_bmp_with_icc_profile(
-        &image,
-        profile,
-        4,
-        oxideav_bmp::BmpEncodeOptions::default(),
-    )
-    .map_err(|e| FrameworkError::internal(format!("image encode failed: bmp: {e}")))
 }
 
 /// Write a canvas as a single-frame GIF.
@@ -1725,15 +1850,7 @@ mod tests {
         bit_depth: u8,
         interlace: u8,
     ) -> oxideav_png::Ihdr {
-        oxideav_png::Ihdr {
-            width,
-            height,
-            bit_depth,
-            colour_type,
-            compression: 0,
-            filter: 0,
-            interlace,
-        }
+        oxideav_png::Ihdr::new(width, height, bit_depth, colour_type).with_interlace(interlace)
     }
 
     /// A PNG with this header and `raw` as its inflated pixel data, and a
@@ -2174,11 +2291,14 @@ mod tests {
         let out = driver
             .encode(source, OutputFormat::WebP, 70, 0)
             .expect("lossless webp");
-        // VP8L with alpha is written in the extended layout: a VP8X header
-        // chunk first, then the VP8L bitstream.
-        assert_eq!(&out[12..16], b"VP8X");
-        assert!(out.windows(4).any(|chunk| chunk == b"VP8L"));
+        // VP8L with alpha is written in the simple layout, its header
+        // declaring the alpha (RFC 9649, section 2.6). oxideav-webp 0.2.3
+        // put a VP8X header chunk first; lossless WebP is MEM-003's
+        // exception for the eas4ai/oxideav-webp encoder.
+        assert_eq!(&out[12..16], b"VP8L");
         assert!(!out.windows(4).any(|chunk| chunk == b"VP8 "));
+        let header = u32::from_le_bytes(out[21..25].try_into().expect("a VP8L header"));
+        assert_eq!((header >> 28) & 1, 1, "the VP8L header declares alpha");
 
         let lossless = driver
             .encode(

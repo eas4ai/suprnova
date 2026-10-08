@@ -475,11 +475,22 @@ async fn webp_with_one_transparent_pixel_stays_lossless_and_keeps_it() {
     let source = rgba_bmp(PHOTO_WIDTH, PHOTO_HEIGHT, &rgba);
 
     let webp = encode(&source, OutputFormat::WebP, 50).await;
+    // Lossless WebP is MEM-003's exception: the eas4ai/oxideav-webp encoder
+    // writes the simple lossless layout, whose VP8L header declares the
+    // alpha (RFC 9649, section 2.6), where oxideav-webp 0.2.3 put a VP8X
+    // header in front.
     assert_eq!(
         webp_chunks(&webp),
-        ["VP8X", "VP8L"],
-        "lossy VP8 has no alpha, so the image must be lossless: VP8L behind \
-         the VP8X header that declares its alpha"
+        ["VP8L"],
+        "lossy VP8 has no alpha, so the image must be lossless: one VP8L chunk"
+    );
+    // After RIFF, the chunk header and the 0x2F signature: width - 1 and
+    // height - 1 in 14 bits each, then the alpha_is_used bit.
+    let header = u32::from_le_bytes(webp[21..25].try_into().expect("a VP8L header"));
+    assert_eq!(
+        (header >> 28) & 1,
+        1,
+        "the VP8L header must declare its alpha"
     );
 
     let (width, height, decoded) = decoded_rgba(&webp).await;

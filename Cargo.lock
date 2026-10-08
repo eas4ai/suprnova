@@ -5096,18 +5096,17 @@ dependencies = [
 
 [[package]]
 name = "oxideav-bmp"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf5cb4a75f7168df267e81413d9e18b06e05892096a28e322784d137f5d83c39"
+version = "0.1.8"
+source = "git+file:///home/shawn/workspace2/oxideav-bmp?rev=fafe3f45b824b62bcecdbc2a9203f66488b77950#fafe3f45b824b62bcecdbc2a9203f66488b77950"
 dependencies = [
  "oxideav-core",
 ]
 
 [[package]]
 name = "oxideav-core"
-version = "0.1.34"
+version = "0.1.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a68d9a74d6d0a7373589eca0c0bb8ab380c46fd1d7fc807e696d716cdad078c"
+checksum = "f49a13fc8a75d81fb4af6108bd67d080d52213ffa008340212246d543d63f982"
 dependencies = [
  "bytemuck",
  "serde_json",
@@ -5150,9 +5149,8 @@ dependencies = [
 
 [[package]]
 name = "oxideav-png"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c78483db4263204f6f9e2e63354b45f0fe2f83e0e08282f68c8a9647d537fa1f"
+version = "0.1.12"
+source = "git+file:///home/shawn/workspace2/oxideav-png?rev=5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e#5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e"
 dependencies = [
  "compcol",
  "oxideav-core",
@@ -5169,9 +5167,8 @@ dependencies = [
 
 [[package]]
 name = "oxideav-webp"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cce95e65b90f1382e20b8774204ae07337b4f9051dcfe5d452c3cc9d13fd08a"
+version = "0.3.1"
+source = "git+file:///home/shawn/workspace2/oxideav-webp?rev=65a9c8ad5d6ce945cd4f3aac5b3279936eb42629#65a9c8ad5d6ce945cd4f3aac5b3279936eb42629"
 dependencies = [
  "oxideav-core",
  "oxideav-vp8",

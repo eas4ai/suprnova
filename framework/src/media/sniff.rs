@@ -848,6 +848,10 @@ pub(crate) struct BmpLayout {
     pub(crate) palette_entries: u64,
     /// Bytes per palette entry on disk: 3 for BITMAPCOREHEADER, else 4.
     pub(crate) palette_entry_bytes: u64,
+    /// `bV5ProfileSize` of a V5 header that embeds its ICC profile
+    /// (`bV5CSType` `PROFILE_EMBEDDED`), else 0. The decoder copies that
+    /// many bytes out of the file when they lie within it.
+    pub(crate) embedded_profile: u64,
 }
 
 /// Read the DIB header fields [`BmpLayout`] names. The legacy 12-byte
@@ -869,11 +873,20 @@ pub(crate) fn bmp_layout(bytes: &[u8]) -> Option<BmpLayout> {
         1 | 4 | 8 => u64::from(colors_used),
         _ => 0,
     };
+    // BITMAPV5HEADER: bV5CSType at 56 and bV5ProfileSize at 116, from the
+    // start of the 124-byte header, which follows the 14-byte file header.
+    let embedded_profile =
+        if dib_size >= 124 && le_u32(bytes, 14 + 56) == Some(oxideav_bmp::PROFILE_EMBEDDED) {
+            u64::from(le_u32(bytes, 14 + 116)?)
+        } else {
+            0
+        };
     Some(BmpLayout {
         bits_per_pixel,
         compression,
         palette_entries,
         palette_entry_bytes,
+        embedded_profile,
     })
 }
 
@@ -1657,6 +1670,7 @@ mod tests {
                 compression: 1,
                 palette_entries: 16,
                 palette_entry_bytes: 4,
+                embedded_profile: 0,
             })
         );
 
@@ -1682,7 +1696,30 @@ mod tests {
                 compression: 0,
                 palette_entries: 16,
                 palette_entry_bytes: 3,
+                embedded_profile: 0,
             })
+        );
+
+        // BITMAPV5HEADER (124) embedding a 3,000-byte profile; the same
+        // header naming the sRGB colour space embeds none.
+        let mut v5 = Vec::from(*b"BM");
+        v5.extend_from_slice(&[0u8; 12]);
+        v5.extend_from_slice(&124u32.to_le_bytes());
+        v5.extend_from_slice(&4i32.to_le_bytes());
+        v5.extend_from_slice(&2i32.to_le_bytes());
+        v5.extend_from_slice(&1u16.to_le_bytes());
+        v5.extend_from_slice(&32u16.to_le_bytes());
+        v5.resize(14 + 124, 0);
+        v5[14 + 56..14 + 60].copy_from_slice(&oxideav_bmp::PROFILE_EMBEDDED.to_le_bytes());
+        v5[14 + 116..14 + 120].copy_from_slice(&3_000u32.to_le_bytes());
+        assert_eq!(
+            bmp_layout(&v5).map(|layout| layout.embedded_profile),
+            Some(3_000)
+        );
+        v5[14 + 56..14 + 60].copy_from_slice(&0x7352_4742u32.to_le_bytes());
+        assert_eq!(
+            bmp_layout(&v5).map(|layout| layout.embedded_profile),
+            Some(0)
         );
     }
 

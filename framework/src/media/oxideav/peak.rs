@@ -60,9 +60,6 @@ const VP8_PER_MACROBLOCK: u64 = 800 + 384 + 24;
 /// refuses a file with more than 4096 of them.
 const WEBP_CHUNK_LIST: u64 = 24 * 4096;
 
-/// oxideav-bmp's lookup table for 16-bit pixels: 65,536 RGBA entries.
-const BMP_LUT_16: u64 = 65_536 * 4;
-
 /// What [`estimate`] and the decode read from an image's headers, walked once.
 pub(super) enum Layout {
     Png(PngLayout),
@@ -473,31 +470,33 @@ fn webp_peak(width: u64, height: u64, plan: &WebpPlan) -> u64 {
     add(peak, WEBP_CHUNK_LIST)
 }
 
-/// oxideav-bmp's `decode_bmp`, which writes one RGBA plane.
+/// oxideav-bmp's `decode`, which writes one plane in the file's own
+/// layout, and the RGBA plane the driver makes of it.
 ///
-/// Run-length encoded bitmaps decode into one RGBA vector a row and are then
-/// concatenated, so both copies are alive. 16-bit pixels may go through a
-/// lookup table. The palette holds four bytes an entry, as many as the
-/// header declares and the space before the pixel data allows.
+/// The plane holds one byte a pixel for 1 to 8 bits (palette indices, run
+/// length encoded or not), two for 16 (four when the masks are neither
+/// 5-5-5 nor 5-6-5, which it expands to RGBA), three for 24 and four for
+/// 32. A four-byte plane becomes the RGBA plane where it lies; any other
+/// is converted into a new RGBA plane while it is held, so both are alive.
+/// The palette holds four bytes an entry, as many as the header declares
+/// and the space before the pixel data allows, and an embedded V5 profile
+/// is copied out of the file, at most the whole file.
 fn bmp_peak(width: u64, height: u64, bmp: BmpLayout, input_len: u64) -> u64 {
-    let rgba = mul(mul(width, height), 4);
-    let run_length = if matches!(bmp.compression, 1 | 2) {
-        // The rows, and a 24-byte vector header each.
-        add(rgba, mul(height, 24))
-    } else {
-        0
-    };
-    let lookup = if bmp.bits_per_pixel == 16 {
-        BMP_LUT_16
-    } else {
-        0
+    let pixels = mul(width, height);
+    let rgba = mul(pixels, 4);
+    let native = match bmp.bits_per_pixel {
+        32 => 0,
+        24 => mul(pixels, 3),
+        16 => mul(pixels, 2),
+        _ => pixels,
     };
     let palette = mul(
         bmp.palette_entries
             .min(input_len / bmp.palette_entry_bytes.max(1)),
         4,
     );
-    add(add(add(rgba, run_length), lookup), palette)
+    let profile = bmp.embedded_profile.min(input_len);
+    add(add(add(rgba, native), palette), profile)
 }
 
 #[cfg(test)]
@@ -532,15 +531,8 @@ mod tests {
         colour_type: u8,
         interlace: u8,
     ) -> u64 {
-        let ihdr = oxideav_png::Ihdr {
-            width,
-            height,
-            bit_depth,
-            colour_type,
-            compression: 0,
-            filter: 0,
-            interlace,
-        };
+        let ihdr =
+            oxideav_png::Ihdr::new(width, height, bit_depth, colour_type).with_interlace(interlace);
         let inflated = png_inflated_len(&ihdr).expect("a PNG pixel format");
         let idat_len = inflated + inflated.div_ceil(65_535) * 5 + 6;
         let layout = Layout::Png(PngLayout {

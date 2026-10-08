@@ -214,6 +214,23 @@ ammonia = "4.1.4"
 # same-owner org: a caret range would silently adopt a breaking 0.x bump.
 # Same-owner coordination makes a deliberate bump cheap.
 #
+# `oxideav-png`, `oxideav-bmp` and `oxideav-webp` come from the eas4ai
+# forks, pinned by exact revision, while the upstream pull requests are
+# open: OxideAV/oxideav-png #18 to #25, oxideav-bmp #11 to #17 and
+# oxideav-webp #35 to #43. They remove copies MEM-003 found inside the
+# encoders: PNG reads a borrowed plane and appends the file to a buffer the
+# caller sized, BMP writes each row straight into a buffer reserved at the
+# file's exact size, and lossy WebP reads the caller's planes in place and
+# copies its bitstream into the container once. The lossless WebP encoder
+# chooses its transforms in one pass rather than by exhaustive search: a
+# 1024 x 1024 photo encodes in 0.48 s instead of 47.8 s in a release
+# build, into a file at most 8.7 percent larger (MEM-003's exception). Each
+# revision is the tip of the fork's integration branch. The forks follow
+# upstream master (png 0.1.12, bmp 0.1.8, webp 0.3.1), whose code needs
+# `oxideav-core` 0.1.37 or later (`ColorSignal`) although their manifests
+# ask for any 0.1, so `oxideav-core` is pinned to 0.1.39, the version their
+# own CI resolves.
+#
 # `oxideav-gif` is Apache-2.0; the other seven are MIT. Compatible, but it
 # is the one non-MIT crate in the set, so it is called out here rather
 # than discovered during a licence audit.
@@ -230,14 +247,14 @@ ammonia = "4.1.4"
 # muxer, so it can read three of the five formats and write exactly one.
 # The driver drives the codec registry directly instead, so there is
 # nothing left for the facade to do. See `media/oxideav.rs`.
-oxideav-core = { version = "=0.1.34", optional = true }
+oxideav-core = { version = "=0.1.39", optional = true }
 oxideav-image-filter = { version = "=0.1.2", optional = true }
 oxideav-pixfmt = { version = "=0.1.7", optional = true }
 oxideav-mjpeg = { version = "=0.1.8", optional = true }
-oxideav-png = { version = "=0.1.8", optional = true }
-oxideav-webp = { version = "=0.2.3", optional = true }
+oxideav-png = { git = "file:///home/shawn/workspace2/oxideav-png", rev = "5a0fcfc4e505d5eb57b24c4593b2b9c44f71057e", optional = true }
+oxideav-webp = { git = "file:///home/shawn/workspace2/oxideav-webp", rev = "65a9c8ad5d6ce945cd4f3aac5b3279936eb42629", optional = true }
 oxideav-gif = { version = "=0.0.12", optional = true, default-features = false }
-oxideav-bmp = { version = "=0.1.6", optional = true }
+oxideav-bmp = { git = "file:///home/shawn/workspace2/oxideav-bmp", rev = "fafe3f45b824b62bcecdbc2a9203f66488b77950", optional = true }
 # JPEG decoding, except lossless frames. oxideav-mjpeg (0.1.8 to 0.1.11)
 # refuses any frame of more than 64 Mi samples (width x height x
 # components), about 22 megapixels in colour, whatever the caller allows,
