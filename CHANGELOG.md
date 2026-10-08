@@ -833,6 +833,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `(w || globalThis).localStorage` name `localStorage` in their refusal.
   A write through such an expression still does not make a global of the
   script's own. The `script-global-sequence` fixture pins it.
+- **Writing a browser global no longer unlocks reading it.** A name a
+  script wrote on the global object became a global of its own that it
+  could read back, so `try { window.localStorage = 1 } catch {}` made
+  `window.localStorage` readable: the write throws, the `catch` swallows
+  it, and the read returned the browser's storage, which the scan
+  otherwise refuses. A written name is now the script's own only if it
+  starts with a capital and no list of the scan holds it, since every
+  browser property of the global object whose write fails is named in
+  lower camel case; the write is checked as before, and a global named
+  like `AcmeX` still reads back. The `script-global-write-unlocks-read`
+  fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

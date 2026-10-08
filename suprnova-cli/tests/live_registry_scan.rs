@@ -1230,6 +1230,88 @@ fn reg_032_the_global_object_reached_through_an_expression_is_the_global_object(
     );
 }
 
+/// REG-032: writing a name on the global object makes it a global of the
+/// script's own, which the script may then read back, only when the name
+/// cannot be one of the browser's own properties there. A browser global
+/// whose write throws, as `localStorage`'s does, would otherwise be read
+/// for real after a `try`. Each read below is refused as the plain read is,
+/// however the name was written; the write itself is unchanged, and a
+/// global the script names with a capital stays its own.
+#[test]
+fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "try {\n  window.localStorage = 1;\n} catch {}\nexport const s = window.localStorage;\n",
+            "localStorage",
+            4,
+        ),
+        (
+            "try {\n  globalThis.indexedDB = 1;\n} catch {}\nexport const s = self.indexedDB;\n",
+            "indexedDB",
+            4,
+        ),
+        (
+            "try {\n  self[\"session\" + \"Storage\"] = 1;\n} catch {}\nexport const s = globalThis.sessionStorage;\n",
+            "sessionStorage",
+            4,
+        ),
+        (
+            "Object.defineProperty(window, \"caches\", { value: 1 });\nexport const s = window.caches;\n",
+            "caches",
+            2,
+        ),
+        (
+            "window.acmeState = {};\nexport const s = window.acmeState;\n",
+            "acmeState",
+            2,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (script, name, line) in cases {
+        let report = scan_widget_script(script);
+        let refused = report.findings.iter().any(|finding| {
+            finding.check == "script-global"
+                && finding.line == Some(*line)
+                && finding.message.contains(&format!("`{name}`"))
+        });
+        if !refused {
+            failures.push(format!(
+                "{script:?}: the read of `{name}` at widget.js:{line} is not refused; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    let own = [
+        "window.AcmeX = {};\nexport const x = (0, window).AcmeX;\n",
+        "globalThis[\"Acme\" + \"Y\"] = {};\nexport const y = window.AcmeY;\n",
+    ];
+    for script in own {
+        let report = scan_widget_script(script);
+        if !report.accepted() {
+            failures.push(format!(
+                "{script:?} was refused: {}",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// The admitted fixtures' directory, under `accepted/`, that pins what the
 /// built-in rule leaves open (REG-032).
 fn own_members() -> PathBuf {

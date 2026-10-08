@@ -76,6 +76,8 @@ pub(super) struct Facts<'a> {
     pub instance_methods: HashMap<u32, BTreeSet<&'a str>>,
     pub private_methods: BTreeSet<&'a str>,
     pub tainted: BTreeSet<&'a str>,
+    /// The globals of the script's own: names it writes on the global
+    /// object that no browser property may hold, which it may read back.
     pub written_globals: BTreeSet<String>,
     /// The binding each name the walk resolved had where it is written, by
     /// the name's offset, or `None` for a global: a value followed from
@@ -1838,8 +1840,9 @@ impl<'a, 'c> Walker<'a, 'c> {
         // Only a write on the global object's name makes a global of the
         // script's own, which later reads may name; a write through an
         // expression that may yield it (`(c ? window : o).x = v`) may
-        // land on another object.
-        if self.names_global_object(member.object()) {
+        // land on another object. A name the browser may already define
+        // there is never the script's own (REG-032).
+        if self.names_global_object(member.object()) && claimable_global(name) {
             self.facts.written_globals.insert(name.to_string());
         }
         self.facts.defined_names.insert(name.to_string());
@@ -3712,6 +3715,23 @@ impl<'a, 'c> Walker<'a, 'c> {
             _ => false,
         }
     }
+}
+
+/// Whether a script may claim a name it writes on the global object as a
+/// global of its own, which it may then read back (REG-032). The browser's
+/// own properties of the global object whose writes fail, so that a
+/// `try` around the write leaves the browser's value to read
+/// (`localStorage`, `indexedDB`, `navigator` and every property added
+/// later), are attributes, and attributes are named in lower camel case.
+/// A name that starts with a capital is an interface or a namespace,
+/// which a write replaces, so the script reads back its own value. A name
+/// the scan's lists already hold is never the script's: it is admitted,
+/// refused or read-only on its own terms.
+fn claimable_global(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && !ADMITTED_GLOBALS.contains(&name)
+        && !REFUSED_PROPERTIES.contains(&name)
+        && !READ_ONLY_PROPERTIES.contains(&name)
 }
 
 /// Whether a global the script does not declare names a built-in object or
