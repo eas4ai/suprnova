@@ -531,6 +531,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   parse. `<` and `>` are now written as `\u003c` and `\u003e` beside the `/`
   escaping, in the same single buffer, as Laravel's `JSON_HEX_TAG` and
   Inertia 3.7.1 do (JE-01, H02).
+- **An Inertia page that cannot be encoded answers an error.** A failure
+  to encode the page object answered `200` with `{}` as the page, as JSON
+  for an Inertia visit and inside the first visit's document, so the
+  client mounted an empty page. It now answers `500` through
+  `FrameworkError`, as Laravel's `JsonResponse` throws (JE-03). Encoding a
+  `serde_json::Value` page does not fail today, so this closes a path
+  rather than one seen in use.
 
 ## 3.2.1 - 2026-10-05
 

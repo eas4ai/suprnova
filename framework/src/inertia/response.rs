@@ -1220,12 +1220,12 @@ impl InertiaResponse {
         );
 
         let response = if is_inertia_request {
-            build_json_response(&page)
+            build_json_response(&page)?
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
             let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
-            build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
+            build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())?
         };
         staged_session.commit();
         Ok(response)
@@ -2284,13 +2284,26 @@ fn to_value_or_err<V: Serialize>(key: &str, value: &V) -> Result<Value, Framewor
     })
 }
 
-fn build_json_response(page: &Value) -> HttpResponse {
+/// The error a page that cannot be encoded answers with: a `500`, never a
+/// `200` with an empty page, as Laravel's `JsonResponse` throws on an
+/// encoding failure.
+fn page_encoding_error(error: &serde_json::Error) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "the Inertia page object could not be encoded as JSON: {error}"
+    ))
+}
+
+/// The JSON page object an Inertia visit answers with.
+///
+/// Generic over the page so a test can hand it a value the encoder
+/// refuses; the framework always passes the page `Value`.
+fn build_json_response<P: Serialize + ?Sized>(page: &P) -> Result<HttpResponse, FrameworkError> {
     // Serialized from the borrowed page, the same bytes `HttpResponse::json`
     // writes, without first cloning the whole page to hand it over.
-    let body = serde_json::to_vec(page).unwrap_or_else(|_| b"{}".to_vec());
-    HttpResponse::bytes_body(body, "application/json")
+    let body = serde_json::to_vec(page).map_err(|error| page_encoding_error(&error))?;
+    Ok(HttpResponse::bytes_body(body, "application/json")
         .header("X-Inertia", "true")
-        .header("Vary", "X-Inertia")
+        .header("Vary", "X-Inertia"))
 }
 
 /// Writes JSON into a buffer with `/` backslash-escaped and `<` and `>`
@@ -2337,12 +2350,18 @@ impl std::io::Write for SlashEscaping<'_> {
     }
 }
 
-fn build_html_response(
-    page: &Value,
+/// The first-visit HTML document, the page JSON written into its
+/// `<script>` element.
+///
+/// Generic over the page for the same reason as [`build_json_response`].
+/// A page that cannot be encoded is an error, not a document with an
+/// empty page.
+fn build_html_response<P: Serialize + ?Sized>(
+    page: &P,
     config: &InertiaConfig,
     title_override: Option<&str>,
     ssr: Option<&super::ssr::SsrResponse>,
-) -> HttpResponse {
+) -> Result<HttpResponse, FrameworkError> {
     let title = title_override.unwrap_or(&config.default_title);
     let csrf = csrf_token().unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
@@ -2410,18 +2429,15 @@ fn build_html_response(
     } else {
         let mut html = html.into_bytes();
         html.extend_from_slice(b"<script type=\"application/json\" data-page=\"app\">");
-        let page_at = html.len();
-        if serde_json::to_writer(SlashEscaping(&mut html), page).is_err() {
-            html.truncate(page_at);
-            html.extend_from_slice(b"{}");
-        }
+        serde_json::to_writer(SlashEscaping(&mut html), page)
+            .map_err(|error| page_encoding_error(&error))?;
         html.extend_from_slice(b"</script>\n<div id=\"app\"></div>\n</body>\n</html>");
         // Only UTF-8 was written: the JSON serializer's output and ASCII.
         String::from_utf8(html)
             .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
     };
 
-    HttpResponse::html(html).header("Vary", "X-Inertia")
+    Ok(HttpResponse::html(html).header("Vary", "X-Inertia"))
 }
 
 /// Whether an SSR head fragment already carries a `<title>` element.
@@ -3001,5 +3017,32 @@ mod tests {
         );
         // Distinct from `location`: must NOT carry X-Inertia-Location.
         assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
+    }
+
+    /// A page the JSON encoder refuses, standing in for any value it
+    /// cannot write.
+    struct Unencodable;
+
+    impl Serialize for Unencodable {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("this page cannot be encoded"))
+        }
+    }
+
+    /// PAR-053 (JE-03): Laravel's `JsonResponse` throws on an encoding
+    /// failure, so the client gets an error, never a `200` carrying `{}`.
+    #[test]
+    fn inp_a_page_that_cannot_be_encoded_answers_an_error_not_an_empty_page() {
+        let Err(json) = build_json_response(&Unencodable) else {
+            panic!("an Inertia visit must not get a 200 with an empty page");
+        };
+        assert_eq!(json.status_code(), 500);
+        assert!(json.to_string().contains("cannot be encoded"), "{json}");
+
+        let Err(html) = build_html_response(&Unencodable, &InertiaConfig::default(), None, None)
+        else {
+            panic!("a first visit must not get a 200 with an empty page");
+        };
+        assert_eq!(html.status_code(), 500);
     }
 }
