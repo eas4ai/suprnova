@@ -1126,18 +1126,25 @@ A field's value is its **first** message, a plain string - the shape
 Inertia's own `ErrorValue` type describes and what
 `$page.props.errors.email` binds to. Set
 `InertiaConfig::with_all_errors(true)` to get every message as an array
-instead; the client-side type then needs the matching augmentation:
+instead. `suprnova generate-types` reads that call under `src/` and types
+the errors to match, in the augmentation it generates (see [TypeScript
+Types](frontend-typescript-types.md#shared-props-and-the-inertia-config)):
 
 ```ts
-// global.d.ts
-import '@inertiajs/core'
+// frontend/src/types/inertia-props.ts, written by `suprnova generate-types`
+export type Errors = Record<string, string[]>;
 
 declare module '@inertiajs/core' {
   export interface InertiaConfig {
-    errorValueType: string[]
+    sharedPageProps: SharedProps;
+    errorValueType: string[];
   }
 }
 ```
+
+A project that keeps its own `declare module '@inertiajs/core'` block gets
+no generated augmentation and sets `errorValueType: string[]` there
+itself.
 
 Multiple forms on one page stay isolated: send
 `X-Inertia-Error-Bag: <name>` with the visit and the errors are flashed

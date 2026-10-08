@@ -11,7 +11,7 @@ Three files, written into `frontend/src/types/`:
 
 | File | Contents |
 |---|---|
-| `inertia-props.ts` | One `export interface` per prop struct, then the page declarations: `Pages`, `SharedProps`, `Errors`, `PageProps<C>` and the `@inertiajs/core` augmentation - always written |
+| `inertia-props.ts` | One `export interface` per prop struct, then the page declarations: `Pages`, `SharedProps`, `Errors`, `PageProps<C>` and, unless the project declares its own (see [Upgrading a project with its own augmentation](#upgrading-a-project-with-its-own-augmentation)), the `@inertiajs/core` augmentation - the file is always written |
 | `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` - written only with `--routes` |
 | `lang-keys.ts` | A `MessageKey` string-literal union of every Fluent message id in the default locale's catalog, fallback parents included - written only when `lang/` yields any ids (see [Message keys](#message-keys)) |
 
@@ -787,9 +787,11 @@ Inertia types `usePage()` through a `declare module '@inertiajs/core'`
 block you write by hand, in a `global.d.ts`, and keep in step with the
 server. Suprnova generates that block into `inertia-props.ts`, from the
 struct your handlers share and the struct you mark as flash data, so the
-shared props cannot drift from the server either. Keep no hand-written
-`InertiaConfig` augmentation beside it: the two would merge, and a key
-both set to different types is a type error.
+shared props cannot drift from the server either. A project that already
+has a hand-written block keeps it, and the generator steps aside: it
+writes no augmentation of its own, since the two would merge and a key
+both set to different types is a type error (see [Upgrading a project with
+its own augmentation](#upgrading-a-project-with-its-own-augmentation)).
 
 ## Next
 
