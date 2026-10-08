@@ -3,8 +3,16 @@
 
 #[path = "../support/common.rs"]
 mod common;
+// `own_process_async` takes the environment lock before it starts a child.
+#[path = "../support/env_lock.rs"]
+mod env_lock;
 // The application convention `test_database!()` resolves against.
 mod migrations;
+// A test that registers a process-wide `AppConfig` runs alone in a child.
+#[path = "../support/own_process.rs"]
+pub mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 
 pub mod assertable_inertia;
 pub mod clock;

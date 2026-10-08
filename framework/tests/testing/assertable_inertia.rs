@@ -598,6 +598,66 @@ fn intt_test_response_assert_inertia_reads_the_html_first_visit() {
         .where_("greeting", "hi");
 }
 
+/// A first-visit document whose page element opens with `tag`, after a
+/// JSON `<script>` that is not the page (it has no `data-page`) and the
+/// `head` scripts of `head`.
+fn document_with_page_tag(head: &str, tag: &str) -> String {
+    let page = json!({
+        "component": "Home",
+        "props": {"greeting": "hi"},
+        "url": "/",
+        "version": "v",
+    });
+    let json = serde_json::to_string(&page).unwrap().replace('/', "\\/");
+    format!(
+        "<!DOCTYPE html><html><head>\
+         <script type=\"application/json\" id=\"config\">{{\"component\":\"Config\"}}</script>\
+         {head}</head><body>{tag}{json}</script><div id=\"app\"></div></body></html>"
+    )
+}
+
+/// Assert both entry points read the page out of `document`.
+fn assert_both_entry_points_read(document: &str) {
+    AssertableInertia::from_response(&HttpResponse::html(document.to_string()))
+        .component("Home")
+        .where_("greeting", "hi");
+    TestResponse::new(200, Vec::<(String, String)>::new(), document.to_string())
+        .assert_inertia()
+        .component("Home")
+        .where_("greeting", "hi");
+}
+
+#[test]
+fn intt_the_page_element_is_read_in_buildssrbody_attribute_order() {
+    // `buildSSRBody` in Inertia 3.8 (`packages/core/src/ssrUtils.ts`).
+    assert_both_entry_points_read(&document_with_page_tag(
+        "",
+        r#"<script data-page="app" type="application/json">"#,
+    ));
+}
+
+#[test]
+fn intt_the_page_element_is_read_with_an_attribute_between_data_page_and_type() {
+    for tag in [
+        r#"<script data-page="app" nonce="r4nd0m" type="application/json">"#,
+        r#"<script type="application/json" nonce="r4nd0m" data-page="root">"#,
+        r#"<script type='application/json' id='page' data-page='app'>"#,
+        r#"<script data-title="a > b" data-page=app type=application/json>"#,
+    ] {
+        assert_both_entry_points_read(&document_with_page_tag("", tag));
+    }
+}
+
+#[test]
+fn intt_text_inside_another_script_is_not_read_as_the_page() {
+    // A script's text is not markup: a string in it that spells the page
+    // element is skipped with the rest of that script.
+    assert_both_entry_points_read(&document_with_page_tag(
+        r#"<script type="module">const s = '<script type="application/json" data-page="x">';</script>"#,
+        r#"<script type="application/json" data-page="app">"#,
+    ));
+}
+
 #[test]
 fn intt_assert_inertia_with_returns_the_response_for_chaining() {
     let response = TestResponse::new(
@@ -1121,6 +1181,44 @@ fn intt_big_integer_markers_are_decoded_when_the_page_preserves_them() {
         .where_("small", 3)
         .has_flash("created", Some(json!(18446744073709551615_u64)));
     assert_eq!(page.to_page()["props"]["id"], json!(9007199254740993_i64));
+}
+
+#[test]
+fn intt_a_big_integer_marker_beyond_64_bits_fails_naming_it() {
+    // 2^64 and -(2^63) - 1: no `i64` or `u64` holds either, and a
+    // `serde_json::Value` has no integer for them.
+    for (extra, path, digits) in [
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "props": {"user": {"id": {"$bigint": "18446744073709551616"}}},
+            }),
+            "props.user.id",
+            "18446744073709551616",
+        ),
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "props": {"rows": [{"n": {"$bigint": "-9223372036854775809"}}]},
+            }),
+            "props.rows.0.n",
+            "-9223372036854775809",
+        ),
+        (
+            json!({
+                "preserveBigIntegers": true,
+                "flash": {"created": {"$bigint": "18446744073709551616"}},
+            }),
+            "flash.created",
+            "18446744073709551616",
+        ),
+    ] {
+        let failure = failure_of(|| {
+            page_with(extra.clone());
+        });
+        assert!(failure.contains(digits), "{failure}");
+        assert!(failure.contains(&format!("`{path}`")), "{failure}");
+    }
 }
 
 #[test]

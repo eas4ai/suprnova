@@ -1,8 +1,9 @@
 //! `AssertableInertia` - fluent assertions over an Inertia page object,
-//! parsed from either an Inertia XHR response body or the `<script
-//! type="application/json" data-page="...">` element embedded in a
-//! hard-navigation HTML shell (see `framework/src/inertia/response.rs`
-//! `build_json_response` / `build_html_response`). Laravel's
+//! parsed from either an Inertia XHR response body or the `<script>`
+//! element with `type="application/json"` and `data-page` embedded in a
+//! first visit's HTML document, the framework's own or a server-rendered
+//! one (see `framework/src/inertia/response.rs` `build_json_response` /
+//! `build_html_response`). Laravel's
 //! `Inertia\Testing\AssertableInertia` equivalent: assertions panic with
 //! an expected/actual excerpt on failure - the same testing-surface
 //! contract as [`crate::testing::TestResponse`] and
@@ -97,13 +98,13 @@ impl AssertableInertia {
     ///
     /// Handles both shapes a resolved Inertia response can take: when the
     /// response carries an `X-Inertia` header, the body is the JSON page
-    /// object directly; otherwise the body is the HTML shell and the page
-    /// object is read out of its first `<script type="application/json"
-    /// data-page="...">` element, whatever id
-    /// [`InertiaConfig::mount_id`](crate::InertiaConfig::mount_id) gave it
-    /// (a server-rendered/SSR body embeds a different shape via
-    /// `buildSSRBody` and is not covered here - no test in this codebase
-    /// asserts against one today).
+    /// object directly; otherwise the body is the HTML document and the
+    /// page object is read out of its first `<script>` element with
+    /// `type="application/json"` and `data-page`, in either order, whatever
+    /// id [`InertiaConfig::mount_id`](crate::InertiaConfig::mount_id) gave
+    /// it. That covers the framework's own document, which writes `type`
+    /// first, and a server-rendered one, whose body Inertia's
+    /// `buildSSRBody` writes with `data-page` first.
     ///
     /// # Panics
     ///
@@ -131,15 +132,15 @@ impl AssertableInertia {
                 Some(Err(e)) => fail_with_report(
                     format!(
                         "AssertableInertia::from_response(...): found the <script \
-                         type=\"application/json\" data-page=...> element, but its content \
-                         is not valid JSON: {e}"
+                         type=\"application/json\" data-page> element, but its content is not \
+                         valid JSON: {e}"
                     ),
                     report.as_ref(),
                 ),
                 None => fail_with_report(
                     "AssertableInertia::from_response(...): no Inertia page object found - no \
-                     X-Inertia header and no <script type=\"application/json\" \
-                     data-page=...> element in the body"
+                     X-Inertia header and no <script type=\"application/json\" data-page> \
+                     element, in either attribute order, in the body"
                         .to_string(),
                     report.as_ref(),
                 ),
@@ -197,8 +198,11 @@ impl AssertableInertia {
         // the integers the handler passed, as Laravel's `fromTestResponse`
         // decodes them.
         if obj.get("preserveBigIntegers") == Some(&Value::Bool(true)) {
-            decode_big_integers(&mut props);
-            decode_big_integers(&mut flash);
+            for (root, value) in [("props", &mut props), ("flash", &mut flash)] {
+                if let Err(wide) = decode_big_integers(value) {
+                    fail(wide.message(root));
+                }
+            }
         }
         let deferred_props = obj
             .get("deferredProps")
@@ -1091,30 +1095,80 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// Replace every `{"$bigint": "<digits>"}` marker in `value`, at any depth,
 /// with the integer it carries: the reverse of the encoding a page with
-/// `preserveBigIntegers` applies (`framework/src/inertia/response.rs`).
-/// A marker whose digits fit no 64-bit integer is left as it is.
-fn decode_big_integers(value: &mut Value) {
-    let decoded = match value {
-        Value::Object(map) => map
-            .get("$bigint")
-            .and_then(Value::as_str)
-            .and_then(|digits| {
-                digits
-                    .parse::<i64>()
-                    .map(Value::from)
-                    .or_else(|_| digits.parse::<u64>().map(Value::from))
-                    .ok()
-            }),
-        _ => None,
-    };
-    if let Some(number) = decoded {
-        *value = number;
-        return;
+/// `preserveBigIntegers` applies (`framework/src/inertia/response.rs`
+/// `encode_big_integers`).
+///
+/// The digits decode to an `i64` or a `u64` and to nothing wider. The
+/// framework's encoder marks only a `serde_json::Number`, which holds at
+/// most 64 bits, so a wider marker cannot come from a Suprnova page, and
+/// a `serde_json::Value` has no integer that holds one. Such a marker, which
+/// only a hand-built page object carries, is an error naming where it is,
+/// rather than an object left in place for `where_type("id", "integer")`
+/// to fail on and `to_page()` to show.
+fn decode_big_integers(value: &mut Value) -> Result<(), WideMarker> {
+    if let Value::Object(map) = value
+        && let Some(Value::String(digits)) = map.get("$bigint")
+    {
+        let decoded = match digits.parse::<i64>() {
+            Ok(signed) => Ok(Value::from(signed)),
+            Err(_) => digits
+                .parse::<u64>()
+                .map(Value::from)
+                .map_err(|_| WideMarker {
+                    digits: digits.clone(),
+                    segments: Vec::new(),
+                }),
+        };
+        *value = decoded?;
+        return Ok(());
     }
     match value {
-        Value::Object(map) => map.values_mut().for_each(decode_big_integers),
-        Value::Array(items) => items.iter_mut().for_each(decode_big_integers),
+        Value::Object(map) => {
+            for (key, nested) in map.iter_mut() {
+                decode_big_integers(nested).map_err(|wide| wide.under(key))?;
+            }
+        }
+        Value::Array(items) => {
+            for (index, nested) in items.iter_mut().enumerate() {
+                decode_big_integers(nested).map_err(|wide| wide.under(index))?;
+            }
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// A big-integer marker whose digits no 64-bit integer holds, found by
+/// [`decode_big_integers`]: its digits, and the path segments from the
+/// marker out to the value the search started at, innermost first, so
+/// each level adds its own on the way out and no path is built unless a
+/// marker fails.
+struct WideMarker {
+    digits: String,
+    segments: Vec<String>,
+}
+
+impl WideMarker {
+    /// The same marker, seen from one level further out, under `segment`.
+    fn under(mut self, segment: impl ToString) -> Self {
+        self.segments.push(segment.to_string());
+        self
+    }
+
+    /// The failure message, with `root` (`props` or `flash`) leading the
+    /// marker's dotted path.
+    fn message(&self, root: &str) -> String {
+        let path = std::iter::once(root)
+            .chain(self.segments.iter().rev().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(".");
+        format!(
+            "AssertableInertia: the big-integer marker at `{path}` holds {:?}, which is not an \
+             integer of 64 bits or fewer. A Suprnova page marks only 64-bit integers \
+             (`i64` or `u64`), so this marker comes from a page object built by hand: \
+             {{\"$bigint\": {:?}}}",
+            self.digits, self.digits
+        )
     }
 }
 
@@ -1151,27 +1205,120 @@ fn json_type_is(name: &str) -> Option<fn(&Value) -> bool> {
     })
 }
 
-/// Extract the JSON page object from a hard-navigation HTML shell's first
-/// `<script type="application/json" data-page="...">` element, whatever its
-/// id: the attribute carries the configured mount id, `app` by default. The
-/// element's content is standard JSON with every `/` escaped as `\/`
-/// (`framework/src/inertia/response.rs` `build_html_response`) - a
-/// valid JSON escape `serde_json` parses natively, so no unescaping is
-/// needed.
+/// Extract the JSON page object from a first visit's HTML document: the
+/// content of its first `<script>` element whose attributes include
+/// `type="application/json"` and `data-page`, in either order and with
+/// any others between them. The framework's own document writes `type`
+/// first (`framework/src/inertia/response.rs` `build_html_response`);
+/// Inertia's `buildSSRBody`, whose output an SSR first visit injects
+/// unchanged, writes `data-page` first. Attribute values may be double
+/// quoted, single quoted or bare. The `data-page` value is the configured
+/// mount id, `app` by default, and any id matches. The element's content
+/// is JSON with every `/` escaped as `\/`, a JSON escape `serde_json`
+/// reads as it is.
 ///
-/// Returns `None` when the element itself isn't present, and
-/// `Some(Err(_))` when it's present but its content doesn't parse -
-/// distinguishing "the element is missing" from "the element is there
-/// but malformed" so [`AssertableInertia::from_response`] can report
-/// the real cause instead of misreporting a found-but-broken element as
-/// absent.
+/// The document is walked one `<script>` element at a time, and the
+/// content of an element that is not the page is skipped whole, so text
+/// inside another script that looks like the page element is never read
+/// as the page.
+///
+/// Returns `None` when no such element is present, and `Some(Err(_))`
+/// when it's present but its content doesn't parse - distinguishing "the
+/// element is missing" from "the element is there but malformed" so
+/// [`AssertableInertia::from_response`] can report the real cause instead
+/// of misreporting a found-but-broken element as absent.
 pub(crate) fn page_object_from_html(html: &str) -> Option<Result<Value, serde_json::Error>> {
-    const OPEN: &str = r#"<script type="application/json" data-page=""#;
-    let id_at = html.find(OPEN)? + OPEN.len();
-    // The id is written attribute-escaped, so the first `">` closes the tag.
-    let start = html[id_at..].find("\">")? + id_at + 2;
-    let end = html[start..].find("</script>")? + start;
-    Some(serde_json::from_str(&html[start..end]))
+    const OPEN: &str = "<script";
+    const CLOSE: &str = "</script";
+    let mut rest = html;
+    loop {
+        let after_name = &rest[find_ignoring_case(rest, OPEN)? + OPEN.len()..];
+        // `<scripts>` or `<script-x>` is another element.
+        if !after_name.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/') {
+            rest = after_name;
+            continue;
+        }
+        let (attributes, tag_len) = start_tag_attributes(after_name)?;
+        let content = &after_name[tag_len..];
+        let end = find_ignoring_case(content, CLOSE)?;
+        if is_page_element(&attributes) {
+            return Some(serde_json::from_str(&content[..end]));
+        }
+        rest = &content[end + CLOSE.len()..];
+    }
+}
+
+/// One attribute of a start tag: its name, and its value, `None` for an
+/// attribute written without one.
+type Attribute<'a> = (&'a str, Option<&'a str>);
+
+/// Whether a `<script>` element's attributes mark it as the page element:
+/// `type` is `application/json` and a `data-page` attribute is present.
+fn is_page_element(attributes: &[Attribute<'_>]) -> bool {
+    let typed_json = attributes.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("type")
+            && value.is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    });
+    typed_json
+        && attributes
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("data-page"))
+}
+
+/// Read the attributes of a start tag from `tag`, the text just after the
+/// tag's name, and the length of the tag up to and including the `>` that
+/// closes it. A `>` inside a quoted value does not close the tag. `None`
+/// when the tag never closes.
+fn start_tag_attributes(tag: &str) -> Option<(Vec<Attribute<'_>>, usize)> {
+    let bytes = tag.as_bytes();
+    let skip_while = |mut at: usize, keep: fn(u8) -> bool| {
+        while bytes.get(at).copied().is_some_and(keep) {
+            at += 1;
+        }
+        at
+    };
+    let mut attributes = Vec::new();
+    let mut at = 0;
+    loop {
+        at = skip_while(at, |b| b.is_ascii_whitespace() || b == b'/');
+        if *bytes.get(at)? == b'>' {
+            return Some((attributes, at + 1));
+        }
+        let name_start = at;
+        at = skip_while(at, |b| {
+            !b.is_ascii_whitespace() && !matches!(b, b'=' | b'>' | b'/')
+        });
+        let name = &tag[name_start..at];
+        at = skip_while(at, |b| b.is_ascii_whitespace());
+        if bytes.get(at) != Some(&b'=') {
+            attributes.push((name, None));
+            continue;
+        }
+        at = skip_while(at + 1, |b| b.is_ascii_whitespace());
+        let value = match *bytes.get(at)? {
+            quote @ (b'"' | b'\'') => {
+                let start = at + 1;
+                let end = start + bytes[start..].iter().position(|&b| b == quote)?;
+                at = end + 1;
+                &tag[start..end]
+            }
+            _ => {
+                let start = at;
+                at = skip_while(at, |b| !b.is_ascii_whitespace() && b != b'>');
+                &tag[start..at]
+            }
+        };
+        attributes.push((name, Some(value)));
+    }
+}
+
+/// The byte offset of the first match of the ASCII `needle` in
+/// `haystack`, ignoring ASCII case, as HTML tag names do.
+fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// A recorded reload request, built by [`AssertableInertia::reload`],
@@ -1183,7 +1330,11 @@ pub(crate) fn page_object_from_html(html: &str) -> Option<Result<Value, serde_js
 /// sends on a follow-up XHR against the same page.
 #[derive(Debug, Clone)]
 pub struct ReloadRequest {
-    /// The page's URL - the same request path (and query) to reissue.
+    /// The page's URL - the request path (and query) to reissue - as the
+    /// page gives it. Under a public path prefix it starts with the root,
+    /// which the router does not see: a [`crate::testing::TestClient`]
+    /// sends the reload without the root, and a harness attached with
+    /// [`AssertableInertia::with_reload`] has to strip it the same way.
     pub url: String,
     /// The page's component name, sent as `X-Inertia-Partial-Component`
     /// whenever [`Self::only`] or [`Self::except`] is set.

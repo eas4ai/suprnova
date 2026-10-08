@@ -740,7 +740,11 @@ pub async fn handle_request_with_peer(
 ///
 /// The trust rule is the one every other forwarded header follows: with no
 /// `AppConfig` registered, or no peer address, nothing is trusted.
-fn request_root(
+///
+/// The test client calls it too, with no peer as [`handle_request`]
+/// passes, to learn the root a request was served under: the task-local
+/// that holds it is gone once [`handle_request`] returns.
+pub(crate) fn request_root(
     req: &hyper::Request<hyper::body::Incoming>,
     peer_ip: Option<std::net::IpAddr>,
 ) -> Arc<str> {

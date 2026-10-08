@@ -456,9 +456,10 @@ impl TestResponse {
     ///
     /// Reads either shape a page response takes: the JSON page object of
     /// an Inertia visit (the response carries `X-Inertia: true`), or the
-    /// HTML document of a first visit, whose `<script
-    /// type="application/json" data-page="...">` element holds the page,
-    /// so a plain `GET` of a page route is assertable as it is. A response
+    /// HTML document of a first visit, whose `<script>` element with
+    /// `type="application/json"` and `data-page`, in either order, holds
+    /// the page, so a plain `GET` of a page route is assertable as it is,
+    /// server-rendered or not. A response
     /// from a [`TestClient`](crate::testing::TestClient) gives the page the
     /// client to reload through.
     ///
@@ -474,13 +475,13 @@ impl TestResponse {
             match super::inertia::page_object_from_html(&html) {
                 Some(Ok(page)) => page,
                 Some(Err(e)) => self.fail(format!(
-                    "assert_inertia(): found the <script type=\"application/json\" \
-                     data-page=...> element, but its content is not valid JSON: {e}"
+                    "assert_inertia(): found the <script type=\"application/json\" data-page> \
+                     element, but its content is not valid JSON: {e}"
                 )),
                 None => self.fail(format!(
                     "assert_inertia(): no Inertia page object in the response - got X-Inertia = \
-                     {:?} and no <script type=\"application/json\" data-page=...> element in \
-                     the body. An Inertia visit sends `X-Inertia: true` \
+                     {:?} and no <script type=\"application/json\" data-page> element, in \
+                     either attribute order, in the body. An Inertia visit sends `X-Inertia: true` \
                      (TestRequest::inertia()); a first visit gets the HTML document the page \
                      renders.\n  status: {}\n  body: {}",
                     self.header("x-inertia"),

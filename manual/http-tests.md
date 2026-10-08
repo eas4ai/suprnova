@@ -593,8 +593,12 @@ Laravel's `Inertia\Testing\AssertableInertia`.
 `TestResponse::assert_inertia()` reads the page from either shape a page
 response takes: the JSON page object of an Inertia visit, which carries
 `X-Inertia: true`, or the HTML document of a first visit, whose
-`<script type="application/json" data-page=...>` element holds the page
-whatever id `InertiaConfig::mount_id` gave it (`app` by default). The
+`<script>` element with `type="application/json"` and `data-page` holds
+the page whatever id `InertiaConfig::mount_id` gave it (`app` by
+default). The two attributes can come in either order, with others
+between them, so the document of a server-rendered first visit reads the
+same way: Inertia's `buildSSRBody` writes it as
+`<script data-page="app" type="application/json">`. The
 `inertia()` request method sends the headers an Inertia visit sends:
 `X-Inertia: true`, its `Accept`, and `X-Inertia-Version` set to the
 installed configuration's asset version, or the empty string with none
@@ -788,6 +792,11 @@ integer the handler rendered:
 response.assert_inertia().where_("id", 9007199254740993_i64);
 ```
 
+A marker whose digits fit no 64-bit integer (`i64` or `u64`) fails the
+assertion, naming the marker's path and digits, such as `props.user.id`
+and `18446744073709551616`. The framework marks only integers it holds in
+64 bits, so such a marker comes from a page object built by hand.
+
 ### Reloading for partial-reload and deferred-props assertions
 
 A page from a `TestClient` response reloads through that client, with
@@ -826,6 +835,15 @@ page.load_deferred_props_with(["stats"], |reloaded| {
 
 `load_deferred_props_of` fails naming a group the page doesn't defer, so
 a typo can't request nothing and pass.
+
+Under a public path prefix, such as `APP_URL=https://example.test/billing`,
+the page's url is the public one, `/billing/users`, while the router
+matches the path the request arrived on, `/users`. The client keeps the
+root each request was served under, and a reload replays the internal
+path, `/users` with the page's query, so it reaches the route the first
+visit did. A reload also sends again the `X-Forwarded-Prefix` header the
+page's request sent, if any. A `ReloadRequest` carries the public url, so
+a `with_reload` harness removes the root itself.
 
 A test that drives requests through its own harness attaches the replay
 with `with_reload`, a closure from a `ReloadRequest` (the url,
