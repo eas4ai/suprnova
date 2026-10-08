@@ -56,9 +56,18 @@ type ServerBody = BoxBody<Bytes, Infallible>;
 /// wait up to the drain's 5 s deadline.
 static WS_TASKS: OnceLock<WsTaskRegistry> = OnceLock::new();
 
-/// The set of in-flight WebSocket handler tasks, behind the lock
-/// [`WS_TASKS`] describes.
-type WsTaskRegistry = std::sync::Mutex<JoinSet<()>>;
+/// What [`WS_TASKS`] holds: the handler tasks still to drain, and whether
+/// the shutdown drain has closed the registry, after which a handler that
+/// registers is not started (see [`drain_ws_tasks`]).
+#[derive(Default)]
+struct WsRegistry {
+    tasks: JoinSet<()>,
+    closed: bool,
+}
+
+/// The in-flight WebSocket handler tasks, behind the lock [`WS_TASKS`]
+/// describes.
+type WsTaskRegistry = std::sync::Mutex<WsRegistry>;
 
 tokio::task_local! {
     /// Carries the accept-loop connection-cap permit (when
@@ -2447,19 +2456,25 @@ async fn drain_connections(
 /// The lock is held only to reap finished handles and spawn, with no await
 /// under it, so a registration never waits behind the drain. A poisoned
 /// lock is recovered: the set holds no invariant a panic elsewhere could
-/// break, and refusing to register would leave the handler untracked.
+/// break, and refusing to register would leave the handler untracked. Once
+/// the drain has closed the registry, at its deadline or when nothing was
+/// left to wait for, a handler is not started: it would outlive the server.
 fn track_ws_task(
     tasks: &WsTaskRegistry,
     task: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
-    let mut tasks = tasks
+    let mut registry = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if registry.closed {
+        tracing::debug!("a WebSocket handler registered after the shutdown drain is not started");
+        return;
+    }
     // Opportunistic reap so the JoinSet doesn't grow unbounded under
     // long-running operation; completed handles get dropped here instead
     // of accumulating until shutdown.
-    while tasks.try_join_next().is_some() {}
-    tasks.spawn(task);
+    while registry.tasks.try_join_next().is_some() {}
+    registry.tasks.spawn(task);
 }
 
 /// Wait for the registered WebSocket handler tasks to finish, up to
@@ -2467,41 +2482,71 @@ fn track_ws_task(
 /// aborted.
 ///
 /// The set is taken out of the registry under a brief lock and awaited
-/// holding none, so a registration during the drain completes at once
-/// into the emptied registry instead of waiting out the deadline.
+/// holding none, so a registration during the drain completes at once into
+/// the emptied registry instead of waiting out the deadline. A handler
+/// registered that way is waited for too: when a set finishes, the drain
+/// takes whatever registered meanwhile and waits for that, until a take
+/// finds nothing, which closes the registry. At the deadline every handler
+/// still running, taken or registered since, is aborted and the registry
+/// closes; a handler registered after that is not started.
 async fn drain_ws_tasks(tasks: &WsTaskRegistry, deadline: std::time::Duration) -> usize {
-    let mut tasks = std::mem::take(
-        &mut *tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    if tasks.is_empty() {
-        return 0;
-    }
-    tracing::info!(
-        ws_in_flight = tasks.len(),
-        "draining in-flight WebSocket handlers (max 5s)"
-    );
-    let ws_drain_deadline = tokio::time::sleep(deadline);
-    tokio::pin!(ws_drain_deadline);
+    let started = tokio::time::Instant::now();
+    let mut announced = false;
     loop {
-        tokio::select! {
-            next = tasks.join_next() => {
-                if next.is_none() {
-                    return 0; // JoinSet drained
-                }
+        let mut running = {
+            let mut registry = tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry.tasks.is_empty() {
+                registry.closed = true;
+                return 0;
             }
-            _ = &mut ws_drain_deadline => {
-                let aborted = tasks.len();
-                tracing::warn!(
-                    ws_in_flight = aborted,
-                    "WS drain deadline exceeded; aborting remaining handlers"
-                );
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return aborted;
-            }
+            std::mem::take(&mut registry.tasks)
+        };
+        if !announced {
+            tracing::info!(
+                ws_in_flight = running.len(),
+                "draining in-flight WebSocket handlers (max {}s)",
+                deadline.as_secs()
+            );
+            announced = true;
         }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let finished = tokio::time::timeout(remaining, async {
+            while running.join_next().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        if finished {
+            // This set finished in time. A handler registered meanwhile
+            // sits in the registry: go round and wait for it too.
+            continue;
+        }
+        // The deadline. Returning here without aborting left the abandoned
+        // connection tasks *running* while the caller went on to flush
+        // OTel and shut the runtime down. That breaks the one ordering
+        // invariant this drain exists to hold: spans and metrics must land
+        // in the batch processors before `shutdown()`. The tasks still
+        // emitting were precisely the ones the deadline gave up on, and the
+        // JoinSet's own `Drop` would not abort them until the caller's
+        // scope ended - well after the flush.
+        let mut late = {
+            let mut registry = tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.closed = true;
+            std::mem::take(&mut registry.tasks)
+        };
+        let aborted = running.len() + late.len();
+        tracing::warn!(
+            ws_in_flight = aborted,
+            "WS drain deadline exceeded; aborting remaining handlers"
+        );
+        running.abort_all();
+        late.abort_all();
+        while running.join_next().await.is_some() {}
+        while late.join_next().await.is_some() {}
+        return aborted;
     }
 }
 
@@ -2856,10 +2901,12 @@ mod tests {
         let tasks: Arc<WsTaskRegistry> = Arc::new(WsTaskRegistry::default());
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let handler_dropped = Arc::new(AtomicBool::new(false));
+        let late_dropped = Arc::new(AtomicBool::new(false));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(3600), {
             let tasks = tasks.clone();
             let order = order.clone();
             let handler_dropped = handler_dropped.clone();
+            let late_dropped = late_dropped.clone();
             async move {
                 track_ws_task(&tasks, never_finishing_handler(&handler_dropped));
                 let drain = tokio::spawn({
@@ -2884,7 +2931,6 @@ mod tests {
                 let registration = tokio::spawn({
                     let tasks = tasks.clone();
                     let order = order.clone();
-                    let late_dropped = Arc::new(AtomicBool::new(false));
                     async move {
                         track_ws_task(&tasks, never_finishing_handler(&late_dropped));
                         order.lock().expect("order").push("registration");
@@ -2902,10 +2948,105 @@ mod tests {
             ["registration", "drain"],
             "a registration issued during the drain completed only after the drain did"
         );
-        assert_eq!(aborted, 1, "the drain aborted the handler it held");
+        assert_eq!(
+            aborted, 2,
+            "the drain aborted the handler it held and the one registered during it"
+        );
         assert!(
             handler_dropped.load(Ordering::SeqCst),
             "the handler still running at the deadline was aborted"
+        );
+        assert!(
+            late_dropped.load(Ordering::SeqCst),
+            "the handler registered during the drain and still running at the deadline was aborted"
+        );
+    }
+
+    /// RTC-004: a handler registered while the drain waits on an earlier
+    /// set is waited for in its turn; the drain does not return before its
+    /// deadline while that handler still runs.
+    #[tokio::test(start_paused = true)]
+    async fn rtc_a_handler_registered_during_the_drain_is_waited_for() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tasks: Arc<WsTaskRegistry> = Arc::new(WsTaskRegistry::default());
+        let first_done = Arc::new(tokio::sync::Notify::new());
+        let late_done = Arc::new(tokio::sync::Notify::new());
+        let late_finished = Arc::new(AtomicBool::new(false));
+        track_ws_task(&tasks, {
+            let first_done = first_done.clone();
+            async move { first_done.notified().await }
+        });
+        let drain = tokio::spawn({
+            let tasks = tasks.clone();
+            async move { drain_ws_tasks(&tasks, std::time::Duration::from_secs(5)).await }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !drain.is_finished(),
+            "the drain waits for the first handler"
+        );
+
+        // Registered during the drain, after it took the first handler out.
+        track_ws_task(&tasks, {
+            let late_done = late_done.clone();
+            let late_finished = late_finished.clone();
+            async move {
+                late_done.notified().await;
+                late_finished.store(true, Ordering::SeqCst);
+            }
+        });
+        first_done.notify_one();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !drain.is_finished(),
+            "the drain returned before its deadline while the handler registered during it was still running"
+        );
+
+        late_done.notify_one();
+        let aborted = drain.await.expect("the drain ran");
+        assert_eq!(aborted, 0, "a handler that finished in time is not aborted");
+        assert!(
+            late_finished.load(Ordering::SeqCst),
+            "the drain waited for the handler registered during it"
+        );
+    }
+
+    /// RTC-004: once the drain has closed the registry, a handler that
+    /// registers is not started; it would outlive the server.
+    #[tokio::test(start_paused = true)]
+    async fn rtc_a_registration_after_the_drain_is_not_started() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tasks = WsTaskRegistry::default();
+        assert_eq!(
+            drain_ws_tasks(&tasks, std::time::Duration::from_secs(5)).await,
+            0
+        );
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        track_ws_task(&tasks, {
+            let started = started.clone();
+            let flag = DropFlag(dropped.clone());
+            async move {
+                let _flag = flag;
+                started.store(true, Ordering::SeqCst);
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "a handler registered after the drain was started"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the handler registered after the drain was dropped unstarted"
         );
     }
 

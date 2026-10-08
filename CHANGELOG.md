@@ -303,7 +303,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   waited out the whole drain before its handler was registered. The
   registry is now a synchronous lock held only to reap finished handlers
   and register a new one, and the drain takes the set out under it and
-  waits holding no lock, still up to 5 s before it aborts what runs (#149).
+  waits holding no lock, still up to 5 s before it aborts what runs. A
+  handler registered while the drain waits is waited for in its turn and
+  aborted with the rest at the deadline; one registered after the drain
+  has closed the registry is not started (#149).
 - **A streamed file is one blocking task, not one per chunk.** A file
   above 1 MiB, served by `HttpResponse::file`, `HttpResponse::download` or
   `StaticFiles`, spawned a blocking-pool task for every 64 KiB chunk, so a
