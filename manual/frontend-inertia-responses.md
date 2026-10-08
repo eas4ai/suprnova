@@ -1313,6 +1313,161 @@ positional matching.
 Escape anything interpolated from user data - these strings are injected as
 HTML, so the usual rules apply.
 
+## The root template
+
+A first visit is a whole HTML document: the page data, the mount element, the
+Vite tags, and whatever else your application wants in the first load - a
+favicon, fonts, meta tags a link preview reads, a `<noscript>`, attributes on
+`<html>` and `<body>`. In Laravel that document is `app.blade.php`. In
+Suprnova it is an Askama template under `templates/`, which you declare with
+`#[inertia_root]` and install on the config:
+
+```rust
+use suprnova::{Frontend, Inertia, InertiaConfig, InertiaRootTemplate};
+
+/// The document every Inertia first visit renders into: `templates/app.html`.
+#[suprnova::inertia_root(path = "app.html")]
+pub struct AppDocument;
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new()
+            .frontend(Frontend::Svelte)
+            .default_title("My App")
+            .root_template(InertiaRootTemplate::of::<AppDocument>()),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+```html
+<!DOCTYPE html>
+<html lang="{{ lang }}" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.ico" />
+    {{ title }}
+    {{ head }}
+    {% if !ssr %}
+    <meta name="description" content="My App" />
+    {% endif %}
+  </head>
+  <body class="antialiased">
+    <noscript>My App needs JavaScript.</noscript>
+    {{ body }}
+  </body>
+</html>
+```
+
+`suprnova new` writes this file as `templates/app.html` and declares it as
+`AppDocument` in `src/bootstrap.rs`. Without a root template, the first visit
+is the document the framework writes itself, byte for byte what it has always
+been.
+
+The framework hands the template these parts:
+
+- `title`: the `<title>` element, from `.title(...)` on the response or
+  `.default_title(...)` on the config. It is empty when the
+  [SSR](#ssr) head carries a `<title>` of its own, because a document shows
+  only its first title. A template that writes its own `<title>` leaves this
+  part out.
+- `head`: the `csrf-token` meta tag, the SSR head when the SSR server rendered
+  the page, and the Vite tags, in that order.
+- `body`: the page data element and the mount element, or the SSR body, which
+  carries both.
+- `lang`: the document's language, the locale in effect for the request.
+- `csrf_token`: the session's CSRF token, for a template that places it
+  itself. It is empty outside a session.
+- `nonce`: the request's CSP nonce, for the template's own inline scripts. It
+  is `None`: no nonce policy supplies one.
+- `ssr`: whether the SSR server rendered this response. A template places
+  fallback head content under `{% if !ssr %}`, for the pages whose own `Head`
+  did not run on the server.
+- `view`: the response's view data, described below.
+
+`title`, `head`, and `body` are markup: placed bare, they are written as they
+are, not escaped as text. `lang`, `csrf_token`, `nonce`, and view data values
+are plain values, and Askama escapes them like any other. Askama checks the
+template at compile time, so a template that names anything other than these
+parts fails the build. A template that fails while it renders, such as one
+whose custom filter returns an error, makes the response an error that names
+the template; no part of the document is sent.
+
+The parts write themselves into the template's output as it renders. The page
+JSON is serialized straight into that output, so a first visit through a root
+template allocates what the framework's own document does, and a root
+template adds no size limit of its own.
+
+### Choose the template per request
+
+To choose a different document for some requests, give the config a function
+of the request instead of one template. It reads the path, the query, and the
+headers through `InertiaRequestExt`, like Laravel's `rootView(Request)`:
+
+```rust
+use suprnova::{InertiaConfig, InertiaRootTemplate};
+
+#[suprnova::inertia_root(path = "admin.html")]
+pub struct AdminDocument;
+
+let cfg = InertiaConfig::new().root_template_with(|req| {
+    if req.path().starts_with("/admin") {
+        InertiaRootTemplate::of::<AdminDocument>()
+    } else {
+        InertiaRootTemplate::of::<AppDocument>()
+    }
+});
+```
+
+`InertiaRootTemplate::framework()` chooses the framework's own document. The
+[error page](#error-pages) goes through the same function, with the request
+as it arrived, so a `404` or a `403` under `/admin` keeps the admin document.
+
+### View data
+
+`.with_view_data(key, value)` hands the root template a value for one response
+and keeps it out of the page props: an Inertia visit's JSON and the first
+visit's page data never include it. It is Laravel's `withViewData`, for what
+the first-load HTML must carry without running JavaScript, such as the meta
+tags a link preview reads:
+
+```rust
+#[handler]
+async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
+    InertiaResponse::new("Posts/Show")
+        .with_view_data("description", post.title.clone())
+        .with("post", post)
+        .resolve(&req)
+        .await
+        .map_err(HttpResponse::from)
+}
+```
+
+```html
+{% if let Some(description) = view.get("description") %}
+<meta property="og:description" content="{{ description }}" />
+{% endif %}
+```
+
+An error page carries no view data: the handler that would have set it failed
+or never ran. The framework's own document places none.
+
+Blade's view data becomes template variables of any type. Here it is text
+that the template reads through `view.get`, so the template's names stay the
+fixed set of parts that Askama checks at compile time.
+
+### The mount id
+
+The page data element's `data-page` attribute and the mount element's `id`
+are `app` unless `.mount_id(...)` on the config names another. Set it to the
+`id` your frontend passes to `createInertiaApp`, and under SSR to
+`createServer`, since the worker writes the SSR body's elements itself:
+
+```rust
+let cfg = InertiaConfig::new().mount_id("root");
+```
+
 ## SSR
 
 Suprnova talks to an out-of-process SSR worker - typically the
@@ -1432,10 +1587,11 @@ Two attributes of the HTML shell are worth calling out.
 page's own head wins over **both**: a worker head carrying a `<title>` is
 the document's only one, and the shell leaves its title out entirely.
 
-`<html lang="...">` is the one attribute you cannot set, because the right
-value is already known - it is the locale in effect for the request, what
-`LocaleMiddleware` detected or the configured `APP_LOCALE` when nothing
-did. See [Localization](localization.md); a screen reader takes its voice
+`<html lang="...">` is the one attribute the framework's own document does
+not let you set, because the right value is already known - it is the
+locale in effect for the request, what `LocaleMiddleware` detected or the
+configured `APP_LOCALE` when nothing did. A [root template](#the-root-template)
+places the same value as its `lang` part. See [Localization](localization.md); a screen reader takes its voice
 from that attribute and a search engine reads it as the page's language,
 so an app serving more than one language no longer has to rewrite the
 finished document to correct it.

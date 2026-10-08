@@ -2471,3 +2471,39 @@ fn rdoc_006_the_dockerfile_copies_templates_before_the_build() {
         );
     }
 }
+
+/// RDOC-006: the Inertia responses chapter documents the root template:
+/// its declaration, each part, the per-request chooser, view data and the
+/// mount id, in a section of its own.
+#[test]
+fn rdoc_006_the_manual_documents_the_root_template() {
+    let chapter = read_from_repo("manual/frontend-inertia-responses.md");
+    let section = chapter
+        .split_once("\n## The root template\n")
+        .map(|(_, rest)| {
+            rest.split_once("\n## ")
+                .map_or(rest, |(section, _)| section)
+        })
+        .expect("manual/frontend-inertia-responses.md has a `## The root template` section");
+    for named in [
+        "#[suprnova::inertia_root(path = ",
+        ".root_template(InertiaRootTemplate::of::<",
+        "- `title`:",
+        "- `head`:",
+        "- `body`:",
+        "- `lang`:",
+        "- `csrf_token`:",
+        "- `nonce`:",
+        "- `ssr`:",
+        "- `view`:",
+        "root_template_with",
+        ".with_view_data(",
+        "view.get(",
+        ".mount_id(",
+    ] {
+        assert!(
+            section.contains(named),
+            "the root template section does not name {named}"
+        );
+    }
+}

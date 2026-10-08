@@ -132,8 +132,8 @@ pub struct InertiaRootParts<'a> {
     pub lang: &'a str,
     /// The session's CSRF token, empty outside a session.
     pub csrf_token: &'a str,
-    /// The request's CSP nonce. Always `None`: no nonce policy supplies
-    /// one yet (RDOC-005).
+    /// The request's CSP nonce. `None`: no nonce policy supplies one
+    /// (RDOC-005).
     pub nonce: Option<&'a str>,
     /// Whether the SSR server rendered this response, for a template that
     /// places fallback head content when it did not.

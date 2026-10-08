@@ -127,6 +127,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`HasRoles::rbac_model_types()`** names every `model_type` a model's
   role and permission assignments are read under: its `morph_type`, its
   aliases and the Rust type path an earlier release stored.
+- **An application-owned Inertia root document.** The framework wrote every
+  first visit's whole document itself, so an application had no place for
+  its own favicon, fonts, meta tags or attributes on `<html>` and `<body>`.
+  `#[inertia_root(path = "app.html")]` declares an Askama template under
+  `templates/` that receives the framework's parts (`title`, `head`, `body`,
+  `lang`, `csrf_token`, `nonce`, `ssr` and `view`), checked at compile time,
+  and `InertiaConfig::root_template` renders every first visit through it.
+  `root_template_with` chooses the template per request, Laravel's
+  `rootView(Request)`, and error pages go through the same choice;
+  `InertiaResponse::with_view_data` hands the template values that never
+  reach the page props, Laravel's `withViewData`. The page JSON is written
+  straight into the template's output: a first visit with a 1 MiB prop
+  allocates 5,386,301 bytes through a template against 5,386,925 through
+  the framework's document, and a 3 MiB page comes back whole. A template
+  that fails to render is an error response, never part of a document.
+  `InertiaConfig::mount_id` names the mount element and the page data
+  element, `app` by default, for a client that mounts on another id. Without
+  a template the first visit is byte for byte what it was.
 
 ### Changed
 
