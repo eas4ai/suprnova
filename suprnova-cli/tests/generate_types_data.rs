@@ -781,6 +781,22 @@ fn intt_the_big_integers_flag_widens_without_a_preserve_call() {
     assert_narrow_stay_number(&block);
 }
 
+/// The PAR-069 falsifier as written: the call sits in `src/bootstrap.rs`
+/// and the struct in another file; preservation is a project-wide fact.
+#[test]
+fn intt_a_preserve_call_in_bootstrap_widens_every_file() {
+    let dir = project(&[
+        ("props.rs", NUMBERS),
+        (
+            "bootstrap.rs",
+            "pub fn register() {\n    Inertia::install(&InertiaConfig::new().preserve_big_integers(true))\n        .expect(\"install\");\n}\n",
+        ),
+    ]);
+    let block = extract_block(&run_generate_types(&dir, &[]), "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
+}
+
 #[test]
 fn intt_the_big_integers_option_widens_an_in_memory_scan() {
     let ts = generate_types_string_with(
