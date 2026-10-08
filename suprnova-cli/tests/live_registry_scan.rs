@@ -1182,6 +1182,74 @@ fn reg_032_a_member_read_off_a_literal_is_the_built_in_method_it_inherits() {
     );
 }
 
+/// REG-032: other scripts reach a built-in function's code through its
+/// `call`, `apply` and `bind` (`Array.prototype.slice.call(list)`), and a
+/// value the script did not make may hold any built-in method under any
+/// name: a number from `Math.random()` inherits `toPrecision`, a string
+/// from an input's `value` inherits `anchor`, an element inherits
+/// `requestFullscreen`. Writing one of those three names is refused on
+/// every value but one the script made: an object, array, function or
+/// class literal, a function or class it declares, a new instance of a
+/// standard constructor, or a name that holds only those. A `this` in a
+/// class is its instance, and its `call` stays its own.
+#[test]
+fn reg_032_call_apply_or_bind_written_on_a_value_the_script_did_not_make_is_refused() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "Math.random().toPrecision.call = () => \"\";\n",
+            "script-builtin",
+            1,
+        ),
+        ("(-1).toPrecision.call = () => \"\";\n", "script-builtin", 1),
+        (
+            "export function f(input) {\n  input.value.anchor.apply = () => \"\";\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(el) {\n  el.requestFullscreen.bind = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    this.requestFullscreen.call = () => null;\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "const s = new Set();\ns.union.call = () => s;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(p) {\n  p.call = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "let o = {};\nexport function f(p) {\n  o = p;\n  o.call = () => null;\n}\n",
+            "script-builtin",
+            4,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const o = {};\no.call = 1;\n",
+        "const xs = [];\nxs.apply = true;\n",
+        "function f() {}\nf.bind = null;\n",
+        "const m = new Map();\nm.call = 1;\n",
+        "let o;\no = { call: 0 };\no.call = 1;\n",
+        "function f(p) {\n  p.call = 1;\n}\nf({});\n",
+        "export class A extends HTMLElement {\n  connectedCallback() {\n    this.call = null;\n  }\n}\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: the scan follows a built-in only through names: a variable, and
 /// a parameter of a function the script calls by name. Anywhere else it
 /// would leave for code the scan cannot follow (a destructured name, an

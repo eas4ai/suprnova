@@ -3149,7 +3149,11 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// method of the page (REG-032). Either changes, for every script on the
     /// page, a function or object the browser provides: `Object.keys = f`,
     /// `p.call = g` where `p` holds `Object.keys`, `document.createElement
-    /// = f`.
+    /// = f`. `call`, `apply` and `bind`, through which every script borrows
+    /// a built-in method that any value may hold
+    /// (`Math.random().toPrecision`), are refused by name on every value the
+    /// script did not make, because the scan cannot follow every path to
+    /// one.
     fn builtin_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
         let object = member.object();
         if self.reaches(Root::Method, object, 0, &mut BTreeSet::new()) {
@@ -3178,6 +3182,130 @@ impl<'a, 'c> Walker<'a, 'c> {
                 span,
                 format!("{verb} `{name}` on {page} replaces a built-in function every script on the page calls"),
             );
+            return;
+        }
+        let borrowing = names.iter().find(|name| borrowing_method(name));
+        if borrowing.is_none() || self.made_by_script(object, 0, &mut BTreeSet::new()) {
+            return;
+        }
+        if let Some(name) = borrowing
+            && !self.instance_this(object)
+        {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on a value the script did not make may change the `{name}` every script borrows a built-in method with, and any value may hold one (`Math.random().toPrecision`), so only an object or function the script made may take a member of that name"),
+            );
+        }
+    }
+
+    /// Whether an expression is `this` in a class, its own instance, whose
+    /// members are its own to write (REG-032).
+    fn instance_this(&self, expr: &Expression<'a>) -> bool {
+        matches!(unparen(expr), Expression::ThisExpression(this)
+            if self.facts.this_class.contains_key(&this.span.start))
+    }
+
+    /// Whether an expression always evaluates to a value the script made,
+    /// never one the browser hands it (REG-032): an object, array, function
+    /// or class literal, a function or class it declares, a new instance of
+    /// a standard constructor, or a name every value of which is one, a
+    /// parameter included when every call of its function by name passes
+    /// one. An instance of a class of the script's own does not count: its
+    /// constructor may return any object.
+    fn made_by_script(
+        &self,
+        expr: &Expression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(expr) {
+            Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_) => true,
+            Expression::NewExpression(new) => matches!(unparen(&new.callee),
+                Expression::Identifier(callee)
+                    if self.bound(callee).is_none()
+                        && ADMITTED_CONSTRUCTORS.contains(&callee.name.as_str())),
+            Expression::Identifier(reference) => self
+                .bound(reference)
+                .is_some_and(|id| self.binding_made(id, depth + 1, seen)),
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.made_by_script(last, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.made_by_script(&conditional.consequent, depth + 1, seen)
+                    && self.made_by_script(&conditional.alternate, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.made_by_script(&logical.left, depth + 1, seen)
+                    && self.made_by_script(&logical.right, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                assignment.operator == AssignmentOperator::Assign
+                    && self.made_by_script(&assignment.right, depth + 1, seen)
+            }
+            _ => false,
+        }
+    }
+
+    /// [`Self::made_by_script`] for a binding: a function or class the
+    /// script declares and never reassigns, a variable every value of which
+    /// is made, or a parameter every call of whose function by name passes
+    /// one made. A binding met again inside its own values adds none.
+    fn binding_made(&self, id: Bid, depth: usize, seen: &mut BTreeSet<Bid>) -> bool {
+        if !seen.insert(id) {
+            return true;
+        }
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        if binding.opaque || binding.numeric_updates {
+            return false;
+        }
+        match binding.kind {
+            Kind::Function | Kind::Class => binding.assignments.is_empty(),
+            Kind::Const | Kind::Let | Kind::Var => {
+                let mut values = binding
+                    .init
+                    .into_iter()
+                    .chain(binding.assignments.iter().copied())
+                    .peekable();
+                values.peek().is_some()
+                    && values.all(|value| self.made_by_script(value, depth, seen))
+            }
+            Kind::Param => {
+                let Some(function) = binding.param_of.and_then(|owner| self.binding(owner)) else {
+                    return false;
+                };
+                if function.escapes || function.calls.is_empty() {
+                    return false;
+                }
+                if let Some(default) = binding.param_default
+                    && !self.made_by_script(default, depth, seen)
+                {
+                    return false;
+                }
+                function
+                    .calls
+                    .iter()
+                    // An omitted argument is the default, checked above, or
+                    // `undefined`, which has no member to write.
+                    .all(|arguments| match arguments.get(binding.param_index) {
+                        None => true,
+                        Some(Argument::SpreadElement(_)) => false,
+                        Some(argument) => argument
+                            .as_expression()
+                            .is_some_and(|value| self.made_by_script(value, depth, seen)),
+                    })
+            }
+            Kind::Import | Kind::Catch | Kind::Implicit => false,
         }
     }
 
@@ -3906,6 +4034,13 @@ fn constant_name(name: &str) -> bool {
 /// did not make inherits.
 fn inherited_method(name: &str) -> bool {
     ADMITTED_METHODS.contains(&name) || INHERITED_METHODS.contains(&name)
+}
+
+/// Whether a member name is one of the three through which every script
+/// borrows a built-in method: `Array.prototype.slice.call(list)` runs the
+/// `call` that `slice` holds (REG-032).
+fn borrowing_method(name: &str) -> bool {
+    matches!(name, "call" | "apply" | "bind")
 }
 
 /// Whether a member name is an index, which names an element or a
