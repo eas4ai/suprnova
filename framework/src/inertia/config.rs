@@ -523,8 +523,9 @@ pub struct SsrConfig {
     /// The file whose presence says the Vite dev server is running, and
     /// whose content is its URL: Laravel's Vite hot file. Default
     /// `public/hot` under the working directory, the file `suprnova serve`
-    /// writes while it runs Vite and removes when Vite stops. Set it with
-    /// [`InertiaConfig::ssr_hot_file`].
+    /// writes while it runs Vite for a frontend that declares the Inertia
+    /// Vite plugin (`@inertiajs/vite`), and removes when Vite stops. Set it
+    /// with [`InertiaConfig::ssr_hot_file`].
     pub hot_file: PathBuf,
     /// Where SSR is dispatched in hot mode, at `/__inertia_ssr`: Laravel's
     /// `inertia.ssr.hot_url`. The Vite dev server renders the page from
