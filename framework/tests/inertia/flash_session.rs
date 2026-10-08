@@ -51,6 +51,14 @@ fn router() -> Router {
             App::flash("toast", "Saved");
             redirect("/hop")
         })
+        .get("/flash-then-empty", |_req: Request| async {
+            App::flash("toast", "Kept");
+            redirect("/empty-hop")
+        })
+        .get("/empty-hop", |_req: Request| async {
+            let response: Response = Ok(HttpResponse::new());
+            response
+        })
         .get("/flash-then-text", |_req: Request| async {
             App::flash("toast", "Queued");
             text("ok")
@@ -127,6 +135,37 @@ async fn inp_flash_before_two_redirects_reaches_the_page_after_them_once() {
 
     let next = client.send("GET", "/page", INERTIA).await.page();
     assert!(next.get("flash").is_none(), "pulled by the page: {next}");
+}
+
+#[tokio::test]
+async fn inp_flash_survives_a_redirect_back_the_middleware_substituted() {
+    // The second hop is an empty 200 the Inertia middleware turns into a
+    // redirect back; PAR-050 keeps the flash data across that redirect as
+    // across one a handler returned.
+    let (mut client, _store) = app().await;
+    assert_eq!(
+        client
+            .send("GET", "/flash-then-empty", INERTIA)
+            .await
+            .status,
+        302
+    );
+    let hop = client
+        .send(
+            "GET",
+            "/empty-hop",
+            &[
+                ("X-Inertia", "true"),
+                ("X-Inertia-Version", "v9"),
+                ("Referer", "/page"),
+            ],
+        )
+        .await;
+    assert_eq!(hop.status, 302, "{hop:?}");
+    assert_eq!(hop.header("location"), Some("/page"));
+
+    let page = client.send("GET", "/page", INERTIA).await.page();
+    assert_eq!(page["flash"]["toast"], "Kept", "{page}");
 }
 
 #[tokio::test]

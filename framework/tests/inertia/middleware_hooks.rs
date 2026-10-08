@@ -62,6 +62,23 @@ impl InertiaMiddlewareHooks for AppHooks {
     }
 }
 
+/// Hooks whose empty-response answer is a redirect with a fragment.
+struct FragmentOnEmpty;
+
+impl InertiaMiddlewareHooks for FragmentOnEmpty {
+    // The version the requests below carry, so the version check lets them
+    // through to the handler.
+    fn version(&self, _request: &dyn InertiaRequestExt) -> Option<String> {
+        Some("v9".to_string())
+    }
+
+    fn on_empty_response(&self, _visit: &InertiaVisit, _response: HttpResponse) -> HttpResponse {
+        HttpResponse::new()
+            .status(302)
+            .header("Location", "/app/page#top")
+    }
+}
+
 /// Hooks that override nothing: every decision is the framework's.
 struct Defaults;
 
@@ -111,6 +128,16 @@ async fn inp_an_on_empty_response_hook_replaces_the_redirect_back() {
     let reply = client.send("GET", "/app/empty", INERTIA).await;
     assert_eq!(reply.status, 204, "{reply:?}");
     assert_eq!(reply.header("location"), None);
+}
+
+#[tokio::test]
+async fn inp_a_fragment_redirect_an_on_empty_response_hook_returns_is_converted_too() {
+    // PAR-048's fragment rule reads the response that is sent, the hook's
+    // included, not the empty 200 the handler returned.
+    let mut client = grouped(&InertiaConfig::new().hooks(FragmentOnEmpty)).await;
+    let reply = client.send("GET", "/app/empty", INERTIA).await;
+    assert_eq!(reply.status, 409, "{reply:?}");
+    assert_eq!(reply.header("x-inertia-redirect"), Some("/app/page#top"));
 }
 
 #[tokio::test]

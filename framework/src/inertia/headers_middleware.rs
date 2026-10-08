@@ -226,9 +226,8 @@ impl InertiaHeadersMiddleware {
     /// request or a partial reload of the component it rendered (deferred
     /// props, polling and infinite scroll reload the page the visitor is
     /// on). Whatever the visit answered counts, as Laravel's
-    /// `shouldStoreCurrentUrl` reads the request alone (PAR-048), except the
-    /// empty `200` the redirect back replaces; the session middleware's
-    /// status rule is for full page loads.
+    /// `shouldStoreCurrentUrl` reads the request alone (PAR-048); the
+    /// session middleware's status rule is for full page loads.
     fn store_current_url(&self, facts: &RequestFacts, visit: &Visit) {
         if !self.store_previous_url
             || !facts.is_get
@@ -271,9 +270,6 @@ impl Middleware for InertiaHeadersMiddleware {
         let rewrap = |http| if was_ok { Ok(http) } else { Err(http) };
         let mut http = response.unwrap_or_else(|e| e);
 
-        // Read before the empty-response substitution: as in Laravel, a
-        // redirect this middleware substitutes is neither checked for a
-        // fragment nor a reason to reflash.
         let was_redirect = is_redirect_status(http.status_code());
 
         // Laravel's `reflash`, for every redirect, Inertia visit or not: the
@@ -288,10 +284,7 @@ impl Middleware for InertiaHeadersMiddleware {
         }
 
         if is_empty_200(&http) {
-            // Laravel `onEmptyResponse`. The visit records no previous URL:
-            // Laravel records it first and its `back()` then relies on the
-            // `Referer`; without one the redirect back would point the visit
-            // at itself.
+            // Laravel `onEmptyResponse`.
             http = match &hook_visit {
                 Some((hooks, inertia_visit)) => hooks.on_empty_response(inertia_visit, http),
                 None => redirect_back(&visit, http),
@@ -302,13 +295,25 @@ impl Middleware for InertiaHeadersMiddleware {
             if facts.needs_303 && http.status_code() == 302 {
                 http = http.status(303);
             }
-        } else {
-            // Laravel's `storeCurrentUrl`: the visit is recorded whatever
-            // it answered, a 404 included.
-            self.store_current_url(&facts, &visit);
         }
 
-        if was_redirect
+        // Laravel's `storeCurrentUrl`: the visit is recorded whatever it
+        // answered, a 404 or the empty 200 included. It runs after the
+        // redirect back chose its target, where Laravel runs it before and
+        // relies on the `Referer`: an empty GET without one then goes to
+        // the page before it rather than to itself.
+        self.store_current_url(&facts, &visit);
+
+        // The two redirect rules read the response that is sent, so a
+        // redirect the empty-response rule substituted keeps the flash data
+        // and converts its fragment like one the handler returned (PAR-048,
+        // PAR-050); Laravel reads the handler's response for both.
+        let is_redirect = is_redirect_status(http.status_code());
+        if is_redirect && !was_redirect {
+            super::flash::reflash_for_redirect();
+        }
+
+        if is_redirect
             && !facts.is_prefetch
             && let Some(location) = http
                 .header_value("Location")
