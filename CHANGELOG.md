@@ -355,7 +355,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `InertiaRequestExt` default now read the header as PHP's boolean cast
   does: every value but an empty one and `0` is an Inertia visit, and JSON
   responses still carry `X-Inertia: true`. Every middleware that asks
-  `is_inertia` follows the same rule (HD-01).
+  `is_inertia` follows the same rule, and so does the development error
+  page, which a visit sending `X-Inertia: 1` now gets in place of a JSON
+  error (HD-01).
 - **The Inertia asset version follows Laravel's order and is empty by
   default.** With no Vite manifest to hash, the page carried the version
   `1.0`; Laravel's carries an empty one. The version now resolves from the

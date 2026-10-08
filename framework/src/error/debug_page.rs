@@ -120,7 +120,8 @@ pub(crate) struct DebugRequest {
     /// Every header, in order, values decoded lossily. Redacted when the
     /// page is rendered, not here, so the rule lives in one place.
     headers: Vec<(String, String)>,
-    /// `X-Inertia: true`.
+    /// `X-Inertia` holds any value but an empty one or `0`, the rule
+    /// `Request::is_inertia` reads it by (PHP's boolean cast).
     is_inertia_visit: bool,
     /// The `Accept` header lists `text/html`.
     accepts_html: bool,
@@ -146,7 +147,7 @@ impl DebugRequest {
                 .collect(),
             is_inertia_visit: headers
                 .get("x-inertia")
-                .is_some_and(|value| value.as_bytes() == b"true"),
+                .is_some_and(|value| crate::inertia::header_is_truthy(value.as_bytes())),
             accepts_html: accept_lists_html(
                 headers
                     .get_all(header::ACCEPT)
