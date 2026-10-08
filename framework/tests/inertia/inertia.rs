@@ -3097,17 +3097,17 @@ async fn errors_default_is_flat_empty_object() {
 }
 
 #[tokio::test]
-async fn errors_scoped_under_named_bag_when_header_set() {
+async fn errors_with_a_named_bag_header_and_no_session_errors_are_empty() {
     let req = MockReq::new("/")
         .inertia()
         .header("X-Inertia-Error-Bag", "registration");
     let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-    // Errors are now `errors: { registration: {} }`.
-    let errors = page["props"]["errors"].as_object().unwrap();
-    assert!(errors.contains_key("registration"));
-    assert!(errors["registration"].is_object());
+    // Laravel's `resolveValidationErrors` gives `{}` when the session
+    // holds no errors, header or not (PAR-048); this used to be
+    // `{ registration: {} }`.
+    assert_eq!(page["props"]["errors"], serde_json::json!({}));
 }
 
 #[tokio::test]

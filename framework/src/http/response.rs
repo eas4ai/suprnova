@@ -824,8 +824,11 @@ impl Redirect {
     /// the previous URL from
     /// [`SessionData::previous_url`](crate::session::SessionData::previous_url),
     /// which [`SessionMiddleware`](crate::session::SessionMiddleware)
-    /// writes on every successful GET request (Inertia partials and
-    /// JSON-API responses are skipped).
+    /// writes on every successful GET page load (prefetches and JSON-API
+    /// responses are skipped) and the Inertia middleware writes on an
+    /// Inertia `GET` ([`InertiaConfig::store_previous_url`](crate::InertiaConfig::store_previous_url)).
+    /// [`Inertia::back`](crate::Inertia::back) tries the request's
+    /// same-origin `Referer` first, as Laravel's `back()` does.
     ///
     /// Use this in form-submit handlers to bounce the user back to
     /// where they came from after a successful POST, or in validation-

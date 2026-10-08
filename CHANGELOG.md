@@ -127,6 +127,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`HasRoles::rbac_model_types()`** names every `model_type` a model's
   role and permission assignments are read under: its `morph_type`, its
   aliases and the Rust type path an earlier release stored.
+- **`Inertia::back(status, fallback)` and
+  `InertiaConfig::store_previous_url`.** `back` is Laravel's
+  `Inertia::back()`: the request's `Referer` when it is a path on this host
+  under the public root, else the session's previous URL, else the
+  fallback, else `/` (RF-18). `store_previous_url` (on by default) turns the
+  previous-URL recording of Inertia visits off (MW-06).
 
 ### Changed
 
@@ -329,6 +335,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key completed before; about 4,800 do now. Acceptance, rejection and
   retry-after answers are unchanged, and no request fails with "rate
   limiter poisoned" any more, since the shard locks do not poison (#148).
+- **An empty Inertia response redirects back as Laravel's does.** An empty
+  `200` on an Inertia visit was answered with `303` to the session's
+  previous URL or `/`, whatever the method, so a `POST` from `/form` with no
+  previous URL landed on `/`. It now goes to the same-origin `Referer`, then
+  the previous URL, then `/`, with `302`, and `303` only for `PUT`, `PATCH`
+  and `DELETE`; a browser follows a `302` after `POST` with a `GET`, so the
+  blanket `303` protected nothing (MW-03, R09).
+- **A redirect with a fragment keeps it on an Inertia visit.** A redirect to
+  `/page#section` reached the client as a plain `302`, and the fragment was
+  lost inside the XHR that followed it. It now arrives as `409` with
+  `X-Inertia-Redirect: /page#section`, which the client visits with the
+  fragment intact, except on a prefetch, which `X-Moz`, `Purpose` or
+  `Sec-Purpose: prefetch` marks (HD-12, HD-13, R06).
+- **Inertia visits record the previous URL.** The session middleware skipped
+  every Inertia visit, so after Inertia navigation `Redirect::back` and a
+  failed validation landed on the last page loaded in full. An Inertia `GET`
+  that matched a route now records its URL, unless it is a prefetch, a
+  Precognition request or a partial reload of the component it rendered,
+  and a browser prefetch no longer records one in the session middleware
+  (MW-06, HD-13).
+- **`errors` under `X-Inertia-Error-Bag` takes Laravel's shape.** With the
+  header, a visit with no session errors got `{"<bag>": {}}` and a session
+  `default` bag was dropped for `{"<bag>": {}}`. It is now `{}` with no
+  errors, `{"<bag>": <default bag>}` with a default bag, and the named bags
+  as they are otherwise (HD-08).
 
 ### Fixed
 

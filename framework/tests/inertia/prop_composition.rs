@@ -1022,10 +1022,11 @@ async fn a_later_dotted_key_wins_over_an_earlier_lazy_parent() {
 
 #[tokio::test]
 async fn a_dotted_key_keeps_its_place_when_the_error_bag_header_scopes_errors() {
-    // The `X-Inertia-Error-Bag` post-pass rewraps `errors`. It must do so
-    // in place, or it moves another prop out of registration order and
-    // changes which dotted write wins.
+    // The `X-Inertia-Error-Bag` post-pass rewraps a handler's `errors`. It
+    // must do so in place, or it moves another prop out of registration
+    // order and changes which dotted write wins.
     let resp = InertiaResponse::new("Profile")
+        .with("errors", json!({ "email": "taken" }))
         .with("user.name", "early")
         .with("user", json!({ "name": "later" }))
         .resolve(
@@ -1037,5 +1038,8 @@ async fn a_dotted_key_keeps_its_place_when_the_error_bag_header_scopes_errors() 
         .unwrap();
     let page = page_of(resp).await;
     assert_eq!(page["props"]["user"], json!({ "name": "later" }));
-    assert_eq!(page["props"]["errors"], json!({ "login": {} }));
+    assert_eq!(
+        page["props"]["errors"],
+        json!({ "login": { "email": "taken" } })
+    );
 }

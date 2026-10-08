@@ -535,6 +535,37 @@ where
         .flatten()
 }
 
+/// Record `current_url` as the session's previous URL when it changes it
+/// and is a path on this origin.
+///
+/// The one rule both writers apply: the session middleware for a page load
+/// and the Inertia middleware for an Inertia visit. A request-target such as
+/// `//evil.test/x` is skipped rather than stored, because `Redirect::back`,
+/// `Redirect::refresh` and `url::previous` send the value back as a
+/// `Location`; an unchanged URL leaves the session clean.
+fn store_previous_url(session: &mut SessionData, current_url: &str) {
+    if session.previous_url().as_deref() != Some(current_url)
+        && let Some(safe_current_url) = crate::routing::url::root_relative_or_none(current_url)
+    {
+        session.set_previous_url(safe_current_url);
+    }
+}
+
+/// Record `current_url` as the previous URL of the session in scope, for the
+/// Inertia middleware, which records an Inertia visit the session middleware
+/// skips. A no-op outside a session scope.
+///
+/// Writes through the slot directly rather than [`session_mut`], which
+/// counts as a session read for RenderCache: this is the framework's own
+/// bookkeeping after the response was built, not something the page read.
+pub(crate) fn record_previous_url(current_url: &str) {
+    let _ = SESSION_CONTEXT.try_with(|slot| {
+        if let Some(session) = crate::lock::recover(slot).as_mut() {
+            store_previous_url(session, current_url);
+        }
+    });
+}
+
 /// Generate a cryptographically secure session ID
 ///
 /// Generates a 40-character alphanumeric string.
@@ -1144,8 +1175,12 @@ struct LoadedSession {
 struct PreviousUrlCandidate {
     /// The request is a GET.
     is_get: bool,
-    /// The request is an Inertia visit.
+    /// The request is an Inertia visit. The Inertia middleware records those
+    /// itself, because only it knows whether the visit was a partial reload
+    /// of the page it rendered.
     is_inertia: bool,
+    /// The request is a prefetch, fetched for later and maybe never shown.
+    is_prefetch: bool,
     /// The request accepts JSON and not HTML.
     wants_json: bool,
     /// The request path, with its query string when it has one.
@@ -1355,9 +1390,11 @@ impl SessionMiddleware {
         // Capture the current URL before `next()` consumes the
         // request. We write it to the session under `_previous.url`
         // AFTER the handler runs, but only when the response indicates
-        // a normal GET HTML page (200/300-range, not an Inertia
-        // partial, not an AJAX endpoint). This mirrors Laravel's
-        // `StartSession::storeCurrentUrl` behaviour and is what
+        // a normal GET page load (200/300-range, not an Inertia visit,
+        // not a prefetch, not an AJAX endpoint). This mirrors Laravel's
+        // `StartSession::storeCurrentUrl`, which skips XHRs the same way;
+        // the Inertia middleware records an Inertia visit itself
+        // (`InertiaConfig::store_previous_url`). It is what
         // [`Redirect::back`] reads.
         let previous_url = Self::capture_previous_url_candidate(&request);
         let host_session_metadata = magnetar_session_metadata(&request);
@@ -1983,6 +2020,7 @@ impl SessionMiddleware {
     fn capture_previous_url_candidate(request: &Request) -> PreviousUrlCandidate {
         let is_get = *request.method() == hyper::Method::GET;
         let is_inertia = request.is_inertia();
+        let is_prefetch = crate::inertia::InertiaRequestExt::is_prefetch(request);
         let wants_json = request
             .headers()
             .get("accept")
@@ -1996,6 +2034,7 @@ impl SessionMiddleware {
         PreviousUrlCandidate {
             is_get,
             is_inertia,
+            is_prefetch,
             wants_json,
             current_url,
         }
@@ -2221,6 +2260,7 @@ impl SessionMiddleware {
         let PreviousUrlCandidate {
             is_get,
             is_inertia,
+            is_prefetch,
             wants_json,
             current_url,
         } = previous_url;
@@ -2266,8 +2306,9 @@ impl SessionMiddleware {
         }
 
         // Record the current URL as `_previous.url` if this turned out
-        // to be a "real" HTML page navigation - successful, GET, not
-        // Inertia partial, not JSON-API. Drives `Redirect::back`.
+        // to be a "real" HTML page navigation - successful, GET, not an
+        // Inertia visit (the Inertia middleware records those), not a
+        // prefetch, not JSON-API. Drives `Redirect::back`.
         //
         // We only write when the value would change. Same-URL navigations
         // (a GET that returns to the same page on retry, a duplicate
@@ -2303,13 +2344,12 @@ impl SessionMiddleware {
         // navigation still sitting in the session.
         if is_get
             && !is_inertia
+            && !is_prefetch
             && !wants_json
             && (is_success || is_redirect)
             && let Some(ref mut s) = session
-            && s.previous_url().as_deref() != Some(current_url.as_str())
-            && let Some(safe_current_url) = crate::routing::url::root_relative_or_none(&current_url)
         {
-            s.set_previous_url(safe_current_url);
+            store_previous_url(s, &current_url);
         }
 
         // Drain pending cookies - both the ones queued from the

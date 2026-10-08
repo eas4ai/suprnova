@@ -145,24 +145,25 @@ async fn a_non_inertia_response_also_carries_vary_x_inertia() {
     assert_eq!(headers.get("vary").map(String::as_str), Some("X-Inertia"));
 }
 
-// ---- empty 200 on an Inertia visit → 303 back ----
+// ---- empty 200 on an Inertia visit → redirect back ----
 
 #[tokio::test]
-async fn an_empty_200_on_an_inertia_visit_becomes_a_303_back() {
+async fn an_empty_200_on_an_inertia_visit_becomes_a_302_back() {
     // The Inertia client treats a response without `X-Inertia` as
     // non-Inertia and shows an error modal. A handler that falls through
     // to a body-less 200 would otherwise blow up the SPA. Laravel's
-    // `onEmptyResponse` redirects back instead.
+    // `onEmptyResponse` redirects back instead, with `302` on a GET
+    // (PAR-048; `303` only for PUT, PATCH and DELETE).
     //
-    // No session middleware in this registry, so `Redirect::back("/")`
-    // finds no `_previous.url` and takes the "/" fallback - this is the
-    // fallback case. `an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url`
+    // No session middleware and no `Referer`, so the redirect finds no
+    // `_previous.url` and takes the "/" fallback - this is the fallback
+    // case. `an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url`
     // below covers the actual "back" behavior with a session in scope.
     let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
     let addr = spawn_server(router(), registry, 2).await;
     let (status, headers, _body) = request(addr, "GET", "/empty", &[("X-Inertia", "true")]).await;
 
-    assert_eq!(status, 303, "an empty 200 must become a redirect");
+    assert_eq!(status, 302, "an empty 200 must become a redirect");
     assert_eq!(
         headers.get("location").map(String::as_str),
         Some("/"),
@@ -173,12 +174,11 @@ async fn an_empty_200_on_an_inertia_visit_becomes_a_303_back() {
 
 #[tokio::test]
 async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
-    // With a session in scope, `Redirect::back("/")` reads `_previous.url`
-    // (the key `SessionMiddleware` writes on every successful GET, see
-    // `SessionData::set_previous_url`) rather than falling back to the
-    // default. This is the behavior the fallback test above cannot
-    // exercise - an empty-response substitution that actually goes "back"
-    // instead of always landing on "/".
+    // With a session in scope and no `Referer`, the redirect back reads
+    // `_previous.url` (see `SessionData::set_previous_url`) rather than
+    // falling back to the default. This is the behavior the fallback test
+    // above cannot exercise - an empty-response substitution that actually
+    // goes "back" instead of always landing on "/".
     let slot = suprnova::session::new_session_slot_for_test();
     {
         let mut guard = slot.lock().unwrap();
@@ -191,7 +191,7 @@ async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
     let addr = spawn_server(router(), registry, 2).await;
     let (status, headers, _body) = request(addr, "GET", "/empty", &[("X-Inertia", "true")]).await;
 
-    assert_eq!(status, 303, "an empty 200 must become a redirect");
+    assert_eq!(status, 302, "an empty 200 must become a redirect");
     assert_eq!(
         headers.get("location").map(String::as_str),
         Some("/dashboard"),
@@ -204,14 +204,14 @@ async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
 async fn an_empty_200_redirect_keeps_the_handlers_cookies_and_policy_headers() {
     // The substitution replaces the body, not what the handler decided.
     // A cookie it set and a security header an inner middleware added
-    // must reach the browser on the 303. Headers that only described the
-    // empty body (its type, its cache lifetime) must not.
+    // must reach the browser on the redirect. Headers that only described
+    // the empty body (its type, its cache lifetime) must not.
     let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
     let addr = spawn_server(router(), registry, 2).await;
     let (status, headers, _body) =
         request(addr, "GET", "/empty-with-policy", &[("X-Inertia", "true")]).await;
 
-    assert_eq!(status, 303, "an empty 200 must become a redirect");
+    assert_eq!(status, 302, "an empty 200 must become a redirect");
     assert_eq!(headers.get("location").map(String::as_str), Some("/"));
     assert_eq!(
         headers.get("set-cookie").map(String::as_str),

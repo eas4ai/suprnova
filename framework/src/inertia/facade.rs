@@ -2,6 +2,7 @@
 //! common Inertia helpers.
 
 use crate::FrameworkError;
+use crate::http::Redirect;
 use crate::pagination::IntoInertiaScroll;
 
 use super::config::InertiaConfig;
@@ -70,13 +71,49 @@ impl Inertia {
         Ok(InertiaResponse::from_data_props(component, props))
     }
 
+    /// A redirect to the previous location - Laravel's
+    /// `Inertia::back($status, $headers, $fallback)`.
+    ///
+    /// The target is chosen in Laravel's order: the request's `Referer`
+    /// when it passes the same-origin check the validation redirect applies
+    /// (a path on this host, under the public root), else the session's
+    /// previous URL, else `fallback`, else `/`. The `Referer` is client-set
+    /// and lands in `Location`, which is why it is checked rather than
+    /// followed.
+    ///
+    /// The `Referer` is read from the request the Inertia middleware is
+    /// handling, so the first leg needs
+    /// [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware) on the
+    /// route; [`Inertia::install`] puts it on every route. Without it the
+    /// target starts at the previous URL. Add headers or flash data to the
+    /// returned [`Redirect`] as to any other.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, Response};
+    ///
+    /// async fn update() -> Response {
+    ///     Inertia::back(302, Some("/settings")).with("status", "Saved").into()
+    /// }
+    /// ```
+    pub fn back(status: u16, fallback: Option<&str>) -> Redirect {
+        let target = match super::visit::current() {
+            Some(visit) => visit.back_target(fallback),
+            None => super::visit::back_target(None, None, "", fallback),
+        };
+        Redirect::to(target).status(status)
+    }
+
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// Registers four global middlewares in order:
     /// 1. [`InertiaHeadersMiddleware`] - sets `Vary: X-Inertia` on every
-    ///    response and turns an empty `200` on an Inertia visit into a
-    ///    `303` back. Registered first, so it wraps everything, including
-    ///    the `409` the version middleware returns below.
+    ///    response; on an Inertia visit it turns an empty `200` into a
+    ///    redirect back (`302`, `303` for `PUT`, `PATCH` and `DELETE`), a
+    ///    redirect with a `#fragment` into `409` + `X-Inertia-Redirect`, and
+    ///    records the visit as the session's previous URL
+    ///    ([`InertiaConfig::store_previous_url`]). Registered first, so it
+    ///    wraps everything, including the `409` the version middleware
+    ///    returns below.
     /// 2. [`InertiaVersionMiddleware`] - emits `409 Conflict` +
     ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
     ///    header doesn't match the server's configured version.
@@ -204,7 +241,7 @@ impl Inertia {
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
-        register_global_middleware(InertiaHeadersMiddleware::new());
+        register_global_middleware(InertiaHeadersMiddleware::from_config(config));
         let version = config.version.clone();
         register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
             version.resolve()

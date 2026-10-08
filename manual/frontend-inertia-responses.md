@@ -747,6 +747,7 @@ protocol flags don't leak to the client.
 Redirect::to("/dashboard")                       // 302 to a path
 Redirect::route("posts.show").with("id", "42")   // named route, route params
 Redirect::back("/")                              // session-recorded previous URL
+Inertia::back(302, Some("/"))                    // Referer, previous URL, fallback
 Redirect::refresh()                              // same URL, fresh GET
 Redirect::guest(&req, "/login")                  // stashes intended URL
 Redirect::intended("/dashboard")                 // pops the stashed URL
@@ -758,6 +759,29 @@ All `Redirect` variants accept `.with(k, v)`, `.with_input(map)`,
 `.with_errors(map)`, `.with_errors_bag(name, map)`, `.cookie(c)`,
 `.header(k, v)`, `.permanent()`, `.status(303)`, etc. The full chain
 mirrors Laravel's `RedirectResponse`.
+
+`Inertia::back(status, fallback)` is Laravel's `back()`: it tries the
+request's `Referer` first, when that is a path on this host under the public
+root (the check the validation redirect applies, so a foreign `Referer` is
+never followed), then the session's previous URL, then `fallback`, then `/`.
+It reads the `Referer` from the request `InertiaHeadersMiddleware` is
+handling, which `Inertia::install` puts on every route; `Redirect::back`
+reads the previous URL only.
+
+The previous URL is recorded twice over: `SessionMiddleware` records every
+successful page load that is not an Inertia visit, a prefetch or a JSON call,
+and the Inertia middleware records an Inertia `GET` that matched a route,
+unless it is a prefetch (`X-Moz`, `Purpose` or `Sec-Purpose` set to
+`prefetch`), a Precognition request or a partial reload of the component it
+rendered - deferred props, polling and infinite scroll reload the page the
+visitor is on, which is no page they came from. Turn the Inertia half off
+with `InertiaConfig::store_previous_url(false)`.
+
+A redirect with a `#fragment` on an Inertia visit becomes `409` with
+`X-Inertia-Redirect` holding the target, which the client visits itself so
+the fragment survives; the fragment of a `Location` is lost inside the XHR
+that follows it. A prefetch keeps its plain redirect, since it is never
+shown. `InertiaResponse::redirect(url)` builds the same `409` by hand.
 
 For non-GET Inertia visits, the framework auto-converts the response to
 `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
@@ -806,6 +830,10 @@ declare module '@inertiajs/core' {
 Multiple forms on one page stay isolated: send
 `X-Inertia-Error-Bag: <name>` with the visit and the errors are flashed
 under that bag and read back under it, arriving as `errors.<name>.<field>`.
+The `errors` prop takes Laravel's shape: with the header, a session `default`
+bag (from `Redirect::with_errors`) arrives as `{<name>: {...}}`, the named
+bags arrive as they are when there is no `default` bag, and no errors at all
+arrive as `{}`; without the header the `default` bag arrives flat.
 
 The `errors` prop is always-visible by default, so a partial reload
 never filters or narrows it. `only: ['users']` still ships the bag, and
@@ -950,7 +978,12 @@ with it.
    guard: a production boot with an unbuilt frontend errors loudly
    instead of silently falling back to a legacy hardcoded asset path.
 2. Registers `InertiaHeadersMiddleware` - sets `Vary: X-Inertia` on every
-   response and turns an empty `200` on an Inertia visit into a `303` back.
+   response. On an Inertia visit it turns an empty `200` into a redirect
+   back (to the same-origin `Referer`, else the previous URL, else `/`; `302`,
+   or `303` for `PUT`, `PATCH` and `DELETE`), turns a redirect with a
+   `#fragment` into `409` + `X-Inertia-Redirect`, and records an Inertia
+   `GET` as the session's previous URL - see
+   [Redirect helpers](#redirect-helpers).
 3. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
 4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
@@ -1492,7 +1525,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Nine other Rust-shaped choices worth flagging:
+Other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -1504,13 +1537,6 @@ Nine other Rust-shaped choices worth flagging:
   does, so a typo in `inertia_response!("Dashbaord", …)` fails the
   build with a "did you mean Dashboard?" suggestion instead of
   surfacing as a runtime "component not found" later.
-- **An empty `200` on an Inertia visit becomes a `303`, not a `302`.**
-  Laravel's `onEmptyResponse` returns `redirect()->back()` (a 302) and
-  relies on its later `302 → 303` conversion for PUT/PATCH/DELETE only. A
-  substituted redirect is never a continuation of the original method - the
-  client has to issue a GET - so Suprnova says `303` directly instead of
-  leaving GET visits on a 302 the client would follow with the original
-  verb.
 - **`Inertia::location($url)` is two methods here, not one.** `location(url)`
   keeps Laravel's always-`409` contract - it predates the request-aware
   form and pinned-tag consumers depend on that shape not changing.

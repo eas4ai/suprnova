@@ -712,8 +712,10 @@ impl SessionData {
     /// Read the previous URL the user visited. Mirrors Laravel's
     /// `Store::previousUrl()` (`Store.php:791-794`). The previous URL
     /// is written by [`crate::session::SessionMiddleware`] on every
-    /// successful GET request that isn't an Inertia partial or a
-    /// JSON-API call. Powers `redirect()->back()` in the routing layer.
+    /// successful GET page load that isn't an Inertia visit, a prefetch or
+    /// a JSON-API call, and by the Inertia middleware on an Inertia `GET`
+    /// (see [`crate::InertiaConfig::store_previous_url`]). Powers
+    /// `redirect()->back()` in the routing layer.
     ///
     /// Re-validated on every read through the crate-internal
     /// `routing::url::root_relative_or_none` - the same guard

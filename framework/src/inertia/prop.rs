@@ -42,14 +42,14 @@ pub trait InertiaRequestExt: Send + Sync {
             .unwrap_or(false)
     }
     /// Whether this is a prefetch visit. The Inertia client sets
-    /// `Purpose: prefetch` on hover/intent prefetches; handlers can
-    /// use this to skip expensive side effects (logging, analytics
-    /// counters, cache warmups) on a request that may never become a
-    /// real navigation.
+    /// `Purpose: prefetch` on hover/intent prefetches, and browsers send
+    /// `Sec-Purpose: prefetch` (Firefox `X-Moz: prefetch`) for their own;
+    /// any of the three counts, as Laravel's `Request::prefetch()` reads
+    /// them. Handlers can use this to skip expensive side effects
+    /// (logging, analytics counters, cache warmups) on a request that may
+    /// never become a real navigation.
     fn is_prefetch(&self) -> bool {
-        self.header("Purpose")
-            .map(|v| v.eq_ignore_ascii_case("prefetch"))
-            .unwrap_or(false)
+        super::visit::is_prefetch(|name| self.header(name))
     }
 }
 

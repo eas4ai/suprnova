@@ -19,6 +19,8 @@ pub mod own_process;
 mod own_process_async;
 pub mod production_fail_closed;
 pub mod prop_composition;
+pub mod protocol_harness;
+pub mod redirect_back;
 pub mod shared_ergonomics;
 pub mod try_serialize;
 pub mod validation_redirect;

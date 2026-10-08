@@ -311,6 +311,16 @@ pub struct InertiaConfig {
     ///
     /// Set it with [`error_page`](Self::error_page).
     pub error_page: Option<String>,
+    /// Whether an Inertia `GET` records its URL as the session's previous
+    /// URL. Default `true`.
+    ///
+    /// The session middleware records only full page loads, so without this
+    /// a `Redirect::back`, an `Inertia::back` or a failed validation lands on
+    /// the last page loaded in full rather than the page the visitor came
+    /// from. Laravel's `inertia.store_previous_url`. A visit that matched a
+    /// route records unless it is a prefetch, a Precognition request or a
+    /// partial reload of the page it rendered.
+    pub store_previous_url: bool,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -526,6 +536,7 @@ impl Default for InertiaConfig {
             // `None` so an app upgrading into this release keeps the
             // exact error bodies it had. Opting in is one builder call.
             error_page: None,
+            store_previous_url: true,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
         }
@@ -798,6 +809,14 @@ impl InertiaConfig {
     /// ```
     pub fn error_page(mut self, component: impl Into<String>) -> Self {
         self.error_page = Some(component.into());
+        self
+    }
+
+    /// Turn the previous-URL recording of Inertia visits on or off; see
+    /// [`store_previous_url`](Self::store_previous_url) for what is
+    /// recorded and why. On by default.
+    pub fn store_previous_url(mut self, on: bool) -> Self {
+        self.store_previous_url = on;
         self
     }
 

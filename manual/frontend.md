@@ -232,8 +232,8 @@ asset path. See [Development vs production](#development-vs-production)
 below.
 
 That registers, in order: `InertiaHeadersMiddleware` (sets `Vary: X-Inertia`
-on every response and turns an empty `200` on an Inertia visit into a `303`
-back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
+on every response and turns an empty `200` on an Inertia visit into a
+redirect back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
 asset-version mismatch so stale clients reload), `Inertia303Middleware`
 (rewrites 302 → 303 on non-GET Inertia visits so the follow-up is
 unambiguously a GET), and `InertiaValidationRedirectMiddleware` (turns a

@@ -1076,6 +1076,9 @@ impl InertiaResponse {
             preserve_fragment,
             lazy_owned,
         } = self;
+        // For the Inertia middleware, which tells a partial reload of this
+        // page from a navigation by it when it records the previous URL.
+        super::visit::record_rendered_component(&component);
 
         // Page URL: path AND query, or the app's resolver. The client
         // writes this into `history.state`, so a bare path silently
@@ -1467,6 +1470,34 @@ fn collapse_error_bags(
 /// than needing an explicit `.merge()` flag - and its per-key `reset`
 /// flag is read straight from `reset_keys` too, independent of the
 /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header.
+/// The `errors` prop the session's validation errors make, Laravel's
+/// `Middleware::resolveValidationErrors` (inertia-laravel 3.5.1):
+///
+/// - with `X-Inertia-Error-Bag`, `{<bag>: <default bag>}` when the session
+///   holds a `default` bag;
+/// - without it, the `default` bag flat (`{field: message}`), which is what
+///   the client binds `page.props.errors.field` to;
+/// - otherwise every bag the session holds, keyed by name, which is `{}`
+///   when it holds none.
+///
+/// A bag the validation redirect flashed under the header's name is a named
+/// bag, so a form that sent `X-Inertia-Error-Bag: login` reads its errors
+/// back as `errors.login` either way.
+fn session_errors_prop(
+    mut session_errors: serde_json::Map<String, Value>,
+    error_bag: Option<&str>,
+) -> Value {
+    match (session_errors.remove("default"), error_bag) {
+        (Some(default_bag), Some(bag)) => {
+            let mut wrapped = serde_json::Map::new();
+            wrapped.insert(bag.to_string(), default_bag);
+            Value::Object(wrapped)
+        }
+        (Some(default_bag), None) => default_bag,
+        (None, _) => Value::Object(session_errors),
+    }
+}
+
 /// The one prop key the Inertia v3 contract guarantees on every page
 /// object. Named rather than spelled out at each site because three
 /// separate rules key off it: the session seed, the `X-Inertia-Error-Bag`
@@ -1501,27 +1532,15 @@ async fn resolve_props(
     // The caller supplies a single staged bag-prefix snapshot. It is empty
     // outside a `SessionMiddleware` scope and is committed only after the
     // complete response succeeds.
-    // Resolve it to the Inertia shape, mirroring Laravel's
-    // `resolveValidationErrors`:
-    //  - `X-Inertia-Error-Bag` header → that bag's errors, flat; the
-    //    post-pass below re-wraps them (and any handler-injected errors)
-    //    under the bag name.
-    //  - no header, `default` bag present → that bag's errors, flat
-    //    (`{field: [...]}`) - what the Inertia client binds to directly
-    //    (`page.props.errors.field`), not nested under `"default"`.
-    //  - no header, no default bag → every bag, keyed by name.
+    // Resolve it to the Inertia shape, Laravel's `resolveValidationErrors`
+    // (see `session_errors_prop`). A handler or shared `errors` prop
+    // replaces it below; only that one is wrapped by the post-pass.
+    let errors_supplied = props.contains_key(ERRORS_KEY);
     let session_errors = collapse_error_bags(session_errors, with_all_errors);
-    let seeded_errors = match error_bag {
-        Some(bag) => session_errors
-            .get(bag)
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
-        None => match session_errors.get("default") {
-            Some(default_bag) => default_bag.clone(),
-            None => Value::Object(session_errors),
-        },
-    };
-    materialized.insert(ERRORS_KEY.to_string(), seeded_errors);
+    materialized.insert(
+        ERRORS_KEY.to_string(),
+        session_errors_prop(session_errors, error_bag),
+    );
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
     let now_ms = crate::clock::now().timestamp_millis();
@@ -1977,14 +1996,13 @@ async fn resolve_props(
     ordered.extend(materialized);
     let mut materialized = ordered;
 
-    // `X-Inertia-Error-Bag` scoping. Apply AFTER all props have
-    // resolved so a handler-provided `errors` prop (via
-    // `.with("errors", {...})`) gets correctly wrapped. Without this
-    // post-pass, the seeded empty object would be wrapped here but
-    // overwritten by the user prop, silently losing the bag. The value is
-    // wrapped in place: moving the key would move another prop out of
-    // registration order.
-    if let Some(bag) = error_bag
+    // `X-Inertia-Error-Bag` scoping of a handler-provided `errors` prop
+    // (via `.with("errors", {...})`), applied AFTER all props have resolved
+    // so the prop the handler set is the one wrapped. The session's errors
+    // were shaped when they were seeded. The value is wrapped in place:
+    // moving the key would move another prop out of registration order.
+    if errors_supplied
+        && let Some(bag) = error_bag
         && let Some(errors_val) = materialized.get_mut(ERRORS_KEY)
     {
         let mut wrapper = serde_json::Map::new();
