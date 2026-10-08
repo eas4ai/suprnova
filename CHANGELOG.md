@@ -377,6 +377,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   flash structs, or a struct named like a generated declaration fails the
   command with every conflict named and leaves the file as it was (T01,
   T02).
+- **A route helper names the page its route renders.** `routes.ts` helpers
+  returned only `url` and `method`, so `<Link instant>` and `<Form
+  instant>` could not make an instant visit through one. A helper now
+  carries `component`, Inertia's `UrlMethodPair.component`, when its
+  handler names exactly one component as a string literal (in
+  `inertia_response!`, `InertiaResponse::new` or the `Inertia` facade's
+  render calls) or its route is a `Router::inertia` route. A handler naming
+  none, several, or one it computes gets none.
+  `Router::inertia` routes, which `routes.ts` left out, now get helpers
+  under `controllers.inertia`, and `RouteConfig` declares
+  `component?: string` (T05).
 
 ### Changed
 

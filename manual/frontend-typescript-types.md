@@ -511,6 +511,7 @@ export interface RouteConfig<TData = void> {
   url: string;
   method: Method;
   data?: TData;
+  component?: string;
 }
 
 export interface UserShowParams {
@@ -519,12 +520,12 @@ export interface UserShowParams {
 
 export const controllers = {
   home: {
-    index: (): RouteConfig => ({ url: '/', method: 'get' }),
+    index: (): RouteConfig => ({ url: '/', method: 'get', component: 'Home' }),
   },
   user: {
-    index: (): RouteConfig => ({ url: '/users', method: 'get' }),
+    index: (): RouteConfig => ({ url: '/users', method: 'get', component: 'Users/Index' }),
     show: (params: UserShowParams): RouteConfig =>
-      ({ url: `/users/${encodeURIComponent(String(params.id))}`, method: 'get' }),
+      ({ url: `/users/${encodeURIComponent(String(params.id))}`, method: 'get', component: 'Users/Show' }),
     store: (): RouteConfig => ({ url: '/users', method: 'post' }),
   },
 } as const;
@@ -553,6 +554,24 @@ router.visit(routes['users.show']({ id: '42' }))
 If a path has params (`/users/{id}`), the generated function requires the
 typed `Params` object - TypeScript catches missing or misspelled keys at
 compile time.
+
+A helper carries `component` when its route renders one page the
+generator can name: the handler's body names exactly one component, as a
+string literal in `inertia_response!`, `InertiaResponse::new`,
+`Inertia::data`, `Inertia::try_data` or `Inertia::paginate`, or the route
+is a `Router::inertia(path, component, props)` route. That is Inertia's
+`UrlMethodPair.component`, which instant visits use: `<Link href={...}
+instant>` and `<Form action={...} instant>` render that page at once with
+the current shared props and fill in the page's own props when the
+response arrives. A plain `router.visit` ignores it. A handler that names
+no component, several, or one it computes at run time gets no
+`component`, and an instant visit through its helper falls back to an
+ordinary one.
+
+A `Router::inertia` route has no controller, so its helper sits under
+`controllers.inertia`, keyed by its path (`/about` is
+`controllers.inertia.about`, `/` is `controllers.inertia.index`), and its
+`.name(..)` reaches it through `routes` like any other.
 
 The helpers build the same URLs the backend's `route()` helper builds:
 
