@@ -3150,12 +3150,13 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// method of the page (REG-032). Either changes, for every script on the
     /// page, a function or object the browser provides: `Object.keys = f`,
     /// `p.call = g` where `p` holds `Object.keys`, `document.createElement
-    /// = f`. Two kinds of name are refused on every value the script did not
-    /// make, because the scan cannot follow every path to what they change:
-    /// a method of the page, which `getRootNode()`, a `parentNode` or an
-    /// event's `currentTarget` may hand over as `document`, and `call`,
-    /// `apply` and `bind`, through which every script borrows a built-in
-    /// method that any value may hold (`Math.random().toPrecision`).
+    /// = f`. A built-in of a window `open` returns counts as one of this
+    /// window's. Two kinds of name are refused on every value the script did
+    /// not make, because the scan cannot follow every path to what they
+    /// change: a method of the page, which `getRootNode()`, a `parentNode`
+    /// or an event's `currentTarget` may hand over as `document`, and
+    /// `call`, `apply` and `bind`, through which every script borrows a
+    /// built-in method that any value may hold (`Math.random().toPrecision`).
     fn builtin_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
         let object = member.object();
         if self.reaches(Root::Method, object, 0, &mut BTreeSet::new()) {
@@ -3183,6 +3184,16 @@ impl<'a, 'c> Walker<'a, 'c> {
                 "script-builtin",
                 span,
                 format!("{verb} `{name}` on {page} replaces a built-in function every script on the page calls"),
+            );
+            return;
+        }
+        if let Some(name) = names.iter().find(|name| builtin_global(name))
+            && self.opened_window(object, 0, &mut BTreeSet::new())
+        {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on the window `open` returns replaces that window's built-in, which a page of the application opened there keeps"),
             );
             return;
         }
@@ -3515,6 +3526,71 @@ impl<'a, 'c> Walker<'a, 'c> {
             && self.invokes(member.object(), name, receiver, depth + 1, seen)
     }
 
+    /// Whether an expression may evaluate to the window `open` returns,
+    /// called on the global object or by its global name, directly or
+    /// through a name that holds what it returns (REG-032). That window is
+    /// a global object: a page of the application opened there over its
+    /// first blank document keeps that document's realm, built-ins
+    /// included. Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn opened_window(&self, expr: &Expression<'a>, depth: usize, seen: &mut BTreeSet<Bid>) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let opens = |call: &CallExpression<'a>| {
+            self.invokes(
+                &call.callee,
+                "open",
+                &|object| self.is_global_object(object),
+                depth + 1,
+                &mut BTreeSet::new(),
+            )
+        };
+        match unparen(expr) {
+            Expression::CallExpression(call) => opens(call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => opens(call),
+                _ => false,
+            },
+            Expression::Identifier(reference) => {
+                let Some(id) = self.bound(reference) else {
+                    return false;
+                };
+                if !seen.insert(id) {
+                    return false;
+                }
+                let Some(binding) = self.binding(id) else {
+                    return false;
+                };
+                binding
+                    .init
+                    .into_iter()
+                    .chain(binding.param_default)
+                    .chain(binding.assignments.iter().copied())
+                    .chain(self.passed_arguments(binding))
+                    .any(|value| self.opened_window(value, depth + 1, seen))
+            }
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.opened_window(last, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.opened_window(&conditional.consequent, depth + 1, seen)
+                    || self.opened_window(&conditional.alternate, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.opened_window(&logical.left, depth + 1, seen)
+                    || self.opened_window(&logical.right, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                self.opened_window(&assignment.right, depth + 1, seen)
+            }
+            Expression::AwaitExpression(await_expr) => {
+                self.opened_window(&await_expr.argument, depth + 1, seen)
+            }
+            _ => false,
+        }
+    }
+
     /// [`Self::reaches`] for the old value of a logical assignment's target.
     fn target_reaches(
         &self,
@@ -3568,11 +3644,18 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .as_ref()
                 .is_some_and(|names| names.iter().any(|name| test(name)))
         };
+        let names_global = match root {
+            Root::BuiltIn | Root::Method => named(&builtin_global),
+            Root::Page => named(&|name| PAGE_OBJECTS.contains(&name)),
+        };
         if self.is_global_object(object) {
-            return match root {
-                Root::BuiltIn | Root::Method => named(&builtin_global),
-                Root::Page => named(&|name| PAGE_OBJECTS.contains(&name)),
-            };
+            return names_global;
+        }
+        // A window `open` returns is a global object too, but the answer
+        // only adds to what the rest of the rule finds, so a trace too deep
+        // to follow still counts as reaching.
+        if names_global && self.opened_window(object, depth + 1, &mut BTreeSet::new()) {
+            return true;
         }
         match root {
             Root::BuiltIn | Root::Method => {

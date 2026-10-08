@@ -1402,6 +1402,59 @@ fn reg_032_call_apply_or_bind_written_on_a_value_the_script_did_not_make_is_refu
     );
 }
 
+/// REG-032: the window `open` returns is a global object, of a page of the
+/// application, which keeps the realm's built-ins when it loads over the
+/// window's first blank document. A built-in of that window, or a method
+/// of its page, is refused written or passed on as this window's is,
+/// through the call itself or a name that holds the window. Using the
+/// window (`focus()`, its `location.href`, its `name`) stays admitted.
+#[test]
+fn reg_032_a_built_in_of_the_window_open_returns_is_a_built_in() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "window.open(\"/x\").JSON.parse = () => ({});\n",
+            "script-builtin",
+            1,
+        ),
+        ("open(\"/x\").Math.random = () => 0;\n", "script-builtin", 1),
+        (
+            "const w = window.open(\"/x\");\nw.Object.keys = () => [];\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "window.open(\"/x\").fetch = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "const w = self.open(\"/x\");\nw.document.open = () => null;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export const parse = window.open(\"/x\").JSON.parse;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "function f(w) {\n  w.customElements.define = () => {};\n}\nf(window.open(\"/x\"));\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const w = window.open(\"/x\");\nw.focus();\nw.location.href = \"/y\";\nw.name = \"x\";\nw.document.title = \"x\";\nexport const closed = () => w.closed;\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: the scan follows a built-in only through names: a variable, and
 /// a parameter of a function the script calls by name. Anywhere else it
 /// would leave for code the scan cannot follow (a destructured name, an
