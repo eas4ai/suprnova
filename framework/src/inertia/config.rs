@@ -514,18 +514,22 @@ pub struct SsrConfig {
     /// Whether `ssr:start` refuses a runtime it cannot find on `PATH`.
     /// Default `false`, as Laravel's `inertia.ssr.ensure_runtime_exists`.
     pub ensure_runtime_exists: bool,
-    /// Where SSR is dispatched in development with the Vite dev server
-    /// running, at `/__inertia_ssr`: Laravel's `inertia.ssr.hot_url`. The
-    /// Vite dev server renders the page from source, so no SSR bundle or
-    /// worker process is needed while developing.
+    /// The file whose presence says the Vite dev server is running, and
+    /// whose content is its URL: Laravel's Vite hot file. Default
+    /// `public/hot` under the working directory, the file `suprnova serve`
+    /// writes while it runs Vite and removes when Vite stops. Set it with
+    /// [`InertiaConfig::ssr_hot_file`].
+    pub hot_file: PathBuf,
+    /// Where SSR is dispatched in hot mode, at `/__inertia_ssr`: Laravel's
+    /// `inertia.ssr.hot_url`. The Vite dev server renders the page from
+    /// source, so no SSR bundle or worker process is needed while
+    /// developing.
     ///
-    /// `None` (the default) uses the dev server's own URL,
-    /// [`InertiaConfig::vite_dev_server`]: in development the
-    /// configuration fills this in when a first visit is dispatched, and in
-    /// production it is ignored, as Laravel only goes hot while Vite runs.
-    /// Hot mode skips the bundle check. When nothing accepts a connection
-    /// at the hot address, the dev server is not running and the visit
-    /// takes the worker path at [`url`](Self::url) instead.
+    /// In development a first visit goes hot when this is set, or when the
+    /// [`hot_file`](Self::hot_file) exists; the address is this URL, else
+    /// the file's content, else [`InertiaConfig::vite_dev_server`]. Hot mode
+    /// skips the bundle check. Production never goes hot and ignores it.
+    /// `None` (the default) leaves the decision to the hot file.
     pub hot_url: Option<String>,
     /// When `true` (the default), a first visit is sent to the worker only
     /// when [`detect_ssr_bundle`](crate::detect_ssr_bundle) finds a bundle:
@@ -552,6 +556,7 @@ impl std::fmt::Debug for SsrConfig {
             .field("runtime", &self.runtime)
             .field("ensure_runtime_exists", &self.ensure_runtime_exists)
             .field("hot_url", &self.hot_url)
+            .field("hot_file", &self.hot_file)
             .field("ensure_bundle_exists", &self.ensure_bundle_exists)
             .finish()
     }
@@ -571,6 +576,7 @@ impl Default for SsrConfig {
             runtime: "node".to_string(),
             ensure_runtime_exists: false,
             hot_url: None,
+            hot_file: PathBuf::from("public/hot"),
             ensure_bundle_exists: true,
         }
     }
@@ -904,11 +910,17 @@ impl InertiaConfig {
         self
     }
 
-    /// Set where SSR is dispatched in development with the Vite dev server
-    /// running, when it is not the dev server itself; see
-    /// [`SsrConfig::hot_url`].
+    /// Set where SSR is dispatched in development, at `/__inertia_ssr`,
+    /// whether or not a hot file exists; see [`SsrConfig::hot_url`].
     pub fn ssr_hot_url(mut self, url: impl Into<String>) -> Self {
         self.ssr.hot_url = Some(url.into());
+        self
+    }
+
+    /// Name the Vite hot file; see [`SsrConfig::hot_file`]. The default,
+    /// `public/hot`, is the file `suprnova serve` writes.
+    pub fn ssr_hot_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.ssr.hot_file = path.into();
         self
     }
 
@@ -993,29 +1005,63 @@ impl InertiaConfig {
         self
     }
 
-    /// The SSR settings a first visit is dispatched with (PAR-058): in
-    /// development [`SsrConfig::hot_url`] defaults to the Vite dev server's
-    /// URL, and in production it is cleared, since nothing runs hot there.
+    /// The SSR settings a first visit is dispatched with (PAR-058): the hot
+    /// URL set when the visit goes hot, and cleared when it does not.
+    ///
+    /// In development the visit goes hot when the application set
+    /// [`SsrConfig::hot_url`], or when the hot file
+    /// ([`SsrConfig::hot_file`]) exists, which is how Laravel knows Vite runs
+    /// (`Vite::isRunningHot`). The address is the configured hot URL, else
+    /// the file's content, else the [`vite_dev_server`](Self::vite_dev_server)
+    /// URL for an empty file. In production nothing runs hot. Only the file
+    /// decides: no connection is attempted, so a server listening at the dev
+    /// server's port changes nothing.
     ///
     /// Resolved here rather than by the builders, so the order of
     /// `development`, `production`, `vite_dev_server` and `ssr_hot_url`
     /// calls does not matter. Production with no hot URL, the common case,
-    /// borrows the settings without a copy.
+    /// borrows the settings without a copy and never looks at the file.
     pub(crate) fn ssr_for_dispatch(&self) -> std::borrow::Cow<'_, SsrConfig> {
         use std::borrow::Cow;
-        match (self.development, self.ssr.hot_url.is_some()) {
-            (true, true) | (false, false) => Cow::Borrowed(&self.ssr),
-            (true, false) => {
-                let mut ssr = self.ssr.clone();
-                ssr.hot_url = Some(self.vite_dev_server.clone());
-                Cow::Owned(ssr)
-            }
-            (false, true) => {
-                let mut ssr = self.ssr.clone();
-                ssr.hot_url = None;
-                Cow::Owned(ssr)
-            }
+        let hot_url = match (self.development, &self.ssr.hot_url) {
+            (true, Some(_)) => return Cow::Borrowed(&self.ssr),
+            (false, None) => return Cow::Borrowed(&self.ssr),
+            (false, Some(_)) => None,
+            (true, None) => match self.hot_file_url() {
+                Some(url) => Some(url),
+                None => return Cow::Borrowed(&self.ssr),
+            },
+        };
+        let mut ssr = self.ssr.clone();
+        ssr.hot_url = hot_url;
+        Cow::Owned(ssr)
+    }
+
+    /// The dev server's URL from the hot file, or `None` when there is no
+    /// hot file: its trimmed content, or the configured dev server URL when
+    /// it is empty or cannot be read.
+    fn hot_file_url(&self) -> Option<String> {
+        let path = &self.ssr.hot_file;
+        if !path.is_file() {
+            return None;
         }
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                tracing::warn!(
+                    hot_file = %path.display(),
+                    %error,
+                    "the Vite hot file cannot be read; SSR uses the configured dev server URL"
+                );
+                String::new()
+            }
+        };
+        let url = content.trim();
+        Some(if url.is_empty() {
+            self.vite_dev_server.clone()
+        } else {
+            url.to_string()
+        })
     }
 
     /// The asset version this config reports, in Laravel's order.

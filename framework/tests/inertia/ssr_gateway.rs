@@ -322,21 +322,41 @@ async fn inssr_ensure_bundle_exists_off_dispatches_without_a_bundle() {
 
 // ---- PAR-058: hot mode through the Vite dev server ----
 
+/// A hot file holding `content`, in a directory the test owns, as
+/// `suprnova serve` writes `public/hot` while it runs Vite.
+fn hot_file(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hot");
+    std::fs::write(&path, content).unwrap();
+    (dir, path)
+}
+
+/// A hot file path where no file exists.
+fn no_hot_file() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hot");
+    (dir, path)
+}
+
 #[tokio::test]
-async fn inssr_development_dispatches_to_the_dev_server_without_a_bundle() {
+async fn inssr_a_hot_file_sends_the_visit_to_the_url_it_holds() {
     // No bundle on disk and the bundle check on: hot mode skips it and
-    // posts to the dev server's `/__inertia_ssr`, never to the worker.
+    // posts to the hot file's URL (trimmed) at `/__inertia_ssr`, never to
+    // the worker or to the configured dev server address.
+    let hot = Worker::rendering().await;
     let dev_server = Worker::rendering().await;
     let worker = Worker::rendering().await;
+    let (_dir, file) = hot_file(&format!("  {}/\n", hot.url()));
     let config = InertiaConfig::new()
         .development(true)
         .vite_dev_server(dev_server.url())
+        .ssr_hot_file(&file)
         .ssr(worker.url());
 
     let document = first_visit(&config).await.expect("the visit renders");
 
     assert!(document.contains(RENDERED), "{document}");
-    let seen = dev_server.seen();
+    let seen = hot.seen();
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(
         (seen[0].method.as_str(), seen[0].path.as_str()),
@@ -344,6 +364,7 @@ async fn inssr_development_dispatches_to_the_dev_server_without_a_bundle() {
     );
     let page: Value = serde_json::from_slice(&seen[0].body).unwrap();
     assert_eq!(page["component"], "Dashboard");
+    assert!(dev_server.seen().is_empty(), "{:?}", dev_server.seen());
     assert!(
         worker.seen().is_empty(),
         "the worker was asked: {:?}",
@@ -352,13 +373,75 @@ async fn inssr_development_dispatches_to_the_dev_server_without_a_bundle() {
 }
 
 #[tokio::test]
+async fn inssr_an_empty_hot_file_sends_the_visit_to_the_vite_dev_server() {
+    let dev_server = Worker::rendering().await;
+    let worker = Worker::rendering().await;
+    let (_dir, file) = hot_file("\n");
+    let config = InertiaConfig::new()
+        .development(true)
+        .vite_dev_server(dev_server.url())
+        .ssr_hot_file(&file)
+        .ssr(worker.url());
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(document.contains(RENDERED), "{document}");
+    assert_eq!(dev_server.seen().len(), 1);
+    assert_eq!(dev_server.seen()[0].path, "/__inertia_ssr");
+    assert!(worker.seen().is_empty());
+}
+
+#[tokio::test]
+async fn inssr_without_a_hot_file_a_listening_dev_server_is_not_asked() {
+    // Nothing but the hot file says the dev server runs: one listening at
+    // the configured address is not asked, and the visit takes the worker
+    // path, bundle check included.
+    let dev_server = Worker::rendering().await;
+    let worker = Worker::rendering().await;
+    let (_dir, file) = no_hot_file();
+    let checked = InertiaConfig::new()
+        .development(true)
+        .vite_dev_server(dev_server.url())
+        .ssr_hot_file(&file)
+        .ssr(worker.url());
+    let (checked, errors) = with_error_hook(checked);
+
+    let document = first_visit(&checked).await.expect("the visit renders");
+    assert!(renders_on_the_client(&document), "{document}");
+    assert!(worker.seen().is_empty());
+    assert!(
+        dev_server.seen().is_empty(),
+        "the dev server was asked: {:?}",
+        dev_server.seen()
+    );
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "{:?}",
+        errors.lock().unwrap()
+    );
+
+    let unchecked = checked.ssr_ensure_bundle_exists(false);
+    let document = first_visit(&unchecked).await.expect("the visit renders");
+    assert!(document.contains(RENDERED), "{document}");
+    assert_eq!(worker.seen().len(), 1);
+    assert_eq!(worker.seen()[0].path, "/render");
+    assert!(
+        dev_server.seen().is_empty(),
+        "the dev server was asked: {:?}",
+        dev_server.seen()
+    );
+}
+
+#[tokio::test]
 async fn inssr_a_configured_hot_url_is_the_address_used() {
     let hot = Worker::rendering().await;
     let dev_server = Worker::rendering().await;
     let worker = Worker::rendering().await;
+    let (_dir, file) = no_hot_file();
     let config = InertiaConfig::new()
         .development(true)
         .vite_dev_server(dev_server.url())
+        .ssr_hot_file(&file)
         .ssr_hot_url(format!("{}/", hot.url()))
         .ssr(worker.url());
 
@@ -373,12 +456,49 @@ async fn inssr_a_configured_hot_url_is_the_address_used() {
 }
 
 #[tokio::test]
+async fn inssr_a_configured_hot_url_wins_over_the_hot_file() {
+    // The configured hot URL is used even where nothing answers it: no
+    // connection attempt decides where the visit goes. The failure is
+    // reported at the hot URL, and neither the hot file's server nor the
+    // worker is asked.
+    let _events = EventFacade::fake();
+    let from_file = Worker::rendering().await;
+    let worker = Worker::rendering().await;
+    let hot_url = closed_url().await;
+    let (_dir, file) = hot_file(&from_file.url());
+    let (config, errors) = with_error_hook(
+        InertiaConfig::new()
+            .development(true)
+            .ssr_hot_file(&file)
+            .ssr_hot_url(hot_url.clone())
+            .ssr(worker.url())
+            .ssr_ensure_bundle_exists(false),
+    );
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    assert!(from_file.seen().is_empty(), "{:?}", from_file.seen());
+    assert!(worker.seen().is_empty(), "{:?}", worker.seen());
+    let failures = suprnova::events::dispatched::<SsrRenderFailed>(|_| true);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].error_type, SsrErrorType::Connection);
+    let errors = errors.lock().unwrap();
+    assert!(
+        errors.len() == 1 && errors[0].contains(&format!("{hot_url}/__inertia_ssr")),
+        "{errors:?}"
+    );
+}
+
+#[tokio::test]
 async fn inssr_production_posts_to_the_worker_and_never_the_hot_url() {
     let hot = Worker::rendering().await;
     let worker = Worker::rendering().await;
+    let (_dir, file) = hot_file(&hot.url());
     let config = InertiaConfig::new()
         .production()
         .vite_dev_server(hot.url())
+        .ssr_hot_file(&file)
         .ssr_hot_url(hot.url())
         .ssr(worker.url())
         .ssr_ensure_bundle_exists(false);
@@ -391,34 +511,6 @@ async fn inssr_production_posts_to_the_worker_and_never_the_hot_url() {
         "production went hot: {:?}",
         hot.seen()
     );
-    assert_eq!(worker.seen().len(), 1);
-    assert_eq!(worker.seen()[0].path, "/render");
-}
-
-#[tokio::test]
-async fn inssr_development_without_a_dev_server_listening_takes_the_worker_path() {
-    // Laravel goes hot only while Vite runs; with nothing listening at the
-    // dev server's address the visit takes the worker path, bundle check
-    // included.
-    let worker = Worker::rendering().await;
-    let checked = InertiaConfig::new()
-        .development(true)
-        .vite_dev_server(closed_url().await)
-        .ssr(worker.url());
-    let (checked, errors) = with_error_hook(checked);
-
-    let document = first_visit(&checked).await.expect("the visit renders");
-    assert!(renders_on_the_client(&document), "{document}");
-    assert!(worker.seen().is_empty());
-    assert!(
-        errors.lock().unwrap().is_empty(),
-        "{:?}",
-        errors.lock().unwrap()
-    );
-
-    let unchecked = checked.ssr_ensure_bundle_exists(false);
-    let document = first_visit(&unchecked).await.expect("the visit renders");
-    assert!(document.contains(RENDERED), "{document}");
     assert_eq!(worker.seen().len(), 1);
     assert_eq!(worker.seen()[0].path, "/render");
 }

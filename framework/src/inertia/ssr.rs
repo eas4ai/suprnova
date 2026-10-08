@@ -177,27 +177,17 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
 }
 
 /// Where a first visit is posted, Laravel's `HttpGateway::dispatch`
-/// order: the hot URL's `/__inertia_ssr` while the Vite dev server runs,
-/// with no bundle check (PAR-058); else the worker's `/render` when a
-/// bundle is found or the check is off (PAR-057); else `None`, which
-/// renders on the client.
+/// order: the hot URL's `/__inertia_ssr` in hot mode, with no bundle check
+/// (PAR-058); else the worker's `/render` when a bundle is found or the
+/// check is off (PAR-057); else `None`, which renders on the client.
 ///
-/// Laravel knows Vite runs from the hot file its Vite plugin writes.
-/// Nothing writes one here, so a connection the hot address accepts is the
-/// sign: in development without the dev server (a test, or a backend
-/// started on its own) the visit takes the worker path as Laravel's does,
-/// rather than reporting a failure on every first visit. The page is
-/// serialized only after this, so a visit that renders on the client never
-/// pays for it.
-async fn dispatch_url(config: &SsrConfig) -> Option<String> {
+/// The configuration decides hot mode before this runs
+/// (`InertiaConfig::ssr_for_dispatch`, from the hot file): a hot URL here
+/// means hot. The page is serialized only after this, so a visit that
+/// renders on the client never pays for it.
+fn dispatch_url(config: &SsrConfig) -> Option<String> {
     if let Some(hot) = config.hot_url.as_deref() {
-        if accepts_connections(hot, config.timeout).await {
-            return Some(endpoint(hot, "/__inertia_ssr"));
-        }
-        tracing::debug!(
-            hot_url = hot,
-            "nothing listens at the SSR hot URL; the visit takes the worker path"
-        );
+        return Some(endpoint(hot, "/__inertia_ssr"));
     }
     if config.ensure_bundle_exists && detect_bundle(config).is_none() {
         return None;
@@ -209,21 +199,6 @@ async fn dispatch_url(config: &SsrConfig) -> Option<String> {
 /// Laravel's `getProductionUrl` and `getHotUrl` join them.
 fn endpoint(base: &str, path: &str) -> String {
     format!("{}{path}", base.trim().trim_end_matches('/'))
-}
-
-/// Whether something accepts a TCP connection at `url`'s host and port
-/// within `timeout`. An address that does not parse accepts nothing.
-async fn accepts_connections(url: &str, timeout: Duration) -> bool {
-    let Ok(parsed) = url::Url::parse(url.trim()) else {
-        return false;
-    };
-    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
-        return false;
-    };
-    // `host_str` keeps an IPv6 literal's brackets, so the pair parses as a
-    // socket address; a name is resolved by the connect.
-    let connect = tokio::net::TcpStream::connect(format!("{host}:{port}"));
-    matches!(tokio::time::timeout(timeout, connect).await, Ok(Ok(_)))
 }
 
 /// Render via the SSR worker. Returns `Ok(Some(_))` when SSR succeeded,
@@ -243,7 +218,7 @@ pub(crate) async fn render(
     if !ssr_runs_for(config, request) {
         return Ok(None);
     }
-    let Some(url) = dispatch_url(config).await else {
+    let Some(url) = dispatch_url(config) else {
         return Ok(None);
     };
 
