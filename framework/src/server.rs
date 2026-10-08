@@ -1332,48 +1332,63 @@ async fn execute_chain_safely(
 ) -> HttpResponse {
     match crate::error::catch_panic(chain.execute(request, handler)).await {
         Ok(result) => result.unwrap_or_else(|e| e),
-        Err(panic) => {
-            let msg = panic_payload_message(&panic.payload);
-            tracing::error!(
-                panic = %msg,
-                method = %method,
-                path = %path,
-                request_id = %request_id,
-                "request middleware or handler panicked - translating to 500"
-            );
-            // Route the panic through the same `FrameworkError ->
-            // HttpResponse` conversion that returned 5xx errors use:
-            //   - the sanitised `{"message": "Internal Server Error"}`
-            //     JSON body (no panic payload leaks downstream);
-            //   - `ErrorOccurred` event dispatch, so observability
-            //     listeners (Sentry, Pagerduty, custom log shippers) that
-            //     fire on returned 5xx errors also fire on panics.
-            // The panic message stays in the tracing::error! above, not in
-            // the HTTP body - same 5xx-sanitisation contract.
-            //
-            // The panic unwound the original `REQUEST_ID` scope, so the
-            // conversion (and the `ErrorOccurred` event it dispatches) would
-            // otherwise read `current_request_id() == None`. Re-establish the
-            // scope with the id resolved once before the chain ran so the
-            // body, the generic 5xx log, and the event all stay correlatable,
-            // then echo the same id back as `X-Request-Id`.
-            crate::logging::REQUEST_ID
-                .sync_scope(request_id.clone(), || {
-                    HttpResponse::from(crate::error::FrameworkError::internal(format!(
-                        "request handler panicked: {msg}"
-                    )))
-                })
-                .header("X-Request-Id", request_id.as_str())
-                // The panic replaces the `Internal` error the conversion
-                // above reported: its message and location are what a
-                // developer needs, not the wrapper's text.
-                .with_error_report(crate::error::ErrorReport::from_panic(
-                    msg,
-                    panic.location,
-                    panic.frames,
-                ))
-        }
+        // The panic unwound the original `REQUEST_ID` scope, so the
+        // conversion (and the `ErrorOccurred` event it dispatches) would
+        // otherwise read `current_request_id() == None`. Re-establish the
+        // scope with the id resolved once before the chain ran so the body,
+        // the generic 5xx log, and the event all stay correlatable, then
+        // echo the same id back as `X-Request-Id`.
+        Err(panic) => crate::logging::REQUEST_ID
+            .sync_scope(request_id.clone(), || {
+                panic_into_response(panic, method.as_str(), path, request_id.as_str())
+            })
+            .header("X-Request-Id", request_id.as_str()),
     }
+}
+
+/// The `500` the panic boundary answers a caught panic with, logged with
+/// the request's method, path and id.
+///
+/// Shared by [`execute_chain_safely`] and the Inertia error-response
+/// middleware, which catches a panic inside it by the same rule so the
+/// application's error callback sees it. Call it inside the request's
+/// `REQUEST_ID` scope.
+///
+/// The panic goes through the same `FrameworkError -> HttpResponse`
+/// conversion returned 5xx errors use:
+///   - the sanitised `{"message": "Internal Server Error"}` JSON body (no
+///     panic payload leaks downstream);
+///   - `ErrorOccurred` event dispatch, so observability listeners
+///     (Sentry, Pagerduty, custom log shippers) that fire on returned 5xx
+///     errors also fire on panics.
+///
+/// The panic message stays in the log, not in the HTTP body - the same
+/// 5xx-sanitisation contract.
+pub(crate) fn panic_into_response(
+    panic: crate::error::CaughtPanic,
+    method: &str,
+    path: &str,
+    request_id: &str,
+) -> HttpResponse {
+    let msg = panic_payload_message(&panic.payload);
+    tracing::error!(
+        panic = %msg,
+        method = %method,
+        path = %path,
+        request_id = %request_id,
+        "request middleware or handler panicked - translating to 500"
+    );
+    HttpResponse::from(crate::error::FrameworkError::internal(format!(
+        "request handler panicked: {msg}"
+    )))
+    // The panic replaces the `Internal` error the conversion above
+    // reported: its message and location are what a developer needs, not
+    // the wrapper's text.
+    .with_error_report(crate::error::ErrorReport::from_panic(
+        msg,
+        panic.location,
+        panic.frames,
+    ))
 }
 
 /// Extract a printable message from a panic payload returned by

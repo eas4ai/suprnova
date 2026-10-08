@@ -20,6 +20,12 @@
 //! of the responses above. Because it runs last, the page also takes the
 //! place of the app's Inertia error page for those responses.
 //!
+//! The Inertia error-response middleware builds the page earlier, inside
+//! the chain, with [`page_for`]: the application's error callback receives
+//! the page as the response the framework would send (PAR-062), and what
+//! the callback decides stands. The server leaves a response that
+//! middleware decided as it is.
+//!
 //! # What it never shows
 //!
 //! The request body, environment variables and configuration values. The
@@ -55,6 +61,7 @@ use hyper::header::{self, HeaderName, HeaderValue};
 
 use super::ErrorReport;
 use super::frames::{self, Frame, Origin};
+use crate::http::HttpResponse;
 
 /// The body type the server sends.
 type Body = BoxBody<Bytes, Infallible>;
@@ -81,9 +88,10 @@ const CREDENTIAL_HEADERS: &[&str] = &[
 ];
 
 tokio::task_local! {
-    /// What the server learns about the request while serving it: the
-    /// route pattern routing matched and the request id it resolved.
-    static NOTES: Arc<Notes>;
+    /// The request being served with debug on, and what the server learns
+    /// about it while serving it: the route pattern routing matched and the
+    /// request id it resolved.
+    static SERVING: Arc<DebugRequest>;
 }
 
 #[derive(Debug, Default)]
@@ -95,19 +103,32 @@ struct Notes {
 /// Note the route pattern routing matched, for the page. Does nothing
 /// unless the request is served with debug on.
 pub(crate) fn note_route_pattern(pattern: &str) {
-    let _ = NOTES.try_with(|notes| {
+    let _ = SERVING.try_with(|serving| {
         // The first match is the request's; a second one cannot happen.
-        let _ = notes.route_pattern.set(pattern.to_string());
+        let _ = serving.notes.route_pattern.set(pattern.to_string());
     });
 }
 
 /// Note the request id the server resolved, for the page. Does nothing
 /// unless the request is served with debug on.
 pub(crate) fn note_request_id(request_id: &str) {
-    let _ = NOTES.try_with(|notes| {
+    let _ = SERVING.try_with(|serving| {
         // Resolved once per request; a second note would be the same id.
-        let _ = notes.request_id.set(request_id.to_string());
+        let _ = serving.notes.request_id.set(request_id.to_string());
     });
+}
+
+/// `response` as the client gets it with debug on: the page in its place
+/// when PAR-012 asks for it, else `response` as it is.
+///
+/// For the Inertia error-response middleware, which hands the result to the
+/// application's error callback. Outside a request served with debug on it
+/// returns `response` as it is.
+pub(crate) fn page_for(response: HttpResponse) -> HttpResponse {
+    match SERVING.try_with(Arc::clone) {
+        Ok(serving) => serving.replace_framework_response(response),
+        Err(_) => response,
+    }
 }
 
 /// The parts of a request the page shows, captured before the middleware
@@ -125,7 +146,7 @@ pub(crate) struct DebugRequest {
     is_inertia_visit: bool,
     /// The `Accept` header lists `text/html`.
     accepts_html: bool,
-    notes: Arc<Notes>,
+    notes: Notes,
 }
 
 impl DebugRequest {
@@ -154,7 +175,7 @@ impl DebugRequest {
                     .iter()
                     .filter_map(|value| value.to_str().ok()),
             ),
-            notes: Arc::default(),
+            notes: Notes::default(),
         }
     }
 
@@ -171,15 +192,29 @@ impl DebugRequest {
         self,
         route: Pin<Box<dyn Future<Output = hyper::Response<Body>> + Send>>,
     ) -> hyper::Response<Body> {
-        let routed = NOTES.scope(Arc::clone(&self.notes), route);
+        let serving = Arc::new(self);
+        let routed = SERVING.scope(Arc::clone(&serving), route);
         let response = frames::record_frames(true, routed).await;
-        self.replace(response)
+        serving.replace(response)
+    }
+
+    /// Whether a response with `status` is replaced by the page for this
+    /// request: a 5xx, sent to a browser or an Inertia visit.
+    fn replaces(&self, status: u16) -> bool {
+        status >= 500 && (self.accepts_html || self.is_inertia_visit)
     }
 
     /// The page in place of `response`, or `response` as it is.
     fn replace(&self, response: hyper::Response<Body>) -> hyper::Response<Body> {
         let status = response.status();
-        if status.as_u16() < 500 || !(self.accepts_html || self.is_inertia_visit) {
+        if !self.replaces(status.as_u16())
+            // The Inertia error-response middleware decided it: the page is
+            // already in place, or the application chose another answer.
+            || response
+                .extensions()
+                .get::<crate::http::ErrorResponseDecided>()
+                .is_some()
+        {
             return response;
         }
         let Some(report) = response.extensions().get::<ErrorReport>() else {
@@ -223,6 +258,41 @@ impl DebugRequest {
             .map_err(|never| match never {})
             .boxed();
         hyper::Response::from_parts(parts, body)
+    }
+
+    /// [`replace`](Self::replace) for a framework response still inside the
+    /// chain: the same page, status, headers and report.
+    fn replace_framework_response(&self, response: HttpResponse) -> HttpResponse {
+        if !self.replaces(response.status_code()) {
+            return response;
+        }
+        let Some(report) = response.error_report() else {
+            return response;
+        };
+        let Ok(status) = StatusCode::from_u16(response.status_code()) else {
+            return response;
+        };
+        let request_id = self
+            .notes
+            .request_id
+            .get()
+            .map(String::as_str)
+            .or_else(|| response.header_value("x-request-id"));
+        let page = self.render(status, report, request_id);
+        let kept: Vec<(String, String)> = response
+            .headers()
+            .filter(|(name, _)| header_survives_page(name))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        HttpResponse::html(page)
+            .status(status.as_u16())
+            .with_headers(kept)
+            .header(header::CACHE_CONTROL.as_str(), "no-store")
+            .header(
+                header::CONTENT_SECURITY_POLICY.as_str(),
+                CONTENT_SECURITY_POLICY,
+            )
+            .with_error_report_of(response)
     }
 
     /// The page, as one HTML document.

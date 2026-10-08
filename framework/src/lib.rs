@@ -330,6 +330,9 @@ pub use inertia::{
     ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest,
     SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
+// The error response the PAR-062 callback decides, on its own line so the
+// list above stays stable.
+pub use inertia::InertiaErrorResponse;
 // The SSR gateway of PAR-060, on its own line so the list above stays stable.
 pub use inertia::{
     CONVENTIONAL_BUNDLE_PATHS, HttpGateway, SsrCondition, SsrDisabledWhen, SsrGateway,

@@ -168,9 +168,9 @@ fn router() -> Router {
             }));
             resp
         })
-        // A handler that panics. Recorded here because the panic net
-        // sits ABOVE the middleware chain, so this response is one the
-        // error page provably cannot reach.
+        // A handler that panics. The error-page middleware runs the chain
+        // inside it under the panic boundary's rule, so the panic's 500
+        // reaches the page like any other 500 (PAR-062).
         .get("/panic", |_req: Request| async {
             panic!("handler exploded");
         })
@@ -518,11 +518,10 @@ async fn an_api_client_asking_for_json_keeps_the_json_body() {
 #[tokio::test]
 #[serial]
 async fn error_page_off_leaves_the_denial_byte_for_byte() {
-    // No error-page middleware in the chain at all - which is exactly
-    // what `Inertia::install` produces when `error_page` is unset. The
-    // gate itself is pinned by the install-delta assertion inside
-    // `install_registers_the_protocol_middlewares` in
-    // `framework/src/inertia/facade.rs`.
+    // No error-page middleware in the chain at all. The one
+    // `Inertia::install` registers with neither an `error_page` nor an
+    // error callback hands every request on and changes nothing, so this
+    // is what such an app sends.
     let _db = seed_member().await;
     let addr = spawn_server(router(), MiddlewareRegistry::new(), 2).await;
 
@@ -662,29 +661,35 @@ async fn a_handlers_own_inertia_page_keeps_its_component_even_on_an_error_status
 
 #[tokio::test]
 #[serial]
-async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
+async fn a_panicking_handler_renders_the_error_page() {
     if crate::own_process_async::delegate(
         module_path!(),
-        "a_panicking_handler_is_out_of_reach_of_the_error_page",
+        "a_panicking_handler_renders_the_error_page",
     )
     .await
     {
         return;
     }
-    // `execute_chain_safely` (framework/src/server.rs) wraps the WHOLE
-    // middleware chain in `catch_unwind`, so a panic unwinds every
-    // middleware frame - this one included - before the synthesized 500
-    // exists. No middleware can rewrite it. Pinned here so the gap is a
-    // recorded fact rather than a surprise in production.
+    // `execute_chain_safely` (framework/src/server.rs) wraps the whole
+    // middleware chain in `catch_unwind`, so a panic used to unwind every
+    // middleware frame before the synthesized 500 existed, and the client
+    // got the JSON 500. The error-page middleware now catches the panic
+    // inside it by the same rule (PAR-062), so the 500 is the page.
     let _debug = debug_off().await;
     let addr = spawn_server(router(), stack(), 2).await;
 
     let (status, headers, body) = request(addr, "GET", "/panic", &inertia_visit()).await;
 
     assert_eq!(status, 500);
-    assert!(!headers.contains_key("x-inertia"));
-    let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
-    assert_eq!(parsed["message"], "Internal Server Error");
+    assert_eq!(headers.get("x-inertia").map(String::as_str), Some("true"));
+    let page = page_object(&body);
+    assert_eq!(page["component"], ERROR_PAGE);
+    assert_eq!(page["props"]["status"], 500);
+    assert_eq!(
+        page["props"]["message"], "Internal Server Error",
+        "the panic's message never reaches the page; got {body}"
+    );
+    assert!(!body.contains("handler exploded"), "got {body}");
 }
 
 // ---------------------------------------------------------------------
