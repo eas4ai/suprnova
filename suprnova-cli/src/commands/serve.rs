@@ -905,7 +905,7 @@ fn eprint_prefixed(prefix: &str, color: console::Color, line: &str, timestamps: 
     }
 }
 
-fn get_package_name() -> Result<String, String> {
+pub(crate) fn get_package_name() -> Result<String, String> {
     let cargo_toml = Path::new("Cargo.toml");
     let content = std::fs::read_to_string(cargo_toml)
         .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
@@ -917,7 +917,7 @@ fn get_package_name() -> Result<String, String> {
         .ok_or_else(|| "Could not find package name in Cargo.toml".to_string())
 }
 
-fn validate_suprnova_project(frontend_only: bool) -> Result<(), String> {
+pub(crate) fn validate_suprnova_project(frontend_only: bool) -> Result<(), String> {
     let cargo_toml = Path::new("Cargo.toml");
 
     if !frontend_only && !cargo_toml.exists() {

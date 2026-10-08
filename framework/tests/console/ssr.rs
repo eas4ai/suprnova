@@ -343,9 +343,20 @@ async fn inssr_start_says_how_to_set_the_bundle_when_none_is_configured() {
         ran.err
     );
     assert!(
-        ran.err.contains("InertiaConfig::ssr_bundle_path")
-            && ran.err.contains("SUPRNOVA_SSR_BUNDLE"),
+        ran.err.contains("InertiaConfig::ssr_bundle_path"),
         "and how to set one: {}",
+        ran.err
+    );
+    for path in suprnova::CONVENTIONAL_BUNDLE_PATHS {
+        assert!(
+            ran.err.contains(path),
+            "and the conventional path {path} it was looked for at: {}",
+            ran.err
+        );
+    }
+    assert!(
+        !ran.err.contains("--bundle") && !ran.err.contains("SUPRNOVA_SSR_BUNDLE"),
+        "the CLI has no bundle flag or variable of its own: {}",
         ran.err
     );
     assert!(!marker.exists(), "no worker started without a bundle");

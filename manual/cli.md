@@ -158,9 +158,16 @@ See [Workflows](workflows.md).
 
 | Command | Description |
 |---|---|
-| `suprnova ssr:start [--runtime node\|bun\|deno\|<path>] [--bundle <path>]` | Launch the Inertia SSR worker in the foreground, with the checks of the application binary's `ssr:start` ([Console](console.md#ssr-commands)). Runtime falls back to `SUPRNOVA_SSR_RUNTIME` env, then `node`; bundle falls back to `SUPRNOVA_SSR_BUNDLE`, then the first conventional path that exists (`frontend/bootstrap/ssr/ssr.js` first). Refuses a runtime it can't find when `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` is true, stops a worker still running at `SUPRNOVA_SSR_URL` first, forwards Ctrl-C and `SIGTERM` to the worker, and exits with its status. |
-| `suprnova ssr:stop [--graceful] [--url <url>] [--timeout-ms N]` | Send the SSR worker `GET /shutdown`. Exits 0 when the worker closes the connection, or with `--graceful` when no worker can be connected to. Falls back to `SUPRNOVA_SSR_URL`, then `http://127.0.0.1:13714`. Timeout default 2000 ms. |
-| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | Check the SSR worker's health through the SSR gateway: its `GET /health` route answers 2xx. Falls back to `SUPRNOVA_SSR_URL`, then `http://127.0.0.1:13714`. Timeout default 2000 ms. |
+| `suprnova ssr:start [--runtime node\|bun\|deno\|<path>]` | Run the application binary's `ssr:start`, which checks the installed Inertia configuration and runs the SSR worker in the foreground. `--runtime` replaces the configured runtime. Ctrl-C, `Ctrl-\`, Ctrl-Z, `fg`, `SIGTERM`, and `SIGHUP` reach the application, which runs in a process group of its own, through the CLI. |
+| `suprnova ssr:stop [--graceful]` | Run the application binary's `ssr:stop`, which sends `GET /shutdown` to the worker at the configured URL. With `--graceful`, a worker that isn't running counts as stopped. |
+| `suprnova ssr:check` | Run the application binary's `ssr:check`, which asks the installed SSR gateway's health check. |
+
+Each of these runs `cargo run --bin <app> -- <name>` from the project
+directory, the way `serve` runs the backend, and exits with the
+application's status. The CLI reads no SSR settings of its own: the
+configuration your application passes to `Inertia::install` decides what
+each command checks and does, as [Console](console.md#ssr-commands)
+describes.
 
 See [Inertia SSR](frontend.md) for the production setup.
 

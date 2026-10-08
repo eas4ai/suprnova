@@ -7,7 +7,7 @@ types, and behaviour reflect what the code actually does, not what the
 starter `.env` happens to ship.
 
 The list also covers the variables the `suprnova` CLI binary reads
-(dev server, SSR worker) since those appear in the starter `.env` and
+(the dev server) since those appear in the starter `.env` and
 readers will look for them here.
 
 See [Configuration](configuration.md) for the loading rules
@@ -569,17 +569,16 @@ OpenTelemetry exporter directly.
 
 ## CLI / dev server
 
-These are read by the `suprnova` CLI binary (dev server, SSR worker)
-rather than the runtime framework - they appear in the starter `.env`
-or are honoured by `suprnova serve` / `suprnova ssr:*`.
+These are read by the `suprnova` CLI binary's dev server rather than
+the runtime framework - they appear in the starter `.env` or are
+honoured by `suprnova serve`. The CLI's `ssr:*` commands read none of
+their own: they run the application binary's commands, which read the
+Inertia configuration the application installed (see
+[Console](console.md#ssr-commands)).
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `VITE_PORT` | `5765` | `u16` | Port Vite binds to in `suprnova serve`. CLI `--frontend-port` overrides. |
-| `SUPRNOVA_SSR_RUNTIME` | `"node"` | `String` | Runtime to launch the SSR worker under (`suprnova ssr:start`). CLI `--runtime` overrides. |
-| `SUPRNOVA_SSR_BUNDLE` | unset | `Path` | Path to the built SSR bundle for `suprnova ssr:start`. Unset, the first conventional path that exists is used (`frontend/bootstrap/ssr/ssr.js` first); set to a missing file, `ssr:start` warns and uses a conventional one when it exists. CLI `--bundle` overrides. |
-| `SUPRNOVA_SSR_URL` | `"http://127.0.0.1:13714"` | `String` | SSR worker URL for `suprnova ssr:check` and `suprnova ssr:stop`, and the worker `suprnova ssr:start` asks to shut down before it starts one. CLI `--url` overrides on `ssr:check` and `ssr:stop`. |
-| `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` | `false` | `bool` | When `true`, `suprnova ssr:start` refuses a runtime it can't find: a path that isn't an executable file, or a name that no `PATH` directory holds as an executable. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`; any other value fails the command. |
 
 ## Subsystems with no env vars
 
