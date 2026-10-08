@@ -459,10 +459,19 @@ pub struct InertiaConfig {
 /// a JSON page object on `POST /render` and returns
 /// `{ head: string[], body: string }`. Configure the worker URL here;
 /// boot it separately (e.g. `suprnova ssr:start`).
+///
+/// SSR is on by default, as Laravel's is, and gated by bundle detection:
+/// an application without an SSR bundle renders on the client and never
+/// contacts the worker.
 #[derive(Clone)]
 pub struct SsrConfig {
     /// When `false`, SSR is fully off and the HTML shell renders empty
-    /// `<div id="app">` for the client to hydrate. Default: `false`.
+    /// `<div id="app">` for the client to hydrate. Default: `true`, as
+    /// Laravel's `inertia.ssr.enabled`: an application opts out of SSR
+    /// rather than in. The bundle check
+    /// ([`ensure_bundle_exists`](Self::ensure_bundle_exists)) keeps an
+    /// application without an SSR bundle rendering on the client, with no
+    /// request to the worker.
     pub enabled: bool,
     /// URL of the running SSR worker (e.g. `http://127.0.0.1:13714`).
     /// The framework posts to `<url>/render`.
@@ -472,8 +481,10 @@ pub struct SsrConfig {
     /// block real users.
     pub timeout: std::time::Duration,
     /// When `true`, SSR errors propagate as 500s instead of falling
-    /// back to CSR. Useful in CI / tests; never set `true` in
-    /// production unless you also have a watchdog.
+    /// back to CSR, with a message naming the component and, when the
+    /// worker gave one, the source location (Laravel's `SsrException`).
+    /// Useful in CI / tests; never set `true` in production unless you
+    /// also have a watchdog.
     pub throw_on_error: bool,
     /// Path patterns excluded from SSR. Matching requests render CSR-only
     /// even when `enabled` is `true`. Patterns follow Laravel's
@@ -483,8 +494,11 @@ pub struct SsrConfig {
     pub excluded_paths: Vec<String>,
     /// Observability hook invoked when an SSR render fails and we
     /// fall back to CSR. Defaults to `eprintln!` to stderr. Wire your
-    /// logger / Sentry / DataDog client here. When events parity
-    /// lands, `SsrRenderFailed` will fire from this callback too.
+    /// logger / Sentry / DataDog client here. Every such failure also
+    /// dispatches the [`SsrRenderFailed`](crate::SsrRenderFailed) event,
+    /// which carries the worker's error details; under
+    /// [`throw_on_error`](Self::throw_on_error) the visit fails instead
+    /// and the hook does not run. A missing bundle is not a failure.
     pub on_error: Option<SsrErrorHook>,
     /// Cap on the SSR worker's response body. Bytes past this point
     /// abort the read and the request falls back to CSR (or 500 if
@@ -492,16 +506,13 @@ pub struct SsrConfig {
     /// than any realistic SSR-rendered page but small enough to bound
     /// damage from a misconfigured or compromised loopback worker.
     pub max_response_bytes: usize,
-    /// Path to the built SSR bundle (e.g. `frontend/bootstrap/ssr/ssr.js` -
-    /// the default `vite build --ssr` output for a scaffolded project,
-    /// and what `suprnova ssr:start` looks for by default). `None`
-    /// (the default) means "not configured" and disables the existence
-    /// check regardless of [`Self::ensure_bundle_exists`] - there being
-    /// nothing to check. Unlike Laravel's `BundleDetector`, this is
-    /// **never auto-detected**: an app that calls `.ssr(url)` without
-    /// also calling [`InertiaConfig::ssr_bundle_path`] gets no bundle
-    /// check at all, which is what every test double and mock SSR
-    /// worker in this codebase (and yours) relies on.
+    /// Path to the built SSR bundle, looked at before the conventional
+    /// paths ([`CONVENTIONAL_BUNDLE_PATHS`](crate::CONVENTIONAL_BUNDLE_PATHS),
+    /// the first of which, `frontend/bootstrap/ssr/ssr.js`, is where a
+    /// scaffolded project's `vite build --ssr` writes it). Laravel's
+    /// `inertia.ssr.bundle`. `None` (the default) searches the conventional
+    /// paths only; [`detect_ssr_bundle`](crate::detect_ssr_bundle) is the
+    /// search, which the bundle check and `ssr:start` share.
     pub bundle_path: Option<PathBuf>,
     /// The runtime `ssr:start` launches the worker under: `node` by default,
     /// `bun`, `deno` or an absolute path. Laravel's `inertia.ssr.runtime`.
@@ -509,18 +520,31 @@ pub struct SsrConfig {
     /// Whether `ssr:start` refuses a runtime it cannot find on `PATH`.
     /// Default `false`, as Laravel's `inertia.ssr.ensure_runtime_exists`.
     pub ensure_runtime_exists: bool,
-    /// Where SSR is dispatched in development with the Vite dev server
-    /// running, at `/__inertia_ssr`; `None` uses the dev server's own URL.
-    /// Laravel's `inertia.ssr.hot_url` (PAR-058).
+    /// The file whose presence says the Vite dev server is running, and
+    /// whose content is its URL: Laravel's Vite hot file. Default
+    /// `public/hot` under the working directory, the file `suprnova serve`
+    /// writes while it runs Vite and removes when Vite stops. Set it with
+    /// [`InertiaConfig::ssr_hot_file`].
+    pub hot_file: PathBuf,
+    /// Where SSR is dispatched in hot mode, at `/__inertia_ssr`: Laravel's
+    /// `inertia.ssr.hot_url`. The Vite dev server renders the page from
+    /// source, so no SSR bundle or worker process is needed while
+    /// developing.
+    ///
+    /// In development a first visit goes hot when this is set, or when the
+    /// [`hot_file`](Self::hot_file) exists; the address is this URL, else
+    /// the file's content, else [`InertiaConfig::vite_dev_server`]. Hot mode
+    /// skips the bundle check. Production never goes hot and ignores it.
+    /// `None` (the default) leaves the decision to the hot file.
     pub hot_url: Option<String>,
-    /// When `true` (the default) and [`Self::bundle_path`] is `Some`,
-    /// the SSR gateway checks the bundle exists on disk before every
-    /// dispatch and falls back to CSR immediately - without paying
-    /// [`Self::timeout`] on a connection that was never going to
-    /// succeed - when it doesn't. Mirrors Laravel's
-    /// `inertia.ssr.ensure_bundle_exists` config
-    /// (`Inertia\Ssr\HttpGateway::shouldDispatch()`). Has no effect
-    /// while `bundle_path` is `None`.
+    /// When `true` (the default), a first visit is sent to the worker only
+    /// when [`detect_ssr_bundle`](crate::detect_ssr_bundle) finds a bundle:
+    /// with none the visit renders on the client at once, quietly, rather
+    /// than paying [`Self::timeout`] on a worker that was never started.
+    /// Laravel's `inertia.ssr.ensure_bundle_exists`. Turn it off for a
+    /// worker whose bundle this process cannot see on disk (a separate
+    /// container, a remote host) and in tests that use a stand-in worker.
+    /// Hot mode ([`Self::hot_url`]) skips the check.
     pub ensure_bundle_exists: bool,
 }
 
@@ -535,6 +559,10 @@ impl std::fmt::Debug for SsrConfig {
             .field("on_error", &self.on_error.as_ref().map(|_| "<closure>"))
             .field("max_response_bytes", &self.max_response_bytes)
             .field("bundle_path", &self.bundle_path)
+            .field("runtime", &self.runtime)
+            .field("ensure_runtime_exists", &self.ensure_runtime_exists)
+            .field("hot_url", &self.hot_url)
+            .field("hot_file", &self.hot_file)
             .field("ensure_bundle_exists", &self.ensure_bundle_exists)
             .finish()
     }
@@ -543,7 +571,7 @@ impl std::fmt::Debug for SsrConfig {
 impl Default for SsrConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             url: "http://127.0.0.1:13714".to_string(),
             timeout: std::time::Duration::from_secs(5),
             throw_on_error: false,
@@ -554,6 +582,7 @@ impl Default for SsrConfig {
             runtime: "node".to_string(),
             ensure_runtime_exists: false,
             hot_url: None,
+            hot_file: PathBuf::from("public/hot"),
             ensure_bundle_exists: true,
         }
     }
@@ -840,14 +869,15 @@ impl InertiaConfig {
         self
     }
 
-    /// Enable SSR with the given worker URL.
+    /// Enable SSR with the given worker URL. SSR is on by default at
+    /// `http://127.0.0.1:13714`; this names another worker address.
     pub fn ssr(mut self, url: impl Into<String>) -> Self {
         self.ssr.enabled = true;
         self.ssr.url = url.into();
         self
     }
 
-    /// Disable SSR explicitly (the default).
+    /// Turn SSR off: every first visit renders on the client.
     pub fn ssr_disabled(mut self) -> Self {
         self.ssr.enabled = false;
         self
@@ -886,10 +916,17 @@ impl InertiaConfig {
         self
     }
 
-    /// Set where SSR is dispatched in development with the Vite dev server
-    /// running; see [`SsrConfig::hot_url`].
+    /// Set where SSR is dispatched in development, at `/__inertia_ssr`,
+    /// whether or not a hot file exists; see [`SsrConfig::hot_url`].
     pub fn ssr_hot_url(mut self, url: impl Into<String>) -> Self {
         self.ssr.hot_url = Some(url.into());
+        self
+    }
+
+    /// Name the Vite hot file; see [`SsrConfig::hot_file`]. The default,
+    /// `public/hot`, is the file `suprnova serve` writes.
+    pub fn ssr_hot_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.ssr.hot_file = path.into();
         self
     }
 
@@ -905,22 +942,20 @@ impl InertiaConfig {
         self
     }
 
-    /// Point the SSR bundle-existence check at the built bundle. Not set
-    /// by default - see [`SsrConfig::bundle_path`]'s doc for why an
-    /// unset path is the safe default rather than an auto-detected one.
-    /// `frontend/bootstrap/ssr/ssr.js` is the conventional location:
-    /// what `suprnova ssr:start` looks for and what the scaffolded
-    /// `vite.config.ts`'s SSR build (`vite build --ssr`) writes to.
+    /// Name the built SSR bundle, looked at before the conventional paths;
+    /// see [`SsrConfig::bundle_path`]. A project that builds its bundle to
+    /// `frontend/bootstrap/ssr/ssr.js`, where the scaffolded
+    /// `vite.config.ts` writes it, needs no call.
     pub fn ssr_bundle_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.ssr.bundle_path = Some(path.into());
         self
     }
 
-    /// Toggle the bundle-existence check. On by default; only takes
-    /// effect once [`Self::ssr_bundle_path`] is also set. Turn it off
-    /// if you dispatch to a worker whose bundle this process can't see
-    /// on disk (a remote build artifact, a container image built
-    /// separately from the one running the backend).
+    /// Toggle the bundle check; see [`SsrConfig::ensure_bundle_exists`].
+    /// On by default. Turn it off if you dispatch to a worker whose bundle
+    /// this process can't see on disk (a remote build artifact, a
+    /// container image built separately from the one running the
+    /// backend), or to a stand-in worker in a test.
     pub fn ssr_ensure_bundle_exists(mut self, on: bool) -> Self {
         self.ssr.ensure_bundle_exists = on;
         self
@@ -974,6 +1009,65 @@ impl InertiaConfig {
     pub fn asset_url(mut self, url: impl Into<String>) -> Self {
         self.asset_url = Some(url.into());
         self
+    }
+
+    /// The SSR settings a first visit is dispatched with (PAR-058): the hot
+    /// URL set when the visit goes hot, and cleared when it does not.
+    ///
+    /// In development the visit goes hot when the application set
+    /// [`SsrConfig::hot_url`], or when the hot file
+    /// ([`SsrConfig::hot_file`]) exists, which is how Laravel knows Vite runs
+    /// (`Vite::isRunningHot`). The address is the configured hot URL, else
+    /// the file's content, else the [`vite_dev_server`](Self::vite_dev_server)
+    /// URL for an empty file. In production nothing runs hot. Only the file
+    /// decides: no connection is attempted, so a server listening at the dev
+    /// server's port changes nothing.
+    ///
+    /// Resolved here rather than by the builders, so the order of
+    /// `development`, `production`, `vite_dev_server` and `ssr_hot_url`
+    /// calls does not matter. Production with no hot URL, the common case,
+    /// borrows the settings without a copy and never looks at the file.
+    pub(crate) fn ssr_for_dispatch(&self) -> std::borrow::Cow<'_, SsrConfig> {
+        use std::borrow::Cow;
+        let hot_url = match (self.development, &self.ssr.hot_url) {
+            (true, Some(_)) => return Cow::Borrowed(&self.ssr),
+            (false, None) => return Cow::Borrowed(&self.ssr),
+            (false, Some(_)) => None,
+            (true, None) => match self.hot_file_url() {
+                Some(url) => Some(url),
+                None => return Cow::Borrowed(&self.ssr),
+            },
+        };
+        let mut ssr = self.ssr.clone();
+        ssr.hot_url = hot_url;
+        Cow::Owned(ssr)
+    }
+
+    /// The dev server's URL from the hot file, or `None` when there is no
+    /// hot file: its trimmed content, or the configured dev server URL when
+    /// it is empty or cannot be read.
+    fn hot_file_url(&self) -> Option<String> {
+        let path = &self.ssr.hot_file;
+        if !path.is_file() {
+            return None;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                tracing::warn!(
+                    hot_file = %path.display(),
+                    %error,
+                    "the Vite hot file cannot be read; SSR uses the configured dev server URL"
+                );
+                String::new()
+            }
+        };
+        let url = content.trim();
+        Some(if url.is_empty() {
+            self.vite_dev_server.clone()
+        } else {
+            url.to_string()
+        })
     }
 
     /// The asset version this config reports, in Laravel's order.

@@ -14,6 +14,9 @@ frontend/bootstrap/ssr
 # Build outputs
 /public/assets
 
+# The Vite hot file `suprnova serve` keeps while the dev server runs.
+/public/hot
+
 # IDE
 .idea
 .vscode

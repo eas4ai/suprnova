@@ -70,8 +70,10 @@ pub trait SsrGateway: Send + Sync {
     }
 }
 
-/// The default gateway: the worker over HTTP, with the run-time settings
-/// the `Inertia` facade keeps on the active container's registry.
+/// The default gateway: the worker over HTTP (or HTTPS), with the run-time
+/// settings the `Inertia` facade keeps on the active container's registry.
+/// Its health check is `GET {url}/health`, through the request
+/// configurator.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HttpGateway;
 
@@ -84,6 +86,10 @@ impl SsrGateway for HttpGateway {
         page: &Value,
     ) -> Result<Option<SsrResponse>, FrameworkError> {
         super::ssr::render(config, request, page).await
+    }
+
+    async fn is_healthy(&self, config: &SsrConfig) -> Option<bool> {
+        Some(super::ssr::is_healthy(config).await)
     }
 
     fn disable(&self, condition: SsrCondition) -> bool {

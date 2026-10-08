@@ -2080,59 +2080,146 @@ let cfg = InertiaConfig::new().mount_id("root");
 
 Suprnova talks to an out-of-process SSR worker - typically the
 `@inertiajs/{svelte,react,vue}/server` `createServer()` bundle run
-under Node / Bun / Deno - over HTTP loopback. Enable it on the config you
-hand to [`Inertia::install`](#bootstrap-inertia-install) - that config is
-what every response starts from, so there is nothing to plumb through
-your handlers:
+under Node, Bun or Deno - over HTTP. SSR is on by default, as in Laravel,
+and gated by bundle detection: a first visit goes to the worker only when
+an SSR bundle exists, so an application without one renders on the client
+and never contacts the worker. Configure it on the config you hand to
+[`Inertia::install`](#bootstrap-inertia-install) - that config is what
+every response starts from, so there is nothing to plumb through your
+handlers:
 
 ```rust
 Inertia::install(
     &InertiaConfig::new()
-        .ssr("http://127.0.0.1:13714")  // worker URL
+        .ssr("http://127.0.0.1:13714")  // worker URL, the default
         .ssr_timeout(std::time::Duration::from_millis(500))
         .ssr_exclude("/admin/**")
         .ssr_max_response_bytes(8 * 1024 * 1024),
 )?;
 ```
 
-SSR is off by default, and it is a property of the config: on for every
-response built from the installed config, off for any response that
-overrides with a `.with_config(...)` which doesn't set it. When enabled,
-the framework posts the page
-object to `<url>/render` and inlines `{ head, body }` in the HTML
-shell. A worker head that carries its own `<title>` - which is every page
-using Inertia's `Head` component - **replaces** the shell's title rather
-than joining it, and that means both `.default_title(...)` on the config
-and a per-response `.title(...)`: a document with two titles shows the
-first one, so the shell's would win over the page's real one in the tab,
-in search results, and in every link preview. With SSR on, set the title
-in `Head` rather than on the response. A head with no title leaves the
-shell's title exactly where it was. On
-worker error or timeout the response falls back to CSR
-(an empty `<div id="app">` the client hydrates) and the
-`on_ssr_error(...)` hook fires; flip `ssr_throw_on_error(true)` in CI
-to make those failures hard 500s instead.
+SSR is a property of the config: on for every response built from the
+installed config, and off for a response that overrides with a
+`.with_config(...)` that calls `.ssr_disabled()`. When it runs, the
+framework posts the page object to `<url>/render` and inlines
+`{ head, body }` in the HTML shell. A worker head that carries its own
+`<title>` - which is every page using Inertia's `Head` component -
+**replaces** the shell's title rather than joining it, and that means both
+`.default_title(...)` on the config and a per-response `.title(...)`: a
+document with two titles shows the first one, so the shell's would win over
+the page's real one in the tab, in search results, and in every link
+preview. With SSR on, set the title in `Head` rather than on the response. A
+head with no title leaves the shell's title exactly where it was. A worker
+answer with nothing to inline - empty JSON, `null`, `false`, anything but an
+object, an object without a `body`, or a body that is not JSON at all -
+renders on the client, and is not a failure.
 
-Before it dispatches at all, the gateway can check that the built SSR
-bundle exists on disk - opt in with `.ssr_bundle_path(...)`, pointed at
-the conventional `frontend/bootstrap/ssr/ssr.js` (the check itself is on
-by default, `.ssr_ensure_bundle_exists(true)`, but has no effect until a
-path is set - this is deliberately not auto-detected, so enabling SSR
-against a test double never has to also stub a bundle on disk). A
-missing bundle falls back to CSR immediately, without paying
-`ssr_timeout` on a connection that was never going to succeed. This
-mirrors Laravel's `ensure_bundle_exists` config.
+### Bundle detection
+
+While `.ssr_ensure_bundle_exists(true)` is set, which is the default, a first
+visit is dispatched only when a bundle exists at the path
+`.ssr_bundle_path(...)` names or, failing that, at one of the conventional
+paths under the working directory, the list Laravel's `BundleDetector`
+checks (`CONVENTIONAL_BUNDLE_PATHS`):
+
+- `frontend/bootstrap/ssr/ssr.js`, where a scaffolded project's
+  `vite build --ssr` writes it
+- `frontend/bootstrap/ssr/app.js`
+- `frontend/bootstrap/ssr/ssr.mjs`
+- `frontend/bootstrap/ssr/app.mjs`
+- `public/js/ssr.js`
+- `public/js/app.js`
+
+With no bundle the visit renders on the client at once, without a request to
+the worker, an error or a log line, so it never pays `ssr_timeout` on a
+worker that was never started. `detect_ssr_bundle(&config.ssr)` runs the
+same search. Turn the check off when the worker's bundle lives where this
+process cannot see it, such as a separate container, or in a test that uses a
+stand-in worker:
 
 ```rust
 Inertia::install(
     &InertiaConfig::new()
-        .ssr("http://127.0.0.1:13714")
-        .ssr_bundle_path("frontend/bootstrap/ssr/ssr.js")
-        .ssr_timeout(std::time::Duration::from_millis(500))
-        .ssr_exclude("/admin/**")
-        .ssr_max_response_bytes(8 * 1024 * 1024),
+        .ssr("http://ssr.internal:13714")
+        .ssr_ensure_bundle_exists(false),
 )?;
 ```
+
+To keep every first visit on the client, call `.ssr_disabled()`.
+
+### Hot mode in development
+
+While the Vite dev server runs, a first visit in development goes to it at
+`/__inertia_ssr` instead of the worker, and the bundle check is skipped:
+the dev server renders the page from source, so you need neither a bundle
+nor a worker process while you work.
+
+The hot file says the dev server runs. `suprnova serve` writes the dev
+server's URL to `public/hot` when it starts Vite, and removes the file when
+Vite stops or `serve` exits, the file Laravel's Vite plugin writes. A visit
+goes hot while that file exists, or whenever you set `.ssr_hot_url(...)`.
+The address is the `.ssr_hot_url(...)` URL, else the file's content, else
+the `.vite_dev_server(...)` URL when the file is empty.
+`.ssr_hot_file(...)` names another file. Without the file the visit takes
+the worker path with its bundle check, whatever listens at the dev server's
+port. Production never goes hot.
+
+A dev server without the Inertia Vite plugin answers `/__inertia_ssr` with
+a `404`. That visit renders on the client quietly: no `SsrRenderFailed`, no
+`on_ssr_error` call, and no error under `ssr_throw_on_error`. Any other
+error status from the dev server is a failure like the worker's.
+
+### Worker failures and `SsrRenderFailed`
+
+On a worker error, a timeout or an unreachable worker the response falls
+back to the client (an empty `<div id="app">` the client mounts on) and the
+`on_ssr_error(...)` hook fires. Every such failure also dispatches the
+`SsrRenderFailed` event first. An Inertia 3 worker answers a failed render
+with an error status and a JSON body (`error`, `type`, `hint`, `browserApi`,
+`stack`, `sourceLocation`), and the event carries those fields with the
+page's `component` and `url`. `error_type` is an `SsrErrorType`:
+`BrowserApi`, `ComponentResolution`, `Render`, `Connection` for a worker that
+could not be reached, or `Unknown`.
+
+```rust
+use std::sync::Arc;
+use suprnova::{EventFacade, FrameworkError, Listener, SsrRenderFailed, async_trait};
+
+struct ReportSsrFailure;
+
+#[async_trait]
+impl Listener<SsrRenderFailed> for ReportSsrFailure {
+    async fn handle(&self, failed: &SsrRenderFailed) -> Result<(), FrameworkError> {
+        tracing::warn!(
+            component = %failed.component,
+            url = %failed.url,
+            kind = %failed.error_type,
+            location = ?failed.source_location,
+            hint = ?failed.hint,
+            "SSR failed: {}",
+            failed.error,
+        );
+        Ok(())
+    }
+}
+
+// In `bootstrap::register`:
+EventFacade::listen::<SsrRenderFailed, _>(Arc::new(ReportSsrFailure)).await;
+```
+
+Set `ssr_throw_on_error(true)` in CI to make those failures hard 500s
+instead. The error names the component and, when the worker gave one, the
+source location, as Laravel's `SsrException` does:
+`SSR render failed for component [Dashboard]: window is not defined at
+resources/js/Pages/Dashboard.vue:12:5`.
+
+### Workers over HTTPS
+
+A worker URL may be `https`. The client speaks TLS through rustls and
+verifies the worker's certificate against the platform's trust store, so a
+worker on another host or behind a TLS proxy needs no other setting.
+
+### Run-time controls
 
 `.ssr_exclude(pattern)` follows Laravel's `ExcludesPaths` rules, so a
 pattern copied from a Laravel app excludes the same requests: slashes at
@@ -2168,6 +2255,51 @@ Inertia::configure_ssr_request_using(|request| {
 `App::disable_ssr_for_request()` still turns SSR off for the one request it
 runs in, whatever the switch says.
 
+### Your own gateway
+
+The SSR call is a driver: the `SsrGateway` trait, with `HttpGateway` as the
+default. Bind your own in the container and every first visit dispatches
+through it:
+
+```rust
+use std::sync::Arc;
+use serde_json::Value;
+use suprnova::{
+    App, FrameworkError, InertiaRequestExt, SsrConfig, SsrGateway, SsrResponse, async_trait,
+};
+
+struct EdgeGateway;
+
+#[async_trait]
+impl SsrGateway for EdgeGateway {
+    async fn dispatch(
+        &self,
+        config: &SsrConfig,
+        request: &dyn InertiaRequestExt,
+        page: &Value,
+    ) -> Result<Option<SsrResponse>, FrameworkError> {
+        // Render `page` somewhere else; `Ok(None)` renders on the client.
+        let _ = (config, request, page);
+        Ok(None)
+    }
+}
+
+App::bind::<dyn SsrGateway>(Arc::new(EdgeGateway));
+```
+
+`is_healthy`, `disable`, `except` and `configure_request_using` have
+defaults a gateway overrides when it supports them. The facade calls in
+[Run-time controls](#run-time-controls) act on the bound gateway; one that
+lacks the capability logs a warning and ignores the call.
+
+`Inertia::ssr_is_healthy().await` returns the gateway's health check. The HTTP
+gateway sends `GET {url}/health`, through the request configurator and within
+`ssr_timeout`, and answers `Some(true)` for a 2xx status and `Some(false)`
+for any other status or no answer. `None` means the gateway has no health
+check.
+
+### Build and run the worker
+
 `suprnova new` scaffolds `frontend/src/ssr.{ts,tsx}` and a `build:ssr`
 npm script for every starter. Build it, then boot the worker:
 
@@ -2176,9 +2308,23 @@ cd frontend && npm run build:ssr
 suprnova ssr:start
 ```
 
-`suprnova ssr:check` verifies the worker is actually answering - it
-hits the worker's own `GET /health` route, which every `createServer()`
-bundle exposes without any extra code.
+For `ssr:start`, `ssr:stop` and `ssr:check`, see [Console](console.md).
+
+### Why Suprnova diverges
+
+Laravel's Vite plugin writes `public/hot` while the dev server runs. A
+Suprnova project's Vite configuration carries no such plugin, so
+`suprnova serve`, which starts Vite, writes and removes the file instead.
+Run Vite on its own (`npm run dev`) and the backend does not go hot unless
+you set `.ssr_hot_url(...)`. A `404` from the hot endpoint renders on the
+client quietly, where Laravel dispatches `SsrRenderFailed`: the starter
+kits do not ship the Inertia Vite plugin, so every first visit would
+report a failure while you develop.
+
+Laravel sets no SSR timeout of its own and inherits its HTTP client's
+30 seconds. Suprnova keeps 5 seconds (`ssr_timeout`): a hung worker would
+otherwise hold every first visit for 30 seconds before the client-rendered
+fallback.
 
 ## Configuration
 

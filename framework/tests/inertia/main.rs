@@ -31,5 +31,6 @@ pub mod redirect_back;
 pub mod root_template;
 pub mod shared_ergonomics;
 pub mod ssr_controls;
+pub mod ssr_gateway;
 pub mod try_serialize;
 pub mod validation_redirect;

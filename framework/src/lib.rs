@@ -276,7 +276,7 @@ pub use error::{
 };
 pub use events::{
     DebouncedListener, ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard,
-    Listener, QueuedListener, Subscriber,
+    Listener, QueuedListener, SsrErrorType, SsrRenderFailed, Subscriber,
 };
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
 #[cfg(feature = "filesystem-azure")]

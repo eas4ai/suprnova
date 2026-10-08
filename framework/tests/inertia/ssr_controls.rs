@@ -82,6 +82,7 @@ async fn inp_an_ssr_exclusion_matches_as_laravel_excludes_paths() {
     let (addr, _seen) = worker().await;
     let config = InertiaConfig::new()
         .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false)
         .ssr_exclude("admin/*")
         .ssr_exclude("/reports/");
 
@@ -100,6 +101,7 @@ async fn inp_disable_ssr_if_decides_per_request_and_can_turn_ssr_on() {
     let (addr, _seen) = worker().await;
     let config = InertiaConfig::new()
         .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false)
         .ssr_disabled();
     assert!(
         !rendered_by_ssr(&config, "/yes").await,
@@ -115,7 +117,9 @@ async fn inp_disable_ssr_if_decides_per_request_and_can_turn_ssr_on() {
 async fn inp_disable_ssr_takes_a_plain_flag_either_way() {
     let _guard = TestContainer::fake();
     let (addr, _seen) = worker().await;
-    let on = InertiaConfig::new().ssr(format!("http://{addr}"));
+    let on = InertiaConfig::new()
+        .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false);
     let off = on.clone().ssr_disabled();
 
     Inertia::disable_ssr(true);
@@ -128,7 +132,9 @@ async fn inp_disable_ssr_takes_a_plain_flag_either_way() {
 async fn inp_without_ssr_excludes_paths_and_full_urls_at_run_time() {
     let _guard = TestContainer::fake();
     let (addr, _seen) = worker().await;
-    let config = InertiaConfig::new().ssr(format!("http://{addr}"));
+    let config = InertiaConfig::new()
+        .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false);
 
     Inertia::without_ssr(["admin/*"]);
     Inertia::without_ssr(["http://localhost/reports*"]);
@@ -142,7 +148,9 @@ async fn inp_without_ssr_excludes_paths_and_full_urls_at_run_time() {
 async fn inp_configure_ssr_request_using_adjusts_the_request_to_the_worker() {
     let _guard = TestContainer::fake();
     let (addr, seen) = worker().await;
-    let config = InertiaConfig::new().ssr(format!("http://{addr}"));
+    let config = InertiaConfig::new()
+        .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false);
 
     Inertia::configure_ssr_request_using(|request| request.header("X-Ssr-Token", "s3cret"));
     assert!(rendered_by_ssr(&config, "/").await);
