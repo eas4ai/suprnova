@@ -6,6 +6,7 @@ mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
 pub mod error_page;
+pub mod indt_red;
 pub mod error_page_placement;
 pub mod exceptions;
 pub mod facade_runtime;
