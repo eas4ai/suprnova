@@ -1092,9 +1092,11 @@ pub struct PartialFilter {
     /// [`Visibility::Standard`] props, and [`Visibility::Optional`] /
     /// [`Visibility::Deferred`] props are excluded outright.
     pub matched: bool,
-    /// Whitelist of prop keys (parsed from `X-Inertia-Partial-Data`).
+    /// Whitelist of prop paths (parsed from `X-Inertia-Partial-Data`).
+    /// `None` when the header is absent or names nothing.
     pub only: Option<Vec<String>>,
-    /// Blacklist of prop keys (parsed from `X-Inertia-Partial-Except`).
+    /// Blacklist of prop paths (parsed from `X-Inertia-Partial-Except`).
+    /// `None` when the header is absent or names nothing.
     pub except: Option<Vec<String>>,
 }
 
@@ -1108,17 +1110,14 @@ impl PartialFilter {
             return Self::default();
         }
 
-        let parse_csv = |raw: &str| -> Vec<String> {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        };
-
         Self {
             matched: true,
-            only: req.header("X-Inertia-Partial-Data").map(parse_csv),
-            except: req.header("X-Inertia-Partial-Except").map(parse_csv),
+            only: req
+                .header("X-Inertia-Partial-Data")
+                .and_then(parse_partial_list),
+            except: req
+                .header("X-Inertia-Partial-Except")
+                .and_then(parse_partial_list),
         }
     }
 
@@ -1315,6 +1314,20 @@ impl PartialFilter {
 
         narrowed
     }
+}
+
+/// Parse a partial-reload header the way Laravel's `PropsResolver::parseHeader`
+/// does: split on `,`, drop the empty segments, and keep every other segment
+/// as it is, spaces included. A header with no entry left counts as absent,
+/// so an empty `X-Inertia-Partial-Data` filters nothing instead of every
+/// prop.
+fn parse_partial_list(raw: &str) -> Option<Vec<String>> {
+    let entries: Vec<String> = raw
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// `Some(rest)` when `entry` names a dotted path *inside* `key` - `key`

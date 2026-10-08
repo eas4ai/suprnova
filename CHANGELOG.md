@@ -365,6 +365,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Laravel's `onVersionChange` does. It still answers before the handler
   runs, and a visit by another method still passes through (MW-02, HD-10,
   R04).
+- **Partial reload headers are parsed as Laravel parses them.**
+  `X-Inertia-Partial-Data` and `X-Inertia-Partial-Except` were trimmed
+  entry by entry, and an empty `X-Inertia-Partial-Data` was a list that
+  matched nothing, so the client received no props at all. The lists are
+  now split on `,` with empty segments dropped and nothing trimmed (`a, b`
+  names `a` and ` b`), and a header that names nothing counts as absent:
+  an empty `X-Inertia-Partial-Data` now returns every prop `except`
+  allows, as Laravel's does (HD-03).
 
 ### Fixed
 

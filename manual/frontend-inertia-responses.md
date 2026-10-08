@@ -494,8 +494,13 @@ three request headers:
 | Header | Meaning |
 |---|---|
 | `X-Inertia-Partial-Component` | The component being partial-reloaded - must match the response's component for filtering to apply. |
-| `X-Inertia-Partial-Data` | Whitelist: comma-separated prop keys to include. |
-| `X-Inertia-Partial-Except` | Blacklist: comma-separated prop keys to exclude. Wins over `Partial-Data` on key collision. |
+| `X-Inertia-Partial-Data` | Whitelist: comma-separated prop paths to include. |
+| `X-Inertia-Partial-Except` | Blacklist: comma-separated prop paths to exclude. Applied after `Partial-Data`, so it wins on a path both name. |
+
+Both lists are read as Laravel reads them: split on `,`, empty segments
+dropped, and no trimming, so `a, b` names `a` and ` b`. A header that names
+nothing - empty, or only commas - counts as absent rather than as a list
+that matches no prop.
 
 Filtering reads one thing: the prop's visibility, set by `.always()`,
 `.optional()`, or `.defer()`. A prop with none of those has the default

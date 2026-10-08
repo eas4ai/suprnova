@@ -38,6 +38,12 @@ impl MockReq {
     pub(super) fn inertia(self) -> Self {
         self.header("X-Inertia", "true")
     }
+
+    /// A partial reload of `component`.
+    pub(super) fn partial(self, component: &str) -> Self {
+        self.inertia()
+            .header("X-Inertia-Partial-Component", component)
+    }
 }
 
 impl InertiaRequestExt for MockReq {
