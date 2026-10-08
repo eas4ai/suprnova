@@ -676,6 +676,11 @@ pub mod svelte {
     pub fn head_component() -> &'static str {
         include_str!("files/frontend/svelte/src/components/Head.svelte.tpl")
     }
+    /// `src/components/AccountLinks.svelte`: the signed-in user's name and
+    /// sign-out, or the sign-in and register links, in both layouts.
+    pub fn account_links_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/AccountLinks.svelte.tpl")
+    }
     /// `src/components/FlashToast.svelte`: the toast both layouts show
     /// from `page.flash`.
     pub fn flash_toast_component() -> &'static str {
@@ -903,10 +908,14 @@ pub fn scaffold_frontend(
                     .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
             }
             let title = svelte::title_module(&crate::commands::new::to_title_case(project_name));
-            let svelte_writes: [(std::path::PathBuf, &str); 8] = [
+            let svelte_writes: [(std::path::PathBuf, &str); 9] = [
                 (lib.join("title.ts"), &title),
                 (lib.join("dates.ts"), svelte::dates_module()),
                 (components.join("Head.svelte"), svelte::head_component()),
+                (
+                    components.join("AccountLinks.svelte"),
+                    svelte::account_links_component(),
+                ),
                 (
                     components.join("FlashToast.svelte"),
                     svelte::flash_toast_component(),

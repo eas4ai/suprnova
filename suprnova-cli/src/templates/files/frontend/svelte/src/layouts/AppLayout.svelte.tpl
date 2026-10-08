@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Link } from '@inertiajs/svelte'
   import type { Snippet } from 'svelte'
+  import AccountLinks from '../components/AccountLinks.svelte'
   import FlashToast from '../components/FlashToast.svelte'
   import type { SharedProps } from '../types/inertia-props'
 
@@ -12,15 +13,15 @@
   // A layout is rendered with the page's own props, the props a page set
   // with `setLayoutProps`, and the page as `children`
   // (`packages/svelte/src/components/App.svelte`, `resolveLayout`). So
-  // `root` and `auth` are the props the server shares with every page, and
-  // `heading` is there while the page that set it is shown: a visit to
-  // another page resets the layout props.
+  // `root` is the prop the server shares with every page, and `heading` is
+  // there while the page that set it is shown: a visit to another page
+  // resets the layout props.
   interface Props extends SharedProps {
     heading?: string
     children?: Snippet
   }
 
-  let { root, auth, heading, children }: Props = $props()
+  let { root, heading, children }: Props = $props()
 </script>
 
 <div class="min-h-screen bg-gray-100">
@@ -31,27 +32,7 @@
         <Link href={`${root}/notes`} class="text-gray-700 hover:text-gray-900">Notes</Link>
       </div>
       <div class="flex items-center gap-4 text-sm">
-        {#if auth.user}
-          <span class="text-gray-700">{auth.user.name}</span>
-          <!-- A post, so it renders as a button. `preserveState={false}`
-               starts the page it lands on afresh: a method other than GET
-               keeps the page's state by default, and this page's layout
-               props would follow the visitor out. -->
-          <Link
-            href={`${root}/logout`}
-            method="post"
-            as="button"
-            preserveState={false}
-            class="rounded-md px-3 py-2 font-medium text-gray-500 hover:text-gray-700"
-          >
-            Sign out
-          </Link>
-        {:else}
-          <Link href={`${root}/login`} class="text-indigo-600 hover:text-indigo-500">Sign in</Link>
-          <Link href={`${root}/register`} class="text-indigo-600 hover:text-indigo-500">
-            Register
-          </Link>
-        {/if}
+        <AccountLinks />
       </div>
     </div>
   </nav>

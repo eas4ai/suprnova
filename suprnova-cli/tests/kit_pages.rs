@@ -221,17 +221,26 @@ mod svelte {
     fn kit_svelte_layouts_exist_with_their_chrome() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let frontend = scaffold(&tmp);
+        // Both layouts show the account links: VerifyEmail sits under
+        // `auth/` and is a signed-in page, so the guest frame needs the
+        // signed-in branch as much as the application frame does.
+        let guest = flatten(&read(&frontend, "src/layouts/GuestLayout.svelte"));
+        for part in [
+            "<AccountLinks />",
+            "<FlashToast />",
+            "{@render children?.()}",
+        ] {
+            assert!(
+                guest.contains(part),
+                "GuestLayout.svelte lacks `{part}`:\n{guest}"
+            );
+        }
         let app = flatten(&read(&frontend, "src/layouts/AppLayout.svelte"));
         for part in [
             "<Link href={`${root}/dashboard`}",
             "<Link href={`${root}/notes`}",
-            "<Link href={`${root}/logout`} method=\"post\" as=\"button\"",
+            "<AccountLinks />",
             "<FlashToast />",
-            "preserveState={false}",
-            "{#if auth.user}",
-            "{auth.user.name}",
-            "<Link href={`${root}/login`}",
-            "<Link href={`${root}/register`}",
             "{#if heading}",
             "{@render children?.()}",
         ] {
@@ -240,16 +249,18 @@ mod svelte {
                 "AppLayout.svelte lacks `{part}`:\n{app}"
             );
         }
-        let guest = flatten(&read(&frontend, "src/layouts/GuestLayout.svelte"));
+        let links = flatten(&read(&frontend, "src/components/AccountLinks.svelte"));
         for part in [
+            "{#if user}",
+            "{user.name}",
+            "<Link href={`${root}/logout`} method=\"post\" as=\"button\" preserveState={false}",
+            "{:else}",
             "<Link href={`${root}/login`}",
             "<Link href={`${root}/register`}",
-            "<FlashToast />",
-            "{@render children?.()}",
         ] {
             assert!(
-                guest.contains(part),
-                "GuestLayout.svelte lacks `{part}`:\n{guest}"
+                links.contains(part),
+                "AccountLinks.svelte lacks `{part}`:\n{links}"
             );
         }
     }

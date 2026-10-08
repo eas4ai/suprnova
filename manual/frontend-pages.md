@@ -280,7 +280,7 @@ works at `/` and under a path prefix:
 </Link>
 ```
 
-The sign-out link comes from `layouts/AppLayout.svelte`, and the note link
+The sign-out link comes from `components/AccountLinks.svelte`, and the note link
 comes from `pages/Notes/Index.svelte`. A link with a method other than GET
 keeps the page's state by default, so the sign-out link passes
 `preserveState={false}` to start the page it lands on afresh. The function
@@ -567,15 +567,14 @@ createInertiaApp({
 ```
 
 A layout receives the page's props, the props a page sets with
-`setLayoutProps`, and the page as `children`. Among the page's props are the
-ones the server shares with every page: `root`, and `auth`, whose `user` is
-the signed-in user or `null`:
+`setLayoutProps`, and the page as `children`:
 
 ```svelte
 <!-- frontend/src/layouts/AppLayout.svelte -->
 <script lang="ts">
   import { Link } from '@inertiajs/svelte'
   import type { Snippet } from 'svelte'
+  import AccountLinks from '../components/AccountLinks.svelte'
   import FlashToast from '../components/FlashToast.svelte'
   import type { SharedProps } from '../types/inertia-props'
 
@@ -584,21 +583,13 @@ the signed-in user or `null`:
     children?: Snippet
   }
 
-  let { root, auth, heading, children }: Props = $props()
+  let { root, heading, children }: Props = $props()
 </script>
 
 <nav>
   <Link href={`${root}/dashboard`}>Dashboard</Link>
   <Link href={`${root}/notes`}>Notes</Link>
-  {#if auth.user}
-    <span>{auth.user.name}</span>
-    <Link href={`${root}/logout`} method="post" as="button" preserveState={false}>
-      Sign out
-    </Link>
-  {:else}
-    <Link href={`${root}/login`}>Sign in</Link>
-    <Link href={`${root}/register`}>Register</Link>
-  {/if}
+  <AccountLinks />
 </nav>
 
 <FlashToast />
@@ -607,6 +598,32 @@ the signed-in user or `null`:
   {#if heading}<h1>{heading}</h1>{/if}
   {@render children?.()}
 </main>
+```
+
+Both layouts render `components/AccountLinks.svelte`, which reads `auth`,
+a prop the server shares with every page. When `auth.user` is set, it shows
+the user's name and a sign-out link. When `auth.user` is `null`, it shows
+sign-in and register links. The guest layout needs both branches, because
+`auth/VerifyEmail` is shown to a user who is signed in:
+
+```svelte
+<!-- frontend/src/components/AccountLinks.svelte -->
+<script lang="ts">
+  import { Link, page } from '@inertiajs/svelte'
+
+  const root = $derived(page.props.root)
+  const user = $derived(page.props.auth.user)
+</script>
+
+{#if user}
+  <span>{user.name}</span>
+  <Link href={`${root}/logout`} method="post" as="button" preserveState={false}>
+    Sign out
+  </Link>
+{:else}
+  <Link href={`${root}/login`}>Sign in</Link>
+  <Link href={`${root}/register`}>Register</Link>
+{/if}
 ```
 
 The dashboard sets the heading with `setLayoutProps({ heading: 'Dashboard' })`.

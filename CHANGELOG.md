@@ -22,8 +22,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   reached other pages through anchors that reloaded the document, and set
   no tab title. `layouts/AppLayout.svelte` and `layouts/GuestLayout.svelte`
   now frame the pages through `createInertiaApp`'s `layout` option and stay
-  mounted across visits. The application layout shows the signed-in user
-  from the shared `auth` prop, or sign-in and register links for a visitor.
+  mounted across visits. Both layouts show the signed-in user from the
+  shared `auth` prop, or sign-in and register links for a visitor, through
+  `components/AccountLinks.svelte`.
   Every navigation is a `Link`, and sign-out is a `Link` with
   `method="post"` rendered as a button. The dashboard sets the
   layout's heading with `setLayoutProps`. `@inertiajs/svelte` has no `Head`
