@@ -232,3 +232,40 @@ on_every_engine!(scaffold_notes_on_laravels_users =>
     kit_scaffold_notes_belong_to_laravels_users_sqlite,
     kit_scaffold_notes_belong_to_laravels_users_postgres,
     kit_scaffold_notes_belong_to_laravels_users_mysql);
+
+/// An application's existing notes schema and rows survive the kit migration.
+async fn scaffold_keeps_existing_notes(engine: Engine) {
+    use sea_orm::ConnectionTrait;
+
+    let (db, _) = support::laravel(engine).await;
+    db.conn
+        .execute_unprepared("CREATE TABLE notes (legacy_title VARCHAR(255) NOT NULL)")
+        .await
+        .expect("create the application's notes table");
+    db.conn
+        .execute_unprepared("INSERT INTO notes (legacy_title) VALUES ('Keep this note')")
+        .await
+        .expect("insert the application's note");
+    crate::scaffold::migrate(&db.conn)
+        .await
+        .expect("migrate without replacing the existing notes table");
+    let rows = db
+        .conn
+        .query_all_raw(sea_orm::Statement::from_string(
+            db.conn.get_database_backend(),
+            "SELECT legacy_title FROM notes".to_owned(),
+        ))
+        .await
+        .expect("the application's column survives");
+    assert_eq!(rows.len(), 1, "{engine:?}: the application's row survives");
+    assert_eq!(
+        rows[0].try_get::<String>("", "legacy_title").unwrap(),
+        "Keep this note",
+        "{engine:?}"
+    );
+}
+
+on_every_engine!(scaffold_keeps_existing_notes =>
+    kit_scaffold_existing_notes_survive_sqlite,
+    kit_scaffold_existing_notes_survive_postgres,
+    kit_scaffold_existing_notes_survive_mysql);

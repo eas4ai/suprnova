@@ -551,11 +551,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   side, so the extension showed nothing. `InertiaConfig::devtools` takes a
   `DevToolsConfig` with Laravel's settings, read from the same
   `INERTIA_DEVTOOLS_ENABLED`, `_TTL_HOURS`, `_PRUNE_INTERVAL_SECONDS`,
-  `_LIMIT` and `_GATE` variables. Unset, DevTools records only when
-  `APP_ENV` is set and names the `local` environment, as a new project's
-  `.env` does; an unset `APP_ENV`, which Laravel reads as production,
-  records nothing, so a test run records nothing. `enabled(true)` and
-  `enabled(false)` decide outright. `Inertia::install` and
+  `_LIMIT` and `_GATE` variables. The application opts in with
+  `.devtools(DevToolsConfig::new())`, as a new project's bootstrap does.
+  With `enabled` unset, it records only when `APP_ENV` is set and names
+  `local`; an unset `APP_ENV`, which Laravel reads as production, records
+  nothing. `enabled(true)` and `enabled(false)` decide outright. `Inertia::install` and
   `Inertia::middleware` then put `DevToolsMiddleware` outermost in the
   Inertia stack, and it skips the `except` paths (`_inertia/devtools*` and
   `_suprnova/*` by default). A failure while recording drops the entry and
@@ -711,6 +711,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Inertia DevTools recording is opt-in.** `APP_ENV=local` used to turn
+  recording and the entries endpoints on without configuration. An
+  application now needs `.devtools(DevToolsConfig::new())`; without the
+  call, upgrading the framework records nothing and serves no entries.
+  The scaffold and dogfood application opt in. A configured instance
+  keeps the same environment and `enabled(..)` rules (DT-01).
+- **The starter keeps an existing notes table.** The notes migration now
+  checks for the table before creating it, like the users migration, so
+  a project using an existing Laravel database keeps its own notes schema
+  and rows (K21).
 
 - **The built-in image driver's PNG, BMP and WebP codecs come from the
   eas4ai forks** of `oxideav-png`, `oxideav-bmp` and `oxideav-webp` while

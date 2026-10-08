@@ -221,7 +221,7 @@ async fn inp_install_off_the_global_list_registers_the_named_stack() {
     // nothing of Inertia's.
     let before = suprnova::middleware::global_middleware_count();
     // DevTools off: a test of this binary may set `APP_ENV=local`, where
-    // DevTools is on by default and answers its endpoints from a global
+    // An opted-in DevTools answers its endpoints from a global
     // middleware this count is not about.
     Inertia::install(
         &InertiaConfig::new()

@@ -7,9 +7,10 @@ use std::path::PathBuf;
 /// set on [`InertiaConfig::devtools`](crate::InertiaConfig::devtools).
 ///
 /// Recording writes every request's headers, bodies and props to disk and
-/// serves them to whoever the endpoints admit, which is why it is off
-/// unless `APP_ENV` names the `local` environment or it is switched on,
-/// and why sensitive
+/// serves them to whoever the endpoints admit. The application must opt
+/// in with [`InertiaConfig::devtools`](crate::InertiaConfig::devtools);
+/// then recording requires `APP_ENV=local` unless explicitly enabled.
+/// That is also why sensitive
 /// keys and headers are redacted before an entry is stored. Each field
 /// defaults to Laravel's value, read from the same environment variables
 /// where Laravel reads one.

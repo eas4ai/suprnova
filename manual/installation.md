@@ -141,9 +141,14 @@ my-app/
 │   ├── commands/       # `#[command]`-annotated handlers
 │   ├── config/         # typed config sections (database, mail)
 │   ├── controllers/    # home, auth, dashboard
+│   │   ├── notes.rs    # notes list, detail and creation
+│   │   └── profile.rs  # display-name updates
 │   ├── middleware/     # logging, authenticate
 │   ├── migrations/     # SeaORM migrators (users, sessions, etc.)
+│   │   └── m20240101_000005_create_notes_table.rs
+│   ├── props/          # typed flash data
 │   └── models/         # `#[suprnova::model]` structs (user)
+│       └── note.rs     # notes owned by a user
 ├── templates/
 │   └── app.html        # the Inertia root document (`AppDocument` in bootstrap.rs)
 ├── frontend/
@@ -153,8 +158,11 @@ my-app/
 │   └── src/
 │       ├── main.{tsx,ts}
 │       ├── app.css
+│       ├── layouts/    # persistent application and guest layouts
+│       ├── components/ # shared navigation, titles and flash toasts
 │       ├── pages/
 │       │   ├── Home, Dashboard
+│       │   ├── Notes/  # Index and Show
 │       │   └── auth/{Login,Register}
 │       └── types/
 │           └── inertia-props.ts
