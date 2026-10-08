@@ -211,10 +211,13 @@ records their routes and `Inertia::install` registers a global
 
 Each entry is one JSON file, `<storage_path>/<id>.json`, written to a
 temporary file and renamed into place. `_meta.json` lists every entry's
-`__meta`, newest first, and is rewritten under a file lock, so several
-processes can record into one directory; when it is missing or unreadable
-it is rebuilt from the entry files. A `.gitignore` in the directory keeps
-it out of your repository.
+`__meta`, newest first. Each rewrite holds a lock on `_meta.lock`, so
+several processes can record into one directory, and renames a complete
+new list over `_meta.json`, so an interrupted rewrite leaves the previous
+list in place. When `_meta.json` is missing, empty or not a JSON list, it
+is rebuilt from the entry files before it is read or rewritten, so the
+next recorded request, prune and tab limit still see every stored entry.
+A `.gitignore` in the directory keeps it out of your repository.
 
 After a request, entries older than `ttl_hours` are pruned when the last
 prune, noted in `_last_prune`, is at least `prune_interval_secs` old. A
@@ -225,9 +228,21 @@ Before an entry is written, the value of every key named by
 and response bodies, in prop values, and in the page object. So are the
 query parameters of the same names in the entry's URLs, and the values of
 the `redact_headers` headers. Names are compared without case, so
-`Password` is caught by `password`. A header value or multipart field that
-is not text is stored as `[UNSERIALIZABLE]`, and the rest of the entry is
-kept.
+`Password` is caught by `password`. A name is also caught by any of its
+parts split on `[`, `]` and `.`: the multipart field `user[password]`, the
+prop path `auth.password` and the query parameter `data[0][token]` are all
+redacted, while a longer word such as `passwords` is kept.
+
+A URL is any string in the entry that holds a `?` and starts with a
+scheme (`https:`), `/` or `?`, such as a `redirect_to` form field or a
+prop. A string under a `url` or `redirectLocation` key, and the value of
+a `Location`, `X-Inertia-Location`, `Referer` or `Content-Location`
+header, is a URL whatever it starts with, and so are the `<...>` targets
+of a `Link` header and the target of a `Refresh` header. So a redirect to
+`/reset?token=abc` is stored with `location: /reset?token=%5BREDACTED%5D`,
+and a header that is not a URL is stored as sent. A header value or
+multipart field that is not text is stored as `[UNSERIALIZABLE]`, and the
+rest of the entry is kept.
 
 ## Recording never breaks a response
 
@@ -256,6 +271,14 @@ either way.
   a body first only when its length is declared and at most 256,000
   bytes, and records `too-large` or `streamed` otherwise. Multipart field
   names are kept as sent, not nested.
+- **Redaction matches key parts and the URLs in headers.** Laravel's
+  `RedactsSensitiveData` matches a key whole and redacts no URL in a
+  header. Suprnova also redacts a key when any bracketed or dotted part
+  of it names a redaction key, such as `user[password]` or
+  `auth.password`, and redacts the query of every URL in headers and
+  bodies, `Location` and `Referer` included. The extension's store is a
+  file on disk, and a reset token in a `Location` header is as sensitive
+  as one in the body.
 - **The gate takes a resource.** Suprnova's gate is typed by user and
   resource, so the ability is defined for `(User, ())`, and a guest is
   `()` where Laravel passes `null`.

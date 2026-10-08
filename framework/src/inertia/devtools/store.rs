@@ -4,18 +4,21 @@
 //! One JSON file per entry, `<id>.json`, written to a temporary file and
 //! renamed into place so a reader never sees half an entry. Beside them
 //! `_meta.json` holds every entry's `__meta`, newest first, so the list
-//! endpoint reads one file instead of all of them; it is rewritten under an
-//! exclusive file lock, since every request of every process writes it,
-//! and rebuilt from the entry files when it is missing or unreadable.
-//! `_last_prune` holds the second of the last prune, and a `.gitignore`
-//! keeps the directory out of the application's repository.
+//! endpoint reads one file instead of all of them. Every request of every
+//! process rewrites it, so a rewrite holds an exclusive lock on
+//! `_meta.lock` and renames a new file over the index, which an
+//! interruption therefore never leaves empty. An index that is missing,
+//! empty or unreadable anyway is rebuilt from the entry files, on a read
+//! and before a rewrite alike. `_last_prune` holds the second of the last
+//! prune, and a `.gitignore` keeps the directory out of the application's
+//! repository.
 //!
 //! Every function here does blocking file I/O; the middleware calls them
 //! on the blocking pool.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -25,6 +28,17 @@ use super::ulid::is_ulid;
 
 /// The index of every entry's metadata.
 const INDEX_FILE: &str = "_meta.json";
+
+/// The file whose exclusive lock serializes rewrites of the index. A
+/// rewrite renames a new file over the index, so a lock on the index
+/// itself would guard a file no longer in place: a writer that opened the
+/// index after the rename would lock the new file while another still
+/// held the old one, and one of their changes would be lost.
+const LOCK_FILE: &str = "_meta.lock";
+
+/// The file a rewrite of the index is written to before it is renamed
+/// over the index. One writer at a time holds the lock, so one name does.
+const INDEX_TEMP_FILE: &str = ".meta.json.tmp";
 
 /// The second the store was last pruned.
 const LAST_PRUNE_FILE: &str = "_last_prune";
@@ -201,28 +215,32 @@ impl EntriesRepository {
     }
 
     /// The index as stored, or rebuilt from the entry files when it is
-    /// missing or not a JSON list.
+    /// missing, empty or not a JSON list. A rewrite renames a whole new
+    /// index into place, so a read sees the list before it or after it and
+    /// takes no lock.
     fn read_index(&self) -> Vec<Value> {
-        let index_path = self.path.join(INDEX_FILE);
-        let read = File::open(&index_path).and_then(|mut file| {
-            file.lock_shared()?;
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)?;
-            Ok(contents)
-        });
-        match read
-            .ok()
-            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
-        {
-            Some(Value::Array(index)) => index.into_iter().map(normalize_meta).collect(),
-            _ => {
-                let rebuilt = self.meta_from_files();
-                if !rebuilt.is_empty() {
-                    let snapshot = rebuilt.clone();
-                    let _ = self.mutate_index(move |index| *index = snapshot);
-                }
-                rebuilt
-            }
+        if let Some(index) = self.stored_index() {
+            return index.into_iter().map(normalize_meta).collect();
+        }
+        let rebuilt = self.meta_from_files();
+        if !rebuilt.is_empty() {
+            // Store the rebuilt index for the next read. The rewrite does
+            // its own rebuild under the lock, so an entry another process
+            // saved meanwhile is kept. A failure here costs only that: the
+            // list is answered from the files, and the next save rebuilds
+            // the index the same way.
+            let _ = self.mutate_index(|_| {});
+        }
+        rebuilt
+    }
+
+    /// The list in the index file, `None` when the file is missing, empty
+    /// or not a JSON list.
+    fn stored_index(&self) -> Option<Vec<Value>> {
+        let contents = fs::read(self.path.join(INDEX_FILE)).ok()?;
+        match serde_json::from_slice::<Value>(&contents).ok()? {
+            Value::Array(index) => Some(index),
+            _ => None,
         }
     }
 
@@ -248,36 +266,30 @@ impl EntriesRepository {
         index
     }
 
-    /// Apply `change` to the index under an exclusive lock on the index
-    /// file, then write it back newest first. An index that does not read
-    /// as a JSON list is rebuilt from the entry files first, so a rewrite
-    /// never drops the metadata of the entries already stored.
+    /// Apply `change` to the index under an exclusive lock on
+    /// [`LOCK_FILE`], then replace the index, newest first. An index that
+    /// is missing, empty or not a JSON list is rebuilt from the entry files
+    /// first, so a rewrite never drops the metadata of the entries already
+    /// stored. The new list is written to [`INDEX_TEMP_FILE`] and renamed
+    /// over the index, so an interrupted rewrite leaves the old index in
+    /// place. The lock is released when its file closes, on every return.
     fn mutate_index(&self, change: impl FnOnce(&mut Vec<Value>)) -> io::Result<()> {
         self.ensure_directory()?;
-        let mut file = OpenOptions::new()
-            .read(true)
+        let lock = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.path.join(INDEX_FILE))?;
-        file.lock()?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let mut index = if contents.trim().is_empty() {
-            Vec::new()
-        } else {
-            match serde_json::from_str::<Value>(&contents) {
-                Ok(Value::Array(index)) => index,
-                _ => self.meta_from_files(),
-            }
-        };
+            .open(self.path.join(LOCK_FILE))?;
+        lock.lock()?;
+        let mut index = self
+            .stored_index()
+            .unwrap_or_else(|| self.meta_from_files());
         change(&mut index);
         sort_newest_first(&mut index);
         let encoded = serde_json::to_vec(&index).map_err(io::Error::other)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.set_len(0)?;
-        file.write_all(&encoded)?;
-        file.flush()
+        let temp = self.path.join(INDEX_TEMP_FILE);
+        fs::write(&temp, &encoded)?;
+        fs::rename(&temp, self.path.join(INDEX_FILE))
     }
 
     /// Delete the files of `ids` and drop them from the index in one
@@ -442,6 +454,125 @@ mod tests {
         let all = repo.all();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0]["id"], id.as_str());
+    }
+
+    /// The ids `repo` lists, newest first.
+    fn listed(repo: &EntriesRepository) -> Vec<String> {
+        repo.all()
+            .iter()
+            .map(|meta| meta["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The two ways an index is lost: its file deleted, or cut to zero
+    /// bytes, as an interrupted in-place rewrite leaves it.
+    fn lose_index(dir: &Path, delete: bool) {
+        let index = dir.join(INDEX_FILE);
+        if delete {
+            fs::remove_file(index).unwrap();
+        } else {
+            fs::write(index, "").unwrap();
+        }
+    }
+
+    #[test]
+    fn indt_a_save_after_the_index_is_deleted_keeps_every_entry_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = EntriesRepository::new(dir.path());
+        let first = new_id(8_000);
+        repo.save(&first, &entry(&first, None, 8.0)).unwrap();
+        lose_index(dir.path(), true);
+        let second = new_id(9_000);
+        repo.save(&second, &entry(&second, None, 9.0)).unwrap();
+        assert_eq!(listed(&repo), vec![second, first]);
+    }
+
+    #[test]
+    fn indt_a_save_after_the_index_is_emptied_keeps_every_entry_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = EntriesRepository::new(dir.path());
+        let first = new_id(10_000);
+        repo.save(&first, &entry(&first, None, 10.0)).unwrap();
+        lose_index(dir.path(), false);
+        let second = new_id(11_000);
+        repo.save(&second, &entry(&second, None, 11.0)).unwrap();
+        assert_eq!(listed(&repo), vec![second, first]);
+    }
+
+    #[test]
+    fn indt_prune_and_the_tab_limit_see_every_entry_after_a_lost_index() {
+        for delete in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = EntriesRepository::new(dir.path());
+            let now: i64 = 1_800_000_000;
+            let old = new_id(12_000);
+            repo.save(&old, &entry(&old, Some("tab"), (now - 25 * 3600) as f64))
+                .unwrap();
+            let recent: Vec<String> = (0..3).map(|i| new_id(13_000 + i)).collect();
+            for id in &recent {
+                repo.save(id, &entry(id, Some("tab"), (now - 60) as f64))
+                    .unwrap();
+            }
+            lose_index(dir.path(), delete);
+            let last = new_id(14_000);
+            repo.save(&last, &entry(&last, Some("tab"), now as f64))
+                .unwrap();
+
+            repo.prune(now as f64 - 24.0 * 3600.0).unwrap();
+            assert!(repo.get(&old).is_none(), "25 hours old: pruned");
+            repo.enforce_tab_limit("tab", 2).unwrap();
+            assert!(repo.get(&recent[0]).is_none(), "past the tab limit");
+            assert!(repo.get(&recent[1]).is_none(), "past the tab limit");
+            assert_eq!(listed(&repo), vec![last, recent[2].clone()]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indt_the_index_is_replaced_by_a_rename_never_rewritten_in_place() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = EntriesRepository::new(dir.path());
+        let first = new_id(15_000);
+        repo.save(&first, &entry(&first, None, 15.0)).unwrap();
+        let index = dir.path().join(INDEX_FILE);
+        let before = fs::metadata(&index).unwrap().ino();
+        let second = new_id(16_000);
+        repo.save(&second, &entry(&second, None, 16.0)).unwrap();
+        assert_ne!(
+            fs::metadata(&index).unwrap().ino(),
+            before,
+            "a new file is renamed over the index; truncating it in place \
+             leaves an empty index if the write is interrupted"
+        );
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(listed(&repo), vec![second, first]);
+    }
+
+    #[test]
+    fn indt_concurrent_saves_keep_every_index_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = (0..32).map(|i| new_id(17_000 + i)).collect();
+        std::thread::scope(|scope| {
+            for chunk in ids.chunks(4) {
+                let repo = EntriesRepository::new(dir.path());
+                scope.spawn(move || {
+                    for id in chunk {
+                        repo.save(id, &entry(id, None, 17.0)).unwrap();
+                    }
+                });
+            }
+        });
+        let mut expected = ids.clone();
+        expected.reverse();
+        assert_eq!(listed(&EntriesRepository::new(dir.path())), expected);
     }
 
     #[test]

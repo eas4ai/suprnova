@@ -6,7 +6,10 @@ use chrono::{Duration, TimeZone, Utc};
 use serde_json::{Value, json};
 use suprnova::http::text;
 use suprnova::testing::TestClock;
-use suprnova::{HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Request, Router};
+use suprnova::{
+    HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Prop, Redirect, Request, Response,
+    Router,
+};
 
 use super::{client, devtools, entry_ids, entry_of, inertia, raw_send, read_entry, read_index};
 use crate::protocol_harness::serve;
@@ -27,8 +30,38 @@ fn router() -> Router {
                 .await
                 .map_err(HttpResponse::from)
         })
+        .get("/flat", |req: Request| async move {
+            InertiaResponse::new("Flat")
+                .prop(
+                    "auth.password",
+                    Prop::eager(json!("prop-password-value")).always(),
+                )
+                .resolve(&req)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .post("/forgot", |_req: Request| async {
+            let response: Response = Redirect::to("/reset?token=abc").into();
+            response
+        })
+        .get("/billing", |_req: Request| async {
+            Ok(Inertia::location("/reset?token=abc"))
+        })
         .get("/text", |_req: Request| async { text("ok") })
         .into()
+}
+
+/// A `multipart/form-data` body with the boundary `XYZ` holding the text
+/// `fields`.
+fn multipart(fields: &[(&str, &str)]) -> Vec<u8> {
+    let mut body = String::new();
+    for (name, value) in fields {
+        body.push_str(&format!(
+            "--XYZ\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+    }
+    body.push_str("--XYZ--\r\n");
+    body.into_bytes()
 }
 
 #[tokio::test]
@@ -131,6 +164,31 @@ async fn indt_a_tab_keeps_its_newest_100_entries() {
 }
 
 #[tokio::test]
+async fn indt_a_request_after_the_index_is_lost_keeps_every_entry_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+    let id_of = |response: &suprnova::testing::TestResponse| {
+        response
+            .header("x-inertia-devtools-id")
+            .unwrap()
+            .to_string()
+    };
+    let first = id_of(&client.get("/text").send().await);
+    std::fs::remove_file(dir.path().join("_meta.json")).unwrap();
+    let second = id_of(&client.get("/text").send().await);
+    std::fs::write(dir.path().join("_meta.json"), "").unwrap();
+    let third = id_of(&client.get("/text").send().await);
+
+    let listed: Vec<String> = read_index(dir.path())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|meta| meta["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(listed, vec![third, second, first]);
+}
+
+#[tokio::test]
 async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storage() {
     let dir = tempfile::tempdir().unwrap();
     let client = client(router(), devtools(dir.path()));
@@ -187,6 +245,140 @@ async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storag
         "prop-token-value",
         "the client still gets it"
     );
+}
+
+#[tokio::test]
+async fn indt_a_flattened_form_field_naming_a_redaction_key_is_redacted_before_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    let reply = raw_send(
+        addr,
+        "POST",
+        "/login",
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"multipart/form-data; boundary=XYZ"),
+        ],
+        multipart(&[
+            ("user[password]", "hunter2"),
+            ("filter[secret]", "s3cret"),
+            ("data[0][token]", "t0ken"),
+            ("user[name]", "Ada"),
+            ("passwords", "a longer word"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200);
+    let id = &reply.headers["x-inertia-devtools-id"];
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    for secret in ["hunter2", "s3cret", "t0ken"] {
+        assert!(!raw.contains(secret), "{secret} reached the store: {raw}");
+    }
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        entry["http"]["requestBody"]["value"],
+        json!({
+            "user[password]": "[REDACTED]",
+            "filter[secret]": "[REDACTED]",
+            "data[0][token]": "[REDACTED]",
+            "user[name]": "Ada",
+            "passwords": "a longer word",
+        })
+    );
+}
+
+#[tokio::test]
+async fn indt_a_dotted_prop_path_naming_a_redaction_key_is_redacted_before_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = client(router(), devtools(dir.path()))
+        .get("/flat")
+        .inertia()
+        .send()
+        .await;
+    let id = page.header("x-inertia-devtools-id").unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(
+        !raw.contains("prop-password-value"),
+        "the prop value reached the store: {raw}"
+    );
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(entry["propValues"]["auth.password"], "[REDACTED]");
+    assert_eq!(
+        page.json()["props"]["auth"]["password"],
+        "prop-password-value",
+        "the client still gets it"
+    );
+}
+
+#[tokio::test]
+async fn indt_url_query_values_in_headers_and_bodies_are_redacted_before_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+
+    let redirect = client
+        .post("/forgot")
+        .inertia()
+        .header("Referer", "http://localhost/forgot?token=abc&page=2")
+        .json(&json!({"redirect_to": "/reset?token=abc&page=2", "note": "see the docs?"}))
+        .send()
+        .await;
+    assert_eq!(redirect.status(), 302);
+    assert_eq!(
+        redirect.header("location"),
+        Some("/reset?token=abc"),
+        "the client still gets it"
+    );
+    let id = redirect.header("x-inertia-devtools-id").unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(
+        !raw.contains("token=abc"),
+        "a token reached the store: {raw}"
+    );
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        entry["http"]["responseHeaders"]["location"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+    assert_eq!(
+        entry["http"]["requestHeaders"]["referer"],
+        "http://localhost/forgot?token=%5BREDACTED%5D&page=2"
+    );
+    assert_eq!(
+        entry["http"]["requestHeaders"]["accept"], "text/html, application/xhtml+xml",
+        "a header that is not a URL is untouched"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["redirect_to"],
+        "/reset?token=%5BREDACTED%5D&page=2"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["note"],
+        "see the docs?"
+    );
+    assert_eq!(
+        entry["__meta"]["redirectLocation"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+
+    let away = client.get("/billing").inertia().send().await;
+    assert_eq!(away.status(), 409);
+    let id = away.header("x-inertia-devtools-id").unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(
+        !raw.contains("token=abc"),
+        "a token reached the store: {raw}"
+    );
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        entry["http"]["responseHeaders"]["x-inertia-location"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+    let index = std::fs::read_to_string(dir.path().join("_meta.json")).unwrap();
+    assert!(!index.contains("token=abc"), "{index}");
 }
 
 #[tokio::test]

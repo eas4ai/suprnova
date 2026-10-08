@@ -1323,6 +1323,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   uses, and keeps the 5 second whole-call timeout over headers and body,
   the 8 MiB response cap and the refusal of an oversized `Content-Length`
   (SS-14).
+- **DevTools redacts a flattened key by its parts.** A multipart field
+  keeps its flat name, so `user[password]=hunter2` was stored under that
+  name, and a dotted prop path such as `auth.password` kept its own
+  `propValues` leaf beside the nested page value. Redaction compared the
+  whole name with each key, so both values reached the entry file as sent.
+  A key is now sensitive when the whole name, or any part of it split on
+  `[`, `]` and `.`, names a redaction key, at any depth of the entry and
+  in query parameter names alike; a longer word such as `passwords` is
+  still kept (DT-07, DT-08).
+- **DevTools redacts the URLs in headers and bodies.** Only a string
+  under a `url` or `redirectLocation` key had its query redacted, so a
+  response's `Location: /reset?token=abc` and `X-Inertia-Location`, a
+  request's `Referer`, and a `redirect_to` field carrying `?token=`
+  reached the entry file as sent. The query of every string that is a URL
+  (it holds a `?` and starts with a scheme, `/` or `?`) is now redacted
+  wherever the entry holds it. In both header bags so is the whole value
+  of `Location`, `X-Inertia-Location`, `Referer` and `Content-Location`,
+  each `<...>` target of a `Link` and the target of a `Refresh`; a header
+  that is not a URL is stored as sent (DT-07, DT-08).
+- **A lost DevTools index no longer drops the entries it listed.** When
+  `_meta.json` was missing or empty, the next recorded request started a
+  new index holding only its own entry, so the older entry files left the
+  list and escaped the 24-hour prune and the per-tab limit for good. An
+  in-place rewrite interrupted between truncating the file and writing it
+  left exactly such an empty index. The index is now rebuilt from the
+  entry files whenever it is missing, empty or not a JSON list, before a
+  rewrite as well as a read, and each rewrite writes a new file and
+  renames it over `_meta.json` under a lock on `_meta.lock`, so an
+  interruption leaves the previous index in place (DT-07, DT-08).
 
 ## 3.2.1 - 2026-10-05
 
