@@ -50,9 +50,14 @@ pub struct Paginator<T> {
     /// Computed by fetching `per_page + 1` rows and checking for the
     /// overflow.
     pub has_more: bool,
-    /// Optional base URL: the URL of a page is this path and the
-    /// parameter `page`.
+    /// Optional base URL: the URL of a page is this path and the page
+    /// parameter.
     pub path: Option<String>,
+    /// Query-string parameter name of the page, `None` for `"page"`. Not
+    /// serialized by itself; the page URLs and the Inertia scroll
+    /// metadata's `pageName` use it, as Laravel's `Paginator::getPageName`
+    /// does, so a page with two listings can page each one apart.
+    pub page_name: Option<String>,
 }
 
 impl<T: Serialize> Serialize for Paginator<T> {
@@ -84,6 +89,7 @@ impl<T> Paginator<T> {
             per_page,
             has_more,
             path: None,
+            page_name: None,
         }
     }
 
@@ -94,10 +100,27 @@ impl<T> Paginator<T> {
         self
     }
 
-    /// The URL of a page: the `path` and the parameter `page`. A page
-    /// under 1 is page 1, as it is in Laravel's `url`.
+    /// Set the query-string parameter name of the page (`"page"` by
+    /// default). Returns `self` for builder-style chaining.
+    pub fn with_page_name(mut self, name: impl Into<String>) -> Self {
+        self.page_name = Some(name.into());
+        self
+    }
+
+    /// The query-string parameter name of the page: the one
+    /// [`Self::with_page_name`] set, or `"page"`.
+    pub fn page_name(&self) -> &str {
+        self.page_name.as_deref().unwrap_or("page")
+    }
+
+    /// The URL of a page: the `path` and the page parameter. A page under
+    /// 1 is page 1, as it is in Laravel's `url`.
     pub fn url_for_page(&self, page: u64) -> String {
-        crate::pagination::build_query_url(self.path.as_deref(), "page", &page.max(1).to_string())
+        crate::pagination::build_query_url(
+            self.path.as_deref(),
+            self.page_name(),
+            &page.max(1).to_string(),
+        )
     }
 
     /// The URL of the page behind the current one, and `None` when

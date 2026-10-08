@@ -61,7 +61,7 @@ impl<T> IntoInertiaScroll<T> for LengthAwarePaginator<T> {
 /// render a "next" link.
 impl<T> ProvidesScrollMetadata for Paginator<T> {
     fn page_name(&self) -> String {
-        "page".to_string()
+        Paginator::page_name(self).to_string()
     }
 
     fn previous_page(&self) -> Option<Value> {
@@ -93,7 +93,9 @@ impl<T> IntoInertiaScroll<T> for Paginator<T> {
 }
 
 // The cursor parameter the client sends back, the one `with_cursor_name`
-// set and the paginator's links use.
+// set and the paginator's links use. The current page is Laravel's
+// `ScrollMetadata::fromPaginator`: `1` on the first page, else the cursor
+// the page was fetched with, else the request's cursor, else `1`.
 impl<T> ProvidesScrollMetadata for CursorPaginator<T> {
     fn page_name(&self) -> String {
         self.cursor_name.as_deref().unwrap_or("cursor").to_string()
@@ -108,7 +110,13 @@ impl<T> ProvidesScrollMetadata for CursorPaginator<T> {
     }
 
     fn current_page(&self) -> Option<Value> {
-        None
+        if self.on_first_page() {
+            return Some(Value::from(1));
+        }
+        let current = self.current_cursor.clone().or_else(|| {
+            crate::context::Context::query_param(&self.page_name()).filter(|c| !c.is_empty())
+        });
+        Some(current.map_or_else(|| Value::from(1), Value::String))
     }
 }
 
@@ -202,18 +210,36 @@ mod tests {
     }
 
     #[test]
+    fn inp_cursor_paginator_first_page_is_page_one() {
+        let paginator = CursorPaginator::new(vec![1], 1, Some("next".to_string()), None);
+        assert_eq!(
+            paginator.scroll_metadata().current_page,
+            Some(Value::from(1))
+        );
+    }
+
+    #[test]
+    fn inp_simple_paginator_page_name_reaches_its_urls_and_metadata() {
+        let paginator = Paginator::new(vec![1], 2, 1, true).with_page_name("p");
+        assert_eq!(paginator.scroll_metadata().page_name, "p");
+        assert_eq!(paginator.url_for_page(3), "?p=3");
+    }
+
+    #[test]
     fn cursor_paginator_provides_scroll_metadata_matches_into_inertia_scroll() {
         let paginator = CursorPaginator::new(
             vec![1, 2],
             2,
             Some("next-token".to_string()),
             Some("prev-token".to_string()),
-        );
+        )
+        .with_current_cursor("current-token");
         let via_trait = paginator.scroll_metadata();
         assert_eq!(via_trait.page_name, "cursor");
         assert_eq!(via_trait.next_page, Some(Value::from("next-token")));
         assert_eq!(via_trait.previous_page, Some(Value::from("prev-token")));
-        assert_eq!(via_trait.current_page, None);
+        // The cursor the page was fetched with (PAR-052).
+        assert_eq!(via_trait.current_page, Some(Value::from("current-token")));
 
         let (via_conversion, data) = paginator.into_inertia_scroll();
         assert_eq!(via_conversion.page_name, "cursor");
@@ -222,7 +248,10 @@ mod tests {
             via_conversion.previous_page,
             Some(Value::from("prev-token"))
         );
-        assert_eq!(via_conversion.current_page, None);
+        assert_eq!(
+            via_conversion.current_page,
+            Some(Value::from("current-token"))
+        );
         assert_eq!(data, vec![1, 2]);
     }
 }

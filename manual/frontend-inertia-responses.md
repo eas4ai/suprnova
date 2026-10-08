@@ -182,7 +182,7 @@ pub async fn show(req: Request) -> Response {
 | `.defer(k, ‖)` / `.defer_with(...)` | Initial-visit-skipped; follow-up XHR triggers resolution | `Inertia::defer(…)` |
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine with existing client state on partial reloads | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Client caches across navigations | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
+| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.scroll_lazy` / `.scroll_lazy_with` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
 | `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
@@ -252,9 +252,9 @@ The flags fall into five groups:
 |---|---|---|
 | Visibility | `.always()`, `.optional()`, `.defer()` | Mutually exclusive; the last call wins |
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
-| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
-| Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
-| Scroll | `.scroll(metadata)`, `.scroll_wrap(key)` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata; `.scroll_wrap` read only when `.scroll` is set |
+| Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.append_at(paths, match_on)`, `.prepend_at(paths, match_on)`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
+| Client cache | `.once()`, `.once_with(options)`, `.as_key(key)`, `.until(moment or span)`, `.fresh(bool)` | Whether the client keeps the value across navigations - see [Once props](#once-props) |
+| Scroll | `.scroll(metadata)`, `.scroll_wrap(key)`, `.scroll_at_root()` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata under the wrapper (`data` by default); `.scroll_wrap` and `.scroll_at_root` read only when `.scroll` is set |
 
 Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
 `Prop::from_resolver(resolver)` for a resolver you built yourself, and
@@ -276,11 +276,11 @@ Two rules are worth knowing before you compose:
     value and does not send its merge instruction, so the client replaces
     rather than appends.
   - `scrollProps` has one extra condition on top of the lists: a
-    `.scroll().defer()` prop announces its merge instruction on a
-    non-partial visit but ships no cursor there, because nothing is on
-    screen yet for a cursor to describe. Every matched partial reload
-    gets the cursor, whether or not that request also resolves the
-    value.
+    `.scroll().defer()` prop announces its merge instruction at the bare
+    key on a non-partial visit but ships no cursor there, because nothing
+    is on screen yet for a cursor to describe. Every matched partial
+    reload gets the cursor and the instruction under the wrapper, whether
+    or not that request also resolves the value.
   - `deferredProps` is the one block the lists never govern. It is
     dropped whole on any matched partial reload, no matter what the
     lists say - Laravel's `resolveDeferredProps` returns `[]` the
@@ -298,6 +298,56 @@ and `.prepend()` on a scroll prop are redundant and not read.
 `.deep_merge()` is the exception: it routes the prop into
 `deepMergeProps` instead of `mergeProps`, the same way Laravel's
 `ScrollProp` does.
+
+### Once props
+
+A once prop is resolved the first time a page needs it and then kept by
+the client across navigations: on later visits the client lists its key
+in `X-Inertia-Except-Once-Props` and the server skips the resolver. The
+options are Laravel's:
+
+```rust
+use suprnova::{InertiaResponse, OnceOptions, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Billing/Index")
+    // Inertia::once(fn () => ...)->as('plans')->until(3600)
+    .once_with("planCatalog", OnceOptions::new().as_key("plans").until(3600), || async {
+        Ok::<_, suprnova::FrameworkError>(load_plans().await?)
+    })
+    // The same options on a composed prop.
+    .prop(
+        "rates",
+        Prop::lazy(|| async { json!({ "usd": 1 }) })
+            .defer()
+            .once()
+            .until(suprnova::chrono::Duration::minutes(5))
+            .fresh(false),
+    )
+```
+
+| Option | Laravel | Effect |
+|---|---|---|
+| `.as_key(key)` | `as($key)` | The cache key the client dedupes on, the prop's name by default. A string, or an enum whose `Display` names the key |
+| `.until(span or moment)` | `until($delay)` | When the client drops its copy. A whole number of seconds, a `std::time::Duration` or a `chrono::Duration` counts from the render; a `DateTime<Utc>` is that moment |
+| `.fresh(bool)` | `fresh($value)` | `true` resolves even when the client claims a copy; `false` honours the claim again |
+| `OnceOptions::once(bool)` | `once($value)` | `false` turns the flag off, leaving an ordinary prop |
+
+`Prop::once_with(options)` and `InertiaResponse::once_with(key, options,
+resolver)` take all of them at once, Laravel's `once($value, $as,
+$until)`; a setting the options leave unset keeps what the prop already
+has.
+
+The page object carries the expiry as `onceProps.<key>.expiresAt`, in
+milliseconds since the epoch, counted in whole seconds as Laravel counts
+it: `.until(60)` on a page rendered at second `t` gives `(t + 60) * 1000`.
+A moment already past gives the render moment.
+
+The server also enforces a moment itself, which Laravel leaves to the
+client: once `.until(deadline)` has passed, a client that still lists the
+key in `X-Inertia-Except-Once-Props` gets a fresh value instead of nothing,
+so a stale client cannot pin an old value. A span is counted from each
+render, so it is the client's own expiry that ends it.
 
 ### Merge strategies and infinite scroll
 
@@ -328,12 +378,14 @@ and `Deep` take the same `match_on`.
 flags, for when the prop also needs a visibility or cache flag - see
 [Composing flags on one prop](#composing-flags-on-one-prop).
 
-`.match_on` takes one field or several in one call -
-`.match_on(["id", "slug"])` and `.match_on("id").match_on("slug")` emit
-the same `matchPropsOn`.
+`.match_on` takes one field or several in one call
+(`.match_on(["id", "slug"])`). Each call replaces the list, as Laravel's
+`matchOn` does, so `.match_on("id").match_on("slug")` dedupes on `slug`
+alone.
 
 To merge only part of a prop's value instead of the whole thing, name
-the nested field with `.merge_with_path`:
+the nested path with `.append_at` or `.prepend_at` - Laravel's
+`append($path, $matchOn)` and `prepend($path, $matchOn)`:
 
 ```rust
 use suprnova::{InertiaResponse, Prop};
@@ -341,23 +393,40 @@ use serde_json::json;
 
 InertiaResponse::new("Feed/Index").prop(
     "posts",
-    Prop::eager(json!({ "data": next_page, "meta": meta }))
-        .merge()
-        .merge_with_path("data")
-        .match_on("data.id"),
+    Prop::eager(json!({ "data": next_page, "meta": meta })).append_at("data", "id"),
 )
 ```
 
 `mergeProps` now carries `"posts.data"` instead of `"posts"`, so only
 `props.posts.data` folds into what the client already holds -
-`props.posts.meta` is replaced outright, like any non-merge prop. Calls
-accumulate, so a prop with two mergeable fields can name each
-independently. Naming a path turns off root-level merging for that prop
-entirely - a path-merging prop never also merges its whole value.
-`match_on` composes with a path by including the path in the field name
-(`"data.id"`, not `"id"`); the framework doesn't infer it for you.
-`.deep_merge()` ignores `.merge_with_path` - a deep merge already
-recurses into every nested field, so there's nothing a path narrows.
+`props.posts.meta` is replaced outright, like any non-merge prop. The
+second argument names the field to dedupe on at that path and adds
+`"posts.data.id"` to `matchPropsOn`; pass `None` for no dedupe field.
+The first argument takes one path or several:
+`.append_at(["a.items", "b"], "id")` merges at both paths and adds
+`"<key>.a.items.id"` and `"<key>.b.id"`. Calls accumulate, and one prop
+can append at one path and prepend at another:
+
+```rust
+Prop::eager(json!({ "older": older, "newer": newer }))
+    .append_at("older", None)
+    .prepend_at("newer", "id")
+```
+
+That prop emits `mergeProps: ["activity.older"]`,
+`prependProps: ["activity.newer"]` and
+`matchPropsOn: ["activity.newer.id"]` under the key `activity`. Naming a
+path turns off root-level merging for that prop entirely - a
+path-merging prop never also merges its whole value. `.append_at` and
+`.prepend_at` turn merging on by themselves, so the prop needs no
+`.merge()`. A later `.match_on(...)` replaces the fields they added, as
+it does in Laravel. `.deep_merge()` ignores the paths - a deep merge
+already recurses into every nested field, so there's nothing a path
+narrows.
+
+`.merge_with_path(path)` is the older single-path form: it merges at the
+path in the prop's own direction (`.merge()` or `.prepend()`) and adds no
+dedupe field, so pair it with `.match_on("data.id")` yourself.
 
 A merge prop's value can come from a resolver too, via `.merge_lazy` /
 `.merge_lazy_with` - the resolver sibling of `.merge` / `.merge_with`:
@@ -374,14 +443,24 @@ resolver-backed prop.
 
 Infinite scroll is the same machinery with pagination metadata attached.
 `.scroll` / `.scroll_with` - or `.paginate`, which adapts a
-`LengthAwarePaginator` or `CursorPaginator` directly - emit `scrollProps`
-next to the data, and the client's `<InfiniteScroll>` component drives the
-next/previous fetches:
+`LengthAwarePaginator`, `Paginator` or `CursorPaginator` directly - emit
+`scrollProps` next to the data, and the client's `<InfiniteScroll>`
+component drives the next/previous fetches:
 
 ```rust
 // `posts` is a CursorPaginator from the query builder.
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
+
+A scroll prop merges under a wrapper, `data` by default, as Laravel's
+`Inertia::scroll($value, $wrapper = 'data')` does: a paginator or resource
+serializes its rows under `data`, and only the rows should fold into what
+the client already holds. `.scroll("posts", metadata, value)` emits
+`mergeProps: ["posts.data"]`. `.paginate` is the exception: it ships the
+paginator's rows as a bare list, so it merges at the prop's root
+(`mergeProps: ["posts"]`); under `posts.data` the client would find no
+list to append to. Reach for `Prop::scroll_at_root()` for any other value
+that is the list itself.
 
 A scroll prop always carries merge metadata, not just on a follow-up
 fetch: it defaults to append, and switches to prepend only when the
@@ -393,58 +472,77 @@ unfiltered visit sends neither header, so it gets `reset: false` and an
 append instruction, matching Laravel.
 
 `.merge_with_path` has no effect on a scroll prop - the scroll block that
-computes its merge instruction reads `Prop::scroll_wrap`'s single wrap
-key, not `.merge_with_path`'s accumulated path list, so
-`.scroll(metadata).merge_with_path("data")` stores a path nothing reads.
-`.scroll_wrap` - reached directly through `.prop(...)`, or through the
-`.scroll_wrapped` response shortcut below - is the nesting equivalent for
-a scroll prop.
+computes its merge instruction reads the prop's single wrapper, not
+`.merge_with_path`'s accumulated path list. `.scroll_wrap` - reached
+directly through `.prop(...)`, or through the `.scroll_wrapped` response
+shortcut below - names another wrapper.
 
 A scroll prop also honors `.match_on(...)`, the same as any other merge
 prop - reach it through `.prop(...)`, since neither `.scroll` nor
-`.match_on` has a combined response-level shortcut:
+`.match_on` has a combined response-level shortcut. The path is relative
+to the prop, as in Laravel, with no wrapper prefix added, so name the
+wrapper in it:
 
 ```rust
 InertiaResponse::new("Users/Index").prop(
     "users",
-    Prop::eager(rows)
+    Prop::eager(serde_json::json!({ "data": rows }))
         .scroll(ScrollMetadata::new("page").current(1).next(2))
-        .match_on("id"),
+        .match_on("data.id"),
 )
 ```
 
-The match field keys off wherever the prop actually merges: the bare key
-when unwrapped (`matchPropsOn: ["users.id"]`), or `key.wrap_key` under
-`.scroll_wrap(...)` (`matchPropsOn: ["posts.data.id"]` for a prop wrapped
-under `"data"`) - so the entry always lines up with the merge path the
-client folds, instead of silently never matching.
+That emits `matchPropsOn: ["users.data.id"]`, which the client matches
+against the `users.data` merge path. `.match_on("id")` would emit
+`"users.id"`, which lines up with a scroll prop merging at its root
+(`.paginate`, `.scroll_at_root()`) and with nothing under a wrapper.
 
-When the prop's value is itself a wrapped structure - `{ data: [...],
-meta: {...} }`, the shape a hand-built API resource typically returns -
-merging the whole object would clobber `meta` on every fetch. Point the
-merge at the array field instead with `.scroll_wrapped`:
+When the value's list sits under another field - `{ items: [...],
+meta: {...} }` - point the merge at that field with `.scroll_wrapped`:
 
 ```rust
 InertiaResponse::new("Feed/Index").scroll_wrapped(
     "posts",
-    "data",
+    "items",
     ScrollMetadata::new("page").current(2).next(3),
-    serde_json::json!({ "data": rows, "meta": { "total": total } }),
+    serde_json::json!({ "items": rows, "meta": { "total": total } }),
 )
 ```
 
-`mergeProps` then names `posts.data`, so the client folds new rows into
+`mergeProps` then names `posts.items`, so the client folds new rows into
 the nested array and leaves `meta` to be replaced wholesale each time.
 `.scroll_with_wrapped` and `try_scroll_wrapped` are the resolver-based and
 fallible siblings, matching `.scroll_with` / `try_scroll`.
 
-A type outside this crate's `pagination` module - a third-party
-paginator, a hand-rolled cursor - can describe itself to `.scroll`
-by implementing `ProvidesScrollMetadata` instead of building
-`ScrollMetadata` field by field:
+A deferred scroll prop (`Prop::lazy(...).scroll(metadata).defer()`)
+announces its bare key under `mergeProps` on the visit that withholds it,
+and `posts.data` on the follow-up request that delivers the rows, as
+Laravel does.
+
+The metadata argument of `.scroll` takes a `ScrollMetadata` or anything
+that implements `ProvidesScrollMetadata`, Laravel's interface of the same
+name. `LengthAwarePaginator`, `Paginator` and `CursorPaginator` implement
+it, so a paginator can be both the metadata and the value - Laravel's
+`Inertia::scroll($paginator)`, its rows under `data`:
 
 ```rust
-use suprnova::{ProvidesScrollMetadata, ScrollMetadata};
+InertiaResponse::new("Feed/Index").scroll("posts", &page, &page)
+```
+
+The paginators report what Laravel's `ScrollMetadata::fromPaginator`
+reports: the page parameter's name (`with_page_name` on
+`LengthAwarePaginator` and `Paginator`, `with_cursor_name` on
+`CursorPaginator`), and the previous, next and current page. A cursor
+page's current page is `1` on the first page, else the cursor it was
+fetched with - `Pagination::cursor` records it, `with_current_cursor` sets
+it - else the request's cursor parameter.
+
+A type outside this crate's `pagination` module - a third-party
+paginator, a hand-rolled cursor - can describe itself to `.scroll` the
+same way:
+
+```rust
+use suprnova::ProvidesScrollMetadata;
 
 impl ProvidesScrollMetadata for MyCursorPage {
     fn page_name(&self) -> String { "cursor".to_string() }
@@ -453,10 +551,34 @@ impl ProvidesScrollMetadata for MyCursorPage {
     fn current_page(&self) -> Option<serde_json::Value> { Some(self.current.clone().into()) }
 }
 
-InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
+InertiaResponse::new("Feed/Index").scroll("posts", &page, page.rows)
 ```
 
-`LengthAwarePaginator`, `Paginator`, and `CursorPaginator` implement it too - see [Pagination](pagination.md#inertia-integration-infinite-scroll-props).
+A list loaded lazily describes its own pages from the loaded value, so it
+needs no second query for them. `.scroll_lazy` reads them from a value
+that implements `ProvidesScrollMetadata`, Laravel's
+`Inertia::scroll(fn () => User::paginate())`; `.scroll_lazy_with` builds
+them with a function of the loaded value, Laravel's callable metadata:
+
+```rust
+use suprnova::{FrameworkError, InertiaResponse, Prop, ScrollMetadata};
+
+InertiaResponse::new("Feed/Index")
+    .scroll_lazy("posts", || async {
+        Ok::<_, FrameworkError>(Post::query().paginate(20).await?)
+    })
+    .scroll_lazy_with(
+        "events",
+        || async { Ok::<_, FrameworkError>(load_events().await?) },
+        |events: &EventPage| ScrollMetadata::new("after").next(events.next_token.clone()),
+    )
+```
+
+`Prop::scroll_lazy(resolver, metadata)` is the same prop for composing
+with other flags, such as `.defer()`. The function runs only when the
+value loads, so the `scrollProps` entry ships with the value and not on a
+visit that withholds it. The value ships whole on a partial reload, as
+Laravel ships a closure's result.
 
 ### Dot-notation nesting
 
@@ -610,9 +732,18 @@ pub fn register() {
     // via `X-Inertia-Except-Once-Props` until the cache key changes.
     App::inertia_share_once("plans", || async {
         Ok::<_, suprnova::FrameworkError>(load_plan_catalog().await?)
-    });
+    })
+    .until(3600);
 }
 ```
+
+`inertia_share_once` returns the registered prop, as Laravel's
+`Inertia::shareOnce` returns its `OnceProp`, and it takes the options any
+once prop takes - `.as_key(key)`, `.until(span or moment)`,
+`.fresh(bool)` and `.once_with(options)`, described under
+[Once props](#once-props). Each call changes the registered prop at once;
+a later share under the same key replaces it, and the earlier handle then
+changes nothing.
 
 Shared keys nest on dots the same way `.with` does - two static shares
 under `"user.name"` / `"user.age"` land in one `user` object on the wire.
@@ -651,12 +782,34 @@ being rendered, so a provider can vary its output by page - see below.
 
 When the same key appears in more than one layer, later writes win:
 
-1. Static registry (`App::inertia_share` / `App::inertia_share_lazy`)
+1. Static registry (`App::inertia_share` / `App::inertia_share_lazy`),
+   then the shared [providers](#prop-providers) in the order they were
+   shared
 2. Per-request trait provider (`InertiaSharedData::share`)
-3. Per-response builder methods (`.with`, `.lazy`, etc.)
+3. The page's [providers](#prop-providers), in the order they were given
+4. Per-response builder methods (`.with`, `.lazy`, etc.)
 
 This lets a handler override a globally-shared default for one page
 without having to unregister anything.
+
+### The `sharedProps` list
+
+The page object lists the top-level key of every shared prop under
+`sharedProps`, as Laravel's does: the static shares, the shared
+providers' keys and the per-request provider's keys, each by its root
+segment (`"auth"` for a share under `"auth.user"`), with `errors` first,
+since every response shares the validation errors. The client reads the
+list during an instant visit, to carry the shared values into the page it
+renders before the server answers. A page that overrides a shared key
+keeps it on the list; the client reads the value from `props`.
+
+```json
+{ "component": "Signup", "props": { "errors": { "email": "Taken" }, "auth": { "user": "Ada" } }, "sharedProps": ["errors", "auth"] }
+```
+
+`InertiaConfig::expose_shared_props(false)` leaves the list out of every
+page object - Laravel's `inertia.expose_shared_prop_keys` setting. It is on
+by default; the shared values still ship as props when it is off.
 
 ### Per-request shared data
 
@@ -705,6 +858,101 @@ App::register_inertia_shared(Arc::new(AuthShare));
 ```
 
 Ignore `component` (`_component`) if your provider doesn't need to vary by page.
+
+### Prop providers
+
+A value that stands in for several props implements
+`ProvidesInertiaProperties` - Laravel's interface of the same name. A page
+takes any number of them with `.provide(...)`, the shared props any number
+with `App::inertia_registry().share_provider(...)`, and each one expands
+once per render with a `RenderContext` of the page component and the
+request:
+
+```rust
+use suprnova::{
+    FrameworkError, InertiaResponse, Prop, ProvidesInertiaProperties, RenderContext,
+    indexmap::IndexMap,
+};
+
+pub struct TeamProps {
+    team_id: i64,
+}
+
+impl ProvidesInertiaProperties for TeamProps {
+    fn to_inertia_properties(
+        &self,
+        context: &RenderContext<'_>,
+    ) -> Result<IndexMap<String, Prop>, FrameworkError> {
+        let team_id = self.team_id;
+        let mut props = IndexMap::new();
+        props.insert("teamId".into(), Prop::eager(team_id.into()));
+        // Async work goes in a lazy prop, which runs only when it is sent.
+        props.insert(
+            "members".into(),
+            Prop::lazy(move || async move { load_members(team_id).await }),
+        );
+        if context.component() == "Teams/Settings" {
+            props.insert("canDelete".into(), Prop::eager(true.into()));
+        }
+        Ok(props)
+    }
+}
+
+InertiaResponse::new("Teams/Show")
+    .provide(TeamProps { team_id: 7 })
+    .provide(BillingProps::for_team(7))
+    .with("title", "Team")
+```
+
+Expansion is synchronous, as Laravel's is; a provider returns lazy props
+for work that has to wait. Providers merge in the order they were given,
+a later one winning over an earlier one, and the page's own props win
+over its providers' whatever the call order. Shared providers expand
+after the keyed shares, and their keys are shared keys. A `#[derive(Data)]`
+object works the same way for its fields: `.with_data(dto)` adds one, any
+number of times, with its lazy fields still behind the `?include=`
+allowlist (`try_with_data` is the fallible sibling).
+
+`App::flush_inertia_shared()` clears the shared providers with the keyed
+shares, as Laravel's `flushShared` does.
+
+One prop's value can convert itself when it is sent: implement
+`ProvidesInertiaProperty` (Laravel's interface of the same name) and
+attach the value with `.with_property(key, value)` or `Prop::property`.
+The conversion gets a `PropertyContext` of the prop's key path, its
+sibling props and the request:
+
+```rust
+use suprnova::{FrameworkError, PropertyContext, ProvidesInertiaProperty};
+
+pub struct Money(i64);
+
+impl ProvidesInertiaProperty for Money {
+    fn to_inertia_property(
+        &self,
+        context: &PropertyContext<'_>,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let currency = context
+            .props()
+            .get("currency")
+            .and_then(|prop| prop.as_value())
+            .and_then(|value| value.as_str())
+            .unwrap_or("USD");
+        Ok(format!("{}.{:02} {currency}", self.0 / 100, self.0 % 100).into())
+    }
+}
+
+InertiaResponse::new("Shop/Show")
+    .with("currency", "EUR")
+    .with_property("price", Money(1250))   // "12.50 EUR"
+```
+
+The conversion runs only when the prop is sent, so a prop a partial
+reload leaves out is never converted. The siblings are the page's props
+before resolution, shared ones included; a sibling given as a value can
+be read with `Prop::as_value`, while a resolver has not run yet. The
+converted value ships whole, as Laravel ships an object's conversion: a
+dotted `only` entry does not narrow it.
 
 ## Flash and redirects
 
@@ -1492,7 +1740,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Nine other Rust-shaped choices worth flagging:
+Other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -1546,21 +1794,6 @@ Nine other Rust-shaped choices worth flagging:
   (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
   `null` would clobber a field the client already has instead of leaving
   it alone.
-- **`.scroll_wrapped` is opt-in, not automatic.** Laravel's
-  `Inertia::scroll($value, $wrapper = 'data', …)` nests every scroll
-  prop's merge instruction under `"data"` by default, because a Laravel
-  paginator resource typically returns `{ data: [...], links: {...},
-  meta: {...} }` and only the array should merge. Suprnova's built-in
-  paginators hand back a bare row array (`Vec<T>`, no envelope), so
-  `.scroll` / `.paginate` merge at the prop's root, and `.scroll_wrapped`
-  is there for the cases that need the nested path instead.
-- **A wrapped scroll prop prefixes its `match_on` fields for you.** On a
-  `.scroll_wrapped("posts", "data")` prop, `match_on("id")` emits
-  `"posts.data.id"`. Laravel emits the unprefixed `"posts.id"`, which its
-  own client then fails to line up against the merge target, so the match
-  silently never fires. The nesting point is unambiguous here - a scroll
-  prop has at most one wrapper - so Suprnova derives the prefix rather
-  than making you type it. Write the bare field name, not the path.
 
 ## Next
 

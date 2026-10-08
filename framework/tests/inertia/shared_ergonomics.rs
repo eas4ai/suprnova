@@ -165,8 +165,9 @@ async fn dotted_share_keys_advertise_their_root_segment_in_shared_props() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // Two dotted shares under one root collapse to a single entry.
-    assert_eq!(names, vec!["user", "appName"]);
+    // Two dotted shares under one root collapse to a single entry, after
+    // the `errors` every response shares (PAR-051).
+    assert_eq!(names, vec!["errors", "user", "appName"]);
     assert!(page["props"]["user"]["name"] == "Todd");
 }
 

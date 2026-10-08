@@ -267,12 +267,13 @@ impl Pagination {
             None
         };
 
-        Ok(CursorPaginator::new(
-            rows,
-            per_page,
-            next_cursor,
-            prev_cursor,
-        ))
+        let paginator = CursorPaginator::new(rows, per_page, next_cursor, prev_cursor);
+        // The cursor this page was fetched with is its current page in the
+        // Inertia scroll metadata.
+        Ok(match cursor {
+            Some(cursor) => paginator.with_current_cursor(cursor),
+            None => paginator,
+        })
     }
 }
 

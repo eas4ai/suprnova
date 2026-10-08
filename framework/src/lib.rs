@@ -327,6 +327,12 @@ pub use inertia::{
     PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata,
     SsrConfig, SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
+// The PAR-051 and PAR-052 prop types (providers, merge paths, once and
+// scroll options), kept on their own line so the list above stays stable.
+pub use inertia::{
+    MergePaths, OnceUntil, PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty,
+    RenderContext, SharedOnceProp,
+};
 pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{

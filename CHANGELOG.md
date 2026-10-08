@@ -127,6 +127,64 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`HasRoles::rbac_model_types()`** names every `model_type` a model's
   role and permission assignments are read under: its `morph_type`, its
   aliases and the Rust type path an earlier release stored.
+- **Merge props merge at nested paths in either direction.**
+  `Prop::append_at(paths, match_on)` and `Prop::prepend_at(paths,
+  match_on)` are Laravel's `append($path, $matchOn)` and
+  `prepend($path, $matchOn)`: they take one path or a list, add
+  `{path}.{match_on}` to `matchPropsOn` when a field is named, and one
+  prop can append at one path and prepend at another, which the single
+  direction of `merge_with_path` could not express.
+  `.append_at(["a.items", "b"], "id")` on a prop `feed` emits
+  `mergeProps: ["feed.a.items", "feed.b"]` and `matchPropsOn:
+  ["feed.a.items.id", "feed.b.id"]`.
+- **Once props take Laravel's options.** `until` takes a moment or a
+  span, as Laravel's `until(DateTimeInterface|DateInterval|int)` does: a
+  `DateTime<Utc>`, a `std::time::Duration`, a `chrono::Duration` or whole
+  seconds, through the new `OnceUntil`. `fresh` takes a `bool`,
+  `OnceOptions::once(false)` turns the flag off, `Prop::once_with(options)`
+  sets the flag, key and expiry in one call (Laravel's `once($value, $as,
+  $until)`), and `as_key` takes an enum whose `Display` names the key.
+  `expiresAt` is the expiry in milliseconds counted in whole seconds, as
+  Laravel counts it. The server still refuses a client's cache claim
+  past a `DateTime` deadline, which Laravel leaves to the client.
+- **`App::inertia_share_once` returns the shared once prop**, a
+  `SharedOnceProp` that takes `as_key`, `until`, `fresh` and `once_with`
+  as Laravel's `shareOnce` returns a chainable `OnceProp`. A shared once
+  prop could not take a cache key, an expiry or `fresh` before; only the
+  `InertiaSharedData` provider could reach them.
+  `InertiaRegistry::share_once` returns the same handle.
+- **Scroll props take any page-facts provider and can read them from the
+  loaded value.** Every `.scroll` builder and `Prop::scroll` take a
+  `ScrollMetadata` or anything implementing `ProvidesScrollMetadata`, so
+  `.scroll("posts", &page, &page)` is Laravel's `Inertia::scroll($paginator)`.
+  `InertiaResponse::scroll_lazy`, `scroll_lazy_with` and
+  `Prop::scroll_lazy` describe a lazily loaded list from the value its
+  resolver returns, as Laravel's callable metadata does, and ship the
+  `scrollProps` entry with that value.
+- **Paginators report the scroll facts Laravel's `fromPaginator` does.** A
+  `CursorPaginator`'s current page is `1` on its first page, else the
+  cursor it was fetched with (`Pagination::cursor` records it in the new
+  `current_cursor`, `with_current_cursor` sets it), else the request's
+  cursor parameter; it was always `null`. `Paginator` (the simple
+  paginator) takes a page parameter name, `with_page_name`, used by its
+  URLs and its `pageName`, where it was fixed to `page`.
+- **Prop providers, page and shared.** A type implementing
+  `ProvidesInertiaProperties` expands into props once per render with a
+  `RenderContext` of the page component and the request, Laravel's
+  interface of the same name. A page takes any number with
+  `InertiaResponse::provide`, the shared props any number with
+  `InertiaRegistry::share_provider`; shared providers' keys count as
+  shared keys, and `flush_shared` clears them. A page also takes any
+  number of `#[derive(Data)]` objects with `with_data` (and
+  `try_with_data`), where it took one, through `Inertia::data`, with no
+  request or component context.
+- **A prop value can convert itself with its context.** A type
+  implementing `ProvidesInertiaProperty` (Laravel's interface of the same
+  name), attached with `InertiaResponse::with_property` or
+  `Prop::property`, is converted when the prop is sent, with a
+  `PropertyContext` of its key path, its sibling props and the request,
+  so a price can format itself with the page's currency. No value type
+  received its key path, siblings or request before.
 
 ### Changed
 
@@ -329,6 +387,39 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key completed before; about 4,800 do now. Acceptance, rejection and
   retry-after answers are unchanged, and no request fails with "rate
   limiter poisoned" any more, since the shard locks do not poison (#148).
+- **`Prop::match_on` replaces the match fields on each call** instead of
+  adding to them, as Laravel's `matchOn` does. `.match_on("x").match_on("y")`
+  emitted `matchPropsOn: ["posts.x", "posts.y"]` and now emits
+  `["posts.y"]`; name several fields in one call with
+  `.match_on(["x", "y"])`.
+- **`until` on a once prop reads an integer as seconds from now**, as
+  Laravel's `until(60)` does, where it read an absolute timestamp in
+  milliseconds: `.until(60)` emitted `expiresAt: 60` and now emits the
+  render time plus 60 seconds. Pass a `DateTime<Utc>` for a fixed
+  deadline (`chrono::DateTime::from_timestamp_millis(ms)`). `fresh()` on
+  `Prop` and `OnceOptions` takes a `bool`: write `.fresh(true)`.
+- **Scroll props merge under the wrapper `data` by default**, as Laravel's
+  `Inertia::scroll($value, $wrapper = 'data')` does: `.scroll("posts",
+  metadata, paginator)` emitted `mergeProps: ["posts"]` and now emits
+  `["posts.data"]`, where a paginator or resource keeps its rows.
+  `.paginate` and `Inertia::paginate` ship bare rows and still merge at
+  the prop's root; `Prop::scroll_at_root()` does the same for any other
+  bare list. A scroll prop's `match_on` path is now relative to the prop,
+  with no wrapper prefix: `.match_on("data.id")` on `posts` emits
+  `posts.data.id`, where a wrapped prop used to prefix the wrapper itself
+  and emit `posts.data.data.id`. A deferred scroll prop announces its bare
+  key under `mergeProps` on the visit that withholds it and
+  `{key}.{wrapper}` when the data arrives, where a wrapped one announced
+  `{key}.{wrapper}` on both. The manual's two divergence entries for
+  these are gone.
+- **`sharedProps` lists `errors`, and a setting turns the list off.**
+  Every response shares the validation errors, as Laravel's middleware
+  does, so `sharedProps` now starts with `errors`: a page with nothing
+  else shared carries `["errors"]` where it carried no `sharedProps`, and
+  after a failed form `errors` reaches the client's instant-visit carry
+  with the other shared keys. `InertiaConfig::expose_shared_props(false)`
+  leaves `sharedProps` out of the page object, Laravel's
+  `inertia.expose_shared_prop_keys`; it is on by default.
 
 ### Fixed
 

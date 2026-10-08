@@ -109,6 +109,14 @@ pub type PropFuture = Pin<Box<dyn Future<Output = Result<Value, FrameworkError>>
 /// `Send + Sync + 'static` so it can be moved across `.await` points.
 pub type PropResolver = Arc<dyn Fn() -> PropFuture + Send + Sync>;
 
+/// Future returned by a scroll prop's loader: the value and the page facts
+/// that describe it, read from the loaded value before it is serialized.
+pub(crate) type ScrollFuture =
+    Pin<Box<dyn Future<Output = Result<(Value, ScrollMetadata), FrameworkError>> + Send>>;
+
+/// Loader stored inside a [`Prop::scroll_lazy`] prop.
+pub(crate) type ScrollResolver = Arc<dyn Fn() -> ScrollFuture + Send + Sync>;
+
 /// Builder for the options passed to
 /// [`InertiaResponse::defer_with`](crate::InertiaResponse::defer_with).
 #[derive(Debug, Clone)]
@@ -291,44 +299,207 @@ pub trait ProvidesScrollMetadata {
     }
 }
 
-/// Builder for the options passed to
-/// [`InertiaResponse::once_with`](crate::InertiaResponse::once_with).
-#[derive(Debug, Clone, Default)]
+/// `ScrollMetadata` describes itself, so every scroll builder takes one
+/// or any other provider - Laravel's `ScrollMetadata implements
+/// ProvidesScrollMetadata`.
+impl ProvidesScrollMetadata for ScrollMetadata {
+    fn page_name(&self) -> String {
+        self.page_name.clone()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        self.previous_page.clone()
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        self.next_page.clone()
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        self.current_page.clone()
+    }
+
+    fn scroll_metadata(&self) -> ScrollMetadata {
+        self.clone()
+    }
+}
+
+/// A borrowed provider describes the same pages, so a paginator can be
+/// passed by reference as the metadata and serialized as the value:
+/// `.scroll("posts", &page, &page)`.
+impl<T: ProvidesScrollMetadata + ?Sized> ProvidesScrollMetadata for &T {
+    fn page_name(&self) -> String {
+        (**self).page_name()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        (**self).previous_page()
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        (**self).next_page()
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        (**self).current_page()
+    }
+
+    fn scroll_metadata(&self) -> ScrollMetadata {
+        (**self).scroll_metadata()
+    }
+}
+
+/// When a once prop's cached value expires - what `until` accepts.
+///
+/// Laravel's `until(DateTimeInterface|DateInterval|int $delay)`
+/// (`inertia-laravel-3.5.1/src/ResolvesOnce.php`): a moment, or a span
+/// counted from the render. Build one from a `DateTime<Utc>`, a
+/// `std::time::Duration`, a `chrono::TimeDelta`, or a whole number of
+/// seconds, so `.until(60)` means one minute from now, as it does in
+/// Laravel.
+///
+/// The page object's `expiresAt` is that moment in milliseconds since
+/// the epoch, counted in whole seconds as Laravel's `availableAt` does: a
+/// span gives `(now + seconds) * 1000`, a moment in the past gives the
+/// render moment itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnceUntil {
+    /// Expire at this moment.
+    At(chrono::DateTime<chrono::Utc>),
+    /// Expire this many seconds after the page renders.
+    After(i64),
+}
+
+impl OnceUntil {
+    /// A span of `seconds`, counted from the render.
+    pub fn seconds(seconds: i64) -> Self {
+        Self::After(seconds)
+    }
+
+    /// The expiry in milliseconds since the epoch for a page rendered at
+    /// `now`. Saturates rather than overflows, so an absurd span is a
+    /// far-future expiry, never a panic.
+    pub fn expires_at_ms(&self, now: chrono::DateTime<chrono::Utc>) -> i64 {
+        let now_secs = now.timestamp();
+        let secs = match *self {
+            Self::At(at) => at.timestamp().max(now_secs),
+            Self::After(seconds) => now_secs.saturating_add(seconds),
+        };
+        secs.saturating_mul(1000)
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for OnceUntil {
+    fn from(at: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::At(at)
+    }
+}
+
+impl From<std::time::Duration> for OnceUntil {
+    fn from(span: std::time::Duration) -> Self {
+        Self::After(i64::try_from(span.as_secs()).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<chrono::TimeDelta> for OnceUntil {
+    fn from(span: chrono::TimeDelta) -> Self {
+        Self::After(span.num_seconds())
+    }
+}
+
+impl From<i64> for OnceUntil {
+    fn from(seconds: i64) -> Self {
+        Self::After(seconds)
+    }
+}
+
+impl From<i32> for OnceUntil {
+    fn from(seconds: i32) -> Self {
+        Self::After(i64::from(seconds))
+    }
+}
+
+impl From<u32> for OnceUntil {
+    fn from(seconds: u32) -> Self {
+        Self::After(i64::from(seconds))
+    }
+}
+
+impl From<u64> for OnceUntil {
+    fn from(seconds: u64) -> Self {
+        Self::After(i64::try_from(seconds).unwrap_or(i64::MAX))
+    }
+}
+
+/// The options of a once prop in one value: Laravel's
+/// `once(bool $value, ?string $as, $until)` plus `fresh`.
+///
+/// Taken by [`InertiaResponse::once_with`](crate::InertiaResponse::once_with)
+/// and [`Prop::once_with`]. A setting left unset keeps what the prop
+/// already has, as Laravel's `once()` leaves `as` and `until` alone when
+/// they are `null`.
+#[derive(Debug, Clone)]
 pub struct OnceOptions {
+    pub(crate) once: bool,
     pub(crate) cache_key: Option<String>,
-    pub(crate) expires_at: Option<i64>,
-    pub(crate) fresh: bool,
+    pub(crate) until: Option<OnceUntil>,
+    pub(crate) fresh: Option<bool>,
+}
+
+impl Default for OnceOptions {
+    fn default() -> Self {
+        Self {
+            once: true,
+            cache_key: None,
+            until: None,
+            fresh: None,
+        }
+    }
 }
 
 impl OnceOptions {
-    /// Build an `OnceOptions` with defaults (no override, no expiry, not fresh).
+    /// Build an `OnceOptions` with defaults: once on, no key override, no
+    /// expiry, freshness unchanged.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Override the cache key the client uses to dedupe this prop.
-    /// Defaults to the prop's name. Map to `Inertia::once()->as('key')`.
-    pub fn as_key(mut self, key: impl Into<String>) -> Self {
-        self.cache_key = Some(key.into());
+    /// Turn the once flag on or off - Laravel's `once($value)`. With
+    /// `false` the prop is an ordinary prop: no `onceProps` entry, and the
+    /// client's `X-Inertia-Except-Once-Props` claim is not consulted.
+    pub fn once(mut self, on: bool) -> Self {
+        self.once = on;
         self
     }
 
-    /// Expire the cached value at the given millis-since-epoch timestamp.
-    /// The client invalidates and refetches once now() exceeds this.
-    /// Maps to `Inertia::once()->until($timestamp)`.
-    pub fn until(mut self, expires_at_ms: i64) -> Self {
-        self.expires_at = Some(expires_at_ms);
+    /// Override the cache key the client uses to dedupe this prop - a
+    /// string, or an enum whose `Display` names the key (Laravel's
+    /// `as(BackedEnum|UnitEnum|string)`). Defaults to the prop's name.
+    pub fn as_key(mut self, key: impl std::fmt::Display) -> Self {
+        self.cache_key = Some(key.to_string());
         self
     }
 
-    /// Force the resolver to run even when the client claims to have a
-    /// cached value via `X-Inertia-Except-Once-Props`. Server-side override.
-    /// Maps to `Inertia::once()->fresh()`.
-    pub fn fresh(mut self) -> Self {
-        self.fresh = true;
+    /// Expire the cached value at a moment or after a span - see
+    /// [`OnceUntil`]. `.until(60)` is one minute from the render, as
+    /// Laravel's `until(60)` is.
+    pub fn until(mut self, until: impl Into<OnceUntil>) -> Self {
+        self.until = Some(until.into());
+        self
+    }
+
+    /// Resolve even when the client claims to hold a cached value via
+    /// `X-Inertia-Except-Once-Props` (`true`), or honour the claim
+    /// (`false`). Laravel's `fresh(bool $value = true)`.
+    pub fn fresh(mut self, on: bool) -> Self {
+        self.fresh = Some(on);
         self
     }
 }
+
+/// The wrapper a scroll prop merges under unless told otherwise -
+/// Laravel's `Inertia::scroll($value, $wrapper = 'data')`.
+const DEFAULT_SCROLL_WRAPPER: &str = "data";
 
 /// Where a prop's value comes from.
 ///
@@ -342,6 +513,12 @@ pub(crate) enum PropSource {
     Value(Value),
     /// Produced by an async closure when the prop resolves.
     Resolver(PropResolver),
+    /// Produced by a scroll prop's loader, with the page facts read from
+    /// the loaded value. See [`Prop::scroll_lazy`].
+    ScrollResolver(ScrollResolver),
+    /// Converted when the prop is sent, with its property context. See
+    /// [`Prop::property`].
+    Property(Arc<dyn super::providers::ProvidesInertiaProperty>),
     /// Absent sentinel. `when_loaded!` produces this when the named
     /// relation is not preloaded on the source entity: the key is left
     /// out of the response entirely - no null, no error.
@@ -432,17 +609,29 @@ pub struct Prop {
     /// root. Read only when `merge` is [`Some`]; ignored on
     /// [`MergeMode::Deep`], which already recurses into every field.
     merge_paths: Vec<String>,
+    /// Nested paths that append whatever the root direction is, set by
+    /// [`append_at`](Self::append_at). Laravel keeps this list apart
+    /// from the prepend one (`MergesProps::$appendsAtPaths`), so one
+    /// prop can append at one path and prepend at another.
+    append_paths: Vec<String>,
+    /// Nested paths that prepend, set by [`prepend_at`](Self::prepend_at).
+    prepend_paths: Vec<String>,
     once: bool,
     /// Read only when `once` is set.
     once_key: Option<String>,
     /// Read only when `once` is set.
-    expires_at: Option<i64>,
+    until: Option<OnceUntil>,
     /// Read only when `once` is set.
     fresh: bool,
     scroll: Option<ScrollMetadata>,
     /// Read only when `scroll` is `Some`. Set by
-    /// [`scroll_wrap`](Self::scroll_wrap).
+    /// [`scroll_wrap`](Self::scroll_wrap); `None` is Laravel's default
+    /// wrapper, `data`.
     scroll_wrap: Option<String>,
+    /// Read only when `scroll` is `Some`. Set by
+    /// [`scroll_at_root`](Self::scroll_at_root): merge at the prop's root,
+    /// for a value that is the list itself.
+    scroll_root: bool,
 }
 
 impl std::fmt::Debug for Prop {
@@ -451,6 +640,8 @@ impl std::fmt::Debug for Prop {
         match &self.source {
             PropSource::Value(v) => s.field("value", v),
             PropSource::Resolver(_) => s.field("value", &"<resolver>"),
+            PropSource::ScrollResolver(_) => s.field("value", &"<scroll resolver>"),
+            PropSource::Property(_) => s.field("value", &"<property>"),
             PropSource::Absent => s.field("value", &"<absent>"),
         };
         s.field("visibility", &self.visibility);
@@ -478,9 +669,15 @@ impl std::fmt::Debug for Prop {
         if !self.merge_paths.is_empty() {
             s.field("merge_paths", &self.merge_paths);
         }
+        if !self.append_paths.is_empty() {
+            s.field("append_paths", &self.append_paths);
+        }
+        if !self.prepend_paths.is_empty() {
+            s.field("prepend_paths", &self.prepend_paths);
+        }
         if self.once {
             s.field("once_key", &self.once_key)
-                .field("expires_at", &self.expires_at)
+                .field("until", &self.until)
                 .field("fresh", &self.fresh);
         }
         if let Some(meta) = &self.scroll {
@@ -493,6 +690,9 @@ impl std::fmt::Debug for Prop {
         // precisely what needs to be visible when debugging it.
         if let Some(wrap) = &self.scroll_wrap {
             s.field("scroll_wrap", wrap);
+        }
+        if self.scroll_root {
+            s.field("scroll_root", &true);
         }
         s.finish_non_exhaustive()
     }
@@ -541,6 +741,43 @@ impl<T: Into<String>> MatchOnFields for Vec<T> {
     }
 }
 
+/// One or more nested merge paths - what [`Prop::append_at`] and
+/// [`Prop::prepend_at`] accept.
+///
+/// A single string names one path (`"data"`); an array or `Vec` names
+/// several in one call (`["a.items", "b"]`), Laravel's
+/// `append(string|array $path)`. Closed over whole-string shapes for the
+/// same reason as [`MatchOnFields`]: an `IntoIterator` bound would let a
+/// bare `&str` iterate as characters.
+pub trait MergePaths {
+    /// Consume `self` into the paths to merge at, in order.
+    fn into_merge_paths(self) -> Vec<String>;
+}
+
+impl MergePaths for &str {
+    fn into_merge_paths(self) -> Vec<String> {
+        vec![self.to_string()]
+    }
+}
+
+impl MergePaths for String {
+    fn into_merge_paths(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl<T: Into<String>, const N: usize> MergePaths for [T; N] {
+    fn into_merge_paths(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<T: Into<String>> MergePaths for Vec<T> {
+    fn into_merge_paths(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
 impl Prop {
     fn with_source(source: PropSource) -> Self {
         Self {
@@ -551,12 +788,15 @@ impl Prop {
             merge: None,
             match_on: Vec::new(),
             merge_paths: Vec::new(),
+            append_paths: Vec::new(),
+            prepend_paths: Vec::new(),
             once: false,
             once_key: None,
-            expires_at: None,
+            until: None,
             fresh: false,
             scroll: None,
             scroll_wrap: None,
+            scroll_root: false,
         }
     }
 
@@ -604,6 +844,58 @@ impl Prop {
             let fut = f();
             Box::pin(async move { Ok(fut.await) })
         }))
+    }
+
+    /// A prop whose value converts itself when it is sent, with its key
+    /// path, its sibling props and the request - Laravel's
+    /// `ProvidesInertiaProperty`. See
+    /// [`ProvidesInertiaProperty`](crate::ProvidesInertiaProperty).
+    pub fn property(value: impl super::providers::ProvidesInertiaProperty + 'static) -> Self {
+        Self::with_source(PropSource::Property(Arc::new(value)))
+    }
+
+    /// A scroll prop whose value comes from `resolver` and whose page
+    /// facts come from `metadata` applied to the loaded value - Laravel's
+    /// `Inertia::scroll(fn () => ..., 'data', fn ($value) => ...)`. A
+    /// lazily loaded list describes its own pages this way, without a
+    /// second query for them.
+    ///
+    /// `metadata` sees the typed value before it is serialized, so a
+    /// paginator can hand over its own facts:
+    /// `Prop::scroll_lazy(load_posts, |page: &LengthAwarePaginator<Post>| page.scroll_metadata())`.
+    /// It runs only when the value loads, so the `scrollProps` entry ships
+    /// with the value and not on a visit that withholds it - deferred,
+    /// optional and not asked for, or held by the client under
+    /// [`once`](Self::once).
+    ///
+    /// The value merges under the wrapper `data` like any scroll prop (see
+    /// [`scroll`](Self::scroll)). It ships whole on a partial reload, as
+    /// Laravel ships a closure's result: a dotted `only` entry does not
+    /// narrow it.
+    pub fn scroll_lazy<F, Fut, V, MF, M>(resolver: F, metadata: MF) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: serde::Serialize + 'static,
+        MF: Fn(&V) -> M + Send + Sync + 'static,
+        M: ProvidesScrollMetadata,
+    {
+        let metadata = Arc::new(metadata);
+        let loader: ScrollResolver = Arc::new(move || {
+            let fut = resolver();
+            let metadata = Arc::clone(&metadata);
+            Box::pin(async move {
+                let loaded = fut.await?;
+                let facts = metadata(&loaded).scroll_metadata();
+                let value = serde_json::to_value(&loaded).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Inertia scroll prop value failed to serialize: {e}"
+                    ))
+                })?;
+                Ok((value, facts))
+            })
+        });
+        Self::with_source(PropSource::ScrollResolver(loader))
     }
 
     // ---- visibility ----------------------------------------------------
@@ -709,16 +1001,16 @@ impl Prop {
     /// To dedupe array elements at that nested path too, include the
     /// path in the [`match_on`](Self::match_on) field name yourself -
     /// `.merge_with_path("data").match_on("data.id")` emits
-    /// `matchPropsOn: ["<key>.data.id"]`. This does not infer the prefix
-    /// for you, unlike Laravel's two-argument `append('data', 'id')`.
+    /// `matchPropsOn: ["<key>.data.id"]` - or reach for
+    /// [`append_at`](Self::append_at), Laravel's two-argument
+    /// `append('data', 'id')`, which adds the prefixed field for you.
     ///
     /// Silently inert on a [`scroll`](Self::scroll) prop: a scroll prop's
     /// merge instruction is computed by a separate code path that reads
-    /// [`scroll_wrap`](Self::scroll_wrap)'s single wrap key, not this
-    /// method's accumulated path list, so `.scroll(meta).merge_with_path("data")`
-    /// stores a path nothing ever reads. Use
-    /// [`scroll_wrap`](Self::scroll_wrap) to nest a scroll prop's merge
-    /// target instead.
+    /// its single wrapper ([`scroll_wrap`](Self::scroll_wrap), `data` by
+    /// default), not this method's accumulated path list, so
+    /// `.scroll(meta).merge_with_path("data")` stores a path nothing ever
+    /// reads.
     pub fn merge_with_path(mut self, path: impl Into<String>) -> Self {
         self.merge_paths.push(path.into());
         self
@@ -726,17 +1018,76 @@ impl Prop {
 
     /// Name the field(s) the client dedupes array elements on, so a
     /// refetch that overlaps the current window replaces matching rows
-    /// in place rather than appending copies. Emitted as `matchPropsOn`.
+    /// in place rather than appending copies. Emitted as `matchPropsOn`,
+    /// each field as `{key}.{field}`.
     ///
     /// Takes one field (`.match_on("id")`) or several in one call
-    /// (`.match_on(["id", "slug"])`) - see [`MatchOnFields`]. Calls also
-    /// accumulate, so `.match_on("id").match_on("slug")` and
-    /// `.match_on(["id", "slug"])` emit the same `matchPropsOn`. The
-    /// client uses the **first** entry whose path prefix matches a given
-    /// merge path (`inertia-3.6.1/packages/core/src/response.ts:534-543`),
-    /// so give each path at most one field.
+    /// (`.match_on(["id", "slug"])`) - see [`MatchOnFields`]. Each call
+    /// **replaces** the list, as Laravel's `matchOn` does (`Arr::wrap`),
+    /// so `.match_on("x").match_on("y")` dedupes on `y` alone; a ported
+    /// app chaining it expects that. It also replaces the fields
+    /// [`append_at`](Self::append_at) and [`prepend_at`](Self::prepend_at)
+    /// added, which Laravel's two-argument `append` stores in the same
+    /// list. The client uses the **first** entry whose path prefix
+    /// matches a given merge path
+    /// (`inertia-3.8.0/packages/core/src/response.ts:547-551`), so give
+    /// each path at most one field.
     pub fn match_on(mut self, fields: impl MatchOnFields) -> Self {
-        self.match_on.extend(fields.into_match_on_fields());
+        self.match_on = fields.into_match_on_fields();
+        self
+    }
+
+    /// Append the incoming items at one or more nested paths of this
+    /// prop's value instead of its root, each optionally deduped on a
+    /// field. Laravel's `append($path, $matchOn)`
+    /// (`inertia-laravel-3.5.1/src/MergesProps.php`).
+    ///
+    /// `paths` is one path or several (see [`MergePaths`]);
+    /// `.append_at(["a.items", "b"], "id")` emits `mergeProps:
+    /// ["<key>.a.items", "<key>.b"]` and adds `"<key>.a.items.id"` and
+    /// `"<key>.b.id"` to `matchPropsOn`. Pass `None` for no dedupe
+    /// field. Calls accumulate, and combine with
+    /// [`prepend_at`](Self::prepend_at) on the same prop. A prop that
+    /// names any path stops merging at its root, as Laravel's
+    /// `mergesAtRoot` does.
+    ///
+    /// Turns merging on when no merge flag is set yet, so
+    /// `Prop::lazy(..).append_at("data", None)` needs no `.merge()`. On a
+    /// [`deep_merge`](Self::deep_merge) prop the paths are ignored: deep
+    /// merge recurses into every field already, and Laravel emits the
+    /// bare key under `deepMergeProps` for one.
+    pub fn append_at<'a>(
+        mut self,
+        paths: impl MergePaths,
+        match_on: impl Into<Option<&'a str>>,
+    ) -> Self {
+        let match_on = match_on.into();
+        self.merge.get_or_insert(MergeMode::Append);
+        for path in paths.into_merge_paths() {
+            push_path_match(&mut self.match_on, &path, match_on);
+            self.append_paths.push(path);
+        }
+        self
+    }
+
+    /// Prepend the incoming items at one or more nested paths of this
+    /// prop's value, each optionally deduped on a field. Laravel's
+    /// `prepend($path, $matchOn)`; the mirror of
+    /// [`append_at`](Self::append_at), emitted under `prependProps`.
+    ///
+    /// [`prepend`](Self::prepend) with no path stays the root-level form,
+    /// Laravel's `prepend()` with no argument.
+    pub fn prepend_at<'a>(
+        mut self,
+        paths: impl MergePaths,
+        match_on: impl Into<Option<&'a str>>,
+    ) -> Self {
+        let match_on = match_on.into();
+        self.merge.get_or_insert(MergeMode::Append);
+        for path in paths.into_merge_paths() {
+            push_path_match(&mut self.match_on, &path, match_on);
+            self.prepend_paths.push(path);
+        }
         self
     }
 
@@ -766,34 +1117,60 @@ impl Prop {
         self
     }
 
+    /// Set the once flag, cache key, expiry and freshness in one call -
+    /// Laravel's `once(bool $value, ?string $as, $until)`. A setting the
+    /// options leave unset keeps what the prop already has, so
+    /// `.as_key("x").once_with(OnceOptions::new())` keeps the key `x`.
+    pub fn once_with(mut self, options: OnceOptions) -> Self {
+        self.once = options.once;
+        if let Some(key) = options.cache_key {
+            self.once_key = Some(key);
+        }
+        if let Some(until) = options.until {
+            self.until = Some(until);
+        }
+        if let Some(fresh) = options.fresh {
+            self.fresh = fresh;
+        }
+        self
+    }
+
     /// Override the cache key the client dedupes on. Defaults to the
     /// prop's own name; override it so several pages can share one
-    /// cached value under different prop names. Maps to
-    /// `Inertia::once()->as('key')`.
+    /// cached value under different prop names. Takes a string, or an
+    /// enum whose `Display` names the key - Laravel's
+    /// `as(BackedEnum|UnitEnum|string)`, where Rust has no backing value
+    /// to read.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn as_key(mut self, key: impl Into<String>) -> Self {
-        self.once_key = Some(key.into());
+    pub fn as_key(mut self, key: impl std::fmt::Display) -> Self {
+        self.once_key = Some(key.to_string());
         self
     }
 
-    /// Expire the cached value at the given millis-since-epoch
-    /// timestamp. The server stops honouring the client's cache claim
-    /// past this point, so a stale client cannot pin an old value
-    /// forever. Maps to `Inertia::once()->until($timestamp)`.
+    /// Expire the cached value at a moment, or after a span counted from
+    /// the render - see [`OnceUntil`]. `.until(60)` is one minute from
+    /// now and `.until(deadline)` is that moment, as Laravel's `until`
+    /// reads them; the page object carries the expiry as `expiresAt`.
+    ///
+    /// The server also refuses a client's cache claim once a moment has
+    /// passed, which Laravel leaves to the client: a stale client cannot
+    /// pin an old value past its deadline. A span is counted from each
+    /// render, so it is the client's own expiry that ends it.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn until(mut self, expires_at_ms: i64) -> Self {
-        self.expires_at = Some(expires_at_ms);
+    pub fn until(mut self, until: impl Into<OnceUntil>) -> Self {
+        self.until = Some(until.into());
         self
     }
 
-    /// Resolve even when the client claims to hold a cached value.
-    /// Maps to `Inertia::once()->fresh()`.
+    /// Resolve even when the client claims to hold a cached value
+    /// (`true`), or honour the claim again (`false`). Laravel's
+    /// `fresh(bool $value = true)`.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn fresh(mut self) -> Self {
-        self.fresh = true;
+    pub fn fresh(mut self, on: bool) -> Self {
+        self.fresh = on;
         self
     }
 
@@ -812,27 +1189,36 @@ impl Prop {
     /// [`deep_merge`](Self::deep_merge) is the one flag that still has
     /// an effect: it routes the prop into `deepMergeProps` instead,
     /// matching Laravel's `ScrollProp` (`ScrollProp implements
-    /// Mergeable`, `Response.php:590,610`).
-    /// [`scroll_wrap`](Self::scroll_wrap) nests the merge path under a
-    /// field inside the value instead of the value's root.
-    pub fn scroll(mut self, metadata: ScrollMetadata) -> Self {
-        self.scroll = Some(metadata);
+    /// Mergeable`).
+    ///
+    /// The merge instruction targets the list inside the value, under the
+    /// wrapper `data` - `{key}.data` - as Laravel's
+    /// `Inertia::scroll($value, $wrapper = 'data')` does for a paginator
+    /// or resource, whose rows sit under `data`.
+    /// [`scroll_wrap`](Self::scroll_wrap) names another wrapper, and
+    /// [`scroll_at_root`](Self::scroll_at_root) merges at the prop's root
+    /// for a value that is the list itself. [`match_on`](Self::match_on)
+    /// is relative to the prop, as in Laravel: `.match_on("data.id")` on
+    /// `posts` emits `posts.data.id`, no wrapper prefix added.
+    ///
+    /// Deferred, the prop announces its bare key under `mergeProps` on the
+    /// visit that withholds it, and `{key}.{wrapper}` once the data
+    /// arrives - Laravel collects the first instruction before the scroll
+    /// prop configures its wrapper.
+    pub fn scroll(mut self, metadata: impl ProvidesScrollMetadata) -> Self {
+        self.scroll = Some(metadata.scroll_metadata());
         self
     }
 
     /// Nest this scroll prop's merge instruction under `<key>.<wrap_key>`
-    /// instead of the bare key. Read only when [`scroll`](Self::scroll) is
-    /// also set; on any other prop it's stored and ignored, the same way
-    /// [`group`](Self::group) is ignored on a non-deferred prop.
+    /// instead of the default `<key>.data`. Read only when
+    /// [`scroll`](Self::scroll) is also set; on any other prop it's stored
+    /// and ignored, the same way [`group`](Self::group) is ignored on a
+    /// non-deferred prop. Maps to `Inertia::scroll($value, $wrapper)`.
     ///
-    /// Reach for this when the prop's value is itself an envelope -
-    /// `{ data: [...], meta: {...} }` - and only the array inside should
-    /// fold into what the client already holds. Laravel's `ScrollProp`
-    /// wraps under `"data"` unconditionally
-    /// (`inertia-laravel-2.0.25/src/ScrollProp.php:58-64`); Suprnova's
-    /// built-in paginators hand back a bare row array, so this is opt-in
-    /// rather than a default every caller has to work around. Maps to
-    /// `Inertia::scroll($value, $wrapper)`.
+    /// Reach for this when the value is an envelope whose list sits under
+    /// another field - `{ items: [...], meta: {...} }` - so only the list
+    /// folds into what the client already holds.
     ///
     /// Ignored when the prop also carries [`deep_merge`](Self::deep_merge):
     /// deep merge already recurses through the entire value, so there is
@@ -841,6 +1227,20 @@ impl Prop {
     /// under [`MergeMode::Deep`].
     pub fn scroll_wrap(mut self, wrap_key: impl Into<String>) -> Self {
         self.scroll_wrap = Some(wrap_key.into());
+        self.scroll_root = false;
+        self
+    }
+
+    /// Merge this scroll prop at its root, `<key>`, instead of under a
+    /// wrapper: for a value that is the list itself, such as the bare rows
+    /// [`InertiaResponse::paginate`](crate::InertiaResponse::paginate)
+    /// ships. Under `<key>.data` the client would find nothing to append
+    /// to in a bare list and would replace it instead. Laravel has no
+    /// such form, because its paginators always serialize their rows under
+    /// `data`.
+    pub fn scroll_at_root(mut self) -> Self {
+        self.scroll_root = true;
+        self.scroll_wrap = None;
         self
     }
 
@@ -885,10 +1285,26 @@ impl Prop {
             && self.scroll.is_none()
     }
 
+    /// True for a [`property`](Self::property) prop, whose value converts
+    /// when it is sent.
+    pub fn is_property(&self) -> bool {
+        matches!(self.source, PropSource::Property(_))
+    }
+
     /// True if the prop's value comes from a closure rather than being
     /// materialized already.
     pub fn has_resolver(&self) -> bool {
-        matches!(self.source, PropSource::Resolver(_))
+        matches!(
+            self.source,
+            PropSource::Resolver(_) | PropSource::ScrollResolver(_)
+        )
+    }
+
+    /// True for a scroll prop: one given page facts by
+    /// [`scroll`](Self::scroll), or built by
+    /// [`scroll_lazy`](Self::scroll_lazy), whose facts come with its value.
+    pub fn is_scroll(&self) -> bool {
+        self.scroll.is_some() || matches!(self.source, PropSource::ScrollResolver(_))
     }
 
     /// The already-materialized value, if this prop has one.
@@ -925,6 +1341,16 @@ impl Prop {
         &self.merge_paths
     }
 
+    /// The paths named by [`append_at`](Self::append_at), in call order.
+    pub fn append_paths(&self) -> &[String] {
+        &self.append_paths
+    }
+
+    /// The paths named by [`prepend_at`](Self::prepend_at), in call order.
+    pub fn prepend_paths(&self) -> &[String] {
+        &self.prepend_paths
+    }
+
     /// Whether the client caches this prop across navigations.
     pub fn is_once(&self) -> bool {
         self.once
@@ -938,9 +1364,22 @@ impl Prop {
             .unwrap_or_else(|| prop_key.to_string())
     }
 
-    /// The cached value's expiry in millis since the epoch, if any.
+    /// The cached value's expiry in millis since the epoch, if any,
+    /// for a page rendered now (see [`OnceUntil::expires_at_ms`]).
     pub fn once_expires_at(&self) -> Option<i64> {
-        self.expires_at
+        self.once_expires_at_for(crate::clock::now())
+    }
+
+    /// The expiry [`until`](Self::until) set, as given.
+    pub fn once_until(&self) -> Option<OnceUntil> {
+        self.until
+    }
+
+    /// The cached value's expiry in millis since the epoch for a page
+    /// rendered at `now`. One response reads one moment for every prop,
+    /// so two props with the same span expire together.
+    pub(crate) fn once_expires_at_for(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        self.until.map(|until| until.expires_at_ms(now))
     }
 
     /// Whether the server refuses the client's cache claim for this prop.
@@ -948,15 +1387,27 @@ impl Prop {
         self.fresh
     }
 
-    /// The infinite-scroll pagination metadata, if this is a scroll prop.
+    /// The page facts [`scroll`](Self::scroll) gave this prop, if any. A
+    /// [`scroll_lazy`](Self::scroll_lazy) prop's facts arrive with its
+    /// value, so this is `None` for one; [`is_scroll`](Self::is_scroll)
+    /// asks whether a prop is a scroll prop at all.
     pub fn scroll_metadata(&self) -> Option<&ScrollMetadata> {
         self.scroll.as_ref()
     }
 
-    /// The nested-merge wrapper key set by [`scroll_wrap`](Self::scroll_wrap),
-    /// if any.
+    /// The wrapper this scroll prop merges under: `data` unless
+    /// [`scroll_wrap`](Self::scroll_wrap) named another, or `None` after
+    /// [`scroll_at_root`](Self::scroll_at_root).
     pub fn scroll_wrap_key(&self) -> Option<&str> {
-        self.scroll_wrap.as_deref()
+        if self.scroll_root {
+            None
+        } else {
+            Some(
+                self.scroll_wrap
+                    .as_deref()
+                    .unwrap_or(DEFAULT_SCROLL_WRAPPER),
+            )
+        }
     }
 
     /// Consume the prop and hand back its source. Read every flag you
@@ -974,10 +1425,23 @@ impl Prop {
     /// and the `deferredProps` / `mergeProps` / `onceProps` /
     /// `scrollProps` metadata - lives in `InertiaResponse::resolve` and
     /// uses this method internally.
+    ///
+    /// # Errors
+    ///
+    /// A resolver's error, or, for a [`property`](Self::property) prop, an
+    /// error saying it converts only inside a response, which gives it its
+    /// key, siblings and request.
     pub async fn resolve(self) -> Result<Value, FrameworkError> {
         match self.source {
             PropSource::Value(v) => Ok(v),
             PropSource::Resolver(r) => r().await,
+            PropSource::ScrollResolver(r) => r().await.map(|(value, _)| value),
+            // A property converts with the page's context, which only a
+            // response has.
+            PropSource::Property(_) => Err(FrameworkError::internal(
+                "a Prop::property value converts only inside an Inertia response, \
+                 which gives it its key, sibling props and request",
+            )),
             // Callers reach the absent sentinel through
             // `resolve_with_owner`, which returns `Ok(None)`. `Null` is
             // the safe fallback so a stray call here cannot panic.
@@ -1306,6 +1770,15 @@ impl PartialFilter {
     }
 }
 
+/// Add Laravel's `{path}.{match_on}` dedupe field for a path that
+/// [`Prop::append_at`] or [`Prop::prepend_at`] named. An empty field
+/// adds nothing, as PHP's falsy `''` does.
+fn push_path_match(match_on: &mut Vec<String>, path: &str, field: Option<&str>) {
+    if let Some(field) = field.filter(|f| !f.is_empty()) {
+        match_on.push(format!("{path}.{field}"));
+    }
+}
+
 /// `Some(rest)` when `entry` names a dotted path *inside* `key` - `key`
 /// followed by `.` and at least one more segment. `None` for an exact
 /// match (`entry == key`, handled separately by callers) and for an
@@ -1597,16 +2070,17 @@ mod tests {
     }
 
     #[test]
-    fn match_on_accumulates_in_call_order() {
+    fn match_on_replaces_the_list_on_each_call() {
+        // Laravel's `matchOn` sets the list (`Arr::wrap`), PAR-052.
         let p = Prop::eager(json!(1))
             .merge()
             .match_on("id")
             .match_on("slug");
-        assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
+        assert_eq!(p.match_on_fields(), ["slug".to_string()]);
     }
 
     #[test]
-    fn match_on_accepts_an_array_in_one_call_and_still_chains_with_single_calls() {
+    fn match_on_accepts_an_array_in_one_call_and_a_later_call_replaces_it() {
         let p = Prop::eager(json!(1)).merge().match_on(["id", "slug"]);
         assert_eq!(p.match_on_fields(), ["id".to_string(), "slug".to_string()]);
 
@@ -1616,7 +2090,21 @@ mod tests {
             .match_on(["slug", "uuid"]);
         assert_eq!(
             p.match_on_fields(),
-            ["id".to_string(), "slug".to_string(), "uuid".to_string()]
+            ["slug".to_string(), "uuid".to_string()]
+        );
+    }
+
+    #[test]
+    fn inp_append_at_and_prepend_at_keep_separate_path_lists_and_prefixed_fields() {
+        let p = Prop::eager(json!(1))
+            .append_at(["a", "b"], "id")
+            .prepend_at("c", None);
+        assert_eq!(p.merge_mode(), Some(MergeMode::Append));
+        assert_eq!(p.append_paths(), ["a".to_string(), "b".to_string()]);
+        assert_eq!(p.prepend_paths(), ["c".to_string()]);
+        assert_eq!(
+            p.match_on_fields(),
+            ["a.id".to_string(), "b.id".to_string()]
         );
     }
 
@@ -1706,9 +2194,9 @@ mod tests {
             .once()
             .as_key("roles")
             .until(42)
-            .fresh();
+            .fresh(true);
         assert_eq!(p.once_cache_key("memberRoles"), "roles");
-        assert_eq!(p.once_expires_at(), Some(42));
+        assert_eq!(p.once_until(), Some(OnceUntil::After(42)));
         assert!(p.is_fresh());
     }
 
@@ -2153,9 +2641,12 @@ mod tests {
     }
 
     #[test]
-    fn scroll_wrap_key_is_none_when_never_set() {
+    fn scroll_wrap_key_defaults_to_data_and_is_none_at_the_root() {
         let p = Prop::eager(json!([])).scroll(ScrollMetadata::new("page"));
+        assert_eq!(p.scroll_wrap_key(), Some("data"));
+        let p = p.scroll_at_root();
         assert_eq!(p.scroll_wrap_key(), None);
+        assert_eq!(p.scroll_wrap("items").scroll_wrap_key(), Some("items"));
     }
 
     struct FixedCursorPage;

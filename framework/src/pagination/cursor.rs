@@ -104,6 +104,14 @@ pub struct CursorPaginator<T> {
     /// [`Builder::cursor_paginate`]: crate::eloquent::Builder::cursor_paginate
     /// [`LengthAwarePaginator::page_name`]: crate::pagination::LengthAwarePaginator::page_name
     pub cursor_name: Option<String>,
+    /// The cursor this page was fetched with, `None` for the first page or
+    /// when the caller did not record it. Not serialized by itself; the
+    /// Inertia scroll metadata reports it as the current page, as
+    /// Laravel's `ScrollMetadata::fromPaginator` reports the request's
+    /// current cursor, so the infinite-scroll client knows where it is.
+    /// Set by [`Pagination::cursor`](crate::pagination::Pagination::cursor)
+    /// and [`Self::with_current_cursor`].
+    pub current_cursor: Option<String>,
 }
 
 impl<T: Serialize> Serialize for CursorPaginator<T> {
@@ -161,6 +169,7 @@ impl<T> CursorPaginator<T> {
             prev_cursor,
             path: None,
             cursor_name: None,
+            current_cursor: None,
         }
     }
 
@@ -176,6 +185,16 @@ impl<T> CursorPaginator<T> {
     /// Returns `self` for builder-style chaining.
     pub fn with_cursor_name(mut self, name: impl Into<String>) -> Self {
         self.cursor_name = Some(name.into());
+        self
+    }
+
+    /// Record the cursor this page was fetched with, reported as the
+    /// current page in the Inertia scroll metadata. Without it, a page past
+    /// the first reads the current cursor from the request's query
+    /// parameter under [`Self::cursor_name`], as Laravel does. Returns
+    /// `self` for builder-style chaining.
+    pub fn with_current_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.current_cursor = Some(cursor.into());
         self
     }
 

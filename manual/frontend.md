@@ -151,13 +151,14 @@ App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
 App::register_inertia_shared(Arc::new(AppSharedData));
 ```
 
-Three flavours, in order of precedence (later wins at the same key):
+The flavours, in order of precedence (later wins at the same key):
 
 | API | When the value materializes |
 |---|---|
 | `App::inertia_share(k, v)` | Sync, set once at boot |
 | `App::inertia_share_lazy(k, \|\| async { ... })` | Per response, recomputed |
 | `App::inertia_share_once(k, \|\| async { ... })` | Per response, then client-cached |
+| `App::inertia_registry().share_provider(provider)` | Per response, expanded with the page and the request; any number |
 | `App::register_inertia_shared(Arc::new(impl))` | Per request, sees `&req` |
 
 Per-page props attached on the response builder always overwrite shared
