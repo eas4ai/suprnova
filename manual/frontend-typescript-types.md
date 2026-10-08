@@ -305,7 +305,9 @@ those names is an error: rename the struct.
 | `serde_json::Value` | `JsonValue` | A recursive alias the generator declares once at the top of the file, and only when something references it. A bare `Value` maps here too, unless the project defines its own `Value` struct - that one wins |
 | `Field<T>` (from `#[derive(Data)]`) | `field?: T \| null` | Field is optional on the wire |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Lazy props omit the `null` half |
-| Anything else | bare identifier | See "Custom types" below |
+| `chrono::DateTime<Tz>`, `NaiveDate`, `NaiveDateTime`, `NaiveTime` | `string` | chrono serializes them as ISO 8601 text |
+| A struct with named fields the project defines | its interface, by name | Derived or not; see "Custom types" below |
+| Anything else | `unknown` | An external type, an enum or a tuple struct; `generate-types` warns. See "Custom types" below |
 
 ### Wide integers
 
@@ -332,25 +334,25 @@ same way.
 
 ## Custom types
 
-The visitor recognises the primitives in the table above. Everything else
-emits as its bare Rust type name. Two consequences fall out of that:
+The visitor recognises the primitives in the table above and chrono's
+date and time types. Any other type name resolves one of two ways.
 
-**A nested struct gets its own interface only if it derives `InertiaProps`
-or `Data`.** A bare `#[derive(Serialize)]` struct is invisible to the
-generator - the emitted interface will reference it by name, but no
-declaration is produced:
+**A struct your project defines gets its own interface, derived or not.**
+A nested struct that only derives `Serialize` is emitted as soon as a prop
+reaches it, directly or through another struct, under the keys serde
+writes:
 
 ```rust
 use serde::Serialize;
 use suprnova::{Data, InertiaProps};
 
 #[derive(Serialize)]
-pub struct Address {  // NOT picked up - no InertiaProps/Data derive
+pub struct Address {  // no InertiaProps or Data derive: picked up anyway
     pub street: String,
     pub city: String,
 }
 
-#[derive(Data)]      // OR InertiaProps - either works
+#[derive(Data)]
 pub struct Company {
     pub name: String,
     pub address: Address,
@@ -366,40 +368,61 @@ pub struct ProfileProps {
 Generated output:
 
 ```typescript
-export interface Company {
-  name: string;
-  address: Address;          // dangling - no Address interface emitted
-}
-
 export interface ProfileProps {
   user_name: string;
   company: Company;
 }
+
+export interface Company {
+  name: string;
+  address: Address;
+}
+
+export interface Address {
+  street: string;
+  city: string;
+}
 ```
 
-To fix: add `#[derive(Data)]` (or `InertiaProps`) to `Address`. The
-serialise behaviour at runtime is unaffected by the derive choice on the
-nested struct - `serde_json` will still emit the struct correctly - but
-TypeScript needs the explicit declaration.
+A struct that no prop reaches stays out of the file. Only a struct with
+named fields counts: an enum or a tuple struct of your own has no shape the
+generator can write, and falls under the next rule.
 
-**Generic args on custom types are not recursed.** `chrono::DateTime<Utc>`,
-`uuid::Uuid`, `rust_decimal::Decimal`, and any of your own non-derived
-types emit as the bare leading identifier (`DateTime`, `Uuid`, `Decimal`).
-They serialise to JSON strings on the wire, but the TypeScript declaration
-won't say so. Two ways to handle this:
+**chrono's types are strings, and any other external type is `unknown`.**
+chrono serializes `DateTime<Tz>`, `NaiveDate`, `NaiveDateTime` and
+`NaiveTime` as ISO 8601 text, so they emit as `string`. A type the
+generator cannot see - `uuid::Uuid`, `rust_decimal::Decimal`, any other
+crate's type, your own enum or tuple struct - emits as `unknown`, so the
+file never names a type it does not declare, and `generate-types` warns
+once per type:
+
+```rust
+#[derive(InertiaProps)]
+pub struct EventProps {
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+    pub day: chrono::NaiveDate,
+    pub id: uuid::Uuid,
+    pub price: rust_decimal::Decimal,
+}
+```
 
 ```typescript
-// frontend/src/types/runtime-types.ts - handwritten alongside the generated file
-export type DateTime = string;        // chrono::DateTime<_> serialises as RFC 3339
-export type Uuid = string;
-export type Decimal = string;         // serde_with default; rust_decimal::Decimal
+export interface EventProps {
+  starts_at: string;
+  day: string;
+  id: unknown;
+  price: unknown;
+}
 ```
 
-Then in `tsconfig.json`, make sure they're picked up via your `include`
-glob, or `import type { DateTime } from './runtime-types'` where needed.
-The framework doesn't ship these aliases for you because the right choice
-(`string` vs `number` vs branded type) depends on the serde feature flags
-you've turned on.
+```
+⚠ Prop type `Uuid` (referenced by `EventProps.id`) isn't a struct this project defines - emitting `unknown`. ...
+```
+
+`unknown` makes the frontend check the value before it uses it. When the
+value travels as a string anyway, as a `Uuid` does, make the prop field a
+`String` (`id: event.id.to_string()`) and it is typed `string`. For a
+shape of its own, mirror it as a struct with named fields in your project.
 
 ## Generic structs
 
