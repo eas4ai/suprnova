@@ -66,3 +66,69 @@ pub trait ProvidesInertiaProperties: Send + Sync {
         context: &RenderContext<'_>,
     ) -> Result<IndexMap<String, Prop>, FrameworkError>;
 }
+
+/// What a [`ProvidesInertiaProperty`] value is converted with: its key
+/// path, its sibling props and the request - Laravel's `PropertyContext`.
+pub struct PropertyContext<'a> {
+    key: &'a str,
+    props: &'a IndexMap<String, Prop>,
+    request: &'a dyn InertiaRequestExt,
+}
+
+impl<'a> PropertyContext<'a> {
+    /// The context of converting the prop at `key`, among `props`, for
+    /// `request`.
+    pub fn new(
+        key: &'a str,
+        props: &'a IndexMap<String, Prop>,
+        request: &'a dyn InertiaRequestExt,
+    ) -> Self {
+        Self {
+            key,
+            props,
+            request,
+        }
+    }
+
+    /// The prop's key path, a dotted key as it was registered
+    /// (`"auth.user"`).
+    pub fn key(&self) -> &'a str {
+        self.key
+    }
+
+    /// Every prop of the page before resolution, shared and the page's
+    /// own, this one included - Laravel's sibling props. A sibling's value
+    /// is there to read when it was given as a value
+    /// ([`Prop::as_value`]); a resolver has not run.
+    pub fn props(&self) -> &'a IndexMap<String, Prop> {
+        self.props
+    }
+
+    /// The request the page is rendered for.
+    pub fn request(&self) -> &'a dyn InertiaRequestExt {
+        self.request
+    }
+}
+
+/// A prop value that converts itself when the page is rendered - Laravel's
+/// `ProvidesInertiaProperty`.
+///
+/// Attach one with [`Prop::property`] or
+/// [`InertiaResponse::with_property`](crate::InertiaResponse::with_property).
+/// The conversion runs only when the prop is sent, with a
+/// [`PropertyContext`], so a value can format itself from a sibling prop
+/// (a price from the page's currency) or from the request. The result
+/// ships whole, as Laravel ships an object's conversion: a dotted `only`
+/// entry does not narrow it.
+pub trait ProvidesInertiaProperty: Send + Sync {
+    /// The prop's value for this render.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the response, or is rescued on a deferred prop
+    /// carrying [`Prop::rescue`], as a resolver's error is.
+    fn to_inertia_property(
+        &self,
+        context: &PropertyContext<'_>,
+    ) -> Result<serde_json::Value, FrameworkError>;
+}

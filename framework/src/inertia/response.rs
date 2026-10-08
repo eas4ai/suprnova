@@ -6,7 +6,9 @@ use super::prop::{
     DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
     PropResolver, PropSource, ScrollMetadata, Visibility,
 };
-use super::providers::{ProvidesInertiaProperties, RenderContext};
+use super::providers::{
+    PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty, RenderContext,
+};
 use crate::container::App;
 use crate::csrf::csrf_token;
 use crate::error::FrameworkError;
@@ -465,6 +467,18 @@ impl InertiaResponse {
     pub fn prop(mut self, key: impl Into<String>, prop: Prop) -> Self {
         self.put_prop(key.into(), prop);
         self
+    }
+
+    /// Attach a value that converts itself when it is sent, with its key
+    /// path, its sibling props and the request - Laravel's
+    /// `ProvidesInertiaProperty` as a prop value. Shorthand for
+    /// `.prop(key, Prop::property(value))`.
+    pub fn with_property(
+        self,
+        key: impl Into<String>,
+        value: impl ProvidesInertiaProperty + 'static,
+    ) -> Self {
+        self.prop(key, Prop::property(value))
     }
 
     /// Build an `InertiaResponse` from the `Vec<(String, PropEntry)>` produced
@@ -1289,6 +1303,7 @@ impl InertiaResponse {
             config.max_concurrent_resolvers,
             config.with_all_errors,
             staged_session.error_bags(),
+            req,
         )
         .await?;
 
@@ -1369,6 +1384,7 @@ impl InertiaResponse {
             usize::MAX,
             config.with_all_errors,
             staged_session.error_bags(),
+            &TestRequest,
         )
         .await
         .expect("test resolver should not fail");
@@ -1605,9 +1621,19 @@ async fn resolve_props(
     max_concurrency: usize,
     with_all_errors: bool,
     session_errors: serde_json::Map<String, Value>,
+    request: &dyn InertiaRequestExt,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
+    // A `Prop::property` value converts with its sibling props (PAR-051),
+    // the whole prop bag before resolution, Laravel's `PropertyContext`.
+    // The loop below consumes the bag, so a copy is kept, and only when a
+    // property prop needs it.
+    let siblings: IndexMap<String, Prop> = if props.values().any(Prop::is_property) {
+        props.clone()
+    } else {
+        IndexMap::new()
+    };
 
     // `errors` is always present per the Inertia v3 contract. Seed
     // with whatever the session has flashed under the canonical bag
@@ -1895,6 +1921,20 @@ async fn resolve_props(
                 };
                 materialized.insert(key, v);
             }
+            // A property converts now, with its context, and ships whole,
+            // as Laravel ships an object's conversion.
+            PropSource::Property(value) => {
+                let context = PropertyContext::new(&key, &siblings, request);
+                match value.to_inertia_property(&context) {
+                    Ok(v) => {
+                        materialized.insert(key, v);
+                    }
+                    Err(e) if rescue => {
+                        tasks.push(Box::pin(async move { Ok(rescued_outcome(key, e)) }));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             // A scroll loader's value ships whole, as Laravel ships a
             // closure's result, and brings the facts its loader read.
             PropSource::ScrollResolver(loader) => {
@@ -2094,6 +2134,21 @@ fn push_merge_paths(metadata: &mut PageMetadata, key: &str, prop: &Prop, mode: M
     metadata
         .merge_prepend
         .extend(prepends.map(|path| format!("{key}.{path}")));
+}
+
+/// The request `build_page_object_for_test` resolves against: a test of
+/// the page object has no request, and its props read none.
+#[cfg(test)]
+struct TestRequest;
+
+#[cfg(test)]
+impl InertiaRequestExt for TestRequest {
+    fn path(&self) -> &str {
+        "/"
+    }
+    fn header(&self, _name: &str) -> Option<&str> {
+        None
+    }
 }
 
 /// Report a rescued deferred prop's failure - the log line and the

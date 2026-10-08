@@ -178,6 +178,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   number of `#[derive(Data)]` objects with `with_data` (and
   `try_with_data`), where it took one, through `Inertia::data`, with no
   request or component context.
+- **A prop value can convert itself with its context.** A type
+  implementing `ProvidesInertiaProperty` (Laravel's interface of the same
+  name), attached with `InertiaResponse::with_property` or
+  `Prop::property`, is converted when the prop is sent, with a
+  `PropertyContext` of its key path, its sibling props and the request,
+  so a price can format itself with the page's currency. No value type
+  received its key path, siblings or request before.
 
 ### Changed
 

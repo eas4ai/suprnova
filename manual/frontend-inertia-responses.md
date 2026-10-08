@@ -897,6 +897,44 @@ allowlist (`try_with_data` is the fallible sibling).
 `App::flush_inertia_shared()` clears the shared providers with the keyed
 shares, as Laravel's `flushShared` does.
 
+One prop's value can convert itself when it is sent: implement
+`ProvidesInertiaProperty` (Laravel's interface of the same name) and
+attach the value with `.with_property(key, value)` or `Prop::property`.
+The conversion gets a `PropertyContext` of the prop's key path, its
+sibling props and the request:
+
+```rust
+use suprnova::{FrameworkError, PropertyContext, ProvidesInertiaProperty};
+
+pub struct Money(i64);
+
+impl ProvidesInertiaProperty for Money {
+    fn to_inertia_property(
+        &self,
+        context: &PropertyContext<'_>,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let currency = context
+            .props()
+            .get("currency")
+            .and_then(|prop| prop.as_value())
+            .and_then(|value| value.as_str())
+            .unwrap_or("USD");
+        Ok(format!("{}.{:02} {currency}", self.0 / 100, self.0 % 100).into())
+    }
+}
+
+InertiaResponse::new("Shop/Show")
+    .with("currency", "EUR")
+    .with_property("price", Money(1250))   // "12.50 EUR"
+```
+
+The conversion runs only when the prop is sent, so a prop a partial
+reload leaves out is never converted. The siblings are the page's props
+before resolution, shared ones included; a sibling given as a value can
+be read with `Prop::as_value`, while a resolver has not run yet. The
+converted value ships whole, as Laravel ships an object's conversion: a
+dotted `only` entry does not narrow it.
+
 ## Flash and redirects
 
 Flash data is one-shot state that should appear on the next render and

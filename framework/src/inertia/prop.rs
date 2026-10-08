@@ -516,6 +516,9 @@ pub(crate) enum PropSource {
     /// Produced by a scroll prop's loader, with the page facts read from
     /// the loaded value. See [`Prop::scroll_lazy`].
     ScrollResolver(ScrollResolver),
+    /// Converted when the prop is sent, with its property context. See
+    /// [`Prop::property`].
+    Property(Arc<dyn super::providers::ProvidesInertiaProperty>),
     /// Absent sentinel. `when_loaded!` produces this when the named
     /// relation is not preloaded on the source entity: the key is left
     /// out of the response entirely - no null, no error.
@@ -638,6 +641,7 @@ impl std::fmt::Debug for Prop {
             PropSource::Value(v) => s.field("value", v),
             PropSource::Resolver(_) => s.field("value", &"<resolver>"),
             PropSource::ScrollResolver(_) => s.field("value", &"<scroll resolver>"),
+            PropSource::Property(_) => s.field("value", &"<property>"),
             PropSource::Absent => s.field("value", &"<absent>"),
         };
         s.field("visibility", &self.visibility);
@@ -840,6 +844,14 @@ impl Prop {
             let fut = f();
             Box::pin(async move { Ok(fut.await) })
         }))
+    }
+
+    /// A prop whose value converts itself when it is sent, with its key
+    /// path, its sibling props and the request - Laravel's
+    /// `ProvidesInertiaProperty`. See
+    /// [`ProvidesInertiaProperty`](crate::ProvidesInertiaProperty).
+    pub fn property(value: impl super::providers::ProvidesInertiaProperty + 'static) -> Self {
+        Self::with_source(PropSource::Property(Arc::new(value)))
     }
 
     /// A scroll prop whose value comes from `resolver` and whose page
@@ -1273,6 +1285,12 @@ impl Prop {
             && self.scroll.is_none()
     }
 
+    /// True for a [`property`](Self::property) prop, whose value converts
+    /// when it is sent.
+    pub fn is_property(&self) -> bool {
+        matches!(self.source, PropSource::Property(_))
+    }
+
     /// True if the prop's value comes from a closure rather than being
     /// materialized already.
     pub fn has_resolver(&self) -> bool {
@@ -1407,11 +1425,23 @@ impl Prop {
     /// and the `deferredProps` / `mergeProps` / `onceProps` /
     /// `scrollProps` metadata - lives in `InertiaResponse::resolve` and
     /// uses this method internally.
+    ///
+    /// # Errors
+    ///
+    /// A resolver's error, or, for a [`property`](Self::property) prop, an
+    /// error saying it converts only inside a response, which gives it its
+    /// key, siblings and request.
     pub async fn resolve(self) -> Result<Value, FrameworkError> {
         match self.source {
             PropSource::Value(v) => Ok(v),
             PropSource::Resolver(r) => r().await,
             PropSource::ScrollResolver(r) => r().await.map(|(value, _)| value),
+            // A property converts with the page's context, which only a
+            // response has.
+            PropSource::Property(_) => Err(FrameworkError::internal(
+                "a Prop::property value converts only inside an Inertia response, \
+                 which gives it its key, sibling props and request",
+            )),
             // Callers reach the absent sentinel through
             // `resolve_with_owner`, which returns `Ok(None)`. `Null` is
             // the safe fallback so a stray call here cannot panic.

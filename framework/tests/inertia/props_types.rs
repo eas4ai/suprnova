@@ -857,3 +857,73 @@ async fn inp_a_response_takes_several_data_objects() {
     assert_eq!(page["props"]["name"], "Ada");
     assert_eq!(page["props"]["plan"], "pro");
 }
+
+/// A value converted with its property context - Laravel's
+/// `ProvidesInertiaProperty`. It formats itself with a sibling prop and
+/// reports the key path and request it saw.
+struct Money {
+    cents: i64,
+    conversions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl suprnova::ProvidesInertiaProperty for Money {
+    fn to_inertia_property(
+        &self,
+        context: &suprnova::PropertyContext<'_>,
+    ) -> Result<Value, suprnova::FrameworkError> {
+        self.conversions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let currency = context
+            .props()
+            .get("currency")
+            .and_then(Prop::as_value)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        Ok(json!({
+            "amount": format!("{}.{:02} {currency}", self.cents / 100, self.cents % 100),
+            "key": context.key(),
+            "path": context.request().path(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn inp_a_property_value_converts_with_its_key_siblings_and_request() {
+    let conversions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Shop")
+        .with("currency", "EUR")
+        .with_property(
+            "price",
+            Money {
+                cents: 1250,
+                conversions: conversions.clone(),
+            },
+        );
+    let page = page_of(response, &MockReq::new("/shop").inertia()).await;
+
+    assert_eq!(
+        page["props"]["price"],
+        json!({ "amount": "12.50 EUR", "key": "price", "path": "/shop" })
+    );
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn inp_a_property_value_converts_only_when_it_is_sent() {
+    // Laravel converts during resolution, so a prop a partial reload
+    // leaves out is never converted.
+    let conversions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Shop").with("currency", "EUR").prop(
+        "price",
+        Prop::property(Money {
+            cents: 1,
+            conversions: conversions.clone(),
+        }),
+    );
+    let req = MockReq::new("/shop").inertia().partial("Shop", "currency");
+    let page = page_of(response, &req).await;
+
+    assert!(page["props"].get("price").is_none(), "{page}");
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -37,7 +37,9 @@ pub use prop::{
     Visibility,
 };
 pub use prop::{MergePaths, OnceUntil};
-pub use providers::{ProvidesInertiaProperties, RenderContext};
+pub use providers::{
+    PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty, RenderContext,
+};
 pub(crate) use response::escape_html_attr;
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
