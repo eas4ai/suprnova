@@ -464,6 +464,63 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the extensions it tried. `component_exists(name, bool)` decides the check
   for one assertion, and with no configuration installed nothing is
   checked (TS-03).
+- **Inertia DevTools records each request.** The Inertia DevTools browser
+  extension reads its entries from the server, and Suprnova had no server
+  side, so the extension showed nothing. `InertiaConfig::devtools` takes a
+  `DevToolsConfig` with Laravel's settings, read from the same
+  `INERTIA_DEVTOOLS_ENABLED`, `_TTL_HOURS`, `_PRUNE_INTERVAL_SECONDS`,
+  `_LIMIT` and `_GATE` variables. Unset, DevTools records in the `local`
+  environment only, which an unset `APP_ENV` is; `enabled(true)` and
+  `enabled(false)` decide outright. `Inertia::install` and
+  `Inertia::middleware` then put `DevToolsMiddleware` outermost in the
+  Inertia stack, and it skips the `except` paths (`_inertia/devtools*` and
+  `_suprnova/*` by default). A failure while recording drops the entry and
+  leaves the response as it was; a write failure is logged at `warn` once
+  and pauses recording into that directory for 30 seconds. See [Inertia
+  DevTools](manual/frontend-inertia-devtools.md) (DT-01, DT-10).
+- **The entry of a request, its headers and the first-visit tag.** Each
+  recorded request stores Laravel's entry key for key: a ULID, the tab,
+  batch and visit ids from the extension's headers, the timestamp, method,
+  URL, status, redirect location and server time, the request type
+  (`precognition` first, then `initial` or `http`, `deferred`, `poll`,
+  `partial`, `prefetch`, `navigate`), the request and response headers,
+  the request body (an Inertia write's JSON or form input with uploads
+  summarized, up to 256,000 bytes read before the handler) and the
+  response body (the page object, or text up to 256,000 bytes), the route
+  with its handler's type name, and for a rendered page the component, its
+  page file and the render call's file and line, which
+  `InertiaResponse::new`, `inertia_response!`, `Inertia::paginate`,
+  `Inertia::data` and `Router::inertia` take through `#[track_caller]`.
+  The response carries `X-Inertia-Devtools-Id`, `-Parent-Out`, and
+  `-Base-Path` under a public root, and a first visit's `200` document
+  carries the id in a `<script data-inertia-devtools-id>` tag before
+  `</body>` (DT-02, DT-04, Precognition row 057).
+- **Prop kinds and their sources in DevTools entries.** An entry lists
+  each prop the client received with its kind in Laravel's order
+  (`always`, `defer` only on the extension's deferred visit with its
+  group, `optional`, `merge`, `scroll`, `once`), `reset`, `once`,
+  `mergeDirection`, `deepMerge` for a deep merge or a `match_on`, and
+  `rescued`. A shared key names the `Inertia::share`, `share_many`,
+  `share_data` or `App::inertia_share*` call that shared it, and the
+  middleware hooks' type for a hook share; a render prop names the line
+  that gives its key. Deep paths without metadata are pruned, and
+  `propValues` holds what the client received (DT-03).
+- **The DevTools entry endpoints.** `GET /_inertia/devtools/entries`
+  lists entries newest first, filtered by `component`, `type`, `exclude`,
+  `offset` and `limit`, and `GET /_inertia/devtools/entries/{id}` answers
+  one entry, or `404 {"message": "Not found."}`. The `local` environment
+  is always admitted; elsewhere only the user the configured gate ability
+  allows, else `403 {"message": "Forbidden."}`. An entry request
+  reflashes the session, never becomes the previous URL, and is never
+  recorded (DT-05, DT-06, DT-09).
+- **DevTools storage and redaction.** Entries are one JSON file each under
+  `storage_path("inertia-devtools")`, listed newest first in `_meta.json`,
+  pruned after 24 hours once the last prune is 300 seconds old, and kept
+  to the newest 100 per browser tab. Before a write, the redaction keys
+  (`password`, `token`, `api_key` and seven more) and headers (`cookie`,
+  `authorization` and four more) become `[REDACTED]` in bodies, prop
+  values, headers and URL query parameters, without regard to case, and a
+  header value that is not text becomes `[UNSERIALIZABLE]` (DT-07, DT-08).
 
 ### Changed
 

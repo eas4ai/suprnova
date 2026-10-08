@@ -1358,8 +1358,16 @@ with it.
    Inertia visit into a `303` back to the form page with the errors
    flashed. See [Validation failures](#validation-failures).
 
+When [Inertia DevTools](frontend-inertia-devtools.md) is enabled - in the
+`local` environment unless `InertiaConfig::devtools` says otherwise -
+`install` registers `DevToolsMiddleware` ahead of all five, outermost of
+the Inertia layer, so the entry it records for each request holds the
+response the five shaped. With `register_globally(false)` the stack for
+route groups carries it instead, and `install` registers a global one that
+only answers the extension's entry endpoints.
+
 Order matters: the headers middleware is registered first, so it is the
-outermost and sees every response - including the `409` the version
+outermost of the protocol middlewares and sees every response - including the `409` the version
 middleware returns before the handler ever runs. The validation-redirect
 middleware is registered last, so it is innermost - closest to the
 handler - and sees a `422` before the other four middlewares get a

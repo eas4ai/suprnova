@@ -111,6 +111,7 @@
 - ## Frontend
     - [Overview](frontend.md)
     - [Inertia Responses](frontend-inertia-responses.md)
+    - [Inertia DevTools](frontend-inertia-devtools.md)
     - [Pages](frontend-pages.md)
     - [TypeScript Types](frontend-typescript-types.md)
 - ## CLI Reference
