@@ -9,7 +9,10 @@ use std::pin::Pin;
 
 use suprnova::routing::ResourceController;
 use suprnova::testing::TestClient;
-use suprnova::{MiddlewareRegistry, Request, Response, Router, get, group, post, put};
+use suprnova::{
+    BoundChild, FrameworkError, MatchedRoute, MiddlewareRegistry, Request, Response, RouteBinding,
+    RouteBindingInfo, Router, get, group, handler, post, put,
+};
 
 /// The name of the route the request matched, or `-` for none.
 async fn name_of(req: Request) -> Response {
@@ -108,5 +111,69 @@ async fn a_resource_names_index_and_store_on_its_one_path() {
     assert_eq!(
         answer(&client, "POST", "/method-names-posts").await,
         "method-names-posts.store"
+    );
+}
+
+/// A value a binder resolves to the name its `MatchedRoute` reports.
+#[derive(Debug, Clone)]
+pub struct SeenName(String);
+
+#[suprnova::async_trait]
+impl RouteBinding for SeenName {
+    fn route_key_name() -> &'static str {
+        "name"
+    }
+    fn route_key(&self) -> String {
+        self.0.clone()
+    }
+    async fn resolve_route_binding(
+        value: &str,
+        _field: Option<&str>,
+    ) -> Result<Option<Self>, FrameworkError> {
+        Ok(Some(Self(value.to_string())))
+    }
+    async fn resolve_child_route_binding(
+        &self,
+        _child: &str,
+        _value: &str,
+        _field: Option<&str>,
+    ) -> Result<Option<BoundChild>, FrameworkError> {
+        Ok(None)
+    }
+    fn route_binding_info() -> RouteBindingInfo {
+        RouteBindingInfo::of::<Self>()
+    }
+}
+
+/// Answer with the name the binder saw.
+#[handler]
+pub async fn show_seen(member: SeenName) -> Response {
+    suprnova::http::text(member.0)
+}
+
+#[tokio::test]
+async fn a_binder_sees_the_name_of_the_route_that_matched_by_its_method() {
+    // `GET` and `POST` on one pattern, named like a resource's `index` and
+    // `store`; the binder reports the name its `MatchedRoute` carries as
+    // the bound value, which the handler answers with.
+    let router: Router = Router::new()
+        .get("/method-names/members/{member}", show_seen)
+        .name("method_names.members.index")
+        .post("/method-names/members/{member}", show_seen)
+        .name("method_names.members.store");
+    let router = router.bind("member", |_value: String, route: MatchedRoute| async move {
+        Ok(Some(SeenName(
+            route.name().unwrap_or_else(|| "-".to_string()),
+        )))
+    });
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+
+    assert_eq!(
+        answer(&client, "GET", "/method-names/members/ada").await,
+        "method_names.members.index"
+    );
+    assert_eq!(
+        answer(&client, "POST", "/method-names/members/ada").await,
+        "method_names.members.store"
     );
 }

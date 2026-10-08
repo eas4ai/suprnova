@@ -1344,6 +1344,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server sets the matched route's name on the request, so each method
   reports its own and an unnamed one reports none. A request that never
   went through dispatch still falls back to the pattern lookup (DT-04).
+  `MatchedRoute::name`, which a `Router::bind` resolver reads, had the
+  same pattern-only lookup and now reports the name the request carries.
 - **A hook-shared prop names a file and line.** A prop the middleware
   hooks' `share` supplied had the hooks' Rust type name as its
   `shareSource` file, at line `0`, which the extension cannot open.
