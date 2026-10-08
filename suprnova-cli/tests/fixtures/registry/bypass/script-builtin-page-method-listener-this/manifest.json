@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-page-method-listener-this",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
