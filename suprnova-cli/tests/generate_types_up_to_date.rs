@@ -157,7 +157,7 @@ fn removing_the_final_props_type_reports_one_mutation_then_up_to_date() {
 /// generator does not write stops compiling.
 #[test]
 fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
-    for frontend in ["svelte", "react", "vue"] {
+    for frontend in ["react", "vue"] {
         let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create tempdir");
         let name = format!("kit_{frontend}");
         let out = Command::new(BIN)

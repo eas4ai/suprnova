@@ -1,30 +1,29 @@
-import { createInertiaApp, type ResolvedComponent } from '@inertiajs/svelte'
-import createServer from '@inertiajs/svelte/server'
-import { render } from 'svelte/server'
+import { createInertiaApp } from '@inertiajs/svelte'
+import AppLayout from './layouts/AppLayout.svelte'
+import GuestLayout from './layouts/GuestLayout.svelte'
+import { pageTitle } from './lib/title'
 
-// `suprnova ssr:start` runs this bundle under Node - `npm run build:ssr`
-// (`vite build --ssr src/ssr.ts`) produces it. `createServer` (from
-// `@inertiajs/svelte/server`, re-exporting `@inertiajs/core/server`)
-// opens the HTTP worker the framework's `SsrConfig` posts `POST /render`
-// to, and answers `GET /health` itself - no extra code needed here for
-// `suprnova ssr:check`.
+// `suprnova ssr:start` runs this entry's bundle under Node, and
+// `npm run build:ssr` (`vite build --ssr src/ssr.ts`) produces it at
+// `bootstrap/ssr/ssr.js`. The call below is the whole entry: on an SSR
+// build `@inertiajs/vite` wraps this top-level `createInertiaApp(...)`
+// statement in the server bootstrap (`packages/vite/src/ssrTransform.ts`
+// and `frameworks/svelte.ts`). It imports `createServer` from
+// `@inertiajs/svelte/server` and `render` from `svelte/server`, renders
+// each page the framework's `SsrConfig` posts to `POST /render`, answers
+// `GET /health` for `suprnova ssr:check`, and starts that server in a
+// production build only. Under `npm run dev` the plugin serves the same
+// render at `/__inertia_ssr` instead.
 //
-// `svelte/server`'s `render()` returns `{ body, head }` directly, which
-// is the exact shape Inertia's `setup()` contract expects for SSR - no
-// `render:` option to pass at the `createInertiaApp` level, unlike
-// React/Vue. `lib/lang.svelte.ts`'s `t()`/`initLang()` are plain module
-// state with no context requirement, so no wrapper is needed here (see
-// `main.ts`'s `setup()` - same story: `initLang` never runs server-side,
-// so `t()` falls back to raw-key rendering for the SSR pass).
-createServer((page) =>
-  createInertiaApp({
-    page,
-    resolve: (name) => {
-      const pages = import.meta.glob<ResolvedComponent>('./pages/**/*.svelte', { eager: true })
-      return pages[`./pages/${name}.svelte`]
-    },
-    setup({ App, props }) {
-      return render(App, { props })
-    },
-  }),
-)
+// The options match `main.ts`, so the markup the server renders is the
+// markup the browser hydrates: the same pages, the same layout, the same
+// title. `initLang` never runs on the server (see `main.ts`'s `setup`), so
+// `t()` falls back to raw-key rendering for this pass; `lib/lang.svelte.ts`
+// is plain module state with no context requirement, so nothing wraps the
+// app here.
+createInertiaApp({
+  pages: './pages',
+  layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),
+  title: pageTitle,
+  serverHead: true,
+})

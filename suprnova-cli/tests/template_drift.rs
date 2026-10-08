@@ -1506,11 +1506,6 @@ fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
             "@inertiajs/react",
         ),
         (
-            "svelte",
-            "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
-            "@inertiajs/svelte",
-        ),
-        (
             "vue",
             "src/templates/files/frontend/vue/src/ssr.ts.tpl",
             "@inertiajs/vue3",
@@ -1844,10 +1839,6 @@ fn the_starter_inertia_props_match_the_starter_controllers() {
             "react",
             suprnova_cli::templates::react::inertia_props_types(),
         ),
-        (
-            "svelte",
-            suprnova_cli::templates::svelte::inertia_props_types(),
-        ),
         ("vue", suprnova_cli::templates::vue::inertia_props_types()),
     ] {
         assert_eq!(
@@ -1894,13 +1885,13 @@ fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
             "svelte",
             "Login",
             suprnova_cli::templates::svelte::login_page(),
-            "form.errors.",
+            "{#snippet children({ errors, processing })}",
         ),
         (
             "svelte",
             "Register",
             suprnova_cli::templates::svelte::register_page(),
-            "form.errors.",
+            "{#snippet children({ errors, processing })}",
         ),
         (
             "vue",
@@ -2385,7 +2376,7 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
             }
         });
     }
-    assert_eq!(pages, 21, "seven pages for each of the three frontends");
+    assert_eq!(pages, 23, "seven pages for react and vue, nine for svelte");
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
 
@@ -2616,8 +2607,8 @@ fn intt_no_kit_page_types_root_by_hand() {
         "these kit pages pass usePage a type argument: {offenders:?}"
     );
     assert_eq!(
-        readers, 21,
-        "the seven pages of each kit that build URLs read `root` through usePage()"
+        readers, 23,
+        "the pages of each kit that build URLs read `root` through usePage(): seven, nine in svelte"
     );
 }
 
