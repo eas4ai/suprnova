@@ -679,9 +679,18 @@ pub fn register() {
     // via `X-Inertia-Except-Once-Props` until the cache key changes.
     App::inertia_share_once("plans", || async {
         Ok::<_, suprnova::FrameworkError>(load_plan_catalog().await?)
-    });
+    })
+    .until(3600);
 }
 ```
+
+`inertia_share_once` returns the registered prop, as Laravel's
+`Inertia::shareOnce` returns its `OnceProp`, and it takes the options any
+once prop takes - `.as_key(key)`, `.until(span or moment)`,
+`.fresh(bool)` and `.once_with(options)`, described under
+[Once props](#once-props). Each call changes the registered prop at once;
+a later share under the same key replaces it, and the earlier handle then
+changes nothing.
 
 Shared keys nest on dots the same way `.with` does - two static shares
 under `"user.name"` / `"user.age"` land in one `user` object on the wire.

@@ -39,6 +39,7 @@ pub use prop::{MergePaths, OnceUntil};
 pub(crate) use response::escape_html_attr;
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;
+pub use shared::SharedOnceProp;
 pub use shared::{InertiaRegistry, InertiaSharedData};
 pub use ssr::SsrResponse;
 pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;

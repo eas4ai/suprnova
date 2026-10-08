@@ -352,3 +352,53 @@ async fn inp_once_as_key_takes_an_enum() {
 
     assert_eq!(page["onceProps"]["plan-pro"]["prop"], "other");
 }
+
+#[tokio::test]
+async fn inp_share_once_takes_the_same_options_as_any_once_prop() {
+    // Laravel's `Inertia::shareOnce('plans', fn () => ...)` returns the
+    // shared `OnceProp`, so `->as(...)->until(...)->fresh()` chain on it.
+    let _guard = suprnova::testing::TestContainer::fake();
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    suprnova::App::inertia_share_once("plans", counted_rates(calls.clone()))
+        .as_key(PlanKey::Pro)
+        .until(60)
+        .fresh(true);
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "plan-pro");
+    let page = page_of(InertiaResponse::new("Billing"), &req).await;
+
+    assert_eq!(
+        page["onceProps"]["plan-pro"],
+        json!({ "prop": "plans", "expiresAt": (1_800_000_000_i64 + 60) * 1000 })
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "fresh(true) resolves despite the client's claim"
+    );
+}
+
+#[tokio::test]
+async fn inp_share_once_options_reach_only_the_share_they_were_chained_on() {
+    // A later share under the same key replaces the prop; the handle of
+    // the earlier one must not change the newer prop.
+    let _guard = suprnova::testing::TestContainer::fake();
+    let first = suprnova::App::inertia_share_once("plans", || async {
+        Ok::<_, suprnova::FrameworkError>(json!(1))
+    });
+    suprnova::App::inertia_share_once("plans", || async {
+        Ok::<_, suprnova::FrameworkError>(json!(2))
+    });
+    first.as_key("stale");
+
+    let page = page_of(
+        InertiaResponse::new("Billing"),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+    assert_eq!(page["onceProps"]["plans"]["prop"], "plans", "{page}");
+    assert!(page["onceProps"].get("stale").is_none(), "{page}");
+}

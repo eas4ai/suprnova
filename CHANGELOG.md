@@ -147,6 +147,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `expiresAt` is the expiry in milliseconds counted in whole seconds, as
   Laravel counts it. The server still refuses a client's cache claim
   past a `DateTime` deadline, which Laravel leaves to the client.
+- **`App::inertia_share_once` returns the shared once prop**, a
+  `SharedOnceProp` that takes `as_key`, `until`, `fresh` and `once_with`
+  as Laravel's `shareOnce` returns a chainable `OnceProp`. A shared once
+  prop could not take a cache key, an expiry or `fresh` before; only the
+  `InertiaSharedData` provider could reach them.
+  `InertiaRegistry::share_once` returns the same handle.
 
 ### Changed
 

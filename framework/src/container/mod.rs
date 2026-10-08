@@ -1307,13 +1307,20 @@ impl App {
     /// changes - locale lists, plan catalogs, navigation menus, etc.
     /// The client tracks the cache key and the framework skips the
     /// resolver via `X-Inertia-Except-Once-Props` on subsequent visits.
-    pub fn inertia_share_once<F, Fut, V>(key: impl Into<String>, resolver: F)
+    ///
+    /// Returns the registered prop, which takes the options any once prop
+    /// takes (`as_key`, `until`, `fresh`, `once_with`), as Laravel's
+    /// `shareOnce` returns its `OnceProp`.
+    pub fn inertia_share_once<F, Fut, V>(
+        key: impl Into<String>,
+        resolver: F,
+    ) -> crate::inertia::SharedOnceProp
     where
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<V, crate::error::FrameworkError>> + Send + 'static,
         V: serde::Serialize + 'static,
     {
-        Self::inertia_registry().share_once(key, resolver);
+        Self::inertia_registry().share_once(key, resolver)
     }
 
     /// Read a value back out of the static Inertia shared-prop registry -
