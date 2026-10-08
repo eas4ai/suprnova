@@ -111,6 +111,29 @@ pub const ADMITTED_GLOBALS: &[&str] = &[
 /// through which an unlisted global could be read.
 pub const GLOBAL_OBJECTS: &[&str] = &["window", "self", "globalThis"];
 
+/// The globals that hold the page itself: its document, its URL and its
+/// session history. A component exists to change the page, so their
+/// properties (`document.title`, `location.hash`) stay under the other
+/// rules, and a value read from one (`document.body`) is part of the page,
+/// not a built-in. A method of theirs is a built-in function every script
+/// on the page calls, so a script may not assign one (REG-032).
+pub const PAGE_OBJECTS: &[&str] = &["document", "location", "history"];
+
+/// Built-in methods a script may read but not call, beyond
+/// [`ADMITTED_METHODS`]: the ones every object inherits from
+/// `Object.prototype`, and `toJSON`, which `JSON.stringify` calls on a
+/// date. A member read under one of these names, or under an admitted
+/// method's name, from a value the script did not make is the built-in
+/// function the value inherits, so a member of it may not be written
+/// (REG-032).
+pub const INHERITED_METHODS: &[&str] = &[
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "valueOf",
+    "toJSON",
+];
+
 /// Method names a script may call on any receiver: standard DOM, events,
 /// collections, strings, numbers, promises and the like. The ones in
 /// [`ARGUMENT_RULES`] have their arguments checked.

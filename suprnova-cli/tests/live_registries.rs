@@ -3215,6 +3215,112 @@ fn reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal() {
     );
 }
 
+/// Every file under `root`, by its path below it, with its bytes, so a
+/// test can show a refused install left the application as it was.
+fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).expect("read a project directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("under the root")
+                    .to_path_buf();
+                files.insert(relative, fs::read(&path).expect("read a project file"));
+            }
+        }
+    }
+    files
+}
+
+/// REG-033: `--yes` is not the developer's answer to a key change. With
+/// `--yes` on a terminal the vouched change is still asked about, showing
+/// both fingerprints: a yes re-pins it, and a no refuses the install and
+/// writes nothing. So `--yes` neither re-pins nor blocks the question.
+#[test]
+fn reg_033_yes_neither_re_pins_nor_blocks_the_key_change_question() {
+    let old = Lib::acme().widget();
+    let new_seed = [15; 32];
+    let handover =
+        signing::sign_handover(&SecretKey::from_bytes(SEED), &public_key(new_seed), ADDRESS)
+            .expect("handover");
+    let rotated = Lib::acme().at("1.1.0").widget().signed_by(new_seed).set(
+        "previousKeys",
+        json!([{
+            "publicKey": handover.from.encode(),
+            "next": handover.to.as_str(),
+            "signature": handover.signature.encode(),
+        }]),
+    );
+    let both = fetcher(&[&old, &rotated]);
+    let asked_about_the_change = |asked: &[String]| {
+        asked.len() == 1
+            && asked[0].contains(public_key(SEED).fingerprint().as_str())
+            && asked[0].contains(public_key(new_seed).fingerprint().as_str())
+    };
+
+    let declined = pinned(&old);
+    add(declined.path(), "acme/acme-ui/widget", &fetcher(&[&old])).expect("first");
+    let before = files_under(declined.path());
+    let mut prompter = terminal(&[false]);
+    let error = expect_refused(
+        install_with(
+            declined.path(),
+            "acme/acme-ui/widget",
+            &both,
+            &yes(),
+            &TestScanner,
+            &mut prompter,
+        ),
+        "was not pinned",
+    );
+    assert!(
+        asked_about_the_change(&prompter.asked),
+        "{error}; asked {:?}",
+        prompter.asked
+    );
+    assert_eq!(
+        ProjectFile::load(declined.path())
+            .expect("load")
+            .pinned_key(&old.address())
+            .expect("pin"),
+        Some(public_key(SEED))
+    );
+    assert!(
+        files_under(declined.path()) == before,
+        "a declined key change wrote to the application"
+    );
+
+    let confirmed = pinned(&old);
+    add(confirmed.path(), "acme/acme-ui/widget", &fetcher(&[&old])).expect("first");
+    let mut prompter = terminal(&[true]);
+    install_with(
+        confirmed.path(),
+        "acme/acme-ui/widget",
+        &both,
+        &yes(),
+        &TestScanner,
+        &mut prompter,
+    )
+    .expect("re-pinned on the terminal's yes");
+    assert!(
+        asked_about_the_change(&prompter.asked),
+        "asked {:?}",
+        prompter.asked
+    );
+    assert_eq!(
+        ProjectFile::load(confirmed.path())
+            .expect("load")
+            .pinned_key(&old.address())
+            .expect("pin"),
+        Some(public_key(new_seed))
+    );
+}
+
 /// REG-033: a new key the pinned key does not vouch for is refused.
 #[test]
 fn reg_033_a_new_key_the_pinned_key_does_not_vouch_for_is_refused() {

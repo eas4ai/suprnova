@@ -807,10 +807,11 @@ fn reg_032_a_traced_value_resolves_each_name_where_it_is_written() {
 
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
-/// a value, but not the prototype itself, so a script may keep one
-/// (`const has = Object.prototype.hasOwnProperty`). `hasOwnProperty`
-/// itself is not an admitted method, so calling it is refused by the call
-/// rule, but not as a prototype.
+/// a value, but not the prototype itself, so a script may keep one in a
+/// name (`const has = Object.prototype.hasOwnProperty`); exporting it is
+/// the built-in rule's to refuse, because it would leave the file the scan
+/// reads. `hasOwnProperty` itself is not an admitted method, so calling it
+/// is refused by the call rule, but not as a prototype.
 #[test]
 fn reg_032_a_prototype_read_through_a_member_is_admitted() {
     let admitted = [
@@ -820,7 +821,7 @@ fn reg_032_a_prototype_read_through_a_member_is_admitted() {
         "export const isArray = (x) => x instanceof Array;\n",
         "export class A {\n  static of() {}\n}\n",
         "export const count = (o) => Object.keys(o).length;\n",
-        "export const has = Object.prototype.hasOwnProperty;\n",
+        "const has = Object.prototype.hasOwnProperty;\n",
         "export const same = (x) => x === Array.prototype;\n",
         "export const kindOf = typeof Array.prototype;\n",
     ];
@@ -847,6 +848,538 @@ fn reg_032_a_prototype_read_through_a_member_is_admitted() {
             .all(|finding| finding.check != "script-prototype"),
         "{:?}",
         borrowed.findings
+    );
+}
+
+/// Every `(script, check, line)` case whose scan does not refuse that line
+/// of `widget.js` with that check.
+fn missing_cases(cases: &[(&str, &str, u32)]) -> Vec<String> {
+    cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect()
+}
+
+/// REG-032: a write to a member of a built-in changes it for every script
+/// on the page, so it is refused however the script names the built-in (by
+/// its name or through the global object) and however it writes (`=`, a
+/// compound or logical assignment, `++`, a destructuring or `for` loop
+/// target, `delete`). A built-in function counts: `Object.keys.call` is a
+/// member of the built-in `Object.keys`.
+#[test]
+fn reg_032_a_write_to_a_member_of_a_built_in_is_refused_in_every_form() {
+    let cases: &[(&str, &str, u32)] = &[
+        ("Object.keys = () => [];\n", "script-builtin", 1),
+        ("JSON.parse = () => null;\n", "script-builtin", 1),
+        ("Math.random = () => 0;\n", "script-builtin", 1),
+        ("globalThis.Object.keys = () => [];\n", "script-builtin", 1),
+        ("window.JSON.parse = () => null;\n", "script-builtin", 1),
+        ("self[\"Math\"].random = () => 0;\n", "script-builtin", 1),
+        ("console.log = () => {};\n", "script-builtin", 1),
+        ("customElements.define = () => {};\n", "script-builtin", 1),
+        ("Object.keys.call = () => [];\n", "script-builtin", 1),
+        ("Object.keys ??= () => [];\n", "script-builtin", 1),
+        ("Math.random ||= () => 0;\n", "script-builtin", 1),
+        ("JSON.parse += \"\";\n", "script-builtin", 1),
+        ("Math.random++;\n", "script-builtin", 1),
+        ("delete JSON.parse;\n", "script-builtin", 1),
+        ("[Math.random] = [() => 0];\n", "script-builtin", 1),
+        (
+            "({ a: JSON.parse } = { a: () => null });\n",
+            "script-builtin",
+            1,
+        ),
+        ("for (Math.random of [() => 0]) {\n}\n", "script-builtin", 1),
+    ];
+    let failures = missing_cases(cases);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a built-in, or a member a built-in hands over, kept in a name is
+/// followed to where a member of it is written: a variable's initializer
+/// and assignments, a parameter's default, and the arguments every call of
+/// its function passes, through as many functions as hand it on. A member
+/// read from a prototype stays the prototype rule's.
+#[test]
+fn reg_032_a_built_in_held_in_a_name_is_refused_where_a_member_is_written() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "const k = Object;\nk.keys = () => [];\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "let k;\nk = JSON;\nk.parse = () => null;\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "const k = Object.keys;\nk.call = () => [];\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(c) {\n  const k = c ? Object : JSON;\n  k.keys = () => [];\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "function f(p) {\n  p.call = () => [];\n}\nf(Object.keys);\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "function f(p = Object.keys) {\n  p.call = () => [];\n}\nf();\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const f = (p) => {\n  p.parse = () => null;\n};\nf(JSON);\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "function f(p) {\n  g(p);\n}\nfunction g(q) {\n  q.random = () => 0;\n}\nf(Math);\n",
+            "script-builtin",
+            5,
+        ),
+        (
+            "function f(p) {\n  p = Math;\n  p.random = () => 0;\n}\nf({});\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export function f() {\n  const k = Object;\n  setTimeout(() => {\n    k.keys = () => [];\n  }, 0);\n}\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "function f(p) {\n  p.call = () => 1;\n}\nf(Array.prototype.slice);\n",
+            "script-prototype",
+            2,
+        ),
+        (
+            "const f = (p) => {\n  delete p.call;\n};\nf(Array.prototype.slice);\n",
+            "script-prototype",
+            2,
+        ),
+    ];
+    let failures = missing_cases(cases);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a method every value inherits is a built-in function, so a
+/// member written on one read from any value the script did not make
+/// (`[].slice`, an element's `addEventListener`, `super.focus`) is refused.
+/// `document`, `location` and `history` are the page, whose members a
+/// component may change, but a method of theirs is a built-in function, so
+/// assigning one is refused however the page object is reached.
+#[test]
+fn reg_032_a_built_in_method_reached_through_any_value_or_the_page_is_refused() {
+    let cases: &[(&str, &str, u32)] = &[
+        ("[].slice.call = () => 1;\n", "script-builtin", 1),
+        ("({}).toString.call = () => \"\";\n", "script-builtin", 1),
+        (
+            "const s = \"\".trim;\ns.call = () => \"\";\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export function f(el) {\n  el.addEventListener.call = () => {};\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export class A extends HTMLElement {\n  m() {\n    super.focus.call = () => {};\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export class A extends HTMLElement {\n  m() {\n    this.querySelector.call = () => null;\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "document.createElement = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        ("location.assign = () => {};\n", "script-builtin", 1),
+        ("history.pushState = () => {};\n", "script-builtin", 1),
+        (
+            "const d = document;\nd.querySelector = () => null;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "window.document.getElementById = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "let d;\nd ||= document;\nd.querySelector = () => null;\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "function f(d) {\n  d.createElement = () => null;\n}\nf(document);\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export class A extends HTMLElement {\n  m() {\n    this.ownerDocument.createElement = () => null;\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "document.location.assign = () => {};\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export function clear(form) {\n  form.search.value = \"\";\n}\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let failures = missing_cases(cases);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: the scan follows a built-in only through names: a variable, and
+/// a parameter of a function the script calls by name. Anywhere else it
+/// would leave for code the scan cannot follow (a destructured name, an
+/// array or object, a member, another script through an export, a function
+/// it does not trace, a return or a browser API that hands it back), so it
+/// is refused there, which covers `Object.defineProperty` and `Reflect.set`
+/// targeting one. A built-in may still be called, read from, compared, and
+/// given to a browser API that only calls it back (`map(Number)`).
+#[test]
+fn reg_032_a_built_in_is_refused_where_it_leaves_the_names_the_scan_follows() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "const { keys } = Object;\nkeys.call = () => [];\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "const [s] = [Array.prototype.slice];\ns.call = () => 1;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "let k;\n({ k } = { k: Object.keys });\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "Object.defineProperty(Object, \"keys\", { value: () => [] });\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "Reflect.set(Math, \"random\", () => 0);\n",
+            "script-builtin",
+            1,
+        ),
+        ("Object.freeze(Math);\n", "script-builtin", 1),
+        (
+            "export const values = Object.values(Math);\n",
+            "script-builtin",
+            1,
+        ),
+        ("const xs = [];\nxs.push(Math);\n", "script-builtin", 2),
+        ("Array.prototype.push.call(Math, 1);\n", "script-builtin", 1),
+        ("export const m = Math;\n", "script-builtin", 1),
+        (
+            "export const has = Object.prototype.hasOwnProperty;\n",
+            "script-builtin",
+            1,
+        ),
+        ("const m = JSON;\nexport { m };\n", "script-builtin", 1),
+        ("export default Object.keys;\n", "script-builtin", 1),
+        ("export const get = () => Math;\n", "script-builtin", 1),
+        (
+            "export function get() {\n  return JSON;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "export const o = { random: Math.random };\n",
+            "script-builtin",
+            1,
+        ),
+        ("export const o = { Math };\n", "script-builtin", 1),
+        ("const o = {};\no.m = Math;\n", "script-builtin", 2),
+        (
+            "Promise.resolve(Math).then((m) => {\n  m.random = () => 0;\n});\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "setTimeout((m) => {\n  m.random = () => 0;\n}, 0, Math);\n",
+            "script-builtin",
+            3,
+        ),
+        ("export class A {\n  m = Math;\n}\n", "script-builtin", 2),
+        (
+            "export function* g() {\n  yield Math;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "function f({ random }) {\n  random.call = () => 0;\n}\nf(Math);\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "function f(p) {\n  arguments[0].random = () => 0;\n}\nf(Math);\n",
+            "script-builtin",
+            4,
+        ),
+        ("let k;\nk ??= Object;\n", "script-builtin", 2),
+        ("throw Math;\n", "script-builtin", 1),
+        ("const xs = [];\nxs.push((0, Math));\n", "script-builtin", 2),
+        (
+            "const xs = [];\nlet k;\nxs.push(k = Math);\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "import { f } from \"./dep.js\";\nf(Math);\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "function run(o) {\n  o.forEach(Math);\n}\nrun({ forEach(p) {\n  p.random = () => 0;\n} });\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let failures = missing_cases(cases);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: an expression that may yield the global object is the global
+/// object to every rule about its members: a sequence's last expression, a
+/// conditional's branch and a logical expression's side. Each read below
+/// is refused as `window.localStorage` is, naming the global it reads, not
+/// only the global object it passes through.
+#[test]
+fn reg_032_the_global_object_reached_through_an_expression_is_the_global_object() {
+    let cases: &[(&str, u32)] = &[
+        ("export const s = window.localStorage;\n", 1),
+        ("export const s = (0, window).localStorage;\n", 1),
+        (
+            "export function f(flag) {\n  return (flag ? window : self).localStorage;\n}\n",
+            2,
+        ),
+        (
+            "export function f(w) {\n  return (w || globalThis).localStorage;\n}\n",
+            2,
+        ),
+        ("export const s = (0, self)[\"local\" + \"Storage\"];\n", 1),
+        ("(0, globalThis).fetch = () => null;\n", 1),
+    ];
+    let mut failures = Vec::new();
+    for (script, line) in cases {
+        let report = scan_widget_script(script);
+        let named = report.findings.iter().any(|finding| {
+            finding.check == "script-global"
+                && finding.line == Some(*line)
+                && (finding.message.contains("`localStorage`")
+                    || finding.message.contains("`fetch`"))
+        });
+        if !named {
+            failures.push(format!(
+                "{script:?}: no `script-global` naming the global at widget.js:{line}; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: writing a name on the global object makes it a global of the
+/// script's own, which the script may then read back, only when the name
+/// cannot be one of the browser's own properties there. A browser global
+/// whose write throws, as `localStorage`'s does, would otherwise be read
+/// for real after a `try`. Each read below is refused as the plain read is,
+/// however the name was written; the write itself is unchanged, and a
+/// global the script names with a capital stays its own.
+#[test]
+fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "try {\n  window.localStorage = 1;\n} catch {}\nexport const s = window.localStorage;\n",
+            "localStorage",
+            4,
+        ),
+        (
+            "try {\n  globalThis.indexedDB = 1;\n} catch {}\nexport const s = self.indexedDB;\n",
+            "indexedDB",
+            4,
+        ),
+        (
+            "try {\n  self[\"session\" + \"Storage\"] = 1;\n} catch {}\nexport const s = globalThis.sessionStorage;\n",
+            "sessionStorage",
+            4,
+        ),
+        (
+            "Object.defineProperty(window, \"caches\", { value: 1 });\nexport const s = window.caches;\n",
+            "caches",
+            2,
+        ),
+        (
+            "window.acmeState = {};\nexport const s = window.acmeState;\n",
+            "acmeState",
+            2,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (script, name, line) in cases {
+        let report = scan_widget_script(script);
+        let refused = report.findings.iter().any(|finding| {
+            finding.check == "script-global"
+                && finding.line == Some(*line)
+                && finding.message.contains(&format!("`{name}`"))
+        });
+        if !refused {
+            failures.push(format!(
+                "{script:?}: the read of `{name}` at widget.js:{line} is not refused; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    let own = [
+        "window.AcmeX = {};\nexport const x = (0, window).AcmeX;\n",
+        "globalThis[\"Acme\" + \"Y\"] = {};\nexport const y = window.AcmeY;\n",
+    ];
+    for script in own {
+        let report = scan_widget_script(script);
+        if !report.accepted() {
+            failures.push(format!(
+                "{script:?} was refused: {}",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The admitted fixtures' directory, under `accepted/`, that pins what the
+/// built-in rule leaves open (REG-032).
+fn own_members() -> PathBuf {
+    accepted().join("own-members")
+}
+
+/// REG-032: writing a member of an object or function the script made stays
+/// admitted, its own object, a parameter given one and its own function
+/// included, and so do calling, reading, comparing and feature-testing a
+/// built-in, handing a built-in function to a browser API that calls it
+/// back, a constant such as `Number.MAX_SAFE_INTEGER` used as a value, and
+/// the page's own properties (`document.title`, `location.hash`).
+#[test]
+fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
+    let admitted = [
+        "const o = {};\no.keys = () => [];\nexport { o };\n",
+        "function f(p) {\n  p.keys = () => [];\n}\nf({});\n",
+        "function mine() {}\nmine.cache = new Map();\n",
+        "export const count = (o) => Object.keys(o).length;\n",
+        "const keys = Object.keys;\nexport const count = (o) => keys(o).length;\n",
+        "const k = Object;\nexport const n = (o) => k.keys(o).length;\n",
+        "export const clean = (xs) => xs.map(Number).filter(Boolean);\n",
+        "export const run = (xs) => xs.forEach(console.log);\n",
+        "export const big = Math.max(1, Number.MAX_SAFE_INTEGER);\n",
+        "export const label = (n) => `${Math.round(n)} of ${Number.MAX_SAFE_INTEGER}`;\n",
+        "export const same = (x) => x === Object || typeof JSON === \"object\";\n",
+        "if (Element.prototype.checkVisibility) {\n  document.title = \"x\";\n}\n",
+        "location.hash = \"#a\";\n",
+        "export const api = { open() {} };\napi.open.label = \"x\";\n",
+        "export class A extends HTMLElement {\n  error = null;\n  connectedCallback() {\n    this.error = this.querySelector(\".e\");\n    if (this.error) this.error.hidden = true;\n  }\n}\n",
+        "globalThis.AcmeLib = { version: 1 };\nglobalThis.AcmeLib.version = 2;\n",
+        "export const failure = (result) => ({ error: result.error, next: result.next });\n",
+        "export const take = (el) => [el.focus, el.values];\n",
+        "export function clear(form) {\n  form.querySelector(\"[name=search]\").value = \"\";\n}\n",
+        "function cache() {}\ncache.size = 0;\n",
+    ];
+    let mut failures = Vec::new();
+    for script in admitted {
+        let report = scan_widget_script(script);
+        if !report.accepted() {
+            failures.push(format!(
+                "{script:?} was refused: {}",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    let fixture = scan_fixture(&own_members());
+    if !fixture.accepted() {
+        failures.push(format!(
+            "accepted/own-members was refused: {}",
+            fixture
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 
