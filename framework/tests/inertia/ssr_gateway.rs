@@ -718,6 +718,37 @@ async fn inssr_a_head_entry_that_is_not_a_string_is_left_out() {
     );
 }
 
+#[tokio::test]
+async fn inssr_a_2xx_answer_that_is_not_json_renders_on_the_client_quietly() {
+    // Laravel's `$response->json()` is `null` for such an answer, which
+    // renders on the client like an empty one.
+    let _events = EventFacade::fake();
+    let worker = Worker::answering(200, "<!doctype html><p>not the worker</p>").await;
+    let (config, errors) = with_error_hook(
+        InertiaConfig::new()
+            .production()
+            .ssr(worker.url())
+            .ssr_ensure_bundle_exists(false)
+            .ssr_throw_on_error(false),
+    );
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    assert_eq!(worker.seen().len(), 1);
+    assert!(
+        suprnova::events::dispatched::<SsrRenderFailed>(|_| true).is_empty(),
+        "an answer that is not JSON is not a failure"
+    );
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "{:?}",
+        errors.lock().unwrap()
+    );
+    let thrown = first_visit(&config.ssr_throw_on_error(true)).await;
+    assert!(thrown.is_ok(), "{thrown:?}");
+}
+
 // ---- PAR-059: the worker's error answer and SsrRenderFailed ----
 
 /// The error JSON an Inertia 3 worker answers a failed render with.

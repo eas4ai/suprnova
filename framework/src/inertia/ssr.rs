@@ -254,14 +254,7 @@ pub(crate) async fn render(
             );
             return Ok(None);
         }
-        Ok(answer) if answer.status.is_success() => match rendered(&answer.body) {
-            Ok(rendered) => return Ok(rendered),
-            Err(e) => failure(
-                page,
-                format!("the SSR worker's answer is not JSON: {e}"),
-                SsrErrorType::Unknown,
-            ),
-        },
+        Ok(answer) if answer.status.is_success() => return Ok(rendered(&answer.body)),
         Ok(answer) => error_answer(page, answer.status, &answer.body),
         Err(transport) => failure(page, transport, SsrErrorType::Connection),
     };
@@ -487,22 +480,20 @@ async fn exchange(
 /// The page a worker's successful answer carries, or `None` when there is
 /// nothing to inline, so the visit renders on the client (SS-02).
 ///
-/// Laravel returns `null` for an answer whose JSON is empty or falsy. An
+/// Laravel returns `null` when `$response->json()` is empty or falsy, and
+/// that is also what it reads from bytes that are not JSON at all. An
 /// object without a non-empty `body` string is the same case here: the
 /// worker's body carries the page data element and the mount element, so
 /// inlining an empty one left a document the client could not start from.
-/// Head entries that are not strings are left out. Bytes that are not JSON
-/// at all are an error, which the caller reports like any worker failure.
-fn rendered(bytes: &[u8]) -> Result<Option<SsrResponse>, serde_json::Error> {
-    if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
-    let serde_json::Value::Object(mut answer) = serde_json::from_slice(bytes)? else {
-        return Ok(None);
+/// None of these is reported as a failure. Head entries that are not
+/// strings are left out.
+fn rendered(bytes: &[u8]) -> Option<SsrResponse> {
+    let Ok(serde_json::Value::Object(mut answer)) = serde_json::from_slice(bytes) else {
+        return None;
     };
     let body = match answer.remove("body") {
         Some(serde_json::Value::String(body)) if !body.is_empty() => body,
-        _ => return Ok(None),
+        _ => return None,
     };
     let head = match answer.remove("head") {
         Some(serde_json::Value::Array(entries)) => entries
@@ -514,7 +505,7 @@ fn rendered(bytes: &[u8]) -> Result<Option<SsrResponse>, serde_json::Error> {
             .collect(),
         _ => Vec::new(),
     };
-    Ok(Some(SsrResponse { head, body }))
+    Some(SsrResponse { head, body })
 }
 
 #[cfg(test)]
