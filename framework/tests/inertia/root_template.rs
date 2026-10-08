@@ -639,10 +639,11 @@ fn page_data(body: &str) -> &str {
     &body[start..start + body[start..].find("</script>").expect("its end")]
 }
 
-/// RDOC-004: view data reaches the root template, escaped where the
-/// template places it, and never the page: not in the first visit's page
-/// data, not in an Inertia visit's JSON, and nowhere in the framework's
-/// own document.
+/// RDOC-004: view data of any value reaches the root template, escaped
+/// where the template places it (a string as itself, a number or an array
+/// as its JSON), and never the page: not in the first visit's page data,
+/// not in an Inertia visit's JSON, and nowhere in the framework's own
+/// document.
 #[tokio::test]
 async fn rdoc_004_view_data_reaches_the_template_and_never_the_page() {
     let _container = TestContainer::fake();
@@ -650,6 +651,8 @@ async fn rdoc_004_view_data_reaches_the_template_and_never_the_page() {
         pinned_page()
             .with_config(chosen())
             .with_view_data("preview", "A <b>shared</b> preview")
+            .with_view_data("rating", 4.5)
+            .with_view_data("keywords", ["rust", "inertia"])
     };
 
     let html = visit("/", page()).await;
@@ -659,7 +662,17 @@ async fn rdoc_004_view_data_reaches_the_template_and_never_the_page() {
         ),
         "{html}"
     );
-    assert!(!page_data(&html).contains("preview"), "{html}");
+    assert!(
+        html.contains("<meta name=\"rating\" content=\"4.5\">"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<meta name=\"keywords\" content=\"[&#34;rust&#34;,&#34;inertia&#34;]\">"),
+        "{html}"
+    );
+    for key in ["preview", "rating", "keywords", "4.5"] {
+        assert!(!page_data(&html).contains(key), "{key} in:\n{html}");
+    }
 
     let admin = visit("/admin/x", page()).await;
     assert!(admin.contains("content=\"A &#60;b&#62;shared"), "{admin}");
@@ -671,7 +684,9 @@ async fn rdoc_004_view_data_reaches_the_template_and_never_the_page() {
     let request = MockReq::new("/").inertia();
     let response = page().resolve(&request).await.expect("an Inertia visit");
     let (_, _, json) = parts(response).await;
-    assert!(!json.contains("preview"), "{json}");
+    for key in ["preview", "rating", "keywords", "4.5"] {
+        assert!(!json.contains(key), "{key} in:\n{json}");
+    }
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).expect("the page")["props"]["message"],
         "</script> & caf\u{e9}"
@@ -806,4 +821,35 @@ async fn rdoc_001_assertable_inertia_reads_a_first_visit_under_another_mount_id(
             .url("/home")
             .where_("message", "</script> & caf\u{e9}");
     }
+}
+
+/// A value whose `Serialize` impl always fails.
+struct Unserializable;
+
+impl serde::Serialize for Unserializable {
+    fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("refused"))
+    }
+}
+
+/// RDOC-004: view data whose `Serialize` impl fails is an error naming its
+/// key through `try_with_view_data`, and a value that serializes is set.
+#[tokio::test]
+async fn rdoc_004_view_data_that_fails_to_serialize_is_an_error_naming_its_key() {
+    let _container = TestContainer::fake();
+    let error = match pinned_page().try_with_view_data("broken", Unserializable) {
+        Ok(_) => panic!("an unserializable value was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("`broken`"), "{error}");
+
+    let page = pinned_page()
+        .with_config(chosen())
+        .try_with_view_data("rating", 5)
+        .expect("a number serializes");
+    let html = visit("/", page).await;
+    assert!(
+        html.contains("<meta name=\"rating\" content=\"5\">"),
+        "{html}"
+    );
 }

@@ -10,6 +10,8 @@
 <meta name="csrf-copy" content="{{ csrf_token }}">
 {% if let Some(nonce) = nonce %}<meta name="nonce" content="{{ nonce }}">{% endif %}
 {% if let Some(preview) = view.get("preview") %}<meta property="og:description" content="{{ preview }}">{% endif %}
+{% if let Some(rating) = view.get("rating") %}<meta name="rating" content="{{ rating }}">{% endif %}
+{% if let Some(keywords) = view.get("keywords") %}<meta name="keywords" content="{{ keywords }}">{% endif %}
 </head>
 <body class="antialiased">
 <noscript>This page needs JavaScript.</noscript>

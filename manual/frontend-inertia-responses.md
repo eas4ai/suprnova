@@ -1450,12 +1450,18 @@ async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
 {% endif %}
 ```
 
+A value is anything serializable. Placed with `{{ value }}`, a string
+displays as itself, and any other value, such as a number or an array,
+displays as its JSON; the template escapes either like any other value.
+`.try_with_view_data(key, value)` returns an error naming the key when the
+value fails to serialize, where `.with_view_data` panics as `.with` does.
+
 An error page carries no view data: the handler that would have set it failed
 or never ran. The framework's own document places none.
 
-Blade's view data becomes template variables of any type. Here it is text
-that the template reads through `view.get`, so the template's names stay the
-fixed set of parts that Askama checks at compile time.
+Blade's view data becomes template variables. Here the template reads it
+through `view.get`, so the template's names stay the fixed set of parts that
+Askama checks at compile time.
 
 ### The mount id
 

@@ -342,9 +342,33 @@ impl InertiaResponse {
     /// the first-load HTML must carry without running JavaScript, such as
     /// the meta tags a link preview reads. The framework's own document
     /// places none.
-    pub fn with_view_data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.view_data.insert(key.into(), value.into());
+    ///
+    /// Any serializable value: placed with `{{ value }}`, a string displays
+    /// as itself and any other value as its JSON. A `Serialize` impl that
+    /// fails panics, as [`with`](Self::with) does;
+    /// [`try_with_view_data`](Self::try_with_view_data) returns the error.
+    pub fn with_view_data<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
+        let value = to_value_or_die(&value);
+        self.view_data.insert(key.into(), value);
         self
+    }
+
+    /// Fallible sibling of [`with_view_data`](Self::with_view_data): returns
+    /// an error naming `key` when the value's `Serialize` impl fails.
+    pub fn try_with_view_data<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let value = serde_json::to_value(&value).map_err(|e| {
+            reflash_session_values_after_eager_error(FrameworkError::internal(format!(
+                "InertiaResponse view data `{key}` failed to serialize: {e} \
+                 (the value's Serialize impl returned Err)"
+            )))
+        })?;
+        self.view_data.insert(key, value);
+        Ok(self)
     }
 
     /// Register `prop` under `key`, replacing any earlier prop there.

@@ -136,11 +136,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and `InertiaConfig::root_template` renders every first visit through it.
   `root_template_with` chooses the template per request, Laravel's
   `rootView(Request)`, and error pages go through the same choice;
-  `InertiaResponse::with_view_data` hands the template values that never
-  reach the page props, Laravel's `withViewData`. The page JSON is written
-  straight into the template's output: a first visit with a 1 MiB prop
-  allocates 5,386,301 bytes through a template against 5,386,925 through
-  the framework's document, and a 3 MiB page comes back whole. A template
+  `InertiaResponse::with_view_data` hands the template values of any
+  serializable type that never reach the page props, Laravel's
+  `withViewData`. The page JSON is written straight into the template's
+  output: a first visit with a 1 MiB prop allocates 5,386,301 bytes
+  through a template against 5,386,925 through the framework's document,
+  and a 3 MiB page comes back whole. A template
   that fails to render is an error response, never part of a document.
   `InertiaConfig::mount_id` names the mount element and the page data
   element, `app` by default, for a client that mounts on another id. Without

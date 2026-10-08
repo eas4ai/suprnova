@@ -148,21 +148,40 @@ pub struct InertiaRootParts<'a> {
 ///
 /// For what the first-load HTML must carry without running JavaScript,
 /// such as the meta tags a link preview reads. An Inertia visit's JSON and
-/// the page data never include it.
+/// the page data never include it. A value is any JSON value, as Laravel's
+/// `withViewData` takes any PHP value.
 #[derive(Clone, Debug, Default)]
 pub struct InertiaViewData {
-    values: IndexMap<String, String>,
+    values: IndexMap<String, Value>,
 }
 
 impl InertiaViewData {
     /// The value set under `key`, or `None`.
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.values.get(key).map(String::as_str)
+    pub fn get(&self, key: &str) -> Option<InertiaViewValue<'_>> {
+        self.values.get(key).map(InertiaViewValue)
     }
 
     /// Sets `key` to `value`, replacing an earlier value.
-    pub(crate) fn insert(&mut self, key: String, value: String) {
+    pub(crate) fn insert(&mut self, key: String, value: Value) {
         self.values.insert(key, value);
+    }
+}
+
+/// One view data value as a template places it with `{{ value }}`: a
+/// string as itself, any other value as its JSON, escaped by the template
+/// like any other value.
+///
+/// A string displays without its JSON quotes because a meta tag's content
+/// is the text, not a JSON literal of it.
+#[derive(Clone, Copy, Debug)]
+pub struct InertiaViewValue<'a>(&'a Value);
+
+impl fmt::Display for InertiaViewValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::String(text) => f.write_str(text),
+            other => fmt::Display::fmt(other, f),
+        }
     }
 }
 
