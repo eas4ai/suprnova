@@ -622,6 +622,14 @@ A `Router::inertia` route has no controller, so its helper sits under
 `controllers.inertia.about`, `/` is `controllers.inertia.index`), and its
 `.name(..)` reaches it through `routes` like any other.
 
+A handler inside an `impl` block is read like a free function. For
+`#[handler(Self = Posts)]` on `index` inside `impl Posts`, registered as
+`get!("/users", controllers::posts::Posts::index)`, the generator reads
+the method from `impl Posts` in the file of `controllers::posts`, for its
+request type and its component alike. A free `index` in the same file
+keeps its own helper. The method's helper sits under the type's name,
+`controllers.Posts.index`.
+
 The helpers build the same URLs the backend's `route()` helper builds:
 
 - Each parameter value is percent-encoded as one path segment. A slug of

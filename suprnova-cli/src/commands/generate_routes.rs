@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use syn::visit::Visit;
-use syn::{Attribute, Fields, FnArg, ItemFn, ItemStruct, Type};
+use syn::{
+    Attribute, Block, Fields, FnArg, ImplItemFn, ItemFn, ItemImpl, ItemStruct, Signature, Type,
+};
 use walkdir::WalkDir;
 
 use super::generate_types::{
@@ -81,6 +83,11 @@ pub struct RouteDefinition {
 #[allow(dead_code)]
 pub struct HandlerInfo {
     pub name: String,
+    /// The type of the `impl` block a method handler sits in (`Posts` for
+    /// `Posts::index`, registered as `controllers::posts::Posts::index`),
+    /// or `None` for a free function, so a method and a free function of
+    /// the same name in one file stay apart.
+    pub owner: Option<String>,
     pub has_handler_attr: bool,
     pub request_type: Option<String>,
     /// Every argument of the handler, in order: its binding's name and its
@@ -581,15 +588,21 @@ fn binding_name(pat: &syn::Pat) -> Option<String> {
     }
 }
 
-/// Visitor that collects handler functions with #[handler] attribute
+/// Visitor that collects handler functions with #[handler] attribute: free
+/// functions, and methods inside `impl` blocks (`#[handler(Self = Posts)]`,
+/// BIND-003), each with the type its block implements.
 struct HandlerVisitor {
     handlers: Vec<HandlerInfo>,
+    /// The type of the `impl` block the visitor is inside, while it visits
+    /// the block's methods.
+    owner: Option<String>,
 }
 
 impl HandlerVisitor {
     fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            owner: None,
         }
     }
 
@@ -597,12 +610,12 @@ impl HandlerVisitor {
         attrs.iter().any(|attr| attr.path().is_ident("handler"))
     }
 
-    fn extract_request_type(&self, func: &ItemFn) -> Option<String> {
-        // Get the first parameter's type
-        if let Some(FnArg::Typed(pat_type)) = func.sig.inputs.first() {
-            return self.type_to_string(&pat_type.ty);
-        }
-        None
+    /// The type of the first parameter, past a `self` receiver.
+    fn extract_request_type(&self, sig: &Signature) -> Option<String> {
+        sig.inputs.iter().find_map(|arg| match arg {
+            FnArg::Typed(pat_type) => Some(self.type_to_string(&pat_type.ty)),
+            FnArg::Receiver(_) => None,
+        })?
     }
 
     fn type_to_string(&self, ty: &Type) -> Option<String> {
@@ -627,20 +640,25 @@ impl HandlerVisitor {
             _ => None,
         }
     }
-}
 
-impl<'ast> Visit<'ast> for HandlerVisitor {
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        let has_handler = self.has_handler_attr(&node.attrs);
+    /// Record the function or method `sig` with its `attrs` and `block`,
+    /// owned by `owner` when it sits in an `impl` block.
+    fn record(
+        &mut self,
+        attrs: &[Attribute],
+        sig: &Signature,
+        block: &Block,
+        owner: Option<String>,
+    ) {
+        let has_handler = self.has_handler_attr(attrs);
         let request_type = if has_handler {
-            self.extract_request_type(node)
+            self.extract_request_type(sig)
         } else {
             None
         };
 
         let args = if has_handler {
-            node.sig
-                .inputs
+            sig.inputs
                 .iter()
                 .filter_map(|arg| match arg {
                     FnArg::Typed(pat_type) => Some((
@@ -654,7 +672,7 @@ impl<'ast> Visit<'ast> for HandlerVisitor {
             Vec::new()
         };
         let mut calls = InertiaCallVisitor::default();
-        calls.visit_block(&node.block);
+        calls.visit_block(block);
         let renders_unnamed_component = calls.renders.iter().any(|site| site.component.is_none());
         let mut components: Vec<String> = calls
             .renders
@@ -665,15 +683,45 @@ impl<'ast> Visit<'ast> for HandlerVisitor {
         components.dedup();
 
         self.handlers.push(HandlerInfo {
-            name: node.sig.ident.to_string(),
+            name: sig.ident.to_string(),
+            owner,
             has_handler_attr: has_handler,
             request_type,
             args,
             components,
             renders_unnamed_component,
         });
+    }
 
-        syn::visit::visit_item_fn(self, node);
+    /// Visit what a function body holds with no `impl` block around it: a
+    /// function declared inside a method is a free function.
+    fn visit_body(&mut self, visit: impl FnOnce(&mut Self)) {
+        let owner = self.owner.take();
+        visit(self);
+        self.owner = owner;
+    }
+}
+
+impl<'ast> Visit<'ast> for HandlerVisitor {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.record(&node.attrs, &node.sig, &node.block, None);
+        self.visit_body(|this| syn::visit::visit_item_fn(this, node));
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        let owner = match &*node.self_ty {
+            Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        };
+        let outer = std::mem::replace(&mut self.owner, owner);
+        syn::visit::visit_item_impl(self, node);
+        self.owner = outer;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let owner = self.owner.clone();
+        self.record(&node.attrs, &node.sig, &node.block, owner);
+        self.visit_body(|this| syn::visit::visit_impl_item_fn(this, node));
     }
 }
 
@@ -816,13 +864,30 @@ fn scan_form_requests(project_path: &Path) -> HashMap<String, FormRequestStruct>
     form_requests
 }
 
+/// Split a handler's module path into the module and the type its last
+/// segment names, if it names one: `controllers::posts::Posts` for a
+/// handler inside `impl Posts` (BIND-003) is the module
+/// `controllers::posts` and the type `Posts`. A segment is a type when it
+/// is written in PascalCase, as a module never is.
+fn split_handler_owner(module_path: &str) -> (&str, Option<&str>) {
+    let is_type = |segment: &str| {
+        segment.starts_with(|first: char| first.is_ascii_uppercase())
+            && (segment.len() == 1 || segment.chars().any(|ch| ch.is_ascii_lowercase()))
+    };
+    match module_path.rsplit_once("::") {
+        Some((module, last)) if is_type(last) => (module, Some(last)),
+        None if is_type(module_path) => ("", Some(module_path)),
+        _ => (module_path, None),
+    }
+}
+
 /// Resolve handler module to file path
 /// e.g., "controllers::user" -> "src/controllers/user.rs"
 fn resolve_module_to_file(project_path: &Path, module_path: &str) -> Option<std::path::PathBuf> {
-    let parts: Vec<&str> = module_path.split("::").collect();
-    if parts.is_empty() {
+    if module_path.is_empty() {
         return None;
     }
+    let parts: Vec<&str> = module_path.split("::").collect();
 
     // Try as a file directly: src/controllers/user.rs
     let file_path = project_path
@@ -865,19 +930,18 @@ pub fn scan_routes(project_path: &Path) -> Result<Vec<GeneratedRoute>, String> {
     let mut generated_routes = Vec::new();
 
     for def in route_definitions {
-        // Try to find the handler
-        let handler_info = if let Some(controller_file) =
-            resolve_module_to_file(project_path, &def.handler_module)
-        {
-            if let Ok(content) = fs::read_to_string(&controller_file) {
-                let handlers = scan_controller_handlers(&content);
-                handlers.into_iter().find(|h| h.name == def.handler_fn)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Find the handler: a free function in the module's file, or, for
+        // a path through a type (`controllers::posts::Posts::index`), the
+        // method of that type's `impl` block in the file of the module
+        // before it.
+        let (module, owner) = split_handler_owner(&def.handler_module);
+        let handler_info = resolve_module_to_file(project_path, module)
+            .and_then(|controller_file| fs::read_to_string(controller_file).ok())
+            .and_then(|content| {
+                scan_controller_handlers(&content)
+                    .into_iter()
+                    .find(|h| h.name == def.handler_fn && h.owner.as_deref() == owner)
+            });
 
         // Find the form request struct if the handler has one: the first
         // argument the route does not read from its path whose type is a

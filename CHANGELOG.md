@@ -388,7 +388,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   handler names exactly one component as a string literal (in
   `inertia_response!`, `InertiaResponse::new` or the `Inertia` facade's
   render calls) or its route is a `Router::inertia` route. A handler naming
-  none, several, or one it computes gets none.
+  none, several, or one it computes gets none. A handler inside an `impl`
+  block (`#[handler(Self = Posts)]`, registered as
+  `controllers::posts::Posts::index`) is read from its method like a free
+  function, for its component and its request type, and a free function
+  of the same name in the same file keeps its own.
   `Router::inertia` routes, which `routes.ts` left out, now get helpers
   under `controllers.inertia`, and `RouteConfig` declares
   `component?: string` (T05).
