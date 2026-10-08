@@ -579,7 +579,8 @@ In a script, parsed as a JavaScript module:
   created by a name the scan cannot trace to a constant.
 - No HTML parsed into the document (`innerHTML`, `outerHTML`,
   `insertAdjacentHTML`, `setHTMLUnsafe`, `createContextualFragment`,
-  `DOMParser`), no `attachShadow`, and no change to a built-in prototype.
+  `DOMParser`), no `attachShadow`, and no change to a built-in or to a
+  built-in prototype.
 - A prototype may be read but not held. `Array.prototype.slice.call(list)`
   and `Object.prototype.toString.call(value)` read a member of a prototype
   and are admitted. A prototype kept in a name, passed as an argument,
@@ -589,10 +590,57 @@ In a script, parsed as a JavaScript module:
   it is used, so it stops the prototype before it leaves the expression
   that reads it. Every write to a member of a prototype is refused, in any
   form (`=`, `+=`, `??=`, `++`, a destructuring or `for` loop target), and
-  so is `delete` of one. A method called on the prototype itself, such as
-  `Array.prototype.push(1)`, is refused too: it runs with the prototype as
-  `this` and changes it. So is destructuring `prototype` out of an object
-  (`const { prototype } = Array`), which puts the prototype in a name.
+  so is `delete` of one. So is a write to a member of a value read from a
+  prototype, wherever the script keeps it: in a name, or in a parameter a
+  call hands it to, as `f(Array.prototype.slice)` hands `slice` to `p` in
+  `function f(p) { p.call = g }`. A method called on the prototype itself,
+  such as `Array.prototype.push(1)`, is refused too: it runs with the
+  prototype as `this` and changes it. So is destructuring `prototype` out
+  of an object (`const { prototype } = Array`), which puts the prototype in
+  a name.
+- A built-in may be called, read and kept in a name, but not changed. A
+  write to a member of a built-in object or function is refused in every
+  form a prototype's is: `Object.keys = f`, `JSON.parse = f`,
+  `Math.random = f`, the same through the global object
+  (`globalThis.Object.keys = f`, `window.JSON.parse = f`), and
+  `Object.keys.call = f`. The scan follows a built-in through the names a
+  script keeps it in, so `const k = Object; k.keys = f` is refused, and so
+  is a write to a member of a parameter given a built-in by its default or
+  by a call of its function by name (`function f(p) { p.call = g }` with
+  `f(Object.keys)`).
+- A member read under a built-in method's name (`slice`,
+  `addEventListener`, `toString`) from a value the script did not make is
+  taken to be the method that value inherits, so `[].slice.call = g` and
+  `element.addEventListener.call = g` are refused. A member the script's
+  own object or class defines under such a name is not, but a field that
+  shares one is: `form.search.value = ""` is refused, and
+  `form.querySelector("[name=search]").value = ""` is admitted. Reading
+  such a member stays admitted.
+- Where the scan stops following a built-in, it is refused: passed to
+  anything but a function the script calls by name or a browser API that
+  only calls it back (`list.map(Number)` is admitted), put in an array or
+  an object, written to a member, destructured (`const { keys } = Object`),
+  returned, thrown or exported. That covers
+  `Object.defineProperty(Object, "keys", ...)`,
+  `Reflect.set(Math, "random", f)` and
+  `Promise.resolve(Math).then((m) => { m.random = f; })`. A constant such
+  as `Number.MAX_SAFE_INTEGER` is a number, not a built-in, and may go
+  anywhere. A write to a member of the script's own object or function
+  stays admitted (`const o = {}; o.keys = f`,
+  `function cache() {} cache.size = 0`), and so does a call
+  (`Object.keys(o)`).
+- `document`, `location` and `history` hold the page, which a component
+  may change: `document.title`, `location.hash` and a value read from
+  them, such as `document.body`, stay under the other rules. Their methods
+  are built-in functions every script on the page calls, so assigning one
+  (`document.createElement = f`, `location.assign = f`) is refused, however
+  the script reaches the object, `this.ownerDocument` included.
+- A name a script writes on the global object (`window.AcmeState = {}`)
+  is a global of its own, which it may read back, only when the name starts
+  with a capital and the browser defines no property of that name; a
+  lower-case name (`window.acmeState`) is not read back, and writing a
+  browser property (`try { window.localStorage = 1 } catch {}`) never
+  unlocks reading it.
 - An attribute name given to `setAttribute` traces to constants and is not an
   event handler, `srcdoc` or `style`.
 - A URL given to `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,
