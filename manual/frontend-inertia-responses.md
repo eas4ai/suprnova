@@ -1186,10 +1186,10 @@ An Inertia XHR gets `409` + `X-Inertia-Location` (the client runs
 `window.location = url`); a hard navigation gets a plain `302` + `Location`,
 or the redirect you passed, status, flash and cookies included - Laravel's
 `Inertia::location`. `InertiaResponse::location` is the same call. It reads
-which kind of request it is answering from the Inertia middleware, so on a
-route without that middleware it answers the `409`; there, use
-`InertiaResponse::location_for(&req, url)`, which decides from the request
-you pass.
+which kind of request it is answering from the facts the server scopes for
+every request it dispatches, so a route outside the Inertia middleware
+answers the same way; `InertiaResponse::location_for(&req, url)` decides
+from the request you pass, for code that runs outside a dispatched request.
 
 ## Version detection
 
