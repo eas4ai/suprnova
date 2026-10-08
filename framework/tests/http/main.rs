@@ -15,6 +15,7 @@ pub mod precognition;
 pub mod redirect;
 pub mod redirect_helpers;
 pub mod request_accessors;
+pub mod request_bodies;
 pub mod request_body_cap;
 pub mod request_peer_ip;
 pub mod response_headers;

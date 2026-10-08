@@ -11,12 +11,18 @@
 //! is missing required fields is asked again until it names no new one.
 //!
 //! [`parse_form_input`] is the url-encoded reader for bodies and query
-//! strings. [`json_field_failures`] reads nothing: it runs only after
+//! strings. It reads bracketed and indexed names (`user[name]`, `tags[]`,
+//! `photos[0]`) as nested data, as PHP does for Laravel.
+//! [`parse_multipart_input`] reads the parts of a multipart body the same
+//! way and hands each file part to an `UploadedFile` field.
+//! [`json_field_failures`] reads nothing: it runs only after
 //! `serde_json` refused a body, to name the fields that made it fail, so
 //! what a JSON body accepts stays exactly what `serde_json` accepts.
 
 mod form;
 mod json;
+mod multipart;
+mod nested;
 mod placeholder;
 
 use std::cell::RefCell;
@@ -25,11 +31,13 @@ use std::fmt;
 
 use serde::de::{self, DeserializeOwned};
 
-use crate::error::ValidationErrors;
+use crate::error::{FrameworkError, ValidationErrors};
 use crate::http::upload::{FieldFailure, add_field_failure};
+use crate::validation::message::ValidationMessage;
 
 pub(crate) use form::parse_form_input;
 pub(crate) use json::json_field_failures;
+pub(crate) use multipart::parse_multipart_input;
 
 use placeholder::Skeleton;
 
@@ -41,6 +49,22 @@ pub(crate) enum InputError {
     /// A failure that belongs to no field, such as an unknown field a
     /// struct denies, as serde worded it.
     Other(String),
+    /// An upload validator's error that is no field's failure, which ends
+    /// the read as it ends the multipart extractor's.
+    Failed(FrameworkError),
+}
+
+impl InputError {
+    /// The error a request answers with: a validation failure for fields,
+    /// a 422 that words any other failure after `context`, and a
+    /// validator's own error as it is.
+    pub(crate) fn into_framework_error(self, context: &str) -> FrameworkError {
+        match self {
+            Self::Fields(errors) => FrameworkError::Validation(errors),
+            Self::Other(message) => FrameworkError::domain(format!("{context}: {message}"), 422),
+            Self::Failed(error) => error,
+        }
+    }
 }
 
 impl fmt::Display for InputError {
@@ -48,6 +72,7 @@ impl fmt::Display for InputError {
         match self {
             Self::Fields(errors) => write!(f, "{errors}"),
             Self::Other(message) => f.write_str(message),
+            Self::Failed(error) => write!(f, "{error}"),
         }
     }
 }
@@ -96,11 +121,19 @@ impl de::Error for FieldError {
     }
 }
 
+/// What one read records against a field.
+enum Recorded {
+    /// A failure with the catalog key for its kind.
+    Failure(FieldFailure),
+    /// A message an upload validator gave.
+    Message(ValidationMessage),
+}
+
 /// The failures one read records, shared by every deserializer the read
 /// runs.
 #[derive(Default)]
 struct Collector {
-    failures: RefCell<Vec<(String, FieldFailure)>>,
+    failures: RefCell<Vec<(String, Recorded)>>,
     /// The input names already recorded: a field is reported once, by the
     /// first failure found for it.
     recorded: RefCell<HashSet<String>>,
@@ -108,13 +141,36 @@ struct Collector {
     /// [`FieldError`], `serde_json`'s: set just before that deserializer
     /// is handed a plain error to return, and taken back as it returns it.
     carried: RefCell<Option<FieldError>>,
+    /// An upload validator's error that is no field's failure: it ends
+    /// the read.
+    failed: RefCell<Option<FrameworkError>>,
 }
 
 impl Collector {
     fn record(&self, path: &str, failure: FieldFailure) {
+        self.record_as(path, Recorded::Failure(failure));
+    }
+
+    /// Record the message an upload validator refused a file with.
+    fn record_message(&self, path: &str, message: ValidationMessage) {
+        self.record_as(path, Recorded::Message(message));
+    }
+
+    fn record_as(&self, path: &str, recorded: Recorded) {
         if self.recorded.borrow_mut().insert(path.to_string()) {
-            self.failures.borrow_mut().push((path.to_string(), failure));
+            self.failures
+                .borrow_mut()
+                .push((path.to_string(), recorded));
         }
+    }
+
+    /// End the read with an upload validator's own error.
+    fn fail(&self, error: FrameworkError) {
+        self.failed.borrow_mut().get_or_insert(error);
+    }
+
+    fn take_failed(&self) -> Option<FrameworkError> {
+        self.failed.borrow_mut().take()
     }
 
     fn has_failures(&self) -> bool {
@@ -151,8 +207,11 @@ impl Collector {
 
     fn into_errors(self) -> ValidationErrors {
         let mut errors = ValidationErrors::new();
-        for (path, failure) in self.failures.into_inner() {
-            add_field_failure(&mut errors, &path, None, failure);
+        for (path, recorded) in self.failures.into_inner() {
+            match recorded {
+                Recorded::Failure(failure) => add_field_failure(&mut errors, &path, None, failure),
+                Recorded::Message(message) => errors.add(path, message),
+            }
         }
         errors
     }

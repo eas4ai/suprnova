@@ -645,9 +645,11 @@ pub fn derive_form_request(input: TokenStream) -> TokenStream {
 /// This is the recommended way to define validated request types.
 /// It automatically adds the necessary derives and generates the trait impl.
 ///
-/// Works with both:
+/// Works with:
 /// - `application/json` - JSON request bodies
 /// - `application/x-www-form-urlencoded` - HTML form submissions
+/// - `multipart/form-data` - forms with files, as the Inertia client sends
+///   them, where a file part fills an `UploadedFile` field
 ///
 /// # Example
 ///
