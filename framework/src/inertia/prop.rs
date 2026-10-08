@@ -439,6 +439,10 @@ impl OnceOptions {
     }
 }
 
+/// The wrapper a scroll prop merges under unless told otherwise -
+/// Laravel's `Inertia::scroll($value, $wrapper = 'data')`.
+const DEFAULT_SCROLL_WRAPPER: &str = "data";
+
 /// Where a prop's value comes from.
 ///
 /// Orthogonal to every flag on [`Prop`]: a value-backed prop and a
@@ -557,8 +561,13 @@ pub struct Prop {
     fresh: bool,
     scroll: Option<ScrollMetadata>,
     /// Read only when `scroll` is `Some`. Set by
-    /// [`scroll_wrap`](Self::scroll_wrap).
+    /// [`scroll_wrap`](Self::scroll_wrap); `None` is Laravel's default
+    /// wrapper, `data`.
     scroll_wrap: Option<String>,
+    /// Read only when `scroll` is `Some`. Set by
+    /// [`scroll_at_root`](Self::scroll_at_root): merge at the prop's root,
+    /// for a value that is the list itself.
+    scroll_root: bool,
 }
 
 impl std::fmt::Debug for Prop {
@@ -615,6 +624,9 @@ impl std::fmt::Debug for Prop {
         // precisely what needs to be visible when debugging it.
         if let Some(wrap) = &self.scroll_wrap {
             s.field("scroll_wrap", wrap);
+        }
+        if self.scroll_root {
+            s.field("scroll_root", &true);
         }
         s.finish_non_exhaustive()
     }
@@ -718,6 +730,7 @@ impl Prop {
             fresh: false,
             scroll: None,
             scroll_wrap: None,
+            scroll_root: false,
         }
     }
 
@@ -876,11 +889,10 @@ impl Prop {
     ///
     /// Silently inert on a [`scroll`](Self::scroll) prop: a scroll prop's
     /// merge instruction is computed by a separate code path that reads
-    /// [`scroll_wrap`](Self::scroll_wrap)'s single wrap key, not this
-    /// method's accumulated path list, so `.scroll(meta).merge_with_path("data")`
-    /// stores a path nothing ever reads. Use
-    /// [`scroll_wrap`](Self::scroll_wrap) to nest a scroll prop's merge
-    /// target instead.
+    /// its single wrapper ([`scroll_wrap`](Self::scroll_wrap), `data` by
+    /// default), not this method's accumulated path list, so
+    /// `.scroll(meta).merge_with_path("data")` stores a path nothing ever
+    /// reads.
     pub fn merge_with_path(mut self, path: impl Into<String>) -> Self {
         self.merge_paths.push(path.into());
         self
@@ -1059,27 +1071,36 @@ impl Prop {
     /// [`deep_merge`](Self::deep_merge) is the one flag that still has
     /// an effect: it routes the prop into `deepMergeProps` instead,
     /// matching Laravel's `ScrollProp` (`ScrollProp implements
-    /// Mergeable`, `Response.php:590,610`).
-    /// [`scroll_wrap`](Self::scroll_wrap) nests the merge path under a
-    /// field inside the value instead of the value's root.
+    /// Mergeable`).
+    ///
+    /// The merge instruction targets the list inside the value, under the
+    /// wrapper `data` - `{key}.data` - as Laravel's
+    /// `Inertia::scroll($value, $wrapper = 'data')` does for a paginator
+    /// or resource, whose rows sit under `data`.
+    /// [`scroll_wrap`](Self::scroll_wrap) names another wrapper, and
+    /// [`scroll_at_root`](Self::scroll_at_root) merges at the prop's root
+    /// for a value that is the list itself. [`match_on`](Self::match_on)
+    /// is relative to the prop, as in Laravel: `.match_on("data.id")` on
+    /// `posts` emits `posts.data.id`, no wrapper prefix added.
+    ///
+    /// Deferred, the prop announces its bare key under `mergeProps` on the
+    /// visit that withholds it, and `{key}.{wrapper}` once the data
+    /// arrives - Laravel collects the first instruction before the scroll
+    /// prop configures its wrapper.
     pub fn scroll(mut self, metadata: ScrollMetadata) -> Self {
         self.scroll = Some(metadata);
         self
     }
 
     /// Nest this scroll prop's merge instruction under `<key>.<wrap_key>`
-    /// instead of the bare key. Read only when [`scroll`](Self::scroll) is
-    /// also set; on any other prop it's stored and ignored, the same way
-    /// [`group`](Self::group) is ignored on a non-deferred prop.
+    /// instead of the default `<key>.data`. Read only when
+    /// [`scroll`](Self::scroll) is also set; on any other prop it's stored
+    /// and ignored, the same way [`group`](Self::group) is ignored on a
+    /// non-deferred prop. Maps to `Inertia::scroll($value, $wrapper)`.
     ///
-    /// Reach for this when the prop's value is itself an envelope -
-    /// `{ data: [...], meta: {...} }` - and only the array inside should
-    /// fold into what the client already holds. Laravel's `ScrollProp`
-    /// wraps under `"data"` unconditionally
-    /// (`inertia-laravel-2.0.25/src/ScrollProp.php:58-64`); Suprnova's
-    /// built-in paginators hand back a bare row array, so this is opt-in
-    /// rather than a default every caller has to work around. Maps to
-    /// `Inertia::scroll($value, $wrapper)`.
+    /// Reach for this when the value is an envelope whose list sits under
+    /// another field - `{ items: [...], meta: {...} }` - so only the list
+    /// folds into what the client already holds.
     ///
     /// Ignored when the prop also carries [`deep_merge`](Self::deep_merge):
     /// deep merge already recurses through the entire value, so there is
@@ -1088,6 +1109,20 @@ impl Prop {
     /// under [`MergeMode::Deep`].
     pub fn scroll_wrap(mut self, wrap_key: impl Into<String>) -> Self {
         self.scroll_wrap = Some(wrap_key.into());
+        self.scroll_root = false;
+        self
+    }
+
+    /// Merge this scroll prop at its root, `<key>`, instead of under a
+    /// wrapper: for a value that is the list itself, such as the bare rows
+    /// [`InertiaResponse::paginate`](crate::InertiaResponse::paginate)
+    /// ships. Under `<key>.data` the client would find nothing to append
+    /// to in a bare list and would replace it instead. Laravel has no
+    /// such form, because its paginators always serialize their rows under
+    /// `data`.
+    pub fn scroll_at_root(mut self) -> Self {
+        self.scroll_root = true;
+        self.scroll_wrap = None;
         self
     }
 
@@ -1223,10 +1258,19 @@ impl Prop {
         self.scroll.as_ref()
     }
 
-    /// The nested-merge wrapper key set by [`scroll_wrap`](Self::scroll_wrap),
-    /// if any.
+    /// The wrapper this scroll prop merges under: `data` unless
+    /// [`scroll_wrap`](Self::scroll_wrap) named another, or `None` after
+    /// [`scroll_at_root`](Self::scroll_at_root).
     pub fn scroll_wrap_key(&self) -> Option<&str> {
-        self.scroll_wrap.as_deref()
+        if self.scroll_root {
+            None
+        } else {
+            Some(
+                self.scroll_wrap
+                    .as_deref()
+                    .unwrap_or(DEFAULT_SCROLL_WRAPPER),
+            )
+        }
     }
 
     /// Consume the prop and hand back its source. Read every flag you
@@ -2447,9 +2491,12 @@ mod tests {
     }
 
     #[test]
-    fn scroll_wrap_key_is_none_when_never_set() {
+    fn scroll_wrap_key_defaults_to_data_and_is_none_at_the_root() {
         let p = Prop::eager(json!([])).scroll(ScrollMetadata::new("page"));
+        assert_eq!(p.scroll_wrap_key(), Some("data"));
+        let p = p.scroll_at_root();
         assert_eq!(p.scroll_wrap_key(), None);
+        assert_eq!(p.scroll_wrap("items").scroll_wrap_key(), Some("items"));
     }
 
     struct FixedCursorPage;

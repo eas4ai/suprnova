@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use suprnova::{InertiaRequestExt, InertiaResponse, Prop};
+use suprnova::{InertiaRequestExt, InertiaResponse, Prop, ScrollMetadata};
 
 /// Minimal `InertiaRequestExt` impl, mirroring the other Inertia test files.
 struct MockReq {
@@ -31,6 +31,12 @@ impl MockReq {
 
     fn inertia(self) -> Self {
         self.header("X-Inertia", "true")
+    }
+
+    /// A partial reload of `component` asking for `only`.
+    fn partial(self, component: &str, only: &str) -> Self {
+        self.header("X-Inertia-Partial-Component", component)
+            .header("X-Inertia-Partial-Data", only)
     }
 }
 
@@ -401,4 +407,128 @@ async fn inp_share_once_options_reach_only_the_share_they_were_chained_on() {
     .await;
     assert_eq!(page["onceProps"]["plans"]["prop"], "plans", "{page}");
     assert!(page["onceProps"].get("stale").is_none(), "{page}");
+}
+
+// ---- PAR-052: scroll props ----
+
+/// Page facts for a second page of posts.
+fn page_two() -> ScrollMetadata {
+    ScrollMetadata::new("page").current(2).previous(1).next(3)
+}
+
+#[tokio::test]
+async fn inp_scroll_prop_merges_under_data_by_default() {
+    // Laravel's `Inertia::scroll($value, $wrapper = 'data')`.
+    let response = InertiaResponse::new("Feed").scroll(
+        "posts",
+        page_two(),
+        json!({ "data": [{ "id": 4 }], "links": {} }),
+    );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
+    assert_eq!(page["scrollProps"]["posts"]["currentPage"], 2);
+}
+
+#[tokio::test]
+async fn inp_scroll_prepend_intent_prepends_at_the_wrapper() {
+    let response =
+        InertiaResponse::new("Feed").scroll("posts", page_two(), json!({ "data": [{ "id": 1 }] }));
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Infinite-Scroll-Merge-Intent", "prepend");
+    let page = page_of(response, &req).await;
+
+    assert_eq!(names(&page, "prependProps"), ["posts.data"]);
+    assert!(names(&page, "mergeProps").is_empty(), "{page}");
+}
+
+#[tokio::test]
+async fn inp_scroll_match_on_is_relative_to_the_prop_not_the_wrapper() {
+    // `match_on("data.id")` on `posts` is `posts.data.id`, which the
+    // client matches against the `posts.data` merge path. No wrapper
+    // prefix is added, with the default wrapper or a named one.
+    let response = InertiaResponse::new("Feed")
+        .prop(
+            "posts",
+            Prop::eager(json!({ "data": [] }))
+                .scroll(page_two())
+                .match_on("data.id"),
+        )
+        .prop(
+            "events",
+            Prop::eager(json!({ "data": [] }))
+                .scroll(page_two())
+                .scroll_wrap("data")
+                .match_on("data.uuid"),
+        );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(
+        names(&page, "matchPropsOn"),
+        ["posts.data.id", "events.data.uuid"]
+    );
+}
+
+#[tokio::test]
+async fn inp_deferred_scroll_announces_the_bare_key_then_the_wrapper() {
+    // First visit: Laravel collects the merge instruction before the
+    // scroll prop configures its wrapper, so it announces the bare key,
+    // and ships no `scrollProps` entry for a list not yet on screen.
+    let deferred = || {
+        InertiaResponse::new("Feed").prop(
+            "posts",
+            Prop::lazy(|| async { json!({ "data": [{ "id": 1 }] }) })
+                .scroll(page_two())
+                .defer(),
+        )
+    };
+    let page = page_of(deferred(), &MockReq::new("/").inertia()).await;
+    assert_eq!(page["deferredProps"]["default"], json!(["posts"]));
+    assert_eq!(names(&page, "mergeProps"), ["posts"]);
+    assert!(
+        !page.as_object().unwrap().contains_key("scrollProps"),
+        "{page}"
+    );
+
+    // The follow-up partial reload delivers the data under the wrapper.
+    let req = MockReq::new("/").inertia().partial("Feed", "posts");
+    let page = page_of(deferred(), &req).await;
+    assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
+    assert_eq!(page["scrollProps"]["posts"]["currentPage"], 2);
+}
+
+#[tokio::test]
+async fn inp_deferred_scroll_with_a_named_wrapper_announces_the_bare_key_first() {
+    let response = InertiaResponse::new("Feed").prop(
+        "posts",
+        Prop::lazy(|| async { json!({ "items": [] }) })
+            .scroll(page_two())
+            .scroll_wrap("items")
+            .defer(),
+    );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(names(&page, "mergeProps"), ["posts"]);
+}
+
+#[tokio::test]
+async fn inp_paginate_keeps_merging_its_bare_rows_at_the_prop_root() {
+    // `paginate` ships the paginator's rows as a bare list, so its merge
+    // instruction stays at the prop's root; under `posts.data` the
+    // client would find nothing to append to.
+    let paginator = suprnova::LengthAwarePaginator::new(vec![json!({ "id": 4 })], 9, 3, 2);
+    let response = InertiaResponse::new("Feed").paginate("posts", paginator);
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(names(&page, "mergeProps"), ["posts"]);
+    assert_eq!(page["props"]["posts"], json!([{ "id": 4 }]));
+
+    let paginator = suprnova::LengthAwarePaginator::new(vec![json!({ "id": 4 })], 9, 3, 2);
+    let page = page_of(
+        suprnova::Inertia::paginate("Feed", "posts", paginator),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+    assert_eq!(names(&page, "mergeProps"), ["posts"]);
 }

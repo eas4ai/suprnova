@@ -366,6 +366,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   render time plus 60 seconds. Pass a `DateTime<Utc>` for a fixed
   deadline (`chrono::DateTime::from_timestamp_millis(ms)`). `fresh()` on
   `Prop` and `OnceOptions` takes a `bool`: write `.fresh(true)`.
+- **Scroll props merge under the wrapper `data` by default**, as Laravel's
+  `Inertia::scroll($value, $wrapper = 'data')` does: `.scroll("posts",
+  metadata, paginator)` emitted `mergeProps: ["posts"]` and now emits
+  `["posts.data"]`, where a paginator or resource keeps its rows.
+  `.paginate` and `Inertia::paginate` ship bare rows and still merge at
+  the prop's root; `Prop::scroll_at_root()` does the same for any other
+  bare list. A scroll prop's `match_on` path is now relative to the prop,
+  with no wrapper prefix: `.match_on("data.id")` on `posts` emits
+  `posts.data.id`, where a wrapped prop used to prefix the wrapper itself
+  and emit `posts.data.data.id`. A deferred scroll prop announces its bare
+  key under `mergeProps` on the visit that withholds it and
+  `{key}.{wrapper}` when the data arrives, where a wrapped one announced
+  `{key}.{wrapper}` on both. The manual's two divergence entries for
+  these are gone.
 
 ### Fixed
 

@@ -254,7 +254,7 @@ The flags fall into five groups:
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
 | Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.append_at(paths, match_on)`, `.prepend_at(paths, match_on)`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
 | Client cache | `.once()`, `.once_with(options)`, `.as_key(key)`, `.until(moment or span)`, `.fresh(bool)` | Whether the client keeps the value across navigations - see [Once props](#once-props) |
-| Scroll | `.scroll(metadata)`, `.scroll_wrap(key)` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata; `.scroll_wrap` read only when `.scroll` is set |
+| Scroll | `.scroll(metadata)`, `.scroll_wrap(key)`, `.scroll_at_root()` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata under the wrapper (`data` by default); `.scroll_wrap` and `.scroll_at_root` read only when `.scroll` is set |
 
 Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
 `Prop::from_resolver(resolver)` for a resolver you built yourself, and
@@ -276,11 +276,11 @@ Two rules are worth knowing before you compose:
     value and does not send its merge instruction, so the client replaces
     rather than appends.
   - `scrollProps` has one extra condition on top of the lists: a
-    `.scroll().defer()` prop announces its merge instruction on a
-    non-partial visit but ships no cursor there, because nothing is on
-    screen yet for a cursor to describe. Every matched partial reload
-    gets the cursor, whether or not that request also resolves the
-    value.
+    `.scroll().defer()` prop announces its merge instruction at the bare
+    key on a non-partial visit but ships no cursor there, because nothing
+    is on screen yet for a cursor to describe. Every matched partial
+    reload gets the cursor and the instruction under the wrapper, whether
+    or not that request also resolves the value.
   - `deferredProps` is the one block the lists never govern. It is
     dropped whole on any matched partial reload, no matter what the
     lists say - Laravel's `resolveDeferredProps` returns `[]` the
@@ -443,14 +443,24 @@ resolver-backed prop.
 
 Infinite scroll is the same machinery with pagination metadata attached.
 `.scroll` / `.scroll_with` - or `.paginate`, which adapts a
-`LengthAwarePaginator` or `CursorPaginator` directly - emit `scrollProps`
-next to the data, and the client's `<InfiniteScroll>` component drives the
-next/previous fetches:
+`LengthAwarePaginator`, `Paginator` or `CursorPaginator` directly - emit
+`scrollProps` next to the data, and the client's `<InfiniteScroll>`
+component drives the next/previous fetches:
 
 ```rust
 // `posts` is a CursorPaginator from the query builder.
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
+
+A scroll prop merges under a wrapper, `data` by default, as Laravel's
+`Inertia::scroll($value, $wrapper = 'data')` does: a paginator or resource
+serializes its rows under `data`, and only the rows should fold into what
+the client already holds. `.scroll("posts", metadata, value)` emits
+`mergeProps: ["posts.data"]`. `.paginate` is the exception: it ships the
+paginator's rows as a bare list, so it merges at the prop's root
+(`mergeProps: ["posts"]`); under `posts.data` the client would find no
+list to append to. Reach for `Prop::scroll_at_root()` for any other value
+that is the list itself.
 
 A scroll prop always carries merge metadata, not just on a follow-up
 fetch: it defaults to append, and switches to prepend only when the
@@ -462,50 +472,52 @@ unfiltered visit sends neither header, so it gets `reset: false` and an
 append instruction, matching Laravel.
 
 `.merge_with_path` has no effect on a scroll prop - the scroll block that
-computes its merge instruction reads `Prop::scroll_wrap`'s single wrap
-key, not `.merge_with_path`'s accumulated path list, so
-`.scroll(metadata).merge_with_path("data")` stores a path nothing reads.
-`.scroll_wrap` - reached directly through `.prop(...)`, or through the
-`.scroll_wrapped` response shortcut below - is the nesting equivalent for
-a scroll prop.
+computes its merge instruction reads the prop's single wrapper, not
+`.merge_with_path`'s accumulated path list. `.scroll_wrap` - reached
+directly through `.prop(...)`, or through the `.scroll_wrapped` response
+shortcut below - names another wrapper.
 
 A scroll prop also honors `.match_on(...)`, the same as any other merge
 prop - reach it through `.prop(...)`, since neither `.scroll` nor
-`.match_on` has a combined response-level shortcut:
+`.match_on` has a combined response-level shortcut. The path is relative
+to the prop, as in Laravel, with no wrapper prefix added, so name the
+wrapper in it:
 
 ```rust
 InertiaResponse::new("Users/Index").prop(
     "users",
-    Prop::eager(rows)
+    Prop::eager(serde_json::json!({ "data": rows }))
         .scroll(ScrollMetadata::new("page").current(1).next(2))
-        .match_on("id"),
+        .match_on("data.id"),
 )
 ```
 
-The match field keys off wherever the prop actually merges: the bare key
-when unwrapped (`matchPropsOn: ["users.id"]`), or `key.wrap_key` under
-`.scroll_wrap(...)` (`matchPropsOn: ["posts.data.id"]` for a prop wrapped
-under `"data"`) - so the entry always lines up with the merge path the
-client folds, instead of silently never matching.
+That emits `matchPropsOn: ["users.data.id"]`, which the client matches
+against the `users.data` merge path. `.match_on("id")` would emit
+`"users.id"`, which lines up with a scroll prop merging at its root
+(`.paginate`, `.scroll_at_root()`) and with nothing under a wrapper.
 
-When the prop's value is itself a wrapped structure - `{ data: [...],
-meta: {...} }`, the shape a hand-built API resource typically returns -
-merging the whole object would clobber `meta` on every fetch. Point the
-merge at the array field instead with `.scroll_wrapped`:
+When the value's list sits under another field - `{ items: [...],
+meta: {...} }` - point the merge at that field with `.scroll_wrapped`:
 
 ```rust
 InertiaResponse::new("Feed/Index").scroll_wrapped(
     "posts",
-    "data",
+    "items",
     ScrollMetadata::new("page").current(2).next(3),
-    serde_json::json!({ "data": rows, "meta": { "total": total } }),
+    serde_json::json!({ "items": rows, "meta": { "total": total } }),
 )
 ```
 
-`mergeProps` then names `posts.data`, so the client folds new rows into
+`mergeProps` then names `posts.items`, so the client folds new rows into
 the nested array and leaves `meta` to be replaced wholesale each time.
 `.scroll_with_wrapped` and `try_scroll_wrapped` are the resolver-based and
 fallible siblings, matching `.scroll_with` / `try_scroll`.
+
+A deferred scroll prop (`Prop::lazy(...).scroll(metadata).defer()`)
+announces its bare key under `mergeProps` on the visit that withholds it,
+and `posts.data` on the follow-up request that delivers the rows, as
+Laravel does.
 
 A type outside this crate's `pagination` module - a third-party
 paginator, a hand-rolled cursor - can describe itself to `.scroll`
@@ -1570,7 +1582,7 @@ active container's `InertiaRegistry`, which gives tests using
 anything. Same surface as Laravel; different machinery underneath
 because the runtime is different.
 
-Nine other Rust-shaped choices worth flagging:
+Other Rust-shaped choices worth flagging:
 
 - **Lazy-prop resolvers run concurrently**, capped by
   `max_concurrent_resolvers` (default 16). A page with twelve lazy
@@ -1624,21 +1636,6 @@ Nine other Rust-shaped choices worth flagging:
   (`inertia-3.6.1/packages/core/src/response.ts:414-425`), and a stray
   `null` would clobber a field the client already has instead of leaving
   it alone.
-- **`.scroll_wrapped` is opt-in, not automatic.** Laravel's
-  `Inertia::scroll($value, $wrapper = 'data', …)` nests every scroll
-  prop's merge instruction under `"data"` by default, because a Laravel
-  paginator resource typically returns `{ data: [...], links: {...},
-  meta: {...} }` and only the array should merge. Suprnova's built-in
-  paginators hand back a bare row array (`Vec<T>`, no envelope), so
-  `.scroll` / `.paginate` merge at the prop's root, and `.scroll_wrapped`
-  is there for the cases that need the nested path instead.
-- **A wrapped scroll prop prefixes its `match_on` fields for you.** On a
-  `.scroll_wrapped("posts", "data")` prop, `match_on("id")` emits
-  `"posts.data.id"`. Laravel emits the unprefixed `"posts.id"`, which its
-  own client then fails to line up against the merge target, so the match
-  silently never fires. The nesting point is unambiguous here - a scroll
-  prop has at most one wrapper - so Suprnova derives the prefix rather
-  than making you type it. Write the bare field name, not the path.
 
 ## Next
 

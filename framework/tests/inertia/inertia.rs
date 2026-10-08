@@ -2546,7 +2546,7 @@ async fn scroll_fresh_visit_emits_reset_false_and_append_merge_metadata() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(1).next(2),
-            serde_json::json!([{"id": 1, "name": "Alice"}]),
+            serde_json::json!({"data": [{"id": 1, "name": "Alice"}]}),
         )
         .resolve(&req)
         .await
@@ -2555,7 +2555,7 @@ async fn scroll_fresh_visit_emits_reset_false_and_append_merge_metadata() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // Value is in props.
-    assert_eq!(page["props"]["users"][0]["name"], "Alice");
+    assert_eq!(page["props"]["users"]["data"][0]["name"], "Alice");
     let scroll = &page["scrollProps"]["users"];
     assert_eq!(scroll["pageName"], "page");
     assert_eq!(scroll["currentPage"], 1);
@@ -2572,7 +2572,7 @@ async fn scroll_fresh_visit_emits_reset_false_and_append_merge_metadata() {
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        merge.contains(&"users"),
+        merge.contains(&"users.data"),
         "a fresh visit still carries the append merge instruction; got {page}"
     );
 }
@@ -2586,7 +2586,7 @@ async fn scroll_append_intent_emits_merge_props_no_reset() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(2).next(3).previous(1),
-            serde_json::json!([{"id": 21}]),
+            serde_json::json!({"data": [{"id": 21}]}),
         )
         .resolve(&req)
         .await
@@ -2602,7 +2602,7 @@ async fn scroll_append_intent_emits_merge_props_no_reset() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(merge.contains(&"users"));
+    assert!(merge.contains(&"users.data"));
 }
 
 #[tokio::test]
@@ -2614,7 +2614,7 @@ async fn scroll_prepend_intent_emits_prepend_props_no_reset() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(0).previous(-1).next(1),
-            serde_json::json!([{"id": 0}]),
+            serde_json::json!({"data": [{"id": 0}]}),
         )
         .resolve(&req)
         .await
@@ -2629,7 +2629,7 @@ async fn scroll_prepend_intent_emits_prepend_props_no_reset() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(prepend.contains(&"users"));
+    assert!(prepend.contains(&"users.data"));
 }
 
 #[tokio::test]
@@ -2644,7 +2644,7 @@ async fn scroll_unknown_intent_falls_back_to_append_default() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(1).next(2),
-            serde_json::json!([]),
+            serde_json::json!({"data": []}),
         )
         .resolve(&req)
         .await
@@ -2659,7 +2659,7 @@ async fn scroll_unknown_intent_falls_back_to_append_default() {
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        merge.contains(&"users"),
+        merge.contains(&"users.data"),
         "an unrecognized intent still defaults to append"
     );
 }
@@ -2716,7 +2716,7 @@ async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(2).next(3),
-            serde_json::json!([{"id": 21}]),
+            serde_json::json!({"data": [{"id": 21}]}),
         )
         .resolve(&req)
         .await
@@ -2725,7 +2725,7 @@ async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // Value still resolves normally.
-    assert_eq!(page["props"]["users"][0]["id"], 21);
+    assert_eq!(page["props"]["users"]["data"][0]["id"], 21);
     assert_eq!(page["scrollProps"]["users"]["reset"], true);
     let obj = page.as_object().unwrap();
     let merge_props = obj
@@ -2735,7 +2735,7 @@ async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
         .unwrap_or_default();
     let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        !names.contains(&"users"),
+        !names.iter().any(|n| n.starts_with("users")),
         "a reset key must not appear in mergeProps; got {page}"
     );
 }
@@ -2754,7 +2754,7 @@ async fn scroll_reset_header_excludes_from_prepend_props_too() {
         .scroll(
             "users",
             ScrollMetadata::new("page").current(0),
-            serde_json::json!([{"id": 0}]),
+            serde_json::json!({"data": [{"id": 0}]}),
         )
         .resolve(&req)
         .await
@@ -2770,7 +2770,7 @@ async fn scroll_reset_header_excludes_from_prepend_props_too() {
         .cloned()
         .unwrap_or_default();
     let names: Vec<&str> = prepend_props.iter().filter_map(|v| v.as_str()).collect();
-    assert!(!names.contains(&"users"));
+    assert!(!names.iter().any(|n| n.starts_with("users")));
 }
 
 #[tokio::test]
@@ -2867,11 +2867,10 @@ async fn scroll_with_wrapped_resolver_runs_closure_and_wraps_the_prepend_path() 
 
 #[tokio::test]
 async fn scroll_match_on_emits_match_props_on_keyed_to_the_bare_prop_name() {
-    // An unwrapped scroll prop merges at its own key, so its `match_on`
-    // fields key off that same bare name - Laravel's
-    // `resolveMergeMatchingKeys` folds a `ScrollProp`'s `matchesOn()` in
-    // exactly like any other `Mergeable`, no scroll exclusion
-    // (`Response.php:558,641-652`).
+    // A scroll prop's `match_on` fields key off the bare prop name -
+    // Laravel's `collectMergeableMetadata` prefixes a `ScrollProp`'s
+    // `matchesOn()` with the prop path alone, like any other `Mergeable`
+    // (PAR-052).
     let req = MockReq::new("/users").inertia();
     let resp = InertiaResponse::new("Users/Index")
         .prop(
@@ -2894,11 +2893,11 @@ async fn scroll_match_on_emits_match_props_on_keyed_to_the_bare_prop_name() {
 }
 
 #[tokio::test]
-async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
-    // A wrapped scroll prop merges at `key.wrap_key`, not `key` - so its
-    // `match_on` field must key off that same nested path, or the
-    // client's prefix-matching `mergeOrMatchItems` can never find it
-    // (`inertia-3.6.1/packages/core/src/response.ts:524-546`).
+async fn scroll_wrapped_match_on_is_relative_to_the_prop() {
+    // A wrapped scroll prop merges at `key.wrap_key`, and its `match_on`
+    // path is relative to the prop, as Laravel's is (PAR-052): name the
+    // wrapper in the path, `match_on("data.id")`, to line up with the
+    // `posts.data` merge path the client folds.
     let req = MockReq::new("/feed").inertia();
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
@@ -2906,7 +2905,7 @@ async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
             Prop::eager(serde_json::json!({ "data": [{"id": 1}], "meta": { "total": 1 } }))
                 .scroll(ScrollMetadata::new("page").current(2).next(3))
                 .scroll_wrap("data")
-                .match_on("id"),
+                .match_on("data.id"),
         )
         .resolve(&req)
         .await
@@ -2917,7 +2916,7 @@ async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
     assert_eq!(
         page["matchPropsOn"],
         serde_json::json!(["posts.data.id"]),
-        "a wrapped scroll prop's match_on field must key off key.wrap_key, not the bare key; got {page}"
+        "a scroll prop's match_on path is emitted as key.path, no wrapper prefix added; got {page}"
     );
 }
 
@@ -2964,7 +2963,7 @@ async fn scroll_always_prop_outside_only_list_emits_no_merge_metadata() {
         .unwrap_or_default();
     let names: Vec<&str> = merge_props.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        !names.contains(&"users"),
+        !names.iter().any(|n| n.starts_with("users")),
         "an Always scroll prop outside the requested set must not emit a merge instruction; got {page}"
     );
     assert!(

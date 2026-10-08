@@ -671,10 +671,12 @@ impl InertiaResponse {
     /// `mergeProps` / `prependProps` for that response, so the client
     /// treats the value as a replacement instead of an append.
     ///
-    /// Merges at the prop's root by default. When the value is itself an
-    /// envelope (`{ data: [...], meta: {...} }`), reach for
-    /// [`scroll_wrapped`](Self::scroll_wrapped) to target the nested
-    /// field instead of the whole value.
+    /// Merges under the wrapper `data` - `key.data` - as Laravel's
+    /// `Inertia::scroll($value, $wrapper = 'data')` does, since a
+    /// paginator or resource serializes its rows there. Reach for
+    /// [`scroll_wrapped`](Self::scroll_wrapped) to name another wrapper,
+    /// or for [`paginate`](Self::paginate), which ships bare rows and
+    /// merges at the prop's root.
     ///
     /// Maps to Laravel's `Inertia::scroll(...)`.
     pub fn scroll<V: Serialize>(
@@ -705,12 +707,12 @@ impl InertiaResponse {
         self.attach_scroll(key.into(), None, metadata, Prop::from_resolver(resolver))
     }
 
-    /// Attach an infinite-scroll prop whose merge instruction targets a
-    /// nested field of the value instead of the value itself -
-    /// `key.wrap_key` rather than bare `key`. Use this when the value is
-    /// an envelope (`{ data: [...], meta: {...} }`) and only the array
-    /// inside should fold into what the client already holds; a plain
-    /// [`scroll`](Self::scroll) merges the whole value.
+    /// Attach an infinite-scroll prop whose merge instruction targets the
+    /// named field of the value - `key.wrap_key` - instead of the default
+    /// `key.data` of [`scroll`](Self::scroll). Use this when the value is
+    /// an envelope whose list sits under another field
+    /// (`{ items: [...], meta: {...} }`), so only that list folds into
+    /// what the client already holds.
     ///
     /// Equivalent to
     /// `Prop::eager(value).scroll(metadata).scroll_wrap(wrap_key)`
@@ -763,12 +765,15 @@ impl InertiaResponse {
         self
     }
 
-    /// Attach a paginator (`LengthAwarePaginator` or `CursorPaginator`)
-    /// as a scroll prop under `key`. The paginator's metadata becomes
-    /// the prop's `ScrollMetadata`; its rows become the prop value.
+    /// Attach a paginator (`LengthAwarePaginator`, `Paginator` or
+    /// `CursorPaginator`) as a scroll prop under `key`. The paginator's
+    /// metadata becomes the prop's `ScrollMetadata`; its rows become the
+    /// prop value.
     ///
-    /// Equivalent to `.scroll(key, paginator.into_inertia_scroll().0, paginator.into_inertia_scroll().1)`,
-    /// but reads better at the call site.
+    /// The value is the bare list of rows, so the merge instruction stays
+    /// at the prop's root ([`Prop::scroll_at_root`]): under the default
+    /// `<key>.data` wrapper of [`scroll`](Self::scroll) the client would
+    /// find nothing to append to and would replace the list instead.
     pub fn paginate<T>(
         self,
         key: &'static str,
@@ -778,7 +783,8 @@ impl InertiaResponse {
         T: Serialize + 'static,
     {
         let (meta, data) = paginator.into_inertia_scroll();
-        self.scroll(key, meta, data)
+        let value = to_value_or_die(&data);
+        self.prop(key, Prop::eager(value).scroll(meta).scroll_at_root())
     }
 
     /// Attach a flash value to this response. Appears under the
@@ -1617,134 +1623,56 @@ async fn resolve_props(
 
         // ---- scroll ----
         //
-        // Laravel folds every scroll prop into the merge protocol
-        // unconditionally: `ScrollProp::configureMergeIntent` runs on
-        // every resolution pass and always sets `merge = true`,
-        // defaulting to append and switching to prepend only when the
-        // client's intent header says so
-        // (`inertia-laravel-2.0.25/src/ScrollProp.php:72-79`). `reset`
-        // is decided independently, straight off `X-Inertia-Reset`
-        // (`Response.php:700-716`) - not off the intent header, and a
-        // reset key is excluded from the merge lists entirely, the
-        // same exclusion a regular merge prop already gets.
+        // Laravel folds every scroll prop into the merge protocol: the
+        // `ScrollProp` constructor sets `merge = true`, and
+        // `configureMergeIntent` appends at its wrapper (`data` by
+        // default), or prepends there when the client's
+        // `X-Inertia-Infinite-Scroll-Merge-Intent` says `prepend`
+        // (`inertia-laravel-3.5.1/src/ScrollProp.php`). `reset` comes
+        // from `X-Inertia-Reset` alone, and a reset key ships no merge
+        // instruction, as for any merge prop.
         //
-        // Placement: deliberately ABOVE the three `continue`s that end
-        // the loop body for a deferred prop, for a prop the client
-        // reports it already has cached under `once`, and for a prop the
-        // partial filter excludes. Laravel builds `resolveMergeProps`
-        // and `resolveScrollProps` from the *unfiltered* prop bag and
-        // narrows them with the only/except lists alone
-        // (`Response.php:553-560`, `:700-716`), never asking whether the
-        // value resolved - which is exactly why the once and merge
-        // blocks above sit here too. Sitting below those `continue`s is
-        // what used to drop the `scrollProps` entry of a
-        // `once()+scroll()` prop the moment the client reported the
-        // value cached; the client reads its cursor from
-        // `currentPage.get().scrollProps?.[propName]`
-        // (`inertia-3.6.1/packages/core/src/infiniteScroll/data.ts:38`),
-        // so infinite scroll silently stopped after the first
-        // navigation.
+        // A deferred scroll prop on a visit that is not a partial reload
+        // is excluded before `configureMergeIntent` runs, so Laravel's
+        // `excludeDeferredProp` collects the merge instruction at the bare
+        // key, and ships no `scrollProps` entry: nothing is on screen yet
+        // for a cursor to describe (`PropsResolver.php`). The follow-up
+        // partial reload configures the wrapper and gets both.
         //
-        // Gate: `passes_lists`, the same as the once/merge blocks above -
-        // not `filter.should_include(&key, &prop)`. Those two
-        // questions diverge for an `Always` prop: `should_include` is
-        // unconditionally `true` for one (it bypasses partial-reload
-        // filtering by design), but Laravel's
-        // `resolveScrollProps`/`resolveMergeProps` still narrow by
-        // `only`/`except` - an `Always` scroll prop outside the
-        // requested set must still ship its value (so `should_include`
-        // is right to let it through below) but must not also emit a
-        // merge instruction for a key the client never fetched fresh
-        // rows for, or the value that already shipped gets appended to
-        // on top of itself. `inertia_prop_composition.rs`'s
-        // `an_always_merge_prop_keeps_its_value_but_drops_merge_metadata_when_filtered_out`
-        // pins the identical rule for a plain (non-scroll) merge prop.
+        // `match_on` fields are relative to the prop - `{key}.{field}` -
+        // with no wrapper prefix: Laravel's `matchesOn` entries are
+        // prefixed with the prop path alone, so `match_on("data.id")` on
+        // `posts` is `posts.data.id`, which the client matches against the
+        // `posts.data` merge path.
         //
-        // One further gate belongs to the `scrollProps` entry ALONE:
-        // `resolveScrollProps` rejects a deferred scroll prop on a
-        // non-partial visit (`reject(fn (ScrollProp $prop) => !
-        // $isPartial && $prop->shouldDefer())`,
-        // `Response.php:704-718`) - the value has not shipped yet, so
-        // there is no accumulator for a cursor to describe.
-        // `getMergePropsForRequest` carries no matching rejection, so
-        // the merge instruction still ships on that first visit: the
-        // same "announce on visit one, merge on the follow-up" rule
-        // `defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up`
-        // pins for a plain merge prop.
-        //
-        // `match_on` folds in too, exactly the way Laravel's
-        // `resolveMergeMatchingKeys` folds a `ScrollProp`'s
-        // `matchesOn()` in alongside any other `Mergeable`
-        // (`Response.php:558,641-652` - `getMergePropsForRequest`
-        // gates only on `instanceof Mergeable && shouldMerge()`, no
-        // scroll exclusion, and `resolveMergeMatchingKeys` doesn't
-        // special-case `ScrollProp` either). This block keys every
-        // match entry off the same `path` it already computes for the
-        // merge/prepend push below: the bare key when unwrapped,
-        // `key.wrap_key` when `.scroll_wrap(...)` is set. That is a
-        // deliberate improvement over a byte-for-byte port of
-        // Laravel's own wiring, not an accident of convenience:
-        // `ScrollProp::configureMergeIntent` only ever calls the
-        // single-argument `append($wrapper)` (`ScrollProp.php:72-79`),
-        // never the two-argument `append($path, $matchOn)` overload
-        // that prefixes `matchOn` with the path
-        // (`MergesProps.php:136-151`) - so a wrapped Laravel
-        // `ScrollProp` given a bare `matchOn('id')` emits an
-        // unprefixed `"key.id"` match entry against a merge target of
-        // `"key.wrapper"`, which the client's `mergeOrMatchItems`
-        // prefix check (`inertia-3.6.1/.../response.ts:524-546`) can
-        // never match - the entry is silently inert. T27's
-        // `merge_with_path` has to leave that prefixing to the caller
-        // because a prop can carry several paths at once and the
-        // crate can't guess which one a given `match_on` field belongs
-        // to (`spec-t27.md` design note 4). `.scroll_wrap` carries no
-        // such ambiguity - it's a single `Option<String>`, the one
-        // nesting point a scroll prop can have - so this block derives
-        // the correct prefix itself instead of reproducing a match
-        // that would silently never fire.
-        //
-        // `.deep_merge()` on a scroll prop is the one merge flag that
-        // is NOT redundant: Laravel's `ScrollProp` constructor already
-        // sets `$this->merge = true` (`ScrollProp.php:60`), so a
-        // caller's own `->merge()`/`->prepend()` call has nothing left
-        // to change - but `shouldDeepMerge()` routes the prop into
-        // `resolveDeepMergeProps`, a completely different list, ahead
-        // of the append/prepend computation
-        // (`resolveAppendMergeProps`/`resolvePrependMergeProps` both
-        // `reject(fn ($p) => $p->shouldDeepMerge())` first,
-        // `Response.php:590,610`). A wrap key has nothing to narrow
-        // under deep merge, same reasoning as the general merge
-        // block's `MergeMode::Deep` arm above ignoring `merge_paths` -
-        // deep merge already recurses through the entire value, so
-        // this block deep-merges at the bare key even when
-        // `.scroll_wrap(...)` is also set.
+        // Gate: `passes_lists`, as for the once and merge blocks above,
+        // and placed above the `continue`s below for the same reason: the
+        // instructions follow the only/except lists, not whether the value
+        // resolved. An `Always` scroll prop outside the requested set still
+        // ships its value but no merge instruction, or the client would
+        // append the rows it already holds to themselves.
         if passes_lists && let Some(scroll_meta) = prop.scroll_metadata().cloned() {
             let is_reset = reset_keys.iter().any(|k| k == &key);
+            let announced_only = prop.is_defer() && !filter.matched;
             if !is_reset {
-                let is_deep = prop.merge_mode() == Some(MergeMode::Deep);
-                let path = if is_deep {
-                    key.clone()
-                } else {
-                    match prop.scroll_wrap_key() {
-                        Some(wrap) => format!("{key}.{wrap}"),
-                        None => key.clone(),
-                    }
-                };
                 for field in prop.match_on_fields() {
-                    metadata.match_props_on.push(format!("{path}.{field}"));
+                    metadata.match_props_on.push(format!("{key}.{field}"));
                 }
-                if is_deep {
-                    metadata.deep_merge.push(path);
+                let path = match prop.scroll_wrap_key() {
+                    Some(wrap) if !announced_only => format!("{key}.{wrap}"),
+                    _ => key.clone(),
+                };
+                if prop.merge_mode() == Some(MergeMode::Deep) {
+                    // Deep merge recurses through the whole value, so it
+                    // targets the bare key whatever the wrapper.
+                    metadata.deep_merge.push(key.clone());
+                } else if !announced_only && scroll_intent == Some("prepend") {
+                    metadata.merge_prepend.push(path);
                 } else {
-                    match scroll_intent {
-                        Some("prepend") => metadata.merge_prepend.push(path),
-                        _ => metadata.merge.push(path),
-                    }
+                    metadata.merge.push(path);
                 }
             }
-            // `reject(fn (ScrollProp $prop) => ! $isPartial && $prop->shouldDefer())`.
-            let rejected_by_defer = prop.is_defer() && !filter.matched;
-            if !rejected_by_defer {
+            if !announced_only {
                 metadata.scroll.insert(
                     key.clone(),
                     ScrollMetadataEntry {
