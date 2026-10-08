@@ -12,4 +12,5 @@ pub mod production_fail_closed;
 pub mod rate_limit;
 #[cfg(feature = "testing")]
 pub mod redis;
+pub mod rtc_sweep;
 pub mod throttle;

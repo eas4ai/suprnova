@@ -265,6 +265,46 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   in that schema, and a `.` becomes `_` in index and foreign key names. On
   MySQL and SQLite a qualified name is refused with an error naming it.
 - **The naive date-time casts read MySQL `TIMESTAMP` columns.**
+- **Password hashing runs under one process-wide limit.** `hash_async`,
+  `verify_async`, `hash_with_cost_async` and Magnetar's sign-in hashing
+  each took a blocking-pool thread with no limit, so a burst of sign-ins
+  could hold up to Tokio's 512 blocking threads at once, and an Argon2id
+  hash under the framework's defaults holds 64 MiB: up to 32 GiB. They now
+  share one limit, `HASH_MAX_CONCURRENCY`, which defaults to the host's
+  available parallelism; work past it waits as a task holding no thread,
+  so a burst holds at most the limit times one hash's memory. A hash keeps
+  its place under the limit until it returns, even when its caller stops
+  waiting. `0` or a value that is not a whole number is refused when the
+  hashing configuration loads (#146).
+- **A WebSocket upgrade no longer waits behind the shutdown drain.** The
+  registry of WebSocket handler tasks sat behind an async lock that the
+  shutdown drain held for up to its 5 s deadline, so an upgrade in flight
+  waited out the whole drain before its handler was registered. The
+  registry is now a synchronous lock held only to reap finished handlers
+  and register a new one, and the drain takes the set out under it and
+  waits holding no lock, still up to 5 s before it aborts what runs (#149).
+- **A streamed file is one blocking task, not one per chunk.** A file
+  above 1 MiB, served by `HttpResponse::file`, `HttpResponse::download` or
+  `StaticFiles`, spawned a blocking-pool task for every 64 KiB chunk, so a
+  1 GiB download made 16,384 trips through the pool and queued behind
+  every other blocking task at each one. One blocking task now reads the
+  whole file in 256 KiB chunks and hands them to the response over a
+  channel of four: one pool trip per file, a client that stops reading
+  leaves at most five chunks read ahead, and a dropped response stops its
+  reader. The bytes and `Content-Length` are unchanged, and a read error or
+  a file that shrinks still ends the body short (#147).
+- **The in-memory rate limiter keeps answering while it sweeps.** Its
+  buckets sat behind one lock: every request locked the whole map and
+  copied its key into a new `String` even when the key had a bucket, and
+  the periodic sweep and `purge_inactive` held that lock across the whole
+  map, so each sweep stalled every throttled request for a time that grows
+  with the number of keys an attacker can rotate. The buckets now sit in a
+  sharded map: a request locks only its key's shard, a key that has a
+  bucket allocates nothing, and the sweep locks one shard at a time.
+  During a sweep over 200,000 buckets (about 45 ms), no request on another
+  key completed before; about 4,800 do now. Acceptance, rejection and
+  retry-after answers are unchanged, and no request fails with "rate
+  limiter poisoned" any more, since the shard locks do not poison (#148).
 
 ### Fixed
 
@@ -311,6 +351,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   takes that table's collation.
 - **On Postgres, a session write for a guest** no longer binds a text NULL
   to `sessions.user_id`, which a `bigint` or `uuid` column refuses.
+- **A component's scripts import by relative path only.** The `live:add`
+  scan admitted a static `import` of an absolute path such as
+  `/acme-ui/x/x.js`, which breaks when the application serves under a path
+  prefix. It now refuses an absolute path, even to the component's own
+  script, as it refuses a URL (`script-import`), and the refusal says the
+  specifier must be a relative path (`./` or `../`) to a script of the
+  component or of a component it depends on.
+- **Magnetar's API documentation builds without the `two-factor`
+  feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
+  `LockoutService::without_user_lock` linked
+  `two_factor::lockout_identity`, which exists only with that feature, so
+  rustdoc failed on two broken links under Magnetar's default features.
+  They now name it as text, with the feature that provides it.
+- **API documentation writes ranges in words.** The docs of
+  `PhoneNumber::new`, `PaymentMethod::Card`'s `exp_month`,
+  `Batch::progress` and `SseEvent::keep_alive` wrote their ranges with an
+  en dash; they now read "8 to 15", "1 to 12", "0 to 100" and "15 to 30
+  seconds".
 
 ## 3.2.1 - 2026-10-05
 

@@ -36,7 +36,7 @@ if !ok {
 
 | Driver | Storage | Selected via |
 |--------|---------|--------------|
-| `InMemoryRateLimiter` | Per-process `HashMap<String, Bucket>` with `tokio::time::Instant` so `start_paused` tests can drive the clock (it does not follow `TestClock`) | `RATE_LIMIT_DRIVER=memory` (default) |
+| `InMemoryRateLimiter` | Per-process sharded map of buckets: a request locks only its key's shard, and the sweep of inactive buckets locks one shard at a time. It reads `tokio::time::Instant` so `start_paused` tests can drive the clock (it does not follow `TestClock`) | `RATE_LIMIT_DRIVER=memory` (default) |
 | `RedisRateLimiter` | Redis ZSET + Lua atomic check-and-record; it reads `suprnova::clock::now()`, so `TestClock` moves its window ([Moving the clock](testing.md#moving-the-clock)) | `RATE_LIMIT_DRIVER=redis` + `RATE_LIMIT_REDIS_URL` |
 
 `bootstrap_from_env()` wires the matching driver into the container. Outside production an unknown driver value falls back to memory with a `warn!` log.

@@ -17,6 +17,12 @@
 //! worker stays free for other requests. The sync variants stay for tests,
 //! CLI tools, and other non-async call sites.
 //!
+//! The async siblings run under one process-wide limit on how many hashes
+//! run at once, `HASH_MAX_CONCURRENCY` (default: the host's available
+//! parallelism), which Magnetar's own hash work shares. Work past the limit
+//! waits as a task holding no thread, so a burst of sign-ins holds at most
+//! the limit times one hash's memory.
+//!
 //! # Algorithm-aware length guard
 //!
 //! Bcrypt's internal block size limits passwords to 72 bytes - the `bcrypt`
@@ -39,7 +45,7 @@
 //!
 //! # Configuration
 //!
-//! Three env vars select and tune the driver - see [`HashConfig`] for the
+//! Seven env vars select and tune the driver - see [`HashConfig`] for the
 //! resolved shape:
 //!
 //! | Env var | Default | Range |
@@ -50,6 +56,7 @@
 //! | `HASH_TIME` | `4` | argon only; `>= 1` |
 //! | `HASH_THREADS` | `1` | argon only; `>= 1` |
 //! | `HASH_VERIFY` | `false` | when `true`, [`verify`] rejects hashes from a different algorithm |
+//! | `HASH_MAX_CONCURRENCY` | available parallelism | `>= 1`; hashes running at once across the async siblings and Magnetar |
 //!
 //! Suprnova's argon defaults match the OWASP 2024 recommendation
 //! (`m = 64 MiB, t = 4, p = 1`) - stronger than Laravel's PHP defaults
@@ -126,6 +133,57 @@ pub const MAX_BCRYPT_PASSWORD_BYTES: usize = 71;
 pub const MAX_PASSWORD_BYTES: usize = MAX_BCRYPT_PASSWORD_BYTES;
 
 static DEFAULT_DRIVER: OnceLock<Box<dyn Hasher>> = OnceLock::new();
+
+/// Set once this process has handed `HASH_MAX_CONCURRENCY` to the hash work
+/// limit. Only a success sets it, so an invalid setting is refused by every
+/// async hash, not only the first.
+static HASH_WORK_LIMIT_CONFIGURED: OnceLock<()> = OnceLock::new();
+
+/// Hand `HASH_MAX_CONCURRENCY` to the process-wide hash work limit, once per
+/// process.
+///
+/// Magnetar owns the limit, as the lower crate, and its own hash work waits
+/// under it. The limit is fixed by whichever comes first, this call or the
+/// first piece of hash work, so the framework calls this before its own
+/// hash work and before it installs a Magnetar engine whose sign-ins hash.
+/// Unset, the limit stays Magnetar's default, the host's available
+/// parallelism.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when the hashing configuration is invalid
+/// (`HASH_MAX_CONCURRENCY` among it), or when the limit was already fixed
+/// at another value before the configuration was read.
+pub(crate) fn configure_hash_work_limit() -> Result<(), FrameworkError> {
+    if HASH_WORK_LIMIT_CONFIGURED.get().is_some() {
+        return Ok(());
+    }
+    if let Some(limit) = HashConfig::from_env()?.max_concurrency {
+        magnetar::password::configure_hash_work_limit(limit).map_err(|error| {
+            FrameworkError::internal(format!(
+                "HASH_MAX_CONCURRENCY={limit} cannot take effect: {error}"
+            ))
+        })?;
+    }
+    let _ = HASH_WORK_LIMIT_CONFIGURED.set(());
+    Ok(())
+}
+
+/// Run one piece of password hash work on the blocking pool under the
+/// process-wide hash work limit, through Magnetar's
+/// [`run_hash_work`](magnetar::password::run_hash_work): the work waits for
+/// a permit as a task, and the permit stays with the work until it returns,
+/// even when the caller stops waiting. `what` names the caller in an error.
+async fn run_hash_work<T, F>(what: &'static str, work: F) -> Result<T, FrameworkError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, FrameworkError> + Send + 'static,
+{
+    configure_hash_work_limit()?;
+    magnetar::password::run_hash_work(move || Ok(work()))
+        .await
+        .map_err(|error| FrameworkError::internal(format!("{what}: {error}")))?
+}
 
 /// Resolve the active hasher driver.
 ///
@@ -228,16 +286,17 @@ pub(crate) fn rehash_for_laravel(password: &str, stored: &str) -> Result<String,
 }
 
 /// Async-safe wrapper around [`rehash_for_laravel`]: the CPU-bound hash
-/// runs on `tokio::task::spawn_blocking`.
+/// runs on the blocking pool under the hash work limit.
 pub(crate) async fn rehash_for_laravel_async(
     password: &str,
     stored: &str,
 ) -> Result<String, FrameworkError> {
     let password = password.to_string();
     let stored = stored.to_string();
-    tokio::task::spawn_blocking(move || rehash_for_laravel(&password, &stored))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("rehash join error: {e}")))?
+    run_hash_work("rehash_for_laravel_async", move || {
+        rehash_for_laravel(&password, &stored)
+    })
+    .await
 }
 
 /// Whether `hash` is not the hash [`hash_for_laravel`] would write at
@@ -401,30 +460,34 @@ fn verify_argon(password: &str, hash: &str) -> Result<bool, FrameworkError> {
         .is_ok())
 }
 
-/// Async-safe wrapper around [`hash`]. Runs the CPU-bound hash on
-/// `tokio::task::spawn_blocking` so the calling worker thread stays free.
+/// Async-safe wrapper around [`hash`]. Runs the CPU-bound hash on the
+/// blocking pool so the calling worker thread stays free, under the
+/// process-wide hash work limit (`HASH_MAX_CONCURRENCY`, see the module
+/// docs), so a burst of hashes waits as tasks instead of taking a thread
+/// and a hash's memory each.
+///
+/// # Errors
+///
+/// The hash's own error, or [`FrameworkError`] when the hashing
+/// configuration is invalid or the blocking task did not complete.
 pub async fn hash_async(password: &str) -> Result<String, FrameworkError> {
     let pw = password.to_string();
-    tokio::task::spawn_blocking(move || hash(&pw))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("hash_async join error: {e}")))?
+    run_hash_work("hash_async", move || hash(&pw)).await
 }
 
-/// Async-safe wrapper around [`hash_with_cost`]. Bcrypt-specific.
+/// Async-safe wrapper around [`hash_with_cost`]. Bcrypt-specific. Runs
+/// under the same hash work limit as [`hash_async`].
 pub async fn hash_with_cost_async(password: &str, cost: u32) -> Result<String, FrameworkError> {
     let pw = password.to_string();
-    tokio::task::spawn_blocking(move || hash_with_cost(&pw, cost))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("hash_with_cost_async join error: {e}")))?
+    run_hash_work("hash_with_cost_async", move || hash_with_cost(&pw, cost)).await
 }
 
-/// Async-safe wrapper around [`verify`].
+/// Async-safe wrapper around [`verify`]. Runs under the same hash work
+/// limit as [`hash_async`]: a verify costs what a hash costs.
 pub async fn verify_async(password: &str, hash: &str) -> Result<bool, FrameworkError> {
     let pw = password.to_string();
     let h = hash.to_string();
-    tokio::task::spawn_blocking(move || verify(&pw, &h))
-        .await
-        .map_err(|e| FrameworkError::internal(format!("verify_async join error: {e}")))?
+    run_hash_work("verify_async", move || verify(&pw, &h)).await
 }
 
 /// True if `hash` was produced with weaker parameters than the active

@@ -17,6 +17,8 @@ let hashed = hashing::hash("my_password")?;
 let valid = hashing::verify("my_password", &hashed)?;
 ```
 
+The async functions run on the blocking pool under one process-wide limit, `HASH_MAX_CONCURRENCY`, which Magnetar's sign-in hashing shares. One Argon2id hash under the defaults holds 64 MiB, so without a limit a burst of sign-ins could hold up to the pool's 512 threads and 32 GiB at once. With it, the burst holds at most the limit times one hash's memory, and the rest waits as tasks that hold no thread. A hash keeps its place under the limit until it returns, even when its caller stops waiting.
+
 The free-function facade reads the active driver from `HASH_DRIVER` (or falls back to bcrypt). For explicit-driver calls, construct the driver type directly and pass it to `hash_with` / `verify_with` / `needs_rehash_with`.
 
 ## Configuration
@@ -29,6 +31,7 @@ The free-function facade reads the active driver from `HASH_DRIVER` (or falls ba
 | `HASH_TIME` | Argon time iterations | `4` | `>= 1` (argon only) |
 | `HASH_THREADS` | Argon parallelism / lanes | `1` | `>= 1` (argon only) |
 | `HASH_VERIFY` | When true, `verify()` rejects cross-algorithm hashes | `false` | `true` / `false` |
+| `HASH_MAX_CONCURRENCY` | Most password hashes running at once in the process, the async functions and Magnetar together | the host's available parallelism | whole number `>= 1` |
 
 Misconfiguration (bad value, out-of-range parameter) surfaces as a `FrameworkError::param` at the first call to `hash` / `verify` / `needs_rehash` - not as a silent default.
 

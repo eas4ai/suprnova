@@ -14,9 +14,11 @@
 //! under the Laravel target the password provider fails the sign-in, as
 //! Laravel could not verify the hash left in place.
 
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock};
 
 use secrecy::{ExposeSecret, SecretString};
+use tokio::sync::Semaphore;
 
 use crate::{Error, Result};
 
@@ -197,13 +199,96 @@ pub struct AttemptVerdict {
     pub rehash: RehashOutcome,
 }
 
-/// Run one piece of password hash work off the async runtime's workers.
+/// The process-wide limit on password hash work running at once, and the
+/// permits that enforce it.
+struct HashWorkGate {
+    limit: NonZeroUsize,
+    permits: Arc<Semaphore>,
+}
+
+impl HashWorkGate {
+    fn new(limit: NonZeroUsize) -> Self {
+        // `configure_hash_work_limit` refuses a limit above the semaphore's
+        // ceiling; the default is the host's parallelism, far below it.
+        let permits = limit.get().min(Semaphore::MAX_PERMITS);
+        Self {
+            limit,
+            permits: Arc::new(Semaphore::new(permits)),
+        }
+    }
+}
+
+/// The one gate for the process: every piece of hash work, the framework's
+/// and Magnetar's, waits on it.
+static HASH_WORK_GATE: OnceLock<HashWorkGate> = OnceLock::new();
+
+/// The gate, built at the host's available parallelism (1 when the host
+/// cannot say) when nothing configured it before the first piece of work.
+fn hash_work_gate() -> &'static HashWorkGate {
+    HASH_WORK_GATE.get_or_init(|| {
+        HashWorkGate::new(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    })
+}
+
+/// Set the process-wide limit on how many pieces of password hash work run
+/// at once.
+///
+/// Every piece of hash work [`run_hash_work`] runs holds one permit of this
+/// limit for as long as it runs. One Argon2id hash holds tens of MiB of
+/// memory and a blocking-pool thread; without a limit, a burst of sign-ins
+/// takes up to the whole blocking pool (512 threads by default) and that
+/// much memory at once. With it, the burst holds at most `limit` hashes'
+/// memory and threads, and the rest waits as tasks holding no thread.
+///
+/// The limit is set once per process, before or at the first piece of
+/// work. When nothing set it by then, it is the host's available
+/// parallelism. Setting it again to the same value succeeds, so two
+/// callers that read the same configuration agree.
+///
+/// # Errors
+///
+/// [`Error::InvalidInput`] when `limit` is above what one semaphore can
+/// hold, and [`Error::Conflict`] when the limit is already set to another
+/// value (by an earlier call, or by the first piece of work).
+pub fn configure_hash_work_limit(limit: NonZeroUsize) -> Result<()> {
+    if limit.get() > Semaphore::MAX_PERMITS {
+        return Err(Error::InvalidInput {
+            field: "hash work limit".to_owned(),
+            message: format!(
+                "{limit} is above the largest limit, {}",
+                Semaphore::MAX_PERMITS
+            ),
+        });
+    }
+    let gate = HASH_WORK_GATE.get_or_init(|| HashWorkGate::new(limit));
+    if gate.limit == limit {
+        Ok(())
+    } else {
+        Err(Error::Conflict {
+            resource: "password hash work limit".to_owned(),
+            message: format!(
+                "the limit is already set to {}; it cannot change to {limit}",
+                gate.limit
+            ),
+        })
+    }
+}
+
+/// Run one piece of password hash work off the async runtime's workers,
+/// under the process-wide hash work limit.
 ///
 /// A password hash is slow on purpose: an Argon2id mint or verify holds a
 /// thread for tens of milliseconds. On a runtime worker that blocks every
 /// other task scheduled there, so the work runs on Tokio's blocking pool
 /// when a runtime is present. Outside a runtime it runs inline, as there is
 /// no worker to stall.
+///
+/// On a runtime the work first waits for a permit of the limit
+/// [`configure_hash_work_limit`] sets, as a task holding no thread. The
+/// permit then moves into the blocking task and lives exactly as long as
+/// the work: the caller may stop waiting (a client disconnects, a timeout
+/// fires) while the work runs on, and the permit must stay with the work
+/// until it returns, or the limit would admit more work than it bounds.
 ///
 /// # Errors
 ///
@@ -214,15 +299,24 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => runtime
-            .spawn_blocking(work)
-            .await
-            .map_err(|error| Error::Internal {
-                message: format!("password hash work did not complete: {error}"),
-            })?,
-        Err(_) => work(),
-    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return work();
+    };
+    let permit = Arc::clone(&hash_work_gate().permits)
+        .acquire_owned()
+        .await
+        .map_err(|error| Error::Internal {
+            message: format!("password hash work limit is closed: {error}"),
+        })?;
+    runtime
+        .spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .map_err(|error| Error::Internal {
+            message: format!("password hash work did not complete: {error}"),
+        })?
 }
 
 /// The highest cost bcrypt takes: a cost above it is no hash bcrypt wrote.
@@ -593,4 +687,23 @@ fn random_secret() -> String {
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     crate::storage::hex_lower(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A limit above what one semaphore can hold is refused before the gate
+    /// is built: `Semaphore::new` would panic on it, and clamping it would
+    /// run under a limit nobody configured.
+    #[test]
+    fn a_hash_work_limit_above_the_semaphore_ceiling_is_refused() {
+        let limit = NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).expect("non-zero");
+        let error = configure_hash_work_limit(limit).expect_err("the limit is refused");
+        assert!(matches!(error, Error::InvalidInput { .. }), "{error}");
+        assert!(
+            !HASH_WORK_GATE.get().is_some_and(|gate| gate.limit == limit),
+            "the gate was built at the refused limit"
+        );
+    }
 }

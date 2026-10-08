@@ -20,14 +20,20 @@ use bytes::Bytes;
 use futures::Stream;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use std::convert::Infallible;
-use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::AsyncReadExt;
 
-/// Size of each chunk a streamed file body reads and sends.
-const FILE_CHUNK_SIZE: usize = 64 * 1024;
+/// Size of each chunk a streamed file body reads and sends: a few reads
+/// per megabyte, while the read-ahead [`FILE_CHUNKS_QUEUED`] bounds stays
+/// near one megabyte.
+const FILE_CHUNK_SIZE: usize = 256 * 1024;
+
+/// How many chunks a streamed file's reader may have waiting for the
+/// response. A client that stops reading holds these, plus the one the
+/// reader holds while it waits for room, and no more.
+const FILE_CHUNKS_QUEUED: usize = 4;
 
 /// Files at or below this size are read fully into memory and served as a
 /// buffered body whose `Content-Length` is the exact number of bytes read.
@@ -192,7 +198,7 @@ impl HttpResponse {
     /// as HTML or SVG), a `Content-Length`, and
     /// `Content-Disposition: inline` with `name`,
     /// or the file's own name when `name` is `None`. A file above 1 MiB is
-    /// streamed in 64 KiB chunks rather than read into memory.
+    /// streamed in 256 KiB chunks rather than read into memory.
     ///
     /// `path` is opened as given. Never build it from request input: for
     /// a file a user names, use `Storage::response` on a disk, whose path
@@ -466,55 +472,107 @@ fn should_add_charset(mime: &str) -> bool {
 /// framework's streaming bodies are `Infallible`, so this short-body abort is
 /// how a read failure is surfaced to the client.
 ///
-/// Each chunk is read by a blocking task straight into the buffer the
-/// chunk is sent in: one allocation per chunk, and none for a poll that
-/// finds the read still running. `tokio::fs::File` would read into its own
-/// buffer and copy into the caller's, and the caller's buffer had to exist
-/// before the read was even ready.
+/// The first poll starts one blocking task that owns the file for the whole
+/// body: it reads [`FILE_CHUNK_SIZE`] chunks in a loop and hands each to the
+/// stream over a channel of [`FILE_CHUNKS_QUEUED`]. The body is one trip
+/// through the blocking pool rather than one per chunk, so a long download
+/// does not compete with every other blocking task chunk by chunk. A client
+/// that stops reading leaves the reader waiting for room with at most those
+/// chunks read; a dropped stream closes the channel, which stops the reader
+/// at its next hand-off; and a body that is never polled, such as the one a
+/// `HEAD` response drops, never starts a reader.
+///
+/// Each chunk is read straight into the buffer it is sent in, allocated for
+/// the read about to fill it: one allocation per chunk, and none for a poll
+/// that finds no chunk ready. `tokio::fs::File` would read into its own
+/// buffer and copy into the caller's.
 struct FileByteStream {
     state: ReadState,
     remaining: u64,
-    finished: bool,
 }
 
-/// Where a [`FileByteStream`] is between chunks.
+/// Where a [`FileByteStream`] is in its body.
 enum ReadState {
-    /// No read is running; the file waits for the next one. `None` only
-    /// after a read task failed and took the file with it.
-    Idle(Option<std::fs::File>),
-    /// A blocking task is reading one chunk, and hands the file back with it.
-    Reading(tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>),
+    /// Not polled yet: the file waits for the reader the first poll starts.
+    Unstarted(std::fs::File),
+    /// The reader owns the file and sends what each read returned here.
+    Reading(tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>),
+    /// The body ended. The channel is closed, so a reader still running
+    /// stops at its next hand-off.
+    Ended,
 }
 
 impl FileByteStream {
     fn new(file: std::fs::File, content_length: u64) -> Self {
         Self {
-            state: ReadState::Idle(Some(file)),
+            state: ReadState::Unstarted(file),
             remaining: content_length,
-            finished: false,
         }
     }
 
     /// End the body, short of its length when bytes are still owed.
     fn finish(&mut self) -> Poll<Option<Result<Bytes, Infallible>>> {
-        self.finished = true;
+        self.state = ReadState::Ended;
         Poll::Ready(None)
     }
 }
 
-/// Read up to `buffer.len()` bytes, retrying a read a signal interrupted.
+/// Start the one blocking task that reads `length` bytes of `file` for a
+/// body, and return the channel its reads arrive on.
+fn read_in_background(
+    file: std::fs::File,
+    length: u64,
+) -> tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(FILE_CHUNKS_QUEUED);
+    // Not awaited: the reader returns by itself after its last send, and
+    // a dropped stream makes its next send fail.
+    drop(tokio::task::spawn_blocking(move || {
+        read_file(file, length, &sender)
+    }));
+    receiver
+}
+
+/// The reader's loop: read `length` bytes of `file` a chunk at a time and
+/// send each read's result. It stops after the last chunk, after an empty
+/// read (the file shrank) or a read error, both of which it sends for the
+/// stream to report, or when a send fails because the stream was dropped.
+fn read_file(
+    mut file: std::fs::File,
+    length: u64,
+    chunks: &tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+) {
+    let mut left = length;
+    while left > 0 {
+        let size = usize::try_from(left).map_or(FILE_CHUNK_SIZE, |left| left.min(FILE_CHUNK_SIZE));
+        let read = read_chunk(&mut file, vec![0; size]);
+        let stop = match &read {
+            Ok(chunk) => {
+                left = left.saturating_sub(chunk.len() as u64);
+                chunk.is_empty()
+            }
+            Err(_) => true,
+        };
+        if chunks.blocking_send(read).is_err() || stop {
+            return;
+        }
+    }
+}
+
+/// Fill `buffer` from `file`, retrying a read a signal interrupted, and
+/// return it cut to what was read, which is shorter only at end of file.
 fn read_chunk(file: &mut std::fs::File, mut buffer: Vec<u8>) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    loop {
-        match file.read(&mut buffer) {
-            Ok(read) => {
-                buffer.truncate(read);
-                return Ok(buffer);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
+    buffer.truncate(filled);
+    Ok(buffer)
 }
 
 impl Stream for FileByteStream {
@@ -522,64 +580,47 @@ impl Stream for FileByteStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        loop {
-            if this.finished {
-                return Poll::Ready(None);
+        if this.remaining == 0 {
+            return this.finish();
+        }
+        this.state = match std::mem::replace(&mut this.state, ReadState::Ended) {
+            ReadState::Unstarted(file) => {
+                ReadState::Reading(read_in_background(file, this.remaining))
             }
-            match &mut this.state {
-                ReadState::Idle(file) => {
-                    if this.remaining == 0 {
-                        return this.finish();
-                    }
-                    let Some(mut file) = file.take() else {
-                        return this.finish();
-                    };
-                    let chunk_size = FILE_CHUNK_SIZE.min(this.remaining as usize);
-                    this.state = ReadState::Reading(tokio::task::spawn_blocking(move || {
-                        let read = read_chunk(&mut file, vec![0; chunk_size]);
-                        (file, read)
-                    }));
-                }
-                ReadState::Reading(task) => {
-                    let joined = std::task::ready!(Pin::new(task).poll(cx));
-                    let (file, read) = match joined {
-                        Ok(done) => done,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                owed = this.remaining,
-                                "file stream read task failed; ending body short so the \
-                                 connection aborts instead of completing a partial payload"
-                            );
-                            this.state = ReadState::Idle(None);
-                            return this.finish();
-                        }
-                    };
-                    this.state = ReadState::Idle(Some(file));
-                    return match read {
-                        Ok(buffer) if buffer.is_empty() => {
-                            tracing::warn!(
-                                owed = this.remaining,
-                                "file shrank mid-stream; ending body short so \
-                                 the connection aborts instead of serving a truncated payload"
-                            );
-                            this.finish()
-                        }
-                        Ok(buffer) => {
-                            this.remaining = this.remaining.saturating_sub(buffer.len() as u64);
-                            Poll::Ready(Some(Ok(Bytes::from(buffer))))
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                owed = this.remaining,
-                                "file stream read failed; ending body short so the \
-                                 connection aborts instead of completing a partial payload"
-                            );
-                            this.finish()
-                        }
-                    };
-                }
+            state => state,
+        };
+        let ReadState::Reading(chunks) = &mut this.state else {
+            return Poll::Ready(None);
+        };
+        match std::task::ready!(chunks.poll_recv(cx)) {
+            Some(Ok(chunk)) if chunk.is_empty() => {
+                tracing::warn!(
+                    owed = this.remaining,
+                    "file shrank mid-stream; ending body short so \
+                     the connection aborts instead of serving a truncated payload"
+                );
+                this.finish()
+            }
+            Some(Ok(chunk)) => {
+                this.remaining = this.remaining.saturating_sub(chunk.len() as u64);
+                Poll::Ready(Some(Ok(Bytes::from(chunk))))
+            }
+            Some(Err(error)) => {
+                tracing::warn!(
+                    error = %error,
+                    owed = this.remaining,
+                    "file stream read failed; ending body short so the \
+                     connection aborts instead of completing a partial payload"
+                );
+                this.finish()
+            }
+            None => {
+                tracing::warn!(
+                    owed = this.remaining,
+                    "file stream read task failed; ending body short so the \
+                     connection aborts instead of completing a partial payload"
+                );
+                this.finish()
             }
         }
     }
@@ -657,7 +698,7 @@ mod tests {
         assert_eq!(emitted, b"abc");
         assert!(emitted.len() < captured_len as usize);
         assert!(stream.remaining > 0, "shrunken file must leave bytes owed");
-        assert!(stream.finished);
+        assert!(matches!(stream.state, ReadState::Ended));
     }
 
     #[tokio::test]
