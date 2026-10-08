@@ -900,7 +900,9 @@ By default you set nothing. The version resolves in the order Laravel's
 
 1. When the config names an `asset_url` - the URL the built assets are
    published under when it changes with each deploy, such as a CDN path
-   that carries a build id - the version is a hash of that URL.
+   that carries a build id - the version is a hash of that URL. It
+   defaults to the `ASSET_URL` environment variable, the one Laravel's
+   `app.asset_url` reads; `.asset_url(...)` on the config wins over it.
 2. Otherwise `InertiaConfig` hashes your Vite build manifest
    (`manifest_path`, default `public/assets/.vite/manifest.json`). The
    manifest is the one file that changes on every build and on no other
@@ -1454,12 +1456,14 @@ bundle exposes without any extra code.
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
 the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
-the one every response starts from. The one env var the framework reads
-directly is `SUPRNOVA_FRONTEND` (`svelte` / `react` / `vue`), and it only
-supplies the default entry-point filename and page-component extensions
-when the config doesn't say - an explicit `.frontend(Frontend::React)` on
-the installed config wins, and is what `suprnova new --frontend react`
-scaffolds. Everything else is builder-shaped:
+the one every response starts from. `SUPRNOVA_FRONTEND` (`svelte` /
+`react` / `vue`) only supplies the default entry-point filename and
+page-component extensions when the config doesn't say - an explicit
+`.frontend(Frontend::React)` on the installed config wins, and is what
+`suprnova new --frontend react` scaffolds. `ASSET_URL` only supplies the
+default `asset_url` the asset version hashes, and `.asset_url(...)` wins
+over it (see [Version detection](#version-detection)). Everything else is
+builder-shaped:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};

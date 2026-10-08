@@ -296,8 +296,12 @@ pub struct InertiaConfig {
     /// `Middleware::version` uses: a deploy that publishes under a new URL
     /// moves the version even where the manifest is not on this host. An
     /// explicit [`version`](Self::version) or
-    /// [`version_with`](Self::version_with) ignores it. `None` by default.
-    /// Set it with [`asset_url`](Self::asset_url).
+    /// [`version_with`](Self::version_with) ignores it.
+    ///
+    /// Defaults to the `ASSET_URL` environment variable when it is set and
+    /// not empty, the variable Laravel's `app.asset_url` reads, and to
+    /// `None` otherwise. [`asset_url`](Self::asset_url) on the builder wins
+    /// over the environment.
     pub asset_url: Option<String>,
     /// Whether a session-flashed validation bag surfaces every message
     /// per field (`{ email: ["a", "b"] }`) or only the first
@@ -544,6 +548,16 @@ fn vite_dev_server_from_env() -> String {
     format!("http://localhost:{port}")
 }
 
+/// The `ASSET_URL` environment variable, trimmed, when it names something.
+/// Laravel's `app.asset_url` reads the same variable, so a deployment that
+/// sets it for a Laravel app moves the Inertia asset version here too.
+fn asset_url_from_env() -> Option<String> {
+    std::env::var("ASSET_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 impl Default for InertiaConfig {
     fn default() -> Self {
         let frontend = Frontend::detect_from_env();
@@ -569,7 +583,7 @@ impl Default for InertiaConfig {
             ssr: SsrConfig::default(),
             manifest_path,
             assets_base_url: "/assets".to_string(),
-            asset_url: None,
+            asset_url: asset_url_from_env(),
             with_all_errors: false,
             preserve_big_integers: false,
             max_concurrent_resolvers: 16,
@@ -792,8 +806,9 @@ impl InertiaConfig {
         self
     }
 
-    /// Set the URL the built assets are published under. While the
-    /// version source is the default (no [`version`](Self::version) or
+    /// Set the URL the built assets are published under, in place of the
+    /// `ASSET_URL` environment variable's. While the version source is the
+    /// default (no [`version`](Self::version) or
     /// [`version_with`](Self::version_with)), the asset version becomes
     /// this URL's hash. See the [`asset_url`](Self::asset_url) field.
     pub fn asset_url(mut self, url: impl Into<String>) -> Self {

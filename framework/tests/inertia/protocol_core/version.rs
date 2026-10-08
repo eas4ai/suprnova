@@ -182,3 +182,37 @@ async fn inp_a_stale_version_on_a_post_passes_through() {
     assert_eq!(status, 200, "only a GET answers 409");
     assert_eq!(body, "posted", "the handler ran");
 }
+
+#[tokio::test]
+async fn inp_the_asset_url_defaults_from_the_environment() {
+    // Laravel's `app.asset_url` reads `ASSET_URL`. The variable lasts for
+    // the life of the process, so the test runs alone in a child process.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "inp_the_asset_url_defaults_from_the_environment",
+    )
+    .await
+    {
+        return;
+    }
+    // SAFETY: this test runs alone in a child process (nextest, or the
+    // child `own_process_async::delegate` starts under plain `cargo test`),
+    // and nothing else in it reads the environment while this call runs.
+    unsafe { std::env::set_var("ASSET_URL", "https://cdn.example.com/build-9") };
+
+    let config = no_manifest();
+    assert_eq!(
+        config.asset_url.as_deref(),
+        Some("https://cdn.example.com/build-9")
+    );
+    assert_eq!(
+        version_of(config).await,
+        hashed(b"https://cdn.example.com/build-9"),
+        "the environment's asset URL decides the default version"
+    );
+    assert_eq!(
+        version_of(no_manifest().asset_url("https://cdn.example.com/build-10")).await,
+        hashed(b"https://cdn.example.com/build-10"),
+        "the builder's asset URL wins over the environment"
+    );
+}
