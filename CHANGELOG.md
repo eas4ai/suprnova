@@ -1350,7 +1350,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   DevTools a summary of what it parsed, after authorization. An upload no
   extractor read records `not-read`, and one whose parse failed records
   `unparsed`, both with the declared length as `size`; the raw text is
-  never stored (DT-02, DT-10).
+  never stored. A name sent more than once, or one that ends in `[]`, is
+  now the list of its parts: the entry kept only the last of the three
+  files of a `photos[]` field (DT-02, DT-10).
 - **The DevTools id tag finds a closing body tag in any case.** The tag
   went before the last literal `</body>`, so a first visit whose root
   template closed with `</BODY>` or `</Body >` went out with no tag. The

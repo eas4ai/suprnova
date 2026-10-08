@@ -256,7 +256,9 @@ fn merge_into(into: &mut Map<String, Value>, from: Value) {
 /// The parts of a parsed multipart body for the entry: text parts as
 /// text, a part that is not text as `[UNSERIALIZABLE]`, and a file part
 /// as its name, size and MIME type, never its bytes. Names are kept as
-/// sent, and a later part of a name replaces an earlier one.
+/// sent. A name sent more than once, or one that ends in `[]`, is the list
+/// of its parts in the order they came, as Laravel lists every file of
+/// `photos[]`; any other name is its one part.
 pub(crate) fn multipart_summary(fields: &[(String, MultipartValue)]) -> Map<String, Value> {
     let mut summary = Map::new();
     for (name, value) in fields {
@@ -274,7 +276,18 @@ pub(crate) fn multipart_summary(fields: &[(String, MultipartValue)]) -> Map<Stri
             MultipartValue::Text(text) => Value::String(text.clone()),
             MultipartValue::NonUtf8Text(_) => Value::String(UNSERIALIZABLE.to_string()),
         };
-        summary.insert(name.clone(), value);
+        // A part is never a list itself, so a list here is one this loop
+        // started for the name.
+        match summary.get_mut(name) {
+            Some(Value::Array(parts)) => parts.push(value),
+            Some(first) => *first = Value::Array(vec![first.take(), value]),
+            None if name.ends_with("[]") => {
+                summary.insert(name.clone(), Value::Array(vec![value]));
+            }
+            None => {
+                summary.insert(name.clone(), value);
+            }
+        }
     }
     summary
 }

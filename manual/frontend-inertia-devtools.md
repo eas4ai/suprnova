@@ -118,7 +118,9 @@ DevTools never reads a multipart upload itself. The upload's extractor
 authorizes the request before any byte of the body is read, then parses
 the body and hands DevTools what it parsed: a text part as text, a part
 that is not text as `[UNSERIALIZABLE]`, and a file as its `name`, `size`
-and `mimeType`, never its bytes, after the query. An upload no extractor
+and `mimeType`, never its bytes, after the query. A name sent more than
+once, or one that ends in `[]`, is the list of its parts, so every file
+of a `photos[]` field is listed. An upload no extractor
 read, because authorization refused it or the handler never asked for it,
 records `not-read` with the declared length, and one whose parse failed
 partway records `unparsed`:
@@ -289,7 +291,7 @@ either way.
   DevTools: its extractor summarizes what it parsed, after the request is
   authorized, so an upload no extractor read is `not-read`, and one whose
   parse failed is `unparsed`. Multipart field names are kept as sent, not
-  nested.
+  nested: the files of `photos[]` are listed under `photos[]`.
 - **The gate takes a resource.** Suprnova's gate is typed by user and
   resource, so the ability is defined for `(User, ())`, and a guest is
   `()` where Laravel passes `null`.

@@ -552,6 +552,82 @@ async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
 }
 
 #[tokio::test]
+async fn indt_an_upload_lists_every_part_of_a_repeated_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    let mut body = Vec::new();
+    let mut part = |headers: &str, data: &[u8]| {
+        body.extend_from_slice(b"--XYZ\r\nContent-Disposition: form-data; ");
+        body.extend_from_slice(headers.as_bytes());
+        body.extend_from_slice(b"\r\n\r\n");
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n");
+    };
+    part("name=\"title\"", b"Holiday");
+    part(
+        "name=\"photo\"; filename=\"cover.jpg\"\r\nContent-Type: image/jpeg",
+        b"cover",
+    );
+    for (file, data) in [("a.jpg", &b"a"[..]), ("b.png", b"bb"), ("c.gif", b"ccc")] {
+        part(
+            &format!("name=\"photos[]\"; filename=\"{file}\"\r\nContent-Type: image/x-test"),
+            data,
+        );
+    }
+    part("name=\"tags\"", b"sea");
+    part("name=\"tags\"", b"sun");
+    body.extend_from_slice(b"--XYZ--\r\n");
+
+    let reply = raw_send(
+        addr,
+        "POST",
+        "/album",
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"multipart/form-data; boundary=XYZ"),
+        ],
+        body,
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let file =
+        |name: &str, size: usize| json!({"name": name, "size": size, "mimeType": "image/x-test"});
+    assert_eq!(
+        read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "present", "value": {
+            "title": "Holiday",
+            "photo": {"name": "cover.jpg", "size": 5, "mimeType": "image/jpeg"},
+            "photos[]": [file("a.jpg", 1), file("b.png", 2), file("c.gif", 3)],
+            "tags": ["sea", "sun"],
+        }})
+    );
+
+    // A name that ends in `[]` is a list even with one part.
+    let single = b"--XYZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday\r\n--XYZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"cover.jpg\"\r\nContent-Type: image/jpeg\r\n\r\ncover\r\n--XYZ\r\nContent-Disposition: form-data; name=\"photos[]\"; filename=\"a.jpg\"\r\nContent-Type: image/x-test\r\n\r\na\r\n--XYZ--\r\n";
+    let reply = raw_send(
+        addr,
+        "POST",
+        "/album",
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"multipart/form-data; boundary=XYZ"),
+        ],
+        single.to_vec(),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"])["http"]["requestBody"]["value"]
+            ["photos[]"],
+        json!([file("a.jpg", 1)])
+    );
+}
+
+#[tokio::test]
 async fn indt_a_denied_upload_is_refused_before_any_byte_of_its_body_is_read() {
     let dir = tempfile::tempdir().unwrap();
     let addr = serve(
