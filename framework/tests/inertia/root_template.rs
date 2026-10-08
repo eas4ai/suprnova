@@ -304,3 +304,36 @@ async fn rdoc_002_the_inertia_visit_is_unchanged() {
         r#"{"component":"Home","props":{"errors":{},"message":"</script> & café"},"url":"/home","version":"pinned"}"#
     );
 }
+
+/// RDOC-001: the page data element and the mount element take their id
+/// from `InertiaConfig::mount_id`, so a client mounting on another id finds
+/// its element; the default stays `app`, and the id is escaped as an
+/// attribute value.
+#[tokio::test]
+async fn rdoc_001_the_mount_id_names_the_page_data_and_mount_elements() {
+    let _container = TestContainer::fake();
+    assert_eq!(InertiaConfig::new().mount_id, "app");
+
+    let config = InertiaConfig::new()
+        .development(true)
+        .version("pinned")
+        .mount_id("root");
+    let (_, _, body) = first_visit(pinned_page().with_config(config)).await;
+    assert!(
+        body.contains(&format!(
+            "<script type=\"application/json\" data-page=\"root\">{PINNED_PAGE_JSON}</script>\n<div id=\"root\"></div>"
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("\"app\""), "{body}");
+
+    let config = InertiaConfig::new()
+        .development(true)
+        .version("pinned")
+        .mount_id("a\"b<c");
+    let (_, _, body) = first_visit(pinned_page().with_config(config)).await;
+    assert!(
+        body.contains("data-page=\"a&quot;b&lt;c\">") && body.contains("<div id=\"a&quot;b&lt;c\">"),
+        "{body}"
+    );
+}

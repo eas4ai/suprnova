@@ -237,6 +237,14 @@ pub struct InertiaConfig {
     /// Default `<title>` for the HTML shell. Per-response title overrides
     /// via `InertiaResponse::title(...)`.
     pub default_title: String,
+    /// The id of the first visit's mount element and the `data-page`
+    /// attribute of its page data element. Default `app`.
+    ///
+    /// The Inertia client looks both up by the `id` given to
+    /// `createInertiaApp` (and to `createServer` under SSR), `app` unless
+    /// the application names another, so the two must agree. Set it with
+    /// [`mount_id`](Self::mount_id).
+    pub mount_id: String,
     /// Whether Inertia responses encrypt their browser history state by
     /// default. Maps to Laravel's `config('inertia.history.encrypt')`.
     /// Overridable per-request via `EncryptHistoryMiddleware` and
@@ -517,6 +525,7 @@ impl Default for InertiaConfig {
             development: !crate::config::Environment::detect().is_production(),
             frontend,
             default_title: "Suprnova".to_string(),
+            mount_id: "app".to_string(),
             encrypt_history_default: false,
             ssr: SsrConfig::default(),
             manifest_path,
@@ -628,6 +637,25 @@ impl InertiaConfig {
     /// Set the default `<title>` used when a page doesn't supply one.
     pub fn default_title(mut self, title: impl Into<String>) -> Self {
         self.default_title = title.into();
+        self
+    }
+
+    /// Name the first visit's mount element: the `id` of the element the
+    /// client mounts on and the `data-page` attribute of the element that
+    /// carries the page data. Default `app`.
+    ///
+    /// Set it to the `id` the frontend passes to `createInertiaApp`; a
+    /// client mounting on an id the document does not carry finds no
+    /// element and renders nothing.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new().mount_id("root");
+    /// # let _ = cfg;
+    /// ```
+    pub fn mount_id(mut self, id: impl Into<String>) -> Self {
+        self.mount_id = id.into();
         self
     }
 

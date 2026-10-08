@@ -1017,7 +1017,7 @@ impl InertiaResponse {
     ///   embedded in a sibling `<script type="application/json"
     ///   data-page="app">` element next to the empty `<div id="app">`
     ///   mount node - the Inertia 3 contract that `getInitialPageFromDOM`
-    ///   reads.
+    ///   reads. Both carry [`InertiaConfig::mount_id`], `app` by default.
     pub async fn resolve<R: InertiaRequestExt>(
         self,
         req: &R,
@@ -2353,14 +2353,19 @@ fn build_html_response(
         html.push_str("\n</body>\n</html>");
         html
     } else {
+        let mount_id = escape_html_attr(&config.mount_id);
         let mut html = html.into_bytes();
-        html.extend_from_slice(b"<script type=\"application/json\" data-page=\"app\">");
+        html.extend_from_slice(b"<script type=\"application/json\" data-page=\"");
+        html.extend_from_slice(mount_id.as_bytes());
+        html.extend_from_slice(b"\">");
         let page_at = html.len();
         if serde_json::to_writer(SlashEscaping(&mut html), page).is_err() {
             html.truncate(page_at);
             html.extend_from_slice(b"{}");
         }
-        html.extend_from_slice(b"</script>\n<div id=\"app\"></div>\n</body>\n</html>");
+        html.extend_from_slice(b"</script>\n<div id=\"");
+        html.extend_from_slice(mount_id.as_bytes());
+        html.extend_from_slice(b"\"></div>\n</body>\n</html>");
         // Only UTF-8 was written: the JSON serializer's output and ASCII.
         String::from_utf8(html)
             .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
