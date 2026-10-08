@@ -894,6 +894,9 @@ instruction.
 - `assert_inertia_flash` is `async` and reads the session through the
   attached store, since the session lives behind the server, not in the
   test's process memory.
+- A big-integer marker whose digits fit no 64-bit integer fails the
+  assertion naming its path, where Laravel's `(int)` cast saturates a wide
+  value and turns a non-numeric one into `0`.
 
 ## Testing middleware
 
