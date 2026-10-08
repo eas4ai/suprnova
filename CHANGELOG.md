@@ -376,6 +376,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   script, as it refuses a URL (`script-import`), and the refusal says the
   specifier must be a relative path (`./` or `../`) to a script of the
   component or of a component it depends on.
+- **A component's script can no longer reach a built-in prototype through
+  a computed key or a name.** The `live:add` scan refused
+  `Array.prototype.map = ...` but admitted `Array["prototype"].polluted = 1`
+  and `const p = Array.prototype; p.polluted = 1;`, and each of them adds
+  a property to every array on the page. A script may now read a member of
+  a prototype (`Array.prototype.slice.call(list)`) but not keep or pass on
+  the prototype: the scan refuses it in every position where it is a value
+  (an initializer, an assignment, an argument, a `return`, an array or
+  object element, a default, a template substitution), under a computed
+  key that traces to `prototype`, and from `getPrototypeOf`
+  (`script-prototype`). Seven bypass fixtures pin it:
+  `script-prototype-computed`, `script-prototype-template-key`,
+  `script-prototype-alias`, `script-prototype-argument`,
+  `script-prototype-getprototypeof`, `script-prototype-parameter` and
+  `script-prototype-destructured`.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

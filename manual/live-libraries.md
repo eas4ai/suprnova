@@ -577,6 +577,14 @@ In a script, parsed as a JavaScript module:
 - No HTML parsed into the document (`innerHTML`, `outerHTML`,
   `insertAdjacentHTML`, `setHTMLUnsafe`, `createContextualFragment`,
   `DOMParser`), no `attachShadow`, and no change to a built-in prototype.
+- A prototype may be read but not held. `Array.prototype.slice.call(list)`
+  and `Object.prototype.toString.call(value)` read a member of a prototype
+  and are admitted. A prototype kept in a name, passed as an argument,
+  returned, or put in an array or an object is refused, however the script
+  reaches it: `Array.prototype`, `Array["prototype"]` or
+  `Object.getPrototypeOf(list)`. The scan cannot follow a value to where
+  it is used, so it stops the prototype before it leaves the expression
+  that reads it.
 - An attribute name given to `setAttribute` traces to constants and is not an
   event handler, `srcdoc` or `style`.
 - A URL given to `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,

@@ -385,6 +385,195 @@ fn reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
     }
 }
 
+/// Scans `script` as the only script of a component, under `widget.js`.
+fn scan_widget_script(script: &str) -> ScanReport {
+    let files = vec![
+        ("widget.html".to_string(), b"<div>x</div>".to_vec()),
+        ("widget.js".to_string(), script.as_bytes().to_vec()),
+    ];
+    let component = ComponentFiles {
+        namespace: "acme",
+        directory: "widget",
+        files: &files,
+        dependency_modules: &[],
+        importable_views: &[],
+        importable_scripts: &[],
+    };
+    scan_component(&component, allowlist::embedded().expect("allowlist")).expect("scan")
+}
+
+/// Each of `lines` of `widget.js` that a scan of `script` does not refuse
+/// with `check`, described with every finding the scan made.
+fn missing_refusals(script: &str, check: &str, lines: &[u32]) -> Vec<String> {
+    let report = scan_widget_script(script);
+    lines
+        .iter()
+        .filter(|line| {
+            !report.findings.iter().any(|finding| {
+                finding.check == check
+                    && finding.file == "widget.js"
+                    && finding.line == Some(**line)
+            })
+        })
+        .map(|line| {
+            format!(
+                "{script:?}: no `{check}` at widget.js:{line}; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+        })
+        .collect()
+}
+
+/// REG-032: a built-in prototype is refused however the script reaches it:
+/// under a computed key that traces to `prototype` (a string, a template
+/// literal, a concatenation), through a name that holds it, from
+/// `getPrototypeOf`, or handed to a function that changes it. Each case
+/// names the lines refused with `script-prototype`; a destructured name
+/// the scan cannot follow is stopped where the prototype enters it.
+#[test]
+fn reg_032_a_prototype_reached_by_a_constant_key_an_alias_or_a_call_is_refused() {
+    let cases: &[(&str, &[u32])] = &[
+        ("Array[\"prototype\"].polluted = 1;\n", &[1]),
+        ("Array[`prototype`].polluted = 1;\n", &[1]),
+        (
+            "const key = \"proto\" + \"type\";\nArray[key].polluted = 1;\n",
+            &[2],
+        ),
+        ("const p = Array.prototype;\np.polluted = 1;\n", &[1, 2]),
+        ("let p;\np = Array.prototype;\np.polluted = 1;\n", &[2, 3]),
+        ("(0, Array.prototype).polluted = 1;\n", &[1]),
+        (
+            "const slice = Array.prototype.slice;\nslice.call = () => 1;\n",
+            &[2],
+        ),
+        ("Object.getPrototypeOf([]).polluted = 1;\n", &[1]),
+        ("Reflect.getPrototypeOf([]).x = 1;\n", &[1]),
+        (
+            "Object.defineProperty(Array.prototype, \"x\", { value: 1 });\n",
+            &[1],
+        ),
+        ("Object.assign(Array.prototype, { x: 1 });\n", &[1]),
+        ("Object.setPrototypeOf(Array.prototype, null);\n", &[1]),
+        ("Object.freeze(Array.prototype);\n", &[1]),
+        ("Reflect.set(Array.prototype, \"x\", 1);\n", &[1]),
+        (
+            "Reflect.defineProperty(Array.prototype, \"x\", { value: 1 });\n",
+            &[1],
+        ),
+        (
+            "function pollute(p) {\n  p.x = 1;\n}\npollute(Array.prototype);\n",
+            &[4],
+        ),
+        ("const [p] = [Array.prototype];\np.x = 1;\n", &[1]),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, lines)| missing_refusals(script, "script-prototype", lines))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: a prototype may not be kept or passed on, so it is refused in
+/// every position where the script uses it as a value.
+#[test]
+fn reg_032_a_prototype_used_as_a_value_is_refused_in_every_position() {
+    let cases: &[(&str, u32)] = &[
+        ("export const p = Array.prototype;\n", 1),
+        ("let p;\np = Array.prototype;\n", 2),
+        ("const xs = [];\nxs.push(Array.prototype);\n", 2),
+        ("const xs = [];\nxs.push(...Array.prototype);\n", 2),
+        ("export const s = new Set(Array.prototype);\n", 1),
+        ("export function f() {\n  return Array.prototype;\n}\n", 2),
+        ("export function* g() {\n  yield Array.prototype;\n}\n", 2),
+        (
+            "export async function a() {\n  await Array.prototype;\n}\n",
+            2,
+        ),
+        ("export const a = () => Array.prototype;\n", 1),
+        ("export const xs = [Array.prototype];\n", 1),
+        ("export const xs = [...Array.prototype];\n", 1),
+        ("export const o = { p: Array.prototype };\n", 1),
+        ("export const o = { ...Array.prototype };\n", 1),
+        (
+            "export function f(p = Array.prototype) {\n  return p;\n}\n",
+            1,
+        ),
+        ("export const t = `${Array.prototype}`;\n", 1),
+        ("export const c = (x) => (x ? Array.prototype : null);\n", 1),
+        ("export const l = (x) => x ?? Array.prototype;\n", 1),
+        ("export const s = (0, Array.prototype);\n", 1),
+        ("export const p = Array?.prototype;\n", 1),
+        ("export class A {\n  p = Array.prototype;\n}\n", 2),
+        ("export default Array.prototype;\n", 1),
+        ("const p = Array.prototype;\nexport const q = p;\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: reading a prototype's member is admitted, so the usual ways of
+/// borrowing a built-in method stay open. A member read from a prototype is
+/// a value, but not the prototype itself, so a script may keep one
+/// (`const has = Object.prototype.hasOwnProperty`). `hasOwnProperty`
+/// itself is not an admitted method, so calling it is refused by the call
+/// rule, but not as a prototype.
+#[test]
+fn reg_032_a_prototype_read_through_a_member_is_admitted() {
+    let admitted = [
+        "export const copy = (xs) => Array.prototype.slice.call(xs);\n",
+        "export const kind = (x) => Object.prototype.toString.call(x);\n",
+        "export const isList = (x) => Array.isArray(x);\n",
+        "export const isArray = (x) => x instanceof Array;\n",
+        "export class A {\n  static of() {}\n}\n",
+        "export const count = (o) => Object.keys(o).length;\n",
+        "export const has = Object.prototype.hasOwnProperty;\n",
+        "export const same = (x) => x === Array.prototype;\n",
+        "export const kindOf = typeof Array.prototype;\n",
+    ];
+    for script in admitted {
+        let report = scan_widget_script(script);
+        assert!(
+            report.accepted(),
+            "{script:?} was refused: {}",
+            report
+                .findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    }
+    let borrowed = scan_widget_script(
+        "export const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);\n",
+    );
+    assert!(
+        borrowed
+            .findings
+            .iter()
+            .all(|finding| finding.check != "script-prototype"),
+        "{:?}",
+        borrowed.findings
+    );
+}
+
 /// REG-031: a view calls nothing the scan cannot show carries no
 /// capability, so a call into a dependency's Rust, whose functions this
 /// scan does not read, is refused.

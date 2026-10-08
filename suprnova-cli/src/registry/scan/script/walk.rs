@@ -84,6 +84,16 @@ enum Pos {
     Comparison,
 }
 
+/// How far from a prototype an expression may stand and still count as
+/// one (REG-032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The prototype itself: what a script may not keep or pass on.
+    Itself,
+    /// The prototype or a value read from it: what a write may not change.
+    Through,
+}
+
 /// The facts a component gives the script scan.
 pub(super) struct Context<'c> {
     pub file: String,
@@ -1014,6 +1024,9 @@ impl<'a, 'c> Walker<'a, 'c> {
         if !self.enter(expr.span()) {
             return;
         }
+        if pos == Pos::Value {
+            self.held_prototype(expr);
+        }
         self.expr_inner(expr, pos);
         self.leave();
     }
@@ -1522,7 +1535,8 @@ impl<'a, 'c> Walker<'a, 'c> {
                 format!("`{name}` is called by the browser itself, so its value must be a function the script defines"),
             );
         }
-        if prototype_chain(member.object()) {
+        if self.check() && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+        {
             self.refuse(
                 "script-prototype",
                 span,
@@ -2501,6 +2515,143 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    // ----- prototypes ----------------------------------------------------
+
+    /// Refuses a prototype used as a value (REG-032). A script may read a
+    /// prototype's members, but once it keeps the prototype in a name or
+    /// passes it on, the scan cannot follow it to where it is changed, so
+    /// it is stopped where it would leave. A parenthesized, sequence,
+    /// conditional, logical or assignment expression is not refused
+    /// itself: the walk visits the part that yields the prototype as a
+    /// value of its own and refuses it there.
+    fn held_prototype(&mut self, expr: &'a Expression<'a>) {
+        if !self.check()
+            || matches!(
+                expr,
+                Expression::ParenthesizedExpression(_)
+                    | Expression::SequenceExpression(_)
+                    | Expression::ConditionalExpression(_)
+                    | Expression::LogicalExpression(_)
+                    | Expression::AssignmentExpression(_)
+            )
+            || !self.prototype(expr, Reach::Itself, 0, &mut BTreeSet::new())
+        {
+            return;
+        }
+        let what = prototype_text(expr);
+        self.refuse(
+            "script-prototype",
+            expr.span(),
+            format!("{what} is used as a value; a script may read a prototype's members, as `Array.prototype.slice` does, but may not keep or pass on the prototype, because the scan cannot follow it to where it is changed"),
+        );
+    }
+
+    /// Whether an expression may evaluate to a prototype, or, with
+    /// [`Reach::Through`], to a prototype or a value read from one: a
+    /// member named `prototype` or `__proto__`, by a static name or a
+    /// computed key that traces to one; what `getPrototypeOf` returns; a
+    /// sequence, conditional, logical or assignment expression that may
+    /// yield one; or a binding the script initializes, defaults or assigns
+    /// from one. A value the scan cannot see, a parameter's argument or a
+    /// destructured name, is not followed: [`Self::held_prototype`] refuses
+    /// a prototype where it would enter one.
+    fn prototype(
+        &self,
+        expr: &Expression<'a>,
+        reach: Reach,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return false;
+        }
+        match unparen(expr) {
+            Expression::CallExpression(call) => self.returns_prototype(call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => self.returns_prototype(call),
+                other => other
+                    .as_member_expression()
+                    .is_some_and(|member| self.prototype_member(member, reach, depth, seen)),
+            },
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.prototype(last, reach, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.prototype(&conditional.consequent, reach, depth + 1, seen)
+                    || self.prototype(&conditional.alternate, reach, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.prototype(&logical.left, reach, depth + 1, seen)
+                    || self.prototype(&logical.right, reach, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                assignment.operator == AssignmentOperator::Assign
+                    && self.prototype(&assignment.right, reach, depth + 1, seen)
+            }
+            Expression::Identifier(reference) => {
+                let Some(id) = self.lookup(reference.name.as_str()) else {
+                    return false;
+                };
+                if !seen.insert(id) {
+                    return false;
+                }
+                let Some(binding) = self.binding(id) else {
+                    return false;
+                };
+                binding
+                    .init
+                    .into_iter()
+                    .chain(binding.param_default)
+                    .chain(binding.assignments.iter().copied())
+                    .any(|value| self.prototype(value, reach, depth + 1, seen))
+            }
+            other => other
+                .as_member_expression()
+                .is_some_and(|member| self.prototype_member(member, reach, depth, seen)),
+        }
+    }
+
+    /// [`Self::prototype`] for a member expression.
+    fn prototype_member(
+        &self,
+        member: &MemberExpression<'a>,
+        reach: Reach,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        let named = match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                prototype_name(member.property.name.as_str())
+            }
+            MemberExpression::ComputedMemberExpression(member) => self
+                .trace(&member.expression, 0)
+                .is_some_and(|keys| keys.iter().any(|key| prototype_name(key))),
+            MemberExpression::PrivateFieldExpression(_) => false,
+        };
+        named
+            || (reach == Reach::Through && self.prototype(member.object(), reach, depth + 1, seen))
+    }
+
+    /// Whether a call is `getPrototypeOf` on any receiver but an object
+    /// whose own method of that name the script defines: the scan cannot
+    /// tell `Object` or `Reflect` from a name that holds one.
+    fn returns_prototype(&self, call: &CallExpression<'a>) -> bool {
+        let Some(member) = unparen(&call.callee).as_member_expression() else {
+            return false;
+        };
+        let named = match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                member.property.name == "getPrototypeOf"
+            }
+            MemberExpression::ComputedMemberExpression(member) => self
+                .trace(&member.expression, 0)
+                .is_some_and(|names| names.iter().any(|name| name == "getPrototypeOf")),
+            MemberExpression::PrivateFieldExpression(_) => false,
+        };
+        named && !self.script_method(member, "getPrototypeOf")
+    }
+
     // ----- tracing -------------------------------------------------------
 
     /// The constant strings an expression can evaluate to, when the scan
@@ -2685,16 +2836,31 @@ fn is_function_expression(expr: &Expression<'_>) -> bool {
     )
 }
 
-/// Whether a member write's object is reached through a `prototype`.
-fn prototype_chain(object: &Expression<'_>) -> bool {
-    match unparen(object) {
-        Expression::StaticMemberExpression(member) => {
-            member.property.name == "prototype"
-                || member.property.name == "__proto__"
-                || prototype_chain(&member.object)
+/// Whether a property name reads an object's prototype.
+fn prototype_name(name: &str) -> bool {
+    name == "prototype" || name == "__proto__"
+}
+
+/// How a refusal names an expression that yields a prototype.
+fn prototype_text(expr: &Expression<'_>) -> String {
+    let member = match unparen(expr) {
+        Expression::Identifier(reference) => {
+            return format!("`{}`, which holds a prototype,", reference.name);
         }
-        Expression::ComputedMemberExpression(member) => prototype_chain(&member.object),
-        _ => false,
+        Expression::CallExpression(_) => {
+            return "the prototype `getPrototypeOf` returns".to_string();
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(_) => {
+                return "the prototype `getPrototypeOf` returns".to_string();
+            }
+            other => other.as_member_expression(),
+        },
+        other => other.as_member_expression(),
+    };
+    match member.map(|member| unparen(member.object())) {
+        Some(Expression::Identifier(owner)) => format!("the prototype of `{}`", owner.name),
+        _ => "a prototype".to_string(),
     }
 }
 
