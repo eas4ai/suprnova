@@ -128,8 +128,13 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
     assert_eq!(meta["requestType"], "navigate");
     assert_eq!(meta["tabUuid"], "dogfood-tab");
     assert_eq!(meta["status"], 200);
-    // Not the route's name: `GET /users` and `POST /users` share the
-    // pattern, and the name is looked up by pattern alone.
+    // `GET /users` and `POST /users` share the pattern; each is recorded
+    // with the name of its own method's route.
+    assert_eq!(
+        recorded["route"]["name"], "users.index",
+        "{}",
+        recorded["route"]
+    );
     assert_eq!(recorded["route"]["uri"], "/users", "{}", recorded["route"]);
     assert_eq!(recorded["route"]["method"], "GET");
     let action = recorded["route"]["action"].as_str().unwrap();
@@ -169,6 +174,16 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
         line_of("src/bootstrap.rs", "Inertia::share(\"appName\"")
     );
     assert_eq!(recorded["propValues"]["appName"], "Suprnova");
+
+    let store = client.post("/users").inertia().send().await;
+    store.assert_status(302);
+    let stored = entry(dir.path(), &store);
+    assert_eq!(
+        stored["route"]["name"], "users.store",
+        "{}",
+        stored["route"]
+    );
+    assert_eq!(stored["route"]["uri"], "/users", "{}", stored["route"]);
 
     let first = client.get("/users").send().await;
     first.assert_ok();

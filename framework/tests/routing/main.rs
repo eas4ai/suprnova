@@ -6,6 +6,7 @@ mod http_wire;
 
 pub mod group_names;
 pub mod inertia;
+pub mod method_names;
 pub mod params;
 pub mod root_group_redirect;
 pub mod route_binding;

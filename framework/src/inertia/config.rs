@@ -441,10 +441,11 @@ pub struct InertiaConfig {
     /// The application's replacements for the middleware's decisions; see
     /// [`hooks`](Self::hooks).
     pub(crate) hooks: Option<Arc<dyn super::hooks::InertiaMiddlewareHooks>>,
-    /// The type name of [`hooks`](Self::hooks), which Inertia DevTools
-    /// names as the source of the props the `share` hooks supplied, since
-    /// a trait object has no other name to give.
-    pub(crate) hooks_name: Option<&'static str>,
+    /// Where the application called [`hooks`](Self::hooks), which Inertia
+    /// DevTools names as the source of the props the `share` hooks
+    /// supplied (PAR-073): the hooks are a trait object, with no file and
+    /// line of their own to give.
+    pub(crate) hooks_location: Option<&'static std::panic::Location<'static>>,
     /// The Inertia DevTools settings, or `None` for the defaults, read
     /// when the middleware stack is built rather than on every response
     /// that starts from this configuration. Set with
@@ -761,7 +762,7 @@ impl Default for InertiaConfig {
             testing_ensure_pages_exist: true,
             register_globally: true,
             hooks: None,
-            hooks_name: None,
+            hooks_location: None,
             devtools: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
@@ -1204,8 +1205,13 @@ impl InertiaConfig {
     /// decision and its default. The middleware stack built from this
     /// config, by [`crate::Inertia::install`] or
     /// [`crate::Inertia::middleware`], runs them.
+    ///
+    /// The file and line of this call are what Inertia DevTools names as
+    /// the source of each prop the `share` hooks supply, taken through
+    /// `#[track_caller]`.
+    #[track_caller]
     pub fn hooks(mut self, hooks: impl super::hooks::InertiaMiddlewareHooks) -> Self {
-        self.hooks_name = Some(std::any::type_name_of_val(&hooks));
+        self.hooks_location = Some(std::panic::Location::caller());
         self.hooks = Some(Arc::new(hooks));
         self
     }

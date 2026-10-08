@@ -836,7 +836,7 @@ fn register_resource(
         if action == ResourceAction::Update {
             methods.push(hyper::Method::PATCH);
         }
-        for method in methods {
+        for method in methods.iter().cloned() {
             router.try_insert_method(&method, &path, handler.clone())?;
             router.note_route_record(method.clone(), &path, record);
             *router.bindings.options_mut(method.clone(), &path) = options(action);
@@ -852,7 +852,9 @@ fn register_resource(
             }
         }
 
-        // The route NAME is claimed once, by the first verb of the action.
+        // The route NAME is claimed once in the process-wide table, and
+        // recorded on the router for every verb of the action, so a PATCH
+        // to `update` reports `posts.update` as its PUT does.
         if !spec.suppress_names {
             let effective_name = spec
                 .name_overrides
@@ -860,6 +862,9 @@ fn register_resource(
                 .cloned()
                 .unwrap_or(default_name);
             super::router::try_register_route_name(&effective_name, &path)?;
+            for method in methods {
+                router.note_route_name(method, &path, &effective_name);
+            }
         }
     }
     Ok(router)

@@ -1444,9 +1444,12 @@ impl GroupDef {
                         }
                     }
 
-                    // Register route name if present
+                    // Register route name if present: process-wide for URL
+                    // generation, and on the router for this method alone.
                     if let Some(name) = route.name {
-                        register_route_name(&format!("{name_prefix}{name}"), full_path);
+                        let name = format!("{name_prefix}{name}");
+                        register_route_name(&name, full_path);
+                        router.note_route_name(route.method.as_hyper(), full_path, &name);
                     }
 
                     // Apply combined middleware (inherited + group), then route-specific.
@@ -1496,7 +1499,11 @@ impl GroupDef {
                     // the same URL no matter which method the caller
                     // is looking up.
                     if let Some(name) = any_route.name {
-                        register_route_name(&format!("{name_prefix}{name}"), full_path);
+                        let name = format!("{name_prefix}{name}");
+                        register_route_name(&name, full_path);
+                        for method in ANY_METHODS {
+                            router.note_route_name(method.clone(), full_path, &name);
+                        }
                     }
 
                     // Fan combined (inherited + group) middleware AND

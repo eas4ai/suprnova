@@ -77,9 +77,12 @@ because the extension reads it:
 - `props` and `propValues` - each prop of a rendered page with its kind,
   and the value the client received. See
   [Props and where they come from](#props-and-where-they-come-from).
-- `route` - the route's `name`, its pattern as `uri`, the `method` for a
-  rendered page, and the handler's type name as `action`
-  (`app::controllers::users::index`).
+- `route` - the `name` of the route that matched, its pattern as `uri`,
+  the `method` for a rendered page, and the handler's type name as
+  `action` (`app::controllers::users::index`). The name belongs to the
+  route's method as well as its pattern, so `GET /users` named
+  `users.index` and `POST /users` named `users.store` each record their
+  own.
 - `renderSource` - the file and line of the call that built the page.
 - `componentPath` - the page file under `InertiaConfig::pages_dir`, when
   there is one.
@@ -110,6 +113,10 @@ The response body of a rendered page is its page object. Any other
 response records its text when its `Content-Type` is textual (JSON,
 `text/*`, XML or JavaScript), decoded when it is JSON, up to 256,000
 bytes; otherwise the reason is `non-textual`, `streamed` or `too-large`.
+A page is recorded only once its response is built, so when the page's
+document fails, such as a root template that fails to render, the entry
+records the error response the client got, with no `component` and no
+`props` or `propValues`.
 
 ## Headers and the id tag
 
@@ -155,14 +162,18 @@ Each prop of a rendered page is listed under `props` with `shared` and
 - `shareSource` - for a shared prop, the file and line of the
   `Inertia::share`, `Inertia::share_many`, `Inertia::share_data`,
   `App::inertia_share`, `App::inertia_share_lazy` or
-  `App::inertia_share_once` call that shared it.
+  `App::inertia_share_once` call that shared it, or of the
+  `InertiaConfig::hooks` call that installed the middleware hooks that
+  shared it.
 - `renderSource` - for any other prop, the line that names its key below
   the render call: `"users":` in `inertia_response!`, or `("users",` in a
-  builder call.
+  builder call. When no line there names the key, as for a typed props
+  struct defined in another file or a source file that is not on disk, it
+  is the render call's own file and line.
 
-A prop your middleware hooks share has the hooks' type name as its
-`shareSource` file, at line `0`: Rust has no reflection that finds the
-`share` method's line. Keys from `share_provider` and
+A prop your middleware hooks share has the `InertiaConfig::hooks` call
+that installed them as its `shareSource`: Rust has no reflection that
+finds the `share` method's line. Keys from `share_provider` and
 `register_inertia_shared` providers are marked `shared` with no source.
 `errors` is listed as an `always` prop every page shares.
 
@@ -258,8 +269,9 @@ either way.
 - **Sources come from the compiler.** Laravel finds a render or share call
   by walking a backtrace and reflects on a route's controller. Here the
   calls take `#[track_caller]`, so a source is exact; the cost is that a
-  hook-shared prop names its hooks' type at line `0`, a provider's keys
-  have no source, and `route` has no `actionSource`.
+  hook-shared prop names the `InertiaConfig::hooks` call rather than the
+  hooks' `share` method, a provider's keys have no source, and `route`
+  has no `actionSource`.
 - **`_suprnova/*` replaces `telescope*` and `horizon*`** in the default
   `except` list: those are Laravel packages, and `_suprnova/` is where the
   framework's own tooling routes live.

@@ -1558,11 +1558,11 @@ impl InertiaResponse {
                     collector.share_source(&key, super::devtools::SourceLocation::of(location));
                 }
                 if let Some(visit) = visit.as_ref()
-                    && let Some(hooks) = visit.hooks_name()
+                    && let Some(location) = visit.hooks_location()
                 {
-                    let source = super::devtools::SourceLocation::of_type(hooks);
+                    let source = super::devtools::SourceLocation::of(location);
                     for key in visit.shared().keys() {
-                        collector.share_source(key, source);
+                        collector.hook_share_source(key, source);
                     }
                 }
             }
@@ -1649,10 +1649,6 @@ impl InertiaResponse {
             },
             shared_keys,
         );
-        if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
-            recorder.page_rendered(collector.build(page.clone()));
-        }
-
         let response = if is_inertia_request {
             build_json_response(&page)?
         } else {
@@ -1682,6 +1678,14 @@ impl InertiaResponse {
                 None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())?,
             }
         };
+        // Inertia DevTools records the page only once the response that
+        // carries it was built: a JSON encoding, SSR dispatch or root
+        // template that fails returned above, and the entry then records
+        // the error response the client gets, with no page and no prop
+        // values (PAR-072, PAR-073).
+        if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
+            recorder.page_rendered(collector.build(page));
+        }
         staged_session.commit();
         Ok(response)
     }

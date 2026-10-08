@@ -1101,6 +1101,11 @@ async fn handle_request_inner(
             if let Some(action) = router.handler_name(&effective_method, &pattern) {
                 request.set_route_action(action);
             }
+            request.set_route_name(
+                router
+                    .route_name(&effective_method, &pattern)
+                    .map(str::to_string),
+            );
             if let Some(slot) = &missing_answer {
                 request.set_missing_answer(slot.clone());
             }

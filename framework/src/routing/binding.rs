@@ -620,6 +620,7 @@ impl HandlerInput {
         let matched = MatchedRoute {
             method: request.method().clone(),
             pattern: request.route_pattern().unwrap_or_default().to_owned(),
+            name: request.route_name(),
             params: self.params.clone(),
         };
         let Some(plan) = route.plan(key, handler, args)? else {
@@ -983,6 +984,7 @@ async fn answer_missing(missing: &RouteMissing, mut request: Request) -> Respons
         let route = MatchedRoute {
             method: request.method().clone(),
             pattern: request.route_pattern().unwrap_or_default().to_owned(),
+            name: request.route_name(),
             params: request.params().clone(),
         };
         match bind_values(plan, &route).await {
@@ -1118,6 +1120,10 @@ where
 pub struct MatchedRoute {
     method: Method,
     pattern: String,
+    /// The name of the route that matched, read from the request, which
+    /// the server gave the name the router holds for the matched method
+    /// and pattern: two methods on one pattern can carry different names.
+    name: Option<String>,
     params: HashMap<String, String>,
 }
 
@@ -1132,9 +1138,12 @@ impl MatchedRoute {
         &self.pattern
     }
 
-    /// The route's name, if it has one.
+    /// The route's name, if it has one: the name of the route that
+    /// matched by its method as well as its pattern, so `POST /users`
+    /// named `users.store` is never reported as `GET /users`'s
+    /// `users.index`.
     pub fn name(&self) -> Option<String> {
-        crate::routing::route_name_for_pattern(&self.pattern)
+        self.name.clone()
     }
 
     /// The raw value of the parameter `name`.
@@ -2186,6 +2195,7 @@ async fn bind_request(plan: &RoutePlan, mut request: Request) -> Result<Request,
     let route = MatchedRoute {
         method: request.method().clone(),
         pattern: request.route_pattern().unwrap_or_default().to_owned(),
+        name: request.route_name(),
         params: request.params().clone(),
     };
     match bind_values(plan, &route).await {

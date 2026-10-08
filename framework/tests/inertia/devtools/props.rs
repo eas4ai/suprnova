@@ -191,7 +191,7 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
     let _container = TestContainer::fake();
     let share_line = share_app_name();
     let dir = tempfile::tempdir().unwrap();
-    let config = inertia(devtools(dir.path())).hooks(LocaleHooks);
+    let (hooks_line, config) = (line!(), inertia(devtools(dir.path())).hooks(LocaleHooks));
     let client = suprnova::testing::TestClient::new(
         router(),
         MiddlewareRegistry::new().append(Inertia::middleware(&config)),
@@ -208,11 +208,15 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
     );
     assert_eq!(source["line"], share_line);
 
+    // A hook's share is sourced where the application installed the
+    // hooks: the file and line of the `.hooks(..)` call.
     assert_eq!(props["locale"]["shared"], true);
-    assert_eq!(
-        props["locale"]["shareSource"],
-        json!({"file": std::any::type_name::<LocaleHooks>(), "line": 0})
+    let hooked = &props["locale"]["shareSource"];
+    assert!(
+        hooked["file"].as_str().unwrap().ends_with("props.rs"),
+        "{hooked}"
     );
+    assert_eq!(hooked["line"], hooks_line, "{hooked}");
     assert!(props["appName"].get("renderSource").is_none());
 
     let render = &props["plain"]["renderSource"];
@@ -224,4 +228,56 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
         .nth(render["line"].as_u64().unwrap() as usize - 1)
         .unwrap();
     assert!(line.contains(".with(\"plain\""), "{line}");
+}
+
+/// Typed page props defined away from the render call, as an
+/// application's props struct lives in a module of its own: no line below
+/// the render call names their keys.
+mod typed {
+    #[derive(suprnova::Data, validator::Validate)]
+    pub struct DashboardData {
+        pub headline: String,
+        pub visits: u32,
+    }
+}
+
+/// The dashboard page rendered with typed props, beside the line of the
+/// render call.
+fn dashboard() -> (u32, InertiaResponse) {
+    (
+        line!() + 1,
+        InertiaResponse::new("Dashboard").with_data(typed::DashboardData {
+            headline: "Welcome".to_string(),
+            visits: 3,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn indt_a_typed_render_gives_each_prop_the_render_call_as_its_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let router: Router = Router::new()
+        .get("/indt-dashboard", |req: Request| async move {
+            let (_, response) = dashboard();
+            response.resolve(&req).await.map_err(HttpResponse::from)
+        })
+        .into();
+    let client = client(router, devtools(dir.path()));
+    let (render_line, _) = dashboard();
+
+    let response = client.get("/indt-dashboard").inertia().send().await;
+    response.assert_ok();
+    let entry = entry_of(dir.path(), &response);
+    let props = entry["props"].as_object().expect("the props");
+    assert!(props.get("headline").is_some() && props.get("visits").is_some());
+    for (key, prop) in props.iter().filter(|(key, _)| *key != "errors") {
+        let source = &prop["renderSource"];
+        assert!(
+            source["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("props.rs")),
+            "{key}: {prop}"
+        );
+        assert_eq!(source["line"], render_line, "{key}: {prop}");
+    }
 }
