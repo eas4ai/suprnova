@@ -422,6 +422,25 @@ pub fn config_mail() -> &'static str {
     include_str!("files/backend/config/mail.rs.tpl")
 }
 
+/// The project's name as a title: `my-shop` and `my_shop` are `My Shop`.
+/// The scaffold names the application with it in two places that must
+/// agree: the server's `default_title` in `src/bootstrap.rs` and the
+/// frontend entries' `title` callback.
+pub fn project_title(project_name: &str) -> String {
+    project_name
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The scaffolded `src/bootstrap.rs`. Takes the frontend because the
 /// generated `Inertia::install` call pins it: left to the environment, the
 /// framework falls back to Svelte, and a React project rendering Svelte's
@@ -673,11 +692,16 @@ pub mod vue {
     pub fn shims_dts() -> &'static str {
         include_str!("files/frontend/vue/src/shims-vue.d.ts.tpl")
     }
-    pub fn main_file() -> &'static str {
-        include_str!("files/frontend/vue/src/main.ts.tpl")
+    /// The browser entry. Takes the project's title because the `title`
+    /// callback appends the application's name to every page title, and
+    /// the name must match the server's `default_title`.
+    pub fn main_file(project_title: &str) -> String {
+        include_str!("files/frontend/vue/src/main.ts.tpl").replace("{project_title}", project_title)
     }
-    pub fn ssr_file() -> &'static str {
-        include_str!("files/frontend/vue/src/ssr.ts.tpl")
+    /// The SSR entry, titled like [`main_file`]: the browser hydrates what
+    /// it renders, so the two must agree.
+    pub fn ssr_file(project_title: &str) -> String {
+        include_str!("files/frontend/vue/src/ssr.ts.tpl").replace("{project_title}", project_title)
     }
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Home.vue.tpl")
@@ -689,6 +713,28 @@ pub mod vue {
     }
     pub fn dashboard_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Dashboard.vue.tpl")
+    }
+    /// The signed-in user's notes: the create form, the remembered search
+    /// and the infinite list the `notes::index` handler paginates.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Notes/Index.vue.tpl")
+    }
+    /// One of the signed-in user's notes, opened from the list as an
+    /// instant visit.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Notes/Show.vue.tpl")
+    }
+    /// The layout `main.ts` gives every page outside `auth/`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/vue/src/layouts/AppLayout.vue.tpl")
+    }
+    /// The layout `main.ts` gives the pages under `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/vue/src/layouts/GuestLayout.vue.tpl")
+    }
+    /// The toast both layouts show from the page's flash data.
+    pub fn flash_toast() -> &'static str {
+        include_str!("files/frontend/vue/src/components/FlashToast.vue.tpl")
     }
     pub fn login_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/auth/Login.vue.tpl")
@@ -797,8 +843,8 @@ pub fn scaffold_frontend(
             vue::package_json(project_name),
             vue::vite_config().to_string(),
             vue::tsconfig().to_string(),
-            vue::main_file().to_string(),
-            vue::ssr_file().to_string(),
+            vue::main_file(&project_title(project_name)),
+            vue::ssr_file(&project_title(project_name)),
             vue::home_page().to_string(),
             vue::dashboard_page().to_string(),
             vue::login_page().to_string(),
@@ -855,6 +901,25 @@ pub fn scaffold_frontend(
                 .map_err(|e| format!("Failed to write src/shims-vue.d.ts: {}", e))?;
             fs::write(lib.join("lang.ts"), vue::lang())
                 .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
+            // The notes pages, the two layouts `main.ts` applies through
+            // its `layout` option, and the toast they show.
+            let notes = pages.join("Notes");
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            for d in [&notes, &layouts, &components] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            for (path, content) in [
+                (notes.join("Index.vue"), vue::notes_index_page()),
+                (notes.join("Show.vue"), vue::notes_show_page()),
+                (layouts.join("AppLayout.vue"), vue::app_layout()),
+                (layouts.join("GuestLayout.vue"), vue::guest_layout()),
+                (components.join("FlashToast.vue"), vue::flash_toast()),
+            ] {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
         }
         Frontend::React => {
             fs::write(src.join("vite-env.d.ts"), react::vite_env_dts())

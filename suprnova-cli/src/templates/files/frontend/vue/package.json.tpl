@@ -12,11 +12,12 @@
   },
   "dependencies": {
     "@fluent/bundle": "^0.19.1",
-    "@inertiajs/core": "^3.6.1",
-    "@inertiajs/vue3": "^3.6.1",
+    "@inertiajs/core": "^3.8.0",
+    "@inertiajs/vue3": "^3.8.0",
     "vue": "^3.5.40"
   },
   "devDependencies": {
+    "@inertiajs/vite": "^3.8.0",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.3",
