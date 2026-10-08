@@ -158,14 +158,16 @@ Each prop of a rendered page is listed under `props` with `shared` and
 - `shareSource` - for a shared prop, the file and line of the
   `Inertia::share`, `Inertia::share_many`, `Inertia::share_data`,
   `App::inertia_share`, `App::inertia_share_lazy` or
-  `App::inertia_share_once` call that shared it.
+  `App::inertia_share_once` call that shared it, or of the
+  `InertiaConfig::hooks` call that installed the middleware hooks that
+  shared it.
 - `renderSource` - for any other prop, the line that names its key below
   the render call: `"users":` in `inertia_response!`, or `("users",` in a
   builder call.
 
-A prop your middleware hooks share has the hooks' type name as its
-`shareSource` file, at line `0`: Rust has no reflection that finds the
-`share` method's line. Keys from `share_provider` and
+A prop your middleware hooks share has the `InertiaConfig::hooks` call
+that installed them as its `shareSource`: Rust has no reflection that
+finds the `share` method's line. Keys from `share_provider` and
 `register_inertia_shared` providers are marked `shared` with no source.
 `errors` is listed as an `always` prop every page shares.
 
@@ -246,8 +248,9 @@ either way.
 - **Sources come from the compiler.** Laravel finds a render or share call
   by walking a backtrace and reflects on a route's controller. Here the
   calls take `#[track_caller]`, so a source is exact; the cost is that a
-  hook-shared prop names its hooks' type at line `0`, a provider's keys
-  have no source, and `route` has no `actionSource`.
+  hook-shared prop names the `InertiaConfig::hooks` call rather than the
+  hooks' `share` method, a provider's keys have no source, and `route`
+  has no `actionSource`.
 - **`_suprnova/*` replaces `telescope*` and `horizon*`** in the default
   `except` list: those are Laravel packages, and `_suprnova/` is where the
   framework's own tooling routes live.

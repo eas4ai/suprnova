@@ -2,11 +2,11 @@
 //! shared: Laravel's `SourceLocator`.
 //!
 //! Laravel walks a backtrace and scans the PHP file for a prop's key. Here
-//! the render and share calls take `#[track_caller]`, so the compiler
-//! hands over the file and line of the call, and the file is scanned from
-//! that line for the line that names a prop's key, as Laravel's
-//! `findPropKeyLine` does: `"key":` in the props of `inertia_response!`,
-//! `("key",` in a builder call.
+//! the render and share calls, and `InertiaConfig::hooks`, take
+//! `#[track_caller]`, so the compiler hands over the file and line of the
+//! call, and the file is scanned from that line for the line that names a
+//! prop's key, as Laravel's `findPropKeyLine` does: `"key":` in the props
+//! of `inertia_response!`, `("key",` in a builder call.
 
 use std::collections::HashMap;
 use std::panic::Location;
@@ -22,9 +22,9 @@ const SCAN_LINES: u32 = 100;
 /// A file and line in the application's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SourceLocation {
-    /// The file as the compiler named it, or a type name for a hook.
+    /// The file as the compiler named it.
     file: &'static str,
-    /// The line, 1-based; `0` when there is no line to name.
+    /// The line, 1-based.
     line: u32,
 }
 
@@ -37,15 +37,6 @@ impl SourceLocation {
         }
     }
 
-    /// A source with no line: the type of the middleware hooks that shared
-    /// a prop, since Rust has no reflection to find their `share` method.
-    pub(crate) fn of_type(type_name: &'static str) -> Self {
-        Self {
-            file: type_name,
-            line: 0,
-        }
-    }
-
     /// The same file at `line`.
     fn at(self, line: u32) -> Self {
         Self { line, ..self }
@@ -53,9 +44,6 @@ impl SourceLocation {
 
     /// The text of this source's file, when it can be read.
     pub(crate) fn text(&self) -> Option<String> {
-        if self.line == 0 {
-            return None;
-        }
         std::fs::read_to_string(resolve(self.file)?).ok()
     }
 
@@ -89,12 +77,8 @@ impl SourceLocation {
     /// this machine when it can be found from the working directory, so
     /// the extension can open it, else as the compiler named it.
     pub(crate) fn to_json(self) -> Value {
-        let file = if self.line == 0 {
-            self.file.to_string()
-        } else {
-            resolve(self.file)
-                .map_or_else(|| self.file.to_string(), |path| path.display().to_string())
-        };
+        let file = resolve(self.file)
+            .map_or_else(|| self.file.to_string(), |path| path.display().to_string());
         json!({"file": file, "line": self.line})
     }
 }
@@ -171,6 +155,5 @@ mod tests {
             rendered["file"].as_str().unwrap().ends_with("source.rs"),
             "{rendered}"
         );
-        assert_eq!(SourceLocation::of_type("app::Hooks").to_json()["line"], 0);
     }
 }

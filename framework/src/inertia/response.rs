@@ -1558,11 +1558,11 @@ impl InertiaResponse {
                     collector.share_source(&key, super::devtools::SourceLocation::of(location));
                 }
                 if let Some(visit) = visit.as_ref()
-                    && let Some(hooks) = visit.hooks_name()
+                    && let Some(location) = visit.hooks_location()
                 {
-                    let source = super::devtools::SourceLocation::of_type(hooks);
+                    let source = super::devtools::SourceLocation::of(location);
                     for key in visit.shared().keys() {
-                        collector.share_source(key, source);
+                        collector.hook_share_source(key, source);
                     }
                 }
             }

@@ -506,7 +506,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `mergeDirection`, `deepMerge` for a deep merge or a `match_on`, and
   `rescued`. A shared key names the `Inertia::share`, `share_many`,
   `share_data` or `App::inertia_share*` call that shared it, and the
-  middleware hooks' type for a hook share; a render prop names the line
+  `InertiaConfig::hooks` call for a hook share; a render prop names the line
   that gives its key. Deep paths without metadata are pruned, and
   `propValues` holds what the client received (DT-03).
 - **The DevTools entry endpoints.** `GET /_inertia/devtools/entries`
@@ -1344,6 +1344,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server sets the matched route's name on the request, so each method
   reports its own and an unnamed one reports none. A request that never
   went through dispatch still falls back to the pattern lookup (DT-04).
+- **A hook-shared prop names a file and line.** A prop the middleware
+  hooks' `share` supplied had the hooks' Rust type name as its
+  `shareSource` file, at line `0`, which the extension cannot open.
+  `InertiaConfig::hooks` now takes its caller's location through
+  `#[track_caller]`, and every hook-shared key names that call's file and
+  line (DT-03).
 
 ## 3.2.1 - 2026-10-05
 

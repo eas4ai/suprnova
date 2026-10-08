@@ -105,6 +105,15 @@ impl Collector {
             .insert(root.to_string(), source.refined_for(root));
     }
 
+    /// Where the hook-shared key `key` was shared: the `InertiaConfig::hooks`
+    /// call that installed the hooks, as it is. The keys are named in the
+    /// hooks' `share` method, not below that call, so no line under it is
+    /// looked for.
+    pub(crate) fn hook_share_source(&mut self, key: &str, source: SourceLocation) {
+        let root = key.split('.').next().unwrap_or(key);
+        self.share_sources.insert(root.to_string(), source);
+    }
+
     /// The metadata of the prop at `path`.
     pub(crate) fn prop(&mut self, path: &str, meta: PropMeta) {
         match self.props.iter_mut().find(|(known, _)| known == path) {

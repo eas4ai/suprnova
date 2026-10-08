@@ -191,7 +191,7 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
     let _container = TestContainer::fake();
     let share_line = share_app_name();
     let dir = tempfile::tempdir().unwrap();
-    let config = inertia(devtools(dir.path())).hooks(LocaleHooks);
+    let (hooks_line, config) = (line!(), inertia(devtools(dir.path())).hooks(LocaleHooks));
     let client = suprnova::testing::TestClient::new(
         router(),
         MiddlewareRegistry::new().append(Inertia::middleware(&config)),
@@ -208,11 +208,15 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
     );
     assert_eq!(source["line"], share_line);
 
+    // A hook's share is sourced where the application installed the
+    // hooks: the file and line of the `.hooks(..)` call.
     assert_eq!(props["locale"]["shared"], true);
-    assert_eq!(
-        props["locale"]["shareSource"],
-        json!({"file": std::any::type_name::<LocaleHooks>(), "line": 0})
+    let hooked = &props["locale"]["shareSource"];
+    assert!(
+        hooked["file"].as_str().unwrap().ends_with("props.rs"),
+        "{hooked}"
     );
+    assert_eq!(hooked["line"], hooks_line, "{hooked}");
     assert!(props["appName"].get("renderSource").is_none());
 
     let render = &props["plain"]["renderSource"];
