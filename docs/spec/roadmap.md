@@ -444,6 +444,21 @@ Requirements: RTC-001, RTC-002, RTC-003, RTC-004, MEM-003, REG-025, REG-032, REG
    Done when `runtime-contention`, `mem-footprint`, `registries-scan` and
    `registries` pass on a committed tree.
 
+## release-foundations-revised
+
+Requirements: RTC-001, RTC-002, RTC-003, RTC-004, MEM-003, REG-025, REG-032, REG-033
+
+35. release-foundations-revised - release-foundations carried over
+   unchanged, except that MEM-003 names the output changes the pinned
+   forks bring from upstream master: the corrected lossy WebP decode, PNG
+   above 1 MiB of filtered data deflated in segments, and lossless WebP
+   with alpha as a simple `VP8L` file (the developer's words of 2026-10-07
+   08:30 and 17:35). The forks also fix what upstream master regressed
+   against IMG-002 and MEM-003: the PNG decoder inflating every `iCCP` and
+   XMP chunk before the budget counts it, the BMP decoder copying an
+   embedded profile, and the BMP encoder's borrowed-profile entry point
+   left deprecated. Same delivery, mechanisms and done-when as 34.
+
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,
