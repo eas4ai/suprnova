@@ -26,6 +26,7 @@ mod root_template;
 mod runtime;
 mod shared;
 pub(crate) mod ssr;
+mod ssr_gateway;
 mod validation_redirect_middleware;
 mod version_middleware;
 pub(crate) mod visit;
@@ -58,9 +59,13 @@ pub use root_template::{
     InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts, InertiaRootTemplate,
     InertiaRootTitle, InertiaViewData, InertiaViewValue,
 };
+pub use runtime::{SsrCondition, SsrDisabledWhen, SsrRequestConfigurator};
 pub use shared::SharedOnceProp;
 pub use shared::{InertiaRegistry, InertiaSharedData};
-pub use ssr::{SsrRequest, SsrResponse};
+pub use ssr::{
+    CONVENTIONAL_BUNDLE_PATHS, SsrRequest, SsrResponse, detect_bundle as detect_ssr_bundle,
+};
+pub use ssr_gateway::{HttpGateway, SsrGateway, gateway as ssr_gateway};
 pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;
 pub use version_middleware::InertiaVersionMiddleware;
 

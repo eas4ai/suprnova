@@ -17,13 +17,13 @@ use super::ssr::SsrRequest;
 pub(crate) type ComponentTransformer = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// A per-request SSR condition: `true` turns SSR off for that request.
-pub(crate) type SsrDisabledWhen = Arc<dyn Fn(&dyn InertiaRequestExt) -> bool + Send + Sync>;
+pub type SsrDisabledWhen = Arc<dyn Fn(&dyn InertiaRequestExt) -> bool + Send + Sync>;
 
 /// The condition [`Inertia::disable_ssr`](crate::Inertia::disable_ssr) or
 /// [`Inertia::disable_ssr_if`](crate::Inertia::disable_ssr_if) sets: SSR is
 /// off for a request when it holds.
 #[derive(Clone)]
-pub(crate) enum SsrCondition {
+pub enum SsrCondition {
     /// The same answer for every request.
     Always(bool),
     /// Decided per request.
@@ -32,7 +32,7 @@ pub(crate) enum SsrCondition {
 
 /// The function [`Inertia::configure_ssr_request_using`](crate::Inertia::configure_ssr_request_using)
 /// installs.
-pub(crate) type SsrRequestConfigurator = Arc<dyn Fn(SsrRequest) -> SsrRequest + Send + Sync>;
+pub type SsrRequestConfigurator = Arc<dyn Fn(SsrRequest) -> SsrRequest + Send + Sync>;
 
 /// The run-time Inertia settings of one container.
 ///
