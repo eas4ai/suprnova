@@ -186,3 +186,38 @@ async fn indt_a_storage_failure_is_logged_once_and_pauses_recording() {
         }
     });
 }
+
+#[tokio::test]
+async fn indt_the_settings_read_the_inertia_devtools_variables() {
+    use crate::env_snapshot::{EnvSnapshot, set_env};
+    let _env = app_env("production").await;
+    let _variables = EnvSnapshot::capture(&[
+        "INERTIA_DEVTOOLS_TTL_HOURS",
+        "INERTIA_DEVTOOLS_PRUNE_INTERVAL_SECONDS",
+        "INERTIA_DEVTOOLS_LIMIT",
+        "INERTIA_DEVTOOLS_GATE",
+    ]);
+    set_env("INERTIA_DEVTOOLS_ENABLED", Some("true"));
+    set_env("INERTIA_DEVTOOLS_TTL_HOURS", Some("12"));
+    set_env("INERTIA_DEVTOOLS_PRUNE_INTERVAL_SECONDS", Some("60"));
+    set_env("INERTIA_DEVTOOLS_LIMIT", Some("7"));
+    set_env("INERTIA_DEVTOOLS_GATE", Some("viewInertiaDevtools"));
+
+    let config = DevToolsConfig::new();
+    assert_eq!(config.enabled, Some(true));
+    assert!(config.is_enabled(), "true records in production");
+    assert_eq!(config.ttl_hours, 12);
+    assert_eq!(config.prune_interval_secs, 60);
+    assert_eq!(config.limit, 7);
+    assert_eq!(config.gate.as_deref(), Some("viewInertiaDevtools"));
+
+    for (raw, expected) in [("false", Some(false)), ("0", Some(false)), ("1", Some(true)), ("", None)] {
+        set_env("INERTIA_DEVTOOLS_ENABLED", Some(raw));
+        assert_eq!(DevToolsConfig::new().enabled, expected, "INERTIA_DEVTOOLS_ENABLED={raw:?}");
+    }
+    assert_eq!(
+        DevToolsConfig::new().enabled(true).enabled,
+        Some(true),
+        "the builder wins over the variable"
+    );
+}
