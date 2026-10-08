@@ -1150,6 +1150,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Expression::UnaryExpression(unary) => {
+                if unary.operator == UnaryOperator::Delete {
+                    self.prototype_delete(unary);
+                }
                 let inner = if unary.operator == UnaryOperator::Typeof {
                     Pos::Typeof
                 } else {
@@ -1462,6 +1465,18 @@ impl<'a, 'c> Walker<'a, 'c> {
             other => {
                 if let Some(member) = other.as_member_expression() {
                     self.member_access(member, true);
+                    // Every member write reaches this arm: an assignment of
+                    // any operator, `++` or `--`, a destructuring target and
+                    // a `for` loop's target (REG-032).
+                    if self.check()
+                        && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+                    {
+                        self.refuse(
+                            "script-prototype",
+                            member.span(),
+                            "assigning a member of a prototype changes it".to_string(),
+                        );
+                    }
                     if let Some(name) = self.member_name(member) {
                         if opaque && checked_write(&name) {
                             self.refuse(
@@ -1533,14 +1548,6 @@ impl<'a, 'c> Walker<'a, 'c> {
                 "script-call",
                 span,
                 format!("`{name}` is called by the browser itself, so its value must be a function the script defines"),
-            );
-        }
-        if self.check() && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
-        {
-            self.refuse(
-                "script-prototype",
-                span,
-                "assigning a member of a prototype changes it".to_string(),
             );
         }
         if URL_PROPERTIES.contains(&name.as_str()) {
@@ -2544,6 +2551,27 @@ impl<'a, 'c> Walker<'a, 'c> {
             expr.span(),
             format!("{what} is used as a value; a script may read a prototype's members, as `Array.prototype.slice` does, but may not keep or pass on the prototype, because the scan cannot follow it to where it is changed"),
         );
+    }
+
+    /// Refuses `delete` of a member of a prototype or of a value read from
+    /// one, which changes it as a write does (REG-032).
+    fn prototype_delete(&mut self, unary: &'a UnaryExpression<'a>) {
+        if !self.check() {
+            return;
+        }
+        let member = match unparen(&unary.argument) {
+            Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
+            other => other.as_member_expression(),
+        };
+        if let Some(member) = member
+            && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+        {
+            self.refuse(
+                "script-prototype",
+                unary.span,
+                "deleting a member of a prototype changes it".to_string(),
+            );
+        }
     }
 
     /// Whether an expression may evaluate to a prototype, or, with

@@ -529,6 +529,42 @@ fn reg_032_a_prototype_used_as_a_value_is_refused_in_every_position() {
     );
 }
 
+/// REG-032: every way a script writes a member of a prototype changes the
+/// prototype, so each is refused, not only a plain assignment: a compound
+/// or logical assignment, `++` and `--`, a destructuring target, a `for`
+/// loop's target, and `delete`.
+#[test]
+fn reg_032_every_write_to_a_prototype_member_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("Array.prototype.polluted ??= 1;\n", 1),
+        ("Array.prototype.polluted ||= 1;\n", 1),
+        ("Array.prototype.count += 1;\n", 1),
+        ("Array.prototype.count++;\n", 1),
+        ("--Array.prototype.count;\n", 1),
+        ("[Array.prototype.polluted] = [1];\n", 1),
+        ("({ a: Array.prototype.polluted } = { a: 1 });\n", 1),
+        ("for (Array.prototype.polluted of [1]) {\n}\n", 1),
+        ("for (Array.prototype.polluted in { a: 1 }) {\n}\n", 1),
+        (
+            "const slice = Array.prototype.slice;\nslice.count += 1;\n",
+            2,
+        ),
+        ("delete Array.prototype.map;\n", 1),
+        ("delete Array[\"prototype\"].map;\n", 1),
+        ("const p = Array.prototype;\ndelete p.map;\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one
