@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
-  import { useForm, usePage } from '@inertiajs/svelte'
+  import { Form, Link, usePage } from '@inertiajs/svelte'
+  import Head from '../../components/Head.svelte'
   import type { ResetPasswordProps } from '../../types/inertia-props'
 
   // The public root the server shares with every page (`RootShare`): empty
@@ -10,100 +10,76 @@
   // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
   const { root } = usePage().props
 
+  // The token came in on the mailed link's query string and goes back in a
+  // hidden field of the form; the server never reads it from the URL on
+  // submit.
   let { token }: ResetPasswordProps = $props()
-
-  // The token came in on the mailed link's query string and goes back in
-  // the form body; the server never reads it from the URL on submit. It is
-  // read once, on purpose: the link's token does not change while this
-  // page is shown, and `untrack` says so where Svelte would otherwise warn
-  // about capturing a prop's initial value.
-  const form = useForm({
-    token: untrack(() => token),
-    password: '',
-    password_confirmation: '',
-  })
-
-  function submit(e: SubmitEvent) {
-    e.preventDefault()
-    form.post(`${root}/reset-password`, {
-      onFinish: () => form.reset('password', 'password_confirmation'),
-    })
-  }
 </script>
 
-<div
-  class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
->
-  <div class="max-w-md w-full space-y-8">
-    <div>
-      <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
-        Choose a new password
-      </h2>
-    </div>
+<Head title="Choose a new password" />
 
-    {#if form.errors.token}
+<h2 class="text-center text-3xl font-extrabold text-gray-900">Choose a new password</h2>
+
+<Form
+  action={`${root}/reset-password`}
+  method="post"
+  resetOnError={['password', 'password_confirmation']}
+  class="mt-8 space-y-6"
+>
+  {#snippet children({ errors, processing })}
+    <input type="hidden" name="token" value={token} />
+
+    {#if errors.token}
       <p class="text-center text-sm text-red-600">
-        {form.errors.token}
-        <a href={`${root}/forgot-password`} class="text-indigo-600 hover:text-indigo-500">
+        {errors.token}
+        <Link href={`${root}/forgot-password`} class="text-indigo-600 hover:text-indigo-500">
           Request a new link
-        </a>
+        </Link>
       </p>
     {/if}
 
-    <form class="mt-8 space-y-6" onsubmit={submit}>
-      <div class="space-y-4">
-        <div>
-          <label for="password" class="block text-sm font-medium text-gray-700"
-            >New password</label
-          >
-          <input
-            id="password"
-            name="password"
-            type="password"
-            autocomplete="new-password"
-            required
-            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-            bind:value={form.password}
-          />
-          {#if form.errors.password}
-            <p class="mt-1 text-sm text-red-600">{form.errors.password}</p>
-          {/if}
-        </div>
-
-        <div>
-          <label for="password_confirmation" class="block text-sm font-medium text-gray-700"
-            >Confirm new password</label
-          >
-          <input
-            id="password_confirmation"
-            name="password_confirmation"
-            type="password"
-            autocomplete="new-password"
-            required
-            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-            bind:value={form.password_confirmation}
-          />
-          {#if form.errors.password_confirmation}
-            <p class="mt-1 text-sm text-red-600">{form.errors.password_confirmation}</p>
-          {/if}
-        </div>
+    <div class="space-y-4">
+      <div>
+        <label for="password" class="block text-sm font-medium text-gray-700">New password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="new-password"
+          required
+          class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+        />
+        {#if errors.password}
+          <p class="mt-1 text-sm text-red-600">{errors.password}</p>
+        {/if}
       </div>
 
       <div>
-        <button
-          type="submit"
-          disabled={form.processing}
-          class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+        <label for="password_confirmation" class="block text-sm font-medium text-gray-700"
+          >Confirm new password</label
         >
-          {form.processing ? 'Saving...' : 'Save new password'}
-        </button>
+        <input
+          id="password_confirmation"
+          name="password_confirmation"
+          type="password"
+          autocomplete="new-password"
+          required
+          class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+        />
+        {#if errors.password_confirmation}
+          <p class="mt-1 text-sm text-red-600">{errors.password_confirmation}</p>
+        {/if}
       </div>
+    </div>
 
-      <div class="text-center">
-        <a href={`${root}/login`} class="text-indigo-600 hover:text-indigo-500">
-          Back to sign in
-        </a>
-      </div>
-    </form>
-  </div>
-</div>
+    <div>
+      <button
+        type="submit"
+        disabled={processing}
+        class="flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
+      >
+        {processing ? 'Saving...' : 'Save new password'}
+      </button>
+    </div>
+  {/snippet}
+</Form>

@@ -679,6 +679,54 @@ pub mod svelte {
     pub fn lang() -> &'static str {
         include_str!("files/frontend/svelte/src/lib/lang.svelte.ts.tpl")
     }
+    /// `src/lib/title.ts`: the tab-title function both entries pass as
+    /// `title` and `components/Head.svelte` applies. It carries the
+    /// project's title, the name `src/bootstrap.rs` gives the server's
+    /// default title, so a page's tab and an untitled page agree.
+    pub fn title_module(project_title: &str) -> String {
+        include_str!("files/frontend/svelte/src/lib/title.ts.tpl")
+            .replace("{project_title}", project_title)
+    }
+    /// `src/lib/dates.ts`: the date format the notes pages print, the same
+    /// on the server and in the browser so hydration matches.
+    pub fn dates_module() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/dates.ts.tpl")
+    }
+    /// `src/components/Head.svelte`: `@inertiajs/svelte` ships no `Head`,
+    /// so the kit's pages title themselves through this one.
+    pub fn head_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/Head.svelte.tpl")
+    }
+    /// `src/components/AccountLinks.svelte`: the signed-in user's name and
+    /// sign-out, or the sign-in and register links, in both layouts.
+    pub fn account_links_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/AccountLinks.svelte.tpl")
+    }
+    /// `src/components/FlashToast.svelte`: the toast both layouts show
+    /// from `page.flash`.
+    pub fn flash_toast_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/FlashToast.svelte.tpl")
+    }
+    /// `src/layouts/AppLayout.svelte`: the persistent frame of every page
+    /// outside `auth/`, applied through `createInertiaApp`'s `layout`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/svelte/src/layouts/AppLayout.svelte.tpl")
+    }
+    /// `src/layouts/GuestLayout.svelte`: the frame of the pages under
+    /// `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/svelte/src/layouts/GuestLayout.svelte.tpl")
+    }
+    /// `src/pages/Notes/Index.svelte`: the signed-in user's notes, the page
+    /// the `notes` controller's `index` renders.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Notes/Index.svelte.tpl")
+    }
+    /// `src/pages/Notes/Show.svelte`: one note, the page the `notes`
+    /// controller's `show` renders.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Notes/Show.svelte.tpl")
+    }
 }
 
 pub mod vue {
@@ -870,6 +918,38 @@ pub fn scaffold_frontend(
             // module with that suffix.
             fs::write(lib.join("lang.svelte.ts"), svelte::lang())
                 .map_err(|e| format!("Failed to write src/lib/lang.svelte.ts: {}", e))?;
+
+            // The layouts `createInertiaApp`'s `layout` option applies, the
+            // components they and the pages share, and the notes pages.
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            let notes = pages.join("Notes");
+            for d in [&layouts, &components, &notes] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            let title = svelte::title_module(&crate::commands::new::to_title_case(project_name));
+            let svelte_writes: [(std::path::PathBuf, &str); 9] = [
+                (lib.join("title.ts"), &title),
+                (lib.join("dates.ts"), svelte::dates_module()),
+                (components.join("Head.svelte"), svelte::head_component()),
+                (
+                    components.join("AccountLinks.svelte"),
+                    svelte::account_links_component(),
+                ),
+                (
+                    components.join("FlashToast.svelte"),
+                    svelte::flash_toast_component(),
+                ),
+                (layouts.join("AppLayout.svelte"), svelte::app_layout()),
+                (layouts.join("GuestLayout.svelte"), svelte::guest_layout()),
+                (notes.join("Index.svelte"), svelte::notes_index_page()),
+                (notes.join("Show.svelte"), svelte::notes_show_page()),
+            ];
+            for (path, content) in svelte_writes {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
         }
         Frontend::Vue => {
             fs::write(src.join("shims-vue.d.ts"), vue::shims_dts())

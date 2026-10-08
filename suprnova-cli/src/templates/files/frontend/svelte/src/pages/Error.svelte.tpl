@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { usePage } from '@inertiajs/svelte'
+  import { Link, usePage } from '@inertiajs/svelte'
+  import Head from '../components/Head.svelte'
   import { t } from '../lib/lang.svelte'
 
   // The public root the server shares with every page (`RootShare`): empty
@@ -30,20 +31,18 @@
   let { status, message, request_id }: ErrorProps = $props()
 </script>
 
-<div
-  class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
->
-  <div class="max-w-md w-full text-center space-y-4">
-    <h1 class="text-6xl font-extrabold text-gray-900">{status}</h1>
-    <p class="text-lg text-gray-700">{message}</p>
-    {#if request_id}
-      <p class="text-sm text-gray-500">
-        {t('error-reference')}
-        <code class="bg-gray-100 px-1 rounded">{request_id}</code>
-      </p>
-    {/if}
-    <p>
-      <a href={`${root}/`} class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</a>
+<Head title={String(status)} />
+
+<div class="mx-auto max-w-md space-y-4 py-12 text-center">
+  <h1 class="text-6xl font-extrabold text-gray-900">{status}</h1>
+  <p class="text-lg text-gray-700">{message}</p>
+  {#if request_id}
+    <p class="text-sm text-gray-500">
+      {t('error-reference')}
+      <code class="rounded bg-gray-100 px-1">{request_id}</code>
     </p>
-  </div>
+  {/if}
+  <p>
+    <Link href={`${root}/`} class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</Link>
+  </p>
 </div>

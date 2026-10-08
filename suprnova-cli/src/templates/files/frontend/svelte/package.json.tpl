@@ -12,11 +12,12 @@
   },
   "dependencies": {
     "@fluent/bundle": "^0.19.1",
-    "@inertiajs/core": "^3.6.1",
-    "@inertiajs/svelte": "^3.6.1",
+    "@inertiajs/core": "^3.8.0",
+    "@inertiajs/svelte": "^3.8.0",
     "svelte": "^5.56.8"
   },
   "devDependencies": {
+    "@inertiajs/vite": "^3.8.0",
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/typography": "^0.5.20",
