@@ -138,6 +138,21 @@ async fn inp_a_dotted_prop_keys_plain_resolver_narrows_like_a_literal() {
 }
 
 #[tokio::test]
+async fn inp_a_dotted_only_into_an_empty_object_yields_an_empty_array() {
+    // An empty literal object has nothing under the path either: Laravel's
+    // walk finds no value and sends `[]`, not the empty object.
+    let req = MockReq::new("/p")
+        .partial("P")
+        .header("X-Inertia-Partial-Data", "missing.path");
+    let resp = InertiaResponse::new("P")
+        .with("missing", json!({}))
+        .resolve(&req)
+        .await
+        .unwrap();
+    assert_eq!(page_of(resp).await["props"]["missing"], json!([]));
+}
+
+#[tokio::test]
 async fn inp_a_dotted_only_that_resolves_to_nothing_yields_an_empty_array() {
     let req = MockReq::new("/p")
         .partial("P")
