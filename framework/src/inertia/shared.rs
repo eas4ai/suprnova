@@ -121,8 +121,9 @@ impl InertiaRegistry {
     }
 
     /// Add or replace a synchronous shared prop. Maps to
-    /// `Inertia::share($k, $v)`; a dotted key nests at share time (see
-    /// [`share_nested`](Self::share_nested)).
+    /// `Inertia::share($k, $v)`; a dotted key nests at share time, as
+    /// Laravel's `Arr::set` does, so a later share of its parent replaces
+    /// the whole object.
     ///
     /// # Panics
     ///

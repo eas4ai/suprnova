@@ -469,8 +469,10 @@ impl Default for SsrConfig {
 impl SsrConfig {
     /// Check whether the given request path is excluded from SSR by
     /// [`excluded_paths`](Self::excluded_paths), with the rules of
-    /// Laravel's `ExcludesPaths`: see [`excluded_by`]. The render also
-    /// tries each pattern against the request's full URL.
+    /// Laravel's `ExcludesPaths`: slashes at either end of a pattern are
+    /// ignored, `*` matches any characters including `/`, and the path is
+    /// decoded and trimmed of its slashes first. The render also tries each
+    /// pattern against the request's full URL.
     pub fn is_path_excluded(&self, path: &str) -> bool {
         excluded_by(&self.excluded_paths, path, None)
     }
