@@ -681,13 +681,18 @@ mod inssr {
     // -- signals ----------------------------------------------------------------
 
     /// A `cargo` that says `ready` once it and its worker run, and writes
-    /// its process id, its sleeper's and its worker's to `pids`. For each
-    /// `SIGINT`, `SIGTERM` or `SIGQUIT` it receives it prints `application
-    /// got <signal> <count>`, and at the `stop_after`th it stops the other two and exits
-    /// with 7. At a `SIGHUP` it waits for its worker, which prints `worker
-    /// got HUP` and exits only when a `SIGHUP` reaches it as well, then
-    /// prints `application got HUP <count> after its worker` and exits with
-    /// 7.
+    /// its process id, its sleeper's and its worker's to `pids`.
+    ///
+    /// For each `SIGINT`, `SIGTERM` or `SIGQUIT` it receives it prints
+    /// `application got <signal> <count>`, and at the `stop_after`th it
+    /// stops the other two and exits with 7.
+    ///
+    /// At a `SIGHUP` it waits for its worker, which prints `worker got HUP`,
+    /// says so in a file and exits only when a `SIGHUP` reaches it as well,
+    /// then prints `application got HUP <count> after its worker` and exits
+    /// with 7. The wait gives up after five seconds, printing `application
+    /// got HUP <count> but its worker did not`, so a CLI that sends `SIGHUP`
+    /// to the application alone fails the test within seconds.
     ///
     /// At a `SIGTSTP` it prints `application got TSTP` and stops itself, as
     /// the default action would, and at a `SIGCONT` it prints `application
@@ -702,9 +707,14 @@ mod inssr {
              got() {{\n\
              \x20 n=$((n + 1))\n\
              \x20 if [ \"$1\" = HUP ]; then\n\
-             \x20   wait \"$worker\"\n\
-             \x20   echo \"application got HUP $n after its worker\"\n\
-             \x20   kill \"$sleeper\" 2>/dev/null\n\
+             \x20   i=0\n\
+             \x20   while [ ! -e '{worker_hup}' ] && [ \"$i\" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done\n\
+             \x20   if [ -e '{worker_hup}' ]; then\n\
+             \x20     echo \"application got HUP $n after its worker\"\n\
+             \x20   else\n\
+             \x20     echo \"application got HUP $n but its worker did not\"\n\
+             \x20   fi\n\
+             \x20   kill \"$sleeper\" \"$worker\" 2>/dev/null\n\
              \x20   exit 7\n\
              \x20 fi\n\
              \x20 echo \"application got $1 $n\"\n\
@@ -718,7 +728,7 @@ mod inssr {
              trap 'echo \"application got CONT\"' CONT\n\
              mkfifo '{worker_ready}'\n\
              (\n\
-             \x20 trap 'echo \"worker got HUP\"; exit 0' HUP\n\
+             \x20 trap 'echo \"worker got HUP\"; : > \"{worker_hup}\"; exit 0' HUP\n\
              \x20 trap 'kill \"$inner\" 2>/dev/null; exit 0' TERM\n\
              \x20 sleep 1000 >/dev/null 2>&1 &\n\
              \x20 inner=$!\n\
@@ -734,6 +744,7 @@ mod inssr {
              while kill -0 \"$sleeper\" 2>/dev/null; do wait \"$sleeper\"; done",
             pids = pids.display(),
             worker_ready = worker_ready.display(),
+            worker_hup = pids.with_file_name("worker-got-hup").display(),
         )
     }
 
