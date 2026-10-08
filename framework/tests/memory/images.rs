@@ -1211,18 +1211,30 @@ fn jpeg_with_profile(jpeg: &[u8], profile: &[u8]) -> Vec<u8> {
     out
 }
 
+/// What reading and writing the small profile below takes, beyond what the
+/// same image keeping only its orientation allocates. Measured with the
+/// eas4ai forks of `oxideav-png`, `oxideav-bmp` and `oxideav-webp`: about
+/// 246,330 bytes for PNG output, which compresses the profile again from
+/// a PNG source whose `iCCP` chunk the decoder now inflates too (140,945
+/// with `oxideav-png` 0.1.8, whose decoder did not); about 178,945 for
+/// JPEG output from the same PNG sources (75,668 with 0.1.8); and 2,382
+/// for WebP output, lossless or lossy, from JPEG sources (the same with
+/// `oxideav-webp` 0.2.3). The allowance this replaces was half the output:
+/// 524,738 bytes for the PNG.
+const PROFILE_WORK: u64 = 320 * 1024;
+
 /// MEM-003: the metadata an image keeps is written into the one output
 /// buffer the encoder fills, not by copying the encoded file again. The
-/// encoder leaves no room for metadata, so that buffer grows once, by
-/// exactly the room it needs, and may move as it grows. Two measures, with
-/// orientation left unapplied so the tag is kept:
-/// - The same image keeping only its orientation also grows its buffer
-///   once. With a profile too, it allocates the same, give or take what
-///   reading and writing the profile takes, which is far less than half
-///   the output: a second copy of the output would be all of it.
-/// - The same image keeping nothing is written with no room and never
-///   moves. With a profile, the run allocates less than one output and a
-///   half more: one move, and no second.
+/// buffer grows at most once, by exactly the room the metadata needs, and
+/// may move as it grows. Two measures, with orientation left unapplied so
+/// the tag is kept:
+/// - The same image keeping only its orientation also makes that room.
+///   With a profile too, it allocates the same, give or take
+///   [`PROFILE_WORK`]: a second copy of the output would be all of it, and
+///   every output here is more than twice that.
+/// - The same image keeping nothing is written with no room. With a
+///   profile, the run allocates less than one output and [`PROFILE_WORK`]
+///   more: one move, and no second.
 #[tokio::test]
 async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     let _lock = exclusive().await;
@@ -1235,17 +1247,16 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     app1.extend_from_slice(&tiff);
     // Noise, so the encoded outputs are as large as the pixels. The WebP
     // images come from an opaque JPEG, so the driver writes `WebP` lossy,
-    // and the JPEG's profile is read whole: inflating a PNG's profile
-    // allocates more than a small output holds, and would hide a copy of
-    // it. The lossless WebP encoder allocates too much for dhat to record
-    // a large image quickly, so its image is small; the lossy one is
-    // written at full quality, so its output is not.
+    // and the JPEG's profile is read whole: a PNG's profile is inflated
+    // twice, once by the decoder, and that work would hide a copy of a
+    // smaller output. The lossy WebP is written at full quality, so its
+    // output is not small.
     let default_quality = ImagePipeline::default().quality;
     let cases = [
         (OutputFormat::Png, 512, default_quality),
-        (OutputFormat::Jpeg, 512, default_quality),
-        (OutputFormat::WebPLossless, 64, default_quality),
-        (OutputFormat::WebP, 128, 100),
+        (OutputFormat::Jpeg, 1024, default_quality),
+        (OutputFormat::WebPLossless, 512, default_quality),
+        (OutputFormat::WebP, 512, 100),
     ]
     .map(|(format, side, quality)| {
         let sources = if matches!(format, OutputFormat::Png | OutputFormat::Jpeg) {
@@ -1282,14 +1293,17 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
         let (bare, out_len) = allocated_by(&driver, plain, &pipeline);
         let (without, _) = allocated_by(&driver, oriented, &pipeline);
         let (with, _) = allocated_by(&driver, tagged, &pipeline);
-        let allowance = out_len as u64 / 2;
         assert!(
-            with < without + allowance,
+            out_len as u64 > 2 * PROFILE_WORK,
+            "{format:?}: a {out_len}-byte output is too small to tell a copy of it"
+        );
+        assert!(
+            with < without + PROFILE_WORK,
             "{format:?}: {with} bytes with the profile against {without} with the orientation \
              alone, for a {out_len}-byte output: the output was copied"
         );
         assert!(
-            with < bare + out_len as u64 + allowance,
+            with < bare + out_len as u64 + PROFILE_WORK,
             "{format:?}: {with} bytes with the profile against {bare} keeping nothing, for a \
              {out_len}-byte output: the output moved more than once"
         );
@@ -1576,13 +1590,20 @@ fn magick_stand_in(name: &str, answer: &[u8]) -> suprnova::MagickCliDriver {
     suprnova::MagickCliDriver::new(stand_in.to_string_lossy())
 }
 
+/// What reading the source's `gAMA` chunk and adding it to ImageMagick's
+/// output takes, beyond the same run with nothing to add: measured at
+/// 16,740 to 16,756 bytes, the same with `oxideav-png` 0.1.8 and with the
+/// eas4ai fork. The allowance this replaces was half the output, 2 MiB.
+#[cfg(unix)]
+const CHUNK_WORK: u64 = 64 * 1024;
+
 /// MEM-003: the `magick` driver adds the metadata a PNG source keeps (its
 /// `gAMA` chunk here) into ImageMagick's output where it stands, rather
 /// than by copying the output into a larger buffer. The stand-in answers
 /// with a PNG one byte short of 4 MiB, the length at which a buffer grown
 /// by doubling while it was read has one byte of room left. The same run
-/// with and without the chunk to add allocates the same, give or take far
-/// less than half the output: a copy of the output would be all of it.
+/// with and without the chunk to add allocates the same, give or take
+/// [`CHUNK_WORK`]: a copy of the output would be 4 MiB.
 #[cfg(unix)]
 #[tokio::test]
 async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() {
@@ -1620,9 +1641,8 @@ async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() 
         png_with_chunks(&answer, &[(b"gAMA", gama)]),
         "the source's gAMA chunk follows IHDR"
     );
-    let allowance = LENGTH as u64 / 2;
     assert!(
-        with < without + allowance,
+        with < without + CHUNK_WORK,
         "{with} bytes with a chunk to add against {without} without, for a {LENGTH}-byte \
          output: the output was copied"
     );
