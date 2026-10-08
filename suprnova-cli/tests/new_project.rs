@@ -35,3 +35,40 @@ fn a_dangling_symlink_at_the_project_path_is_refused() {
         target.display()
     );
 }
+
+/// RDOC-006: the violating example for the `inertia-root-template`
+/// mechanism's fail receipt. The scaffold ships a root template under
+/// `templates/` and no `frontend/index.html`, which the server never
+/// serves.
+#[test]
+fn rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(BIN)
+        .args([
+            "new",
+            "rdocapp",
+            "--no-interaction",
+            "--no-git",
+            "--frontend",
+            "svelte",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("spawn");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = tmp.path().join("rdocapp");
+    assert!(
+        !project.join("frontend/index.html").exists(),
+        "the scaffold still writes frontend/index.html, a shell the server never serves"
+    );
+    assert!(
+        project.join("templates").join("inertia").is_dir()
+            || project.join("templates").join("root.html").exists(),
+        "the scaffold ships no root template under templates/"
+    );
+}
