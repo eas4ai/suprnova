@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use suprnova::config::{AppConfig, Config, Environment};
 use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionStore};
 use suprnova::testing::{AssertableInertia, TestClient, TestContainer};
 use suprnova::{
@@ -600,6 +601,133 @@ async fn intt_reload_only_with_and_the_other_callbacks_run() {
     .await;
 
     assert_eq!(ran, ["only", "except", "full"]);
+}
+
+// ── PAR-063, PAR-066: reloads under a public path prefix ────────────
+
+/// One request to `/users`: its target (path and query) and its
+/// `X-Forwarded-Prefix` header.
+type Target = (String, Option<String>);
+
+/// What `/users` saw on each request.
+#[derive(Clone, Default)]
+struct Targets(Arc<Mutex<Vec<Target>>>);
+
+impl Targets {
+    fn all(&self) -> Vec<Target> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// `/users`, a page with a deferred group, recording every request.
+fn recording_users_routes(targets: Targets) -> Router {
+    Router::new()
+        .get("/users", move |req: Request| {
+            let targets = targets.clone();
+            async move {
+                targets.0.lock().unwrap().push((
+                    req.uri().to_string(),
+                    req.header("X-Forwarded-Prefix").map(str::to_string),
+                ));
+                InertiaResponse::new("Users/Index")
+                    .with("users", json!([{"id": 1, "name": "Ada"}]))
+                    .with("filters", json!({"q": ""}))
+                    .defer_with(
+                        "stats",
+                        suprnova::DeferOptions::default().group("stats"),
+                        || async { Ok::<_, FrameworkError>(json!({"total": 1})) },
+                    )
+                    .resolve(&req)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn intt_a_page_under_an_app_url_path_reloads_through_the_internal_path() {
+    // The `AppConfig` is process-wide: the test runs alone in a child.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "intt_a_page_under_an_app_url_path_reloads_through_the_internal_path",
+    )
+    .await
+    {
+        return;
+    }
+    Config::register(
+        AppConfig::builder()
+            .environment(Environment::Testing)
+            .debug(false)
+            .url("https://example.test/billing")
+            .build(),
+    );
+    let targets = Targets::default();
+    let client = TestClient::new(
+        recording_users_routes(targets.clone()),
+        MiddlewareRegistry::new(),
+    );
+
+    let page = client
+        .get("/users?page=2")
+        .inertia()
+        .send()
+        .await
+        .assert_inertia();
+    // The page's url is the public one; the router matched `/users`.
+    page.component("Users/Index").url("/billing/users?page=2");
+
+    page.reload().await.has("users").has("filters");
+    page.reload_only(["users"]).await.missing("filters");
+    page.load_deferred_props()
+        .await
+        .where_("stats.total", 1)
+        .missing("users");
+    // A reloaded page reloads again the same way.
+    page.reload().await.reload_except(["filters"]).await;
+
+    let sent: Vec<String> = targets
+        .all()
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect();
+    assert_eq!(
+        sent,
+        vec!["/users?page=2"; 6],
+        "every reload must reach the path the first visit did, query kept"
+    );
+}
+
+#[tokio::test]
+async fn intt_a_reload_sends_the_forwarded_prefix_the_page_request_sent() {
+    let targets = Targets::default();
+    let client = TestClient::new(
+        recording_users_routes(targets.clone()),
+        MiddlewareRegistry::new(),
+    );
+
+    let page = client
+        .get("/users")
+        .header("X-Forwarded-Prefix", "/billing")
+        .inertia()
+        .send()
+        .await
+        .assert_inertia();
+    page.reload_only(["users"]).await;
+    let plain = client.get("/users").inertia().send().await.assert_inertia();
+    plain.reload().await;
+
+    assert_eq!(
+        targets.all(),
+        vec![
+            ("/users".to_string(), Some("/billing".to_string())),
+            ("/users".to_string(), Some("/billing".to_string())),
+            ("/users".to_string(), None),
+            ("/users".to_string(), None),
+        ],
+        "a reload sends the X-Forwarded-Prefix its page's request sent, and only that"
+    );
 }
 
 // ── PAR-067: page readers and the Inertia flash in the session ──────

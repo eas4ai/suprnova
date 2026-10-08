@@ -1277,7 +1277,11 @@ fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
 /// sends on a follow-up XHR against the same page.
 #[derive(Debug, Clone)]
 pub struct ReloadRequest {
-    /// The page's URL - the same request path (and query) to reissue.
+    /// The page's URL - the request path (and query) to reissue - as the
+    /// page gives it. Under a public path prefix it starts with the root,
+    /// which the router does not see: a [`crate::testing::TestClient`]
+    /// sends the reload without the root, and a harness attached with
+    /// [`AssertableInertia::with_reload`] has to strip it the same way.
     pub url: String,
     /// The page's component name, sent as `X-Inertia-Partial-Component`
     /// whenever [`Self::only`] or [`Self::except`] is set.

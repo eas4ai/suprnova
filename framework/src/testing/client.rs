@@ -13,6 +13,12 @@
 //! Between requests the client keeps every cookie a response sets and sends
 //! them back, as a browser does, so a session started by one request is the
 //! session of the next.
+//!
+//! Under a public path prefix (`APP_URL` with a path) an Inertia page's url
+//! is the public URL, `/billing/users`, while the router matches the path
+//! the request arrived on, `/users`. The client keeps the root each request
+//! was served under, and a reload of the page sends the page's url without
+//! it, so the reload reaches the route the first visit did.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -27,6 +33,7 @@ use serde::Serialize;
 
 use super::inertia::{ReloadRequest, Reloader};
 use super::response::TestResponse;
+use crate::routing::root::FORWARDED_PREFIX_HEADER;
 use crate::{ErrorReport, Method, MiddlewareRegistry, Router, SessionStore};
 
 /// How long one request may take before [`TestRequest::send`] gives up on
@@ -146,12 +153,23 @@ impl TestClient {
 
     /// Replay a page reload through this client, with its cookies: an
     /// Inertia visit to the page's url carrying the reload's headers.
-    fn reloader(&self) -> Reloader {
+    ///
+    /// `root` is the public root the page's request was served under. The
+    /// page's url carries it, and the router does not see it (PFX-009), so
+    /// the replay sends the url without it ([`internal_target`]).
+    /// `forwarded_prefix` is the `X-Forwarded-Prefix` the page's request
+    /// sent, if any, sent again so the replay resolves the same root.
+    fn reloader(&self, root: Arc<str>, forwarded_prefix: Option<String>) -> Reloader {
         let client = self.clone();
         Arc::new(move |reload: ReloadRequest| {
             let client = client.clone();
+            let target = internal_target(&root, &reload.url);
+            let forwarded_prefix = forwarded_prefix.clone();
             Box::pin(async move {
-                let mut request = client.get(reload.url.clone()).inertia();
+                let mut request = client.get(target).inertia();
+                if let Some(prefix) = forwarded_prefix {
+                    request = request.header(FORWARDED_PREFIX_HEADER, prefix);
+                }
                 for (name, value) in reload.headers() {
                     request = request.header(name, value);
                 }
@@ -190,7 +208,8 @@ impl TestClient {
     }
 
     /// Send `request` over a fresh in-memory connection and read the whole
-    /// response, with the error report the framework attached to it.
+    /// response, with the error report the framework attached to it and
+    /// the public root the request was served under.
     async fn exchange(
         &self,
         request: hyper::Request<Full<Bytes>>,
@@ -198,17 +217,24 @@ impl TestClient {
         let (client_io, server_io) = tokio::io::duplex(PIPE_CAPACITY);
         // The report lives in the response's extensions, which hyper drops
         // when it writes the response to the wire; the service takes it out
-        // first.
+        // first. The root lives in a task-local `handle_request` sets and
+        // drops; the service resolves it from the received request the way
+        // `handle_request` does, with no peer address.
         let report: Arc<Mutex<Option<ErrorReport>>> = Arc::default();
+        let root: Arc<Mutex<Option<Arc<str>>>> = Arc::default();
         let service = {
             let router = self.router.clone();
             let registry = self.registry.clone();
             let report = report.clone();
+            let root = root.clone();
             service_fn(move |req: hyper::Request<Incoming>| {
                 let router = router.clone();
                 let registry = registry.clone();
                 let report = report.clone();
+                let root = root.clone();
                 async move {
+                    *root.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(crate::server::request_root(&req, None));
                     let response = crate::handle_request(router, registry, req).await;
                     let (mut parts, body) = response.into_parts();
                     if let Some(taken) = parts.extensions.remove::<ErrorReport>() {
@@ -248,11 +274,17 @@ impl TestClient {
             })
             .collect();
         let report = report.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let root = root
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_default();
         Ok(Exchanged {
             status: parts.status.as_u16(),
             headers,
             body,
             report,
+            root,
         })
     }
 }
@@ -263,6 +295,27 @@ struct Exchanged {
     headers: Vec<(String, String)>,
     body: Bytes,
     report: Option<ErrorReport>,
+    /// The public root the request was served under, the empty string at
+    /// the host root.
+    root: Arc<str>,
+}
+
+/// The request target a reload of the page at `url` sends: `url` without
+/// the public root `root`, its query kept, so the router sees the path
+/// the page's own request arrived on (PFX-009). `/billing/users?page=2`
+/// under `/billing` is `/users?page=2`, and `/billing` alone is `/`. A url
+/// not under the root, such as one a custom `InertiaConfig` url resolver
+/// gave, is sent as it is.
+fn internal_target(root: &str, url: &str) -> String {
+    if root.is_empty() || !crate::routing::root::is_under(root, url) {
+        return url.to_string();
+    }
+    let rest = &url[root.len()..];
+    if rest.starts_with('/') {
+        rest.to_string()
+    } else {
+        format!("/{rest}")
+    }
 }
 
 /// Whether a `Set-Cookie` line's attributes expire the cookie now: a
@@ -391,6 +444,10 @@ impl TestRequest {
             headers,
             body,
         } = self;
+        let forwarded_prefix = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(FORWARDED_PREFIX_HEADER))
+            .map(|(_, value)| value.clone());
         let request = build_request(&method, &path, headers, body, &client.cookie_pairs());
         let exchanged = match tokio::time::timeout(client.timeout, client.exchange(request)).await {
             Ok(Ok(exchanged)) => exchanged,
@@ -406,7 +463,7 @@ impl TestRequest {
         let mut response = TestResponse::new(exchanged.status, exchanged.headers, exchanged.body)
             .with_error_report(exchanged.report)
             .with_client_cookies(client.cookie_pairs())
-            .with_reloader(client.reloader());
+            .with_reloader(client.reloader(exchanged.root, forwarded_prefix));
         if let Some((store, cookie_name)) = &client.session {
             response = response.with_session_store(store.clone(), cookie_name.clone());
         }
@@ -465,7 +522,30 @@ fn build_request(
 
 #[cfg(test)]
 mod tests {
-    use super::expires_now;
+    use super::{expires_now, internal_target};
+
+    #[test]
+    fn intt_a_reload_target_drops_the_public_root_and_keeps_the_query() {
+        assert_eq!(internal_target("/billing", "/billing/users"), "/users");
+        assert_eq!(
+            internal_target("/billing", "/billing/users?page=2"),
+            "/users?page=2"
+        );
+        assert_eq!(internal_target("/billing", "/billing"), "/");
+        assert_eq!(internal_target("/billing", "/billing/"), "/");
+        assert_eq!(internal_target("/billing", "/billing?tab=2"), "/?tab=2");
+        // Not under the root: sent as it is.
+        assert_eq!(
+            internal_target("/billing", "/billingx/users"),
+            "/billingx/users"
+        );
+        assert_eq!(internal_target("/billing", "/users"), "/users");
+        assert_eq!(
+            internal_target("/billing", "https://example.test/billing/users"),
+            "https://example.test/billing/users"
+        );
+        assert_eq!(internal_target("", "/users?page=2"), "/users?page=2");
+    }
 
     #[test]
     fn intt_a_set_cookie_expires_by_max_age_before_expires() {

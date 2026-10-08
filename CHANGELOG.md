@@ -401,8 +401,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   ones a response expires, keeps each response's error report, gives every
   `TestResponse` the session store `with_session_store` names, and fails a
   request that has not answered after 10 seconds, naming its method and
-  path. See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01,
-  TS-10).
+  path. Under a public path prefix (`APP_URL=https://example.test/billing`)
+  a page's url is the public `/billing/users` while the router matches
+  `/users`, so a reload of a client response sent `/billing/users` and got
+  a 404. The client now keeps the root each request was served under and
+  replays a reload to the internal path, `/users` with the page's query,
+  sending again the `X-Forwarded-Prefix` header the page's request sent.
+  See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01, TS-10).
 - **Laravel's prop assertions and scopes on `AssertableInertia`.** It had
   `has`, `missing`, `where_` and `count` only. It now has `has_all`,
   `has_any`, `missing_all`, `count_between`, `where_not`, `where_null`,

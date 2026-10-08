@@ -831,6 +831,15 @@ page.load_deferred_props_with(["stats"], |reloaded| {
 `load_deferred_props_of` fails naming a group the page doesn't defer, so
 a typo can't request nothing and pass.
 
+Under a public path prefix, such as `APP_URL=https://example.test/billing`,
+the page's url is the public one, `/billing/users`, while the router
+matches the path the request arrived on, `/users`. The client keeps the
+root each request was served under, and a reload replays the internal
+path, `/users` with the page's query, so it reaches the route the first
+visit did. A reload also sends again the `X-Forwarded-Prefix` header the
+page's request sent, if any. A `ReloadRequest` carries the public url, so
+a `with_reload` harness removes the root itself.
+
 A test that drives requests through its own harness attaches the replay
 with `with_reload`, a closure from a `ReloadRequest` (the url,
 component, version, and partial-reload keys to send) to a future that
