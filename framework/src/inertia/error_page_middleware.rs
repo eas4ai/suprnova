@@ -262,9 +262,9 @@ fn is_protocol_response(response: &HttpResponse) -> bool {
 /// Whether `response` is a validation result: a `422` whose JSON body
 /// carries an `errors` object, the framework's
 /// `{"message": .., "errors": {..}}`. The validation redirect owns it: it
-/// turns an Inertia visit's into the redirect back to the form with the
-/// errors flashed, and an API client or a Precognition dry run reads the
-/// errors off it. A callback that rendered it would break every form.
+/// turns an Inertia visit's `422` into the redirect back to the form with
+/// the errors flashed, and an API client or a Precognition dry run reads
+/// the errors off it. A callback that rendered it would break every form.
 fn is_validation_result(response: &HttpResponse) -> bool {
     response.status_code() == 422
         && !response.is_streaming()

@@ -489,9 +489,9 @@ impl Inertia {
     /// A validation failure never reaches the callback: a `422` whose body
     /// carries an `errors` object belongs to
     /// [`InertiaValidationRedirectMiddleware`], which turns an Inertia
-    /// visit's into the redirect back to the form. A panic in the callback
-    /// itself reaches the server's panic boundary, as a panic in any
-    /// middleware does.
+    /// visit's `422` into the redirect back to the form. A panic in the
+    /// callback itself reaches the server's panic boundary, as a panic in
+    /// any middleware does.
     ///
     /// ```rust,no_run
     /// use serde_json::json;
