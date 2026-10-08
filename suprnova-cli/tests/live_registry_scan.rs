@@ -749,6 +749,55 @@ fn reg_032_a_shorthand_destructuring_target_is_a_target_like_any_other() {
     assert!(declared.accepted(), "{:?}", declared.findings);
 }
 
+/// REG-032: a value the scan follows from elsewhere (an initializer, an
+/// assignment, a call's argument) names the binding each of its names had
+/// where it was written, not the binding the same name has where the value
+/// is used, so a shadowing name cannot stand in for the real value.
+#[test]
+fn reg_032_a_traced_value_resolves_each_name_where_it_is_written() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "const y = \"https://evil.example/x\";\nconst x = y;\nexport function show() {\n  const y = \"/ok\";\n  const img = new Image();\n  img.src = x;\n}\n",
+            "script-url",
+            6,
+        ),
+        (
+            "let x = \"/ok\";\nexport function set() {\n  const y = \"https://evil.example/x\";\n  x = y;\n}\nconst y = \"/fine\";\nexport function show() {\n  const img = new Image();\n  img.src = x;\n}\n",
+            "script-url",
+            9,
+        ),
+        (
+            "function load(u) {\n  const img = new Image();\n  img.src = u;\n}\nconst v = \"/ok\";\nexport function go() {\n  const v = \"https://evil.example/x\";\n  load(v);\n}\n",
+            "script-url",
+            3,
+        ),
+        (
+            "const k = \"constructor\";\nconst n = k;\nexport function read(o) {\n  const k = 1;\n  return o[n];\n}\n",
+            "script-eval",
+            5,
+        ),
+        (
+            "const g = \"alert(1)\";\nconst f = g;\nexport function later() {\n  function g() {}\n  setTimeout(f, 1);\n}\n",
+            "script-timer",
+            5,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let shadowed = scan_widget_script(
+        "const y = \"/ok\";\nconst x = y;\nexport function show() {\n  const y = \"https://evil.example/x\";\n  const img = new Image();\n  img.src = x;\n}\n",
+    );
+    assert!(shadowed.accepted(), "{:?}", shadowed.findings);
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one

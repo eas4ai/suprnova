@@ -417,6 +417,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `script-prototype-assignment-default`,
   `script-destructuring-shorthand-url` and
   `script-destructuring-shorthand-global`.
+- **The script scan follows a value by the names it was written with.**
+  To check a URL, a timer handler or a computed key, the `live:add` scan
+  follows a name to its initializer, its assignments and the arguments of
+  its function's calls, but it looked up each name it met there where the
+  value was used, so a shadowing name stood in for the real one:
+  `const y = "https://evil.example/x"; const x = y;` followed by
+  `function show() { const y = "/ok"; img.src = x; }` passed the URL rule,
+  and a timer could be handed a string the same way. Each name in a
+  followed value now names the binding it had where it is written, so that
+  input is refused (`script-url`), and the reverse, a constant shadowed by
+  a remote URL where it is used, is no longer refused by mistake. The
+  `script-trace-shadowed-initializer` fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

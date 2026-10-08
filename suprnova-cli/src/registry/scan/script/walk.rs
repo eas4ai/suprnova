@@ -71,6 +71,11 @@ pub(super) struct Facts<'a> {
     pub private_methods: BTreeSet<&'a str>,
     pub tainted: BTreeSet<&'a str>,
     pub written_globals: BTreeSet<String>,
+    /// The binding each name the walk resolved had where it is written, by
+    /// the name's offset, or `None` for a global: a value followed from
+    /// elsewhere names these bindings, not the ones the same names have
+    /// where the value is used (REG-032).
+    pub resolved: HashMap<u32, Option<Bid>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +225,28 @@ impl<'a, 'c> Walker<'a, 'c> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
+    }
+
+    /// Resolves a name where the walk stands, and records the binding it
+    /// names there for [`Self::bound`].
+    fn resolve(&mut self, reference: &IdentifierReference<'a>) -> Option<Bid> {
+        let id = self.lookup(reference.name.as_str());
+        if self.phase == Phase::Collect {
+            self.facts.resolved.insert(reference.span.start, id);
+        }
+        id
+    }
+
+    /// The binding a name had where it is written, which is what a value
+    /// followed from an initializer, an assignment or a call's argument
+    /// must use: the name may be shadowed where the value is used. A name
+    /// the walk has not reached yet, which only the first phase meets,
+    /// resolves where the walk stands.
+    fn bound(&self, reference: &IdentifierReference<'a>) -> Option<Bid> {
+        match self.facts.resolved.get(&reference.span.start) {
+            Some(id) => *id,
+            None => self.lookup(reference.name.as_str()),
+        }
     }
 
     fn declare_pattern(
@@ -985,7 +1012,7 @@ impl<'a, 'c> Walker<'a, 'c> {
 
     fn identifier(&mut self, reference: &'a IdentifierReference<'a>, pos: Pos) {
         let name = reference.name.as_str();
-        match self.lookup(name) {
+        match self.resolve(reference) {
             Some(id) => {
                 if self.phase == Phase::Collect
                     && let Some(binding) = self.facts.bindings.get_mut(id)
@@ -1250,8 +1277,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn is_global_object(&self, expr: &Expression<'a>) -> bool {
         match unparen(expr) {
             Expression::Identifier(reference) => {
-                GLOBAL_OBJECTS.contains(&reference.name.as_str())
-                    && self.lookup(reference.name.as_str()).is_none()
+                GLOBAL_OBJECTS.contains(&reference.name.as_str()) && self.bound(reference).is_none()
             }
             _ => false,
         }
@@ -1665,7 +1691,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         self.prototype_receiver(callee);
         match unparen(callee) {
             Expression::Identifier(reference) => {
-                if self.lookup(reference.name.as_str()).is_none() {
+                if self.resolve(reference).is_none() {
                     self.global(reference.name.as_str(), reference.span, Pos::Value);
                 }
             }
@@ -1684,7 +1710,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn call(&mut self, call: &'a CallExpression<'a>) {
         let callee = unparen(&call.callee);
         if let Expression::Identifier(reference) = callee
-            && let Some(id) = self.lookup(reference.name.as_str())
+            && let Some(id) = self.resolve(reference)
             && self.phase == Phase::Collect
             && let Some(binding) = self.facts.bindings.get_mut(id)
         {
@@ -1760,7 +1786,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// logical expression, a bound function's target.
     fn callee_rules(&self, callee: &Expression<'a>) -> Vec<Rule> {
         match unparen(callee) {
-            Expression::Identifier(reference) if self.lookup(reference.name.as_str()).is_none() => {
+            Expression::Identifier(reference) if self.bound(reference).is_none() => {
                 rule_for(reference.name.as_str()).into_iter().collect()
             }
             Expression::SequenceExpression(sequence) => sequence
@@ -1827,7 +1853,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .last()
                 .is_some_and(|class| self.class_defines(class, name)),
             Expression::Identifier(reference) => {
-                let Some(id) = self.lookup(reference.name.as_str()) else {
+                let Some(id) = self.bound(reference) else {
                     return false;
                 };
                 let Some(binding) = self.binding(id) else {
@@ -1839,7 +1865,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 match binding.init.map(unparen) {
                     Some(Expression::NewExpression(new)) => match unparen(&new.callee) {
                         Expression::Identifier(class) => self
-                            .lookup(class.name.as_str())
+                            .bound(class)
                             .and_then(|class_id| self.binding(class_id))
                             .and_then(|class_binding| class_binding.class)
                             .is_some_and(|class| self.class_defines(class, name)),
@@ -1869,7 +1895,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         match unparen(callee) {
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.bound(reference) {
                     Some(id) => self.binding_callable(id, depth + 1),
                     None => {
                         ADMITTED_GLOBALS.contains(&name)
@@ -2040,7 +2066,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             | Expression::ClassExpression(_) => true,
             Expression::NullLiteral(_) => true,
             Expression::Identifier(reference)
-                if reference.name == "undefined" && self.lookup("undefined").is_none() =>
+                if reference.name == "undefined" && self.bound(reference).is_none() =>
             {
                 true
             }
@@ -2073,7 +2099,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             return;
         }
         let name = match callee {
-            Expression::Identifier(reference) if self.lookup(reference.name.as_str()).is_none() => {
+            Expression::Identifier(reference) if self.bound(reference).is_none() => {
                 Some(reference.name.as_str())
             }
             other => other
@@ -2096,7 +2122,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         match callee {
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.resolve(reference) {
                     Some(id) => {
                         if self.check() && !self.binding_callable(id, 0) {
                             self.refuse(
@@ -2481,10 +2507,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         let Expression::Identifier(reference) = unparen(object) else {
             return false;
         };
-        let Some(binding) = self
-            .lookup(reference.name.as_str())
-            .and_then(|id| self.binding(id))
-        else {
+        let Some(binding) = self.bound(reference).and_then(|id| self.binding(id)) else {
             return false;
         };
         binding.kind == Kind::Const
@@ -2748,7 +2771,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                     && self.prototype(&assignment.right, reach, depth + 1, seen)
             }
             Expression::Identifier(reference) => {
-                let Some(id) = self.lookup(reference.name.as_str()) else {
+                let Some(id) = self.bound(reference) else {
                     return false;
                 };
                 if !seen.insert(id) {
@@ -2855,7 +2878,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::CallExpression(call)
                 if matches!(unparen(&call.callee), Expression::Identifier(callee)
-                    if callee.name == "String" && self.lookup("String").is_none()) =>
+                    if callee.name == "String" && self.bound(callee).is_none()) =>
             {
                 match call.arguments.first() {
                     Some(argument) => self.trace(argument.as_expression()?, depth + 1)?,
@@ -2864,7 +2887,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::Identifier(reference) => {
                 let name = reference.name.as_str();
-                match self.lookup(name) {
+                match self.bound(reference) {
                     None if name == "undefined" => vec!["undefined".to_string()],
                     None => return None,
                     Some(id) => self.trace_binding(id, depth + 1)?,
@@ -2962,10 +2985,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 .last()
                 .is_some_and(|last| self.numeric(last, depth + 1)),
             Expression::Identifier(reference) => {
-                let Some(binding) = self
-                    .lookup(reference.name.as_str())
-                    .and_then(|id| self.binding(id))
-                else {
+                let Some(binding) = self.bound(reference).and_then(|id| self.binding(id)) else {
                     return false;
                 };
                 if binding.opaque || !matches!(binding.kind, Kind::Const | Kind::Let | Kind::Var) {
