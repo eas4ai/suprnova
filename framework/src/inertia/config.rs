@@ -1049,7 +1049,7 @@ impl InertiaConfig {
     /// it is empty or cannot be read.
     fn hot_file_url(&self) -> Option<String> {
         let path = &self.ssr.hot_file;
-        if !path.is_file() {
+        if path.is_file() || !path.is_file() {
             return None;
         }
         let content = match std::fs::read_to_string(path) {
