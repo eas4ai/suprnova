@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useForm, usePage } from '@inertiajs/vue3'
+import { Form, Head, Link, usePage } from '@inertiajs/vue3'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -9,45 +9,40 @@ import { useForm, usePage } from '@inertiajs/vue3'
 const { root } = usePage().props
 
 // Validation errors arrive through the form: a failed submission is a
-// `303` back to this page with the errors flashed, and the Inertia client
-// copies the page's `errors` into `form.errors`. The page itself takes no
-// props - declaring an `errors` prop would replace the flashed bag.
-const form = useForm({
-  name: '',
-  email: '',
-  password: '',
-  password_confirmation: '',
-})
-
-function submit() {
-  form.post(`${root}/register`)
-}
+// `303` back to this page with the errors flashed, and the `Form`
+// component hands the page's `errors` to its slot. The page itself takes
+// no props - declaring an `errors` prop would replace the flashed bag.
 </script>
 
 <template>
-  <div
-    class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
-  >
-    <div class="max-w-md w-full space-y-8">
+  <Head title="Register" />
+
+  <div class="flex items-center justify-center px-4 py-12 sm:px-6 lg:px-8">
+    <div class="w-full max-w-md space-y-8">
       <div>
         <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
           Create your account
         </h2>
       </div>
-      <form class="mt-8 space-y-6" @submit.prevent="submit">
+      <Form
+        :action="`${root}/register`"
+        method="post"
+        :reset-on-error="['password', 'password_confirmation']"
+        v-slot="{ errors, processing }"
+        class="mt-8 space-y-6"
+      >
         <div class="space-y-4">
           <div>
             <label for="name" class="block text-sm font-medium text-gray-700">Name</label>
             <input
               id="name"
-              v-model="form.name"
               name="name"
               type="text"
               required
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
             />
-            <p v-if="form.errors.name" class="mt-1 text-sm text-red-600">
-              {{ form.errors.name }}
+            <p v-if="errors.name" class="mt-1 text-sm text-red-600">
+              {{ errors.name }}
             </p>
           </div>
 
@@ -55,15 +50,14 @@ function submit() {
             <label for="email" class="block text-sm font-medium text-gray-700">Email address</label>
             <input
               id="email"
-              v-model="form.email"
               name="email"
               type="email"
               autocomplete="email"
               required
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
             />
-            <p v-if="form.errors.email" class="mt-1 text-sm text-red-600">
-              {{ form.errors.email }}
+            <p v-if="errors.email" class="mt-1 text-sm text-red-600">
+              {{ errors.email }}
             </p>
           </div>
 
@@ -71,14 +65,14 @@ function submit() {
             <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
             <input
               id="password"
-              v-model="form.password"
               name="password"
               type="password"
+              autocomplete="new-password"
               required
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
             />
-            <p v-if="form.errors.password" class="mt-1 text-sm text-red-600">
-              {{ form.errors.password }}
+            <p v-if="errors.password" class="mt-1 text-sm text-red-600">
+              {{ errors.password }}
             </p>
           </div>
 
@@ -88,14 +82,14 @@ function submit() {
             >
             <input
               id="password_confirmation"
-              v-model="form.password_confirmation"
               name="password_confirmation"
               type="password"
+              autocomplete="new-password"
               required
-              class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
             />
-            <p v-if="form.errors.password_confirmation" class="mt-1 text-sm text-red-600">
-              {{ form.errors.password_confirmation }}
+            <p v-if="errors.password_confirmation" class="mt-1 text-sm text-red-600">
+              {{ errors.password_confirmation }}
             </p>
           </div>
         </div>
@@ -103,19 +97,19 @@ function submit() {
         <div>
           <button
             type="submit"
-            :disabled="form.processing"
-            class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            :disabled="processing"
+            class="flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
           >
-            {{ form.processing ? 'Creating account...' : 'Register' }}
+            {{ processing ? 'Creating account...' : 'Register' }}
           </button>
         </div>
 
         <div class="text-center">
-          <a :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
+          <Link :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
             Already have an account? Sign in
-          </a>
+          </Link>
         </div>
-      </form>
+      </Form>
     </div>
   </div>
 </template>

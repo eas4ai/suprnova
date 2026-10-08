@@ -327,23 +327,6 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The project's display title, from its directory name: `my-shop` and
-/// `my_shop` both become `My Shop`. The scaffold names the application with
-/// it in `bootstrap.rs`'s default title and in the kits' tab titles.
-pub(crate) fn to_title_case(s: &str) -> String {
-    s.replace(['-', '_'], " ")
-        .split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn create_api_project(
     project_name: &str,
     package_name: &str,
@@ -421,8 +404,6 @@ pub(crate) fn create_project(
     fs::create_dir_all(project_path.join("src/live"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/models"))
-        .map_err(|e| format!("Failed to create directories: {}", e))?;
-    fs::create_dir_all(project_path.join("src/props"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/migrations"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
@@ -560,20 +541,6 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/controllers/password_reset.rs: {}", e))?;
 
-    // Write src/controllers/notes.rs
-    fs::write(
-        project_path.join("src/controllers/notes.rs"),
-        templates::notes_controller(),
-    )
-    .map_err(|e| format!("Failed to write src/controllers/notes.rs: {}", e))?;
-
-    // Write src/controllers/profile.rs
-    fs::write(
-        project_path.join("src/controllers/profile.rs"),
-        templates::profile_controller(),
-    )
-    .map_err(|e| format!("Failed to write src/controllers/profile.rs: {}", e))?;
-
     // Write src/config/mod.rs
     fs::write(
         project_path.join("src/config/mod.rs"),
@@ -617,7 +584,7 @@ pub(crate) fn create_project(
     .map_err(|e| format!("Failed to write src/middleware/authenticate.rs: {}", e))?;
 
     // Write src/bootstrap.rs, titled after the project
-    let title = to_title_case(project_name);
+    let title = templates::project_title(project_name);
     fs::write(
         project_path.join("src/bootstrap.rs"),
         templates::bootstrap(frontend, &title),
@@ -660,30 +627,6 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/models/user.rs: {}", e))?;
 
-    // Write src/models/note.rs
-    fs::write(
-        project_path.join("src/models/note.rs"),
-        templates::note_model(),
-    )
-    .map_err(|e| format!("Failed to write src/models/note.rs: {}", e))?;
-
-    // Write src/props/mod.rs and src/props/flash.rs
-    fs::write(
-        project_path.join("src/props/mod.rs"),
-        templates::props_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/props/mod.rs: {}", e))?;
-    fs::write(
-        project_path.join("src/props/flash.rs"),
-        templates::flash_props(),
-    )
-    .map_err(|e| format!("Failed to write src/props/flash.rs: {}", e))?;
-    fs::write(
-        project_path.join("src/props/shared.rs"),
-        templates::shared_props(),
-    )
-    .map_err(|e| format!("Failed to write src/props/shared.rs: {}", e))?;
-
     // Write src/migrations/mod.rs
     fs::write(
         project_path.join("src/migrations/mod.rs"),
@@ -725,12 +668,6 @@ pub(crate) fn create_project(
             e
         )
     })?;
-
-    fs::write(
-        project_path.join("src/migrations/m20240101_000005_create_notes_table.rs"),
-        templates::create_notes_migration(),
-    )
-    .map_err(|e| format!("Failed to write create_notes_table migration: {}", e))?;
 
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate

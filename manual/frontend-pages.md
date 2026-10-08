@@ -238,19 +238,25 @@ title.
 ### Vue 3.5
 
 `<script setup lang="ts">` with `defineProps`. Props are accessed directly
-in the template:
+in the template. `<Head>` sets the tab title, and the entry's `title`
+callback appends the application's name, so a project scaffolded as
+`my-app` shows `Welcome - My App`:
 
 ```vue
 <!-- frontend/src/pages/Home.vue -->
 <script setup lang="ts">
+import { Head } from '@inertiajs/vue3'
 import type { HomeProps } from '../types/inertia-props'
+import { t } from '../lib/lang'
 
 defineProps<HomeProps>()
 </script>
 
 <template>
+  <Head title="Welcome" />
+
   <div class="font-sans p-8 max-w-xl mx-auto">
-    <h1 class="text-3xl font-bold">{{ title }}</h1>
+    <h1 class="text-3xl font-bold">{{ t('welcome', { app: title }) }}</h1>
     <p class="mt-2">{{ message }}</p>
   </div>
 </template>
@@ -338,16 +344,64 @@ second argument, so `root` reaches the first render too.
 
 ### Vue 3.5
 
+The Vue kit reaches every application route through `Link`. Each URL starts
+from `root`, the public root the server shares with every page, so one build
+runs at `/` and under a path prefix. The account links read the signed-in
+user the server shares as `auth.user`. The sign-out is a `Link` that posts,
+rendered as a button. A posting link keeps the page's state by default, so
+it passes `:preserve-state="false"`, and the layout props the page set do not
+follow the visitor to the sign-in page:
+
 ```vue
+<!-- frontend/src/components/AccountLinks.vue, without its classes -->
 <script setup lang="ts">
-import { Link, router } from '@inertiajs/vue3'
+import { computed } from 'vue'
+import { Link, usePage } from '@inertiajs/vue3'
+
+const page = usePage()
+const { root } = page.props
+const user = computed(() => page.props.auth.user)
 </script>
 
 <template>
-  <Link href="/posts">All posts</Link>
-  <Link href="/posts/42" method="delete" as="button">Delete</Link>
-  <button @click="router.visit('/posts')">Visit programmatically</button>
+  <template v-if="user">
+    <span>{{ user.name }}</span>
+    <Link :href="`${root}/logout`" method="post" as="button" :preserve-state="false">
+      Sign out
+    </Link>
+  </template>
+  <template v-else>
+    <Link :href="`${root}/login`">Sign in</Link>
+    <Link :href="`${root}/register`">Register</Link>
+  </template>
 </template>
+```
+
+A row of `Notes/Index.vue` prefetches its note on hover and opens it as an
+instant visit: `component` and `page-props` let the client render
+`Notes/Show` from the row at once, and the server's answer replaces it when
+it arrives. `page-props` takes the function form, which keeps the shared
+props, `root` among them, on that first render; the object form would drop
+them until the server answers. The search box navigates programmatically,
+keeping the page's state and starting the infinite list over:
+
+```vue
+<Link
+  :href="`${root}/notes/${note.id}`"
+  prefetch
+  component="Notes/Show"
+  :page-props="(_props, shared) => ({ ...shared, note })"
+>
+  {{ note.title }}
+</Link>
+```
+
+```ts
+router.get(
+  `${root}/notes`,
+  { search: unref(filters).search },
+  { preserveState: true, replace: true, only: ['notes', 'search'], reset: ['notes'] },
+)
 ```
 
 The `router` object also exposes `router.post(url, data)`,
@@ -442,33 +496,79 @@ sign-in page does for its `remember` checkbox:
 
 ### Vue 3.5
 
+The Vue kit submits every form through the `<Form>` component. It reads the
+fields by their `name`, sends them to `action`, and hands its slot the
+`errors` the server answered with and a `processing` flag. The note form in
+`Notes/Index.vue`, without its classes:
+
 ```vue
-<!-- frontend/src/pages/Posts/Create.vue -->
+<!-- frontend/src/pages/Notes/Index.vue (the note form) -->
 <script setup lang="ts">
-import { useForm } from '@inertiajs/vue3'
+import { Form, usePage } from '@inertiajs/vue3'
 
-const form = useForm({
-  title: '',
-  content: '',
-})
+const { root } = usePage().props
+</script>
 
-function submit() {
-  form.post('/posts')
+<template>
+  <Form
+    :action="`${root}/notes`"
+    method="post"
+    :options="{ preserveState: 'errors' }"
+    v-slot="{ errors, processing }"
+  >
+    <input id="title" name="title" type="text" required maxlength="255" />
+    <p v-if="errors.title">{{ errors.title }}</p>
+
+    <textarea id="body" name="body" rows="4" maxlength="10000" />
+    <p v-if="errors.body">{{ errors.body }}</p>
+
+    <button type="submit" :disabled="processing">
+      {{ processing ? 'Saving...' : 'Save note' }}
+    </button>
+  </Form>
+</template>
+```
+
+`preserveState: 'errors'` keeps the page as it is when the server answers
+with validation errors, and remounts it after a saved note, so the list
+starts over from the newest note and the fields are empty again.
+
+`<Form>` sends JSON, and a checked checkbox is the string `"on"` in its data.
+The sign-in page sends `remember` as the boolean the server reads:
+
+```vue
+<script setup lang="ts">
+import type { FormDataConvertible } from '@inertiajs/core'
+
+function withRememberFlag(data: Record<string, FormDataConvertible>) {
+  return { ...data, remember: 'remember' in data }
 }
 </script>
 
 <template>
-  <form @submit.prevent="submit" class="space-y-4">
-    <input type="text" v-model="form.title" placeholder="Title" />
-    <p v-if="form.errors.title" class="text-red-500">{{ form.errors.title }}</p>
-
-    <textarea v-model="form.content" rows="6" />
-
-    <button type="submit" :disabled="form.processing">
-      {{ form.processing ? 'Saving…' : 'Create' }}
-    </button>
-  </form>
+  <Form :action="`${root}/login`" method="post" :transform="withRememberFlag" v-slot="{ errors, processing }">
+    <!-- email, password, and <input name="remember" type="checkbox" /> -->
+  </Form>
 </template>
+```
+
+For a JSON endpoint outside page visits, the dashboard's display-name form
+uses `useHttp`. `optimistic` shows the new name before the server answers; a
+`422` puts the old name back and fills `errors.name`. A saved name reloads the
+shared `auth` prop, so the layout shows it too:
+
+```ts
+const page = usePage()
+const user = computed(() => page.props.auth.user)
+
+const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: user.value?.name ?? '' })
+const draft = ref(user.value?.name ?? '')
+
+function saveName() {
+  return profile.optimistic(() => ({ name: draft.value })).post(`${root}/profile/name`, {
+    onSuccess: () => router.reload({ only: ['auth'] }),
+  })
+}
 ```
 
 ### Form callbacks
@@ -730,24 +830,59 @@ is gone on the next visit.
 
 ### Vue 3.5
 
+The Vue kit applies its two layouts through `createInertiaApp`'s `layout`
+option, so no page imports one. Pages under `auth/` get the guest layout and
+every other page gets the application layout:
+
+```ts
+// frontend/src/main.ts
+import AppLayout from './layouts/AppLayout.vue'
+import GuestLayout from './layouts/GuestLayout.vue'
+
+createInertiaApp({
+  pages: './pages',
+  layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),
+  // title, serverHead, nonce and setup follow
+})
+```
+
+A layout given this way stays mounted across visits between two pages that
+share it; only the page inside it changes. It reads the signed-in user from
+the shared `auth.user`, so a guest on the home page sees the sign-in links
+rather than a sign-out, and it receives the props a page sets with
+`setLayoutProps`:
+
 ```vue
-<!-- frontend/src/layouts/AppLayout.vue -->
+<!-- frontend/src/layouts/AppLayout.vue (structure) -->
 <script setup lang="ts">
-import { Link } from '@inertiajs/vue3'
+import AccountLinks from '../components/AccountLinks.vue'
+import FlashToast from '../components/FlashToast.vue'
+
+defineProps<{
+  heading?: string
+}>()
 </script>
 
 <template>
   <div class="min-h-screen bg-gray-100">
-    <nav class="bg-white shadow p-4">
-      <Link href="/">Home</Link>
-      <Link href="/posts">Posts</Link>
-    </nav>
-    <main class="max-w-6xl mx-auto py-8">
+    <!-- the Dashboard and Notes Links for a signed-in user, then: -->
+    <AccountLinks />
+    <FlashToast />
+    <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <h1 v-if="heading" class="mb-6 text-2xl font-semibold text-gray-900">{{ heading }}</h1>
       <slot />
     </main>
   </div>
 </template>
 ```
+
+```ts
+// frontend/src/pages/Dashboard.vue
+setLayoutProps({ heading: 'Dashboard' })
+```
+
+The client clears the layout props on every visit that does not preserve
+state, so the next page shows no heading unless it sets one.
 
 ## Why Suprnova diverges
 

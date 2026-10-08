@@ -192,6 +192,23 @@ guest layout (the `auth/` pages) or an application layout (the rest). Both
 show the flash toast and, from the shared `auth` prop, the signed-in
 user's name and a sign-out link or the sign-in and register links. See [Page Components](frontend-pages.md) for the
 code.
+The Vue kit (`--frontend vue`) runs on Inertia 3.8 and its Vite plugin, and
+each page shows part of the client at work:
+
+- `Dashboard.vue` loads the note counts as a deferred prop with `Deferred`,
+  polls them with `usePoll`, loads the recent notes with `WhenVisible`, and
+  saves the display name through `useHttp` with an optimistic update.
+- `Notes/Index.vue` creates a note with `Form`, remembers its search with
+  `useRemember`, scrolls the signed-in user's notes with `InfiniteScroll`, and
+  opens a note as an instant visit from a prefetching `Link`.
+- `Notes/Show.vue` shows one of the signed-in user's notes.
+- The five pages under `auth/` submit through `Form`.
+- `layouts/AppLayout.vue` and `layouts/GuestLayout.vue`, applied through the
+  `layout` option, carry the navigation, the flash toast from
+  `components/FlashToast.vue`, and the account links from
+  `components/AccountLinks.vue`: the signed-in user's name and a sign-out
+  button, or the sign-in and register links for a guest. Every page titles
+  its tab with `Head`.
 
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and

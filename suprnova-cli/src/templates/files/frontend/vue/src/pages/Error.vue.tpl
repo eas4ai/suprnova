@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { usePage } from '@inertiajs/vue3'
+import { Head, Link, usePage } from '@inertiajs/vue3'
 import { t } from '../lib/lang'
 
 // The public root the server shares with every page (`RootShare`): empty
@@ -31,7 +31,9 @@ defineProps<ErrorProps>()
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+  <Head :title="String(status)" />
+
+  <div class="flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
     <div class="max-w-md w-full text-center space-y-4">
       <h1 class="text-6xl font-extrabold text-gray-900">{{ status }}</h1>
       <p class="text-lg text-gray-700">{{ message }}</p>
@@ -40,7 +42,7 @@ defineProps<ErrorProps>()
         <code class="bg-gray-100 px-1 rounded">{{ request_id }}</code>
       </p>
       <p>
-        <a :href="`${root}/`" class="text-indigo-600 hover:text-indigo-500">{{ t('error-go-home') }}</a>
+        <Link :href="`${root}/`" class="text-indigo-600 hover:text-indigo-500">{{ t('error-go-home') }}</Link>
       </p>
     </div>
   </div>
