@@ -292,3 +292,69 @@ async fn indt_an_entry_request_is_never_recorded() {
     );
     let _: Value = list.json();
 }
+
+#[tokio::test]
+async fn indt_with_the_stack_on_route_groups_the_endpoints_still_answer() {
+    // `Inertia::install` registers process-wide middleware and retains its
+    // configuration, so this runs alone in a child process.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "indt_with_the_stack_on_route_groups_the_endpoints_still_answer",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = app_env("local").await;
+    let dir = tempfile::tempdir().unwrap();
+    let before = suprnova::middleware::global_middleware_count();
+    Inertia::install(&inertia(devtools(dir.path())).register_globally(false))
+        .expect("dev-mode install needs no manifest");
+    assert_eq!(
+        suprnova::middleware::global_middleware_count(),
+        before + 1,
+        "one global middleware, for the endpoints"
+    );
+
+    let router: Router = Router::new()
+        .group("/app", |r| {
+            r.get("/page", |req: Request| async move {
+                InertiaResponse::new("Home")
+                    .resolve(&req)
+                    .await
+                    .map_err(HttpResponse::from)
+            })
+        })
+        .middleware_named("inertia")
+        .into();
+    let router: Router = router
+        .group("/api", |r| {
+            r.get("/ping", |_req: Request| async {
+                suprnova::http::text("pong")
+            })
+        })
+        .into();
+    let client = TestClient::new(router, MiddlewareRegistry::from_global());
+
+    let page = client.get("/app/page").inertia().send().await;
+    page.assert_ok();
+    let id = page
+        .header("x-inertia-devtools-id")
+        .expect("the group's stack records its routes")
+        .to_string();
+    let api = client.get("/api/ping").send().await;
+    api.assert_ok().assert_see("pong");
+    assert_eq!(
+        api.header("x-inertia-devtools-id"),
+        None,
+        "a route outside the groups is not recorded"
+    );
+
+    let found = client
+        .get(format!("/_inertia/devtools/entries/{id}"))
+        .send()
+        .await;
+    found.assert_ok();
+    assert_eq!(found.json()["__meta"]["id"], id.as_str());
+    assert_eq!(entry_ids(dir.path()), vec![id]);
+}
