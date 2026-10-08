@@ -206,6 +206,10 @@ inventory::collect!(GenericHandlerRecord);
 pub(crate) struct HandlerRef {
     record: Option<&'static HandlerRecord>,
     unrecorded: UnrecordedHandler,
+    /// The handler's type name, its path for a function: what Inertia
+    /// DevTools shows as the route's action, Laravel's
+    /// `Route::getActionName`.
+    name: Option<&'static str>,
 }
 
 impl HandlerRef {
@@ -213,11 +217,17 @@ impl HandlerRef {
     pub(crate) const BINDS_NOTHING: Self = Self {
         record: None,
         unrecorded: UnrecordedHandler::BindsNothing,
+        name: None,
     };
 
     /// The handler's `#[handler]` record, when it has one.
     pub(crate) fn record(&self) -> Option<&'static HandlerRecord> {
         self.record
+    }
+
+    /// The handler's type name, when the router saw its type.
+    pub(crate) fn name(&self) -> Option<&'static str> {
+        self.name
     }
 }
 
@@ -243,14 +253,17 @@ enum UnrecordedHandler {
 
 /// What the router knows about the handler `H`.
 pub(crate) fn handler_ref<H: 'static>() -> HandlerRef {
+    let name = std::any::type_name::<H>();
     match record_of::<H>() {
         Some(record) => HandlerRef {
             record: Some(record),
             unrecorded: UnrecordedHandler::BindsNothing,
+            name: Some(name),
         },
         None => HandlerRef {
             record: None,
-            unrecorded: unrecorded_handler(std::any::type_name::<H>()),
+            unrecorded: unrecorded_handler(name),
+            name: Some(name),
         },
     }
 }
@@ -1315,6 +1328,13 @@ impl RouterBindings {
             .entry((method, pattern.to_owned()))
             .or_default()
             .handler = handler;
+    }
+
+    /// The type name of the handler of the route `(method, pattern)`.
+    pub(crate) fn handler_name(&self, method: &Method, pattern: &str) -> Option<&'static str> {
+        self.routes
+            .get(&(method.clone(), pattern.to_owned()))
+            .and_then(|entry| entry.handler.name())
     }
 
     /// Record the fallback route's handler.

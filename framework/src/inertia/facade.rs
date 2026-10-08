@@ -14,8 +14,9 @@ use super::response::{IntoInertiaData, reflash_session_values_after_eager_error}
 use super::runtime::SsrCondition;
 use super::ssr::SsrRequest;
 use super::{
-    Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaResponse,
-    InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
+    DevToolsMiddleware, Inertia303Middleware, InertiaErrorPageMiddleware,
+    InertiaHeadersMiddleware, InertiaResponse, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -45,6 +46,7 @@ impl Inertia {
     /// The metadata page-name comes from the paginator itself:
     /// `"page"` for `LengthAwarePaginator`, `"cursor"` for
     /// `CursorPaginator`.
+    #[track_caller]
     pub fn paginate<T>(
         component: &'static str,
         key: &'static str,
@@ -62,6 +64,7 @@ impl Inertia {
     /// Lazy fields registered via `#[data(lazy)]` / `#[data(auto_lazy)]`
     /// resolve against the request's `?include=` set; the per-DTO allowlist
     /// enforces default-deny - disallowed includes return 400.
+    #[track_caller]
     pub fn data<T>(component: &'static str, dto: T) -> InertiaResponse
     where
         T: IntoInertiaData,
@@ -78,6 +81,7 @@ impl Inertia {
     /// when building an Inertia response off that path (queue workers,
     /// scheduled tasks, CLI) where no panic net applies, or whenever you
     /// want to handle the serialization failure explicitly.
+    #[track_caller]
     pub fn try_data<T>(component: &'static str, dto: T) -> Result<InertiaResponse, FrameworkError>
     where
         T: IntoInertiaData,
@@ -614,7 +618,12 @@ impl Inertia {
 
     /// Install the standard Inertia protocol middleware globally.
     ///
-    /// Registers five global middlewares in order:
+    /// When Inertia DevTools is enabled ([`InertiaConfig::devtools`], on
+    /// by default in the `local` environment only), the
+    /// [`DevToolsMiddleware`](crate::DevToolsMiddleware) that records each
+    /// request for the browser extension and answers its entry endpoints
+    /// is registered first, outermost of the Inertia layer. Then it
+    /// registers five global middlewares in order:
     /// 1. [`InertiaHeadersMiddleware`] - sets `Vary: X-Inertia` on every
     ///    response; on an Inertia visit it turns an empty `200` into a
     ///    redirect back (`302`, `303` for `PUT`, `PATCH` and `DELETE`), a
@@ -773,6 +782,8 @@ impl Inertia {
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
+        let devtools = config.devtools_config();
+        let devtools_enabled = devtools.is_enabled();
         if !config.register_globally {
             // The stack for route groups instead: named, so a group takes
             // it with `middleware_named("inertia")`, and a route outside
@@ -780,6 +791,12 @@ impl Inertia {
             let stack = InertiaMiddleware::new(config);
             crate::middleware::register_middleware_alias(MIDDLEWARE_NAME, move || stack.clone());
             return Ok(());
+        }
+        // Outermost of the Inertia layer, inside the session registered
+        // before this call: an entry sees the response every Inertia
+        // middleware below shaped.
+        if devtools_enabled {
+            register_global_middleware(DevToolsMiddleware::new(devtools));
         }
         register_global_middleware(InertiaHeadersMiddleware::from_config(config));
         // The middleware reads the version per request: the `version` hook's
@@ -915,10 +932,14 @@ mod tests {
         // here can land inside that window. Dev mode never consults the
         // manifest, so install succeeds without a Vite build in the test
         // process's working directory.
+        // DevTools off: it is on by default in the `local` environment, an
+        // unset `APP_ENV` included, and adds a sixth middleware this test
+        // is not about.
         Inertia::install(
             &InertiaConfig::new()
                 .version("test-version")
-                .development(true),
+                .development(true)
+                .devtools(super::super::DevToolsConfig::new().enabled(false)),
         )
         .expect("dev-mode install must not require a manifest");
         let after = get_global_middleware().len();
@@ -961,6 +982,7 @@ mod tests {
             &InertiaConfig::new()
                 .version("test-version")
                 .development(true)
+                .devtools(super::super::DevToolsConfig::new().enabled(false))
                 .error_page("Error"),
         )
         .expect("dev-mode install must not require a manifest");

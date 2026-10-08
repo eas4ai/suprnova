@@ -157,7 +157,7 @@ fn generate_ulid_lowercase() -> String {
 /// overflow a 130-bit space). Matches the canonical ULID spec and
 /// every mainstream implementation (`ulid-go`, `ulid.js`,
 /// Laravel `Str::ulid()`).
-fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
+pub(crate) fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
     let mut out = String::with_capacity(26);
     out.push(CROCKFORD[((buf[0] & 0xE0) >> 5) as usize] as char);
     out.push(CROCKFORD[(buf[0] & 0x1F) as usize] as char);
@@ -195,7 +195,7 @@ fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
 /// (case-insensitive - Laravel emits lowercase but lib readers may
 /// accept either). Twenty-six characters carry 130 bits and a ULID is
 /// 128, so the first character carries three bits and stops at `7`.
-fn is_valid_ulid(value: &str) -> bool {
+pub(crate) fn is_valid_ulid(value: &str) -> bool {
     if value.len() != 26 {
         return false;
     }

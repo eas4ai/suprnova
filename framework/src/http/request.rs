@@ -117,6 +117,11 @@ pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 /// would grow every frame of a deep middleware stack. The mutex makes the
 /// cell `Sync` and `Clone`, which the extension map requires; the value is
 /// taken out once.
+/// The type name of the handler of the route the request matched, kept in
+/// the request's extensions.
+#[derive(Clone, Copy)]
+struct RouteAction(&'static str);
+
 #[derive(Clone)]
 struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
@@ -1257,6 +1262,23 @@ impl Request {
         let q = self.query().unwrap_or("");
         crate::http::input::parse_form_input(q.as_bytes())
             .map_err(|error| error.into_framework_error("query parse"))
+    }
+
+    /// Record the type name of the handler of the route the request
+    /// matched. Called by the server with the matched route's pattern.
+    pub(crate) fn set_route_action(&mut self, action: &'static str) {
+        self.parts.extensions.insert(RouteAction(action));
+    }
+
+    /// The type name of the handler of the route the request matched, its
+    /// path for a function (`app::controllers::users::index`): Laravel's
+    /// `Route::getActionName`, which Inertia DevTools shows as the route's
+    /// action. `None` for an unmatched request.
+    pub(crate) fn route_action(&self) -> Option<&'static str> {
+        self.parts
+            .extensions
+            .get::<RouteAction>()
+            .map(|RouteAction(action)| *action)
     }
 
     /// Returns the matched route pattern (e.g. `/users/{id}`) when the

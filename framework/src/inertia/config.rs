@@ -438,6 +438,11 @@ pub struct InertiaConfig {
     /// The application's replacements for the middleware's decisions; see
     /// [`hooks`](Self::hooks).
     pub(crate) hooks: Option<Arc<dyn super::hooks::InertiaMiddlewareHooks>>,
+    /// The Inertia DevTools settings, or `None` for the defaults, read
+    /// when the middleware stack is built rather than on every response
+    /// that starts from this configuration. Set with
+    /// [`devtools`](Self::devtools).
+    pub(crate) devtools: Option<Arc<super::devtools::DevToolsConfig>>,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -749,6 +754,7 @@ impl Default for InertiaConfig {
             testing_ensure_pages_exist: true,
             register_globally: true,
             hooks: None,
+            devtools: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
             root_template: None,
@@ -1193,6 +1199,32 @@ impl InertiaConfig {
     pub fn hooks(mut self, hooks: impl super::hooks::InertiaMiddlewareHooks) -> Self {
         self.hooks = Some(Arc::new(hooks));
         self
+    }
+
+    /// Set the Inertia DevTools settings: whether requests are recorded
+    /// for the browser extension, where entries are stored, and what is
+    /// redacted. See [`DevToolsConfig`](crate::DevToolsConfig); without
+    /// this call the defaults apply, which record in the `local`
+    /// environment only.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{DevToolsConfig, InertiaConfig};
+    ///
+    /// let cfg = InertiaConfig::new().devtools(DevToolsConfig::new().enabled(false));
+    /// # let _ = cfg;
+    /// ```
+    pub fn devtools(mut self, config: super::devtools::DevToolsConfig) -> Self {
+        self.devtools = Some(Arc::new(config));
+        self
+    }
+
+    /// The Inertia DevTools settings this configuration carries, the
+    /// defaults when none were set.
+    pub(crate) fn devtools_config(&self) -> super::devtools::DevToolsConfig {
+        match &self.devtools {
+            Some(config) => config.as_ref().clone(),
+            None => super::devtools::DevToolsConfig::default(),
+        }
     }
 
     /// Choose whether [`crate::Inertia::install`] registers the stack on

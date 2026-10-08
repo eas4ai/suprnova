@@ -344,6 +344,9 @@ pub use inertia::{
     MergePaths, OnceUntil, PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty,
     RenderContext, SharedOnceProp,
 };
+// The Inertia DevTools server support (PAR-071 to PAR-075), on its own line
+// so the list above stays stable.
+pub use inertia::{DevToolsConfig, DevToolsMiddleware};
 pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{
