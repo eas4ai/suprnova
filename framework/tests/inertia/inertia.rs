@@ -2101,7 +2101,10 @@ async fn encrypt_history_config_default_applies_when_no_override() {
 
 #[tokio::test]
 async fn inertia_location_returns_409_with_x_inertia_location() {
-    let resp = InertiaResponse::location("https://example.com/external");
+    // The 409 form is the answer to an Inertia visit; outside a dispatched
+    // request no visit is in scope, so the request is given explicitly.
+    let req = MockReq::new("/leave").inertia();
+    let resp = InertiaResponse::location_for(&req, "https://example.com/external");
     let hyper_resp = resp.into_hyper();
     assert_eq!(hyper_resp.status(), 409);
     assert_eq!(
@@ -2172,9 +2175,11 @@ async fn inertia_redirect_returns_409_with_x_inertia_redirect() {
 
 #[tokio::test]
 async fn inertia_redirect_distinct_from_location() {
-    // Sanity check: redirect() and location() produce different shapes.
+    // Sanity check: redirect() and location() produce different shapes
+    // for an Inertia visit.
+    let req = MockReq::new("/foo").inertia();
     let redirect = InertiaResponse::redirect("/foo").into_hyper();
-    let location = InertiaResponse::location("/foo").into_hyper();
+    let location = InertiaResponse::location_for(&req, "/foo").into_hyper();
 
     assert!(redirect.headers().get("X-Inertia-Redirect").is_some());
     assert!(redirect.headers().get("X-Inertia-Location").is_none());
