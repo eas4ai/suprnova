@@ -56,14 +56,15 @@ fn golden_rgba(alpha: bool) -> Vec<u8> {
 }
 
 fn golden_png(format: oxideav_png::PngPixelFormat, channels: usize, data: Vec<u8>) -> Vec<u8> {
-    oxideav_png::encode_png_image(&oxideav_png::PngImage {
-        width: GOLDEN_WIDTH,
-        height: GOLDEN_HEIGHT,
-        pixel_format: format,
-        stride: GOLDEN_WIDTH as usize * channels,
-        data,
-        palette: Vec::new(),
-    })
+    oxideav_png::encode_plane(
+        GOLDEN_WIDTH,
+        GOLDEN_HEIGHT,
+        format,
+        GOLDEN_WIDTH as usize * channels,
+        &data,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the golden PNG encodes")
 }
 
@@ -81,17 +82,19 @@ fn golden_sources() -> Vec<(&'static str, Vec<u8>, bool)> {
         .chunks(4)
         .flat_map(|pixel| [pixel[0], pixel[3]])
         .collect();
-    let (bmp, _) = oxideav_bmp::encode_bmp(&oxideav_bmp::BmpImage {
-        width: GOLDEN_WIDTH,
-        height: GOLDEN_HEIGHT,
-        pixel_format: oxideav_bmp::BmpPixelFormat::Rgba,
-        planes: vec![oxideav_bmp::BmpPlane {
-            stride: GOLDEN_WIDTH as usize * 4,
-            data: opaque.clone(),
-        }],
-        palette: None,
-        pts: None,
-    })
+    let bmp = oxideav_bmp::encode(
+        &oxideav_bmp::BmpImage::new(
+            GOLDEN_WIDTH,
+            GOLDEN_HEIGHT,
+            oxideav_bmp::PixelFormat::Rgba,
+            vec![oxideav_bmp::Plane::new(
+                GOLDEN_WIDTH as usize * 4,
+                opaque.clone(),
+            )],
+        )
+        .expect("the golden BMP image"),
+        &oxideav_bmp::EncodeOptions::default(),
+    )
     .expect("the golden BMP encodes");
     use oxideav_png::PngPixelFormat as P;
     vec![
@@ -155,6 +158,8 @@ fn golden_sources() -> Vec<(&'static str, Vec<u8>, bool)> {
             .to_vec(),
             true,
         ),
+        // Its outputs take their digests from the lossy-source fixture:
+        // MEM-003 excepts output decoded from a lossy WebP.
         (
             "webp-lossy-alpha",
             include_bytes!(concat!(
@@ -318,22 +323,87 @@ fn mem_003_outputs() -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// The label prefix of the one source that is a lossy WebP, whose outputs
+/// MEM-003 excepts.
+const LOSSY_WEBP_SOURCE: &str = "webp-lossy-alpha/";
+
+/// Whether `bytes` is a lossless WebP: a RIFF/WEBP file whose image is a
+/// `VP8L` bitstream and carries no lossy `VP8 ` one.
+fn is_lossless_webp(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"RIFF") || bytes.get(8..12) != Some(&b"WEBP"[..]) {
+        return false;
+    }
+    let (mut lossless, mut lossy) = (false, false);
+    let mut at = 12;
+    while let Some(head) = bytes.get(at..at + 8) {
+        lossless |= &head[..4] == b"VP8L";
+        lossy |= &head[..4] == b"VP8 ";
+        let size = u32::from_le_bytes(head[4..].try_into().expect("four bytes")) as usize;
+        at += 8 + size + (size & 1);
+    }
+    lossless && !lossy
+}
+
 /// MEM-003: the built-in driver's output, size and average colour for
 /// every case are byte for byte what the code before the commitment
 /// produced.
+///
+/// Lossless WebP is MEM-003's exception: the eas4ai/oxideav-webp encoder
+/// chooses its transforms in one pass, and writes the simple lossless
+/// layout where oxideav-webp 0.2.3 put a `VP8X` header in front of an
+/// image with alpha. `fixtures/image-outputs-lossless-webp-eas4ai-65a9c8a.txt`
+/// holds those outputs as the fork at 65a9c8a writes them, and only a
+/// lossless WebP may take its digest from there.
+///
+/// Output decoded from a lossy WebP source is MEM-003's exception too:
+/// oxideav-webp 0.3 corrected the lossy decoder's colour conversion to
+/// within one level of libwebp's, which moves 11,006 of the 11,008 pixels
+/// of the one lossy source by up to 16 levels.
+/// `fixtures/image-outputs-lossy-webp-source-eas4ai-65a9c8a.txt` holds that
+/// source's outputs as the fork at 65a9c8a decodes it, and only an output
+/// of that source may take its digest from there. They differ from
+/// c04577b96's in pixel values only: the same dimensions and chunks, and
+/// the PNG, BMP and average-colour outputs of the pixels oxideav-webp 0.2.3
+/// decoded are c04577b96's bytes.
 #[tokio::test]
 async fn mem_audit_image_output_is_byte_for_byte_what_it_was() {
     let _lock = exclusive().await;
-    let golden: std::collections::BTreeMap<&str, &str> =
-        include_str!("fixtures/image-outputs-c04577b96.txt")
-            .lines()
+    let digests = |file: &'static str| -> std::collections::BTreeMap<&'static str, &'static str> {
+        file.lines()
+            .filter(|line| !line.starts_with('#'))
             .filter_map(|line| line.split_once(' '))
-            .collect();
+            .collect()
+    };
+    let golden = digests(include_str!("fixtures/image-outputs-c04577b96.txt"));
+    let lossless = digests(include_str!(
+        "fixtures/image-outputs-lossless-webp-eas4ai-65a9c8a.txt"
+    ));
+    let lossy_source = digests(include_str!(
+        "fixtures/image-outputs-lossy-webp-source-eas4ai-65a9c8a.txt"
+    ));
+    assert!(
+        lossless.keys().all(|label| golden.contains_key(label)),
+        "every lossless WebP digest replaces one from c04577b96"
+    );
+    assert!(
+        lossy_source
+            .keys()
+            .all(|label| golden.contains_key(label) && label.starts_with(LOSSY_WEBP_SOURCE)),
+        "every lossy-source digest replaces one from c04577b96 for the lossy WebP source"
+    );
     let mut differ = Vec::new();
     let mut seen = 0;
     for (label, bytes) in mem_003_outputs() {
         let digest = hex::encode(Sha256::digest(&bytes));
-        match golden.get(label.as_str()) {
+        let expected = lossy_source
+            .get(label.as_str())
+            .or_else(|| {
+                is_lossless_webp(&bytes)
+                    .then(|| lossless.get(label.as_str()))
+                    .flatten()
+            })
+            .or_else(|| golden.get(label.as_str()));
+        match expected {
             Some(&before) if before == digest => {}
             Some(_) => differ.push(label),
             None => differ.push(format!("{label} (no digest from c04577b96)")),

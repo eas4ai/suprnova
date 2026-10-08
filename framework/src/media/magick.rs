@@ -56,7 +56,7 @@ use super::custom::CustomTransformation;
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
 use super::metadata::{self, ColourClass, IccData, Kept, SrgbConversion};
 use super::orientation::Orientation;
-use super::oxideav::OxideAvImageDriver;
+use super::oxideav::{OxideAvImageDriver, encode_png};
 use super::sniff;
 
 /// Default binary name. ImageMagick 7 only.
@@ -793,11 +793,9 @@ fn intermediate_args(keeps_exif: bool) -> Vec<String> {
 /// by its length: it is not inflated into a buffer or compressed again,
 /// and it is copied once, into the next PNG (MEM-003). The encoder writes
 /// the pixels alone, and the chunk and the EXIF are added after, as
-/// [`metadata::add`] adds them to any output: `oxideav_png` copies a
-/// profile into a chunk of its own and again to checksum it. Its API leaves
-/// no room in what it returns, so adding them moves the encoded pixels once
-/// into a buffer with that room; writing them through the encoder grew its
-/// buffer by doubling as well.
+/// [`metadata::add`] adds them to any output, into the room the encoder's
+/// buffer was given for them: the encoder would compress the profile again
+/// rather than carry the chunk as it stands.
 fn rust_stage(
     intermediate: &[u8],
     after: AfterStage,
@@ -870,26 +868,18 @@ fn rust_stage(
     if let Some(conversion) = profile.as_deref().and_then(SrgbConversion::from_profile) {
         conversion.convert_rgba(pixels.pixels_mut())?;
     }
-    let (width, height) = (pixels.width(), pixels.height());
-    let mut png = oxideav_png::encode_png_image(&oxideav_png::PngImage {
-        width,
-        height,
-        pixel_format: oxideav_png::PngPixelFormat::Rgba,
-        stride: width as usize * 4,
-        data: pixels.into_pixels(),
-        palette: Vec::new(),
-    })
-    .map_err(|e| {
-        FrameworkError::internal(format!("image encode failed between ImageMagick runs: {e}"))
-    })?;
     let additions = Kept {
         icc: carried.map(IccData::PngChunk),
         orientation,
         png_colour: &[],
     }
     .prepare(OutputFormat::Png)?;
+    let (width, height) = (pixels.width(), pixels.height());
+    let mut png =
+        encode_png(width, height, pixels.into_pixels(), additions.len()).map_err(|e| {
+            FrameworkError::internal(format!("image encode failed between ImageMagick runs: {e}"))
+        })?;
     if additions.len() > 0 {
-        png.reserve_exact(additions.len());
         metadata::add(&mut png, &additions)?;
     }
     Ok(png)

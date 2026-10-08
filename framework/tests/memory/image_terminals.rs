@@ -8,7 +8,7 @@
 use std::future::Future;
 
 use base64::Engine as _;
-use oxideav_png::{PngImage, PngPixelFormat};
+use oxideav_png::PngPixelFormat;
 use suprnova::{Image, ImageDriverKind};
 
 use crate::support::{Heap, exclusive};
@@ -21,14 +21,15 @@ const SIDE: u32 = 1024;
 /// A `SIDE` by `SIDE` PNG of one colour.
 fn source() -> bytes::Bytes {
     let stride = SIDE as usize * 3;
-    let png = oxideav_png::encode_png_image(&PngImage {
-        width: SIDE,
-        height: SIDE,
-        pixel_format: PngPixelFormat::Rgb24,
+    let png = oxideav_png::encode_plane(
+        SIDE,
+        SIDE,
+        PngPixelFormat::Rgb24,
         stride,
-        data: [0x20, 0x80, 0xE0].repeat(SIDE as usize * SIDE as usize),
-        palette: Vec::new(),
-    })
+        &[0x20, 0x80, 0xE0].repeat(SIDE as usize * SIDE as usize),
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the PNG encodes");
     bytes::Bytes::from(png)
 }

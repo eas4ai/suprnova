@@ -9,7 +9,7 @@
 //! install a process-global `ImageConfig` override.
 
 use oxideav_gif::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
-use oxideav_png::{PngEncoderOptions, PngImage, PngPixelFormat};
+use oxideav_png::PngPixelFormat;
 use suprnova::{Image, ImageConfig, OutputFormat};
 
 use crate::image_processing::ConfigGuard;
@@ -35,14 +35,15 @@ fn png_chunks(png: &[u8], kind: &[u8; 4]) -> Vec<Vec<u8>> {
 /// `height * (1 + width * 4)` bytes once inflated.
 fn png_declaring_one_pixel(width: u32, height: u32) -> Vec<u8> {
     let stride = width as usize * 4;
-    let large = oxideav_png::encode_png_image(&PngImage {
+    let large = oxideav_png::encode_plane(
         width,
         height,
-        pixel_format: PngPixelFormat::Rgba,
+        PngPixelFormat::Rgba,
         stride,
-        data: vec![0u8; stride * height as usize],
-        palette: Vec::new(),
-    })
+        &vec![0u8; stride * height as usize],
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the large image encodes");
     let idat = png_chunks(&large, b"IDAT").concat();
 
@@ -101,24 +102,15 @@ async fn interlaced_palette_and_sixteen_bit_pngs_still_decode() {
         for interlace in [false, true] {
             for (width, height) in [(1u32, 1u32), (3, 3), (13, 7), (9, 17)] {
                 let stride = width as usize * bytes_per_pixel;
-                let palette = if pixel_format == PngPixelFormat::Pal8 {
-                    vec![255, 0, 0]
-                } else {
-                    Vec::new()
-                };
-                let png = oxideav_png::encode_png_image_with_options(
-                    &PngImage {
-                        width,
-                        height,
-                        pixel_format,
-                        stride,
-                        data: vec![0u8; stride * height as usize],
-                        palette,
-                    },
-                    &PngEncoderOptions {
-                        interlace,
-                        ..PngEncoderOptions::default()
-                    },
+                let palette = oxideav_png::Palette::new(vec![[255, 0, 0, 255]]);
+                let png = oxideav_png::encode_plane(
+                    width,
+                    height,
+                    pixel_format,
+                    stride,
+                    &vec![0u8; stride * height as usize],
+                    (pixel_format == PngPixelFormat::Pal8).then_some(&palette),
+                    &oxideav_png::EncodeOptions::default().with_interlace(interlace),
                 )
                 .expect("the fixture encodes");
                 let dimensions = Image::from_bytes(png).dimensions().await.unwrap_or_else(|e| {
