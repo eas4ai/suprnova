@@ -652,8 +652,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   not send `X-Inertia` cannot follow, so an OAuth or SSO bounce started
   outside the SPA dead-ended on a blank page. Under the Inertia middleware it
   now answers an Inertia visit with the `409` and anything else with a `302`
-  + `Location`, or the `Redirect` it was given, as Laravel's does;
-  `location_for(&req, url)` stays for routes without the middleware (RF-16).
+  + `Location`, or the `Redirect` it was given, as Laravel's does, on every
+  route the server dispatches, the Inertia middleware installed or not;
+  `location_for(&req, url)` stays for code outside a dispatched request
+  (RF-16).
 
 ### Fixed
 
@@ -671,7 +673,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   part that carries a file and runs its validators, and a field that fails
   is named by its dotted path (`user.name`, `photos.1`). A multipart body
   stays under the form request's `max_body_bytes` (8 MiB by default) and
-  the multipart part ceiling (1,000 parts).
+  the multipart part ceiling (1,000 parts). A multipart body a middleware
+  read first, as a body-keyed rate limit does, is parsed from the buffer
+  where the reader answered `400` naming a framework bug.
 - **JPEGs from the built-in driver show the right colours everywhere.** The
   `oxideav` driver wrote RGB samples behind a JFIF header, so libjpeg-based
   decoders, ImageMagick and most browsers among them, showed the wrong
