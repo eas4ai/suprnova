@@ -4,7 +4,7 @@
 //! validation, and authorization.
 
 use super::Request;
-use super::body::{parse_form, parse_json};
+use super::body::{parse_form, parse_json, parse_multipart};
 use super::extract::FromRequest;
 use crate::error::{FrameworkError, ValidationErrors};
 use async_trait::async_trait;
@@ -14,7 +14,7 @@ use validator::Validate;
 /// Trait for validated form/JSON request data
 ///
 /// Implement this trait on request structs to enable automatic:
-/// - Body parsing (JSON or form-urlencoded based on Content-Type)
+/// - Body parsing (JSON, form-urlencoded or multipart based on Content-Type)
 /// - Validation using the `validator` crate
 /// - Authorization checks
 ///
@@ -159,6 +159,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     }
 
     /// Maximum request body size (in bytes) accepted by this FormRequest.
+    /// It caps a JSON, url-encoded and multipart body alike.
     ///
     /// Defaults to the process-global cap
     /// ([`crate::http::body::global_max_request_body_bytes`]), which is
@@ -191,7 +192,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     ///
     /// This method:
     /// 1. Checks authorization
-    /// 2. Parses the request body (JSON or form based on Content-Type)
+    /// 2. Parses the request body (JSON, form or multipart based on
+    ///    Content-Type)
     /// 3. Validates the parsed data
     ///
     /// Returns `Err(FrameworkError)` on authorization failure, parse error,
@@ -232,28 +234,34 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
                 .to_ascii_lowercase()
         });
 
-        // Only two body shapes are understood: form-urlencoded, and JSON
+        // Three body shapes are understood: form-urlencoded, multipart (the
+        // body the Inertia client sends for a form with a file), and JSON
         // (`application/json` or any `application/*+json` suffix type). Every
         // other content type - including a missing or empty `Content-Type` -
         // is rejected with 415 rather than silently parsed as JSON. The check
         // runs BEFORE the body is read so an unsupported request never streams.
         let is_form = media_type.as_deref() == Some("application/x-www-form-urlencoded");
+        let is_multipart = media_type.as_deref() == Some("multipart/form-data");
         let is_json = media_type
             .as_deref()
             .is_some_and(|mt| mt == "application/json" || mt.ends_with("+json"));
-        if !is_form && !is_json {
+        if !is_form && !is_multipart && !is_json {
             return Err(FrameworkError::UnsupportedMediaType);
         }
 
-        // Collect and parse body. Honor the per-struct cap; `body_bytes_with_cap`
-        // reads `Content-Length` from headers and pre-rejects oversized
-        // requests with 413 before consuming any body bytes.
-        let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
-
-        let parsed = if is_form {
-            parse_form(&bytes)
+        // Collect and parse body. Honor the per-struct cap, a multipart body
+        // included; `body_bytes_with_cap` and the multipart parser read
+        // `Content-Length` from headers and pre-reject oversized requests
+        // with 413 before consuming any body bytes.
+        let parsed = if is_multipart {
+            parse_multipart(req, Self::max_body_bytes()).await
         } else {
-            parse_json(&bytes)
+            let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
+            if is_form {
+                parse_form(&bytes)
+            } else {
+                parse_json(&bytes)
+            }
         };
         let data: Self = match parsed {
             Ok(data) => data,

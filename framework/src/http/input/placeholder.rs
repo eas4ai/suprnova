@@ -10,6 +10,7 @@
 use serde::de::{self, DeserializeSeed, IntoDeserializer, Visitor};
 
 use super::FieldError;
+use super::multipart::{UPLOADED_FILE, offer_placeholder};
 
 /// A value of whatever type the visitor asks for.
 pub(super) struct Placeholder;
@@ -130,12 +131,17 @@ impl<'de> de::Deserializer<'de> for Placeholder {
         visitor.visit_unit()
     }
 
+    /// An `UploadedFile` gets a placeholder file.
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        visitor.visit_newtype_struct(self)
+        if name == UPLOADED_FILE {
+            offer_placeholder(visitor)
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {

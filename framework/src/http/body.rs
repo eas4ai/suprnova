@@ -1,6 +1,7 @@
 //! Body parsing utilities for HTTP requests
 //!
-//! Provides async body collection and parsing for JSON and form-urlencoded data.
+//! Provides async body collection and parsing for JSON, form-urlencoded and
+//! multipart data.
 //!
 //! Body collection is capped to bound process memory under load. The cap
 //! is layered in three places - see [`DEFAULT_MAX_REQUEST_BODY_BYTES`],
@@ -202,11 +203,11 @@ pub(crate) fn is_form_urlencoded(content_type: &str) -> bool {
 /// `null` before any rule runs. So an empty value is left out, which is how
 /// `null` reaches a typed field: an `Option` is `None` and a required field
 /// is missing, a `String` included. A name sent more than once keeps its
-/// last value, as PHP does. A name that ends in `[]`, PHP's mark for a
-/// list, is read as a list under the name without the brackets, with its
-/// empty elements left out. The multipart extractor reads a form by the
-/// same rules, so a form gives a handler the same values whichever way it
-/// is posted.
+/// last value, as PHP does. A name with brackets is nested data, as PHP's
+/// `parse_str` reads it: `user[name]` is the member `name` of `user`,
+/// `tags[]` appends to the list `tags`, and `photos[1]` is an element of
+/// the list `photos`, read in index order, with empty elements `null` in
+/// their places.
 ///
 /// A field that is missing or does not parse answers as a validation
 /// failure, a 422 whose `errors` names every such field under its input
@@ -214,10 +215,50 @@ pub(crate) fn is_form_urlencoded(content_type: &str) -> bool {
 /// Any other failure, such as a name a struct denies, is a 422 that words
 /// it.
 pub fn parse_form<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
-    crate::http::input::parse_form_input(bytes).map_err(|error| match error {
-        crate::http::input::InputError::Fields(errors) => FrameworkError::Validation(errors),
-        crate::http::input::InputError::Other(message) => {
-            FrameworkError::domain(format!("Failed to parse form body: {message}"), 422)
-        }
-    })
+    crate::http::input::parse_form_input(bytes)
+        .map_err(|error| error.into_framework_error("Failed to parse form body"))
+}
+
+/// Whether a `Content-Type` value names `multipart/form-data`, compared as
+/// [`is_form_urlencoded`] compares, so a boundary parameter or a capital
+/// letter does not change what the body is.
+pub(crate) fn is_multipart_form_data(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+}
+
+/// Read a `multipart/form-data` body into `T` as a form body is read, with
+/// bracketed and indexed names nested (see [`parse_form`]), and each part
+/// that carries a file handed to an `UploadedFile` field.
+///
+/// This is the body the Inertia client sends for a form with a file. The
+/// body is capped at `max_body_bytes`, the cap the caller applies to any
+/// body it reads, so a multipart body is never larger than a url-encoded
+/// one may be. The part ceiling and the in-memory limit of each part come
+/// from the upload settings, as for `#[derive(MultipartRequest)]`
+/// ([`crate::http::upload::global_max_multipart_parts`],
+/// [`crate::http::upload::global_upload_spill_threshold`]): a body over a
+/// limit answers 413, and a file part over the in-memory limit is written
+/// to a temp file.
+pub(crate) async fn parse_multipart<T: DeserializeOwned>(
+    req: crate::http::Request,
+    max_body_bytes: usize,
+) -> Result<T, FrameworkError> {
+    let payload = crate::http::upload::parse_multipart_streaming_with_limits(
+        req,
+        crate::http::upload::MultipartLimits {
+            max_body_bytes,
+            max_parts: crate::http::upload::global_max_multipart_parts(),
+            spill_threshold: crate::http::upload::global_upload_spill_threshold(),
+            per_field_max_counts: &[],
+        },
+        |_, _, _| Ok(()),
+    )
+    .await?;
+    crate::http::input::parse_multipart_input(payload)
+        .map_err(|error| error.into_framework_error("Failed to parse multipart body"))
 }
