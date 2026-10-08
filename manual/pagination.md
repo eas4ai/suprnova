@@ -559,13 +559,16 @@ All three paginators work here - `LengthAwarePaginator`, `Paginator`, and
 `CursorPaginator`. The metadata page-name comes from the paginator
 itself, and it is the query parameter the paginator reads: the name a
 `LengthAwarePaginator` got from `paginate_using` or `with_page_name`
-(`"page"` by default), `"page"` for `Paginator`, and the name a
-`CursorPaginator` got from `with_cursor_name` (`"cursor"` by default).
-The client receives the rows under the chosen prop key
-plus a `ScrollMetadata` descriptor with `current_page`, `next_page`,
-`previous_page` (page identifiers for the offset paginators; cursor
-strings for cursor paginators) - which the `useInfiniteScroll` /
-`WhenVisible` Inertia helpers consume for infinite scroll.
+(`"page"` by default), the name a `Paginator` got from `with_page_name`
+(`"page"` by default), and the name a `CursorPaginator` got from
+`with_cursor_name` (`"cursor"` by default). The client receives the rows
+under the chosen prop key plus a `ScrollMetadata` descriptor with
+`current_page`, `next_page` and `previous_page`: page numbers for the
+offset paginators, and for a cursor paginator `1` on its first page,
+else the cursor the page was fetched with (`Pagination::cursor` records
+it; `with_current_cursor` sets it by hand), else the request's cursor
+parameter. The `useInfiniteScroll` and `WhenVisible` Inertia helpers
+consume it for infinite scroll.
 
 Each paginator builds that descriptor through `ProvidesScrollMetadata` -
 the same interface Laravel's paginator adapter satisfies

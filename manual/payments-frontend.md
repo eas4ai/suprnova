@@ -74,7 +74,7 @@ Suprnova flips that: the backend always returns the same `SessionPayload` enum a
   });
 
   async function mountStripeElements(s: Extract<SessionPayload, { flow: "stripe_elements" }>) {
-    // Stripe.js must be loaded - add to index.html:
+    // Stripe.js must be loaded - add to templates/app.html, the root document:
     // <script src="https://js.stripe.com/v3/"></script>
     const stripe = (window as any).Stripe(s.publishable_key);
     const elements = stripe.elements({ clientSecret: s.client_secret });
@@ -100,7 +100,7 @@ Suprnova flips that: the backend always returns the same `SessionPayload` enum a
   }
 
   function mountPaddleInline(s: Extract<SessionPayload, { flow: "paddle_inline" }>) {
-    // Paddle.js must be loaded - add to index.html:
+    // Paddle.js must be loaded - add to templates/app.html, the root document:
     // <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
     const Paddle = (window as any).Paddle;
     Paddle.Initialize({ token: s.client_token });
@@ -377,7 +377,10 @@ async function pollMobileMoney(txId: string) {
 
 ## Loading the Payment SDKs
 
-Add the relevant scripts to your `index.html` (or equivalent entry point). Only include the ones your provider selection requires:
+Add the relevant scripts to your root template, `templates/app.html` in a
+scaffolded project (see [the root template](frontend-inertia-responses.md#the-root-template)),
+so they reach every first visit's document. Only include the ones your
+provider selection requires:
 
 ```html
 <!-- Stripe (add if using stripe_elements or stripe_checkout_redirect) -->

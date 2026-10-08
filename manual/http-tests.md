@@ -508,7 +508,8 @@ response
 Or directly from an `HttpResponse` - what `InertiaResponse::resolve`
 returns - for a test that drives the response pipeline without a
 socket. This form handles both shapes: an `X-Inertia` JSON body, or the
-HTML shell's embedded `<script data-page="app">` element:
+HTML document's embedded `<script type="application/json" data-page=...>`
+element, whatever id `InertiaConfig::mount_id` gave it (`app` by default):
 
 ```rust
 use suprnova::testing::AssertableInertia;
