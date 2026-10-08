@@ -21,6 +21,8 @@ pub mod database_provider;
 pub mod dummy_verify_timing;
 pub mod eloquent_provider;
 pub mod http_middleware;
+#[cfg(feature = "testing")]
+mod models;
 pub mod providerless_fallback;
 pub mod remember_me;
 #[cfg(feature = "testing")]

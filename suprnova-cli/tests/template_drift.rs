@@ -1595,6 +1595,8 @@ fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
             "password_reset.rs",
             suprnova_cli::templates::password_reset_controller(),
         ),
+        ("notes.rs", suprnova_cli::templates::notes_controller()),
+        ("profile.rs", suprnova_cli::templates::profile_controller()),
     ]
 }
 
@@ -1622,8 +1624,11 @@ fn the_controllers_module_declares_exactly_the_scaffolded_controllers() {
     );
 }
 
-/// Write the scaffold's controllers into `<dir>/src/controllers/` and scan
-/// them the way `suprnova generate-types` would.
+/// Write the scaffold's controllers into `<dir>/src/controllers/`, and the
+/// flash and shared props into `<dir>/src/props/`, and scan them the way
+/// `suprnova generate-types` would. The props have to be there: the
+/// generator scans all of `src/`, and they name `flashDataType` and the
+/// fields `SharedProps` adds to `root`.
 fn scan_scaffold_controllers(
     dir: &Path,
 ) -> Vec<suprnova_cli::commands::generate_types::InertiaPropsStruct> {
@@ -1632,6 +1637,18 @@ fn scan_scaffold_controllers(
     for (name, body) in scaffold_controllers() {
         fs::write(controllers.join(name), body).unwrap_or_else(|e| panic!("write {name}: {e}"));
     }
+    let props = dir.join("src/props");
+    fs::create_dir_all(&props).expect("create src/props");
+    fs::write(
+        props.join("flash.rs"),
+        suprnova_cli::templates::flash_props(),
+    )
+    .expect("write src/props/flash.rs");
+    fs::write(
+        props.join("shared.rs"),
+        suprnova_cli::templates::shared_props(),
+    )
+    .expect("write src/props/shared.rs");
     suprnova_cli::commands::generate_types::scan_inertia_props(dir)
 }
 

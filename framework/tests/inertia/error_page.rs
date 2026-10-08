@@ -1,7 +1,7 @@
 //! Framework error responses render the app's Inertia error page.
 //!
 //! The Inertia client treats any response without `X-Inertia: true` as
-//! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
+//! non-Inertia (`inertia-3.8.0/packages/core/src/response.ts:75,180-182`)
 //! and hands it to the full-screen error modal. So a `403` from a
 //! permission middleware, a `404` for an unrouted path, or a `500`
 //! reaches the user as "All Inertia requests must receive a valid Inertia

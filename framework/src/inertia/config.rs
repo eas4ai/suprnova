@@ -366,7 +366,7 @@ pub struct InertiaConfig {
     /// unrouted path, a `429`, or a `500` reaches the Inertia client as a
     /// JSON body with no `X-Inertia` header. The client treats any such
     /// response as non-Inertia
-    /// (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`) and
+    /// (`inertia-3.8.0/packages/core/src/response.ts:75,180-182`) and
     /// shows its "All Inertia requests must receive a valid Inertia
     /// response, however a plain JSON response was received" modal -
     /// which is what a real user saw on a `403` in production. Naming a

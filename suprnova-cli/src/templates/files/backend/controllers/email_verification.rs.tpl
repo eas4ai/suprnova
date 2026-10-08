@@ -13,11 +13,12 @@
 //! `MAIL_*` settings in `.env`.
 
 use suprnova::{
-    Auth, FrameworkError, InertiaProps, MustVerifyEmail, Request, Response,
+    Auth, FrameworkError, Inertia, InertiaProps, MustVerifyEmail, Request, Response,
     auth_flows::EmailVerification, handler, inertia_response, redirect, url,
 };
 
 use crate::models::user::User;
+use crate::props::flash::Toast;
 
 /// Where the mailed link lands: the route that consumes the token.
 const VERIFY_PATH: &str = "/verify-email/verify";
@@ -61,12 +62,14 @@ pub async fn notice(req: Request) -> Response {
 
 /// `POST /email/verification-notification` - mail a fresh link to the
 /// signed-in user and return to the notice. A verified account gets no
-/// mail: there is nothing left to prove.
+/// mail and no toast: there is nothing left to prove, and the notice sends
+/// it on to the dashboard.
 #[handler]
 pub async fn resend(_req: Request) -> Response {
     let user = current_user().await?;
     if !user.is_email_verified() {
         EmailVerification::send_link(&user, &verification_link()).await?;
+        Inertia::flash("toast", Toast::info("A new verification link is on its way."))?;
     }
     redirect!("/verify-email").into()
 }
@@ -80,5 +83,6 @@ pub async fn resend(_req: Request) -> Response {
 pub async fn verify(req: Request) -> Response {
     let token = req.query_param("token").unwrap_or_default();
     EmailVerification::verify(&token).await?;
+    Inertia::flash("toast", Toast::success("Your email address is verified."))?;
     redirect!("/dashboard").into()
 }

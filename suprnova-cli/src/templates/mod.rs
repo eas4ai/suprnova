@@ -398,6 +398,27 @@ pub fn models_mod() -> &'static str {
     include_str!("files/backend/models/mod.rs.tpl")
 }
 
+// Props templates: the structs more than one page reads.
+
+/// The scaffolded `src/props/mod.rs`.
+pub fn props_mod() -> &'static str {
+    include_str!("files/backend/props/mod.rs.tpl")
+}
+
+/// The scaffolded `src/props/flash.rs`: the `Flash` the generated types
+/// name as Inertia's `flashDataType`, and the `Toast` every account flow
+/// and the notes form flash under it (PAR-078).
+pub fn flash_props() -> &'static str {
+    include_str!("files/backend/props/flash.rs.tpl")
+}
+
+/// The scaffolded `src/props/shared.rs`: the `auth` prop every page
+/// receives, the signed-in user or none, and the struct that types it in
+/// the generated `SharedProps`.
+pub fn shared_props() -> &'static str {
+    include_str!("files/backend/props/shared.rs.tpl")
+}
+
 // Actions templates
 
 pub fn actions_mod() -> &'static str {
@@ -1067,12 +1088,29 @@ pub fn password_reset_controller() -> &'static str {
     include_str!("files/backend/controllers/password_reset.rs.tpl")
 }
 
+/// The scaffolded `src/controllers/notes.rs`: the signed-in user's own
+/// notes, listed by cursor, shown and written (PAR-080).
+pub fn notes_controller() -> &'static str {
+    include_str!("files/backend/controllers/notes.rs.tpl")
+}
+
+/// The scaffolded `src/controllers/profile.rs`: the JSON handler the
+/// dashboard's display-name form posts to (PAR-080).
+pub fn profile_controller() -> &'static str {
+    include_str!("files/backend/controllers/profile.rs.tpl")
+}
+
 pub fn authenticate_middleware() -> &'static str {
     include_str!("files/backend/middleware/authenticate.rs.tpl")
 }
 
 pub fn user_model() -> &'static str {
     include_str!("files/backend/models/user.rs.tpl")
+}
+
+/// The scaffolded `src/models/note.rs`: a note owned by one user.
+pub fn note_model() -> &'static str {
+    include_str!("files/backend/models/note.rs.tpl")
 }
 
 // Auth migration templates
@@ -1091,6 +1129,12 @@ pub fn create_remember_tokens_migration() -> &'static str {
 
 pub fn create_auth_flow_tokens_migration() -> &'static str {
     include_str!("files/backend/migrations/create_auth_flow_tokens_table.rs.tpl")
+}
+
+/// The scaffolded notes migration, created after the users table it
+/// references.
+pub fn create_notes_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_notes_table.rs.tpl")
 }
 
 // Root templates

@@ -2,10 +2,10 @@
 //! app's Inertia error page.
 //!
 //! The Inertia client treats a response without an `X-Inertia` header as
-//! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
+//! non-Inertia (`inertia-3.8.0/packages/core/src/response.ts:75,180-182`)
 //! and hands it to `dialog.show(...)` - the full-screen "All Inertia
 //! requests must receive a valid Inertia response, however a plain JSON
-//! response was received" modal (`response.ts:168-169`). Every non-2xx
+//! response was received" modal (`response.ts:175-176`). Every non-2xx
 //! the framework produces takes that path: the `403` from
 //! [`PermissionMiddleware`](crate::PermissionMiddleware) or
 //! [`Gate::authorize`](crate::Gate), the `404` for an unrouted path, a

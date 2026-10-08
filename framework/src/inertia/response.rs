@@ -1353,8 +1353,8 @@ impl InertiaResponse {
         // start fresh from. We resolve their values normally (so the
         // client gets the current data) but omit the merge metadata so
         // the client treats the value as a replacement, not an append.
-        // See `inertia-3.1.1/packages/core/src/requestParams.ts`: the
-        // client puts reset keys into `only` AND `X-Inertia-Reset`, so
+        // See `inertia-3.8.0/packages/core/src/requestParams.ts:139,149-150`:
+        // the client puts reset keys into `only` AND `X-Inertia-Reset`, so
         // the partial filter already guarantees inclusion.
         let reset_keys: Vec<String> = parse_csv_header(req, "X-Inertia-Reset");
         // `X-Inertia-Error-Bag` scopes the `errors` prop under a named
@@ -1465,15 +1465,16 @@ impl InertiaResponse {
         // Track the union of (1) + (2) as `shared_keys` so the page
         // object can advertise them under `sharedProps` (the client
         // uses this for instant-swap during navigation - see
-        // `inertia-3.1.1/packages/core/src/router.ts` `performInstantSwap`).
+        // `inertia-3.8.0/packages/core/src/router.ts:633`, `performInstantSwap`).
         //
         // A dotted share key contributes only its ROOT segment. The
         // registry stores `"user.name"` literally and `unpack_map` nests
         // it into `props.user.name` at the end of `resolve_props`, but
         // the client filters `sharedProps` against `props` with a flat
         // `key in current.props` test and then spreads the survivors
-        // into the page it renders mid-swap
-        // (`inertia-3.6.1/packages/core/src/router.ts:624-633`). A raw
+        // into the page it renders mid-swap, or hands them to a
+        // `pageProps` callback
+        // (`inertia-3.8.0/packages/core/src/router.ts:636-645`). A raw
         // `"user.name"` entry fails that lookup, so `user` would be
         // *absent* - not stale - for that frame and any layout reading
         // `props.user.name` throws. Laravel never hits this because
@@ -1969,7 +1970,7 @@ fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
 ///
 /// Laravel emits `$errors[0]` unless `$withAllErrors` is set
 /// (`inertia-laravel-2.0.25/src/Middleware.php:196`), and Inertia's
-/// `ErrorValue` is `string` by default (`inertia-3.6.1/packages/core/src/types.ts:59,100`) -
+/// `ErrorValue` is `string` by default (`inertia-3.8.0/packages/core/src/types.ts:59,100`) -
 /// a bare string is what `useForm().errors.email` resolves to.
 /// Emitting an array meant every page had to index `[0]`, which on a
 /// string silently yields its first character.
@@ -2346,7 +2347,7 @@ async fn resolve_props(
         // *empty* errors object rather than omitting the key. That is
         // the destructive shape: the client folds a partial response in
         // with `{...current.props, ...response.props}`
-        // (`inertia-3.6.1/packages/core/src/response.ts:427`), so `{}`
+        // (`inertia-3.8.0/packages/core/src/response.ts:440`), so `{}`
         // wipes the errors it was already displaying, while an absent
         // key would have left them alone.
         //

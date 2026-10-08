@@ -157,3 +157,13 @@ impl Authenticatable for LdbUser {
 }
 
 impl HasRoles for LdbUser {}
+
+/// The scaffold's `Note` model, and its `User` beside it, at the paths the
+/// scaffold's templates name each other by: the scaffold's `User` has many
+/// notes, and a note belongs to it.
+// `#[rustfmt::skip]`: the template is scaffold output, not workspace source,
+// so `cargo fmt` must not rewrite it.
+#[rustfmt::skip]
+#[path = "../../../suprnova-cli/src/templates/files/backend/models/note.rs.tpl"]
+pub mod note;
+pub use crate::scaffold::user;

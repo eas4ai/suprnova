@@ -222,7 +222,7 @@ pub enum MergeStrategy {
 /// Pagination metadata for an infinite-scroll prop.
 ///
 /// Mirrors the Inertia v3 `ScrollProp` shape (see
-/// `inertia-3.1.1/packages/core/src/types.ts:213`). Page identifiers are
+/// `inertia-3.8.0/packages/core/src/types.ts:218`). Page identifiers are
 /// `serde_json::Value` to support both offset pagination (numbers) and
 /// cursor pagination (strings), matching Laravel's `paginate()`,
 /// `simplePaginate()`, and `cursorPaginate()`.

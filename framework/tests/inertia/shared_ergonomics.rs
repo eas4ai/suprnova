@@ -143,8 +143,9 @@ async fn dotted_share_keys_advertise_their_root_segment_in_shared_props() {
     // `sharedProps` has to name the same top-level keys the client can
     // find in `props`. The Inertia client filters the list with a flat
     // `key in current.props` lookup and then spreads the survivors into
-    // the intermediate page it renders during an instant swap
-    // (`inertia-3.6.1/packages/core/src/router.ts:624-633`), so a raw
+    // the intermediate page it renders during an instant swap, or hands
+    // them to a `pageProps` callback
+    // (`inertia-3.8.0/packages/core/src/router.ts:636-645`), so a raw
     // `"user.name"` entry never matches and `user` vanishes from that
     // frame entirely - a layout reading `props.user.name` throws.
     // Laravel has the same top-level shape because `Inertia::share`

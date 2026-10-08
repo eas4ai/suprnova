@@ -526,6 +526,57 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `authorization` and four more) become `[REDACTED]` in bodies, prop
   values, headers and URL query parameters, without regard to case, and a
   header value that is not text becomes `[UNSERIALIZABLE]` (DT-07, DT-08).
+- **The scaffold's notes: a list, a page and a form over the signed-in
+  user's own notes.** A new application had nothing a kit page could
+  scroll, open or write: its dashboard sent one eager prop and no handler
+  paginated anything. `suprnova new` now writes a `create_notes_table`
+  migration and a `Note` model that belongs to a user (the `User` model
+  gains `has_many` notes), and three routes behind the dashboard's
+  authentication: `GET /notes` lists the user's notes 10 at a time with
+  `cursor_paginate` through `Inertia::paginate`, filtered by the `search`
+  query parameter in title or body without regard to case, and sends
+  `search` back; `GET /notes/{id}` shows one, and answers `404` for a note
+  of another user; `POST /notes` validates `title` (1 to 255 characters)
+  and `body` (at most 10000), writes the note and flashes a toast. Every
+  handler reads notes through `Note::owned_by`, and none lists accounts
+  (K12, K14).
+- **The scaffold's dashboard defers `stats` and leaves `recent_notes`
+  optional.** The dashboard sends the user's note count and the notes
+  written today as a deferred `stats`, and the user's five newest notes as
+  an optional `recent_notes` the page asks for when it scrolls them into
+  view (K14).
+- **The signed-in user on every page of the scaffold.** A layout had no
+  way to name the signed-in user outside the dashboard. The scaffold now
+  shares `auth`, the signed-in user or `null`, with
+  `App::inertia_share_lazy`, read from the request's session for each
+  response that sends it, and `SharedData` in `src/props/shared.rs`, marked
+  `#[inertia_props(shared)]`, adds `auth` to the generated `SharedProps`
+  (K12).
+- **A JSON handler for the display name.** `POST /profile/name` takes
+  `{"name": ...}`, saves it on the signed-in user, and answers `200` with
+  `{"user": {...}}`, or `422` with the framework's validation body for an
+  empty name or one over 255 characters, for the dashboard's `useHttp`
+  form (K21).
+- **Flashed toasts after every account action.** Nothing a new
+  application did told the user it worked: the server sends `page.flash`,
+  but the scaffold flashed nothing. A `Toast` in `src/props/flash.rs` is
+  now flashed under `toast` after sign-in, registration, a reset-link
+  request, a password reset, email verification, a verification resend,
+  sign-out and a saved note, and the `Flash` struct beside it, marked
+  `#[inertia_props(flash)]`, makes `suprnova generate-types` type
+  `page.flash.toast` as Inertia's `flashDataType` (K17).
+- **Laravel's route names in the scaffold.** The scaffold's routes carry
+  the names Laravel's kits give them: `dashboard`, `notes.index`,
+  `notes.show`, `notes.store`, `profile.name`, `login`, `register`,
+  `password.request`, `password.email`, `password.reset`,
+  `password.update`, `verification.notice`, `verification.send`,
+  `verification.verify` and `logout` (K12).
+- **The sources and the manual cite the Inertia.js client at 3.8.0.**
+  The framework's comments cited the client at 3.6.1 and 3.1.1, and the
+  frontend chapter named 3.4.0. Each rule they cite was read again in the
+  3.8.0 client, and every citation names its 3.8.0 file and line; the
+  frontend chapter and the CSRF chapter name 3.8.0, and the frontend
+  chapter lists `@inertiajs/vite` (K01).
 
 ### Changed
 
