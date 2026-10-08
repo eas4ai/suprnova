@@ -9,7 +9,6 @@
 //! attaches: each next page is the rows after the last one shown, so a
 //! note written while the user scrolls neither repeats nor skips a row.
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use suprnova::{
     Auth, CursorPaginator, FormRequest, FrameworkError, Inertia, InertiaProps, Model, Request,
@@ -30,7 +29,7 @@ const NOTES_PER_PAGE: u64 = 10;
 pub struct NoteSummary {
     pub id: u64,
     pub title: String,
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: String,
 }
 
 impl From<Note> for NoteSummary {
@@ -38,7 +37,7 @@ impl From<Note> for NoteSummary {
         Self {
             id: note.id,
             title: note.title,
-            created_at: note.created_at,
+            created_at: note.created_at.map(|date| date.to_rfc3339()).unwrap_or_default(),
         }
     }
 }
@@ -49,7 +48,7 @@ pub struct NoteView {
     pub id: u64,
     pub title: String,
     pub body: Option<String>,
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: String,
 }
 
 impl From<Note> for NoteView {
@@ -58,7 +57,7 @@ impl From<Note> for NoteView {
             id: note.id,
             title: note.title,
             body: note.body,
-            created_at: note.created_at,
+            created_at: note.created_at.map(|date| date.to_rfc3339()).unwrap_or_default(),
         }
     }
 }

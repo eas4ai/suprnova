@@ -41,7 +41,7 @@ export interface NotesIndexProps {
 export interface NoteSummary {
   id: number;
   title: string;
-  created_at: string | null;
+  created_at: string;
 }
 
 export interface NotesShowProps {
@@ -52,7 +52,7 @@ export interface NoteView {
   id: number;
   title: string;
   body: string | null;
-  created_at: string | null;
+  created_at: string;
 }
 
 export interface RegisterProps {
