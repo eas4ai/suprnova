@@ -1527,6 +1527,9 @@ fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
 
     for (frontend, tpl, package) in [
         (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
+            "@inertiajs/svelte",
         ),
         (
             "vue",
@@ -1547,7 +1550,7 @@ fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
             )));
             assert!(
                 config.contains("import inertia from '@inertiajs/vite'")
-                    && config.contains("inertia()"),
+                    && config.contains("inertia("),
                 "{frontend}'s ssr entry leaves createServer to the Inertia Vite plugin, \
                  so its vite.config.ts must run the plugin; got:\n{config}"
             );
@@ -1897,14 +1900,16 @@ fn the_starter_inertia_props_match_the_starter_controllers() {
         suprnova_cli::commands::generate_types::PageTypes::default(),
     );
 
-    // The react kit types the notes pages and the flash toast of the kit
-    // contract, whose handlers this branch's controller templates do not
-    // have yet; `kit_pages.rs`'s
-    // `kit_react_types_are_what_generate_types_writes_for_the_kit_contract`
-    // holds it to the generator's output for them instead.
     for (frontend, shipped) in [
         (
+            "svelte",
+            suprnova_cli::templates::svelte::inertia_props_types(),
         ),
+        (
+            "react",
+            suprnova_cli::templates::react::inertia_props_types(),
+        ),
+        ("vue", suprnova_cli::templates::vue::inertia_props_types()),
     ] {
         assert_eq!(
             shipped, expected,

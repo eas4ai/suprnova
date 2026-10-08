@@ -83,6 +83,7 @@ fn kit_svelte_type_checks_and_builds() {
         "`npm run build:ssr` must land the bundle at frontend/bootstrap/ssr/ssr.js, \
          where `suprnova ssr:start` reads it"
     );
+}
 
 /// The React kit.
 mod react {

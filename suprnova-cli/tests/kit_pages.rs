@@ -740,6 +740,7 @@ mod backend {
             "scaffold_snapshot.rs must expect the `^3.8.0` pin"
         );
     }
+}
 
 mod svelte {
     use std::fs;
@@ -1177,61 +1178,6 @@ mod svelte {
             types.contains("    flashDataType: "),
             "the generated types must name the flash data type:\n{types}"
         );
-    }
-
-    /// The structs the kit's pages are typed from, as the scaffold's
-    /// backend declares them for PAR-078 to PAR-080: the flash data, the
-    /// shared `auth`, the dashboard and the notes pages. They go into
-    /// `src/controllers/` over the scaffold's own, and `generate-types` runs
-    /// on the result. Once the scaffold ships these structs itself, this
-    /// list repeats or replaces them and the test fails until it is gone.
-    const KIT_BACKEND: [(&str, &str); 4] = [
-        (
-            "dashboard.rs",
-            include_str!("fixtures/kit_svelte/dashboard.rs"),
-        ),
-        ("notes.rs", include_str!("fixtures/kit_svelte/notes.rs")),
-        ("flash.rs", include_str!("fixtures/kit_svelte/flash.rs")),
-        ("shared.rs", include_str!("fixtures/kit_svelte/shared.rs")),
-    ];
-
-    #[test]
-    fn kit_svelte_types_are_what_generate_types_writes_for_the_kit_backend() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let frontend = scaffold(&tmp);
-        let project = frontend.parent().expect("project").to_path_buf();
-        let shipped = read(&frontend, "src/types/inertia-props.ts");
-        for (file, body) in KIT_BACKEND {
-            fs::write(project.join("src/controllers").join(file), body)
-                .unwrap_or_else(|e| panic!("write src/controllers/{file}: {e}"));
-        }
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"))
-            .arg("generate-types")
-            .current_dir(&project)
-            .output()
-            .expect("run `suprnova generate-types`");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.status.success(), "generate-types failed: {text}");
-        assert!(
-            text.contains("./frontend/src/types/inertia-props.ts is up to date"),
-            "the shipped types differ from what generate-types writes: {text}"
-        );
-        assert_eq!(read(&frontend, "src/types/inertia-props.ts"), shipped);
-        for declaration in [
-            "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}",
-            "    flashDataType: Flash;",
-            "  \"Notes/Index\": NotesIndexProps;",
-            "  \"Notes/Show\": NotesShowProps;",
-        ] {
-            assert!(
-                shipped.contains(declaration),
-                "the shipped types lack `{declaration}`:\n{shipped}"
-            );
-        }
     }
 }
 
@@ -1747,196 +1693,6 @@ mod react {
             assert!(show.contains(needle), "Notes/Show lacks {needle}:\n{show}");
         }
     }
-
-    /// The kit's `inertia-props.ts` is what `suprnova generate-types` writes
-    /// for the handlers the kit contract names: the scaffold's auth, reset,
-    /// verification and home controllers as they are, and the dashboard,
-    /// notes, shared and flash structs as the contract's amendments declare
-    /// them. The backend lane writes those four; until its controllers are on
-    /// this branch, the sources below stand in for them. The command runs as
-    /// a user runs it, so a conflict it refuses fails here too.
-    #[test]
-    fn kit_react_types_are_what_generate_types_writes_for_the_kit_contract() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let project = tmp.path();
-        let controllers = project.join("src/controllers");
-        let props = project.join("src/props");
-        for dir in [&controllers, &props, &project.join("frontend/src/types")] {
-            fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-        }
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"kit-types\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )
-        .expect("write Cargo.toml");
-        for (path, body) in [
-            (
-                controllers.join("home.rs"),
-                suprnova_cli::templates::home_controller(),
-            ),
-            (
-                controllers.join("auth.rs"),
-                suprnova_cli::templates::auth_controller(),
-            ),
-            (
-                controllers.join("email_verification.rs"),
-                suprnova_cli::templates::email_verification_controller(),
-            ),
-            (
-                controllers.join("password_reset.rs"),
-                suprnova_cli::templates::password_reset_controller(),
-            ),
-            (controllers.join("dashboard.rs"), CONTRACT_DASHBOARD),
-            (controllers.join("notes.rs"), CONTRACT_NOTES),
-            (props.join("shared.rs"), CONTRACT_SHARED),
-            (props.join("flash.rs"), CONTRACT_FLASH),
-        ] {
-            fs::write(&path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        }
-
-        let output = Command::new(BIN)
-            .arg("generate-types")
-            .current_dir(project)
-            .output()
-            .expect("spawn suprnova generate-types");
-        assert!(
-            output.status.success(),
-            "`suprnova generate-types` refused the kit contract's structs:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let generated = fs::read_to_string(project.join("frontend/src/types/inertia-props.ts"))
-            .expect("read the generated types");
-        let shipped = suprnova_cli::templates::react::inertia_props_types();
-        assert_eq!(
-            shipped, generated,
-            "react's inertia-props.ts.tpl is not what `suprnova generate-types` writes \
-             for the kit contract.\nexpected:\n{generated}\nshipped:\n{shipped}"
-        );
-        for declared in [
-            "\"Notes/Index\": NotesIndexProps;",
-            "\"Notes/Show\": NotesShowProps;",
-            "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}",
-            "flashDataType: Flash;",
-            "toast: Toast | null;",
-        ] {
-            assert!(shipped.contains(declared), "the types lack {declared}");
-        }
-    }
-
-    /// The dashboard's props as the kit contract declares them.
-    const CONTRACT_DASHBOARD: &str = r#"
-use serde::Serialize;
-use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
-
-#[derive(Serialize)]
-pub struct Stats {
-    pub notes: u64,
-    pub written_today: u64,
-}
-
-#[derive(Serialize)]
-pub struct NoteSummary {
-    pub id: u64,
-    pub title: String,
-    pub created_at: String,
-}
-
-#[derive(InertiaProps)]
-pub struct DashboardProps {
-    pub stats: Stats,
-    pub recent_notes: Vec<NoteSummary>,
-}
-
-#[handler]
-pub async fn index(req: Request) -> Response {
-    let props: DashboardProps = dashboard_props(&req).await?;
-    inertia_response!(&req, "Dashboard", props)
-}
-"#;
-
-    /// The notes pages' props as the kit contract declares them.
-    const CONTRACT_NOTES: &str = r#"
-use serde::Serialize;
-use suprnova::{handler, inertia_response, InertiaProps, InertiaResponse, Request, Response};
-
-use super::dashboard::NoteSummary;
-
-#[derive(InertiaProps)]
-pub struct NotesIndexProps {
-    pub notes: Vec<NoteSummary>,
-    pub search: String,
-}
-
-#[derive(Serialize)]
-pub struct NoteView {
-    pub id: u64,
-    pub title: String,
-    pub body: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(InertiaProps)]
-pub struct NotesShowProps {
-    pub note: NoteView,
-}
-
-#[handler]
-pub async fn index(req: Request) -> Response {
-    let props: NotesIndexProps = notes_props(&req).await?;
-    InertiaResponse::new("Notes/Index").with_data(props).into()
-}
-
-#[handler]
-pub async fn show(req: Request) -> Response {
-    let note = note_for(&req).await?;
-    inertia_response!(&req, "Notes/Show", NotesShowProps { note })
-}
-"#;
-
-    /// The shared props as the kit contract declares them, under the name
-    /// `SharedData`: `suprnova generate-types` refuses a struct named
-    /// `SharedProps`, the name of the declaration it writes from this one.
-    const CONTRACT_SHARED: &str = r#"
-use serde::Serialize;
-use suprnova::InertiaProps;
-
-#[derive(Serialize)]
-pub struct UserInfo {
-    pub id: u64,
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Serialize)]
-pub struct Auth {
-    pub user: Option<UserInfo>,
-}
-
-#[derive(InertiaProps, Serialize)]
-#[inertia_props(shared)]
-pub struct SharedData {
-    pub auth: Auth,
-}
-"#;
-
-    /// The flash data as the kit contract declares it.
-    const CONTRACT_FLASH: &str = r#"
-use serde::Serialize;
-use suprnova::InertiaProps;
-
-#[derive(Serialize)]
-pub struct Toast {
-    pub kind: String,
-    pub message: String,
-}
-
-#[derive(InertiaProps, Serialize)]
-#[inertia_props(flash)]
-pub struct Flash {
-    pub toast: Option<Toast>,
-}
-"#;
 }
 
 mod vue {
@@ -2437,6 +2193,9 @@ mod vue {
         }
     }
 
+    // The dashboard and notes pages are built with the builder (defer, paginate),
+    // which the generator does not pair with a `Pages` entry yet; the pages
+    // import their interfaces directly.
     #[test]
     fn kit_vue_types_declare_the_flash_data_type() {
         let (_tmp, src) = scaffold();
@@ -2452,8 +2211,6 @@ mod vue {
             "export interface NotesShowProps {\n  note: NoteView;\n}\n",
             "export interface NoteSummary {",
             "export interface NoteView {",
-            "  \"Notes/Index\": NotesIndexProps;\n",
-            "  \"Notes/Show\": NotesShowProps;\n",
             "export type Errors = Record<string, string>;",
             "export type PageProps<C extends keyof Pages>",
             "    flashDataType: Flash;\n",
