@@ -327,7 +327,9 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn to_title_case(s: &str) -> String {
+/// `my-app` and `my_app` become `My App`: the name the scaffold gives the
+/// application in `src/bootstrap.rs` and in the svelte kit's tab titles.
+pub(crate) fn to_title_case(s: &str) -> String {
     s.replace(['-', '_'], " ")
         .split_whitespace()
         .map(|word| {

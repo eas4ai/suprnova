@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { useForm, usePage } from '@inertiajs/svelte'
+  import { Form, Link, usePage } from '@inertiajs/svelte'
+  import Head from '../../components/Head.svelte'
 
   // The public root the server shares with every page (`RootShare`): empty
   // at the host root, `/billing` behind a proxy that serves the app there.
@@ -8,101 +9,88 @@
   // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
   const { root } = usePage().props
 
-  // Validation errors arrive through the form: a failed submission is a
-  // `303` back to this page with the errors flashed, and the Inertia
-  // client copies the page's `errors` into `form.errors`. The page itself
-  // takes no props - declaring an `errors` prop would replace the flashed
-  // bag.
-  const form = useForm({
-    email: '',
-    password: '',
-    remember: false,
-  })
-
-  function submit(e: SubmitEvent) {
-    e.preventDefault()
-    form.post(`${root}/login`)
-  }
+  // Inertia's `Form` component posts the form's fields and hands its
+  // children `errors` and `processing`. Validation errors arrive through
+  // it: a failed submission is a `303` back to this page with the errors
+  // flashed, and the form takes the page's `errors` as its own. The page
+  // itself takes no props - declaring an `errors` prop would replace the
+  // flashed bag.
+  //
+  // A checked checkbox submits the text `on`, and the JSON body the form
+  // sends needs `remember` as a boolean, so `transform` turns it into one.
 </script>
 
-<div
-  class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
+<Head title="Sign in" />
+
+<h2 class="text-center text-3xl font-extrabold text-gray-900">Sign in to your account</h2>
+
+<Form
+  action={`${root}/login`}
+  method="post"
+  transform={(data) => ({ ...data, remember: data.remember === 'on' })}
+  resetOnError={['password']}
+  class="mt-8 space-y-6"
 >
-  <div class="max-w-md w-full space-y-8">
-    <div>
-      <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
-        Sign in to your account
-      </h2>
-    </div>
-    <form class="mt-8 space-y-6" onsubmit={submit}>
-      <div class="rounded-md shadow-sm -space-y-px">
-        <div>
-          <label for="email" class="sr-only">Email address</label>
-          <input
-            id="email"
-            name="email"
-            type="email"
-            autocomplete="email"
-            required
-            class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-            placeholder="Email address"
-            bind:value={form.email}
-          />
-        </div>
-        <div>
-          <label for="password" class="sr-only">Password</label>
-          <input
-            id="password"
-            name="password"
-            type="password"
-            autocomplete="current-password"
-            required
-            class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-            placeholder="Password"
-            bind:value={form.password}
-          />
-        </div>
-      </div>
-
-      {#if form.errors.email}
-        <div class="text-red-600 text-sm">{form.errors.email}</div>
-      {/if}
-
-      {#if form.errors.password}
-        <div class="text-red-600 text-sm">{form.errors.password}</div>
-      {/if}
-
-      <div class="flex items-center">
-        <input
-          id="remember"
-          name="remember"
-          type="checkbox"
-          class="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
-          bind:checked={form.remember}
-        />
-        <label for="remember" class="ml-2 block text-sm text-gray-900">
-          Remember me
-        </label>
-        <a href={`${root}/forgot-password`} class="ml-auto text-sm text-indigo-600 hover:text-indigo-500">
-          Forgot your password?
-        </a>
-      </div>
-
+  {#snippet children({ errors, processing })}
+    <div class="-space-y-px rounded-md shadow-sm">
       <div>
-        <button
-          type="submit"
-          disabled={form.processing}
-          class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-        >
-          {form.processing ? 'Signing in...' : 'Sign in'}
-        </button>
+        <label for="email" class="sr-only">Email address</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="email"
+          required
+          class="relative block w-full appearance-none rounded-none rounded-t-md border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+          placeholder="Email address"
+        />
       </div>
+      <div>
+        <label for="password" class="sr-only">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+          class="relative block w-full appearance-none rounded-none rounded-b-md border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+          placeholder="Password"
+        />
+      </div>
+    </div>
 
-      <div class="text-center">
-        <a href={`${root}/register`} class="text-indigo-600 hover:text-indigo-500">
-          Don't have an account? Register
-        </a>
-      </div>
-    </form>
-  </div>
-</div>
+    {#if errors.email}
+      <div class="text-sm text-red-600">{errors.email}</div>
+    {/if}
+
+    {#if errors.password}
+      <div class="text-sm text-red-600">{errors.password}</div>
+    {/if}
+
+    <div class="flex items-center">
+      <input
+        id="remember"
+        name="remember"
+        type="checkbox"
+        class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+      />
+      <label for="remember" class="ml-2 block text-sm text-gray-900">Remember me</label>
+      <Link
+        href={`${root}/forgot-password`}
+        class="ml-auto text-sm text-indigo-600 hover:text-indigo-500"
+      >
+        Forgot your password?
+      </Link>
+    </div>
+
+    <div>
+      <button
+        type="submit"
+        disabled={processing}
+        class="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
+      >
+        {processing ? 'Signing in...' : 'Sign in'}
+      </button>
+    </div>
+  {/snippet}
+</Form>

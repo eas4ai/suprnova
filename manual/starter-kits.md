@@ -158,6 +158,26 @@ pub async fn index(req: Request) -> Response {
         .await?)
 }
 ```
+The Svelte kit's pages show Inertia 3.8's client components at work:
+
+- `layouts/AppLayout.svelte` and `layouts/GuestLayout.svelte` frame every
+  page through `createInertiaApp`'s `layout` option and stay mounted across
+  visits. They carry the `Link` navigation, the signed-in user's name and a
+  sign-out `Link` (or sign-in and register links for a visitor), and the
+  toast a handler flashes, which `components/FlashToast.svelte` reads from
+  `page.flash`.
+- `Dashboard` loads the note counts with `Deferred` and polls them with
+  `usePoll`, loads the recent notes with `WhenVisible` once they scroll
+  into view, and sets the layout's heading with `setLayoutProps`. Its
+  display-name form posts JSON through `useHttp` and shows the new name
+  before the server answers.
+- `Notes/Index` creates a note with the `Form` component, keeps its search
+  box with `useRemember`, loads more notes with `InfiniteScroll`, and opens
+  a note with a prefetched, instant `Link` to `Notes/Show`.
+- The pages under `auth/` submit through the `Form` component, and every
+  page titles its tab with the kit's `components/Head.svelte`.
+
+For the code, see [Page Components](frontend-pages.md).
 
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and
