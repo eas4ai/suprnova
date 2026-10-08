@@ -306,3 +306,54 @@ async fn intt_client_drops_a_cookie_the_response_expires() {
     client.get("/forget").send().await.assert_ok();
     assert_eq!(client.get("/read").send().await.body_text(), "none");
 }
+
+// ── PAR-064: `assert_inertia` on any page response ──────────────────
+
+fn dashboard_routes() -> Router {
+    Router::new()
+        .get("/dashboard", |req: Request| async move {
+            InertiaResponse::new("Dashboard")
+                .with("count", 3)
+                .resolve(&req)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn intt_assert_inertia_reads_the_first_visit_html_document() {
+    let client = TestClient::new(dashboard_routes(), MiddlewareRegistry::new());
+
+    let response = client.get("/dashboard").send().await;
+
+    assert!(
+        response.header("x-inertia").is_none(),
+        "a first visit is the HTML document, not the JSON page"
+    );
+    response
+        .assert_inertia()
+        .component("Dashboard")
+        .url("/dashboard")
+        .where_("count", 3);
+}
+
+#[tokio::test]
+async fn intt_assert_inertia_with_runs_the_callback_and_returns_the_response() {
+    let client = TestClient::new(dashboard_routes(), MiddlewareRegistry::new());
+    let mut seen = None;
+
+    client
+        .get("/dashboard")
+        .inertia()
+        .send()
+        .await
+        .assert_inertia_with(|page| {
+            page.component("Dashboard");
+            seen = Some(page.prop("count"));
+        })
+        .assert_ok()
+        .assert_header("x-inertia", "true");
+
+    assert_eq!(seen, Some(json!(3)), "the callback must have run");
+}

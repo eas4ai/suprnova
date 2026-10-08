@@ -438,32 +438,72 @@ impl TestResponse {
         (session_id.to_string(), session_data)
     }
 
-    /// Build an [`AssertableInertia`](crate::testing::AssertableInertia)
-    /// from this response's JSON body and assert it as an Inertia page
-    /// object.
+    /// Read this response's Inertia page object and return it for
+    /// assertions. Laravel's `assertInertia()`.
     ///
-    /// Requires the response to actually be an Inertia visit response -
-    /// the request that produced it must have sent `X-Inertia: true`, or
-    /// there is no page object to parse (a hard navigation returns the
-    /// HTML shell instead; use
-    /// [`crate::testing::AssertableInertia::from_response`] directly on
-    /// the `HttpResponse` for that case, which handles both shapes).
+    /// Reads either shape a page response takes: the JSON page object of
+    /// an Inertia visit (the response carries `X-Inertia: true`), or the
+    /// HTML document of a first visit, whose `<script
+    /// type="application/json" data-page="...">` element holds the page,
+    /// so a plain `GET` of a page route is assertable as it is. A response
+    /// from a [`TestClient`](crate::testing::TestClient) gives the page the
+    /// client to reload through.
     ///
     /// # Panics
     ///
-    /// Panics if the response has no `X-Inertia` header, or if the body
-    /// isn't a valid Inertia page object.
+    /// Panics if the response holds neither shape, or if the page object
+    /// isn't a valid Inertia page.
     pub fn assert_inertia(&self) -> crate::testing::AssertableInertia {
-        if self.header("x-inertia") != Some("true") {
-            self.fail(format!(
-                "assert_inertia(): expected an X-Inertia response (X-Inertia: true header), \
-                 got X-Inertia = {:?}. A hard navigation returns the HTML shell instead of a \
-                 page object - send `X-Inertia: true` with the request, or use \
-                 AssertableInertia::from_response(&http_response) directly.",
-                self.header("x-inertia")
-            ));
-        }
-        crate::testing::AssertableInertia::from_page(self.json(), self.report.clone())
+        let page = if self.header("x-inertia") == Some("true") {
+            self.json()
+        } else {
+            let html = self.body_text();
+            match super::inertia::page_object_from_html(&html) {
+                Some(Ok(page)) => page,
+                Some(Err(e)) => self.fail(format!(
+                    "assert_inertia(): found the <script type=\"application/json\" \
+                     data-page=...> element, but its content is not valid JSON: {e}"
+                )),
+                None => self.fail(format!(
+                    "assert_inertia(): no Inertia page object in the response - got X-Inertia = \
+                     {:?} and no <script type=\"application/json\" data-page=...> element in \
+                     the body. An Inertia visit sends `X-Inertia: true` \
+                     (TestRequest::inertia()); a first visit gets the HTML document the page \
+                     renders.\n  status: {}\n  body: {}",
+                    self.header("x-inertia"),
+                    self.status,
+                    excerpt(&html)
+                )),
+            }
+        };
+        crate::testing::AssertableInertia::from_page(page, self.report.clone())
+    }
+
+    /// Run `callback` over this response's Inertia page and return the
+    /// response, so response assertions chain after the page's. Laravel's
+    /// `assertInertia(fn (Assert $page) => ...)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does, and with any assertion the
+    /// callback fails.
+    pub fn assert_inertia_with(
+        &self,
+        callback: impl FnOnce(&crate::testing::AssertableInertia),
+    ) -> &Self {
+        let page = self.assert_inertia();
+        callback(&page);
+        self
+    }
+}
+
+/// The start of a body for a failure message: a page's whole HTML document
+/// buries the message it was printed for.
+fn excerpt(body: &str) -> String {
+    const LIMIT: usize = 500;
+    match body.char_indices().nth(LIMIT) {
+        Some((cut, _)) => format!("{}... ({} bytes)", &body[..cut], body.len()),
+        None => body.to_string(),
     }
 }
 

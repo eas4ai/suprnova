@@ -221,13 +221,60 @@ impl AssertableInertia {
         self
     }
 
-    /// Assert the page's component name.
+    /// Assert the page's component name, and that the component has a page
+    /// file.
+    ///
+    /// The file check runs when an Inertia configuration is installed on
+    /// the active container ([`crate::Inertia::install`]) with
+    /// [`testing_ensure_pages_exist`](crate::InertiaConfig::testing_ensure_pages_exist)
+    /// on, which it is by default: the component must have a file under
+    /// its [`pages_dir`](crate::InertiaConfig::pages_dir) with one of its
+    /// [`page_extensions`](crate::InertiaConfig::page_extensions), the
+    /// lookup [`ensure_pages_exist`](crate::InertiaConfig::ensure_pages_exist)
+    /// does at render time. A test asserting a component nobody built would
+    /// otherwise pass. With no configuration installed there is no
+    /// directory to look in, and no check. Laravel's `component($value)`.
     pub fn component(&self, expected: &str) -> &Self {
+        self.assert_component("component", expected, None)
+    }
+
+    /// Assert the page's component name, with the page-file check of
+    /// [`Self::component`] forced on (`true`) or off (`false`) for this
+    /// call whatever the configuration says. Forced on with no
+    /// configuration installed, the check looks in the default
+    /// `frontend/src/pages`. Laravel's `component($value, $shouldExist)`.
+    pub fn component_exists(&self, expected: &str, should_exist: bool) -> &Self {
+        self.assert_component("component_exists", expected, Some(should_exist))
+    }
+
+    /// The component assertion behind [`Self::component`] and
+    /// [`Self::component_exists`]: the name, then the page file when
+    /// `should_exist` (or, when `None`, the installed configuration) asks
+    /// for it. `method` names the assertion in a failure.
+    fn assert_component(&self, method: &str, expected: &str, should_exist: Option<bool>) -> &Self {
         if self.component != expected {
             self.fail(format!(
-                "AssertableInertia::component({expected:?})\n  Expected: {expected:?}\n  \
+                "AssertableInertia::{method}({expected:?})\n  Expected: {expected:?}\n  \
                  Received: {:?}",
                 self.component
+            ));
+        }
+        let installed = crate::App::inertia_registry().installed_config();
+        let config = match (should_exist, installed) {
+            (Some(false), _) => return self,
+            (Some(true), installed) => installed.unwrap_or_default(),
+            (None, Some(config)) if config.testing_ensure_pages_exist => config,
+            (None, _) => return self,
+        };
+        if crate::inertia::ensure_page_exists(&config, expected).is_err() {
+            self.fail(format!(
+                "AssertableInertia::{method}({expected:?})\n  Inertia page component file \
+                 [{expected}] does not exist.\n  Looked for: {expected}.{{{}}} under {}\n  \
+                 Create the page, fix the name, or turn the check off with \
+                 InertiaConfig::testing_ensure_pages_exist(false) (or for this assertion \
+                 with component_exists({expected:?}, false)).",
+                config.page_extensions.join(","),
+                config.pages_dir.display()
             ));
         }
         self
@@ -364,7 +411,7 @@ impl AssertableInertia {
     {
         let only: Vec<String> = only.into_iter().map(Into::into).collect();
         let reloaded = self.replay(Some(only.clone()), None).await;
-        reloaded.component(&self.component);
+        reloaded.assert_component("component", &self.component, Some(false));
         reloaded.url(&self.url);
         reloaded.version(&self.version);
         for key in &only {
@@ -386,7 +433,7 @@ impl AssertableInertia {
     {
         let except: Vec<String> = except.into_iter().map(Into::into).collect();
         let reloaded = self.replay(None, Some(except.clone())).await;
-        reloaded.component(&self.component);
+        reloaded.assert_component("component", &self.component, Some(false));
         reloaded.url(&self.url);
         reloaded.version(&self.version);
         for key in &except {
@@ -471,7 +518,7 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 /// but malformed" so [`AssertableInertia::from_response`] can report
 /// the real cause instead of misreporting a found-but-broken element as
 /// absent.
-fn page_object_from_html(html: &str) -> Option<Result<Value, serde_json::Error>> {
+pub(crate) fn page_object_from_html(html: &str) -> Option<Result<Value, serde_json::Error>> {
     const OPEN: &str = r#"<script type="application/json" data-page=""#;
     let id_at = html.find(OPEN)? + OPEN.len();
     // The id is written attribute-escaped, so the first `">` closes the tag.

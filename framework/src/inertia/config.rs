@@ -414,6 +414,16 @@ pub struct InertiaConfig {
     /// accepts. Default `svelte`, `tsx`, `jsx` and `vue`, the ones
     /// `inertia_response!` looks for.
     pub page_extensions: Vec<String>,
+    /// Whether [`AssertableInertia::component`](crate::testing::AssertableInertia::component)
+    /// also checks that the component has a page file under
+    /// [`pages_dir`](Self::pages_dir) with one of the
+    /// [`page_extensions`](Self::page_extensions). Default `true`.
+    ///
+    /// A test that asserts a component the frontend never built passes
+    /// while the browser shows a blank page; the check makes it fail
+    /// instead. It runs only in tests and only with this configuration
+    /// installed. Laravel's `inertia.testing.ensure_pages_exist`.
+    pub testing_ensure_pages_exist: bool,
     /// Whether [`crate::Inertia::install`] registers the Inertia
     /// middleware stack on every route. Default `true`.
     ///
@@ -736,6 +746,7 @@ impl Default for InertiaConfig {
                 .iter()
                 .map(|ext| ext.to_string())
                 .collect(),
+            testing_ensure_pages_exist: true,
             register_globally: true,
             hooks: None,
             manifest: Arc::new(OnceLock::new()),
@@ -1205,6 +1216,14 @@ impl InertiaConfig {
     /// ```
     pub fn ensure_pages_exist(mut self, on: bool) -> Self {
         self.ensure_pages_exist = on;
+        self
+    }
+
+    /// Choose whether a test's component assertion also checks the page
+    /// file; see [`testing_ensure_pages_exist`](Self::testing_ensure_pages_exist).
+    /// On by default. Laravel's `inertia.testing.ensure_pages_exist`.
+    pub fn testing_ensure_pages_exist(mut self, on: bool) -> Self {
+        self.testing_ensure_pages_exist = on;
         self
     }
 

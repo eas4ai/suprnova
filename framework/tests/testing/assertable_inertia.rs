@@ -13,10 +13,12 @@
 //! without needing `PartialFilter`/`InertiaResponse` at all; those are
 //! already covered end-to-end by `framework/tests/inertia.rs`.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use serde_json::json;
 
-use suprnova::testing::{AssertableInertia, ReloadRequest, TestResponse};
-use suprnova::{HttpResponse, MANIFEST_VERSION_FALLBACK};
+use suprnova::testing::{AssertableInertia, ReloadRequest, TestContainer, TestResponse};
+use suprnova::{HttpResponse, Inertia, InertiaConfig, MANIFEST_VERSION_FALLBACK};
 
 fn json_page_response() -> HttpResponse {
     let page = json!({
@@ -545,4 +547,152 @@ fn reload_request_headers_include_partial_except_and_omit_partial_data_when_only
     // The `only` and `except` branches build independent header entries
     // - setting one must not also emit the other's header.
     assert!(!headers.iter().any(|(k, _)| k == "X-Inertia-Partial-Data"));
+}
+
+// ── PAR-064: the HTML first visit, the callback form, the page-file check
+
+/// The panic message `assertion` fails with, or a failure of the test when
+/// it passes.
+fn failure_of(assertion: impl FnOnce()) -> String {
+    let payload =
+        catch_unwind(AssertUnwindSafe(assertion)).expect_err("the assertion was expected to fail");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+fn page_for(component: &str) -> HttpResponse {
+    HttpResponse::json(json!({
+        "component": component,
+        "props": {"errors": {}},
+        "url": "/",
+        "version": "",
+    }))
+    .header("X-Inertia", "true")
+}
+
+#[test]
+fn intt_test_response_assert_inertia_reads_the_html_first_visit() {
+    let page = json!({
+        "component": "Home",
+        "props": {"greeting": "hi"},
+        "url": "/",
+        "version": "abc123",
+    });
+    let shell = html_shell_response(&page);
+    let response = TestResponse::new(
+        200,
+        vec![(
+            "content-type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        )],
+        shell.body().to_vec(),
+    );
+
+    response
+        .assert_inertia()
+        .component("Home")
+        .version("abc123")
+        .where_("greeting", "hi");
+}
+
+#[test]
+fn intt_assert_inertia_with_returns_the_response_for_chaining() {
+    let response = TestResponse::new(
+        200,
+        vec![("x-inertia".to_string(), "true".to_string())],
+        json!({"component": "Home", "props": {}, "url": "/", "version": ""}).to_string(),
+    );
+    let mut ran = false;
+
+    let returned: *const TestResponse = response.assert_inertia_with(|page| {
+        page.component("Home");
+        ran = true;
+    });
+
+    assert!(ran, "the callback must run");
+    assert!(
+        std::ptr::eq(returned, &response),
+        "the response itself must come back"
+    );
+}
+
+/// A temp `pages_dir` holding `Home.svelte`, installed on a fake container.
+fn install_pages(configure: impl FnOnce(InertiaConfig) -> InertiaConfig) -> tempfile::TempDir {
+    let pages = tempfile::tempdir().expect("a temp pages dir");
+    std::fs::write(pages.path().join("Home.svelte"), "<p>home</p>").expect("write Home.svelte");
+    Inertia::install(&configure(
+        InertiaConfig::new()
+            .development(true)
+            .register_globally(false)
+            .pages_dir(pages.path()),
+    ))
+    .expect("a development install");
+    pages
+}
+
+#[test]
+fn intt_component_checks_the_page_file_under_the_installed_configuration() {
+    let _container = TestContainer::fake();
+    let pages = install_pages(|config| config);
+
+    AssertableInertia::from_response(&page_for("Home")).component("Home");
+
+    let failure = failure_of(|| {
+        AssertableInertia::from_response(&page_for("Missing")).component("Missing");
+    });
+    assert!(
+        failure.contains("Inertia page component file [Missing] does not exist."),
+        "{failure}"
+    );
+    assert!(
+        failure.contains(&pages.path().display().to_string()),
+        "the failure names the directory looked in: {failure}"
+    );
+    assert!(failure.contains("svelte"), "and the extensions: {failure}");
+}
+
+#[test]
+fn intt_component_exists_decides_the_check_for_one_call() {
+    let _container = TestContainer::fake();
+    let pages = install_pages(|config| config);
+
+    AssertableInertia::from_response(&page_for("Missing")).component_exists("Missing", false);
+
+    std::fs::remove_file(pages.path().join("Home.svelte")).expect("remove Home.svelte");
+    let failure = failure_of(|| {
+        AssertableInertia::from_response(&page_for("Home")).component_exists("Home", true);
+    });
+    assert!(
+        failure.contains("Inertia page component file [Home] does not exist."),
+        "{failure}"
+    );
+}
+
+#[test]
+fn intt_component_exists_still_asserts_the_name() {
+    let _container = TestContainer::fake();
+    let _pages = install_pages(|config| config);
+
+    let failure = failure_of(|| {
+        AssertableInertia::from_response(&page_for("Home")).component_exists("Other", false);
+    });
+    assert!(failure.contains("Expected: \"Other\""), "{failure}");
+}
+
+#[test]
+fn intt_testing_ensure_pages_exist_off_skips_the_file_check() {
+    let _container = TestContainer::fake();
+    let _pages = install_pages(|config| config.testing_ensure_pages_exist(false));
+
+    AssertableInertia::from_response(&page_for("Missing")).component("Missing");
+}
+
+#[test]
+fn intt_component_checks_no_file_without_an_installed_configuration() {
+    let _container = TestContainer::fake();
+
+    AssertableInertia::from_response(&page_for("Missing")).component("Missing");
 }
