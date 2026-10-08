@@ -1,13 +1,14 @@
 import { usePage } from '@inertiajs/react'
-import type { Toast } from '../types/inertia-props'
 
 // The message a handler flashed with `Inertia::flash("toast", Toast { .. })`
-// after a sign-in, a registration, a reset or a saved note. The server sends
-// it in the next page's `flash` and removes it from the session there, so
-// the toast is read from the page on every render and never copied into
-// state: the page after it carries no toast, and this renders nothing.
+// after a sign-in, a registration, a reset or a saved note. `page.flash` is
+// typed by the generated `flashDataType`, `Flash`, whose `toast` it is. The
+// server sends it in the next page's `flash` and removes it from the
+// session there, so the toast is read from the page on every render and
+// never copied into state: the page after it carries no toast, and this
+// renders nothing.
 export default function FlashToast() {
-  const toast = flashedToast(usePage().flash)
+  const { toast } = usePage().flash
 
   if (!toast) {
     return null
@@ -30,31 +31,4 @@ export default function FlashToast() {
       </p>
     </div>
   )
-}
-
-/**
- * The toast in a page's flash data, or `null` when the page carries none.
- *
- * `page.flash` holds each flashed value under the key it was flashed with,
- * so the toast is `flash.toast`. It is read through `object` because the
- * generated `flashDataType` names the `Toast` struct itself rather than the
- * map that holds it under `toast`.
- */
-function flashedToast(flash: object): Toast | null {
-  if (!('toast' in flash)) {
-    return null
-  }
-
-  const toast = flash.toast
-
-  if (
-    typeof toast !== 'object' ||
-    toast === null ||
-    !('message' in toast) ||
-    typeof toast.message !== 'string'
-  ) {
-    return null
-  }
-
-  return toast as Toast
 }

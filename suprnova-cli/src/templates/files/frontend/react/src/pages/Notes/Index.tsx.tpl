@@ -1,22 +1,11 @@
 import { Form, Head, InfiniteScroll, Link, router, usePage, useRemember } from '@inertiajs/react'
-import type { Pages } from '../../types/inertia-props'
+import type { NotesIndexProps } from '../../types/inertia-props'
 
-// A row of the list: the note as `Notes/Show` receives it, so a row can open
-// its note through an instant visit.
-type Note = Pages['Notes/Show']['note']
-
-// The handler renders this page with `Inertia::paginate("Notes/Index",
-// "notes", paginator)`: `notes` is one page of the signed-in user's notes,
-// newest first, with the cursor of the next page in the page's
-// `scrollProps`, and `search` the filter it applied. A paginator is not a
-// props struct, so `suprnova generate-types` cannot type it and this page
-// declares it.
-interface Props {
-  notes: Note[]
-  search: string
-}
-
-export default function NotesIndex({ notes, search }: Props) {
+// `notes` is one page of the signed-in user's notes, newest first: the
+// handler builds it with `cursor_paginate` and sends it through
+// `Inertia::paginate`, with the cursor of the next page in the page's
+// `scrollProps`. `search` is the filter it applied.
+export default function NotesIndex({ notes, search }: NotesIndexProps) {
   // The public root the server shares with every page (`RootShare`): empty
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this page posts to or links is built from it, so one build
@@ -125,8 +114,8 @@ export default function NotesIndex({ notes, search }: Props) {
                 {/* `component` and `pageProps` make the visit instant: the
                     show page renders from this row before the server answers,
                     then takes the server's props. `shared` carries the shared
-                    props, `root` among them, into that first render.
-                    `prefetch` loads the page on hover. */}
+                    props, `root` and `auth` among them, into that first
+                    render. `prefetch` loads the page on hover. */}
                 <Link
                   href={`${root}/notes/${note.id}`}
                   prefetch

@@ -183,6 +183,10 @@ mod react {
                 "vite.config.ts lacks {needle}:\n{config}"
             );
         }
+        assert!(
+            !config.contains("ssr_start.rs") && config.contains("frontend/bootstrap/ssr/ssr.js"),
+            "vite.config.ts cites `suprnova ssr:start` and its bundle path, not a source file:\n{config}"
+        );
 
         for (path, body) in kit.sources("").into_iter().chain([
             (kit.frontend.join("package.json"), kit.read("package.json")),
@@ -261,54 +265,70 @@ mod react {
     }
 
     /// PAR-077 and PAR-078: the guest and application layouts, and the flash
-    /// toast both show, read from the page and never kept in state.
+    /// toast both show, read from the page and never kept in state. Both
+    /// layouts render `AccountLinks`, which reads the signed-in user from the
+    /// shared `auth` prop: the sign-in and register links when there is
+    /// none, the name and the sign-out `Link` when there is one.
     #[test]
     fn kit_react_ships_both_layouts_and_the_flash_toast() {
         let kit = Kit::scaffold();
         let app = kit.read("src/layouts/AppLayout.tsx");
+        let guest = kit.read("src/layouts/GuestLayout.tsx");
         for needle in [
             "href={`${root}/dashboard`}",
             "href={`${root}/notes`}",
-            "<Link href={`${root}/logout`} method=\"post\" as=\"button\"",
-            "user.name",
             "heading",
-            "<FlashToast />",
         ] {
             assert!(app.contains(needle), "AppLayout lacks {needle}:\n{app}");
         }
-        // A `Link` that posts preserves the page's state by default, and a
-        // visit that preserves state keeps the layout props: signing out
-        // from the dashboard would carry its heading onto the next page
-        // (`packages/react/src/Link.ts` and `App.ts` in Inertia 3.8.0).
-        assert!(
-            app.contains(
-                "<Link href={`${root}/logout`} method=\"post\" as=\"button\" preserveState={false}"
-            ),
-            "the sign-out Link must not preserve state:\n{app}"
-        );
-        let guest = kit.read("src/layouts/GuestLayout.tsx");
+        for (layout, body) in [("AppLayout", &app), ("GuestLayout", &guest)] {
+            for needle in ["<AccountLinks", "<FlashToast />"] {
+                assert!(body.contains(needle), "{layout} lacks {needle}:\n{body}");
+            }
+            assert!(
+                !body.contains("user?:"),
+                "{layout} takes the user from the shared `auth` prop, not from a page prop:\n{body}"
+            );
+        }
+        let account = kit.read("src/components/AccountLinks.tsx");
         for needle in [
-            "<Link href={`${root}/login`}",
-            "<Link href={`${root}/register`}",
-            "<FlashToast />",
+            "const { root, auth } = usePage().props",
+            "auth?.user",
+            "user ? (",
+            "{user.name}",
+            "href={`${root}/login`}",
+            "href={`${root}/register`}",
+            // A `Link` that posts preserves the page's state by default, and
+            // a visit that preserves state keeps the layout props: signing
+            // out from the dashboard would carry its heading onto the next
+            // page (`packages/react/src/Link.ts` and `App.ts` in Inertia
+            // 3.8.0).
+            "<Link href={`${root}/logout`} method=\"post\" as=\"button\" preserveState={false}",
         ] {
             assert!(
-                guest.contains(needle),
-                "GuestLayout lacks {needle}:\n{guest}"
+                account.contains(needle),
+                "AccountLinks lacks {needle}:\n{account}"
             );
         }
 
         let toast = kit.read("src/components/FlashToast.tsx");
-        for needle in ["usePage().flash", "flash.toast", "toast.message"] {
+        for needle in ["const { toast } = usePage().flash", "toast.message"] {
             assert!(
                 toast.contains(needle),
                 "FlashToast lacks {needle}:\n{toast}"
             );
         }
-        for stored in ["useState", "useRemember", "useEffect"] {
+        for refused in [
+            "useState",
+            "useRemember",
+            "useEffect",
+            "'toast' in",
+            "object",
+        ] {
             assert!(
-                !toast.contains(stored),
-                "FlashToast must render the toast from the page, not keep it ({stored}):\n{toast}"
+                !toast.contains(refused),
+                "FlashToast must read the typed toast from the page, not keep or probe it \
+                 ({refused}):\n{toast}"
             );
         }
 
@@ -342,8 +362,8 @@ mod react {
             }
         }
         assert_eq!(
-            scanned, 13,
-            "ten pages, two layouts and the toast component"
+            scanned, 14,
+            "ten pages, two layouts, the account links and the toast"
         );
         assert!(
             offenders.is_empty(),
@@ -436,9 +456,22 @@ mod react {
             "profile.errors.name",
             "setLayoutProps({ heading: 'Dashboard' })",
             "<Head title=\"Dashboard\" />",
+            // The signed-in user is the shared `auth.user`; after a save the
+            // dashboard reloads it so the layout shows the new name.
+            "usePage().props",
+            "auth.user",
+            "router.reload({ only: ['auth'] })",
+            "Partial<DashboardProps>",
         ] {
             assert!(body.contains(needle), "Dashboard lacks {needle}:\n{body}");
         }
+        assert!(
+            body.contains(
+                "export default function Dashboard({ stats, recent_notes }: Partial<DashboardProps>)"
+            ),
+            "the dashboard takes `stats` and `recent_notes`, both absent until loaded, \
+             and no `user` prop:\n{body}"
+        );
     }
 
     /// PAR-079: the notes page creates a note through `Form`, remembers its
@@ -469,8 +502,13 @@ mod react {
                 "Notes/Index lacks {needle}:\n{index}"
             );
         }
+        assert!(
+            index.contains("NotesIndexProps"),
+            "Notes/Index is typed by the generated NotesIndexProps:\n{index}"
+        );
         let show = kit.page("Notes/Show");
         for needle in [
+            "NotesShowProps",
             "<Head title={note.title} />",
             "<Link href={`${root}/notes`}",
         ] {
@@ -479,65 +517,124 @@ mod react {
     }
 
     /// The kit's `inertia-props.ts` is what `suprnova generate-types` writes
-    /// for the handlers the kit contract names: the scaffold's controllers,
-    /// with the notes controller and the flash struct as the contract
-    /// declares them. The backend lane writes those two; until its
-    /// controllers are on this branch, `notes.rs` and `flash.rs` below stand
-    /// in for them.
+    /// for the handlers the kit contract names: the scaffold's auth, reset,
+    /// verification and home controllers as they are, and the dashboard,
+    /// notes, shared and flash structs as the contract's amendments declare
+    /// them. The backend lane writes those four; until its controllers are on
+    /// this branch, the sources below stand in for them. The command runs as
+    /// a user runs it, so a conflict it refuses fails here too.
     #[test]
     fn kit_react_types_are_what_generate_types_writes_for_the_kit_contract() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let controllers = dir.path().join("src/controllers");
-        let props = dir.path().join("src/props");
-        fs::create_dir_all(&controllers).expect("create src/controllers");
-        fs::create_dir_all(&props).expect("create src/props");
-        for (name, body) in [
-            ("home.rs", suprnova_cli::templates::home_controller()),
-            ("auth.rs", suprnova_cli::templates::auth_controller()),
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path();
+        let controllers = project.join("src/controllers");
+        let props = project.join("src/props");
+        for dir in [&controllers, &props, &project.join("frontend/src/types")] {
+            fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+        }
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"kit-types\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("write Cargo.toml");
+        for (path, body) in [
             (
-                "dashboard.rs",
-                suprnova_cli::templates::dashboard_controller(),
+                controllers.join("home.rs"),
+                suprnova_cli::templates::home_controller(),
             ),
             (
-                "email_verification.rs",
+                controllers.join("auth.rs"),
+                suprnova_cli::templates::auth_controller(),
+            ),
+            (
+                controllers.join("email_verification.rs"),
                 suprnova_cli::templates::email_verification_controller(),
             ),
             (
-                "password_reset.rs",
+                controllers.join("password_reset.rs"),
                 suprnova_cli::templates::password_reset_controller(),
             ),
-            ("notes.rs", CONTRACT_NOTES_CONTROLLER),
+            (controllers.join("dashboard.rs"), CONTRACT_DASHBOARD),
+            (controllers.join("notes.rs"), CONTRACT_NOTES),
+            (props.join("shared.rs"), CONTRACT_SHARED),
+            (props.join("flash.rs"), CONTRACT_FLASH),
         ] {
-            fs::write(controllers.join(name), body).unwrap_or_else(|e| panic!("write {name}: {e}"));
+            fs::write(&path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
         }
-        fs::write(props.join("flash.rs"), CONTRACT_FLASH).expect("write flash.rs");
 
-        let structs = suprnova_cli::commands::generate_types::scan_inertia_props(dir.path());
-        let expected = suprnova_cli::commands::generate_types::generate_typescript(
-            &structs,
-            suprnova_cli::commands::generate_types::PageTypes::default(),
+        let output = Command::new(BIN)
+            .arg("generate-types")
+            .current_dir(project)
+            .output()
+            .expect("spawn suprnova generate-types");
+        assert!(
+            output.status.success(),
+            "`suprnova generate-types` refused the kit contract's structs:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        let generated = fs::read_to_string(project.join("frontend/src/types/inertia-props.ts"))
+            .expect("read the generated types");
         let shipped = suprnova_cli::templates::react::inertia_props_types();
         assert_eq!(
-            shipped, expected,
+            shipped, generated,
             "react's inertia-props.ts.tpl is not what `suprnova generate-types` writes \
-             for the kit contract.\nexpected:\n{expected}\nshipped:\n{shipped}"
+             for the kit contract.\nexpected:\n{generated}\nshipped:\n{shipped}"
         );
         for declared in [
-            "\"Notes/Show\": NoteShowProps;",
-            "flashDataType: Toast;",
-            "export interface DashboardProps",
+            "\"Notes/Index\": NotesIndexProps;",
+            "\"Notes/Show\": NotesShowProps;",
+            "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}",
+            "flashDataType: Flash;",
+            "toast: Toast | null;",
         ] {
             assert!(shipped.contains(declared), "the types lack {declared}");
         }
     }
 
-    /// The notes handlers as the kit contract declares them: `Notes/Index`
-    /// through `Inertia::paginate` (no struct, so no `Pages` entry) and
-    /// `Notes/Show` with `note: {id, title, body, created_at}`.
-    const CONTRACT_NOTES_CONTROLLER: &str = r#"
+    /// The dashboard's props as the kit contract declares them.
+    const CONTRACT_DASHBOARD: &str = r#"
 use serde::Serialize;
-use suprnova::{handler, inertia_response, Inertia, InertiaProps, Request, Response};
+use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
+
+#[derive(Serialize)]
+pub struct Stats {
+    pub notes: u64,
+    pub written_today: u64,
+}
+
+#[derive(Serialize)]
+pub struct NoteSummary {
+    pub id: u64,
+    pub title: String,
+    pub created_at: String,
+}
+
+#[derive(InertiaProps)]
+pub struct DashboardProps {
+    pub stats: Stats,
+    pub recent_notes: Vec<NoteSummary>,
+}
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    let props: DashboardProps = dashboard_props(&req).await?;
+    inertia_response!(&req, "Dashboard", props)
+}
+"#;
+
+    /// The notes pages' props as the kit contract declares them.
+    const CONTRACT_NOTES: &str = r#"
+use serde::Serialize;
+use suprnova::{handler, inertia_response, InertiaProps, InertiaResponse, Request, Response};
+
+use super::dashboard::NoteSummary;
+
+#[derive(InertiaProps)]
+pub struct NotesIndexProps {
+    pub notes: Vec<NoteSummary>,
+    pub search: String,
+}
 
 #[derive(Serialize)]
 pub struct NoteView {
@@ -548,41 +645,64 @@ pub struct NoteView {
 }
 
 #[derive(InertiaProps)]
-pub struct NoteShowProps {
+pub struct NotesShowProps {
     pub note: NoteView,
 }
 
 #[handler]
 pub async fn index(req: Request) -> Response {
-    let paginator = notes_for(&req).await?;
-    Inertia::paginate("Notes/Index", "notes", paginator).into()
+    let props: NotesIndexProps = notes_props(&req).await?;
+    InertiaResponse::new("Notes/Index").with_data(props).into()
 }
 
 #[handler]
 pub async fn show(req: Request) -> Response {
     let note = note_for(&req).await?;
-    inertia_response!(&req, "Notes/Show", NoteShowProps { note })
+    inertia_response!(&req, "Notes/Show", NotesShowProps { note })
 }
 "#;
 
-    /// The flash struct as the kit contract declares it.
+    /// The shared props as the kit contract declares them, under the name
+    /// `SharedData`: `suprnova generate-types` refuses a struct named
+    /// `SharedProps`, the name of the declaration it writes from this one.
+    const CONTRACT_SHARED: &str = r#"
+use serde::Serialize;
+use suprnova::InertiaProps;
+
+#[derive(Serialize)]
+pub struct UserInfo {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Serialize)]
+pub struct Auth {
+    pub user: Option<UserInfo>,
+}
+
+#[derive(InertiaProps, Serialize)]
+#[inertia_props(shared)]
+pub struct SharedData {
+    pub auth: Auth,
+}
+"#;
+
+    /// The flash data as the kit contract declares it.
     const CONTRACT_FLASH: &str = r#"
 use serde::Serialize;
 use suprnova::InertiaProps;
 
 #[derive(Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToastKind {
-    Success,
-    Info,
-    Error,
+pub struct Toast {
+    pub kind: String,
+    pub message: String,
 }
 
 #[derive(InertiaProps, Serialize)]
 #[inertia_props(flash)]
-pub struct Toast {
-    pub kind: ToastKind,
-    pub message: String,
+pub struct Flash {
+    pub toast: Option<Toast>,
 }
 "#;
 }

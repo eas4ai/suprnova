@@ -31,9 +31,9 @@ export default defineConfig(({ isSsrBuild }) => ({
   build: isSsrBuild
     ? {
         // `vite build --ssr src/ssr.tsx` lands here, not in
-        // `public/assets` alongside the client bundle - `suprnova
-        // ssr:start` looks for `frontend/bootstrap/ssr/ssr.js` by
-        // default (see `suprnova-cli/src/commands/ssr_start.rs`). The
+        // `public/assets` alongside the client bundle: `suprnova
+        // ssr:start` runs the conventional bundle path,
+        // `frontend/bootstrap/ssr/ssr.js`, unless told otherwise. The
         // Inertia plugin adds the entry as the build's input and a source
         // map beside the bundle; it leaves the output directory and the
         // file name to this config.

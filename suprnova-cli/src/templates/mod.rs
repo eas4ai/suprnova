@@ -611,6 +611,11 @@ pub mod react {
     pub fn guest_layout() -> &'static str {
         include_str!("files/frontend/react/src/layouts/GuestLayout.tsx.tpl")
     }
+    /// The account corner both layouts show from the shared `auth` prop:
+    /// the user's name and sign-out, or the sign-in and register links.
+    pub fn account_links() -> &'static str {
+        include_str!("files/frontend/react/src/components/AccountLinks.tsx.tpl")
+    }
     /// The toast both layouts show from the page's flash data.
     pub fn flash_toast() -> &'static str {
         include_str!("files/frontend/react/src/components/FlashToast.tsx.tpl")
@@ -901,6 +906,7 @@ pub fn scaffold_frontend(
                 (lib.join("app.ts"), app_module.as_str()),
                 (layouts.join("AppLayout.tsx"), react::app_layout()),
                 (layouts.join("GuestLayout.tsx"), react::guest_layout()),
+                (components.join("AccountLinks.tsx"), react::account_links()),
                 (components.join("FlashToast.tsx"), react::flash_toast()),
                 (notes.join("Index.tsx"), react::notes_index_page()),
                 (notes.join("Show.tsx"), react::notes_show_page()),

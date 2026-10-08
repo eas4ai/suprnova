@@ -12,35 +12,22 @@ import {
 } from '@inertiajs/react'
 import type { DashboardProps, UserInfo } from '../types/inertia-props'
 
-// The handler adds two props to `DashboardProps` that it resolves apart from
-// the page: `stats` deferred (`.defer("stats", ..)`), fetched in a request
-// of its own once the page has rendered, and `recent_notes` optional
-// (`.optional("recent_notes", ..)`), sent only when a partial reload names
-// it. Neither is a field of the struct, so `suprnova generate-types` cannot
-// type them and this page declares them; both are absent until loaded.
-interface NoteStats {
-  notes: number
-  written_today: number
-}
-
-interface RecentNote {
-  id: number
-  title: string
-  created_at: string
-}
-
-type Props = DashboardProps & {
-  stats?: NoteStats
-  recent_notes?: RecentNote[]
-}
-
-export default function Dashboard({ user, stats, recent_notes }: Props) {
+// The handler resolves both props apart from the page: `stats` deferred
+// (`.defer("stats", ..)`), fetched in a request of its own once the page
+// has rendered, and `recent_notes` optional (`.optional("recent_notes",
+// ..)`), sent only when a partial reload names it. Both are absent until
+// loaded, so the page takes them as optional.
+export default function Dashboard({ stats, recent_notes }: Partial<DashboardProps>) {
   // The public root the server shares with every page (`RootShare`): empty
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this page posts to or links is built from it, so one build
   // runs at both.
   // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
   const { root } = usePage().props
+  // The signed-in user, shared with every page. The dashboard is behind
+  // the `auth` middleware, so it is set here; the type also covers a guest
+  // page, hence the fallbacks below.
+  const user = usePage().props.auth.user
 
   // The application layout shows this heading. A visit to another page
   // clears it, so a page that sets none shows none.
@@ -55,17 +42,17 @@ export default function Dashboard({ user, stats, recent_notes }: Props) {
   // the visitor is typing. Submitting copies the draft into the shown name
   // at once (`optimistic`); a `422` puts the previous name back and fills
   // `profile.errors.name` from the response's `errors`.
-  const [draft, setDraft] = useState(user.name)
-  const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: user.name })
+  const [draft, setDraft] = useState(user?.name ?? '')
+  const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: user?.name ?? '' })
 
   const saveName = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     profile
       .optimistic(() => ({ name: draft }))
       .post(`${root}/profile/name`, {
-        // The layout shows the signed-in user from the page's `user` prop;
-        // reload just that prop so it shows the saved name too.
-        onSuccess: () => router.reload({ only: ['user'] }),
+        // The layouts show the signed-in user from the shared `auth`
+        // prop; reload just that prop so they show the saved name too.
+        onSuccess: () => router.reload({ only: ['auth'] }),
       })
       .catch(() => {
         // Anything but a 2xx or a 422 (a network failure, a 500) rejects
@@ -80,7 +67,7 @@ export default function Dashboard({ user, stats, recent_notes }: Props) {
 
       <section className="rounded-lg bg-white p-6 shadow">
         <h2 className="text-xl font-semibold text-gray-900">Welcome, {profile.data.name}!</h2>
-        <p className="mt-1 text-sm text-gray-500">Signed in as {user.email}</p>
+        <p className="mt-1 text-sm text-gray-500">Signed in as {user?.email}</p>
 
         <form className="mt-4 flex flex-wrap items-start gap-3" onSubmit={saveName}>
           <div>

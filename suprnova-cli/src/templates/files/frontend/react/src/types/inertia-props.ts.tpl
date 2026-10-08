@@ -4,13 +4,22 @@
 import '@inertiajs/core';
 
 export interface DashboardProps {
-  user: UserInfo;
+  stats: Stats;
+  recent_notes: Array<NoteSummary>;
 }
 
-export interface UserInfo {
-  id: number;
-  name: string;
-  email: string;
+export interface Stats {
+  notes: number;
+  written_today: number;
+}
+
+export interface Flash {
+  toast: Toast | null;
+}
+
+export interface Toast {
+  kind: string;
+  message: string;
 }
 
 export interface ForgotPasswordProps {
@@ -24,7 +33,18 @@ export interface HomeProps {
 export interface LoginProps {
 }
 
-export interface NoteShowProps {
+export interface NotesIndexProps {
+  notes: Array<NoteSummary>;
+  search: string;
+}
+
+export interface NoteSummary {
+  id: number;
+  title: string;
+  created_at: string;
+}
+
+export interface NotesShowProps {
   note: NoteView;
 }
 
@@ -42,9 +62,18 @@ export interface ResetPasswordProps {
   token: string;
 }
 
-export interface Toast {
-  kind: unknown;
-  message: string;
+export interface SharedData {
+  auth: Auth;
+}
+
+export interface Auth {
+  user: UserInfo | null;
+}
+
+export interface UserInfo {
+  id: number;
+  name: string;
+  email: string;
 }
 
 export interface VerifyEmailProps {
@@ -54,7 +83,8 @@ export interface VerifyEmailProps {
 export interface Pages {
   "Dashboard": DashboardProps;
   "Home": HomeProps;
-  "Notes/Show": NoteShowProps;
+  "Notes/Index": NotesIndexProps;
+  "Notes/Show": NotesShowProps;
   "auth/ForgotPassword": ForgotPasswordProps;
   "auth/Login": LoginProps;
   "auth/Register": RegisterProps;
@@ -64,6 +94,7 @@ export interface Pages {
 
 export interface SharedProps {
   root: string;
+  auth: Auth;
 }
 
 export type Errors = Record<string, string>;
@@ -74,6 +105,6 @@ declare module '@inertiajs/core' {
   export interface InertiaConfig {
     sharedPageProps: SharedProps;
     errorValueType: string;
-    flashDataType: Toast;
+    flashDataType: Flash;
   }
 }

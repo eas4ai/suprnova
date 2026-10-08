@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link, usePage } from '@inertiajs/react'
+import AccountLinks from '../components/AccountLinks'
 import FlashToast from '../components/FlashToast'
-import type { UserInfo } from '../types/inertia-props'
 
 // The layout of every page outside `auth/`, applied by `layout` in
 // `lib/app.ts`. It stays mounted while the visitor moves between those
@@ -14,20 +14,18 @@ interface AppLayoutProps {
   /** A heading a page sets with `setLayoutProps({ heading })`. The next
    *  page that sets none shows none: a visit clears the layout props. */
   heading?: string
-  /** The signed-in user, on a page whose handler sends one (the dashboard). */
-  user?: UserInfo
 }
 
 const linkClass = 'rounded-md px-3 py-2 text-sm font-medium'
 const idleClass = `${linkClass} text-gray-600 hover:text-gray-900`
 const activeClass = `${linkClass} bg-gray-100 text-gray-900`
 
-export default function AppLayout({ children, heading, user }: AppLayoutProps) {
+export default function AppLayout({ children, heading }: AppLayoutProps) {
   // The public root the server shares with every page (`RootShare`): empty
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this layout links is built from it, so one build runs at both.
-  const { root } = usePage().props
-  const { component } = usePage()
+  const { component, props } = usePage()
+  const { root } = props
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -50,13 +48,7 @@ export default function AppLayout({ children, heading, user }: AppLayoutProps) {
             </Link>
           </div>
           <div className="flex items-center gap-4">
-            {user && <span className="text-sm text-gray-700">{user.name}</span>}
-            {/* A `Link` that posts keeps the page's state by default, and
-                with it the layout props; this visit starts the next page
-                clean, so the dashboard's heading does not follow it. */}
-            <Link href={`${root}/logout`} method="post" as="button" preserveState={false} className={idleClass}>
-              Sign out
-            </Link>
+            <AccountLinks className={idleClass} />
           </div>
         </div>
       </nav>
