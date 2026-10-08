@@ -388,7 +388,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   now split on `,` with empty segments dropped and nothing trimmed (`a, b`
   names `a` and ` b`), and a header that names nothing counts as absent:
   an empty `X-Inertia-Partial-Data` now returns every prop `except`
-  allows, as Laravel's does (HD-03).
+  allows, as Laravel's does. `X-Inertia-Reset` and
+  `X-Inertia-Except-Once-Props` were trimmed too and now follow the same
+  rule (HD-03).
 - **Dotted partial-reload entries narrow literal values only, as
   Laravel's do.** `only: ['users.name']` narrowed every prop's resolved
   value, a resolver's and a `defer`, `optional`, `merge` or `once` prop's

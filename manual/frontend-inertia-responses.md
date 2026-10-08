@@ -511,7 +511,9 @@ three request headers:
 Both lists are read as Laravel reads them: split on `,`, empty segments
 dropped, and no trimming, so `a, b` names `a` and ` b`. A header that names
 nothing - empty, or only commas - counts as absent rather than as a list
-that matches no prop.
+that matches no prop. The other list headers the client sends,
+`X-Inertia-Reset` and `X-Inertia-Except-Once-Props`, are read by the same
+rule.
 
 Filtering reads one thing: the prop's visibility, set by `.always()`,
 `.optional()`, or `.defer()`. A prop with none of those has the default

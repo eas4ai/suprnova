@@ -380,3 +380,65 @@ async fn inp_a_held_deferred_once_prop_keeps_its_merge_entry() {
     assert_eq!(names(&page, "mergeProps"), vec!["plans".to_string()]);
     assert_eq!(page["onceProps"]["plans"]["prop"], "plans");
 }
+
+// ---- the other Inertia list headers ----
+
+#[tokio::test]
+async fn inp_x_inertia_reset_is_parsed_without_trimming() {
+    // "other, items" names "other" and " items", so `items` is not reset
+    // and keeps its merge instruction.
+    let page_for = |reset: &'static str| async move {
+        let req = MockReq::new("/feed")
+            .inertia()
+            .header("X-Inertia-Reset", reset);
+        let resp = InertiaResponse::new("Feed")
+            .merge("items", json!([{"id": 1}]))
+            .resolve(&req)
+            .await
+            .unwrap();
+        page_of(resp).await
+    };
+    let untrimmed = page_for("other, items").await;
+    assert_eq!(
+        names(&untrimmed, "mergeProps"),
+        vec!["items".to_string()],
+        "` items` does not name `items`; got {untrimmed}"
+    );
+    // Empty segments are dropped, and the exact entry resets the prop.
+    let exact = page_for(",items,").await;
+    assert!(names(&exact, "mergeProps").is_empty(), "got {exact}");
+}
+
+#[tokio::test]
+async fn inp_x_inertia_except_once_props_is_parsed_without_trimming() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let page_for = |held: &'static str| {
+        let calls = calls.clone();
+        async move {
+            let req = MockReq::new("/billing")
+                .inertia()
+                .header("X-Inertia-Except-Once-Props", held);
+            let resp = InertiaResponse::new("Billing")
+                .prop("plans", counted(calls, json!([{"id": 1}])).once())
+                .resolve(&req)
+                .await
+                .unwrap();
+            page_of(resp).await
+        }
+    };
+    let untrimmed = page_for("other, plans").await;
+    assert_eq!(
+        untrimmed["props"]["plans"],
+        json!([{"id": 1}]),
+        "` plans` does not name `plans`, so the client holds nothing; got {untrimmed}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // Empty segments are dropped, and the exact entry is a held value.
+    let exact = page_for(",plans,").await;
+    assert!(exact["props"].get("plans").is_none(), "got {exact}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the held prop's resolver must not run"
+    );
+}

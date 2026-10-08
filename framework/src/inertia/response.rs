@@ -1433,15 +1433,14 @@ enum TaskOutcome {
     Rescued { key: String },
 }
 
-/// Parse a CSV header into a deduped list of trimmed, non-empty values.
+/// Parse an Inertia list header (`X-Inertia-Reset`,
+/// `X-Inertia-Except-Once-Props`) by the rule every Inertia list header
+/// follows: split on `,`, empty segments dropped, nothing trimmed, as
+/// Laravel's `PropsResolver::parseHeader` reads it. Empty when the header
+/// is absent or names nothing.
 fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
     req.header(name)
-        .map(|raw| {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
+        .and_then(super::prop::parse_header_list)
         .unwrap_or_default()
 }
 

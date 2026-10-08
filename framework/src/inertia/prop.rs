@@ -1116,10 +1116,10 @@ impl PartialFilter {
             matched: true,
             only: req
                 .header("X-Inertia-Partial-Data")
-                .and_then(parse_partial_list),
+                .and_then(parse_header_list),
             except: req
                 .header("X-Inertia-Partial-Except")
-                .and_then(parse_partial_list),
+                .and_then(parse_header_list),
         }
     }
 
@@ -1356,12 +1356,14 @@ impl PartialFilter {
     }
 }
 
-/// Parse a partial-reload header the way Laravel's `PropsResolver::parseHeader`
+/// Parse an Inertia list header the way Laravel's `PropsResolver::parseHeader`
 /// does: split on `,`, drop the empty segments, and keep every other segment
 /// as it is, spaces included. A header with no entry left counts as absent,
 /// so an empty `X-Inertia-Partial-Data` filters nothing instead of every
-/// prop.
-fn parse_partial_list(raw: &str) -> Option<Vec<String>> {
+/// prop. Laravel reads `X-Inertia-Partial-Data`, `X-Inertia-Partial-Except`,
+/// `X-Inertia-Reset` and `X-Inertia-Except-Once-Props` with it, and so does
+/// this adapter.
+pub(crate) fn parse_header_list(raw: &str) -> Option<Vec<String>> {
     let entries: Vec<String> = raw
         .split(',')
         .filter(|entry| !entry.is_empty())
