@@ -37,6 +37,7 @@
 
 use super::config::InertiaConfig;
 use super::dotted;
+use super::exceptions::ExceptionHandler;
 use super::prop::{InertiaRequestExt, OnceOptions, OnceUntil, Prop, PropResolver};
 use super::providers::ProvidesInertiaProperties;
 use super::runtime::InertiaRuntime;
@@ -177,6 +178,10 @@ pub struct InertiaRegistry {
     /// The settings the `Inertia` facade changes at run time, kept here so
     /// they follow the container's lookup like the shares above.
     runtime: InertiaRuntime,
+    /// The callback `Inertia::handle_exceptions_using` installed, here for
+    /// the same reason: a test that installs one under
+    /// `TestContainer::fake()` keeps it to itself.
+    exception_handler: RwLock<Option<ExceptionHandler>>,
 }
 
 impl InertiaRegistry {
@@ -189,6 +194,7 @@ impl InertiaRegistry {
             provider: RwLock::new(None),
             config: RwLock::new(None),
             runtime: InertiaRuntime::default(),
+            exception_handler: RwLock::new(None),
         }
     }
 
@@ -423,6 +429,46 @@ impl InertiaRegistry {
                 None
             }
         }
+    }
+
+    /// The `error_page` component of the config retained by
+    /// `Inertia::install`, if any. Read once per request by the
+    /// error-response middleware, so it copies the one name rather than
+    /// the whole config.
+    ///
+    /// **Poison policy** (matching `installed_config`): on lock poison,
+    /// returns `None` and logs a `tracing::error!`.
+    pub(crate) fn installed_error_page(&self) -> Option<String> {
+        match lock::read(&self.config, "inertia installed config slot") {
+            Ok(slot) => slot.as_ref().and_then(|config| config.error_page.clone()),
+            Err(_) => {
+                tracing::error!(
+                    "Inertia installed-config slot lock poisoned; rendering no error page."
+                );
+                None
+            }
+        }
+    }
+
+    /// Install the callback that decides each error response, replacing
+    /// any earlier one. Called by `Inertia::handle_exceptions_using`.
+    ///
+    /// The slot holds one whole value, so a poisoned lock is recovered
+    /// rather than leaving the earlier callback in place.
+    pub(crate) fn set_exception_handler(&self, handler: ExceptionHandler) {
+        let mut slot = self
+            .exception_handler
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(handler);
+    }
+
+    /// The callback that decides each error response, if one is installed.
+    pub(crate) fn exception_handler(&self) -> Option<ExceptionHandler> {
+        self.exception_handler
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Snapshot of the static registry - clones each entry. Cheap because

@@ -1,4 +1,5 @@
-//! Framework error responses → the app's Inertia error page.
+//! Framework error responses: the application's error callback, or the
+//! app's Inertia error page.
 //!
 //! The Inertia client treats a response without an `X-Inertia` header as
 //! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
@@ -11,9 +12,10 @@
 //! `429`, a `500`. A user with the wrong role clicks a nav link and gets
 //! a crash screen instead of a page.
 //!
-//! Laravel + Inertia solve this in the exception handler: render an
-//! app-defined `Error` component with the status as a prop, keeping the
-//! status code. The conversion cannot live in
+//! Laravel + Inertia solve this in the exception handler:
+//! `Inertia::handleExceptionsUsing` hands every rendered exception to a
+//! callback, which renders an app-defined `Error` component with the
+//! status as a prop, keeping the status code. The decision cannot live in
 //! `From<FrameworkError> for HttpResponse` here, because that impl has no
 //! request in scope and the answer depends entirely on who asked - an
 //! Inertia visit wants a page object, a hard navigation wants the HTML
@@ -22,30 +24,54 @@
 //! [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
 //! post-processes a `422`.
 //!
-//! [`Inertia::install`](crate::Inertia::install) registers this only when
-//! [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names a
-//! component, so an app that has not opted in runs exactly the code it
-//! ran before. An app whose stack answers before the Inertia layer is
-//! reached - CSRF, a rate limiter, an auth guard registered above
-//! `install` - registers the middleware itself, further out; see
-//! [`InertiaErrorPageMiddleware`] for where it may sit.
+//! The middleware hands each error response to the callback
+//! [`Inertia::handle_exceptions_using`](crate::Inertia::handle_exceptions_using)
+//! installed, or, without one, to the default callback for the component
+//! [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names
+//! (PAR-062). With neither, it hands the request on and does nothing else.
+//! [`Inertia::install`](crate::Inertia::install) always registers one. An
+//! app whose stack answers before the Inertia layer is reached - CSRF, a
+//! rate limiter, an auth guard registered above `install` - registers the
+//! middleware itself, further out; see [`InertiaErrorPageMiddleware`] for
+//! where it may sit.
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use crate::http::{Request, Response};
-use crate::middleware::{Middleware, Next};
+use crate::error::ErrorReport;
+use crate::http::{HttpResponse, Request, Response};
+use crate::middleware::{Middleware, MiddlewareFuture, Next};
 
-use super::InertiaRequestExt;
-use super::InertiaResponse;
+use super::exceptions::{CapturedRequest, Decision, ExceptionHandler, InertiaErrorResponse};
+use super::{InertiaRequestExt, InertiaResponse, Prop};
 
-/// Rewrites framework error responses into an Inertia page response for
-/// the configured error component, keeping the original status code.
+/// Decides each framework error response: the application's error callback
+/// when one is installed, else the default callback that renders the error
+/// page component, keeping the original status code.
 ///
 /// See the module documentation for why this is a middleware and not a
 /// branch inside the error-to-response conversion.
 ///
-/// A browser navigation's page renders through the root template
+/// # What it hands the callback
+///
+/// Every response with a status from `400` to `599` that the framework
+/// rendered from an error: one that carries an
+/// [`ErrorReport`](crate::ErrorReport) (a handler's or a middleware's
+/// `Err`, a panic), and the framework's own error bodies that carry none -
+/// an empty body, a JSON object with a string `message`, the router's
+/// `404 Not Found`. It runs the chain inside it under the panic boundary's
+/// rule, so a handler that panics reaches the callback as a `500` with the
+/// panic's report. Three kinds of response are never handed over: one a
+/// handler built itself in some other shape, which is the handler's
+/// answer; an Inertia protocol response (`X-Inertia`,
+/// `X-Inertia-Location`, `X-Inertia-Redirect`), which is an instruction to
+/// the client; and a validation result, a `422` whose JSON body carries an
+/// `errors` object, which
+/// [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
+/// owns. Each response is decided once, so a second instance further out
+/// leaves it alone.
+///
+/// A page the callback renders goes through the root template
 /// [`InertiaConfig::root_template_with`](crate::InertiaConfig::root_template_with)
 /// picks for the request as it arrived, so an error under `/admin` keeps
 /// the admin shell. It carries no view data: the handler that would have
@@ -54,11 +80,9 @@ use super::InertiaResponse;
 /// # Registering it yourself
 ///
 /// [`Inertia::install`](crate::Inertia::install) registers this
-/// **innermost** of the Inertia layer when
-/// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names a
-/// component, which is the right place for almost every app: the scaffold
-/// registers `CsrfMiddleware` and the rest of its stack *after* that call,
-/// so their responses pass back out through it.
+/// **innermost** of the Inertia layer, which is the right place for almost
+/// every app: the scaffold registers `CsrfMiddleware` and the rest of its
+/// stack *after* that call, so their responses pass back out through it.
 ///
 /// It is the wrong place for an app that registers a middleware which
 /// answers **before** the Inertia layer is reached - a `CsrfMiddleware`
@@ -94,20 +118,22 @@ use super::InertiaResponse;
 /// you named here, since this instance is the one in the chain. The page
 /// is therefore named **once**, at your own registration, and
 /// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) becomes
-/// optional: harmless to keep (nothing else reads it), and still what
-/// makes `install` register a middleware for an app that does not place
-/// one itself.
+/// optional. An error callback, when one is installed, decides in place of
+/// the component this instance names.
 ///
 /// **Where it must sit.** After
 /// [`SessionMiddleware`](crate::SessionMiddleware) and `LocaleMiddleware`,
-/// always. The page it renders carries the app's shared props - `auth`,
+/// always. The page it renders can carry the app's shared props - `auth`,
 /// the locale share, flash - and it renders on the way *out*, once every
 /// middleware registered inside it has returned and popped whatever
 /// request scope it opened. Registered above those two, every error page
 /// loses the visitor's session and locale. Then: before the middleware
 /// whose rejections it should cover, and nowhere further out than that.
 pub struct InertiaErrorPageMiddleware {
-    component: String,
+    /// The component the default callback renders. `None` for the instance
+    /// `Inertia::install` registers, which reads the installed config's
+    /// `error_page` per request.
+    component: Option<String>,
 }
 
 impl InertiaErrorPageMiddleware {
@@ -120,108 +146,285 @@ impl InertiaErrorPageMiddleware {
     /// let [`Inertia::install`](crate::Inertia::install) place it.
     pub fn new(component: impl Into<String>) -> Self {
         Self {
-            component: component.into(),
+            component: Some(component.into()),
         }
     }
+
+    /// The instance `Inertia::install` and the route-group stack place:
+    /// the default callback renders `component`, or the installed config's
+    /// `error_page` when that is `None`.
+    pub(crate) fn with_component(component: Option<String>) -> Self {
+        Self { component }
+    }
+
+    /// Who decides this request's error responses, if anyone does.
+    ///
+    /// Read per request from the active container, so a callback or an
+    /// install under `TestContainer::fake()` decides only that test's
+    /// requests.
+    fn decider(&self) -> Option<Decider> {
+        let registry = crate::App::inertia_registry();
+        if let Some(callback) = registry.exception_handler() {
+            return Some(Decider::Callback(callback));
+        }
+        self.component
+            .clone()
+            .or_else(|| registry.installed_error_page())
+            .map(Decider::Page)
+    }
+}
+
+/// Who decides a request's error responses.
+enum Decider {
+    /// The callback `Inertia::handle_exceptions_using` installed.
+    Callback(ExceptionHandler),
+    /// The default callback, rendering this error page component.
+    Page(String),
 }
 
 #[async_trait]
 impl Middleware for InertiaErrorPageMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Decide the audience before `next` consumes the request, and
-        // capture the request only for an audience that could actually
-        // receive a page. An API client - the common case for a service
-        // that also serves an SPA - pays two header lookups and nothing
-        // else.
-        let captured = match audience(&request) {
-            Audience::Neither => None,
-            _ => Some(CapturedRequest::capture(&request)),
+        let Some(decider) = self.decider() else {
+            return next(request).await;
         };
+        // The default callback renders only for an Inertia visit or a
+        // browser navigation. For anyone else the response is exactly the
+        // one the framework sends without this middleware, a panic's `500`
+        // included, so the request is handed on untouched: an API client -
+        // the common case for a service that also serves an SPA - pays a
+        // registry read and two header lookups and nothing else.
+        if matches!(decider, Decider::Page(_)) && audience(&request) == Audience::Neither {
+            return next(request).await;
+        }
 
-        let response = next(request).await;
+        let captured = CapturedRequest::capture(&request);
+        let response = run_catching_panics(&captured, next(request)).await;
         let was_ok = response.is_ok();
         let http = response.unwrap_or_else(|e| e);
         let restore = |http| if was_ok { Ok(http) } else { Err(http) };
 
-        let Some(captured) = captured else {
+        if http.is_error_decided() || !is_error_response(&http) {
             return restore(http);
-        };
-
-        // Scoped so the borrow of `http` ends before it is either
-        // returned untouched or dropped in favour of the page.
-        let decision = {
-            let facts = ErrorResponseFacts {
-                status: http.status_code(),
-                is_inertia_request: captured.is_inertia(),
-                accept: captured.header("Accept"),
-                response_is_inertia_page: http
-                    .header_values("X-Inertia")
-                    .any(|v| v.eq_ignore_ascii_case("true")),
-                has_inertia_location: http.header_value("X-Inertia-Location").is_some(),
-                is_streaming: http.is_streaming(),
-                content_type: http.header_value("Content-Type"),
-                body: http.body(),
-            };
-            decide(&facts)
-        };
-
-        let ErrorPageDecision::Render(props) = decision else {
-            return restore(http);
-        };
-
-        // The replaced response's headers come along except the ones
-        // that only described the body being replaced, or how it could be
-        // stored - see
-        // `header_survives_rewrite` for the rule and why it is phrased as
-        // a drop list. This is what keeps `Retry-After` on a `429` and
-        // `WWW-Authenticate` on a `401` true after the body becomes a
-        // page.
-        let carried: Vec<(String, String)> = http
-            .headers()
-            .filter(|(name, _)| header_survives_rewrite(name))
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
-
-        let status = props.status;
-        let mut page = InertiaResponse::new(self.component.clone())
-            .with("status", props.status)
-            .with("message", props.message);
-        if let Some(request_id) = props.request_id {
-            page = page.with("request_id", request_id);
         }
+        // With debug on, the response the framework would send for a 5xx
+        // a browser or an Inertia visit gets is the development error page
+        // (PAR-012), so that is what the callback receives.
+        let http = crate::error::debug_page::page_for(http);
+        restore(decide(&decider, &captured, http).await.mark_error_decided())
+    }
+}
 
-        // Rendered under the root captured before the handler ran, so the
-        // page's URL, its Vite tags and its shared props name the root the
-        // request arrived under (PFX-002). The root template is the one the
-        // chooser picks for the captured request, and the page has no view
-        // data of its own (RDOC-006).
-        let root = std::sync::Arc::clone(&captured.root);
-        match crate::routing::root::scope(root, page.resolve(&captured)).await {
-            Ok(rendered) => restore(
-                rendered
-                    .status(status)
-                    .with_headers(carried)
-                    // Last, and unconditional: the page is per-viewer
-                    // where the body it replaced was not.
-                    .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL)
-                    // The page replaces the body, not what went wrong.
-                    .with_error_report_of(http),
-            ),
-            Err(e) => {
-                // The error page failing is not a reason to lose the
-                // error. Returning the original response means the user
-                // sees the modal again - bad, but recoverable and
-                // truthful - rather than a second failure masking the
-                // first.
-                tracing::warn!(
-                    component = %self.component,
-                    status,
-                    request_id = ?crate::logging::current_request_id(),
-                    error = %e,
-                    "Inertia error page failed to render; returning the original error response"
-                );
-                restore(http)
+/// Run the rest of the chain under the panic boundary's rule: a panic
+/// becomes the `500` the server's `execute_chain_safely` answers with, its
+/// report included, so the callback sees it. The panic is caught inside the
+/// request's `REQUEST_ID` scope, which `RequestIdMiddleware` keeps open
+/// around this middleware, so the body and the log carry the request id.
+async fn run_catching_panics(captured: &CapturedRequest, chain: MiddlewareFuture) -> Response {
+    match crate::error::catch_panic(chain).await {
+        Ok(response) => response,
+        Err(panic) => {
+            let request_id = crate::logging::current_request_id();
+            Err(crate::server::panic_into_response(
+                panic,
+                &captured.method,
+                captured.path(),
+                request_id.as_ref().map_or("", |id| id.as_str()),
+            ))
+        }
+    }
+}
+
+/// Whether `response` is an error response the framework rendered, the
+/// ones the callback is handed. See [`InertiaErrorPageMiddleware`].
+fn is_error_response(response: &HttpResponse) -> bool {
+    if !(400..=599).contains(&response.status_code())
+        || is_protocol_response(response)
+        || is_validation_result(response)
+    {
+        return false;
+    }
+    response.error_report().is_some()
+        || (!response.is_streaming()
+            && replaceable_body(response.header_value("Content-Type"), response.body()).is_some())
+}
+
+/// Whether `response` is an Inertia protocol response: a page, or an
+/// instruction the client acts on by its header rather than its body.
+fn is_protocol_response(response: &HttpResponse) -> bool {
+    response
+        .header_values("X-Inertia")
+        .any(|v| v.eq_ignore_ascii_case("true"))
+        || response.header_value("X-Inertia-Location").is_some()
+        || response.header_value("X-Inertia-Redirect").is_some()
+}
+
+/// Whether `response` is a validation result: a `422` whose JSON body
+/// carries an `errors` object, the framework's
+/// `{"message": .., "errors": {..}}`. The validation redirect owns it: it
+/// turns an Inertia visit's `422` into the redirect back to the form with
+/// the errors flashed, and an API client or a Precognition dry run reads
+/// the errors off it. A callback that rendered it would break every form.
+fn is_validation_result(response: &HttpResponse) -> bool {
+    response.status_code() == 422
+        && !response.is_streaming()
+        && serde_json::from_slice::<Value>(response.body())
+            .ok()
+            .is_some_and(|body| body.get("errors").is_some_and(Value::is_object))
+}
+
+/// Hand `http` to the decider and build what it chose.
+async fn decide(decider: &Decider, captured: &CapturedRequest, http: HttpResponse) -> HttpResponse {
+    let (decision, shared_data) = {
+        // A response the framework built without an error behind it carries
+        // no report; the callback reads one made from its message.
+        let made;
+        let error = match http.error_report() {
+            Some(report) => report,
+            None => {
+                made = ErrorReport::from_message(report_message(&http));
+                &made
             }
+        };
+        let response = InertiaErrorResponse::new(error, captured, &http);
+        let decided = match decider {
+            Decider::Callback(callback) => callback(response),
+            Decider::Page(component) => default_callback(component, response),
+        };
+        decided.map_or((Decision::Keep, false), InertiaErrorResponse::into_decision)
+    };
+    match decision {
+        Decision::Keep => http,
+        // The replacement answers the same failure, so the report stays.
+        Decision::Respond(replacement) => replacement.with_error_report_of(http),
+        Decision::Render { component, props } => match props {
+            Ok(props) => render_page(captured, http, component, props, shared_data).await,
+            Err(problem) => {
+                tracing::warn!(
+                    %component,
+                    status = http.status_code(),
+                    request_id = ?crate::logging::current_request_id(),
+                    %problem,
+                    "Inertia error page props are not an object; returning the original error response"
+                );
+                http
+            }
+        },
+    }
+}
+
+/// The message a response without a report is reported with: its error
+/// body's `message`, or its status's reason phrase.
+fn report_message(response: &HttpResponse) -> String {
+    let message = match replaceable_body(response.header_value("Content-Type"), response.body()) {
+        Some(ReplaceableBody::FrameworkError(fields)) => fields
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    };
+    message.unwrap_or_else(|| reason_phrase(response.status_code()))
+}
+
+/// The callback [`InertiaConfig::error_page`](crate::InertiaConfig::error_page)
+/// installs: the rule [`decide_page`] states, rendering `component` with
+/// the shared props for the responses it covers and keeping every other
+/// response.
+///
+/// With debug on, a `5xx` it receives for a browser or an Inertia visit is
+/// the development error page, an HTML body, which the rule leaves alone.
+fn default_callback<'a>(
+    component: &str,
+    error: InertiaErrorResponse<'a>,
+) -> Option<InertiaErrorResponse<'a>> {
+    let request = error.request();
+    let response = error.response();
+    let facts = ErrorResponseFacts {
+        status: response.status_code(),
+        is_inertia_request: request.is_inertia(),
+        accept: request.header("Accept"),
+        response_is_inertia_page: response
+            .header_values("X-Inertia")
+            .any(|v| v.eq_ignore_ascii_case("true")),
+        has_inertia_location: response.header_value("X-Inertia-Location").is_some(),
+        is_streaming: response.is_streaming(),
+        content_type: response.header_value("Content-Type"),
+        body: response.body(),
+    };
+    let ErrorPageDecision::Render(props) = decide_page(&facts) else {
+        return None;
+    };
+    let mut page = Map::new();
+    page.insert("status".to_string(), props.status.into());
+    page.insert("message".to_string(), props.message.into());
+    if let Some(request_id) = props.request_id {
+        page.insert("request_id".to_string(), request_id.into());
+    }
+    Some(
+        error
+            .render(component, Value::Object(page))
+            .with_shared_data(),
+    )
+}
+
+/// Render `component` with `props` in place of `http`, keeping its status.
+///
+/// When the page fails to render, `http` is sent as it is.
+async fn render_page(
+    captured: &CapturedRequest,
+    http: HttpResponse,
+    component: String,
+    props: Map<String, Value>,
+    shared_data: bool,
+) -> HttpResponse {
+    // The replaced response's headers come along except the ones that only
+    // described the body being replaced, or how it could be stored - see
+    // `header_survives_rewrite` for the rule and why it is phrased as a
+    // drop list. This is what keeps `Retry-After` on a `429` and
+    // `WWW-Authenticate` on a `401` true after the body becomes a page.
+    let carried: Vec<(String, String)> = http
+        .headers()
+        .filter(|(name, _)| header_survives_rewrite(name))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+
+    let status = http.status_code();
+    let mut page = InertiaResponse::new(component.clone());
+    for (key, value) in props {
+        page = page.prop(key, Prop::eager(value));
+    }
+    if !shared_data {
+        page = page.without_shared_data();
+    }
+
+    // Rendered under the root captured before the handler ran, so the
+    // page's URL, its Vite tags and its shared props name the root the
+    // request arrived under (PFX-002). The root template is the one the
+    // chooser picks for the captured request, and the page has no view
+    // data of its own (RDOC-006).
+    let root = std::sync::Arc::clone(&captured.root);
+    match crate::routing::root::scope(root, page.resolve(captured)).await {
+        Ok(rendered) => rendered
+            .status(status)
+            .with_headers(carried)
+            // Last, and unconditional: the page is per-viewer where the
+            // body it replaced was not.
+            .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL)
+            // The page replaces the body, not what went wrong.
+            .with_error_report_of(http),
+        Err(e) => {
+            // The error page failing is not a reason to lose the error.
+            // Returning the original response means the user sees the modal
+            // again - bad, but recoverable and truthful - rather than a
+            // second failure masking the first.
+            tracing::warn!(
+                %component,
+                status,
+                request_id = ?crate::logging::current_request_id(),
+                error = %e,
+                "Inertia error page failed to render; returning the original error response"
+            );
+            http
         }
     }
 }
@@ -246,49 +449,6 @@ fn audience<R: InertiaRequestExt + ?Sized>(request: &R) -> Audience {
         Audience::BrowserNavigation
     } else {
         Audience::Neither
-    }
-}
-
-/// The parts of the request the page render needs, captured before
-/// `next` takes ownership.
-///
-/// The whole header map comes along rather than a hand-picked subset: an
-/// app's [`InertiaSharedData`](crate::InertiaSharedData) provider is
-/// handed this value and may read any header it likes, and a shared prop
-/// that silently sees fewer headers on the error page than on every
-/// other page would be a trap. Cloning a `HeaderMap` is one table
-/// allocation plus refcount bumps on `Bytes`-backed values.
-struct CapturedRequest {
-    path: String,
-    path_and_query: String,
-    headers: hyper::HeaderMap,
-    /// The public root of the request, taken with the rest before the
-    /// handler runs (PFX-002).
-    root: std::sync::Arc<str>,
-}
-
-impl CapturedRequest {
-    fn capture(request: &Request) -> Self {
-        Self {
-            path: crate::http::Request::path(request).to_string(),
-            path_and_query: InertiaRequestExt::path_and_query(request),
-            headers: request.headers().clone(),
-            root: request.public_root(),
-        }
-    }
-}
-
-impl InertiaRequestExt for CapturedRequest {
-    fn path(&self) -> &str {
-        &self.path
-    }
-
-    fn path_and_query(&self) -> String {
-        self.path_and_query.clone()
-    }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 }
 
@@ -322,12 +482,12 @@ struct ErrorResponseFacts<'a> {
     body: &'a [u8],
 }
 
-/// The whole rule set, in one place.
+/// The default callback's whole rule set, in one place.
 ///
 /// Every arm that returns [`ErrorPageDecision::PassThrough`] is a
 /// contract somebody else already owns; taking the response from them
 /// would break the thing they exist to do.
-fn decide(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
+fn decide_page(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
     // Only client and server errors. This is also what leaves `302`
     // and every other redirect alone.
     if !(400..=599).contains(&facts.status) {
@@ -436,8 +596,8 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 ///
 /// **The page response is the authority on it.** `X-Inertia`.
 /// Unreachable in practice - a response already carrying it never reaches
-/// the rewrite, see [`decide`] - and stated anyway so the rewrite cannot
-/// inherit a contradictory claim.
+/// the rewrite, see [`is_error_response`] - and stated anyway so the
+/// rewrite cannot inherit a contradictory claim.
 ///
 /// `Content-Security-Policy` and `Content-Security-Policy-Report-Only`
 /// are the one carve-out from the `Content-` prefix. They share it and
@@ -621,7 +781,7 @@ mod tests {
     #[test]
     fn a_framework_denial_becomes_the_page_with_its_message_and_request_id() {
         assert_eq!(
-            decide(&facts(403, "application/json", UNAUTHORIZED)),
+            decide_page(&facts(403, "application/json", UNAUTHORIZED)),
             ErrorPageDecision::Render(ErrorPageProps {
                 status: 403,
                 message: "This action is unauthorized.".to_string(),
@@ -634,7 +794,7 @@ mod tests {
     fn a_body_without_a_message_falls_back_to_the_reason_phrase() {
         // The router's own unrouted 404, and a body-less error.
         assert_eq!(
-            decide(&facts(404, "text/plain", b"404 Not Found")),
+            decide_page(&facts(404, "text/plain", b"404 Not Found")),
             ErrorPageDecision::Render(ErrorPageProps {
                 status: 404,
                 message: "Not Found".to_string(),
@@ -642,7 +802,7 @@ mod tests {
             })
         );
         assert_eq!(
-            decide(&facts(429, "", b"")),
+            decide_page(&facts(429, "", b"")),
             ErrorPageDecision::Render(ErrorPageProps {
                 status: 429,
                 message: "Too Many Requests".to_string(),
@@ -656,7 +816,7 @@ mod tests {
         // Outside a request scope the framework serializes `request_id`
         // as JSON null. The prop must be absent, not `"null"`.
         assert_eq!(
-            decide(&facts(
+            decide_page(&facts(
                 500,
                 "application/json",
                 br#"{"message":"Internal Server Error","request_id":null}"#
@@ -673,13 +833,16 @@ mod tests {
     fn everything_another_contract_owns_passes_through() {
         // Success and redirects.
         assert_eq!(
-            decide(&facts(200, "text/html", b"ok")),
+            decide_page(&facts(200, "text/html", b"ok")),
             ErrorPageDecision::PassThrough
         );
-        assert_eq!(decide(&facts(302, "", b"")), ErrorPageDecision::PassThrough);
+        assert_eq!(
+            decide_page(&facts(302, "", b"")),
+            ErrorPageDecision::PassThrough
+        );
         // Validation belongs to the redirect-back middleware.
         assert_eq!(
-            decide(&facts(
+            decide_page(&facts(
                 422,
                 "application/json",
                 br#"{"message":"The given data was invalid.","errors":{"email":["r"]}}"#
@@ -690,17 +853,17 @@ mod tests {
         // A response that already is an Inertia page.
         let mut already = facts(410, "application/json", br#"{"component":"Gone"}"#);
         already.response_is_inertia_page = true;
-        assert_eq!(decide(&already), ErrorPageDecision::PassThrough);
+        assert_eq!(decide_page(&already), ErrorPageDecision::PassThrough);
 
         // A version-mismatch bounce, or an RBAC `redirect_to` denial.
         let mut bounce = facts(409, "", b"");
         bounce.has_inertia_location = true;
-        assert_eq!(decide(&bounce), ErrorPageDecision::PassThrough);
+        assert_eq!(decide_page(&bounce), ErrorPageDecision::PassThrough);
 
         // A streaming body has produced nothing yet to inspect.
         let mut streaming = facts(500, "text/event-stream", b"");
         streaming.is_streaming = true;
-        assert_eq!(decide(&streaming), ErrorPageDecision::PassThrough);
+        assert_eq!(decide_page(&streaming), ErrorPageDecision::PassThrough);
     }
 
     #[test]
@@ -710,12 +873,12 @@ mod tests {
         //
         // A handler's own HTML error page.
         assert_eq!(
-            decide(&facts(404, "text/html; charset=utf-8", b"<h1>gone</h1>")),
+            decide_page(&facts(404, "text/html; charset=utf-8", b"<h1>gone</h1>")),
             ErrorPageDecision::PassThrough
         );
         // A handler's own JSON envelope, in some other shape.
         assert_eq!(
-            decide(&facts(
+            decide_page(&facts(
                 402,
                 "application/json",
                 br#"{"error":"payment_required"}"#
@@ -724,12 +887,12 @@ mod tests {
         );
         // A plain-text body that is not the router's fixed 404.
         assert_eq!(
-            decide(&facts(404, "text/plain", b"no such widget")),
+            decide_page(&facts(404, "text/plain", b"no such widget")),
             ErrorPageDecision::PassThrough
         );
         // JSON that does not parse.
         assert_eq!(
-            decide(&facts(500, "application/json", b"{not json")),
+            decide_page(&facts(500, "application/json", b"{not json")),
             ErrorPageDecision::PassThrough
         );
     }
@@ -741,14 +904,17 @@ mod tests {
             accept: Some("application/json"),
             ..facts(403, "application/json", UNAUTHORIZED)
         };
-        assert_eq!(decide(&json_client), ErrorPageDecision::PassThrough);
+        assert_eq!(decide_page(&json_client), ErrorPageDecision::PassThrough);
 
         let browser = ErrorResponseFacts {
             is_inertia_request: false,
             accept: Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
             ..facts(403, "application/json", UNAUTHORIZED)
         };
-        assert!(matches!(decide(&browser), ErrorPageDecision::Render(_)));
+        assert!(matches!(
+            decide_page(&browser),
+            ErrorPageDecision::Render(_)
+        ));
 
         // No `Accept` at all is not a browser navigation.
         let bare = ErrorResponseFacts {
@@ -756,7 +922,7 @@ mod tests {
             accept: None,
             ..facts(403, "application/json", UNAUTHORIZED)
         };
-        assert_eq!(decide(&bare), ErrorPageDecision::PassThrough);
+        assert_eq!(decide_page(&bare), ErrorPageDecision::PassThrough);
     }
 
     #[test]
@@ -884,6 +1050,75 @@ mod tests {
         // A short name that merely starts with "Content" is not prefixed
         // by "Content-" and must not be swept up.
         assert!(header_survives_rewrite("Content"));
+    }
+
+    #[test]
+    fn only_responses_the_framework_rendered_from_an_error_reach_the_callback() {
+        use crate::error::FrameworkError;
+
+        // Built from an error: it carries a report, whatever its body.
+        assert!(is_error_response(&HttpResponse::from(
+            FrameworkError::domain("denied", 403)
+        )));
+        // The framework's own error bodies that carry no report.
+        assert!(is_error_response(
+            &HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404)
+        ));
+        assert!(is_error_response(
+            &HttpResponse::json(serde_json::json!({ "message": "CSRF token mismatch." }))
+                .status(419)
+        ));
+        assert!(is_error_response(&HttpResponse::new().status(429)));
+
+        // A handler's own answer in another shape, and anything that is not
+        // an error status.
+        assert!(!is_error_response(
+            &HttpResponse::html("<h1>No such widget</h1>").status(404)
+        ));
+        assert!(!is_error_response(&HttpResponse::new().status(302)));
+        assert!(!is_error_response(&HttpResponse::from(
+            FrameworkError::domain("not an error status", 302)
+        )));
+
+        // Inertia protocol responses are instructions to the client, a
+        // report or not.
+        for header in ["X-Inertia-Location", "X-Inertia-Redirect"] {
+            assert!(
+                !is_error_response(&HttpResponse::new().status(409).header(header, "/next")),
+                "{header}"
+            );
+        }
+        assert!(!is_error_response(
+            &HttpResponse::from(FrameworkError::domain("gone", 410)).header("X-Inertia", "true")
+        ));
+
+        // A validation result belongs to the validation redirect, though it
+        // carries a report. A 422 in any other shape is an error like any
+        // other.
+        let mut errors = crate::ValidationErrors::new();
+        errors.add("email", "The email field is required.");
+        let validation = HttpResponse::from(FrameworkError::validation_errors(errors));
+        assert_eq!(validation.status_code(), 422);
+        assert!(validation.error_report().is_some());
+        assert!(!is_error_response(&validation));
+        assert!(is_error_response(&HttpResponse::from(
+            FrameworkError::domain("unprocessable", 422)
+        )));
+    }
+
+    #[test]
+    fn a_response_without_a_report_is_reported_by_its_message() {
+        assert_eq!(
+            report_message(
+                &HttpResponse::json(serde_json::json!({ "message": "CSRF token mismatch." }))
+                    .status(419)
+            ),
+            "CSRF token mismatch."
+        );
+        assert_eq!(
+            report_message(&HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404)),
+            "Not Found"
+        );
     }
 
     #[test]

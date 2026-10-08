@@ -47,7 +47,21 @@ pub struct HttpResponse {
     /// response's extensions, never into a header or the body. Boxed so a
     /// response without one, the common case, grows by one pointer.
     error_report: Option<Box<ErrorReport>>,
+    /// Whether the Inertia error-response middleware already decided this
+    /// response, through the application's callback or the default one.
+    /// In process only: [`Self::into_hyper`] turns it into an
+    /// `ErrorResponseDecided` extension, and the development error page
+    /// leaves such a response alone, as an outer error-response middleware
+    /// does.
+    error_decided: bool,
 }
+
+/// The in-process mark of a response the Inertia error-response
+/// middleware decided. It rides in the hyper response's extensions so the
+/// development error page, applied around the whole chain, does not undo
+/// the application's decision.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ErrorResponseDecided;
 
 /// Handler return type: a `Result` whose **error** is also an
 /// [`HttpResponse`], so `?` can short-circuit a handler with a rendered
@@ -78,6 +92,7 @@ impl HttpResponse {
             body: Body::Static(Bytes::new()),
             headers: Vec::new(),
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -88,6 +103,7 @@ impl HttpResponse {
             body: Body::Static(Bytes::from(body.into())),
             headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -98,6 +114,7 @@ impl HttpResponse {
             body: Body::Static(Bytes::from(body.to_string())),
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -117,6 +134,7 @@ impl HttpResponse {
             body: Body::Static(body),
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -179,6 +197,7 @@ impl HttpResponse {
                 "text/html; charset=utf-8".to_string(),
             )],
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -270,6 +289,7 @@ impl HttpResponse {
             body: Body::Stream(BoxBody::new(stream_body)),
             headers: Vec::new(),
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -338,6 +358,7 @@ impl HttpResponse {
             body: Body::Static(body.into()),
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
+            error_decided: false,
         }
     }
 
@@ -399,6 +420,19 @@ impl HttpResponse {
             self.error_report = original.error_report;
         }
         self
+    }
+
+    /// Mark this response as decided by the Inertia error-response
+    /// middleware, so nothing outside it decides it again.
+    pub(crate) fn mark_error_decided(mut self) -> Self {
+        self.error_decided = true;
+        self
+    }
+
+    /// Whether the Inertia error-response middleware already decided this
+    /// response.
+    pub(crate) fn is_error_decided(&self) -> bool {
+        self.error_decided
     }
 
     /// Add a header to the response
@@ -659,6 +693,9 @@ impl HttpResponse {
         // In-process only: extensions never reach the wire.
         if let Some(report) = self.error_report {
             response.extensions_mut().insert(*report);
+        }
+        if self.error_decided {
+            response.extensions_mut().insert(ErrorResponseDecided);
         }
         response
     }

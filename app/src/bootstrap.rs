@@ -303,24 +303,27 @@ pub fn inertia_version() -> String {
 ///
 ///    Ahead of `Inertia::install`, deliberately. A middleware's
 ///    post-`next` code runs after everything inside it has returned, so
-///    the error-page middleware `Inertia::install` registers when an app
-///    sets `InertiaConfig::error_page` renders its page *after* this
+///    the error-response middleware `Inertia::install` always registers
+///    renders an error page - for `InertiaConfig::error_page` or an
+///    `Inertia::handle_exceptions_using` callback - *after* this
 ///    middleware's locale scope has been popped. The other order would
 ///    give every error page the default locale instead of the visitor's.
 ///    Nothing in the Inertia layer reads localization, so the swap costs
 ///    nothing.
-/// 6. Inertia protocol, four middlewares registered together by
+/// 6. Inertia protocol, five middlewares registered together by
 ///    `Inertia::install`: `Vary: X-Inertia` on every response (outermost
-///    of the four, so it also covers the `409` below); an empty `200`
+///    of the five, so it also covers the `409` below); an empty `200`
 ///    on an Inertia visit substituted with a redirect back (`302`, or
 ///    `303` for `PUT`, `PATCH` and `DELETE`); `409` +
 ///    `X-Inertia-Location` on an `X-Inertia-Version` mismatch, re-flashing
 ///    the session first so a flashed error survives the client's
 ///    follow-up full-page GET; `302` → `303` on non-GET Inertia
-///    redirects; and, innermost, a `422` carrying an `errors` object
-///    turned into the redirect-back the Inertia client expects, so a
-///    failed validation restores the form with its messages rather than
-///    surfacing a raw `422`. `inertia_config()` installs the default version
+///    redirects; a `422` carrying an `errors` object turned into the
+///    redirect-back the Inertia client expects, so a failed validation
+///    restores the form with its messages rather than surfacing a raw
+///    `422`; and, innermost, the error-response middleware, which changes
+///    nothing here because this app sets neither an `error_page` nor an
+///    error callback. `inertia_config()` installs the default version
 ///    resolver - a hash of the Vite build manifest - so the version
 ///    string tracks the built frontend rather than a literal that
 ///    someone has to remember to bump.

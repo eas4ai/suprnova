@@ -465,13 +465,63 @@ impl Inertia {
         flash::set_history_flag(flash::PRESERVE_FRAGMENT);
     }
 
+    /// Decide every error response the framework renders - Laravel's
+    /// `Inertia::handleExceptionsUsing($callback)`.
+    ///
+    /// The callback receives an [`InertiaErrorResponse`](crate::InertiaErrorResponse)
+    /// for each error response that passes through the error-response
+    /// middleware [`install`](Self::install) registers: a handler's or a
+    /// middleware's `Err`, a panic in either, the router's `404`, a
+    /// middleware's own `{"message": ...}` answer. Every request type is
+    /// covered, an API client's included. It returns the value with a
+    /// decision - [`render`](crate::InertiaErrorResponse::render) a page,
+    /// [`respond_with`](crate::InertiaErrorResponse::respond_with) another
+    /// response - or `None`, which keeps the response.
+    ///
+    /// The callback replaces the rule
+    /// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page)
+    /// installs: an app that sets both gets its callback. A later call
+    /// replaces the callback. It lives on the active container's Inertia
+    /// registry, so a callback installed under
+    /// [`TestContainer::fake`](crate::testing::TestContainer::fake) stays in
+    /// that test.
+    ///
+    /// A validation failure never reaches the callback: a `422` whose body
+    /// carries an `errors` object belongs to
+    /// [`InertiaValidationRedirectMiddleware`], which turns an Inertia
+    /// visit's `422` into the redirect back to the form. A panic in the
+    /// callback itself reaches the server's panic boundary, as a panic in
+    /// any middleware does.
+    ///
+    /// ```rust,no_run
+    /// use serde_json::json;
+    /// use suprnova::Inertia;
+    ///
+    /// Inertia::handle_exceptions_using(|error| match error.status() {
+    ///     403 | 404 | 500 | 503 => {
+    ///         let status = error.status();
+    ///         Some(error.render("Error", json!({ "status": status })).with_shared_data())
+    ///     }
+    ///     _ => None,
+    /// });
+    /// ```
+    pub fn handle_exceptions_using<F>(callback: F)
+    where
+        F: Fn(super::InertiaErrorResponse<'_>) -> Option<super::InertiaErrorResponse<'_>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        crate::App::inertia_registry().set_exception_handler(Arc::new(callback));
+    }
+
     /// The Inertia middleware stack as one middleware, for a route group -
     /// the way a Laravel app registers `HandleInertiaRequests` on its `web`
     /// group and keeps it off `api`.
     ///
     /// The stack is the one [`install`](Self::install) registers globally
     /// (headers and redirect rules, version check, `302 → 303`, validation
-    /// redirect, and the error page when `config` names one), with
+    /// redirect, and the error-response middleware), with
     /// `config`'s settings and [`hooks`](InertiaConfig::hooks). Install
     /// with [`InertiaConfig::register_globally`] off so the stack is not
     /// also on every route; `install` then registers it as the named
@@ -530,13 +580,16 @@ impl Inertia {
     ///    `X-Inertia` header, treats it as non-Inertia, and shows the
     ///    error modal instead of populating `form.errors`.
     ///
-    /// A fifth, [`InertiaErrorPageMiddleware`], is registered innermost
-    /// **only when** [`InertiaConfig::error_page`] names a component. It
-    /// rewrites the framework's own error responses - a `403` denial, an
-    /// unrouted `404`, a `429`, a `500` - into that page, so they stop
-    /// reaching the client as the plain-JSON error modal. Without an
-    /// `error_page` nothing is registered and error responses are
-    /// untouched.
+    /// A fifth, the error-response middleware
+    /// ([`InertiaErrorPageMiddleware`]), is registered innermost. It hands
+    /// the framework's own error responses - a `403` denial, an unrouted
+    /// `404`, a `429`, a `500`, a handler's panic - to the callback
+    /// [`handle_exceptions_using`](Self::handle_exceptions_using)
+    /// installed, or, without one, to the default callback that renders
+    /// the page [`InertiaConfig::error_page`] names, so they stop reaching
+    /// the client as the plain-JSON error modal. With neither, it hands
+    /// every request on and changes nothing. It is registered whatever the
+    /// config says because the callback may be installed after this call.
     ///
     /// Innermost is the wrong place for an app whose stack answers
     /// *before* the Inertia layer is reached - a `CsrfMiddleware`, rate
@@ -546,7 +599,9 @@ impl Inertia {
     /// `install` sees that registration, logs at `debug`, and skips its
     /// own, leaving both the app's placement and the component the app
     /// named intact. `error_page` on the config is then optional. See that
-    /// type's documentation for where it may sit.
+    /// type's documentation for where it may sit. One registered after
+    /// this call sits inside the one `install` placed; each error response
+    /// is decided once, by the innermost.
     ///
     /// With [`InertiaConfig::register_globally`] off, none of them is
     /// registered globally: `install` registers the whole stack as the
@@ -670,17 +725,20 @@ impl Inertia {
         }
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
-        // Innermost, and only when the app named a component. It has to
-        // see the response the handler and the route middleware actually
-        // produced - a `403` from `PermissionMiddleware` never reaches
-        // the handler at all - and it deliberately declines the `422`
-        // the validation middleware above it is about to bounce.
-        match error_page_action(
-            config.error_page.as_deref(),
-            crate::middleware::has_global_middleware::<InertiaErrorPageMiddleware>(),
-        ) {
-            ErrorPageAction::Register(component) => {
-                register_global_middleware(InertiaErrorPageMiddleware::new(component));
+        // Innermost, whatever the config says (PAR-062). It has to see the
+        // response the handler and the route middleware actually produced -
+        // a `403` from `PermissionMiddleware` never reaches the handler at
+        // all - and the default callback declines the `422` the validation
+        // middleware above it is about to bounce. The error callback may be
+        // installed after this call, and the middleware reads it, and the
+        // installed `error_page`, per request.
+        match error_page_action(crate::middleware::has_global_middleware::<
+            InertiaErrorPageMiddleware,
+        >()) {
+            ErrorPageAction::Register => {
+                register_global_middleware(InstalledErrorPage(
+                    InertiaErrorPageMiddleware::with_component(None),
+                ));
             }
             ErrorPageAction::KeepExisting => {
                 tracing::debug!(
@@ -689,9 +747,28 @@ impl Inertia {
                      Inertia::install would add"
                 );
             }
-            ErrorPageAction::None => {}
         }
         Ok(())
+    }
+}
+
+/// The error-response middleware [`Inertia::install`] registers.
+///
+/// Its own type, because global registration is idempotent per type: an
+/// app that registers [`InertiaErrorPageMiddleware`] itself after `install`
+/// keeps its registration rather than losing it as a duplicate of this one.
+/// The inner of the two decides each error response, and the outer leaves
+/// a decided response alone.
+struct InstalledErrorPage(InertiaErrorPageMiddleware);
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for InstalledErrorPage {
+    async fn handle(
+        &self,
+        request: Request,
+        next: crate::middleware::Next,
+    ) -> crate::http::Response {
+        self.0.handle(request, next).await
     }
 }
 
@@ -699,36 +776,32 @@ impl Inertia {
 /// registered globally, for `GroupBuilder::middleware_named`.
 const MIDDLEWARE_NAME: &str = "inertia";
 
-/// What [`Inertia::install`] does about the error-page middleware.
+/// What [`Inertia::install`] does about the error-response middleware.
 #[derive(Debug, PartialEq, Eq)]
 enum ErrorPageAction {
-    /// No `error_page` on the config: register nothing, as before.
-    None,
-    /// Register one innermost of the Inertia layer, for this component.
-    Register(String),
-    /// One is already in the chain. Leave it exactly where the app put
-    /// it, rendering the component the app named.
+    /// Register one innermost of the Inertia layer, rendering the installed
+    /// config's `error_page` when no callback is installed.
+    Register,
+    /// The app registered one before `install`. Leave it exactly where the
+    /// app put it, rendering the component the app named.
     KeepExisting,
 }
 
-/// The whole decision, as a pure function of the two facts it reads.
+/// The whole decision, as a pure function of the fact it reads.
 ///
-/// Split out from [`Inertia::install`] because one of those facts is the
+/// Split out from [`Inertia::install`] because that fact is the
 /// process-global middleware registry, shared by every test in the binary,
-/// so the rule set itself would otherwise only be testable through
-/// whatever registrations the rest of the suite happened to have made
-/// first.
+/// so the rule itself would otherwise only be testable through whatever
+/// registrations the rest of the suite happened to have made first.
 ///
 /// An app that registered the middleware itself named its component
 /// there, and that instance is the one in the chain - so `install` has
-/// nothing left to decide beyond staying out of the way. Registration is
-/// idempotent per middleware type, so this only makes explicit what the
-/// registry would have done anyway.
-fn error_page_action(configured: Option<&str>, already_registered: bool) -> ErrorPageAction {
-    match configured {
-        None => ErrorPageAction::None,
-        Some(_) if already_registered => ErrorPageAction::KeepExisting,
-        Some(component) => ErrorPageAction::Register(component.to_string()),
+/// nothing left to decide beyond staying out of the way.
+fn error_page_action(already_registered: bool) -> ErrorPageAction {
+    if already_registered {
+        ErrorPageAction::KeepExisting
+    } else {
+        ErrorPageAction::Register
     }
 }
 
@@ -741,28 +814,14 @@ mod tests {
     /// live call reads it from.
     #[test]
     fn error_page_registration_keeps_what_the_app_placed() {
-        // Nothing configured: unchanged behaviour for an app that never
-        // opted in.
-        assert_eq!(
-            error_page_action(None, false),
-            ErrorPageAction::None,
-            "no error_page means no middleware, whatever else is registered"
-        );
-        assert_eq!(error_page_action(None, true), ErrorPageAction::None);
-
-        // The default: install places it.
-        assert_eq!(
-            error_page_action(Some("Error"), false),
-            ErrorPageAction::Register("Error".to_string())
-        );
+        // The default: install places it, whatever the config says, since
+        // the error callback may be installed after the call.
+        assert_eq!(error_page_action(false), ErrorPageAction::Register);
 
         // The app placed it further out, ahead of a middleware that
         // answers before the Inertia layer is reached. Its position - and
         // the component it names - is what stands.
-        assert_eq!(
-            error_page_action(Some("Error"), true),
-            ErrorPageAction::KeepExisting
-        );
+        assert_eq!(error_page_action(true), ErrorPageAction::KeepExisting);
     }
 
     #[test]
@@ -791,9 +850,9 @@ mod tests {
         let after = get_global_middleware().len();
         assert_eq!(
             after - before,
-            4,
-            "Inertia::install should register exactly four middlewares (headers + version + 303 \
-             + validation redirect), got delta={}",
+            5,
+            "Inertia::install should register exactly five middlewares (headers + version + 303 \
+             + validation redirect + error responses), got delta={}",
             after - before
         );
         // This asserts the count, not the registration ORDER (headers
@@ -809,37 +868,21 @@ mod tests {
         // observable consequence of that order: `Vary` on a `409` the
         // version middleware returns without calling the handler.
 
-        // The error-page middleware is the opt-in fifth. Both installs
-        // live in this one test rather than in a sibling because
-        // registration is idempotent per type and process-global: two
-        // tests each measuring their own delta would race over which of
-        // them registered the four shared types.
+        // The error-response middleware is registered whatever the config
+        // says, since the error callback may be installed after `install`;
+        // naming an error page adds nothing more. Both installs live in
+        // this one test rather than in a sibling because registration is
+        // idempotent per type and process-global: two tests each measuring
+        // their own delta would race over which of them registered the
+        // five shared types.
         //
         // Known side effect: `TestContainer::fake` scopes
         // `set_installed_config`, but `register_global_middleware` really
         // is process-global, so from here on every test in this binary
-        // that builds a chain from `get_global_middleware()` carries an
-        // error-page rewrite. Nothing depends on its absence today; if
-        // something ever does, the fix is a registry the container owns,
-        // not moving this assertion somewhere it would race.
-        Inertia::install(
-            &InertiaConfig::new()
-                .version("test-version")
-                .development(true)
-                .error_page("Error"),
-        )
-        .expect("dev-mode install must not require a manifest");
-        let with_error_page = get_global_middleware().len();
-        assert_eq!(
-            with_error_page - after,
-            1,
-            "naming an error page adds exactly one middleware on top of the four"
-        );
-
-        // An error page already in the chain keeps its position - which is
-        // the whole point of letting an app register it further out, ahead
-        // of a CSRF middleware or a rate limiter that answers before the
-        // Inertia layer is reached. `install` must not append a second.
+        // that builds a chain from `get_global_middleware()` carries the
+        // error-response middleware. It reads the callback and the
+        // installed `error_page` from the active container per request,
+        // so it changes nothing for a test that sets neither.
         Inertia::install(
             &InertiaConfig::new()
                 .version("test-version")
@@ -849,8 +892,8 @@ mod tests {
         .expect("dev-mode install must not require a manifest");
         assert_eq!(
             get_global_middleware().len(),
-            with_error_page,
-            "an error page already registered must not be joined by a second"
+            after,
+            "naming an error page adds no middleware: the fifth is already there"
         );
     }
 

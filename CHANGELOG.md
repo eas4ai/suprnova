@@ -268,6 +268,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   of on every route, so an API group carries no `Vary: X-Inertia` and has no
   redirect turned into `303` (MW-08, MW-10).
 
+- **`Inertia::handle_exceptions_using(callback)` decides every error
+  response**, Laravel's `Inertia::handleExceptionsUsing`. The callback
+  receives an `InertiaErrorResponse` for each error response the framework
+  renders - a handler's or a middleware's `Err`, a panic, the router's
+  `404`, a middleware's own `{"message": ...}` answer - for every request
+  type, an API client's included. It reads `status()`, `error()` (the error
+  report, or the panic's message and location), `request()`, `method()`
+  and `response()`, which with debug on is the development error page where
+  that page applies. It returns `render(component, props)` for an Inertia
+  page at the original status, `respond_with(response)` for any other
+  response, or `None` to keep the response. A validation failure, a `422`
+  whose body carries an `errors` object, never reaches the callback: the
+  validation redirect owns it, so an Inertia form still goes back with its
+  errors flashed. A rendered page carries the shared props, the middleware
+  hooks' `share` and `share_once` included, only after
+  `with_shared_data()`. `InertiaConfig::error_page` is now the default
+  callback and keeps its rule; an app that sets both gets its callback. A
+  later call replaces the callback, which lives on the active container, so
+  a callback installed under `TestContainer::fake()` stays in that test
+  (EX-01, EX-02, EX-03, EX-06, EX-07).
+
 ### Changed
 
 - **The built-in image driver's PNG, BMP and WebP codecs come from the
@@ -695,7 +716,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `script-prototype-member-parameter`), and the `own-members` accepted
   fixture pins what stays admitted.
 
+- **A handler panic reaches the Inertia error page.** The panic boundary
+  wraps the whole middleware chain, so a panic unwound past the error-page
+  middleware: an Inertia visit to a panicking handler got the JSON
+  `{"message":"Internal Server Error"}` `500` and the client's "plain JSON
+  response" modal, even with `error_page` set. The middleware now runs the
+  chain inside it under the boundary's rule, so the same `500`, with the
+  panic's error report, reaches the error callback, and with
+  `error_page("Error")` the visit gets the `Error` page at status `500`. An
+  API client still gets the JSON `500`. `Inertia::install` now registers the
+  error-response middleware whatever the config says, five middlewares
+  rather than four, because the callback can be installed after it; with
+  neither a callback nor an `error_page` it hands every request on and
+  changes nothing.
+
 ### Fixed
+
+- **An error page placed outside the Inertia stack follows a fragment
+  redirect.** An `InertiaErrorPageMiddleware` an app registered before
+  `Inertia::install` saw the headers middleware's `409` with
+  `X-Inertia-Redirect`, read its empty body as an error, and sent the error
+  page in its place, so the client never followed a redirect to a
+  `#fragment`. Inertia protocol responses (`X-Inertia`, `X-Inertia-Location`,
+  `X-Inertia-Redirect`) are never handed to an error callback now, the
+  default one included.
 
 - **A drop-in Inertia form with a file, and a `GET` filter form, read as the
   client shapes them.** The Inertia client sends a form that holds a file

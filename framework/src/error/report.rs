@@ -104,6 +104,22 @@ impl ErrorReport {
         }
     }
 
+    /// Report an error response that carries no report of its own: the
+    /// router's `404` for a path no route matches, or a middleware's own
+    /// `{"message": ...}` answer. `message` is the response's message, or
+    /// its status's reason phrase.
+    ///
+    /// Built only for the Inertia error callback to read; it is never
+    /// attached to the response.
+    pub(crate) fn from_message(message: String) -> Self {
+        Self {
+            kind: Kind::Error {
+                chain: vec![message],
+            },
+            frames: None,
+        }
+    }
+
     /// Report a panic the panic boundary caught. `location` and `frames`
     /// are `None` when they were not captured; see [`catch_panic`].
     pub(crate) fn from_panic(

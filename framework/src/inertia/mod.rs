@@ -11,6 +11,7 @@ mod conversion_middleware;
 mod dotted;
 mod encrypt_middleware;
 mod error_page_middleware;
+mod exceptions;
 mod facade;
 pub(crate) mod flash;
 mod headers_middleware;
@@ -35,6 +36,7 @@ pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, 
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;
+pub use exceptions::InertiaErrorResponse;
 pub use facade::Inertia;
 pub use flash::FlashKey;
 pub use headers_middleware::InertiaHeadersMiddleware;
