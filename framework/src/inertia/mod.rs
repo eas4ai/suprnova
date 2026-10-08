@@ -14,6 +14,7 @@ mod error_page_middleware;
 mod facade;
 pub(crate) mod flash;
 mod headers_middleware;
+mod hooks;
 mod manifest;
 mod pages;
 mod prop;
@@ -33,6 +34,9 @@ pub use error_page_middleware::InertiaErrorPageMiddleware;
 pub use facade::Inertia;
 pub use flash::FlashKey;
 pub use headers_middleware::InertiaHeadersMiddleware;
+pub use hooks::{
+    DefaultInertiaHooks, InertiaMiddleware, InertiaMiddlewareHooks, InertiaVisit, PageUrlResolver,
+};
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{
     DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,

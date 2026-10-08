@@ -159,6 +159,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`Inertia::location(url or redirect)`**, Laravel's `Inertia::location`,
   beside `InertiaResponse::location`, both taking a URL or a `Redirect`
   through the new `InertiaLocation` (RF-16, HM-04).
+- **Inertia middleware hooks and the stack on a route group.** The
+  `InertiaMiddlewareHooks` trait carries Laravel's overridable middleware
+  decisions (`version`, `share`, `share_once`, `root_view`, `url_resolver`,
+  `on_empty_response`, `on_version_change`, `on_redirect_with_fragment`),
+  each defaulting to the framework's behaviour; `InertiaConfig::hooks`
+  installs an implementation, `DefaultInertiaHooks` is the framework's
+  answer to start from, and `InertiaVisit` is the request an `on_*` hook
+  answers. `Inertia::middleware(&cfg)` is the whole stack as one middleware
+  for a route group, and `InertiaConfig::register_globally(false)` makes
+  `Inertia::install` register it as the named middleware `inertia` instead
+  of on every route, so an API group carries no `Vary: X-Inertia` and has no
+  redirect turned into `303` (MW-08, MW-10).
 
 ### Changed
 

@@ -319,11 +319,12 @@ pub use http_client::{
 };
 pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
-    DeferOptions, EncryptHistoryMiddleware, FlashKey, Frontend, Inertia, Inertia303Middleware,
-    InertiaConfig, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaLocation,
-    InertiaRegistry, InertiaRequestExt, InertiaResponse, InertiaSharedData,
-    InertiaValidationRedirectMiddleware, InertiaVersionMiddleware, IntoInertiaData,
-    MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
+    DefaultInertiaHooks, DeferOptions, EncryptHistoryMiddleware, FlashKey, Frontend, Inertia,
+    Inertia303Middleware, InertiaConfig, InertiaErrorPageMiddleware, InertiaHeadersMiddleware,
+    InertiaLocation, InertiaMiddleware, InertiaMiddlewareHooks, InertiaRegistry, InertiaRequestExt,
+    InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware, InertiaVisit, IntoInertiaData, MANIFEST_VERSION_FALLBACK,
+    ManifestEntry, MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PageUrlResolver,
     PartialFilter, Prop, PropEntry, PropFuture, PropResolver, ProvidesScrollMetadata,
     ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest, SsrResponse, VersionResolver,
     Visibility, ViteManifest,

@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use super::config::InertiaConfig;
 use super::error_page_middleware::header_survives_rewrite;
+use super::hooks::{InertiaMiddlewareHooks, InertiaVisit};
 use super::visit::{self, Visit};
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
@@ -61,25 +62,31 @@ use async_trait::async_trait;
 /// `409` the client follows, and records the visit as the previous URL.
 pub struct InertiaHeadersMiddleware {
     store_previous_url: bool,
+    hooks: Option<Arc<dyn InertiaMiddlewareHooks>>,
 }
 
 impl InertiaHeadersMiddleware {
     /// Build the middleware with the framework defaults: previous-URL
-    /// recording on.
+    /// recording on, no hooks.
     pub fn new() -> Self {
         Self {
             store_previous_url: true,
+            hooks: None,
         }
     }
 
-    /// Build the middleware with the settings of `config` that it reads,
-    /// [`InertiaConfig::store_previous_url`] so far. [`Inertia::install`]
+    /// Build the middleware with the settings of `config` that it reads:
+    /// [`InertiaConfig::store_previous_url`] and the
+    /// [`hooks`](InertiaConfig::hooks), whose request hooks it runs before
+    /// the handler and whose `on_empty_response` and
+    /// `on_redirect_with_fragment` answer for it. [`Inertia::install`]
     /// builds it this way.
     ///
     /// [`Inertia::install`]: crate::Inertia::install
     pub fn from_config(config: &InertiaConfig) -> Self {
         Self {
             store_previous_url: config.store_previous_url,
+            hooks: config.hooks.clone(),
         }
     }
 }
@@ -185,7 +192,7 @@ fn substitute(original: HttpResponse, replacement: HttpResponse) -> HttpResponse
 
 /// Laravel's default `onEmptyResponse`: `Redirect::back()`, a `302` the
 /// `302 → 303` rule turns into `303` for `PUT`, `PATCH` and `DELETE`.
-fn redirect_back(visit: &Visit, response: HttpResponse) -> HttpResponse {
+pub(super) fn redirect_back(visit: &Visit, response: HttpResponse) -> HttpResponse {
     let target = visit.back_target(None);
     substitute(
         response,
@@ -204,7 +211,7 @@ fn is_empty_200(response: &HttpResponse) -> bool {
 /// Laravel's default `onRedirectWithFragment`: `409` with the redirect's
 /// target as `X-Inertia-Redirect`, which the client visits itself so the
 /// fragment survives.
-fn redirect_with_fragment(location: String, response: HttpResponse) -> HttpResponse {
+pub(super) fn redirect_with_fragment(location: String, response: HttpResponse) -> HttpResponse {
     substitute(
         response,
         HttpResponse::new()
@@ -244,7 +251,19 @@ impl Middleware for InertiaHeadersMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         // Capture before `next` consumes the request.
         let facts = RequestFacts::capture(&request);
-        let visit = Arc::new(Visit::capture(&request));
+        let visit = Arc::new(match &self.hooks {
+            Some(hooks) => Visit::capture_with_hooks(&request, hooks.clone()),
+            None => Visit::capture(&request),
+        });
+        // What an `on_*` hook is handed; only an Inertia visit reaches one,
+        // and only installed hooks need it.
+        let hook_visit = match &self.hooks {
+            Some(hooks) if facts.is_inertia => Some((
+                hooks.clone(),
+                InertiaVisit::capture(&request, visit.clone()),
+            )),
+            _ => None,
+        };
         let response = visit::scope(visit.clone(), next(request)).await;
 
         let was_ok = response.is_ok();
@@ -271,10 +290,13 @@ impl Middleware for InertiaHeadersMiddleware {
             // Laravel `onEmptyResponse`. The visit records no previous URL:
             // an empty response is no page the visitor saw, and recording
             // it would make the redirect back point at itself.
-            http = redirect_back(&visit, http);
-            // The `302 → 303` rule for the redirect substituted here; one
-            // the handler returned has already been converted by
-            // `Inertia303Middleware` inside this one.
+            http = match &hook_visit {
+                Some((hooks, inertia_visit)) => hooks.on_empty_response(inertia_visit, http),
+                None => redirect_back(&visit, http),
+            };
+            // The `302 → 303` rule for the response substituted here, the
+            // hook's included; one the handler returned has already been
+            // converted by `Inertia303Middleware` inside this one.
             if facts.needs_303 && http.status_code() == 302 {
                 http = http.status(303);
             }
@@ -289,7 +311,12 @@ impl Middleware for InertiaHeadersMiddleware {
                 .filter(|location| location.contains('#'))
                 .map(str::to_string)
         {
-            http = redirect_with_fragment(location, http);
+            http = match &hook_visit {
+                Some((hooks, inertia_visit)) => {
+                    hooks.on_redirect_with_fragment(inertia_visit, http)
+                }
+                None => redirect_with_fragment(location, http),
+            };
         }
 
         rewrap(ensure_vary_x_inertia(http))

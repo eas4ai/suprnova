@@ -6,6 +6,7 @@ use crate::http::{Redirect, Request};
 use crate::pagination::IntoInertiaScroll;
 
 use super::flash::{self, FlashKey};
+use super::hooks::{InertiaMiddleware, VersionChangeHook};
 use super::response::PropEntry;
 use super::runtime::SsrCondition;
 use super::shared::InertiaSharedData;
@@ -425,6 +426,41 @@ impl Inertia {
         flash::set_history_flag(flash::PRESERVE_FRAGMENT);
     }
 
+    /// The Inertia middleware stack as one middleware, for a route group -
+    /// the way a Laravel app registers `HandleInertiaRequests` on its `web`
+    /// group and keeps it off `api`.
+    ///
+    /// The stack is the one [`install`](Self::install) registers globally
+    /// (headers and redirect rules, version check, `302 → 303`, validation
+    /// redirect, and the error page when `config` names one), with
+    /// `config`'s settings and [`hooks`](InertiaConfig::hooks). Install
+    /// with [`InertiaConfig::register_globally`] off so the stack is not
+    /// also on every route; `install` then registers it as the named
+    /// middleware `inertia`, which a group can name instead of holding this
+    /// value.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Inertia, InertiaConfig, Router};
+    /// # use suprnova::{Request, Response, text};
+    /// # async fn dashboard(_r: Request) -> Response { text("ok") }
+    /// # async fn users(_r: Request) -> Response { text("ok") }
+    ///
+    /// # fn routes() -> Result<Router, suprnova::FrameworkError> {
+    /// let cfg = InertiaConfig::new().register_globally(false);
+    /// Inertia::install(&cfg)?;
+    ///
+    /// let router: Router = Router::new()
+    ///     .group("/", |r| r.get("/dashboard", dashboard))
+    ///     .middleware(Inertia::middleware(&cfg))
+    ///     .into();
+    /// // No Inertia stack on the API: no `Vary: X-Inertia`, no 303.
+    /// let router: Router = router.group("/api", |r| r.get("/users", users)).into();
+    /// # Ok(router) }
+    /// ```
+    pub fn middleware(config: &InertiaConfig) -> InertiaMiddleware {
+        InertiaMiddleware::new(config)
+    }
+
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// Registers four global middlewares in order:
@@ -471,6 +507,13 @@ impl Inertia {
     /// own, leaving both the app's placement and the component the app
     /// named intact. `error_page` on the config is then optional. See that
     /// type's documentation for where it may sit.
+    ///
+    /// With [`InertiaConfig::register_globally`] off, none of them is
+    /// registered globally: `install` registers the whole stack as the
+    /// named middleware `inertia` for route groups instead (see
+    /// [`middleware`](Self::middleware)), and retains the config as below.
+    /// With [`InertiaConfig::hooks`] set, the headers middleware and the
+    /// version check run them.
     ///
     /// One call wires all four, so an app cannot end up carrying two of
     /// them and silently missing the third - each closes a failure mode
@@ -563,11 +606,27 @@ impl Inertia {
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
+        if !config.register_globally {
+            // The stack for route groups instead: named, so a group takes
+            // it with `middleware_named("inertia")`, and a route outside
+            // such a group gets nothing of Inertia's.
+            let stack = InertiaMiddleware::new(config);
+            crate::middleware::register_middleware_alias(MIDDLEWARE_NAME, move || stack.clone());
+            return Ok(());
+        }
         register_global_middleware(InertiaHeadersMiddleware::from_config(config));
+        // The `version` hook's answer, when it gave one, is what the client
+        // is compared against.
         let version = config.version.clone();
-        register_global_middleware(InertiaVersionMiddleware::with_resolver(move || {
-            version.resolve()
-        }));
+        let version_check = InertiaVersionMiddleware::with_resolver(move || {
+            super::visit::scoped_version().unwrap_or_else(|| version.resolve())
+        });
+        match config.hooks.clone() {
+            Some(hooks) => {
+                register_global_middleware(VersionChangeHook::new(version_check, hooks));
+            }
+            None => register_global_middleware(version_check),
+        }
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
         // Innermost, and only when the app named a component. It has to
@@ -594,6 +653,10 @@ impl Inertia {
         Ok(())
     }
 }
+
+/// The name [`Inertia::install`] registers the stack under when it is not
+/// registered globally, for `GroupBuilder::middleware_named`.
+const MIDDLEWARE_NAME: &str = "inertia";
 
 /// What [`Inertia::install`] does about the error-page middleware.
 #[derive(Debug, PartialEq, Eq)]

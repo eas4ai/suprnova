@@ -338,6 +338,20 @@ pub struct InertiaConfig {
     /// accepts. Default `svelte`, `tsx`, `jsx` and `vue`, the ones
     /// `inertia_response!` looks for.
     pub page_extensions: Vec<String>,
+    /// Whether [`crate::Inertia::install`] registers the Inertia
+    /// middleware stack on every route. Default `true`.
+    ///
+    /// Set it `false` to put the stack only on the route groups that serve
+    /// pages: `install` then registers the stack as the named middleware
+    /// `inertia` instead, for `GroupBuilder::middleware_named("inertia")`,
+    /// and [`crate::Inertia::middleware`] builds it as a value. An API group
+    /// without it carries no `Vary: X-Inertia` and has no redirect turned
+    /// into `303`, as a Laravel app that registers `HandleInertiaRequests`
+    /// on its `web` group only.
+    pub register_globally: bool,
+    /// The application's replacements for the middleware's decisions; see
+    /// [`hooks`](Self::hooks).
+    pub(crate) hooks: Option<Arc<dyn super::hooks::InertiaMiddlewareHooks>>,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -583,6 +597,8 @@ impl Default for InertiaConfig {
                 .iter()
                 .map(|ext| ext.to_string())
                 .collect(),
+            register_globally: true,
+            hooks: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
         }
@@ -864,6 +880,25 @@ impl InertiaConfig {
     /// recorded and why. On by default.
     pub fn store_previous_url(mut self, on: bool) -> Self {
         self.store_previous_url = on;
+        self
+    }
+
+    /// Replace the Inertia middleware's decisions with the application's -
+    /// a Laravel app's `HandleInertiaRequests` overrides. See
+    /// [`InertiaMiddlewareHooks`](crate::InertiaMiddlewareHooks) for each
+    /// decision and its default. The middleware stack built from this
+    /// config, by [`crate::Inertia::install`] or
+    /// [`crate::Inertia::middleware`], runs them.
+    pub fn hooks(mut self, hooks: impl super::hooks::InertiaMiddlewareHooks) -> Self {
+        self.hooks = Some(Arc::new(hooks));
+        self
+    }
+
+    /// Choose whether [`crate::Inertia::install`] registers the stack on
+    /// every route or as the named middleware `inertia` for route groups;
+    /// see [`register_globally`](Self::register_globally).
+    pub fn register_globally(mut self, on: bool) -> Self {
+        self.register_globally = on;
         self
     }
 

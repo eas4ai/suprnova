@@ -12,6 +12,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use indexmap::IndexMap;
+
+use super::hooks::InertiaMiddlewareHooks;
+use super::prop::Prop;
 use crate::http::Request;
 
 tokio::task_local! {
@@ -30,6 +34,12 @@ pub(crate) struct Visit {
     public_root: String,
     /// The component the page render answered with, when one rendered.
     rendered_component: Mutex<Option<String>>,
+    /// The application's middleware hooks, when it installed any.
+    hooks: Option<Arc<dyn InertiaMiddlewareHooks>>,
+    /// The `version` hook's answer for this request.
+    version: Option<String>,
+    /// The `share` and `share_once` hooks' props for this request.
+    shared: IndexMap<String, Prop>,
 }
 
 impl Visit {
@@ -41,7 +51,39 @@ impl Visit {
             http_host: request.http_host(),
             public_root: request.public_root().to_string(),
             rendered_component: Mutex::new(None),
+            hooks: None,
+            version: None,
+            shared: IndexMap::new(),
         }
+    }
+
+    /// Capture `request` and run the request hooks (`version`, `share`,
+    /// `share_once`) for it, before the handler, as Laravel's middleware
+    /// does.
+    pub(crate) fn capture_with_hooks(
+        request: &Request,
+        hooks: Arc<dyn InertiaMiddlewareHooks>,
+    ) -> Self {
+        let mut visit = Self::capture(request);
+        visit.version = hooks.version(request);
+        visit.shared = super::hooks::hook_shares(hooks.as_ref(), request);
+        visit.hooks = Some(hooks);
+        visit
+    }
+
+    /// The application's hooks, when it installed any.
+    pub(crate) fn hooks(&self) -> Option<&Arc<dyn InertiaMiddlewareHooks>> {
+        self.hooks.as_ref()
+    }
+
+    /// The `version` hook's answer for this request.
+    pub(crate) fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// The hooks' shared props for this request.
+    pub(crate) fn shared(&self) -> &IndexMap<String, Prop> {
+        &self.shared
     }
 
     /// Where a redirect back from this request goes: Laravel's
@@ -70,6 +112,13 @@ pub(crate) async fn scope<F: std::future::Future>(visit: Arc<Visit>, fut: F) -> 
 /// not pass through it.
 pub(crate) fn current() -> Option<Arc<Visit>> {
     VISIT.try_with(Arc::clone).ok()
+}
+
+/// The `version` hook's answer for the request in scope, which the version
+/// check compares against and the page carries in place of the configured
+/// version.
+pub(crate) fn scoped_version() -> Option<String> {
+    VISIT.try_with(|visit| visit.version.clone()).ok().flatten()
 }
 
 /// Record the component a page render answered with, for the middleware's

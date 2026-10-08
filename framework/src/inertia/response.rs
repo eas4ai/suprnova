@@ -1275,6 +1275,15 @@ impl InertiaResponse {
                 merged.insert(k, v);
             }
         }
+        // The `share` and `share_once` middleware hooks, run for this
+        // request before the handler (Laravel's middleware `share()`).
+        let visit = super::visit::current();
+        if let Some(visit) = &visit {
+            for (k, v) in visit.shared() {
+                track_shared(&mut shared_keys, k);
+                merged.insert(k.clone(), v.clone());
+            }
+        }
         for (k, v) in props {
             // Note: when user props override a shared key, we keep the
             // key in `shared_keys` per the Inertia v3 client contract -
@@ -1335,6 +1344,12 @@ impl InertiaResponse {
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
+            // The `root_view` middleware hook chooses the configuration the
+            // document is written with.
+            let config = match visit.as_ref().and_then(|visit| visit.hooks()) {
+                Some(hooks) => hooks.root_view(req, config),
+                None => config,
+            };
             let ssr_result = super::ssr::render(&config.ssr, req, &page).await?;
             build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
         };
@@ -1348,6 +1363,18 @@ impl InertiaResponse {
     /// installed, then the [`InertiaConfig::ensure_pages_exist`] check on
     /// the name it gives.
     fn prepare_component(&mut self) -> Result<(), FrameworkError> {
+        // The request hooks of the Inertia middleware: a `version` answer
+        // replaces the configured version for this page, as the version
+        // check compares against it, and a `url_resolver` the configured
+        // one.
+        if let Some(visit) = super::visit::current() {
+            if let Some(version) = visit.version() {
+                self.config.version = super::config::VersionResolver::Static(version.to_string());
+            }
+            if let Some(resolver) = visit.hooks().and_then(|hooks| hooks.url_resolver()) {
+                self.config.url_resolver = Some(resolver);
+            }
+        }
         let component = std::mem::take(&mut self.component);
         self.component = App::inertia_registry()
             .runtime()

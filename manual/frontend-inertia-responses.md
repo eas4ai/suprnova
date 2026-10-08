@@ -1107,6 +1107,94 @@ calling `next` hands its response to nothing inside it. If your
 install, register the error-page middleware yourself between them - see
 [Where the page is rendered](#where-the-page-is-rendered).
 
+### Middleware hooks
+
+A Laravel app changes what its `HandleInertiaRequests` middleware decides by
+overriding its methods. Here those decisions are the methods of
+`InertiaMiddlewareHooks`, each defaulting to the framework's behaviour, so an
+implementation overrides only what it changes and installs with
+`InertiaConfig::hooks`:
+
+```rust
+use suprnova::{
+    DefaultInertiaHooks, HttpResponse, Inertia, InertiaConfig, InertiaMiddlewareHooks,
+    InertiaRequestExt, InertiaVisit, Prop, indexmap::IndexMap,
+};
+
+struct Hooks;
+
+impl InertiaMiddlewareHooks for Hooks {
+    // Shared with every page this middleware serves, per request.
+    fn share(&self, request: &dyn InertiaRequestExt) -> IndexMap<String, Prop> {
+        let mut props = IndexMap::new();
+        props.insert("path".into(), Prop::eager(serde_json::json!(request.path())));
+        props
+    }
+
+    // A handler that answers nothing means "done": 204, not a redirect back.
+    fn on_empty_response(&self, _visit: &InertiaVisit, _response: HttpResponse) -> HttpResponse {
+        HttpResponse::new().status(204)
+    }
+
+    // Start from the framework's 409 and add to it.
+    fn on_version_change(&self, visit: &InertiaVisit, response: HttpResponse) -> HttpResponse {
+        DefaultInertiaHooks
+            .on_version_change(visit, response)
+            .header("X-Deploy", "2026-10")
+    }
+}
+
+Inertia::install(&InertiaConfig::new().hooks(Hooks))?;
+```
+
+| Hook | Laravel | Default |
+|---|---|---|
+| `version(request)` | `version()` | `None`: the configured version; an answer is what the client is compared against and what the page carries |
+| `share(request)` | `share()` | nothing beyond the framework's `errors` |
+| `share_once(request)` | `shareOnce()` | nothing; each value becomes a once prop |
+| `root_view(request, config)` | `rootView()` | the config as it is; return a changed one to change this request's first-visit document |
+| `url_resolver()` | `urlResolver()` | `None`: `InertiaConfig::url_resolver` |
+| `on_empty_response(visit, response)` | `onEmptyResponse()` | the redirect back; a `302` it returns becomes `303` for `PUT`, `PATCH` and `DELETE` |
+| `on_version_change(visit, response)` | `onVersionChange()` | the `409` with `X-Inertia-Location` |
+| `on_redirect_with_fragment(visit, response)` | `onRedirectWithFragment()` | the `409` with `X-Inertia-Redirect` |
+
+The request hooks run once per request, before the handler; the `on_*`
+hooks run on an Inertia visit only and receive the response the framework
+would send. `InertiaVisit` carries the request's method, path, URL and
+headers, and `back_target(fallback)`, where a redirect back would go.
+
+### The stack on a route group
+
+`Inertia::install` puts the stack on every route, so an API route answers
+with `Vary: X-Inertia` and has its `302` turned into `303` for an Inertia
+`PUT`. To keep it to the groups that serve pages - Laravel's
+`HandleInertiaRequests` on the `web` group only - install with
+`register_globally(false)` and put the stack on those groups:
+
+```rust
+use suprnova::{Inertia, InertiaConfig, Router};
+
+let cfg = InertiaConfig::new()
+    .version(env!("CARGO_PKG_VERSION"))
+    .register_globally(false);
+Inertia::install(&cfg)?;           // retains the config, registers "inertia"
+
+let router: Router = Router::new()
+    .group("/", |r| r.get("/dashboard", dashboard))
+    .middleware(Inertia::middleware(&cfg))  // or .middleware_named("inertia")
+    .into();
+let router: Router = router
+    .group("/api", |r| r.get("/users", users)) // no Inertia stack here
+    .into();
+```
+
+`Inertia::middleware(&cfg)` is the whole stack as one middleware, in the
+order `install` registers it globally, with the error page when `cfg` names
+one and with `cfg`'s hooks. With `register_globally(false)`, `install`
+registers it as the named middleware `inertia` instead of globally, so a group
+can name it. `SessionMiddleware` stays global, outside the group's stack, as
+the Inertia layer reads the session it opens.
+
 Skip the call only if you genuinely don't want one of these middlewares
 (rare; each of them closes a real failure mode - cache poisoning across
 the two representations of a URL, silent stale-bundle,

@@ -16,6 +16,7 @@ pub mod inertia;
 pub mod location;
 pub mod merge_paths;
 pub mod middleware;
+pub mod middleware_hooks;
 #[path = "../support/own_process.rs"]
 pub mod own_process;
 #[path = "../support/own_process_async.rs"]
