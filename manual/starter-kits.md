@@ -227,3 +227,12 @@ users would show every member the name and email of every other member.
 Built something reusable on top of Suprnova and want to upstream it as a
 canonical kit? See [Contributions](contributions.md). We're happy to take a
 real implementation and round it into a generic kit.
+
+Every kit is held to the browser suite in `suprnova-cli/tests/kit_browser/`.
+Run `cargo test -p suprnova-cli --test kit_browser -- --ignored --test-threads=1`
+from the repository root. The harness scaffolds all three kits, builds one
+backend against the in-tree framework, builds each frontend, and runs the
+same Chromium assertions over each served application. It uses the existing
+Playwright browser cache; it does not install browsers. Failed runs print
+the kit name, the browser output, the server log, and the retained artifact
+directory.
