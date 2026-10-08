@@ -301,9 +301,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   default `public/hot`) names another file; the address is the hot URL,
   else the file's content, else the `vite_dev_server` URL. Without the file
   the visit takes the worker path, whatever listens at the dev server's
-  port, and production never goes hot. A `404` from the dev server, which
-  serves no SSR without the Inertia Vite plugin, renders on the client
-  quietly (SS-05).
+  port, and production never goes hot. `suprnova serve` writes the file
+  only when `frontend/package.json` declares `@inertiajs/vite`, the Inertia
+  Vite plugin that serves `/__inertia_ssr`: without it the dev server serves
+  no SSR, so no file is written and a first visit takes the worker path. A
+  `404` from the dev server, which serves no SSR without the Inertia Vite
+  plugin, renders on the client quietly (SS-05).
 - **SSR runtime settings.** `SsrConfig::runtime` (`node` by default, or
   `bun`, `deno` or a path) and `ensure_runtime_exists` (off by default), set
   with `InertiaConfig::ssr_runtime` and `ssr_ensure_runtime_exists`, are

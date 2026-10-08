@@ -406,7 +406,8 @@ struct ProcessSpec {
     name: String,
     color: console::Color,
     /// The Vite hot file kept while this process runs: `Some` for the
-    /// frontend pane only.
+    /// frontend pane only, and only when the frontend declares the Inertia
+    /// Vite plugin.
     hot_file: Option<HotFile>,
 }
 
@@ -416,7 +417,9 @@ struct ProcessSpec {
 /// The framework reads it to send a first visit's SSR to the dev server's
 /// `/__inertia_ssr` in development (PAR-058), so it must exist only while
 /// Vite does: `serve` writes it when Vite starts or is respawned, and
-/// removes it when Vite exits and when the session ends.
+/// removes it when Vite exits and when the session ends. It is kept only
+/// for a frontend that declares the Inertia Vite plugin
+/// ([`inertia_vite_plugin_declared`]), the one that serves that route.
 #[derive(Debug, Clone)]
 struct HotFile {
     path: PathBuf,
@@ -543,14 +546,16 @@ impl ProcessManager {
         self.start(spec)
     }
 
-    /// Spawn the Vite dev server, keeping `hot_file` while it runs.
+    /// Spawn the Vite dev server, keeping `hot_file` while it runs. With
+    /// `None` no hot file is written or removed: the frontend does not
+    /// declare the Inertia Vite plugin, so the dev server serves no SSR.
     fn spawn_vite(
         &mut self,
         command: &str,
         args: &[&str],
         cwd: Option<&Path>,
         envs: &[(&str, String)],
-        hot_file: HotFile,
+        hot_file: Option<HotFile>,
     ) -> Result<(), String> {
         let spec = ProcessSpec {
             command: command.to_string(),
@@ -563,7 +568,7 @@ impl ProcessManager {
             prefix: "[frontend]".to_string(),
             name: bare_name("[frontend]"),
             color: console::Color::Cyan,
-            hot_file: Some(hot_file),
+            hot_file,
         };
         self.start(spec)
     }
@@ -933,6 +938,61 @@ fn validate_suprnova_project(frontend_only: bool) -> Result<(), String> {
 fn frontend_present() -> bool {
     let frontend_dir = Path::new("frontend");
     frontend_dir.is_dir() && frontend_dir.join("package.json").is_file()
+}
+
+/// The package of the Inertia Vite plugin, whose dev-server middleware
+/// answers a first visit's SSR at `/__inertia_ssr`.
+const INERTIA_VITE_PLUGIN: &str = "@inertiajs/vite";
+
+/// Whether `<frontend_dir>/package.json` declares the Inertia Vite plugin
+/// under `dependencies` or `devDependencies`, at any version.
+///
+/// Only that plugin makes the Vite dev server serve SSR, so only then does
+/// `serve` write the hot file that sends a first visit to the dev server's
+/// `/__inertia_ssr` (PAR-058). Without the plugin the dev server answers
+/// that route with a `404`, which the framework reports as a failure like a
+/// worker's (PAR-059), so writing the file anyway would report one on every
+/// first visit. In Laravel the plugin is what writes the hot file, so this
+/// is the same rule. A missing file or a missing key is the ordinary case
+/// of a project without SSR in development and says nothing; a file that
+/// cannot be read, or is not a JSON object, is warned about.
+fn inertia_vite_plugin_declared(frontend_dir: &Path) -> bool {
+    let path = frontend_dir.join("package.json");
+    let skipped = "the Vite dev server gets no hot file";
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            ui::warning(&format!(
+                "Could not read {}: {error}; {skipped}",
+                path.display()
+            ));
+            return false;
+        }
+    };
+    let manifest = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(serde_json::Value::Object(manifest)) => manifest,
+        Ok(_) => {
+            ui::warning(&format!(
+                "{} is not a JSON object; {skipped}",
+                path.display()
+            ));
+            return false;
+        }
+        Err(error) => {
+            ui::warning(&format!(
+                "{} is not valid JSON ({error}); {skipped}",
+                path.display()
+            ));
+            return false;
+        }
+    };
+    ["dependencies", "devDependencies"].iter().any(|section| {
+        manifest
+            .get(*section)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|packages| packages.contains_key(INERTIA_VITE_PLUGIN))
+    })
 }
 
 /// Which dev panes this invocation runs.
@@ -1443,14 +1503,15 @@ pub fn run(
         let vite_env = [("VITE_PORT", vite_port.to_string())];
 
         // The hot file tells the backend Vite runs, and where, so a first
-        // visit's SSR goes to the dev server in development.
-        let hot_file = HotFile {
+        // visit's SSR goes to the dev server in development. Only a dev
+        // server with the Inertia Vite plugin serves that SSR.
+        let hot_file = inertia_vite_plugin_declared(frontend_path).then(|| HotFile {
             path: PathBuf::from("public/hot"),
             url: dev_server_url(
                 std::env::var("INERTIA_VITE_DEV_SERVER").ok().as_deref(),
                 vite_port,
             ),
-        };
+        });
 
         if let Err(e) = manager.spawn_vite(
             "npm",
@@ -3152,7 +3213,7 @@ mod hot_file_tests {
         let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
 
         manager
-            .spawn_vite("sh", &["-c", "exec sleep 60"], None, &[], hot.clone())
+            .spawn_vite("sh", &["-c", "exec sleep 60"], None, &[], Some(hot.clone()))
             .expect("the shell runs");
 
         assert_eq!(
@@ -3169,7 +3230,7 @@ mod hot_file_tests {
         let hot = hot_file(&dir);
         let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
         manager
-            .spawn_vite("sh", &["-c", "exit 3"], None, &[], hot.clone())
+            .spawn_vite("sh", &["-c", "exit 3"], None, &[], Some(hot.clone()))
             .expect("the shell runs");
         assert!(hot.path.exists());
 
@@ -3198,7 +3259,7 @@ mod hot_file_tests {
         let hot = hot_file(&dir);
         let mut manager = ProcessManager::new(false, 3, OutputMode::Json);
         manager
-            .spawn_vite("sh", &["-c", "exit 0"], None, &[], hot.clone())
+            .spawn_vite("sh", &["-c", "exit 0"], None, &[], Some(hot.clone()))
             .expect("the shell runs");
 
         wait_for_exit(&mut manager, 0);
@@ -3213,11 +3274,58 @@ mod hot_file_tests {
         let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
 
         let error = manager
-            .spawn_vite("suprnova-no-such-command", &[], None, &[], hot.clone())
+            .spawn_vite(
+                "suprnova-no-such-command",
+                &[],
+                None,
+                &[],
+                Some(hot.clone()),
+            )
             .expect_err("the command does not exist");
 
         assert!(error.contains("suprnova-no-such-command"), "{error}");
         assert!(!hot.path.exists());
+    }
+
+    #[test]
+    fn a_vite_spawned_without_a_hot_file_leaves_the_path_untouched() {
+        // A frontend without the Inertia Vite plugin gets no hot file: the
+        // session neither writes one nor removes one that is already there,
+        // when Vite starts, exits, is respawned or the session ends.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("public/hot");
+        std::fs::create_dir_all(dir.path().join("public")).expect("create public/");
+        std::fs::write(&path, "http://elsewhere:5173").expect("write the existing file");
+        let untouched = |when: &str| {
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file is still there"),
+                "http://elsewhere:5173",
+                "{when}"
+            );
+        };
+        let mut manager = ProcessManager::new(true, 3, OutputMode::Json);
+
+        manager
+            .spawn_vite("sh", &["-c", "exit 3"], None, &[], None)
+            .expect("the shell runs");
+        untouched("after the spawn");
+
+        wait_for_exit(&mut manager, 0);
+        assert!(!manager.poll(), "a crash is respawned, not the end");
+        untouched("after the exit");
+
+        manager.processes[0].state = ProcessState::PendingRestart {
+            respawn_at: Instant::now(),
+        };
+        manager.poll();
+        assert!(
+            matches!(manager.processes[0].state, ProcessState::Running(_)),
+            "the respawn ran"
+        );
+        untouched("after the respawn");
+
+        manager.shutdown_all();
+        untouched("after the session's end");
     }
 
     #[test]
@@ -3228,5 +3336,73 @@ mod hot_file_tests {
             dev_server_url(Some(" https://vite.nebula.localhost "), 5799),
             "https://vite.nebula.localhost"
         );
+    }
+}
+
+#[cfg(test)]
+mod inertia_vite_plugin_tests {
+    use super::*;
+
+    /// A frontend directory holding a `package.json` with `content`.
+    fn frontend_with(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("package.json"), content).expect("write package.json");
+        dir
+    }
+
+    #[test]
+    fn the_plugin_under_dependencies_is_declared() {
+        let frontend = frontend_with(
+            r#"{"dependencies": {"@inertiajs/vue3": "^3.6.1", "@inertiajs/vite": "^3.8.0"}}"#,
+        );
+        assert!(inertia_vite_plugin_declared(frontend.path()));
+    }
+
+    #[test]
+    fn the_plugin_under_dev_dependencies_is_declared_at_any_version() {
+        let frontend = frontend_with(
+            r#"{"dependencies": {"vue": "^3.5.40"}, "devDependencies": {"@inertiajs/vite": "workspace:*"}}"#,
+        );
+        assert!(inertia_vite_plugin_declared(frontend.path()));
+    }
+
+    #[test]
+    fn a_frontend_without_the_plugin_does_not_declare_it() {
+        // The other Inertia packages and a `vite` dependency are not the
+        // plugin; neither is the name anywhere but a dependency key.
+        let frontend = frontend_with(
+            r#"{
+                "name": "@inertiajs/vite",
+                "scripts": {"@inertiajs/vite": "vite"},
+                "dependencies": {"@inertiajs/vue3": "^3.6.1"},
+                "devDependencies": {"vite": "^8.1.5", "@vitejs/plugin-vue": "^6.0.8"}
+            }"#,
+        );
+        assert!(!inertia_vite_plugin_declared(frontend.path()));
+    }
+
+    #[test]
+    fn a_frontend_without_a_package_json_does_not_declare_it() {
+        let frontend = tempfile::tempdir().expect("tempdir");
+        assert!(!inertia_vite_plugin_declared(frontend.path()));
+        assert!(!inertia_vite_plugin_declared(
+            &frontend.path().join("no-such-directory")
+        ));
+    }
+
+    #[test]
+    fn a_package_json_that_cannot_be_read_does_not_declare_it() {
+        // A directory where the file belongs: present, but unreadable.
+        let frontend = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(frontend.path().join("package.json")).expect("create the directory");
+        assert!(!inertia_vite_plugin_declared(frontend.path()));
+    }
+
+    #[test]
+    fn a_package_json_that_is_not_json_does_not_declare_it() {
+        let frontend = frontend_with(r#"{"devDependencies": {"@inertiajs/vite": "^3.8.0""#);
+        assert!(!inertia_vite_plugin_declared(frontend.path()));
+        let frontend = frontend_with(r#"["@inertiajs/vite"]"#);
+        assert!(!inertia_vite_plugin_declared(frontend.path()));
     }
 }

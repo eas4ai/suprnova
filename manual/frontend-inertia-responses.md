@@ -2154,10 +2154,12 @@ While the Vite dev server runs, a first visit in development goes to it at
 the dev server renders the page from source, so you need neither a bundle
 nor a worker process while you work.
 
-The hot file says the dev server runs. `suprnova serve` writes the dev
-server's URL to `public/hot` when it starts Vite, and removes the file when
-Vite stops or `serve` exits, the file Laravel's Vite plugin writes. A visit
-goes hot while that file exists, or whenever you set `.ssr_hot_url(...)`.
+The hot file says the dev server runs and serves SSR. When
+`frontend/package.json` declares `@inertiajs/vite`, the Inertia Vite plugin
+that serves `/__inertia_ssr`, `suprnova serve` writes the dev server's URL
+to `public/hot` when it starts Vite, and removes the file when Vite stops or
+`serve` exits. Without the plugin it writes no file. A visit goes hot while
+that file exists, or whenever you set `.ssr_hot_url(...)`.
 The address is the `.ssr_hot_url(...)` URL, else the file's content, else
 the `.vite_dev_server(...)` URL when the file is empty.
 `.ssr_hot_file(...)` names another file. Without the file the visit takes
@@ -2318,11 +2320,11 @@ reading the configuration you installed, as in
 
 ### Why Suprnova diverges
 
-Laravel's Vite plugin writes `public/hot` while the dev server runs. A
-Suprnova project's Vite configuration carries no such plugin, so
-`suprnova serve`, which starts Vite, writes and removes the file instead.
-Run Vite on its own (`npm run dev`) and the backend does not go hot unless
-you set `.ssr_hot_url(...)`. A `404` from the hot endpoint renders on the
+Laravel's Vite plugin writes `public/hot` while the dev server runs. Here
+`suprnova serve`, which starts Vite, writes and removes the file, and only
+when `frontend/package.json` declares `@inertiajs/vite`, the plugin that
+makes the dev server serve SSR. Run Vite on its own (`npm run dev`) and the
+backend does not go hot unless you set `.ssr_hot_url(...)`. A `404` from the hot endpoint renders on the
 client quietly, where Laravel dispatches `SsrRenderFailed`: the starter
 kits do not ship the Inertia Vite plugin, so every first visit would
 report a failure while you develop.
