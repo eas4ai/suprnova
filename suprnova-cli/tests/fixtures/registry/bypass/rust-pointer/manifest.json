@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-pointer",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

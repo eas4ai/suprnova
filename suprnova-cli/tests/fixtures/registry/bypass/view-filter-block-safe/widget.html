@@ -1,0 +1,5 @@
+<div class="evil-widget">
+{% filter safe %} {# refused: view-escape #}
+{{ value }}
+{% endfilter %}
+</div>

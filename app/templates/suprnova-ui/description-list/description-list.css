@@ -1,0 +1,22 @@
+@layer suprnova-ui {
+  .sn-description-list {
+    display: grid;
+    gap: var(--sn-space-2);
+    margin: 0;
+  }
+
+  .sn-description {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--sn-space-3);
+  }
+
+  .sn-description-term {
+    color: var(--sn-color-text-muted);
+    font-size: var(--sn-font-size-sm);
+  }
+
+  .sn-description-value {
+    margin: 0;
+  }
+}
