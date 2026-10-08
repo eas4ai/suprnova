@@ -453,10 +453,19 @@ pub struct InertiaConfig {
 /// a JSON page object on `POST /render` and returns
 /// `{ head: string[], body: string }`. Configure the worker URL here;
 /// boot it separately (e.g. `suprnova ssr:start`).
+///
+/// SSR is on by default, as Laravel's is, and gated by bundle detection:
+/// an application without an SSR bundle renders on the client and never
+/// contacts the worker.
 #[derive(Clone)]
 pub struct SsrConfig {
     /// When `false`, SSR is fully off and the HTML shell renders empty
-    /// `<div id="app">` for the client to hydrate. Default: `false`.
+    /// `<div id="app">` for the client to hydrate. Default: `true`, as
+    /// Laravel's `inertia.ssr.enabled`: an application opts out of SSR
+    /// rather than in. The bundle check
+    /// ([`ensure_bundle_exists`](Self::ensure_bundle_exists)) keeps an
+    /// application without an SSR bundle rendering on the client, with no
+    /// request to the worker.
     pub enabled: bool,
     /// URL of the running SSR worker (e.g. `http://127.0.0.1:13714`).
     /// The framework posts to `<url>/render`.
@@ -486,16 +495,13 @@ pub struct SsrConfig {
     /// than any realistic SSR-rendered page but small enough to bound
     /// damage from a misconfigured or compromised loopback worker.
     pub max_response_bytes: usize,
-    /// Path to the built SSR bundle (e.g. `frontend/bootstrap/ssr/ssr.js` -
-    /// the default `vite build --ssr` output for a scaffolded project,
-    /// and what `suprnova ssr:start` looks for by default). `None`
-    /// (the default) means "not configured" and disables the existence
-    /// check regardless of [`Self::ensure_bundle_exists`] - there being
-    /// nothing to check. Unlike Laravel's `BundleDetector`, this is
-    /// **never auto-detected**: an app that calls `.ssr(url)` without
-    /// also calling [`InertiaConfig::ssr_bundle_path`] gets no bundle
-    /// check at all, which is what every test double and mock SSR
-    /// worker in this codebase (and yours) relies on.
+    /// Path to the built SSR bundle, looked at before the conventional
+    /// paths ([`CONVENTIONAL_BUNDLE_PATHS`](crate::CONVENTIONAL_BUNDLE_PATHS),
+    /// the first of which, `frontend/bootstrap/ssr/ssr.js`, is where a
+    /// scaffolded project's `vite build --ssr` writes it). Laravel's
+    /// `inertia.ssr.bundle`. `None` (the default) searches the conventional
+    /// paths only; [`detect_ssr_bundle`](crate::detect_ssr_bundle) is the
+    /// search, which the bundle check and `ssr:start` share.
     pub bundle_path: Option<PathBuf>,
     /// The runtime `ssr:start` launches the worker under: `node` by default,
     /// `bun`, `deno` or an absolute path. Laravel's `inertia.ssr.runtime`.
@@ -507,14 +513,14 @@ pub struct SsrConfig {
     /// running, at `/__inertia_ssr`; `None` uses the dev server's own URL.
     /// Laravel's `inertia.ssr.hot_url` (PAR-058).
     pub hot_url: Option<String>,
-    /// When `true` (the default) and [`Self::bundle_path`] is `Some`,
-    /// the SSR gateway checks the bundle exists on disk before every
-    /// dispatch and falls back to CSR immediately - without paying
-    /// [`Self::timeout`] on a connection that was never going to
-    /// succeed - when it doesn't. Mirrors Laravel's
-    /// `inertia.ssr.ensure_bundle_exists` config
-    /// (`Inertia\Ssr\HttpGateway::shouldDispatch()`). Has no effect
-    /// while `bundle_path` is `None`.
+    /// When `true` (the default), a first visit is sent to the worker only
+    /// when [`detect_ssr_bundle`](crate::detect_ssr_bundle) finds a bundle:
+    /// with none the visit renders on the client at once, quietly, rather
+    /// than paying [`Self::timeout`] on a worker that was never started.
+    /// Laravel's `inertia.ssr.ensure_bundle_exists`. Turn it off for a
+    /// worker whose bundle this process cannot see on disk (a separate
+    /// container, a remote host) and in tests that use a stand-in worker.
+    /// Hot mode ([`Self::hot_url`]) skips the check.
     pub ensure_bundle_exists: bool,
 }
 
@@ -537,7 +543,7 @@ impl std::fmt::Debug for SsrConfig {
 impl Default for SsrConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             url: "http://127.0.0.1:13714".to_string(),
             timeout: std::time::Duration::from_secs(5),
             throw_on_error: false,
@@ -834,14 +840,15 @@ impl InertiaConfig {
         self
     }
 
-    /// Enable SSR with the given worker URL.
+    /// Enable SSR with the given worker URL. SSR is on by default at
+    /// `http://127.0.0.1:13714`; this names another worker address.
     pub fn ssr(mut self, url: impl Into<String>) -> Self {
         self.ssr.enabled = true;
         self.ssr.url = url.into();
         self
     }
 
-    /// Disable SSR explicitly (the default).
+    /// Turn SSR off: every first visit renders on the client.
     pub fn ssr_disabled(mut self) -> Self {
         self.ssr.enabled = false;
         self
@@ -899,22 +906,20 @@ impl InertiaConfig {
         self
     }
 
-    /// Point the SSR bundle-existence check at the built bundle. Not set
-    /// by default - see [`SsrConfig::bundle_path`]'s doc for why an
-    /// unset path is the safe default rather than an auto-detected one.
-    /// `frontend/bootstrap/ssr/ssr.js` is the conventional location:
-    /// what `suprnova ssr:start` looks for and what the scaffolded
-    /// `vite.config.ts`'s SSR build (`vite build --ssr`) writes to.
+    /// Name the built SSR bundle, looked at before the conventional paths;
+    /// see [`SsrConfig::bundle_path`]. A project that builds its bundle to
+    /// `frontend/bootstrap/ssr/ssr.js`, where the scaffolded
+    /// `vite.config.ts` writes it, needs no call.
     pub fn ssr_bundle_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.ssr.bundle_path = Some(path.into());
         self
     }
 
-    /// Toggle the bundle-existence check. On by default; only takes
-    /// effect once [`Self::ssr_bundle_path`] is also set. Turn it off
-    /// if you dispatch to a worker whose bundle this process can't see
-    /// on disk (a remote build artifact, a container image built
-    /// separately from the one running the backend).
+    /// Toggle the bundle check; see [`SsrConfig::ensure_bundle_exists`].
+    /// On by default. Turn it off if you dispatch to a worker whose bundle
+    /// this process can't see on disk (a remote build artifact, a
+    /// container image built separately from the one running the
+    /// backend), or to a stand-in worker in a test.
     pub fn ssr_ensure_bundle_exists(mut self, on: bool) -> Self {
         self.ssr.ensure_bundle_exists = on;
         self

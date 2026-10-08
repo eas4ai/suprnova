@@ -447,6 +447,7 @@ async fn ssr_failure_reflashes_aged_errors_until_successful_response() {
                 .with_config(
                     InertiaConfig::new()
                         .ssr("http://127.0.0.1:1")
+                        .ssr_ensure_bundle_exists(false)
                         .ssr_throw_on_error(true),
                 )
                 .resolve(&request)

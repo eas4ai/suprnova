@@ -150,39 +150,6 @@ pub fn new_disable_ssr_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
-/// Laravel's `HttpGateway::shouldDispatch()`: when
-/// [`SsrConfig::ensure_bundle_exists`] is on and a
-/// [`SsrConfig::bundle_path`] is configured, dispatch is gated on the
-/// built bundle actually being on disk - so a worker that was never
-/// started, or a bundle that was never built, fails fast, before paying
-/// `config.timeout` on a connection that was never going to succeed.
-///
-/// Returns `Some(reason)` when dispatch should be skipped, `None` when
-/// it's fine to proceed - bundle exists, the check is off, or (the
-/// common case for every test in this codebase) no path is configured
-/// at all, which is treated the same as "off": there's nothing to
-/// check. This check runs unconditionally of `throw_on_error` - a
-/// missing bundle is a deployment/build problem the caller should see
-/// in logs, not a request-time failure mode to escalate to a 500, and
-/// that matches `HttpGateway::shouldDispatch()`, which sits entirely
-/// outside the HTTP-error branch `throw_on_error` guards in Laravel too.
-fn missing_bundle_reason(config: &SsrConfig) -> Option<String> {
-    if !config.ensure_bundle_exists {
-        return None;
-    }
-    let bundle_path = config.bundle_path.as_ref()?;
-    if bundle_path.exists() {
-        return None;
-    }
-    Some(format!(
-        "SSR bundle not found at {} (ensure_bundle_exists is on); falling back to CSR. \
-         Run `vite build --ssr`, or turn the check off with \
-         InertiaConfig::ssr_ensure_bundle_exists(false) if the worker's bundle lives \
-         somewhere this process can't see.",
-        bundle_path.display()
-    ))
-}
-
 /// Whether SSR runs for `request`: Laravel's `HttpGateway::ssrIsEnabled`.
 ///
 /// The condition `Inertia::disable_ssr` or `disable_ssr_if` set decides
@@ -209,9 +176,13 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
 }
 
 /// Render via the SSR worker. Returns `Ok(Some(_))` when SSR succeeded,
-/// `Ok(None)` when SSR was disabled, the request was excluded, or the
-/// configured bundle doesn't exist on disk (caller falls back to CSR),
+/// `Ok(None)` when SSR was disabled, the request was excluded, or no
+/// bundle was found while the check is on (caller falls back to CSR),
 /// and `Err` only when `throw_on_error` is true.
+///
+/// A missing bundle is not reported: with SSR on by default, an
+/// application that has no bundle would otherwise log it on every first
+/// visit. Laravel's `HttpGateway::dispatch` returns `null` the same way.
 pub(crate) async fn render(
     config: &SsrConfig,
     request: &dyn InertiaRequestExt,
@@ -220,12 +191,7 @@ pub(crate) async fn render(
     if !ssr_runs_for(config, request) {
         return Ok(None);
     }
-    if let Some(msg) = missing_bundle_reason(config) {
-        if let Some(cb) = &config.on_error {
-            cb(&msg);
-        } else {
-            eprintln!("[inertia] {}", msg);
-        }
+    if config.ensure_bundle_exists && detect_bundle(config).is_none() {
         return Ok(None);
     }
 
@@ -412,14 +378,19 @@ mod tests {
     }
 
     #[test]
-    fn ssr_disabled_when_config_disabled() {
+    fn inssr_ssr_is_enabled_by_default() {
         let cfg = SsrConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
+        assert!(cfg.ensure_bundle_exists);
     }
 
     #[tokio::test]
     async fn render_returns_none_when_disabled() {
-        let cfg = SsrConfig::default();
+        let cfg = SsrConfig {
+            enabled: false,
+            ensure_bundle_exists: false,
+            ..SsrConfig::default()
+        };
         let page = serde_json::json!({"component": "Home"});
         let result = render(&cfg, &At("/foo"), &page).await.unwrap();
         assert!(result.is_none());
@@ -502,47 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_bundle_reason_is_none_when_bundle_exists() {
-        let path = std::env::temp_dir().join(format!(
-            "suprnova-ssr-test-bundle-{}.js",
-            std::process::id()
-        ));
+    fn inssr_detect_bundle_finds_the_configured_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("ssr.js");
         std::fs::write(&path, b"").expect("write test bundle");
         let cfg = SsrConfig {
-            enabled: true,
             bundle_path: Some(path.clone()),
-            ensure_bundle_exists: true,
             ..SsrConfig::default()
         };
-        let result = missing_bundle_reason(&cfg);
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_none());
+        assert_eq!(detect_bundle(&cfg), Some(path));
     }
 
     #[test]
-    fn missing_bundle_reason_is_none_when_no_path_is_configured() {
-        // The safe default: `.ssr(url)` alone (no `.ssr_bundle_path`)
-        // must never gate dispatch - this is what keeps every SSR test
-        // in `framework/tests/inertia.rs` behaving exactly as before.
+    fn inssr_detect_bundle_is_none_without_a_bundle() {
+        // `framework/` holds a bundle at none of the conventional paths,
+        // and a configured path that does not exist is not a bundle.
         let cfg = SsrConfig {
-            enabled: true,
-            bundle_path: None,
-            ensure_bundle_exists: true,
-            ..SsrConfig::default()
-        };
-        assert!(missing_bundle_reason(&cfg).is_none());
-    }
-
-    #[test]
-    fn missing_bundle_reason_names_the_path() {
-        let cfg = SsrConfig {
-            enabled: true,
             bundle_path: Some(std::path::PathBuf::from("/nonexistent/ssr.js")),
-            ensure_bundle_exists: true,
             ..SsrConfig::default()
         };
-        let reason = missing_bundle_reason(&cfg).expect("missing bundle must be reported");
-        assert!(reason.contains("/nonexistent/ssr.js"));
+        assert_eq!(detect_bundle(&cfg), None);
+        assert_eq!(detect_bundle(&SsrConfig::default()), None);
     }
 
     /// T31 fix round 1. `post_json`'s header-await was bounded by
@@ -593,6 +544,9 @@ mod tests {
             enabled: true,
             url: format!("http://{local}"),
             timeout: std::time::Duration::from_millis(200),
+            // No bundle on disk here: the check would keep the stalled
+            // worker from being asked at all.
+            ensure_bundle_exists: false,
             ..SsrConfig::default()
         };
         let page = serde_json::json!({"component": "Home"});

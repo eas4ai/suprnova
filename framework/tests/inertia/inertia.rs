@@ -1915,6 +1915,7 @@ async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
 
     let cfg = InertiaConfig::new()
         .ssr(format!("http://{local}"))
+        .ssr_ensure_bundle_exists(false)
         .ssr_max_response_bytes(64 * 1024)
         // Don't throw - exercise the fallback path explicitly.
         .ssr_throw_on_error(false);
@@ -2312,7 +2313,9 @@ mod ssr_tests {
     }
 
     #[tokio::test]
-    async fn ssr_disabled_by_default_produces_empty_mount() {
+    async fn ssr_without_a_bundle_produces_empty_mount() {
+        // SSR is on by default (PAR-057), and no bundle is on disk here,
+        // so the default configuration renders on the client.
         let req = MockReq::new("/"); // non-XHR initial visit
         let resp = InertiaResponse::new("Home")
             .with("title", "Hi")
@@ -2327,7 +2330,9 @@ mod ssr_tests {
     #[tokio::test]
     async fn ssr_enabled_injects_head_and_body_with_data_attr() {
         let addr = spawn_mock_ssr().await;
-        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false);
         let req = MockReq::new("/");
         let resp = InertiaResponse::new("Home")
             .with_config(cfg)
@@ -2364,7 +2369,9 @@ mod ssr_tests {
     #[tokio::test]
     async fn an_ssr_head_that_carries_a_title_replaces_the_frameworks_default() {
         let addr = spawn_mock_ssr().await;
-        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false);
         let req = MockReq::new("/");
         let resp = InertiaResponse::new("Home")
             .with_config(cfg)
@@ -2392,6 +2399,7 @@ mod ssr_tests {
         let addr = spawn_mock_ssr_with_head(&["<meta name=\"ssr\" content=\"yes\">"]).await;
         let cfg = InertiaConfig::new()
             .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false)
             .default_title("Acme App");
         let req = MockReq::new("/");
         let resp = InertiaResponse::new("Home")
@@ -2417,6 +2425,7 @@ mod ssr_tests {
         let addr = spawn_mock_ssr_with_head(&["<title-bar data-x=\"1\"></title-bar>"]).await;
         let cfg = InertiaConfig::new()
             .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false)
             .default_title("Acme App");
         let req = MockReq::new("/");
         let resp = InertiaResponse::new("Home")
@@ -2438,7 +2447,9 @@ mod ssr_tests {
     #[tokio::test]
     async fn the_ssr_shell_declares_the_active_locale() {
         let addr = spawn_mock_ssr().await;
-        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false);
         let req = MockReq::new("/");
         let body = suprnova::scope_locale(suprnova::Locale::parse("ja").unwrap(), async {
             let resp = InertiaResponse::new("Home")
@@ -2457,7 +2468,9 @@ mod ssr_tests {
     async fn ssr_worker_unreachable_falls_back_to_csr() {
         // Point at a port nothing is listening on. Default
         // throw_on_error=false → falls back silently.
-        let cfg = InertiaConfig::new().ssr("http://127.0.0.1:1");
+        let cfg = InertiaConfig::new()
+            .ssr("http://127.0.0.1:1")
+            .ssr_ensure_bundle_exists(false);
         let req = MockReq::new("/");
         let resp = InertiaResponse::new("Home")
             .with_config(cfg)
@@ -2472,6 +2485,7 @@ mod ssr_tests {
     async fn ssr_throw_on_error_propagates_error() {
         let cfg = InertiaConfig::new()
             .ssr("http://127.0.0.1:1")
+            .ssr_ensure_bundle_exists(false)
             .ssr_throw_on_error(true);
         let req = MockReq::new("/");
         let result = InertiaResponse::new("Home")
@@ -2490,6 +2504,7 @@ mod ssr_tests {
         let addr = spawn_mock_ssr().await;
         let cfg = InertiaConfig::new()
             .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false)
             .ssr_exclude("/admin/**");
         let req = MockReq::new("/admin/users");
         let resp = InertiaResponse::new("Admin/Users")
@@ -2516,7 +2531,9 @@ mod ssr_tests {
                 drop(stream);
             }
         });
-        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .ssr_ensure_bundle_exists(false);
         let req = MockReq::new("/").inertia();
         let resp = InertiaResponse::new("Home")
             .with_config(cfg)
