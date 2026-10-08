@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "states": ["active", "suspended", "retired"],
+  "resource_kinds": ["upload", "stream", "poll", "timer", "transport"],
+  "bounds": {"max_items": 2, "max_bytes": 8, "max_active": 1},
+  "cases": [
+    {
+      "id": "retire-drains-owned-work-once",
+      "operations": [
+        {"operation":"enqueue","bytes":4,"expected":"accepted"},
+        {"operation":"enqueue","bytes":4,"expected":"accepted"},
+        {"operation":"acquire","expected":"acquired"},
+        {"operation":"retire","expected":{"canceled":true,"drained_items":2,"drained_bytes":8,"released_permits":1}},
+        {"operation":"retire","expected":{"canceled":false,"drained_items":0,"drained_bytes":0,"released_permits":0}},
+        {"operation":"enqueue","bytes":1,"expected":"retired"}
+      ]
+    },
+    {
+      "id": "suspension-preserves-bounds-until-resume",
+      "operations": [
+        {"operation":"suspend","expected":"suspended"},
+        {"operation":"enqueue","bytes":4,"expected":"accepted"},
+        {"operation":"acquire","expected":"suspended"},
+        {"operation":"resume","expected":"active"},
+        {"operation":"acquire","expected":"acquired"},
+        {"operation":"release","expected":"released"}
+      ]
+    }
+  ]
+}
