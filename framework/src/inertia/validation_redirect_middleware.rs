@@ -1,14 +1,14 @@
 //! Validation failure → `303` redirect-back bridge for Inertia visits.
 //!
 //! The Inertia client treats a response with no `X-Inertia` header as
-//! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
+//! non-Inertia (`inertia-3.8.0/packages/core/src/response.ts:75,180-182`)
 //! and hands it to `dialog.show(...)` - the full-screen error modal
-//! (`response.ts:168-169`). A `422` body therefore never reaches
+//! (`response.ts:175-176`). A `422` body therefore never reaches
 //! `form.errors`, so a failed `useForm().post()` shows a crash screen
 //! unless the handler redirects by hand.
 //!
 //! Laravel gets this right by content negotiation: Inertia sends
-//! `Accept: text/html, application/xhtml+xml` (`request.ts:168`), so
+//! `Accept: text/html, application/xhtml+xml` (`request.ts:186`), so
 //! `$request->expectsJson()` is false and a `ValidationException` takes
 //! the `redirect()->back()->withErrors()` branch. This is that branch,
 //! made explicit.

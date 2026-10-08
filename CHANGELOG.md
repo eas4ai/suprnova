@@ -563,6 +563,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `password.request`, `password.email`, `password.reset`,
   `password.update`, `verification.notice`, `verification.send`,
   `verification.verify` and `logout` (K12).
+- **The sources and the manual cite the Inertia.js client at 3.8.0.**
+  The framework's comments cited the client at 3.6.1 and 3.1.1, and the
+  frontend chapter named 3.4.0. Each rule they cite was read again in the
+  3.8.0 client, and every citation names its 3.8.0 file and line; the
+  frontend chapter and the CSRF chapter name 3.8.0, and the frontend
+  chapter lists `@inertiajs/vite` (K01).
 
 ### Changed
 

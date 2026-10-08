@@ -644,4 +644,17 @@ mod backend {
             }
         });
     }
+
+    /// PAR-076: the scaffold tests hold every kit's `@inertiajs/*` pin at
+    /// 3.8.0, the version the kits' manifests declare.
+    #[test]
+    fn kit_scaffold_snapshot_expects_the_inertia_3_8_pin() {
+        let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scaffold_snapshot.rs");
+        let source = std::fs::read_to_string(&snapshot)
+            .unwrap_or_else(|e| panic!("read {}: {e}", snapshot.display()));
+        assert!(
+            source.contains(r#"const EXPECTED_INERTIA_PIN: &str = "^3.8.0";"#),
+            "scaffold_snapshot.rs must expect the `^3.8.0` pin"
+        );
+    }
 }

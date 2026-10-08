@@ -113,7 +113,7 @@ token in a header.
 The scaffolded Svelte, React, and Vue entry points carry no CSRF wiring at
 all, and that is deliberate. The Inertia client the scaffold installs
 (`@inertiajs/svelte`, `@inertiajs/react`, `@inertiajs/vue3`, all pinned
-`^3.6.1`) reads the `XSRF-TOKEN` cookie `CsrfMiddleware` attached to the
+`^3.8.0`) reads the `XSRF-TOKEN` cookie `CsrfMiddleware` attached to the
 previous response and sets the `X-XSRF-TOKEN` header itself, once per
 visit. The value that travels is whatever the browser holds at that
 moment, so a login or a logout that rotates the session's token is
