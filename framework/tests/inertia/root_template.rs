@@ -784,3 +784,26 @@ async fn rdoc_006_error_pages_render_through_the_chosen_template_without_view_da
     );
     assert!(!body.contains("content=\"admin\""), "{body}");
 }
+
+/// RDOC-001: `AssertableInertia` reads the page data element whatever its
+/// id, so a first visit rendered under another `mount_id` is assertable,
+/// through the framework's document and through a root template alike.
+#[tokio::test]
+async fn rdoc_001_assertable_inertia_reads_a_first_visit_under_another_mount_id() {
+    let _container = TestContainer::fake();
+    for config in [
+        InertiaConfig::new().development(true).version("pinned"),
+        templated(),
+    ] {
+        let request = MockReq::new("/home");
+        let response = pinned_page()
+            .with_config(config.mount_id("root"))
+            .resolve(&request)
+            .await
+            .expect("a first visit");
+        suprnova::testing::AssertableInertia::from_response(&response)
+            .component("Home")
+            .url("/home")
+            .where_("message", "</script> & caf\u{e9}");
+    }
+}
