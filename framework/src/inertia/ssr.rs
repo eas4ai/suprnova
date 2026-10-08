@@ -385,10 +385,10 @@ pub(crate) async fn is_healthy(config: &SsrConfig) -> bool {
 /// The client every SSR call shares, built once for the process: one
 /// connection pool, and rustls for a worker at an `https` URL (SS-14).
 ///
-/// It follows no redirects and uses no proxy from the environment, as the
-/// plain HTTP client it replaced did not: the worker's address is the
-/// configuration's, and a proxy variable set for outbound traffic must
-/// not capture a loopback worker.
+/// Like the plain HTTP client it replaced, it follows no redirects and
+/// ignores the proxy variables of the environment: the worker's address is
+/// the configuration's, and a proxy set for outbound traffic must not
+/// capture a loopback worker.
 fn shared_client() -> Result<&'static reqwest::Client, String> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
         std::sync::OnceLock::new();

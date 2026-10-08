@@ -399,10 +399,11 @@ impl Inertia {
     /// [`SsrGateway`](crate::SsrGateway)'s health check, Laravel's
     /// `HasHealthCheck::isHealthy` that `inertia:check-ssr` reads.
     ///
-    /// The default gateway answers `GET {url}/health` with the installed
-    /// configuration's worker URL and timeout and the request configurator:
-    /// `Some(true)` for a 2xx, `Some(false)` for any other status or no
-    /// answer. `None` means the bound gateway has no health check.
+    /// The default gateway sends `GET {url}/health` with the installed
+    /// configuration's worker URL and timeout, through the request
+    /// configurator, and answers `Some(true)` for a 2xx and `Some(false)`
+    /// for any other status or no answer. `None` means the bound gateway
+    /// has no health check.
     ///
     /// ```rust,no_run
     /// use suprnova::Inertia;
