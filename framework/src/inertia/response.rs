@@ -140,6 +140,13 @@ pub struct InertiaResponse {
 /// delete them. This guard selectively reflashes the values on every
 /// uncommitted exit, including cancellation, and removes them only after the
 /// complete response has been built.
+///
+/// Three kinds of entry are staged: the aged one-shot values (`_flash.old.*`,
+/// validation bags and the Inertia flash data among them), the Inertia flash
+/// data this request wrote (`_flash.new.inertia.flash_data`), and the two
+/// history flags, which are plain session entries that last until a page
+/// emits them. The page pulls all three; only the aged values need moving
+/// back when it fails, since the others stay where they are.
 struct StagedInertiaSessionValues {
     entries: Vec<(String, Value)>,
     committed: bool,
@@ -148,18 +155,32 @@ struct StagedInertiaSessionValues {
 impl StagedInertiaSessionValues {
     const OLD_PREFIX: &'static str = "_flash.old.";
     const NEW_PREFIX: &'static str = "_flash.new.";
-    const PRESERVE_FRAGMENT: &'static str = "_inertia.preserve_fragment";
-    const CLEAR_HISTORY: &'static str = "_inertia.clear_history";
+    /// The flashed preserve-fragment flag an earlier release wrote. Read
+    /// beside [`flash::PRESERVE_FRAGMENT`] so a session that holds it across
+    /// an upgrade still delivers it.
+    const LEGACY_PRESERVE_FRAGMENT: &'static str = "_inertia.preserve_fragment";
+    /// The flashed clear-history flag an earlier release wrote, read beside
+    /// [`flash::CLEAR_HISTORY`] for the same reason: a logout in flight
+    /// across an upgrade must still clear the history.
+    const LEGACY_CLEAR_HISTORY: &'static str = "_inertia.clear_history";
 
     fn stage() -> Self {
+        let new_flash_data = flash::flash_data_new_key();
         let entries = crate::session::session()
             .map(|session| {
                 session
                     .data
                     .iter()
                     .filter_map(|(key, value)| {
-                        let name = key.strip_prefix(Self::OLD_PREFIX)?;
-                        Self::is_inertia_value(name).then(|| (key.clone(), value.clone()))
+                        let staged = match key.strip_prefix(Self::OLD_PREFIX) {
+                            Some(name) => Self::is_inertia_value(name),
+                            None => {
+                                *key == new_flash_data
+                                    || key == flash::CLEAR_HISTORY
+                                    || key == flash::PRESERVE_FRAGMENT
+                            }
+                        };
+                        staged.then(|| (key.clone(), value.clone()))
                     })
                     .collect()
             })
@@ -171,18 +192,34 @@ impl StagedInertiaSessionValues {
     }
 
     fn is_inertia_value(name: &str) -> bool {
-        !name.starts_with('_') || name == Self::PRESERVE_FRAGMENT || name == Self::CLEAR_HISTORY
+        !name.starts_with('_')
+            || name == Self::LEGACY_PRESERVE_FRAGMENT
+            || name == Self::LEGACY_CLEAR_HISTORY
     }
 
-    fn value(&self, name: &str) -> Option<&Value> {
-        let full_key = format!("{}{name}", Self::OLD_PREFIX);
+    fn value_at(&self, full_key: &str) -> Option<&Value> {
         self.entries
             .iter()
-            .find_map(|(key, value)| (key == &full_key).then_some(value))
+            .find_map(|(key, value)| (key == full_key).then_some(value))
     }
 
-    fn bool_value(&self, name: &str) -> bool {
-        self.value(name).and_then(Value::as_bool).unwrap_or(false)
+    /// Whether a history flag is pending: the session entry Laravel's key
+    /// names, or the flash an earlier release wrote.
+    fn flag(&self, key: &str, legacy: &str) -> bool {
+        let legacy_key = format!("{}{legacy}", Self::OLD_PREFIX);
+        [key, legacy_key.as_str()]
+            .iter()
+            .any(|key| self.value_at(key).and_then(Value::as_bool) == Some(true))
+    }
+
+    /// The pending clear-history flag, emitted as `clearHistory: true`.
+    fn clear_history(&self) -> bool {
+        self.flag(flash::CLEAR_HISTORY, Self::LEGACY_CLEAR_HISTORY)
+    }
+
+    /// The pending preserve-fragment flag, emitted as `preserveFragment: true`.
+    fn preserve_fragment(&self) -> bool {
+        self.flag(flash::PRESERVE_FRAGMENT, Self::LEGACY_PRESERVE_FRAGMENT)
     }
 
     fn error_bags(&self) -> serde_json::Map<String, Value> {
@@ -196,18 +233,33 @@ impl StagedInertiaSessionValues {
             .collect()
     }
 
+    /// The session's part of `page.flash`: the plain session flashes the
+    /// previous request left, then the Inertia flash data, each only while
+    /// the session still holds what was staged (a handler that pulled the
+    /// flash data before the render sends none).
     fn page_flash(&self) -> serde_json::Map<String, Value> {
         let visible = flash::drain_session_flash_for_page();
-        self.entries
+        let mut out: serde_json::Map<String, Value> = self
+            .entries
             .iter()
             .filter_map(|(key, value)| {
                 let name = key.strip_prefix(Self::OLD_PREFIX)?;
                 (!name.starts_with('_')
                     && !name.starts_with("errors.")
+                    && name != flash::FLASH_DATA
                     && visible.get(name) == Some(value))
                 .then(|| (name.to_string(), value.clone()))
             })
-            .collect()
+            .collect();
+        let held = crate::session::session();
+        for key in [flash::flash_data_old_key(), flash::flash_data_new_key()] {
+            if let Some(Value::Object(data)) = self.value_at(&key)
+                && held.as_ref().and_then(|session| session.data.get(&key)) == self.value_at(&key)
+            {
+                out.extend(data.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        out
     }
 
     fn commit(mut self) {
@@ -238,10 +290,21 @@ impl StagedInertiaSessionValues {
                 };
                 session.data.remove(old_key);
                 let new_key = format!("{}{name}", Self::NEW_PREFIX);
-                session
-                    .data
-                    .entry(new_key)
-                    .or_insert_with(|| staged_value.clone());
+                match (session.data.get_mut(&new_key), staged_value) {
+                    // Inertia flash data this request added to: keep both,
+                    // what it added winning.
+                    (Some(Value::Object(newer)), Value::Object(older))
+                        if name == flash::FLASH_DATA =>
+                    {
+                        for (k, v) in older {
+                            newer.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                    (Some(_), _) => {}
+                    (None, _) => {
+                        session.data.insert(new_key, staged_value.clone());
+                    }
+                }
                 session.dirty = true;
             }
         });
@@ -791,10 +854,26 @@ impl InertiaResponse {
     /// Attach a flash value to this response. Appears under the
     /// top-level `flash` field of the page object (not under `props`).
     /// Use for one-shot toasts / success messages.
+    ///
+    /// Laravel's `Response::flash`: with a session in scope the value goes
+    /// into the session's Inertia flash data at once, like
+    /// [`Inertia::flash`](crate::Inertia::flash), so it reaches the next
+    /// page response even when this one is never sent, and
+    /// [`Inertia::get_flashed`](crate::Inertia::get_flashed) sees it.
+    /// Without a session it rides on this response alone.
     pub fn flash<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
         let v = to_value_or_die(&value);
-        self.flash.insert(key.into(), v);
+        self.put_flash(key.into(), v);
         self
+    }
+
+    /// Put one flash entry where [`flash`](Self::flash) documents it goes.
+    fn put_flash(&mut self, key: String, value: Value) {
+        let mut entry = serde_json::Map::new();
+        entry.insert(key.clone(), value.clone());
+        if !flash::put_in_session(entry) {
+            self.flash.insert(key, value);
+        }
     }
 
     // ---- Fallible (try_*) prop builders -------------------------------
@@ -885,7 +964,7 @@ impl InertiaResponse {
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
         let v = to_value_or_err(&key, &value)?;
-        self.flash.insert(key, v);
+        self.put_flash(key, v);
         Ok(self)
     }
 
@@ -1101,28 +1180,25 @@ impl InertiaResponse {
             .or_else(flash::encrypt_history_flag)
             .unwrap_or(config.encrypt_history_default);
 
-        // preserve-fragment precedence: per-response override > session
-        // flash (set by `Redirect::preserve_fragment()`) > false. The
-        // session lookup is a no-op outside a `SessionMiddleware` scope.
-        // The staged session guard commits its removal only after the
-        // complete response has been constructed, so the flag is one-shot
-        // without being lost on a later response error.
-        let flashed_preserve_fragment =
-            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT);
-        let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
+        // preserve-fragment precedence: per-response override > the session
+        // entry `Redirect::preserve_fragment()` sets > false. The session
+        // lookup is a no-op outside a `SessionMiddleware` scope. The entry
+        // lasts until a page emits it, however many redirects come first;
+        // the staged session guard removes it only after the complete
+        // response has been constructed, so a response error keeps it.
+        let resolved_preserve_fragment =
+            preserve_fragment.unwrap_or_else(|| staged_session.preserve_fragment());
 
         // clear-history precedence: per-response override OR the session
-        // flash set by `App::clear_history()`. Either alone is enough -
+        // entry `App::clear_history()` sets. Either alone is enough -
         // unlike `preserve_fragment` there is no "force off" case, because
         // the only reason to ask for a history clear is that the previous
-        // session must stop being readable. The staged session guard makes
-        // the flag survive exactly one successful hop; a flag that stuck
-        // around would rotate the key on every navigation and defeat
-        // encrypted history entirely. No-op outside a
-        // `SessionMiddleware` scope.
-        let flashed_clear_history =
-            staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
-        let resolved_clear_history = clear_history || flashed_clear_history;
+        // session must stop being readable. The entry lasts until a page
+        // emits it, so a logout followed by two redirects still clears; the
+        // page that emits it removes it, since a flag that stuck around
+        // would rotate the key on every navigation and defeat encrypted
+        // history entirely. No-op outside a `SessionMiddleware` scope.
+        let resolved_clear_history = clear_history || staged_session.clear_history();
 
         // Layer props in precedence order (later writes override earlier):
         //   1. Static shared registry  (App::inertia_share, App::inertia_share_lazy)
@@ -1274,11 +1350,9 @@ impl InertiaResponse {
         // override. Tests that DO drive a session scope via
         // `session_scope_for_test` pick up `_flash.old.*` via the
         // shared session-flash merge below.
-        let resolved_preserve_fragment = preserve_fragment.unwrap_or_else(|| {
-            staged_session.bool_value(StagedInertiaSessionValues::PRESERVE_FRAGMENT)
-        });
-        let resolved_clear_history =
-            clear_history || staged_session.bool_value(StagedInertiaSessionValues::CLEAR_HISTORY);
+        let resolved_preserve_fragment =
+            preserve_fragment.unwrap_or_else(|| staged_session.preserve_fragment());
+        let resolved_clear_history = clear_history || staged_session.clear_history();
         // The test helper does not exercise the shared-data registry.
         let shared_keys: Vec<String> = Vec::new();
 

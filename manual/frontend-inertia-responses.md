@@ -183,7 +183,7 @@ pub async fn show(req: Request) -> Response {
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine with existing client state on partial reloads | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Client caches across navigations | `Inertia::once(…)` |
 | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
-| `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
+| `.flash(k, v)` | One-shot value under `page.flash` (not `props`), kept in the session until a page shows it | `Inertia::render(…)->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
 | `.clear_history()` | Force history key rotation on **this** page | `Inertia::clearHistory()` |
@@ -199,11 +199,12 @@ you'd rather handle the failure explicitly.
 `.clear_history()` marks the response you are building. A logout handler
 redirects, and the browser discards the redirect's response - so the login
 page, not the logout response, is the one that has to carry the flag.
-`App::clear_history()` is the fix for that case - it's a free function, not
-a builder method, so it isn't in the table above. It flashes a one-shot
-session flag that the next Inertia page object turns into
-`clearHistory: true`. It needs a session scope, and it survives exactly
-one hop.
+`App::clear_history()` (also `Inertia::clear_history()`) is the fix for that
+case - it's a free function, not a builder method, so it isn't in the table
+above. It sets the session entry `inertia.clear_history`, which the next
+Inertia page object turns into `clearHistory: true` and removes. It needs a
+session scope, and it lasts until a page emits it, however many redirects
+come first, so a logout that bounces through two redirects still clears.
 
 Call it **after** `Auth::logout()` / `Auth::logout_and_invalidate()`, not
 before - invalidation flushes the whole session, and the flag lives in
@@ -710,34 +711,65 @@ Ignore `component` (`_component`) if your provider doesn't need to vary by page.
 
 Flash data is one-shot state that should appear on the next render and
 disappear after - toast messages, "just created" IDs, validation summaries.
-Suprnova surfaces it under `page.flash` on every Inertia response. There
-are three writers:
+Suprnova surfaces it under `page.flash`, outside `props`, so it never enters
+the browser's history state. Laravel's `Inertia::flash` is the main writer:
 
 ```rust
-// 1. Push into the current request's flash bag.
-App::flash("toast", "Saved");
+use suprnova::{FlashKey, Inertia, InertiaResponse, Redirect, Response};
 
-// 2. Attach to a specific response (same effect on this response only).
-InertiaResponse::new("Posts/Show").flash("toast", "Saved")
+pub async fn store() -> Response {
+    // A key and a value, or several at once.
+    Inertia::flash("toast", "Saved")?;
+    Inertia::flash_many([("created_id", 42), ("count", 3)])?;
+    Redirect::to("/posts").into()
+}
 
-// 3. Carry across a redirect via the Redirect facade.
-use suprnova::Redirect;
+// An enum key, as a Laravel app flashes with an enum case.
+enum Toast {
+    Success,
+}
 
-Redirect::to("/posts").with("toast", "Created")
+impl FlashKey for Toast {
+    fn flash_key(&self) -> String {
+        match self {
+            Toast::Success => "success".to_string(),
+        }
+    }
+}
 ```
 
-The `Redirect::with(key, value)` form is the cross-handler path: the
-value lands in the session under `_flash.new.*`, the next request's
-[`SessionMiddleware`](csrf.md) ages it into `_flash.old.*`, and the
-destination's `InertiaResponse` surfaces it under `page.flash`.
+`Inertia::flash`, `App::flash` (the same call with a string key) and
+`InertiaResponse::new("Posts/Show").flash("toast", "Saved")` all write the
+session entry `inertia.flash_data`, Laravel's key. The next Inertia page
+response emits it under `page.flash` and removes it, whatever the request that
+set it answered: a handler that flashes and returns plain JSON still gets its
+toast on the next page. A redirect keeps it for one more request, so it
+reaches the page at the end of any number of redirects. Without a session in
+scope the value rides on the current response only.
 
-Same-request flash (the task-local bag) wins over inherited session
-flash on key collision, so a destination handler can override an
-inbound value just by re-flashing the key.
+Read or take the pending data with `Inertia::get_flashed(&req)` and
+`Inertia::pull_flashed(&req)` - Laravel's `getFlashed` and `pullFlashed`.
+`get_flashed` returns exactly what `pull_flashed` would remove, and a page
+rendered after a pull shows none of it.
+
+`Redirect::to("/posts").with("toast", "Created")` is a plain session flash:
+it lands under `_flash.new.*`, the next request's
+[`SessionMiddleware`](csrf.md) ages it into `_flash.old.*`, and that page
+surfaces it under `page.flash` too, below the Inertia flash data. It lasts one
+request, so a second redirect drops it.
+
+Same-request flash wins over inherited session flash on key collision, so a
+destination handler can override an inbound value just by re-flashing the key.
 
 Internal session keys (anything prefixed `_`) are filtered out of
-`page.flash` - `_old_input` for form repopulation and `_inertia.*`
-protocol flags don't leak to the client.
+`page.flash` - `_old_input` for form repopulation doesn't leak to the client.
+
+The two history flags work the same way: `App::clear_history()` (or
+`Inertia::clear_history()`), `Inertia::preserve_fragment()` and
+`Redirect::preserve_fragment()` set the session entries
+`inertia.clear_history` and `inertia.preserve_fragment`, which last until a
+page response emits them as `clearHistory: true` and `preserveFragment: true`,
+however many redirects come first.
 
 ### Redirect helpers
 
@@ -1543,12 +1575,11 @@ Other Rust-shaped choices worth flagging:
   `location_for(&req, url)` is the newer, request-aware form: `409` for an
   Inertia XHR, plain `302` for a hard navigation. Reach for `location_for`
   in new code.
-- **`Inertia::clearHistory()` is two methods here, not one, either.**
-  `.clear_history()` on the builder marks a single response; `App::clear_history()`
-  flashes the flag into the session so it survives a redirect. Laravel gets
-  away with one method because it's already session-backed - Suprnova
-  keeps the response-local form as the default (no session dependency) and
-  makes the cross-redirect case an explicit opt-in instead.
+- **`Inertia::clearHistory()` has a response-local form too.**
+  `App::clear_history()` and `Inertia::clear_history()` are Laravel's call:
+  the flag lives in the session until a page emits it. `.clear_history()` on
+  the builder marks a single response with no session dependency, for the
+  case where the response you are returning is the page that should clear.
 - **`.lazy()` isn't Laravel's `Inertia::lazy()`.** Laravel's method is
   deprecated and behaves like `optional()` - `LazyProp` is a straight
   alias for `OptionalProp`, skipped entirely on the initial visit

@@ -29,6 +29,7 @@ pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;
 pub use facade::Inertia;
+pub use flash::FlashKey;
 pub use headers_middleware::InertiaHeadersMiddleware;
 pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub use prop::{

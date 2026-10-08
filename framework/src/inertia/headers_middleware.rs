@@ -1,6 +1,7 @@
 //! The Inertia middleware's decisions about the response: `Vary: X-Inertia`
-//! on every response, and on an Inertia visit Laravel's `onEmptyResponse`,
-//! `onRedirectWithFragment` and `storeCurrentUrl`.
+//! on every response, Laravel's `reflash` on every redirect, and on an
+//! Inertia visit `onEmptyResponse`, `onRedirectWithFragment` and
+//! `storeCurrentUrl`.
 //!
 //! Each needs to wrap the *entire* chain, so they share one pass:
 //!
@@ -29,7 +30,11 @@
 //!    lets the client visit it with the fragment intact. A prefetch keeps
 //!    its redirect: it is never shown.
 //!
-//! 4. **The previous URL.** The session middleware records only full page
+//! 4. **Inertia flash data across redirects.** A redirect keeps the Inertia
+//!    flash data the previous request left for one more request, so it
+//!    reaches the page at the end of a chain of redirects.
+//!
+//! 5. **The previous URL.** The session middleware records only full page
 //!    loads, so an Inertia `GET` records its own URL here, unless it is a
 //!    prefetch, a Precognition request or a partial reload of the page it
 //!    rendered (see [`InertiaConfig::store_previous_url`]).
@@ -245,14 +250,21 @@ impl Middleware for InertiaHeadersMiddleware {
         let rewrap = |http| if was_ok { Ok(http) } else { Err(http) };
         let mut http = response.unwrap_or_else(|e| e);
 
+        // Read before the empty-response substitution: as in Laravel, a
+        // redirect this middleware substitutes is neither checked for a
+        // fragment nor a reason to reflash.
+        let was_redirect = is_redirect_status(http.status_code());
+
+        // Laravel's `reflash`, for every redirect, Inertia visit or not: the
+        // Inertia flash data the previous request left would expire on the
+        // way, so it is kept for the page at the end of the redirects.
+        if was_redirect {
+            super::flash::reflash_for_redirect();
+        }
+
         if !facts.is_inertia {
             return rewrap(ensure_vary_x_inertia(http));
         }
-
-        // Read before the empty-response substitution: as in Laravel, a
-        // redirect this middleware substitutes is not checked for a
-        // fragment.
-        let was_redirect = is_redirect_status(http.status_code());
 
         if is_empty_200(&http) {
             // Laravel `onEmptyResponse`. The visit records no previous URL:

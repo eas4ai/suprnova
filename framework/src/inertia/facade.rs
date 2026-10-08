@@ -2,8 +2,10 @@
 //! common Inertia helpers.
 
 use crate::FrameworkError;
-use crate::http::Redirect;
+use crate::http::{Redirect, Request};
 use crate::pagination::IntoInertiaScroll;
+
+use super::flash::{self, FlashKey};
 
 use super::config::InertiaConfig;
 use super::response::{IntoInertiaData, reflash_session_values_after_eager_error};
@@ -101,6 +103,95 @@ impl Inertia {
             None => super::visit::back_target(None, None, "", fallback),
         };
         Redirect::to(target).status(status)
+    }
+
+    /// Flash a value for the next page response - Laravel's
+    /// `Inertia::flash($key, $value)`.
+    ///
+    /// The value lives in the session under `inertia.flash_data`, is
+    /// emitted as `page.flash` by the next Inertia page response and
+    /// removed by it. Unlike a prop it never enters the browser's history
+    /// state, which is what one-shot toasts and highlights want. It does
+    /// not depend on what this request answers, and the Inertia middleware
+    /// keeps it across any number of redirects before a page shows it.
+    ///
+    /// `key` is a string or a type implementing [`FlashKey`], such as an
+    /// application's enum of toast kinds. Without a session in scope the
+    /// value rides on this request's own page response only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] when `value`'s `Serialize` impl fails;
+    /// nothing is flashed then.
+    pub fn flash<K: FlashKey, V: serde::Serialize>(key: K, value: V) -> Result<(), FrameworkError> {
+        Self::flash_many([(key, value)])
+    }
+
+    /// Flash several values at once - Laravel's `Inertia::flash([...])`.
+    /// See [`flash`](Self::flash).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the key whose value fails to
+    /// serialize; nothing is flashed then.
+    pub fn flash_many<I, K, V>(entries: I) -> Result<(), FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: FlashKey,
+        V: serde::Serialize,
+    {
+        let mut map = serde_json::Map::new();
+        for (key, value) in entries {
+            let key = key.flash_key();
+            let value = serde_json::to_value(&value).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "Inertia flash value for '{key}' failed to serialize: {e}"
+                ))
+            })?;
+            map.insert(key, value);
+        }
+        if !flash::put_in_session(map.clone()) {
+            for (key, value) in map {
+                flash::push(key, value);
+            }
+        }
+        Ok(())
+    }
+
+    /// The Inertia flash data waiting for the next page response -
+    /// Laravel's `Inertia::getFlashed($request)`.
+    ///
+    /// Reads the session of `request`, the one in scope while it is
+    /// handled; empty without a session. What it returns is exactly what
+    /// [`pull_flashed`](Self::pull_flashed) would remove.
+    pub fn get_flashed(_request: &Request) -> serde_json::Map<String, serde_json::Value> {
+        flash::get_from_session()
+    }
+
+    /// Remove and return the Inertia flash data - Laravel's
+    /// `Inertia::pullFlashed($request)`. A page rendered afterwards shows
+    /// none of it. Empty without a session.
+    pub fn pull_flashed(_request: &Request) -> serde_json::Map<String, serde_json::Value> {
+        flash::pull_from_session()
+    }
+
+    /// Clear the client's history state on the next page - Laravel's
+    /// `Inertia::clearHistory()`. The same as
+    /// [`App::clear_history`](crate::App::clear_history): the flag lives in
+    /// the session until a page response emits it as `clearHistory: true`,
+    /// however many redirects come first, which is what a logout that
+    /// redirects needs.
+    pub fn clear_history() {
+        crate::App::clear_history();
+    }
+
+    /// Keep the URL fragment across the next redirect - Laravel's
+    /// `Inertia::preserveFragment()`, the session form of
+    /// [`Redirect::preserve_fragment`]. The flag lives in the session until
+    /// a page response emits it as `preserveFragment: true`. A no-op
+    /// without a session in scope.
+    pub fn preserve_fragment() {
+        flash::set_history_flag(flash::PRESERVE_FRAGMENT);
     }
 
     /// Install the standard Inertia protocol middleware globally.

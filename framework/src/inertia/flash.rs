@@ -19,20 +19,26 @@
 //! worker thread. The thread-local InertiaContext bug we fixed in Tier 0
 //! is exactly the kind of problem this avoids.
 //!
-//! ## Cross-redirect persistence
+//! ## Inertia flash data in the session
 //!
-//! Laravel's flash semantics include **cross-redirect persistence**:
-//! controller A flashes a value and redirects to controller B; the
-//! flash data appears on B's response. Suprnova implements this by
-//! bridging the per-request flash bag into the session on every
-//! [`Redirect`](crate::http::Redirect) → [`Response`](crate::http::Response)
-//! conversion. The receiving request's
-//! [`SessionMiddleware`](crate::session::SessionMiddleware) ages the
-//! flashed values into `_flash.old.*`, and
-//! [`InertiaResponse::resolve`](crate::InertiaResponse::resolve)
-//! merges them into the page object's top-level `flash` field
-//! alongside same-request flashes from [`App::flash`](crate::App::flash)
-//! and [`InertiaResponse::flash`](crate::InertiaResponse::flash).
+//! Laravel's `Inertia::flash` keeps its data in the session under
+//! `inertia.flash_data`, emits it as `page.flash` and pulls it when a page
+//! renders. Suprnova does the same: [`App::flash`](crate::App::flash),
+//! [`Inertia::flash`](crate::Inertia::flash) and
+//! [`InertiaResponse::flash`](crate::InertiaResponse::flash) write into
+//! that one session entry (as a session flash, so it is
+//! `_flash.new.inertia.flash_data` until the next request ages it), and
+//! [`InertiaResponse::resolve`](crate::InertiaResponse::resolve) emits and
+//! removes it once the whole page is built. The data does not depend on
+//! the response of the request that set it, and the Inertia middleware
+//! keeps it for one more request whenever the response is a redirect, so it
+//! survives any number of redirects before a page shows it. Without a
+//! session in scope the values go to the task-local bag above and appear on
+//! the current response only.
+//!
+//! Other session flash values (`Redirect::with`) still appear under
+//! `page.flash` on the page after the redirect, merged below the Inertia
+//! flash data.
 //!
 //! ### Precedence on key collision
 //!
@@ -46,6 +52,15 @@
 //! (`_old_input` for form repopulation, `_inertia.*` for protocol
 //! flags). Only user-visible keys are surfaced to `page.flash` - keys
 //! prefixed with `_` are filtered out.
+//!
+//! ## History flags
+//!
+//! `clear_history` and `preserve_fragment` set for a later page are plain
+//! session entries, `inertia.clear_history` and `inertia.preserve_fragment`,
+//! as Laravel's are: they last until a page emits them, however many
+//! redirects come first. A one-request flash let a logout followed by two
+//! redirects render the next page without `clearHistory`, leaving private
+//! pages decryptable in the history.
 
 use crate::lock;
 use serde_json::Value;
@@ -73,10 +88,149 @@ pub(crate) fn encrypt_history_flag() -> Option<bool> {
     ENCRYPT_HISTORY.try_with(|b| *b).ok()
 }
 
-/// Push a value into the current request's flash bag.
+/// A key Inertia flash data can be stored under.
 ///
-/// Silently no-ops when there is no active flash scope (e.g. called
-/// outside an HTTP handler in tests that don't set up the scope).
+/// Laravel's `Inertia::flash` takes a string or an enum case (a backed
+/// enum's value, a unit enum's name), so a Laravel app that names its toast
+/// kinds with an enum flashes with the case itself. Implement this for such
+/// a type; `&str`, `String` and `&String` implement it already.
+///
+/// ```rust
+/// use suprnova::FlashKey;
+///
+/// enum Toast {
+///     Success,
+///     Warning,
+/// }
+///
+/// impl FlashKey for Toast {
+///     fn flash_key(&self) -> String {
+///         match self {
+///             Toast::Success => "success".to_string(),
+///             Toast::Warning => "warning".to_string(),
+///         }
+///     }
+/// }
+/// ```
+pub trait FlashKey {
+    /// The key the value is stored under in `page.flash`.
+    fn flash_key(&self) -> String;
+}
+
+impl FlashKey for &str {
+    fn flash_key(&self) -> String {
+        (*self).to_string()
+    }
+}
+
+impl FlashKey for String {
+    fn flash_key(&self) -> String {
+        self.clone()
+    }
+}
+
+impl FlashKey for &String {
+    fn flash_key(&self) -> String {
+        (*self).clone()
+    }
+}
+
+/// Session key of the Inertia flash data, Laravel's
+/// `SessionKey::FLASH_DATA`.
+pub(crate) const FLASH_DATA: &str = "inertia.flash_data";
+
+/// Session key of the pending clear-history flag, Laravel's
+/// `SessionKey::CLEAR_HISTORY`.
+pub(crate) const CLEAR_HISTORY: &str = "inertia.clear_history";
+
+/// Session key of the pending preserve-fragment flag, Laravel's
+/// `SessionKey::PRESERVE_FRAGMENT`.
+pub(crate) const PRESERVE_FRAGMENT: &str = "inertia.preserve_fragment";
+
+/// Where a flash written in this request sits until the next one ages it.
+pub(crate) fn flash_data_new_key() -> String {
+    format!("_flash.new.{FLASH_DATA}")
+}
+
+/// Where a flash written by the previous request sits.
+pub(crate) fn flash_data_old_key() -> String {
+    format!("_flash.old.{FLASH_DATA}")
+}
+
+/// The Inertia flash data `session` holds: what the previous request left,
+/// overlaid with what this one wrote.
+fn flash_data_in(session: &crate::session::SessionData) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for key in [flash_data_old_key(), flash_data_new_key()] {
+        if let Some(Value::Object(map)) = session.data.get(&key) {
+            out.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+    }
+    out
+}
+
+/// Merge `entries` into the session's Inertia flash data, kept for the
+/// next request. Returns `false`, writing nothing, when no session is in
+/// scope.
+///
+/// As Laravel's `flash` does, the whole merged map is flashed again, so
+/// what an earlier request left survives with what this one adds.
+pub(crate) fn put_in_session(entries: serde_json::Map<String, Value>) -> bool {
+    crate::session::session_mut(|session| {
+        let mut merged = flash_data_in(session);
+        merged.extend(entries);
+        session.data.remove(&flash_data_old_key());
+        session.flash(FLASH_DATA, Value::Object(merged));
+    })
+    .is_some()
+}
+
+/// The Inertia flash data in the session in scope, empty without one.
+pub(crate) fn get_from_session() -> serde_json::Map<String, Value> {
+    crate::session::session()
+        .map(|session| flash_data_in(&session))
+        .unwrap_or_default()
+}
+
+/// Remove and return the Inertia flash data in the session in scope.
+pub(crate) fn pull_from_session() -> serde_json::Map<String, Value> {
+    crate::session::session_mut(|session| {
+        let data = flash_data_in(session);
+        session.forget(&flash_data_old_key());
+        session.forget(&flash_data_new_key());
+        data
+    })
+    .unwrap_or_default()
+}
+
+/// Keep the Inertia flash data the previous request left for one more
+/// request - Laravel's `Middleware::reflash`, run when the response is a
+/// redirect, so the data reaches the page at the end of a chain of
+/// redirects instead of expiring on the way.
+pub(crate) fn reflash_for_redirect() {
+    crate::session::session_mut(|session| {
+        if session.data.contains_key(&flash_data_old_key()) {
+            let merged = flash_data_in(session);
+            session.data.remove(&flash_data_old_key());
+            session.flash(FLASH_DATA, Value::Object(merged));
+        }
+    });
+}
+
+/// Set a history flag (`CLEAR_HISTORY` or `PRESERVE_FRAGMENT`) for the next
+/// page response. Returns `false`, writing nothing, without a session.
+pub(crate) fn set_history_flag(key: &str) -> bool {
+    crate::session::session_mut(|session| session.put(key, true)).is_some()
+}
+
+/// Add a value to the Inertia flash data.
+///
+/// With a session in scope it is merged into the session's
+/// `inertia.flash_data`, so it reaches the next page response whatever
+/// this request answers. Without one it goes into the current request's
+/// flash bag and appears on this request's page only; a no-op when there
+/// is no flash scope either (e.g. called outside an HTTP handler in tests
+/// that don't set up the scope).
 ///
 /// **Poison policy** (Domain 20 audit D20-A): the per-request flash
 /// `Mutex` is scoped to a single request and recreated on the next
@@ -85,9 +239,15 @@ pub(crate) fn encrypt_history_flag() -> Option<bool> {
 /// `tracing::error!` is emitted - the request is already failing,
 /// so silent loss matches the documented "no active scope" no-op.
 pub fn push(key: impl Into<String>, value: Value) {
+    let key = key.into();
+    let mut entry = serde_json::Map::new();
+    entry.insert(key.clone(), value.clone());
+    if put_in_session(entry) {
+        return;
+    }
     let _ = FLASH_BAG.try_with(|bag| match lock::lock(bag, "inertia flash bag") {
         Ok(mut guard) => {
-            guard.insert(key.into(), value);
+            guard.insert(key, value);
         }
         Err(_) => {
             tracing::error!(
@@ -130,15 +290,14 @@ pub(crate) fn new_bag() -> Arc<Mutex<HashMap<String, Value>>> {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-/// Bridge the per-request flash bag into the active session as
-/// `_flash.new.*` so the values survive an outgoing redirect.
+/// Bridge the per-request flash bag into the session's Inertia flash data
+/// so the values survive an outgoing redirect.
 ///
 /// Called by `From<Redirect> for Response` immediately before the HTTP
-/// response is built. On the receiving request the
-/// [`SessionMiddleware`](crate::session::SessionMiddleware) ages the
-/// values into `_flash.old.*`, and
-/// [`drain_session_flash_for_page`] surfaces them under the page
-/// object's top-level `flash` field.
+/// response is built. [`push`] writes to the session directly whenever one
+/// is in scope, so the bag only holds values pushed before a session scope
+/// existed; this moves them into `inertia.flash_data`, which the page after
+/// the redirect emits under `flash`.
 ///
 /// No-op when no session scope is active (e.g. the route is outside
 /// the session middleware) - the values remain in the task-local bag
@@ -156,14 +315,12 @@ pub fn transfer_to_session() {
     if !has_pending() {
         return;
     }
-    // Drain inside the session callback, which runs only when a session
-    // is in scope. Draining first and then finding no session dropped the
-    // values the doc above promises stay in the bag.
-    crate::session::session_mut(|s| {
-        for (k, v) in drain() {
-            s.flash(&k, v);
-        }
-    });
+    // Drain only once a session is known to be there: draining first and
+    // then finding none would drop the values the doc above promises stay
+    // in the bag.
+    if crate::session::session_mut(|_| ()).is_some() {
+        put_in_session(drain());
+    }
 }
 
 /// Whether the current request's flash bag holds anything, without
@@ -187,7 +344,8 @@ fn has_pending() -> bool {
 /// `_old_input` form-repopulation bag and the `_inertia.*` protocol
 /// flags don't leak to the client. The unprefixed `_old_input` itself
 /// is also filtered as belt-and-suspenders against a future move of
-/// the constant.
+/// the constant. The Inertia flash data is left out too: it is emitted
+/// entry by entry, not as one `inertia.flash_data` key.
 ///
 /// Returns an empty map outside a `SessionMiddleware` scope.
 pub fn drain_session_flash_for_page() -> serde_json::Map<String, Value> {
@@ -198,7 +356,7 @@ pub fn drain_session_flash_for_page() -> serde_json::Map<String, Value> {
                 let Some(name) = key.strip_prefix("_flash.old.") else {
                     continue;
                 };
-                if name.starts_with('_') {
+                if name.starts_with('_') || name == FLASH_DATA {
                     continue;
                 }
                 out.insert(name.to_string(), value.clone());

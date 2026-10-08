@@ -133,6 +133,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   under the public root, else the session's previous URL, else the
   fallback, else `/` (RF-18). `store_previous_url` (on by default) turns the
   previous-URL recording of Inertia visits off (MW-06).
+- **Inertia flash on the facade: `Inertia::flash`, `flash_many`,
+  `get_flashed`, `pull_flashed`, `clear_history` and `preserve_fragment`.**
+  `flash` takes a string key or any type implementing the new `FlashKey`
+  trait, such as an application's enum of toast kinds; `get_flashed(&req)`
+  returns exactly what `pull_flashed(&req)` removes (RF-17, RF-19, RF-08,
+  RF-09).
 
 ### Changed
 
@@ -360,6 +366,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `default` bag was dropped for `{"<bag>": {}}`. It is now `{}` with no
   errors, `{"<bag>": <default bag>}` with a default bag, and the named bags
   as they are otherwise (HD-08).
+- **Inertia flash data lives in the session until a page shows it.**
+  `App::flash` kept its value in the request: a request that answered plain
+  JSON lost it, and one that redirected twice dropped it at the second hop.
+  `App::flash`, `Inertia::flash` and `InertiaResponse::flash` now write the
+  session entry `inertia.flash_data`, the next Inertia page emits it under
+  `page.flash` and removes it, and every redirect keeps it for one more
+  request (RF-17, MW-05).
+- **`clearHistory` and `preserveFragment` survive any number of redirects.**
+  `App::clear_history()` and `Redirect::preserve_fragment()` flashed a flag
+  for one request, so a logout that redirected twice rendered the login page
+  without `clearHistory: true` and left the previous user's encrypted
+  history readable. The flags are now the session entries
+  `inertia.clear_history` and `inertia.preserve_fragment`, which last until a
+  page emits them; a flag an earlier release flashed is still read (RF-08,
+  RF-09).
 
 ### Fixed
 

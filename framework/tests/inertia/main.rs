@@ -8,6 +8,7 @@ mod env_snapshot;
 pub mod error_page;
 pub mod error_page_placement;
 pub mod flash_commit_boundary;
+pub mod flash_session;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 pub mod inertia;

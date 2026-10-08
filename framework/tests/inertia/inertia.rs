@@ -3419,9 +3419,10 @@ async fn x_inertia_reset_empty_header_is_noop() {
 // ---- Cross-redirect carry: Redirect::preserve_fragment() round-trip ----
 //
 // These tests drive the full chain: a `Redirect::preserve_fragment()`
-// chainable flashes `_inertia.preserve_fragment` to the session, and
-// the next request's `InertiaResponse::resolve()` consumes the flag
-// and emits `preserveFragment: true`. Each test scopes the session
+// chainable sets `inertia.preserve_fragment` in the session, and the
+// next page's `InertiaResponse::resolve()` consumes the flag and emits
+// `preserveFragment: true` (PAR-050: the flag lasts until a page emits
+// it, so it is a session entry rather than a one-request flash). Each test scopes the session
 // via `session_scope_for_test` (mirroring what `SessionMiddleware`
 // does at runtime) so the `task_local!` slot is bound.
 
@@ -3436,12 +3437,12 @@ async fn redirect_preserve_fragment_flashes_session_flag() {
     })
     .await;
 
-    // The chainable should have set a *new* flash entry (before aging).
+    // The chainable sets the session entry Laravel's key names.
     let s = slot.lock().unwrap();
     let session = s.as_ref().expect("session present");
     assert!(
-        session.has("_flash.new._inertia.preserve_fragment"),
-        "expected new-flash entry after Redirect::preserve_fragment() conversion"
+        session.has("inertia.preserve_fragment"),
+        "expected the session entry after Redirect::preserve_fragment() conversion"
     );
 }
 
@@ -3474,8 +3475,8 @@ async fn redirect_route_preserve_fragment_flashes_session_flag() {
     let s = slot.lock().unwrap();
     let session = s.as_ref().expect("session present");
     assert!(
-        session.has("_flash.new._inertia.preserve_fragment"),
-        "RedirectRouteBuilder::preserve_fragment must flash the same key as Redirect::preserve_fragment"
+        session.has("inertia.preserve_fragment"),
+        "RedirectRouteBuilder::preserve_fragment must set the same key as Redirect::preserve_fragment"
     );
 }
 
@@ -3955,20 +3956,21 @@ async fn app_flash_survives_redirect_into_session() {
     session_scope_for_test(slot.clone(), async {
         suprnova::inertia::flash_scope_for_test(bag, async {
             suprnova::App::flash("status", serde_json::json!("Saved!"));
-            // Convert a Redirect → Response. The conversion should
-            // bridge the task-local bag into the session as
-            // `_flash.new.*`.
             let _: suprnova::Response = Redirect::to("/dashboard").into();
         })
         .await;
     })
     .await;
 
+    // With a session in scope the value goes into the session's Inertia
+    // flash data, Laravel's `inertia.flash_data` (PAR-050), kept for the
+    // next request as a flash.
     let s = slot.lock().unwrap();
     let session = s.as_ref().expect("session present");
-    assert!(
-        session.has("_flash.new.status"),
-        "App::flash should be bridged into session as _flash.new.status"
+    assert_eq!(
+        session.get::<serde_json::Value>("_flash.new.inertia.flash_data"),
+        Some(serde_json::json!({"status": "Saved!"})),
+        "App::flash should land in the session's Inertia flash data"
     );
 }
 
@@ -4449,8 +4451,8 @@ async fn app_clear_history_flashes_into_the_session() {
     let g = slot.lock().unwrap();
     let s = g.as_ref().unwrap();
     assert!(
-        s.has("_flash.new._inertia.clear_history"),
-        "App::clear_history must flash for the NEXT request"
+        s.has("inertia.clear_history"),
+        "App::clear_history must set the session entry the next page emits"
     );
 }
 
