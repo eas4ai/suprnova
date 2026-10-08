@@ -353,6 +353,12 @@ pub struct InertiaConfig {
     /// Page component that renders framework error responses, or `None`
     /// (the default) to leave every error response exactly as it is.
     ///
+    /// Naming one installs the default error callback (PAR-062): the rule
+    /// below, which renders this component with the shared props. A
+    /// callback the app installs with
+    /// [`Inertia::handle_exceptions_using`](crate::Inertia::handle_exceptions_using)
+    /// decides in its place.
+    ///
     /// Without this, a `403` from a permission middleware, a `404` for an
     /// unrouted path, a `429`, or a `500` reaches the Inertia client as a
     /// JSON body with no `X-Inertia` header. The client treats any such
@@ -1030,9 +1036,12 @@ impl InertiaConfig {
     /// This is the opt-in for [`error_page`](Self::error_page) - read
     /// that field's documentation for which responses are rewritten,
     /// which are deliberately left alone, and the three props the
-    /// component receives. [`crate::Inertia::install`] registers the
-    /// middleware that does the work only when this is set, so an app
-    /// that never calls it pays nothing and behaves exactly as before.
+    /// component receives. It installs the default error callback, the
+    /// one-line form of
+    /// [`Inertia::handle_exceptions_using`](crate::Inertia::handle_exceptions_using);
+    /// a callback the app installs decides in its place. Without either,
+    /// the middleware [`crate::Inertia::install`] registers hands every
+    /// request on and changes nothing.
     ///
     /// **Name the page once.** An app that registers
     /// [`InertiaErrorPageMiddleware`](crate::InertiaErrorPageMiddleware)

@@ -144,6 +144,11 @@ pub struct InertiaResponse {
     /// Values for the root template only, never the page props. Maps to
     /// `Inertia::render(...)->withViewData(...)`.
     view_data: super::root_template::InertiaViewData,
+    /// Whether the shared props join the page: the shared registry and the
+    /// middleware hooks' `share` and `share_once`. Always on, except for an
+    /// error page the application's error callback rendered without
+    /// `with_shared_data()` (PAR-062).
+    shared_data: bool,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -371,7 +376,18 @@ impl InertiaResponse {
             lazy_owned: IndexMap::new(),
             providers: Vec::new(),
             view_data: super::root_template::InertiaViewData::default(),
+            shared_data: true,
         }
+    }
+
+    /// Leave the shared props out of this page: the shared registry and the
+    /// middleware hooks' `share` and `share_once`. For an error page the
+    /// application's error callback renders without
+    /// [`with_shared_data`](crate::InertiaErrorResponse::with_shared_data),
+    /// as Laravel's `ExceptionResponse` leaves them out.
+    pub(crate) fn without_shared_data(mut self) -> Self {
+        self.shared_data = false;
+        self
     }
 
     /// Override the default [`InertiaConfig`] for this response.
@@ -1355,6 +1371,7 @@ impl InertiaResponse {
             lazy_owned,
             providers,
             view_data,
+            shared_data,
         } = self;
         // For the Inertia middleware, which tells a partial reload of this
         // page from a navigation by it when it records the previous URL.
@@ -1433,7 +1450,14 @@ impl InertiaResponse {
                 shared_keys.push(root.to_string());
             }
         }
-        for (k, v) in registry.snapshot_static()? {
+        // An error page the application's callback rendered without
+        // `with_shared_data()` takes none of the shared layers (PAR-062).
+        let shares = if shared_data {
+            registry.snapshot_static()?
+        } else {
+            Vec::new()
+        };
+        for (k, v) in shares {
             track_shared(&mut shared_keys, &k);
             merged.insert(k, v);
         }
@@ -1441,13 +1465,23 @@ impl InertiaResponse {
         // ones after the keyed shares, and their keys are shared keys; the
         // page's after every shared layer, under the page's own props.
         let context = RenderContext::new(&component, req);
-        for provider in registry.shared_providers()? {
+        let shared_providers = if shared_data {
+            registry.shared_providers()?
+        } else {
+            Vec::new()
+        };
+        for provider in shared_providers {
             for (k, v) in provider.to_inertia_properties(&context)? {
                 track_shared(&mut shared_keys, &k);
                 merged.insert(k, v);
             }
         }
-        if let Some(provider) = registry.trait_provider()? {
+        let trait_provider = if shared_data {
+            registry.trait_provider()?
+        } else {
+            None
+        };
+        if let Some(provider) = trait_provider {
             let trait_shared = provider.share(req, &component).await?;
             for (k, v) in trait_shared {
                 track_shared(&mut shared_keys, &k);
@@ -1460,7 +1494,7 @@ impl InertiaResponse {
         // The `share` and `share_once` middleware hooks, run for this
         // request before the handler (Laravel's middleware `share()`).
         let visit = super::visit::current();
-        if let Some(visit) = &visit {
+        if let Some(visit) = visit.as_ref().filter(|_| shared_data) {
             for (k, v) in visit.shared() {
                 track_shared(&mut shared_keys, k);
                 merged.insert(k.clone(), v.clone());
@@ -1624,6 +1658,7 @@ impl InertiaResponse {
             lazy_owned,
             providers: _,
             view_data: _,
+            shared_data: _,
         } = self;
         let (mut materialized, metadata) = resolve_props(
             props,

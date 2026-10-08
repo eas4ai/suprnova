@@ -13,7 +13,7 @@ pub(crate) mod frames;
 mod report;
 
 pub use report::ErrorReport;
-pub(crate) use report::catch_panic;
+pub(crate) use report::{CaughtPanic, catch_panic};
 
 /// Trait for errors that can be converted to HTTP responses
 ///

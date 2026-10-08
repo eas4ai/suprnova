@@ -47,6 +47,7 @@ use suprnova::{FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Re
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
 
+mod error_callback;
 mod frames;
 mod replacement;
 mod request_context;

@@ -1350,11 +1350,12 @@ with it.
 5. Registers `InertiaValidationRedirectMiddleware` - turns a `422` on an
    Inertia visit into a `303` back to the form page with the errors
    flashed. See [Validation failures](#validation-failures).
-6. Registers `InertiaErrorPageMiddleware`, **only when** `cfg` names an
-   `.error_page(...)` - turns the framework's own error responses into
-   that page. See [Error pages](#error-pages). If you registered one
-   yourself, further out, yours keeps its position and the component it
-   names, and this step is skipped - see
+6. Registers `InertiaErrorPageMiddleware` - hands the framework's own
+   error responses to your error callback, or turns them into the page
+   `cfg` names with `.error_page(...)`. With neither, it changes nothing.
+   See [Error pages](#error-pages). If you registered one yourself,
+   further out, yours keeps its position and the component it names, and
+   this step is skipped - see
    [Where the page is rendered](#where-the-page-is-rendered).
 
 Order matters: the headers middleware is registered first, so it is the
@@ -1561,6 +1562,10 @@ pub fn register_http_stack() {
 **The three starters ship one and set `.error_page("Error")` already** -
 a new project is covered without doing anything.
 
+`.error_page(...)` is the default error callback: a fixed rule, described
+below, that decides each error response for you. To decide each error
+yourself, see [Deciding each error yourself](#deciding-each-error-yourself).
+
 ### Where the page is rendered
 
 `Inertia::install` registers `InertiaErrorPageMiddleware` **innermost** of
@@ -1701,16 +1706,20 @@ every response with debug off, still renders your component.
 
 ### What it never touches
 
-The middleware only stands in where nobody else has an answer. It leaves
-alone:
+These are the default callback's choices. A callback of your own decides
+for itself - see [Deciding each error yourself](#deciding-each-error-yourself).
+The default callback only stands in where nobody else has an answer. It
+leaves alone:
 
 - **Validation `422`s.** `InertiaValidationRedirectMiddleware` owns
   those - see [Validation failures](#validation-failures). A `422` that
   survives that middleware (no `errors` object, or a Precognition
   dry-run) keeps its body too.
-- **Anything carrying `X-Inertia-Location`.** The `409` version bounce,
-  and the `redirect_to` form of the RBAC middlewares. The client acts on
-  the header, not the body.
+- **Anything carrying `X-Inertia-Location` or `X-Inertia-Redirect`.**
+  The `409` version bounce, the `redirect_to` form of the RBAC
+  middlewares, `Inertia::location`, and a redirect with a `#fragment`.
+  The client acts on the header, not the body. No callback is handed
+  these.
 - **Redirects.** Only `400`-`599` is in scope.
 - **API clients.** A request whose `Accept` prefers `application/json`
   over `text/html` keeps the JSON contract it has always had. `curl`'s
@@ -1721,9 +1730,9 @@ alone:
 - **Bodies that are not the framework's error shape.** Your own HTML
   error page, plain text that is not the router's own `404 Not Found`, or
   a JSON envelope keyed differently - none of those is overruled.
-- **Everything, when `error_page` is unset.** The middleware is not
-  registered at all, so an app that has not opted in runs exactly the
-  code it ran before.
+- **Everything, when neither `error_page` nor a callback is set.** The
+  middleware `Inertia::install` registers hands every request on, so an
+  app that has not opted in gets exactly the responses it got before.
 
 ### Which bodies get rewritten
 
@@ -1749,16 +1758,105 @@ something other than `message` - or set `X-Inertia: true` on the response
 yourself, which marks it as already being an Inertia response and takes
 it out of scope. Both are one line at the point that builds the response.
 
-One gap worth knowing: a handler that **panics** is out of reach. The
-panic net wraps the whole middleware chain, so the synthesized `500` is
-built after every middleware frame has already unwound. Panicking
-handlers still surface the client's modal. Return `Err(...)` rather than
-panicking (see [Errors](errors.md)) and the error page covers it.
+A handler that **panics** is covered too. The middleware runs the rest
+of the chain inside it under the panic boundary's rule, so the panic
+becomes the same sanitized `500` the boundary sends, with the panic's
+error report, and the page renders for it. A panic in a middleware
+registered *outside* it still reaches the boundary around the whole
+chain and its JSON `500`.
 
 If the page itself fails to render - the component cannot be resolved,
 SSR is down, a shared prop errors - the framework logs a `warn` with the
 request id and returns the original error response. A broken error page
 never masks the error it was rendering.
+
+### Deciding each error yourself
+
+`Inertia::handle_exceptions_using` installs a callback that decides every
+error response the framework renders, the way Laravel's
+`Inertia::handleExceptionsUsing` does. The callback receives an
+`InertiaErrorResponse` and returns it with a decision, or `None` to send
+the response the framework built:
+
+```rust
+use serde_json::json;
+use suprnova::Inertia;
+
+pub fn register_error_pages() {
+    Inertia::handle_exceptions_using(|error| match error.status() {
+        403 | 404 | 500 | 503 => {
+            let status = error.status();
+            Some(
+                error
+                    .render("Error", json!({ "status": status }))
+                    .with_shared_data(),
+            )
+        }
+        _ => None,
+    });
+}
+```
+
+`InertiaErrorResponse` shows what went wrong and who asked:
+
+- `status()` - the status of the response the framework would send.
+- `error()` - the [error report](error-model.md): the error and its
+  source chain, or a panic's message and location. A response the
+  framework built without an error behind it, such as the router's `404`
+  for a path no route matches, reports its message or the status's reason
+  phrase.
+- `request()` and `method()` - the request as it arrived: its method,
+  path, query, and headers.
+- `response()` - the response the framework would send.
+
+It offers three decisions:
+
+- `render(component, props)` renders an Inertia page in place of the
+  response and keeps its status. `props` is anything that serializes to a
+  JSON object, such as `json!({ ... })`. The page gets the same treatment
+  as the default callback's page: the root template the request's chooser
+  picks, `Cache-Control: no-cache, private`, and the original headers
+  minus the ones described in [What survives the swap](#what-survives-the-swap).
+- `with_shared_data()` adds the shared props to that page: everything
+  `Inertia::share` and `App::inertia_share` registered, the shared
+  providers, the `InertiaSharedData` provider, and the `share` and
+  `share_once` [middleware hooks](#middleware-hooks).
+  Without it, the page carries only the props you gave it.
+- `respond_with(response)` sends any other response instead.
+
+The callback sees every error response the framework renders, for every
+request type - an API client's included, so check
+`error.request().header("Accept")` or `error.request().is_inertia()`
+before you render a page for one. That covers a handler's or a
+middleware's `Err(...)`, a handler that panics, the router's `404`, and
+a middleware's own `{"message": ...}` answer. A response a handler built
+itself with an error status, such as its own HTML `404` page, is that
+handler's answer, and the callback doesn't see it. Neither are Inertia
+protocol responses: pages, and anything carrying `X-Inertia-Location` or
+`X-Inertia-Redirect`.
+
+Validation failures never reach the callback either. A `422` whose body
+carries an `errors` object is a validation result, and
+`InertiaValidationRedirectMiddleware` owns it: an Inertia visit gets the
+redirect back to the form with the errors flashed, and an API client or a
+Precognition dry run gets the `422` with its errors - see
+[Validation failures](#validation-failures).
+
+With debug mode on, `response()` for a `5xx` that carries an error
+report, sent to a browser or an Inertia visit, is the
+[development error page](error-model.md#the-development-error-page).
+Return `None` to keep it, as the default callback does. A page you render
+instead is what the client gets, so check `Config::is_debug()` first if
+you want the development page while you work.
+
+`.error_page("Error")` is the default callback. An app that sets both
+gets its own callback, and `None` from it keeps the framework's response
+rather than falling back to the error page. A later call to
+`handle_exceptions_using` replaces the callback. The callback lives on
+the active container, so one installed under `TestContainer::fake()`
+decides only that test's requests. `Inertia::install` registers the
+middleware whatever the config says, so you can install the callback
+before or after it.
 
 ### Why Suprnova diverges
 
@@ -1769,13 +1867,13 @@ with `$response->setStatusCode(...)` to put the code back. That is
 flexible, and it is also a piece of framework plumbing every project
 rewrites by hand, usually after seeing the modal in production first.
 
-Here it is one config line, because the decision is the same for every
-app: an Inertia visit or a browser navigation gets a page, an API client
-gets JSON, and everything another contract owns is left alone. The
-trade is that the rule is a fixed one rather than a `match` you write, so
-opting a particular response out means giving it a body the gate does not
-recognize, or marking it as already-Inertia - see
-[Which bodies get rewritten](#which-bodies-get-rewritten).
+Here the common case is one config line, because the decision is the
+same for almost every app: an Inertia visit or a browser navigation gets
+a page, an API client gets JSON, and everything another contract owns is
+left alone. That line installs the default callback. When the fixed rule
+doesn't fit, `Inertia::handle_exceptions_using` gives you Laravel's
+per-error decision - see
+[Deciding each error yourself](#deciding-each-error-yourself).
 
 ## Server-driven `<head>` elements
 
