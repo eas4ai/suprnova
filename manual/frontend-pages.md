@@ -619,6 +619,7 @@ setLayoutProps({ heading: 'Dashboard' })
 // frontend/src/layouts/AppLayout.tsx (shortened)
 import type { ReactNode } from 'react'
 import { Link, usePage } from '@inertiajs/react'
+import AccountLinks from '../components/AccountLinks'
 import FlashToast from '../components/FlashToast'
 
 export default function AppLayout({ children, heading }: { children?: ReactNode; heading?: string }) {
@@ -629,7 +630,7 @@ export default function AppLayout({ children, heading }: { children?: ReactNode;
       <nav className="bg-white shadow">
         <Link href={`${root}/dashboard`}>Dashboard</Link>
         <Link href={`${root}/notes`}>Notes</Link>
-        <Link href={`${root}/logout`} method="post" as="button" preserveState={false}>Sign out</Link>
+        <AccountLinks className="text-sm" />
       </nav>
       <FlashToast />
       {heading && <h1 className="text-2xl font-bold">{heading}</h1>}
@@ -639,10 +640,13 @@ export default function AppLayout({ children, heading }: { children?: ReactNode;
 }
 ```
 
-`FlashToast` shows the toast a handler flashed with
-`Inertia::flash("toast", Toast { .. })`, read from the page's `flash` on
-every render. The server sends a flash with one page only, so the toast is
-gone on the next visit.
+`AccountLinks` reads the signed-in user from the shared `auth` prop: the
+name and the sign-out `Link` when someone is signed in, the sign-in and
+register links when not. `FlashToast` shows `usePage().flash.toast`, the
+toast a handler flashed with `Inertia::flash("toast", Toast { .. })`,
+typed by the generated `flashDataType`. It reads the toast from the page
+on every render. The server sends a flash with one page only, so the toast
+is gone on the next visit.
 
 ### Vue 3.5
 

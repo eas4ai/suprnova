@@ -109,8 +109,9 @@ scrolls your notes with `InfiniteScroll`, and opens one with an instant,
 prefetched `Link`; `Notes/Show` renders it. `Login`, `Register`,
 `ForgotPassword`, `ResetPassword`, and `VerifyEmail` submit through `Form`.
 Every page sets its title with `Head`, and the pages render inside a
-guest layout (the `auth/` pages) or an application layout (the rest), both
-with the flash toast. See [Page Components](frontend-pages.md) for the
+guest layout (the `auth/` pages) or an application layout (the rest). Both
+show the flash toast and, from the shared `auth` prop, the signed-in
+user's name and a sign-out link or the sign-in and register links. See [Page Components](frontend-pages.md) for the
 code.
 
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
