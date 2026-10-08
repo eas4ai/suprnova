@@ -784,8 +784,9 @@ impl Inertia {
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
-        let devtools = config.devtools_config();
-        let devtools_enabled = devtools.is_enabled();
+        let devtools = config
+            .devtools_config()
+            .filter(|config| config.is_enabled());
         if !config.register_globally {
             // The stack for route groups instead: named, so a group takes
             // it with `middleware_named("inertia")`, and a route outside
@@ -796,7 +797,7 @@ impl Inertia {
             // extension's entry endpoints belong to no group, so they are
             // answered by a global DevTools middleware that records
             // nothing.
-            if devtools_enabled {
+            if let Some(devtools) = devtools {
                 register_global_middleware(DevToolsMiddleware::endpoints_only(devtools));
             }
             return Ok(());
@@ -804,7 +805,7 @@ impl Inertia {
         // Outermost of the Inertia layer, inside the session registered
         // before this call: an entry sees the response every Inertia
         // middleware below shaped.
-        if devtools_enabled {
+        if let Some(devtools) = devtools {
             register_global_middleware(DevToolsMiddleware::new(devtools));
         }
         register_global_middleware(InertiaHeadersMiddleware::from_config(config));

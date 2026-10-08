@@ -108,7 +108,7 @@ fn boot() -> MiddlewareRegistry {
         register_global_middleware(RejectsLikeCsrf);
 
         let before = global_middleware_count();
-        // DevTools off: with `APP_ENV=local` it is on by default and would
+        // DevTools off: an opted-in instance under `APP_ENV=local` would
         // add a fifth middleware this count is not about.
         Inertia::install(
             &InertiaConfig::new()
