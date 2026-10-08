@@ -1,6 +1,7 @@
 use super::config::{Frontend, InertiaConfig};
 use super::dotted;
 use super::flash;
+use super::prop::ProvidesScrollMetadata;
 use super::prop::{
     DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
     PropResolver, PropSource, ScrollMetadata, Visibility,
@@ -682,7 +683,7 @@ impl InertiaResponse {
     pub fn scroll<V: Serialize>(
         self,
         key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         value: V,
     ) -> Self {
         let v = to_value_or_die(&value);
@@ -695,7 +696,7 @@ impl InertiaResponse {
     pub fn scroll_with<F, Fut, V>(
         self,
         key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         resolver: F,
     ) -> Self
     where
@@ -721,7 +722,7 @@ impl InertiaResponse {
         self,
         key: impl Into<String>,
         wrap_key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         value: V,
     ) -> Self {
         let v = to_value_or_die(&value);
@@ -733,7 +734,7 @@ impl InertiaResponse {
         self,
         key: impl Into<String>,
         wrap_key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         resolver: F,
     ) -> Self
     where
@@ -750,11 +751,52 @@ impl InertiaResponse {
         )
     }
 
+    /// Attach an infinite-scroll prop loaded by `resolver` whose value
+    /// describes its own pages - a paginator, typically. Laravel's
+    /// `Inertia::scroll(fn () => User::paginate())`, where the metadata is
+    /// read from the loaded paginator.
+    ///
+    /// The value is serialized whole and merges under `key.data`, where a
+    /// paginator keeps its rows. The `scrollProps` entry ships with the
+    /// value, so a visit that withholds the value ships none. See
+    /// [`Prop::scroll_lazy`].
+    pub fn scroll_lazy<F, Fut, V>(self, key: impl Into<String>, resolver: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + ProvidesScrollMetadata + 'static,
+    {
+        self.prop(
+            key,
+            Prop::scroll_lazy(resolver, |value: &V| value.scroll_metadata()),
+        )
+    }
+
+    /// Attach an infinite-scroll prop loaded by `resolver` whose page facts
+    /// `metadata` builds from the loaded value - Laravel's
+    /// `Inertia::scroll($value, 'data', fn ($value) => ...)`. See
+    /// [`Prop::scroll_lazy`].
+    pub fn scroll_lazy_with<F, Fut, V, MF, M>(
+        self,
+        key: impl Into<String>,
+        resolver: F,
+        metadata: MF,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: Serialize + 'static,
+        MF: Fn(&V) -> M + Send + Sync + 'static,
+        M: ProvidesScrollMetadata,
+    {
+        self.prop(key, Prop::scroll_lazy(resolver, metadata))
+    }
+
     fn attach_scroll(
         mut self,
         key: String,
         wrap_key: Option<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         prop: Prop,
     ) -> Self {
         let mut prop = prop.scroll(metadata);
@@ -852,7 +894,7 @@ impl InertiaResponse {
     pub fn try_scroll<V: Serialize>(
         self,
         key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         value: V,
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
@@ -868,7 +910,7 @@ impl InertiaResponse {
         self,
         key: impl Into<String>,
         wrap_key: impl Into<String>,
-        metadata: ScrollMetadata,
+        metadata: impl ProvidesScrollMetadata,
         value: V,
     ) -> Result<Self, FrameworkError> {
         let key = key.into();
@@ -1383,8 +1425,20 @@ struct PageObjectFlags {
 /// before the resolver is even scheduled, so the only thing a completed
 /// resolver still decides is whether its value lands in `props`.
 enum TaskOutcome {
-    Insert { key: String, value: Value },
-    Rescued { key: String },
+    Insert {
+        key: String,
+        value: Value,
+    },
+    /// A [`Prop::scroll_lazy`] value, with the `scrollProps` entry its
+    /// loader described, or `None` when this response ships no entry.
+    InsertScroll {
+        key: String,
+        value: Value,
+        scroll: Option<ScrollMetadataEntry>,
+    },
+    Rescued {
+        key: String,
+    },
 }
 
 /// Parse a CSV header into a deduped list of trimmed, non-empty values.
@@ -1610,7 +1664,7 @@ async fn resolve_props(
         // client wants to start fresh from: resolve the value normally
         // but drop the instruction, so the client replaces instead of
         // appending.
-        if prop.scroll_metadata().is_none()
+        if !prop.is_scroll()
             && let Some(mode) = prop.merge_mode()
             && passes_lists
             && !reset_keys.iter().any(|k| k == &key)
@@ -1651,7 +1705,13 @@ async fn resolve_props(
         // resolved. An `Always` scroll prop outside the requested set still
         // ships its value but no merge instruction, or the client would
         // append the rows it already holds to themselves.
-        if passes_lists && let Some(scroll_meta) = prop.scroll_metadata().cloned() {
+        //
+        // A `Prop::scroll_lazy` prop's facts come from its loaded value, so
+        // its entry is recorded when the value resolves (`scroll_entry`
+        // carries the `reset` flag there) and not on a visit that
+        // withholds the value.
+        let mut scroll_entry: Option<bool> = None;
+        if passes_lists && prop.is_scroll() {
             let is_reset = reset_keys.iter().any(|k| k == &key);
             let announced_only = prop.is_defer() && !filter.matched;
             if !is_reset {
@@ -1673,13 +1733,16 @@ async fn resolve_props(
                 }
             }
             if !announced_only {
-                metadata.scroll.insert(
-                    key.clone(),
-                    ScrollMetadataEntry {
-                        metadata: scroll_meta,
-                        reset: is_reset,
-                    },
-                );
+                scroll_entry = Some(is_reset);
+                if let Some(scroll_meta) = prop.scroll_metadata().cloned() {
+                    metadata.scroll.insert(
+                        key.clone(),
+                        ScrollMetadataEntry {
+                            metadata: scroll_meta,
+                            reset: is_reset,
+                        },
+                    );
+                }
             }
         }
 
@@ -1766,6 +1829,24 @@ async fn resolve_props(
                 };
                 materialized.insert(key, v);
             }
+            // A scroll loader's value ships whole, as Laravel ships a
+            // closure's result, and brings the facts its loader read.
+            PropSource::ScrollResolver(loader) => {
+                tasks.push(Box::pin(async move {
+                    match loader().await {
+                        Ok((value, facts)) => Ok(TaskOutcome::InsertScroll {
+                            scroll: scroll_entry.map(|reset| ScrollMetadataEntry {
+                                metadata: facts,
+                                reset,
+                            }),
+                            key,
+                            value,
+                        }),
+                        Err(e) if rescue => Ok(rescued_outcome(key, e)),
+                        Err(e) => Err(e),
+                    }
+                }));
+            }
             PropSource::Resolver(resolver) if rescue => {
                 let filter = filter.clone();
                 tasks.push(Box::pin(async move {
@@ -1851,6 +1932,12 @@ async fn resolve_props(
     for outcome in outcomes {
         match outcome {
             TaskOutcome::Insert { key, value } => {
+                materialized.insert(key, value);
+            }
+            TaskOutcome::InsertScroll { key, value, scroll } => {
+                if let Some(entry) = scroll {
+                    metadata.scroll.insert(key.clone(), entry);
+                }
                 materialized.insert(key, value);
             }
             TaskOutcome::Rescued { key } => {
@@ -1941,6 +2028,30 @@ fn push_merge_paths(metadata: &mut PageMetadata, key: &str, prop: &Prop, mode: M
     metadata
         .merge_prepend
         .extend(prepends.map(|path| format!("{key}.{path}")));
+}
+
+/// Report a rescued deferred prop's failure - the log line and the
+/// best-effort `ErrorOccurred` event - and the outcome that leaves its key
+/// out of `props` and lists it under `rescuedProps`. Used by the scroll
+/// loader arm of `resolve_props`; the resolver arm reports the same way.
+fn rescued_outcome(key: String, e: FrameworkError) -> TaskOutcome {
+    let logged = crate::error::render_error_chain(&e);
+    tracing::warn!(
+        prop_key = %key,
+        error = %logged,
+        "inertia deferred prop resolver failed; rescued per spec",
+    );
+    let evt = crate::events::ErrorOccurred {
+        error_message: logged,
+        status_code: 500,
+        request_id: crate::logging::current_request_id().map(|id| id.as_str().to_string()),
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = crate::events::EventFacade::dispatch(evt).await;
+        });
+    }
+    TaskOutcome::Rescued { key }
 }
 
 fn build_page_object(

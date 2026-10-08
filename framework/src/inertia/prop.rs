@@ -109,6 +109,14 @@ pub type PropFuture = Pin<Box<dyn Future<Output = Result<Value, FrameworkError>>
 /// `Send + Sync + 'static` so it can be moved across `.await` points.
 pub type PropResolver = Arc<dyn Fn() -> PropFuture + Send + Sync>;
 
+/// Future returned by a scroll prop's loader: the value and the page facts
+/// that describe it, read from the loaded value before it is serialized.
+pub(crate) type ScrollFuture =
+    Pin<Box<dyn Future<Output = Result<(Value, ScrollMetadata), FrameworkError>> + Send>>;
+
+/// Loader stored inside a [`Prop::scroll_lazy`] prop.
+pub(crate) type ScrollResolver = Arc<dyn Fn() -> ScrollFuture + Send + Sync>;
+
 /// Builder for the options passed to
 /// [`InertiaResponse::defer_with`](crate::InertiaResponse::defer_with).
 #[derive(Debug, Clone)]
@@ -291,6 +299,56 @@ pub trait ProvidesScrollMetadata {
     }
 }
 
+/// `ScrollMetadata` describes itself, so every scroll builder takes one
+/// or any other provider - Laravel's `ScrollMetadata implements
+/// ProvidesScrollMetadata`.
+impl ProvidesScrollMetadata for ScrollMetadata {
+    fn page_name(&self) -> String {
+        self.page_name.clone()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        self.previous_page.clone()
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        self.next_page.clone()
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        self.current_page.clone()
+    }
+
+    fn scroll_metadata(&self) -> ScrollMetadata {
+        self.clone()
+    }
+}
+
+/// A borrowed provider describes the same pages, so a paginator can be
+/// passed by reference as the metadata and serialized as the value:
+/// `.scroll("posts", &page, &page)`.
+impl<T: ProvidesScrollMetadata + ?Sized> ProvidesScrollMetadata for &T {
+    fn page_name(&self) -> String {
+        (**self).page_name()
+    }
+
+    fn previous_page(&self) -> Option<Value> {
+        (**self).previous_page()
+    }
+
+    fn next_page(&self) -> Option<Value> {
+        (**self).next_page()
+    }
+
+    fn current_page(&self) -> Option<Value> {
+        (**self).current_page()
+    }
+
+    fn scroll_metadata(&self) -> ScrollMetadata {
+        (**self).scroll_metadata()
+    }
+}
+
 /// When a once prop's cached value expires - what `until` accepts.
 ///
 /// Laravel's `until(DateTimeInterface|DateInterval|int $delay)`
@@ -455,6 +513,9 @@ pub(crate) enum PropSource {
     Value(Value),
     /// Produced by an async closure when the prop resolves.
     Resolver(PropResolver),
+    /// Produced by a scroll prop's loader, with the page facts read from
+    /// the loaded value. See [`Prop::scroll_lazy`].
+    ScrollResolver(ScrollResolver),
     /// Absent sentinel. `when_loaded!` produces this when the named
     /// relation is not preloaded on the source entity: the key is left
     /// out of the response entirely - no null, no error.
@@ -576,6 +637,7 @@ impl std::fmt::Debug for Prop {
         match &self.source {
             PropSource::Value(v) => s.field("value", v),
             PropSource::Resolver(_) => s.field("value", &"<resolver>"),
+            PropSource::ScrollResolver(_) => s.field("value", &"<scroll resolver>"),
             PropSource::Absent => s.field("value", &"<absent>"),
         };
         s.field("visibility", &self.visibility);
@@ -778,6 +840,50 @@ impl Prop {
             let fut = f();
             Box::pin(async move { Ok(fut.await) })
         }))
+    }
+
+    /// A scroll prop whose value comes from `resolver` and whose page
+    /// facts come from `metadata` applied to the loaded value - Laravel's
+    /// `Inertia::scroll(fn () => ..., 'data', fn ($value) => ...)`. A
+    /// lazily loaded list describes its own pages this way, without a
+    /// second query for them.
+    ///
+    /// `metadata` sees the typed value before it is serialized, so a
+    /// paginator can hand over its own facts:
+    /// `Prop::scroll_lazy(load_posts, |page: &LengthAwarePaginator<Post>| page.scroll_metadata())`.
+    /// It runs only when the value loads, so the `scrollProps` entry ships
+    /// with the value and not on a visit that withholds it - deferred,
+    /// optional and not asked for, or held by the client under
+    /// [`once`](Self::once).
+    ///
+    /// The value merges under the wrapper `data` like any scroll prop (see
+    /// [`scroll`](Self::scroll)). It ships whole on a partial reload, as
+    /// Laravel ships a closure's result: a dotted `only` entry does not
+    /// narrow it.
+    pub fn scroll_lazy<F, Fut, V, MF, M>(resolver: F, metadata: MF) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: serde::Serialize + 'static,
+        MF: Fn(&V) -> M + Send + Sync + 'static,
+        M: ProvidesScrollMetadata,
+    {
+        let metadata = Arc::new(metadata);
+        let loader: ScrollResolver = Arc::new(move || {
+            let fut = resolver();
+            let metadata = Arc::clone(&metadata);
+            Box::pin(async move {
+                let loaded = fut.await?;
+                let facts = metadata(&loaded).scroll_metadata();
+                let value = serde_json::to_value(&loaded).map_err(|e| {
+                    FrameworkError::internal(format!(
+                        "Inertia scroll prop value failed to serialize: {e}"
+                    ))
+                })?;
+                Ok((value, facts))
+            })
+        });
+        Self::with_source(PropSource::ScrollResolver(loader))
     }
 
     // ---- visibility ----------------------------------------------------
@@ -1087,8 +1193,8 @@ impl Prop {
     /// visit that withholds it, and `{key}.{wrapper}` once the data
     /// arrives - Laravel collects the first instruction before the scroll
     /// prop configures its wrapper.
-    pub fn scroll(mut self, metadata: ScrollMetadata) -> Self {
-        self.scroll = Some(metadata);
+    pub fn scroll(mut self, metadata: impl ProvidesScrollMetadata) -> Self {
+        self.scroll = Some(metadata.scroll_metadata());
         self
     }
 
@@ -1170,7 +1276,17 @@ impl Prop {
     /// True if the prop's value comes from a closure rather than being
     /// materialized already.
     pub fn has_resolver(&self) -> bool {
-        matches!(self.source, PropSource::Resolver(_))
+        matches!(
+            self.source,
+            PropSource::Resolver(_) | PropSource::ScrollResolver(_)
+        )
+    }
+
+    /// True for a scroll prop: one given page facts by
+    /// [`scroll`](Self::scroll), or built by
+    /// [`scroll_lazy`](Self::scroll_lazy), whose facts come with its value.
+    pub fn is_scroll(&self) -> bool {
+        self.scroll.is_some() || matches!(self.source, PropSource::ScrollResolver(_))
     }
 
     /// The already-materialized value, if this prop has one.
@@ -1253,7 +1369,10 @@ impl Prop {
         self.fresh
     }
 
-    /// The infinite-scroll pagination metadata, if this is a scroll prop.
+    /// The page facts [`scroll`](Self::scroll) gave this prop, if any. A
+    /// [`scroll_lazy`](Self::scroll_lazy) prop's facts arrive with its
+    /// value, so this is `None` for one; [`is_scroll`](Self::is_scroll)
+    /// asks whether a prop is a scroll prop at all.
     pub fn scroll_metadata(&self) -> Option<&ScrollMetadata> {
         self.scroll.as_ref()
     }
@@ -1292,6 +1411,7 @@ impl Prop {
         match self.source {
             PropSource::Value(v) => Ok(v),
             PropSource::Resolver(r) => r().await,
+            PropSource::ScrollResolver(r) => r().await.map(|(value, _)| value),
             // Callers reach the absent sentinel through
             // `resolve_with_owner`, which returns `Ok(None)`. `Null` is
             // the safe fallback so a stray call here cannot panic.

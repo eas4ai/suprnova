@@ -437,6 +437,44 @@ async fn cursor_paginate_is_bidirectional_and_matches_the_facade() {
     Context::test_clear_query();
 }
 
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn inp_pagination_cursor_records_the_cursor_it_was_fetched_with() {
+    // PAR-052: the Inertia scroll metadata reports a cursor page's current
+    // cursor, so the facade keeps the one it was given.
+    use suprnova::{Pagination, ProvidesScrollMetadata};
+
+    let _db = fixture(25).await;
+    let first = Pagination::cursor::<facade::Entity, facade::Column>(
+        facade::Entity::find(),
+        None,
+        10,
+        facade::Column::Id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.current_cursor, None);
+    assert_eq!(
+        first.scroll_metadata().current_page,
+        Some(serde_json::json!(1))
+    );
+
+    let next = first.next_cursor.clone().expect("page 1 has a next page");
+    let second = Pagination::cursor::<facade::Entity, facade::Column>(
+        facade::Entity::find(),
+        Some(&next),
+        10,
+        facade::Column::Id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.current_cursor.as_deref(), Some(next.as_str()));
+    assert_eq!(
+        second.scroll_metadata().current_page,
+        Some(serde_json::Value::String(next))
+    );
+}
+
 #[tokio::test]
 async fn cursor_paginate_zero_per_page_errors() {
     let _db = fixture(5).await;

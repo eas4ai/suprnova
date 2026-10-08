@@ -182,7 +182,7 @@ pub async fn show(req: Request) -> Response {
 | `.defer(k, ‖)` / `.defer_with(...)` | Initial-visit-skipped; follow-up XHR triggers resolution | `Inertia::defer(…)` |
 | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with` | Combine with existing client state on partial reloads | `Inertia::merge` / `deepMerge` |
 | `.once(k, ‖)` / `.once_with(…)` | Client caches across navigations | `Inertia::once(…)` |
-| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
+| `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.scroll_with_wrapped` / `.scroll_lazy` / `.scroll_lazy_with` / `.paginate` (via `Inertia::paginate`) | Infinite-scroll pagination | `Inertia::scroll(…)` |
 | `.flash(k, v)` | One-shot value under `page.flash` (not `props`) | `session()->flash(…)` |
 | `.title(…)` | Default `<title>` for the HTML shell | `Inertia::render(…)->title(…)` |
 | `.encrypt_history(bool)` | Per-response history encryption | `Inertia::encryptHistory(…)` |
@@ -519,13 +519,30 @@ announces its bare key under `mergeProps` on the visit that withholds it,
 and `posts.data` on the follow-up request that delivers the rows, as
 Laravel does.
 
-A type outside this crate's `pagination` module - a third-party
-paginator, a hand-rolled cursor - can describe itself to `.scroll`
-by implementing `ProvidesScrollMetadata` instead of building
-`ScrollMetadata` field by field:
+The metadata argument of `.scroll` takes a `ScrollMetadata` or anything
+that implements `ProvidesScrollMetadata`, Laravel's interface of the same
+name. `LengthAwarePaginator`, `Paginator` and `CursorPaginator` implement
+it, so a paginator can be both the metadata and the value - Laravel's
+`Inertia::scroll($paginator)`, its rows under `data`:
 
 ```rust
-use suprnova::{ProvidesScrollMetadata, ScrollMetadata};
+InertiaResponse::new("Feed/Index").scroll("posts", &page, &page)
+```
+
+The paginators report what Laravel's `ScrollMetadata::fromPaginator`
+reports: the page parameter's name (`with_page_name` on
+`LengthAwarePaginator` and `Paginator`, `with_cursor_name` on
+`CursorPaginator`), and the previous, next and current page. A cursor
+page's current page is `1` on the first page, else the cursor it was
+fetched with - `Pagination::cursor` records it, `with_current_cursor` sets
+it - else the request's cursor parameter.
+
+A type outside this crate's `pagination` module - a third-party
+paginator, a hand-rolled cursor - can describe itself to `.scroll` the
+same way:
+
+```rust
+use suprnova::ProvidesScrollMetadata;
 
 impl ProvidesScrollMetadata for MyCursorPage {
     fn page_name(&self) -> String { "cursor".to_string() }
@@ -534,10 +551,34 @@ impl ProvidesScrollMetadata for MyCursorPage {
     fn current_page(&self) -> Option<serde_json::Value> { Some(self.current.clone().into()) }
 }
 
-InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
+InertiaResponse::new("Feed/Index").scroll("posts", &page, page.rows)
 ```
 
-`LengthAwarePaginator`, `Paginator`, and `CursorPaginator` implement it too - see [Pagination](pagination.md#inertia-integration-infinite-scroll-props).
+A list loaded lazily describes its own pages from the loaded value, so it
+needs no second query for them. `.scroll_lazy` reads them from a value
+that implements `ProvidesScrollMetadata`, Laravel's
+`Inertia::scroll(fn () => User::paginate())`; `.scroll_lazy_with` builds
+them with a function of the loaded value, Laravel's callable metadata:
+
+```rust
+use suprnova::{FrameworkError, InertiaResponse, Prop, ScrollMetadata};
+
+InertiaResponse::new("Feed/Index")
+    .scroll_lazy("posts", || async {
+        Ok::<_, FrameworkError>(Post::query().paginate(20).await?)
+    })
+    .scroll_lazy_with(
+        "events",
+        || async { Ok::<_, FrameworkError>(load_events().await?) },
+        |events: &EventPage| ScrollMetadata::new("after").next(events.next_token.clone()),
+    )
+```
+
+`Prop::scroll_lazy(resolver, metadata)` is the same prop for composing
+with other flags, such as `.defer()`. The function runs only when the
+value loads, so the `scrollProps` entry ships with the value and not on a
+visit that withholds it. The value ships whole on a partial reload, as
+Laravel ships a closure's result.
 
 ### Dot-notation nesting
 

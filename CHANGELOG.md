@@ -153,6 +153,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prop could not take a cache key, an expiry or `fresh` before; only the
   `InertiaSharedData` provider could reach them.
   `InertiaRegistry::share_once` returns the same handle.
+- **Scroll props take any page-facts provider and can read them from the
+  loaded value.** Every `.scroll` builder and `Prop::scroll` take a
+  `ScrollMetadata` or anything implementing `ProvidesScrollMetadata`, so
+  `.scroll("posts", &page, &page)` is Laravel's `Inertia::scroll($paginator)`.
+  `InertiaResponse::scroll_lazy`, `scroll_lazy_with` and
+  `Prop::scroll_lazy` describe a lazily loaded list from the value its
+  resolver returns, as Laravel's callable metadata does, and ship the
+  `scrollProps` entry with that value.
+- **Paginators report the scroll facts Laravel's `fromPaginator` does.** A
+  `CursorPaginator`'s current page is `1` on its first page, else the
+  cursor it was fetched with (`Pagination::cursor` records it in the new
+  `current_cursor`, `with_current_cursor` sets it), else the request's
+  cursor parameter; it was always `null`. `Paginator` (the simple
+  paginator) takes a page parameter name, `with_page_name`, used by its
+  URLs and its `pageName`, where it was fixed to `page`.
 
 ### Changed
 

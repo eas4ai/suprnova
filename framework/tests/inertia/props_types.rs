@@ -532,3 +532,200 @@ async fn inp_paginate_keeps_merging_its_bare_rows_at_the_prop_root() {
     .await;
     assert_eq!(names(&page, "mergeProps"), ["posts"]);
 }
+
+// ---- PAR-052: scroll metadata from paginators and providers ----
+
+#[tokio::test]
+async fn inp_cursor_paginator_on_its_first_page_reports_current_page_one() {
+    // Laravel's `ScrollMetadata::fromPaginator`: `onFirstPage() ? 1 : ...`.
+    let paginator = suprnova::CursorPaginator::new(
+        vec![json!({ "id": 1 })],
+        1,
+        Some("next-token".to_string()),
+        None,
+    );
+    let page = page_of(
+        InertiaResponse::new("Feed").paginate("posts", paginator),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+
+    assert_eq!(
+        page["scrollProps"]["posts"],
+        json!({
+            "pageName": "cursor",
+            "previousPage": null,
+            "nextPage": "next-token",
+            "currentPage": 1,
+            "reset": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn inp_cursor_paginator_past_its_first_page_reads_the_requests_cursor() {
+    // Laravel resolves the current cursor from the request under the
+    // paginator's cursor name; `cursor_paginate` builds a paginator that
+    // does not carry it.
+    let _query = suprnova::Context::test_query_guard("after", "current-token");
+    let paginator = suprnova::CursorPaginator::new(
+        vec![json!({ "id": 2 })],
+        1,
+        Some("next-token".to_string()),
+        Some("prev-token".to_string()),
+    )
+    .with_cursor_name("after");
+    let page = page_of(
+        InertiaResponse::new("Feed").paginate("posts", paginator),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+
+    let scroll = &page["scrollProps"]["posts"];
+    assert_eq!(scroll["pageName"], "after");
+    assert_eq!(scroll["previousPage"], "prev-token");
+    assert_eq!(scroll["currentPage"], "current-token");
+}
+
+#[tokio::test]
+async fn inp_cursor_paginator_reports_the_cursor_it_was_built_from() {
+    let paginator = suprnova::CursorPaginator::new(
+        vec![json!({ "id": 2 })],
+        1,
+        None,
+        Some("prev-token".to_string()),
+    )
+    .with_current_cursor("current-token");
+    let page = page_of(
+        InertiaResponse::new("Feed").paginate("posts", paginator),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+
+    assert_eq!(page["scrollProps"]["posts"]["currentPage"], "current-token");
+    assert_eq!(page["scrollProps"]["posts"]["nextPage"], json!(null));
+}
+
+#[tokio::test]
+async fn inp_simple_paginator_scroll_metadata_uses_its_page_name() {
+    let paginator = suprnova::Paginator::new(vec![json!({ "id": 7 })], 3, 1, true)
+        .with_page_name("comments_page");
+    let page = page_of(
+        InertiaResponse::new("Post").paginate("comments", paginator),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+
+    assert_eq!(
+        page["scrollProps"]["comments"],
+        json!({
+            "pageName": "comments_page",
+            "previousPage": 2,
+            "nextPage": 4,
+            "currentPage": 3,
+            "reset": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn inp_scroll_takes_any_provides_scroll_metadata_value() {
+    // Laravel's `scroll($paginator)`: the paginator is the value, under
+    // `data`, and describes its own pages.
+    let paginator = suprnova::LengthAwarePaginator::new(vec![json!({ "id": 4 })], 9, 3, 2)
+        .with_page_name("posts_page");
+    let response = InertiaResponse::new("Feed").scroll("posts", &paginator, &paginator);
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
+    assert_eq!(page["props"]["posts"]["data"], json!([{ "id": 4 }]));
+    assert_eq!(page["scrollProps"]["posts"]["pageName"], "posts_page");
+    assert_eq!(page["scrollProps"]["posts"]["currentPage"], 2);
+    assert_eq!(page["scrollProps"]["posts"]["nextPage"], 3);
+}
+
+#[tokio::test]
+async fn inp_scroll_lazy_describes_its_pages_from_the_loaded_paginator() {
+    // A lazily loaded scroll list: the metadata comes from the value the
+    // resolver returns, as Laravel's `scroll(fn () => User::paginate())`
+    // reads it from the resolved paginator.
+    let response = InertiaResponse::new("Feed").scroll_lazy("posts", || async {
+        Ok::<_, suprnova::FrameworkError>(suprnova::LengthAwarePaginator::new(
+            vec![json!({ "id": 7 })],
+            9,
+            3,
+            3,
+        ))
+    });
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["props"]["posts"]["data"], json!([{ "id": 7 }]));
+    assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
+    assert_eq!(
+        page["scrollProps"]["posts"],
+        json!({
+            "pageName": "page",
+            "previousPage": 2,
+            "nextPage": null,
+            "currentPage": 3,
+            "reset": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn inp_scroll_lazy_with_builds_metadata_with_a_function_of_the_loaded_value() {
+    // Laravel's `scroll($value, 'data', fn ($value) => new ScrollMetadata(...))`.
+    let response = InertiaResponse::new("Feed").scroll_lazy_with(
+        "posts",
+        || async { Ok::<_, suprnova::FrameworkError>(json!({ "data": [1, 2], "next": "n-2" })) },
+        |value: &Value| {
+            ScrollMetadata::new("cursor")
+                .current("n-1")
+                .next(value["next"].clone())
+        },
+    );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["scrollProps"]["posts"]["pageName"], "cursor");
+    assert_eq!(page["scrollProps"]["posts"]["nextPage"], "n-2");
+    assert_eq!(page["scrollProps"]["posts"]["currentPage"], "n-1");
+}
+
+#[tokio::test]
+async fn inp_deferred_scroll_lazy_loads_nothing_on_the_first_visit() {
+    // The metadata function needs the loaded value, so a deferred list
+    // loads nothing and describes nothing until the client asks for it.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deferred = |calls: std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        InertiaResponse::new("Feed").prop(
+            "posts",
+            Prop::scroll_lazy(
+                move || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::future::ready(Ok::<_, suprnova::FrameworkError>(
+                        suprnova::LengthAwarePaginator::new(vec![json!({ "id": 1 })], 4, 2, 1),
+                    ))
+                },
+                |paginator: &suprnova::LengthAwarePaginator<Value>| {
+                    use suprnova::ProvidesScrollMetadata;
+                    paginator.scroll_metadata()
+                },
+            )
+            .defer(),
+        )
+    };
+    let page = page_of(deferred(calls.clone()), &MockReq::new("/").inertia()).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(names(&page, "mergeProps"), ["posts"]);
+    assert!(
+        !page.as_object().unwrap().contains_key("scrollProps"),
+        "{page}"
+    );
+
+    let req = MockReq::new("/").inertia().partial("Feed", "posts");
+    let page = page_of(deferred(calls.clone()), &req).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
+    assert_eq!(page["scrollProps"]["posts"]["nextPage"], 2);
+}
