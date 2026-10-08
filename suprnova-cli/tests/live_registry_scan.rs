@@ -595,6 +595,41 @@ fn reg_032_a_method_called_on_a_prototype_itself_is_refused() {
     assert!(borrowed.accepted(), "{:?}", borrowed.findings);
 }
 
+/// REG-032: destructuring `prototype` out of an object puts the prototype
+/// in a name the scan does not follow, so it is refused in a declaration,
+/// a parameter, a `catch` clause, a `for` loop and a destructuring
+/// assignment, by a static or computed key, shorthand or nested.
+#[test]
+fn reg_032_destructuring_a_prototype_out_of_an_object_is_refused() {
+    let cases: &[(&str, u32)] = &[
+        ("const { prototype: p } = Array;\np.polluted = 1;\n", 1),
+        ("const { prototype } = Array;\nprototype.polluted = 1;\n", 1),
+        ("const { [\"proto\" + \"type\"]: p } = Array;\n", 1),
+        ("const { a: { prototype: p } } = { a: Array };\n", 1),
+        (
+            "function pollute({ prototype }) {\n  prototype.polluted = 1;\n}\npollute(Array);\n",
+            1,
+        ),
+        ("for (const { prototype } of [Array]) {\n}\n", 1),
+        ("try {\n} catch ({ prototype }) {\n}\n", 2),
+        ("let p;\n({ prototype: p } = Array);\n", 2),
+        ("let prototype;\n({ prototype } = Array);\n", 2),
+        ("let p;\n({ [`prototype`]: p } = Array);\n", 2),
+        ("let p;\n({ a: { prototype: p } } = { a: Array });\n", 2),
+        ("let p;\n[{ prototype: p }] = [Array];\n", 2),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, line)| missing_refusals(script, "script-prototype", &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one

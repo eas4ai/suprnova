@@ -588,7 +588,8 @@ In a script, parsed as a JavaScript module:
   form (`=`, `+=`, `??=`, `++`, a destructuring or `for` loop target), and
   so is `delete` of one. A method called on the prototype itself, such as
   `Array.prototype.push(1)`, is refused too: it runs with the prototype as
-  `this` and changes it.
+  `this` and changes it. So is destructuring `prototype` out of an object
+  (`const { prototype } = Array`), which puts the prototype in a name.
 - An attribute name given to `setAttribute` traces to constants and is not an
   event handler, `srcdoc` or `style`.
 - A URL given to `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,

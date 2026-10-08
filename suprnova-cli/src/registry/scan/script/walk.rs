@@ -27,6 +27,10 @@ const MAX_TRACE_DEPTH: usize = 12;
 /// How deep the walker follows nested expressions.
 const MAX_DEPTH: usize = 200;
 
+/// Why destructuring `prototype` out of an object is refused (REG-032).
+const DESTRUCTURED_PROTOTYPE: &str =
+    "destructuring `prototype` puts a prototype in a name the scan does not follow";
+
 pub(super) type Bid = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,6 +725,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                     } else if let Some(name) = property.key.static_name() {
                         self.property_name(&name, property.span, false);
                     }
+                    self.destructured_prototype(&property.key, property.computed, property.span);
                     self.pattern_defaults(&property.value);
                 }
                 if let Some(rest) = &object.rest {
@@ -1419,6 +1424,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
         }
+        self.target_prototype_keys(target);
     }
 
     fn simple_target(
@@ -2581,6 +2587,81 @@ impl<'a, 'c> Walker<'a, 'c> {
             callee.span(),
             format!("{method} is called on {what} itself, so it runs with the prototype as `this` and can change it, as `push`, `fill` and `splice` do; borrow the method with `call` instead"),
         );
+    }
+
+    /// Refuses destructuring `prototype` out of an object (REG-032): the
+    /// target receives the prototype, and a destructured name is one the
+    /// scan does not follow.
+    fn destructured_prototype(&mut self, key: &PropertyKey<'a>, computed: bool, span: Span) {
+        if !self.check() {
+            return;
+        }
+        let named = if computed {
+            key.as_expression()
+                .and_then(|key| self.trace(key, 0))
+                .is_some_and(|keys| keys.iter().any(|key| prototype_name(key)))
+        } else {
+            key.static_name().is_some_and(|name| prototype_name(&name))
+        };
+        if named {
+            self.refuse("script-prototype", span, DESTRUCTURED_PROTOTYPE.to_string());
+        }
+    }
+
+    /// [`Self::destructured_prototype`] for every key of a destructuring
+    /// assignment's target, at any depth.
+    fn target_prototype_keys(&mut self, target: &'a AssignmentTarget<'a>) {
+        match target {
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                            if self.check() && prototype_name(shorthand.binding.name.as_str()) {
+                                self.refuse(
+                                    "script-prototype",
+                                    shorthand.span,
+                                    DESTRUCTURED_PROTOTYPE.to_string(),
+                                );
+                            }
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            self.destructured_prototype(
+                                &property.name,
+                                property.computed,
+                                property.span,
+                            );
+                            self.target_default_prototype_keys(&property.binding);
+                        }
+                    }
+                }
+                if let Some(rest) = &object.rest {
+                    self.target_prototype_keys(&rest.target);
+                }
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.target_default_prototype_keys(element);
+                }
+                if let Some(rest) = &array.rest {
+                    self.target_prototype_keys(&rest.target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Self::target_prototype_keys`] for a target that may carry a default.
+    fn target_default_prototype_keys(&mut self, target: &'a AssignmentTargetMaybeDefault<'a>) {
+        match target {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+                self.target_prototype_keys(&with_default.binding);
+            }
+            other => {
+                if let Some(target) = other.as_assignment_target() {
+                    self.target_prototype_keys(target);
+                }
+            }
+        }
     }
 
     /// Refuses `delete` of a member of a prototype or of a value read from
