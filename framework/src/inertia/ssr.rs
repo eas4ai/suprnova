@@ -176,6 +176,12 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
     !(excluded(&config.excluded_paths) || excluded(&added))
 }
 
+/// Where a first visit is posted, and whether that is the hot endpoint.
+struct Target {
+    url: String,
+    hot: bool,
+}
+
 /// Where a first visit is posted, Laravel's `HttpGateway::dispatch`
 /// order: the hot URL's `/__inertia_ssr` in hot mode, with no bundle check
 /// (PAR-058); else the worker's `/render` when a bundle is found or the
@@ -185,14 +191,20 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
 /// (`InertiaConfig::ssr_for_dispatch`, from the hot file): a hot URL here
 /// means hot. The page is serialized only after this, so a visit that
 /// renders on the client never pays for it.
-fn dispatch_url(config: &SsrConfig) -> Option<String> {
+fn dispatch_target(config: &SsrConfig) -> Option<Target> {
     if let Some(hot) = config.hot_url.as_deref() {
-        return Some(endpoint(hot, "/__inertia_ssr"));
+        return Some(Target {
+            url: endpoint(hot, "/__inertia_ssr"),
+            hot: true,
+        });
     }
     if config.ensure_bundle_exists && detect_bundle(config).is_none() {
         return None;
     }
-    Some(endpoint(&config.url, "/render"))
+    Some(Target {
+        url: endpoint(&config.url, "/render"),
+        hot: false,
+    })
 }
 
 /// `base` with `path` appended, the trailing slashes of `base` dropped, as
@@ -218,7 +230,7 @@ pub(crate) async fn render(
     if !ssr_runs_for(config, request) {
         return Ok(None);
     }
-    let Some(url) = dispatch_url(config) else {
+    let Some(target) = dispatch_target(config) else {
         return Ok(None);
     };
 
@@ -227,11 +239,21 @@ pub(crate) async fn render(
     let request = crate::App::inertia_registry()
         .runtime()
         .configure_ssr_request(SsrRequest {
-            url,
+            url: target.url,
             headers: Vec::new(),
             timeout: config.timeout,
         });
     let failure = match exchange(&request, Some(body), config.max_response_bytes).await {
+        // A dev server without the Inertia Vite plugin serves no SSR: its
+        // 404 means "render on the client", not a failure to report on
+        // every first visit while developing.
+        Ok(answer) if target.hot && answer.status == reqwest::StatusCode::NOT_FOUND => {
+            tracing::debug!(
+                url = %request.url,
+                "the Vite dev server serves no SSR; the visit renders on the client"
+            );
+            return Ok(None);
+        }
         Ok(answer) if answer.status.is_success() => match rendered(&answer.body) {
             Ok(rendered) => return Ok(rendered),
             Err(e) => failure(
