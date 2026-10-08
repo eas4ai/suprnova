@@ -375,8 +375,15 @@ impl HttpResponse {
     /// headers, cookies and the error report stay as they were. For a
     /// middleware that rewrites a document it was handed, as Inertia
     /// DevTools adds its id tag to a page's first visit.
+    ///
+    /// A `Content-Length` the old body set is dropped: it measured that
+    /// body, and hyper would send it as it is for the new one (and assert
+    /// on the mismatch in a debug build), breaking the framing. Without
+    /// it, hyper sends the length of the buffered body.
     pub(crate) fn with_static_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = Body::Static(body.into());
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
         self
     }
 
@@ -1999,6 +2006,18 @@ mod stream_tests {
         let resp = HttpResponse::text("hello world").into_hyper();
         let collected = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&collected[..], b"hello world");
+    }
+
+    #[test]
+    fn indt_a_replaced_body_drops_the_content_length_of_the_old_one() {
+        let response = HttpResponse::html("<p>old</p>")
+            .header("Content-Length", "10")
+            .header("content-length", "10")
+            .header("X-Kept", "yes")
+            .with_static_body("<p>a longer body</p>");
+        assert_eq!(response.header_value("Content-Length"), None);
+        assert_eq!(response.header_value("X-Kept"), Some("yes"));
+        assert_eq!(response.body(), b"<p>a longer body</p>");
     }
 }
 

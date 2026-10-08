@@ -829,6 +829,10 @@ where
         });
     }
 
+    // From here on the body is read. Inertia DevTools, recording this
+    // request, gets the summary of what was parsed, or, from an error
+    // return dropping the report, that the parse failed.
+    let report = crate::inertia::MultipartReport::start();
     let (_parts, body) = req.into_parts();
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`
     // does not impl `Into<Bytes>` (multer's bound). `BodyDataStream` drops
@@ -855,6 +859,11 @@ where
                 status_code: 400,
             });
         }
+        crate::http::BodyState::Failed(error) => return Err(error),
+        crate::http::BodyState::Partial { read, rest } => Box::pin(
+            futures::stream::once(async move { Ok(read) })
+                .chain(BodyDataStream::new(rest).map(|chunk| chunk.map_err(std::io::Error::other))),
+        ),
     };
     // SEC-05: cap the RAW stream, not just the bytes that reach a part.
     //
@@ -1038,6 +1047,7 @@ where
         payload.fields.push((name, value));
     }
 
+    report.parsed(&payload.fields);
     Ok(payload)
 }
 

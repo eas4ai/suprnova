@@ -202,3 +202,136 @@ pub async fn raw_send(
         body: String::from_utf8_lossy(&bytes).into_owned(),
     }
 }
+
+/// Send `head`, a request's line and headers ending in a blank line, on a
+/// fresh connection to `addr`, then `body`, then close the write side when
+/// `close_write` says so: for what no client sends, a body that ends
+/// before its declared length or chunks that are not chunks. The request
+/// should say `Connection: close`; the reply is read until the server
+/// closes the connection.
+pub async fn raw_request(
+    addr: std::net::SocketAddr,
+    head: &str,
+    body: &[u8],
+    close_write: bool,
+) -> RawReply {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    if close_write {
+        stream.shutdown().await.unwrap();
+    }
+    let mut received = Vec::new();
+    stream.read_to_end(&mut received).await.unwrap();
+    final_reply(&received).0
+}
+
+/// Send `head`, which must carry `Expect: 100-continue`, and send `body`
+/// only once the server asks for it with `100 Continue`. Answers the final
+/// reply and whether the server asked: a server that never polls the body
+/// never asks, so a `false` proves no byte of it was read.
+pub async fn raw_request_on_continue(
+    addr: std::net::SocketAddr,
+    head: &str,
+    body: &[u8],
+) -> (RawReply, bool) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 4096];
+    // Read until the first response head is complete.
+    while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "the connection closed before any response");
+        received.extend_from_slice(&chunk[..read]);
+    }
+    let continued = received.starts_with(b"HTTP/1.1 100");
+    if continued {
+        stream.write_all(body).await.unwrap();
+    }
+    stream.read_to_end(&mut received).await.unwrap();
+    let (reply, interim) = final_reply(&received);
+    assert_eq!(interim > 0, continued);
+    (reply, continued)
+}
+
+/// The final response in `received`, after any `1xx` ones, and how many
+/// `1xx` responses came before it.
+fn final_reply(received: &[u8]) -> (RawReply, usize) {
+    let mut rest = received;
+    let mut interim = 0;
+    loop {
+        let end = rest
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap_or_else(|| {
+                panic!(
+                    "no complete response in {:?}",
+                    String::from_utf8_lossy(received)
+                )
+            });
+        let head = String::from_utf8_lossy(&rest[..end]).into_owned();
+        let body = &rest[end + 4..];
+        let mut lines = head.split("\r\n");
+        let status: u16 = lines
+            .next()
+            .and_then(|line| line.split(' ').nth(1))
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {head:?}"));
+        if (100..200).contains(&status) {
+            interim += 1;
+            rest = body;
+            continue;
+        }
+        let mut headers = std::collections::HashMap::new();
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                headers
+                    .entry(name.trim().to_ascii_lowercase())
+                    .or_insert_with(|| value.trim().to_string());
+            }
+        }
+        let body = if headers
+            .get("transfer-encoding")
+            .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+        {
+            dechunk(body)
+        } else {
+            body.to_vec()
+        };
+        let reply = RawReply {
+            status,
+            headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        };
+        return (reply, interim);
+    }
+}
+
+/// The data of a chunked body.
+fn dechunk(mut body: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    loop {
+        let line_end = body
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .expect("a chunk size line");
+        let size = usize::from_str_radix(
+            String::from_utf8_lossy(&body[..line_end])
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim(),
+            16,
+        )
+        .expect("a hexadecimal chunk size");
+        body = &body[line_end + 2..];
+        if size == 0 {
+            return data;
+        }
+        data.extend_from_slice(&body[..size]);
+        body = &body[size + 2..];
+    }
+}
