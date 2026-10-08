@@ -228,9 +228,18 @@ the `redact_headers` headers. Names are compared without case, so
 `Password` is caught by `password`. A name is also caught by any of its
 parts split on `[`, `]` and `.`: the multipart field `user[password]`, the
 prop path `auth.password` and the query parameter `data[0][token]` are all
-redacted, while a longer word such as `passwords` is kept. A header value
-or multipart field that is not text is stored as `[UNSERIALIZABLE]`, and
-the rest of the entry is kept.
+redacted, while a longer word such as `passwords` is kept.
+
+A URL is any string in the entry that holds a `?` and starts with a
+scheme (`https:`), `/` or `?`, such as a `redirect_to` form field or a
+prop. A string under a `url` or `redirectLocation` key, and the value of
+a `Location`, `X-Inertia-Location`, `Referer` or `Content-Location`
+header, is a URL whatever it starts with, and so are the `<...>` targets
+of a `Link` header and the target of a `Refresh` header. So a redirect to
+`/reset?token=abc` is stored with `location: /reset?token=%5BREDACTED%5D`,
+and a header that is not a URL is stored as sent. A header value or
+multipart field that is not text is stored as `[UNSERIALIZABLE]`, and the
+rest of the entry is kept.
 
 ## Recording never breaks a response
 

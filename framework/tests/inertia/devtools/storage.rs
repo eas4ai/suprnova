@@ -6,7 +6,10 @@ use chrono::{Duration, TimeZone, Utc};
 use serde_json::{Value, json};
 use suprnova::http::text;
 use suprnova::testing::TestClock;
-use suprnova::{HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Prop, Request, Router};
+use suprnova::{
+    HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Prop, Redirect, Request, Response,
+    Router,
+};
 
 use super::{client, devtools, entry_ids, entry_of, inertia, raw_send, read_entry, read_index};
 use crate::protocol_harness::serve;
@@ -36,6 +39,13 @@ fn router() -> Router {
                 .resolve(&req)
                 .await
                 .map_err(HttpResponse::from)
+        })
+        .post("/forgot", |_req: Request| async {
+            let response: Response = Redirect::to("/reset?token=abc").into();
+            response
+        })
+        .get("/billing", |_req: Request| async {
+            Ok(Inertia::location("/reset?token=abc"))
         })
         .get("/text", |_req: Request| async { text("ok") })
         .into()
@@ -277,6 +287,73 @@ async fn indt_a_dotted_prop_path_naming_a_redaction_key_is_redacted_before_stora
         "prop-password-value",
         "the client still gets it"
     );
+}
+
+#[tokio::test]
+async fn indt_url_query_values_in_headers_and_bodies_are_redacted_before_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+
+    let redirect = client
+        .post("/forgot")
+        .inertia()
+        .header("Referer", "http://localhost/forgot?token=abc&page=2")
+        .json(&json!({"redirect_to": "/reset?token=abc&page=2", "note": "see the docs?"}))
+        .send()
+        .await;
+    assert_eq!(redirect.status(), 302);
+    assert_eq!(
+        redirect.header("location"),
+        Some("/reset?token=abc"),
+        "the client still gets it"
+    );
+    let id = redirect.header("x-inertia-devtools-id").unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(
+        !raw.contains("token=abc"),
+        "a token reached the store: {raw}"
+    );
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        entry["http"]["responseHeaders"]["location"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+    assert_eq!(
+        entry["http"]["requestHeaders"]["referer"],
+        "http://localhost/forgot?token=%5BREDACTED%5D&page=2"
+    );
+    assert_eq!(
+        entry["http"]["requestHeaders"]["accept"], "text/html, application/xhtml+xml",
+        "a header that is not a URL is untouched"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["redirect_to"],
+        "/reset?token=%5BREDACTED%5D&page=2"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["note"],
+        "see the docs?"
+    );
+    assert_eq!(
+        entry["__meta"]["redirectLocation"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+
+    let away = client.get("/billing").inertia().send().await;
+    assert_eq!(away.status(), 409);
+    let id = away.header("x-inertia-devtools-id").unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+    assert!(
+        !raw.contains("token=abc"),
+        "a token reached the store: {raw}"
+    );
+    let entry: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        entry["http"]["responseHeaders"]["x-inertia-location"],
+        "/reset?token=%5BREDACTED%5D"
+    );
+    let index = std::fs::read_to_string(dir.path().join("_meta.json")).unwrap();
+    assert!(!index.contains("token=abc"), "{index}");
 }
 
 #[tokio::test]

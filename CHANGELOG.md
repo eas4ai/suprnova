@@ -1332,6 +1332,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `[`, `]` and `.`, names a redaction key, at any depth of the entry and
   in query parameter names alike; a longer word such as `passwords` is
   still kept (DT-07, DT-08).
+- **DevTools redacts the URLs in headers and bodies.** Only a string
+  under a `url` or `redirectLocation` key had its query redacted, so a
+  response's `Location: /reset?token=abc` and `X-Inertia-Location`, a
+  request's `Referer`, and a `redirect_to` field carrying `?token=`
+  reached the entry file as sent. The query of every string that is a URL
+  (it holds a `?` and starts with a scheme, `/` or `?`) is now redacted
+  wherever the entry holds it. In both header bags so is the whole value
+  of `Location`, `X-Inertia-Location`, `Referer` and `Content-Location`,
+  each `<...>` target of a `Link` and the target of a `Refresh`; a header
+  that is not a URL is stored as sent (DT-07, DT-08).
 
 ## 3.2.1 - 2026-10-05
 
