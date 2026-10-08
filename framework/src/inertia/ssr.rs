@@ -258,7 +258,7 @@ pub(crate) async fn render(
 
     let result = post_json(&request, body, config.max_response_bytes).await;
     match result {
-        Ok(resp) => Ok(Some(resp)),
+        Ok(rendered) => Ok(rendered),
         Err(e) => {
             if config.throw_on_error {
                 Err(FrameworkError::internal(format!("SSR render failed: {e}")))
@@ -383,18 +383,51 @@ async fn exchange(
     })
 }
 
-/// POST the page to the worker and read its rendered answer.
+/// POST the page to the worker and read its rendered answer; `None` for an
+/// answer with nothing to inline.
 async fn post_json(
     request: &SsrRequest,
     body: Vec<u8>,
     max_response_bytes: usize,
-) -> Result<SsrResponse, String> {
+) -> Result<Option<SsrResponse>, String> {
     let answer = exchange(request, Some(body), max_response_bytes).await?;
     if !answer.status.is_success() {
         return Err(format!("ssr worker returned {}", answer.status));
     }
-    serde_json::from_slice::<SsrResponse>(&answer.body)
-        .map_err(|e| format!("deserialize response: {e}"))
+    rendered(&answer.body).map_err(|e| format!("deserialize response: {e}"))
+}
+
+/// The page a worker's successful answer carries, or `None` when there is
+/// nothing to inline, so the visit renders on the client (SS-02).
+///
+/// Laravel returns `null` for an answer whose JSON is empty or falsy. An
+/// object without a non-empty `body` string is the same case here: the
+/// worker's body carries the page data element and the mount element, so
+/// inlining an empty one left a document the client could not start from.
+/// Head entries that are not strings are left out. Bytes that are not JSON
+/// at all are an error, which the caller reports like any worker failure.
+fn rendered(bytes: &[u8]) -> Result<Option<SsrResponse>, serde_json::Error> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let serde_json::Value::Object(mut answer) = serde_json::from_slice(bytes)? else {
+        return Ok(None);
+    };
+    let body = match answer.remove("body") {
+        Some(serde_json::Value::String(body)) if !body.is_empty() => body,
+        _ => return Ok(None),
+    };
+    let head = match answer.remove("head") {
+        Some(serde_json::Value::Array(entries)) => entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                serde_json::Value::String(fragment) => Some(fragment),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(Some(SsrResponse { head, body }))
 }
 
 #[cfg(test)]

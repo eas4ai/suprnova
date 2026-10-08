@@ -457,3 +457,72 @@ async fn inssr_an_https_worker_url_is_spoken_to_in_tls() {
         String::from_utf8_lossy(&bytes)
     );
 }
+
+// ---- PAR-059: an empty or falsy worker answer ----
+
+#[tokio::test]
+async fn inssr_an_empty_or_falsy_worker_answer_renders_on_the_client() {
+    // Laravel's `if (! $data = $response->json()) return null;`: nothing
+    // to inline means the client renders, from the page data the shell
+    // carries. An answer with no body is the same: inlining it would leave
+    // the document with neither the page data nor the mount element.
+    let answers = [
+        "{}",
+        "null",
+        "false",
+        "[]",
+        "\"<div id=\\\"app\\\"></div>\"",
+        "0",
+        "",
+        "{\"head\": [\"<title>From the worker</title>\"]}",
+        "{\"head\": [], \"body\": \"\"}",
+        "{\"head\": [], \"body\": null}",
+    ];
+    for answer in answers {
+        let worker = Worker::answering(200, answer).await;
+        let (config, errors) = with_error_hook(
+            InertiaConfig::new()
+                .production()
+                .ssr(worker.url())
+                .ssr_ensure_bundle_exists(false),
+        );
+
+        let document = first_visit(&config).await.expect("the visit renders");
+
+        assert!(
+            renders_on_the_client(&document),
+            "the answer {answer:?} left the document without the client shell:\n{document}"
+        );
+        assert!(
+            !document.contains("From the worker"),
+            "{answer:?}:\n{document}"
+        );
+        assert_eq!(worker.seen().len(), 1, "{answer:?}");
+        assert!(
+            errors.lock().unwrap().is_empty(),
+            "an empty answer is not a failure: {answer:?} {:?}",
+            errors.lock().unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn inssr_a_head_entry_that_is_not_a_string_is_left_out() {
+    let answer = json!({
+        "head": ["<title>From the worker</title>", 42, null],
+        "body": RENDERED,
+    });
+    let worker = Worker::answering(200, answer.to_string()).await;
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(worker.url())
+        .ssr_ensure_bundle_exists(false);
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(document.contains(RENDERED), "{document}");
+    assert!(
+        document.contains("<title>From the worker</title>"),
+        "{document}"
+    );
+}
