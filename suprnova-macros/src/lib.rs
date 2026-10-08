@@ -140,6 +140,12 @@ pub fn derive_data(input: TokenStream) -> TokenStream {
 /// It honors serde's `rename_all` on the struct and `rename`, `skip` and
 /// `skip_serializing` on a field, and refuses any other serde attribute.
 ///
+/// `#[inertia_props(shared)]` marks the struct whose fields every page
+/// shares, and `#[inertia_props(flash)]` the struct of a page's flash data.
+/// The derive writes the same `Serialize` impl with or without them;
+/// `suprnova generate-types` reads them to type Inertia's `sharedPageProps`
+/// and `flashDataType` with the struct's interface.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -150,7 +156,7 @@ pub fn derive_data(input: TokenStream) -> TokenStream {
 ///     current_user: User, // sent as `currentUser`
 /// }
 /// ```
-#[proc_macro_derive(InertiaProps, attributes(serde))]
+#[proc_macro_derive(InertiaProps, attributes(serde, inertia_props))]
 pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
     inertia::derive_inertia_props_impl(input)
 }
