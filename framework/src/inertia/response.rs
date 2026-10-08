@@ -123,6 +123,10 @@ pub struct InertiaResponse {
     /// session-flash mechanism mirroring Laravel's
     /// `redirect()->preserveFragment()` chainable.
     preserve_fragment: Option<bool>,
+    /// Per-response override for big-integer markers. `None` defers to
+    /// [`InertiaConfig::preserve_big_integers`]. Maps to Laravel's
+    /// `Response::preserveBigIntegers($bool)`.
+    preserve_big_integers: Option<bool>,
     /// Sidecar map for props registered via `prop_lazy_with_owner`.
     /// Maps the prop key to `(owner_struct_name, field_name)` so
     /// `resolve_props` can run `Prop::passes_include_gate` ahead of the
@@ -290,6 +294,7 @@ impl InertiaResponse {
             encrypt_history: None,
             clear_history: false,
             preserve_fragment: None,
+            preserve_big_integers: None,
             lazy_owned: IndexMap::new(),
         }
     }
@@ -929,6 +934,17 @@ impl InertiaResponse {
         self
     }
 
+    /// Send every integer beyond JavaScript's safe range (plus or minus
+    /// 9007199254740991) in props and flash as `{"$bigint": "<digits>"}`,
+    /// with `preserveBigIntegers: true` on the page, so the client restores
+    /// it as an exact `BigInt`; `false` sends plain numbers. Overrides
+    /// [`InertiaConfig::preserve_big_integers`] for this response. Maps to
+    /// Laravel's `Response::preserveBigIntegers($bool)`.
+    pub fn preserve_big_integers(mut self, on: bool) -> Self {
+        self.preserve_big_integers = Some(on);
+        self
+    }
+
     /// Build a `409 Conflict` external-redirect response. The client
     /// performs `window.location = url`, doing a full page navigation
     /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
@@ -1074,6 +1090,7 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            preserve_big_integers,
             lazy_owned,
         } = self;
 
@@ -1202,6 +1219,16 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
+        // Big-integer markers go on the finished props and flash, the
+        // values Laravel's `encodeBigIntegersWhenEnabled` sees.
+        let resolved_preserve_big_integers =
+            preserve_big_integers.unwrap_or(config.preserve_big_integers);
+        let mut materialized = materialized;
+        if resolved_preserve_big_integers {
+            encode_big_integers_in(&mut materialized);
+            encode_big_integers_in(&mut flash);
+        }
+
         let page = build_page_object(
             &component,
             ResolvedProps {
@@ -1215,6 +1242,7 @@ impl InertiaResponse {
                 encrypt_history: resolved_encrypt_history,
                 clear_history: resolved_clear_history,
                 preserve_fragment: resolved_preserve_fragment,
+                preserve_big_integers: resolved_preserve_big_integers,
             },
             shared_keys,
         );
@@ -1249,6 +1277,7 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            preserve_big_integers,
             lazy_owned,
         } = self;
         let (materialized, metadata) = resolve_props(
@@ -1290,6 +1319,14 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
+        let resolved_preserve_big_integers =
+            preserve_big_integers.unwrap_or(config.preserve_big_integers);
+        let mut materialized = materialized;
+        if resolved_preserve_big_integers {
+            encode_big_integers_in(&mut materialized);
+            encode_big_integers_in(&mut flash);
+        }
+
         let page = build_page_object(
             &component,
             ResolvedProps {
@@ -1303,6 +1340,7 @@ impl InertiaResponse {
                 encrypt_history: resolved_encrypt_history,
                 clear_history: resolved_clear_history,
                 preserve_fragment: resolved_preserve_fragment,
+                preserve_big_integers: resolved_preserve_big_integers,
             },
             shared_keys,
         );
@@ -1376,6 +1414,9 @@ struct PageObjectFlags {
     clear_history: bool,
     /// Emitted as `preserveFragment: true` when set, and omitted otherwise.
     preserve_fragment: bool,
+    /// Emitted as `preserveBigIntegers: true` when set, and omitted
+    /// otherwise; the props and flash then carry `$bigint` markers.
+    preserve_big_integers: bool,
 }
 
 /// Outcome of a single prop's async resolution.
@@ -2023,6 +2064,41 @@ async fn resolve_props(
     Ok((materialized, metadata))
 }
 
+/// The largest integer JavaScript represents exactly, `2^53 - 1`.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Replace every integer in `values` beyond plus or minus
+/// [`MAX_SAFE_INTEGER`], at any depth, with `{"$bigint": "<digits>"}`, the
+/// marker the Inertia client restores as a `BigInt`. Laravel's
+/// `PreservesBigIntegers::encodeBigIntegers`. Floats are not integers and
+/// stay as they are, as do object keys.
+fn encode_big_integers_in(values: &mut serde_json::Map<String, Value>) {
+    for value in values.values_mut() {
+        encode_big_integers(value);
+    }
+}
+
+/// [`encode_big_integers_in`] for one value, in place.
+fn encode_big_integers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            let beyond = match (number.as_u64(), number.as_i64()) {
+                (Some(unsigned), _) => unsigned > MAX_SAFE_INTEGER,
+                (None, Some(signed)) => signed.unsigned_abs() > MAX_SAFE_INTEGER,
+                (None, None) => false,
+            };
+            if beyond {
+                let mut marker = serde_json::Map::with_capacity(1);
+                marker.insert("$bigint".to_string(), Value::String(number.to_string()));
+                *value = Value::Object(marker);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(encode_big_integers),
+        Value::Object(map) => map.values_mut().for_each(encode_big_integers),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
 /// Whether Laravel's resolver would walk this prop's value as a literal,
 /// so dotted `only`/`except` entries narrow it.
 ///
@@ -2057,6 +2133,7 @@ fn build_page_object(
         encrypt_history,
         clear_history,
         preserve_fragment,
+        preserve_big_integers,
     } = flags;
     let mut page = serde_json::Map::new();
     page.insert(
@@ -2081,6 +2158,9 @@ fn build_page_object(
     }
     if preserve_fragment {
         page.insert("preserveFragment".to_string(), Value::Bool(true));
+    }
+    if preserve_big_integers {
+        page.insert("preserveBigIntegers".to_string(), Value::Bool(true));
     }
 
     if !flash.is_empty() {

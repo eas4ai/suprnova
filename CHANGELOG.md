@@ -135,6 +135,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   after the call advertises it, and the version middleware
   `Inertia::install` registers now reads `Inertia::get_version` per request
   instead of the version captured at install (RF-05).
+- **Big integers survive the trip to the browser.** JavaScript reads
+  integers exactly only up to 9007199254740991, so a 64-bit id beyond it,
+  9007199254740993 for one, reached an Inertia page as 9007199254740992.
+  With the new `InertiaConfig::preserve_big_integers(true)` setting, or
+  `InertiaResponse::preserve_big_integers(true)` for one response, every
+  integer beyond plus or minus 9007199254740991 in props and flash, at
+  any depth, is sent as `{"$bigint": "<digits>"}` and the page carries
+  `preserveBigIntegers: true`, so the Inertia client restores it as an
+  exact `BigInt`, as Laravel's `preserve_big_integers` does. Off by
+  default; when off nothing is wrapped and the flag is absent (JE-04,
+  JE-05).
 
 ### Changed
 

@@ -1544,6 +1544,33 @@ installed config shares that one cache, so the file is read and parsed
 once. When it's missing, production asset tags fall back to a hardcoded
 legacy path and a `tracing::warn!` fires so the gap surfaces in logs.
 
+### Big integers
+
+JavaScript represents integers exactly only up to 9007199254740991
+(2^53 - 1), so a 64-bit database id beyond it reaches the browser rounded.
+Turn on `preserve_big_integers` to send every integer outside plus or minus
+that bound, in props and flash and at any depth, as a marker the Inertia
+client restores as a `BigInt`:
+
+```rust
+use suprnova::{InertiaConfig, InertiaResponse};
+
+// Every response built from this config.
+let cfg = InertiaConfig::new().preserve_big_integers(true);
+
+// One response, whatever the config says.
+let page = InertiaResponse::new("Orders/Show")
+    .with("id", 9_007_199_254_740_993_u64)
+    .preserve_big_integers(true);
+```
+
+That `id` arrives as `{"$bigint": "9007199254740993"}`, and the page object
+carries `preserveBigIntegers: true` so the client knows to restore it.
+Integers inside the safe range, floats and object keys are left alone.
+With the setting off, the default, nothing is wrapped and the flag is
+absent. This is Laravel's `inertia.preserve_big_integers` setting and
+`Response::preserveBigIntegers`.
+
 ### Why Suprnova diverges
 
 Laravel's Inertia adapter has a single global "shared data"

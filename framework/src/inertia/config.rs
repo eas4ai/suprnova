@@ -309,6 +309,15 @@ pub struct InertiaConfig {
     /// drained from the session flash only - an `errors` prop a handler
     /// sets itself passes through as-is.
     pub with_all_errors: bool,
+    /// Whether every integer beyond JavaScript's safe range (plus or minus
+    /// 9007199254740991) in props and flash is sent as
+    /// `{"$bigint": "<digits>"}`, with `preserveBigIntegers: true` on the
+    /// page, so the client restores it as an exact `BigInt` instead of a
+    /// rounded number. A 64-bit database id past 2^53 otherwise reaches
+    /// the browser off by a few. Laravel's `inertia.preserve_big_integers`;
+    /// default `false`. A response overrides it with
+    /// [`InertiaResponse::preserve_big_integers`](crate::InertiaResponse::preserve_big_integers).
+    pub preserve_big_integers: bool,
     /// Maximum number of lazy/deferred/once/shared prop resolvers that
     /// run concurrently for a single response.
     ///
@@ -560,6 +569,7 @@ impl Default for InertiaConfig {
             assets_base_url: "/assets".to_string(),
             asset_url: None,
             with_all_errors: false,
+            preserve_big_integers: false,
             max_concurrent_resolvers: 16,
             // `None` so an app upgrading into this release keeps the
             // exact error bodies it had. Opting in is one builder call.
@@ -802,6 +812,14 @@ impl InertiaConfig {
             }
             (version, _) => version.resolve(),
         }
+    }
+
+    /// Send integers beyond JavaScript's safe range as `$bigint` markers.
+    /// See the [`preserve_big_integers`](Self::preserve_big_integers)
+    /// field.
+    pub fn preserve_big_integers(mut self, on: bool) -> Self {
+        self.preserve_big_integers = on;
+        self
     }
 
     /// Override the per-response cap on concurrent prop resolvers.
