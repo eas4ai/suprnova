@@ -4376,13 +4376,19 @@ async fn location_for_returns_302_on_a_plain_browser_request() {
 }
 
 #[tokio::test]
-async fn location_keeps_its_always_409_shape() {
-    // The pre-existing surface is unchanged: `location(url)` is the
-    // "I already know this is an Inertia request" form.
+async fn location_outside_a_request_answers_the_plain_visit_form() {
+    // `location(url)` answers from the visit the server scopes for every
+    // dispatched request; outside one no visit is in scope, and the answer
+    // is the redirect a plain visit gets, never the 409 a browser cannot
+    // follow (PAR-049).
     let resp = InertiaResponse::location("https://example.com/external");
     let hyper_resp = resp.into_hyper();
-    assert_eq!(hyper_resp.status(), 409);
-    assert!(hyper_resp.headers().get("X-Inertia-Location").is_some());
+    assert_eq!(hyper_resp.status(), 302);
+    assert_eq!(
+        hyper_resp.headers().get("Location").unwrap(),
+        "https://example.com/external"
+    );
+    assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
 }
 
 // ---- clear_history survives a redirect ----
