@@ -245,7 +245,10 @@ async fn bind_002_a_malformed_value_answers_404_for_a_scoped_child_and_an_option
         "an optional argument answers a malformed value as a missing row"
     );
     assert_eq!(message(&missing), "KyPost not found");
-    assert!(!without_request_id(&malformed).to_string().contains("7abc"), "{malformed}");
+    assert!(
+        !without_request_id(&malformed).to_string().contains("7abc"),
+        "{malformed}"
+    );
 }
 
 #[tokio::test]

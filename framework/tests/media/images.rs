@@ -50,27 +50,29 @@ fn flat(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
 }
 
 fn png_of(width: u32, height: u32, rgba: Vec<u8>) -> Vec<u8> {
-    oxideav_png::encode_png_image(&oxideav_png::PngImage {
+    oxideav_png::encode_plane(
         width,
         height,
-        pixel_format: oxideav_png::PngPixelFormat::Rgba,
-        stride: width as usize * 4,
-        data: rgba,
-        palette: Vec::new(),
-    })
+        oxideav_png::PngPixelFormat::Rgba,
+        width as usize * 4,
+        &rgba,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the fixture PNG encodes")
 }
 
 /// A one-channel greyscale PNG.
 fn grey_png(width: u32, height: u32, level: u8) -> Vec<u8> {
-    oxideav_png::encode_png_image(&oxideav_png::PngImage {
+    oxideav_png::encode_plane(
         width,
         height,
-        pixel_format: oxideav_png::PngPixelFormat::Gray8,
-        stride: width as usize,
-        data: vec![level; (width * height) as usize],
-        palette: Vec::new(),
-    })
+        oxideav_png::PngPixelFormat::Gray8,
+        width as usize,
+        &vec![level; (width * height) as usize],
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the fixture PNG encodes")
 }
 
@@ -311,7 +313,7 @@ fn grey_gamma_profile() -> Vec<u8> {
 
 /// Width, height and packed RGBA of a PNG.
 fn png_pixels(png: &[u8]) -> (u32, u32, Vec<u8>) {
-    let bitmap = oxideav_png::decode_png_to_rgba(png).expect("the output PNG decodes");
+    let bitmap = oxideav_png::decode_rgba8(png).expect("the output PNG decodes");
     (bitmap.width, bitmap.height, bitmap.data)
 }
 
@@ -1250,21 +1252,17 @@ fn sources_with_profile(
     profile: &[u8],
 ) -> Vec<(&'static str, Vec<u8>)> {
     let png = png_of(width, height, rgba.to_vec());
-    let bmp = oxideav_bmp::encode_bmp_with_icc_profile(
-        &oxideav_bmp::BmpImage {
+    // Rendering intent 4: LCS_GM_IMAGES, perceptual, the ICC default.
+    let bmp = oxideav_bmp::encode(
+        &oxideav_bmp::BmpImage::new(
             width,
             height,
-            pixel_format: oxideav_bmp::BmpPixelFormat::Rgba,
-            planes: vec![oxideav_bmp::BmpPlane {
-                stride: width as usize * 4,
-                data: rgba.to_vec(),
-            }],
-            palette: None,
-            pts: None,
-        },
-        profile,
-        4,
-        oxideav_bmp::BmpEncodeOptions::default(),
+            oxideav_bmp::PixelFormat::Rgba,
+            vec![oxideav_bmp::Plane::new(width as usize * 4, rgba.to_vec())],
+        )
+        .expect("the fixture BMP image")
+        .with_metadata(oxideav_bmp::Metadata::new().with_icc(profile.to_vec())),
+        &oxideav_bmp::EncodeOptions::default().with_rendering_intent(4),
     )
     .expect("the fixture BMP encodes");
     vec![

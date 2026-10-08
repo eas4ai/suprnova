@@ -1,0 +1,15 @@
+# MEM-003's exception for output decoded from a lossy WebP source:
+# oxideav-webp 0.3 (eas4ai/oxideav-webp at 65a9c8a) corrected the lossy
+# decoder's colour conversion to within one level of libwebp's. These
+# outputs differ from c04577b96's in pixel values only, by at most 16
+# levels; dimensions, layout and chunks are unchanged.
+webp-lossy-alpha/resize/png 4022b73b72d7c92a2780b8fc810102dc23e08ce1cea092abb9643624c9037a7c
+webp-lossy-alpha/resize/webp 3cbd702e1b31df20d84ac4ccb8fa0f436b49420ecfe175f85b706fd353aa11eb
+webp-lossy-alpha/resize/webp-lossless 3cbd702e1b31df20d84ac4ccb8fa0f436b49420ecfe175f85b706fd353aa11eb
+webp-lossy-alpha/resize/bmp a2d758c0b59f02782eb8c54183127c68edd9b2becbced57da33ca0dbb0ff2a1b
+webp-lossy-alpha/cover/png 7957c805c8e49607abd91803595cecd8b89f158a414e15df137bdb2962eb8a9a
+webp-lossy-alpha/chain/png 94a88b64f9c74595cc976f5e77371e016fa5f2f9d76e771fd1c2076a1d61403f
+webp-lossy-alpha/chain/webp ca81682f9ea2aefa95afc79bc15689be57efe7ec41b872926a22975d416448ce
+webp-lossy-alpha/chain/webp-lossless ca81682f9ea2aefa95afc79bc15689be57efe7ec41b872926a22975d416448ce
+webp-lossy-alpha/chain/bmp 42d65666720a8c8d558e1060ab6c56a3fc89db5f37feae53af2039535a58f90d
+webp-lossy-alpha/dominant-color 58f80ecf05ba34ea11943a50d22f38e974fc4c4d4f283bcc4ffa33017bf73922

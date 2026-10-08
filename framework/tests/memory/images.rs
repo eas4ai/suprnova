@@ -4,7 +4,7 @@
 #![cfg(feature = "media")]
 
 use oxideav_gif::{Block, DisposalMethod, GifFile, GifFrameData, GraphicControl, Rgb, Version};
-use oxideav_png::{PngEncoderOptions, PngImage, PngPixelFormat};
+use oxideav_png::PngPixelFormat;
 use suprnova::ImageConfig;
 use suprnova::media::{
     ImageDriver, ImagePipeline, OutputFormat, OxideAvImageDriver, Transformation,
@@ -140,14 +140,15 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// a `width x height` RGBA image, `height * (1 + width * 4)` bytes inflated.
 fn png_declaring_one_pixel(width: u32, height: u32) -> Vec<u8> {
     let stride = width as usize * 4;
-    let large = oxideav_png::encode_png_image(&PngImage {
+    let large = oxideav_png::encode_plane(
         width,
         height,
-        pixel_format: PngPixelFormat::Rgba,
+        PngPixelFormat::Rgba,
         stride,
-        data: vec![0u8; stride * height as usize],
-        palette: Vec::new(),
-    })
+        &vec![0u8; stride * height as usize],
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the large image encodes");
     let mut idat = Vec::new();
     let mut pos = PNG_SIGNATURE.len();
@@ -359,19 +360,14 @@ fn encode_png(
     interlace: bool,
 ) -> Vec<u8> {
     let stride = width as usize * channels;
-    oxideav_png::encode_png_image_with_options(
-        &PngImage {
-            width,
-            height,
-            pixel_format,
-            stride,
-            data: noise(width, height, channels),
-            palette: Vec::new(),
-        },
-        &PngEncoderOptions {
-            interlace,
-            ..PngEncoderOptions::default()
-        },
+    oxideav_png::encode_plane(
+        width,
+        height,
+        pixel_format,
+        stride,
+        &noise(width, height, channels),
+        None,
+        &oxideav_png::EncodeOptions::default().with_interlace(interlace),
     )
     .expect("the PNG encodes")
 }
@@ -453,14 +449,15 @@ async fn mem_audit_jpeg_webp_and_bmp_decode_within_the_budget() {
         .chunks(3)
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
-    let source = oxideav_png::encode_png_image(&PngImage {
-        width: 256,
-        height: 256,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 256 * 4,
-        data: opaque,
-        palette: Vec::new(),
-    })
+    let source = oxideav_png::encode_plane(
+        256,
+        256,
+        PngPixelFormat::Rgba,
+        256 * 4,
+        &opaque,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the PNG encodes");
     for (name, format) in [
         ("JPEG", OutputFormat::Jpeg),
@@ -469,6 +466,62 @@ async fn mem_audit_jpeg_webp_and_bmp_decode_within_the_budget() {
         ("BMP", OutputFormat::Bmp),
     ] {
         assert_the_budget_holds(name, &convert(&source, format), 256, 256);
+    }
+}
+
+/// A `side x side` BMP of noise in `format`, `channels` bytes a pixel, with
+/// a 256-colour palette for `Pal8`, embedding `profile` in a V5 header when
+/// one is given.
+fn bmp_of(
+    side: u32,
+    format: oxideav_bmp::PixelFormat,
+    channels: usize,
+    profile: Option<Vec<u8>>,
+) -> Vec<u8> {
+    let image = oxideav_bmp::BmpImage::new(
+        side,
+        side,
+        format,
+        vec![oxideav_bmp::Plane::new(
+            side as usize * channels,
+            noise(side, side, channels),
+        )],
+    )
+    .expect("the BMP image")
+    .with_palette((format == oxideav_bmp::PixelFormat::Pal8).then(|| {
+        oxideav_bmp::Palette::new(
+            (0..=255u8)
+                .map(|level| [level, 255 - level, level / 2, 255])
+                .collect(),
+        )
+    }))
+    .with_metadata(oxideav_bmp::Metadata::new().with_icc(profile));
+    oxideav_bmp::encode(&image, &oxideav_bmp::EncodeOptions::default()).expect("the BMP encodes")
+}
+
+/// MEM-003 and IMG-002: `oxideav-bmp` decodes a BMP into the file's own
+/// layout, and the driver asks it to leave an embedded profile in the file.
+/// A 32-bit plane becomes the RGBA plane where it lies; a narrower one is
+/// converted into a new RGBA plane while it is held. The estimate counts
+/// both planes and no copy of the profile, so the file with a profile fails
+/// here if the decoder copies it again.
+#[tokio::test]
+async fn mem_audit_bmps_in_every_depth_decode_within_the_budget() {
+    let _lock = exclusive().await;
+    use oxideav_bmp::PixelFormat as F;
+    for (name, format, channels, profile) in [
+        ("24-bit BMP", F::Bgr24, 3, None),
+        ("16-bit BMP", F::Rgb565, 2, None),
+        ("8-bit BMP", F::Pal8, 1, None),
+        ("32-bit BMP", F::Bgra, 4, None),
+        (
+            "32-bit BMP with a profile",
+            F::Bgra,
+            4,
+            Some(p3_profile_of(256 * 1024)),
+        ),
+    ] {
+        assert_the_budget_holds(name, &bmp_of(256, format, channels, profile), 256, 256);
     }
 }
 
@@ -677,14 +730,15 @@ fn lossy_webp_with_a_many_group_alpha_plane() -> Vec<u8> {
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
     let lossy = convert(
-        &oxideav_png::encode_png_image(&PngImage {
-            width: 4,
-            height: 4,
-            pixel_format: PngPixelFormat::Rgba,
-            stride: 4 * 4,
-            data: opaque,
-            palette: Vec::new(),
-        })
+        &oxideav_png::encode_plane(
+            4,
+            4,
+            PngPixelFormat::Rgba,
+            4 * 4,
+            &opaque,
+            None,
+            &oxideav_png::EncodeOptions::default(),
+        )
         .expect("the PNG encodes"),
         OutputFormat::WebP,
     );
@@ -924,14 +978,15 @@ async fn img_001_an_oriented_decode_stays_within_its_estimate() {
         .chunks(3)
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
-    let source = oxideav_png::encode_png_image(&PngImage {
-        width: 256,
-        height: 128,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 256 * 4,
-        data: opaque,
-        palette: Vec::new(),
-    })
+    let source = oxideav_png::encode_plane(
+        256,
+        128,
+        PngPixelFormat::Rgba,
+        256 * 4,
+        &opaque,
+        None,
+        &oxideav_png::EncodeOptions::default(),
+    )
     .expect("the PNG encodes");
     let tiff = orientation_tiff(6);
     let mut app1 = vec![0xFF, 0xE1];
@@ -1157,18 +1212,30 @@ fn jpeg_with_profile(jpeg: &[u8], profile: &[u8]) -> Vec<u8> {
     out
 }
 
+/// What reading and writing the small profile below takes, beyond what the
+/// same image keeping only its orientation allocates. Measured with the
+/// eas4ai forks of `oxideav-png`, `oxideav-bmp` and `oxideav-webp`, whose
+/// PNG decoder the driver asks to leave the source's `iCCP` chunk
+/// compressed: 142,886 bytes for PNG output, which compresses the profile
+/// again (140,945 with `oxideav-png` 0.1.8); 75,491 for JPEG output from
+/// the same PNG sources (75,668 with 0.1.8); and 2,382 for WebP output,
+/// lossless or lossy, from JPEG sources (the same with `oxideav-webp`
+/// 0.2.3). The allowance this replaces was half the output: 524,738 bytes
+/// for the PNG.
+const PROFILE_WORK: u64 = 192 * 1024;
+
 /// MEM-003: the metadata an image keeps is written into the one output
 /// buffer the encoder fills, not by copying the encoded file again. The
-/// encoder leaves no room for metadata, so that buffer grows once, by
-/// exactly the room it needs, and may move as it grows. Two measures, with
-/// orientation left unapplied so the tag is kept:
-/// - The same image keeping only its orientation also grows its buffer
-///   once. With a profile too, it allocates the same, give or take what
-///   reading and writing the profile takes, which is far less than half
-///   the output: a second copy of the output would be all of it.
-/// - The same image keeping nothing is written with no room and never
-///   moves. With a profile, the run allocates less than one output and a
-///   half more: one move, and no second.
+/// buffer grows at most once, by exactly the room the metadata needs, and
+/// may move as it grows. Two measures, with orientation left unapplied so
+/// the tag is kept:
+/// - The same image keeping only its orientation also makes that room.
+///   With a profile too, it allocates the same, give or take
+///   [`PROFILE_WORK`]: a second copy of the output would be all of it, and
+///   every output here is more than twice that.
+/// - The same image keeping nothing is written with no room. With a
+///   profile, the run allocates less than one output and [`PROFILE_WORK`]
+///   more: one move, and no second.
 #[tokio::test]
 async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     let _lock = exclusive().await;
@@ -1181,17 +1248,15 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     app1.extend_from_slice(&tiff);
     // Noise, so the encoded outputs are as large as the pixels. The WebP
     // images come from an opaque JPEG, so the driver writes `WebP` lossy,
-    // and the JPEG's profile is read whole: inflating a PNG's profile
-    // allocates more than a small output holds, and would hide a copy of
-    // it. The lossless WebP encoder allocates too much for dhat to record
-    // a large image quickly, so its image is small; the lossy one is
-    // written at full quality, so its output is not.
+    // and the JPEG's profile is read whole: a PNG's profile is inflated,
+    // and that work would hide a copy of a smaller output. The lossy WebP
+    // is written at full quality, so its output is not small.
     let default_quality = ImagePipeline::default().quality;
     let cases = [
         (OutputFormat::Png, 512, default_quality),
-        (OutputFormat::Jpeg, 512, default_quality),
-        (OutputFormat::WebPLossless, 64, default_quality),
-        (OutputFormat::WebP, 128, 100),
+        (OutputFormat::Jpeg, 1024, default_quality),
+        (OutputFormat::WebPLossless, 512, default_quality),
+        (OutputFormat::WebP, 512, 100),
     ]
     .map(|(format, side, quality)| {
         let sources = if matches!(format, OutputFormat::Png | OutputFormat::Jpeg) {
@@ -1228,14 +1293,17 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
         let (bare, out_len) = allocated_by(&driver, plain, &pipeline);
         let (without, _) = allocated_by(&driver, oriented, &pipeline);
         let (with, _) = allocated_by(&driver, tagged, &pipeline);
-        let allowance = out_len as u64 / 2;
         assert!(
-            with < without + allowance,
+            out_len as u64 > 2 * PROFILE_WORK,
+            "{format:?}: a {out_len}-byte output is too small to tell a copy of it"
+        );
+        assert!(
+            with < without + PROFILE_WORK,
             "{format:?}: {with} bytes with the profile against {without} with the orientation \
              alone, for a {out_len}-byte output: the output was copied"
         );
         assert!(
-            with < bare + out_len as u64 + allowance,
+            with < bare + out_len as u64 + PROFILE_WORK,
             "{format:?}: {with} bytes with the profile against {bare} keeping nothing, for a \
              {out_len}-byte output: the output moved more than once"
         );
@@ -1522,13 +1590,20 @@ fn magick_stand_in(name: &str, answer: &[u8]) -> suprnova::MagickCliDriver {
     suprnova::MagickCliDriver::new(stand_in.to_string_lossy())
 }
 
+/// What reading the source's `gAMA` chunk and adding it to ImageMagick's
+/// output takes, beyond the same run with nothing to add: measured at
+/// 16,740 to 16,756 bytes, the same with `oxideav-png` 0.1.8 and with the
+/// eas4ai fork. The allowance this replaces was half the output, 2 MiB.
+#[cfg(unix)]
+const CHUNK_WORK: u64 = 64 * 1024;
+
 /// MEM-003: the `magick` driver adds the metadata a PNG source keeps (its
 /// `gAMA` chunk here) into ImageMagick's output where it stands, rather
 /// than by copying the output into a larger buffer. The stand-in answers
 /// with a PNG one byte short of 4 MiB, the length at which a buffer grown
 /// by doubling while it was read has one byte of room left. The same run
-/// with and without the chunk to add allocates the same, give or take far
-/// less than half the output: a copy of the output would be all of it.
+/// with and without the chunk to add allocates the same, give or take
+/// [`CHUNK_WORK`]: a copy of the output would be 4 MiB.
 #[cfg(unix)]
 #[tokio::test]
 async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() {
@@ -1566,9 +1641,8 @@ async fn mem_audit_the_magick_driver_adds_metadata_without_copying_its_output() 
         png_with_chunks(&answer, &[(b"gAMA", gama)]),
         "the source's gAMA chunk follows IHDR"
     );
-    let allowance = LENGTH as u64 / 2;
     assert!(
-        with < without + allowance,
+        with < without + CHUNK_WORK,
         "{with} bytes with a chunk to add against {without} without, for a {LENGTH}-byte \
          output: the output was copied"
     );
@@ -2294,36 +2368,40 @@ async fn mem_audit_an_encoded_image_is_not_copied_out_of_its_encoder() {
     let plane = (SIDE * SIDE * 4) as usize;
     let png = encode_png(SIDE, SIDE, PngPixelFormat::Rgba, 4, false);
     let bmp = convert(&png, OutputFormat::Bmp);
-    let pixels = oxideav_png::decode_png_to_rgba(&png)
+    let pixels = oxideav_png::decode_rgba8(&png)
         .expect("the PNG decodes")
         .data;
     assert_eq!(pixels.len(), plane);
     type ByHand = fn(Vec<u8>) -> Vec<u8>;
     let by_hand: [(&str, &[u8], ByHand); 2] = [
+        // At deflate level 6, the level the driver keeps from the
+        // `oxideav-png` releases before the crate's default became 2.
         ("PNG", &png, |pixels| {
-            oxideav_png::encode_png_image(&PngImage {
-                width: SIDE,
-                height: SIDE,
-                pixel_format: PngPixelFormat::Rgba,
-                stride: SIDE as usize * 4,
-                data: pixels,
-                palette: Vec::new(),
-            })
+            oxideav_png::encode(
+                &oxideav_png::PngImage::packed(
+                    SIDE,
+                    SIDE,
+                    PngPixelFormat::Rgba,
+                    SIDE as usize * 4,
+                    pixels,
+                )
+                .expect("the PNG image"),
+                &oxideav_png::EncodeOptions::default().with_compression_level(6),
+            )
             .expect("the PNG encodes")
         }),
         ("BMP", &bmp, |pixels| {
-            oxideav_bmp::encode_bmp_plane(
-                &oxideav_bmp::BmpPlane {
-                    stride: SIDE as usize * 4,
-                    data: pixels,
-                },
-                oxideav_bmp::BmpPixelFormat::Rgba,
-                None,
-                SIDE,
-                SIDE,
+            oxideav_bmp::encode(
+                &oxideav_bmp::BmpImage::new(
+                    SIDE,
+                    SIDE,
+                    oxideav_bmp::PixelFormat::Rgba,
+                    vec![oxideav_bmp::Plane::new(SIDE as usize * 4, pixels)],
+                )
+                .expect("the BMP image"),
+                &oxideav_bmp::EncodeOptions::default(),
             )
             .expect("the BMP encodes")
-            .0
         }),
     ];
     let pipeline = ImagePipeline::default();

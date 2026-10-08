@@ -130,6 +130,40 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **The built-in image driver's PNG, BMP and WebP codecs come from the
+  eas4ai forks** of `oxideav-png`, `oxideav-bmp` and `oxideav-webp` while
+  the upstream pull requests are open (OxideAV/oxideav-png #18 to #25,
+  oxideav-bmp #11 to #17, oxideav-webp #35 to #43). The encoders copy
+  less: a PNG is written into a buffer with room for the metadata added
+  after it, so keeping an orientation tag on a 512 x 512 noise PNG no
+  longer moves its 1 MiB file once more, and a BMP into a buffer reserved
+  at the file's exact size; lossy WebP is encoded from the converted
+  planes where they lie, and lossless WebP from the pixels, instead of
+  from a copy of each. Lossless WebP chooses its transforms in one pass
+  rather than by exhaustive search: a 1024 x 1024 photo encodes in about
+  half a second instead of 47.8 s in a release build, and processing a
+  64 x 64 image to lossless WebP allocates 0.76 MB in all instead of
+  1.23 GB. Its files are at most 8.7 percent larger. The forks carry
+  three fixes of their own, each offered upstream (oxideav-png #26,
+  oxideav-bmp #18 and #19): a PNG is decoded
+  without inflating its `iCCP` profile or XMP packet, which
+  `oxideav-png` 0.1.11 and later inflated, up to 64 MiB each, before
+  `IMAGE_MAX_ALLOC_BYTES` could count them (a crafted profile held
+  118,213,096 bytes under a 4 MiB budget); a BMP is decoded without a
+  copy of its embedded profile (5,242,912 bytes allocated for a
+  1024 x 1024 RGBA file with a 1 MiB profile, now 4,194,336); and a BMP
+  with a profile is written by an encoder that borrows the profile. An
+  RGBA PNG is also decoded without the second copy of its pixels the
+  crate's RGBA entry made (1 MiB for a 512 x 512 image). The forks
+  follow upstream master, which changes three kinds of output: an image
+  decoded from a lossy WebP, whose colour conversion `oxideav-webp` 0.3
+  corrected to within one level of libwebp's (pixels move by up to 16
+  levels); a PNG with more than 1 MiB of filtered data, which
+  `oxideav-png` 0.1.12 deflates in 1 MiB pieces, so its bytes can differ
+  (a 1024 x 1024 noise PNG is 4,196,716 bytes instead of 4,196,676); and
+  lossless WebP with transparency, written in the simple lossless layout,
+  its alpha declared in the `VP8L` header, rather than behind a `VP8X`
+  header.
 - **The project file is `suprnova.toml`, all lowercase.** `suprnova serve`
   reads its extra dev processes from `suprnova.toml`, and `live:add` keeps
   its records there. A project that holds a `Suprnova.toml` must rename it:
