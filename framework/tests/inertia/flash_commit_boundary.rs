@@ -399,7 +399,7 @@ async fn lazy_failure_reflashes_aged_named_errors_until_successful_response() {
     );
     assert_eq!(final_response.status(), 200);
     let final_page: serde_json::Value = serde_json::from_str(&body(final_response).await).unwrap();
-    assert_eq!(final_page["props"]["errors"], json!({"login": {}}));
+    assert_eq!(final_page["props"]["errors"], json!({}));
     assert!(final_page.get("flash").is_none());
     assert!(final_page.get("preserveFragment").is_none());
     assert!(final_page.get("clearHistory").is_none());
@@ -496,7 +496,7 @@ async fn ssr_failure_reflashes_aged_errors_until_successful_response() {
     );
     assert_eq!(final_response.status(), 200);
     let final_page: serde_json::Value = serde_json::from_str(&body(final_response).await).unwrap();
-    assert_eq!(final_page["props"]["errors"], json!({"profile": {}}));
+    assert_eq!(final_page["props"]["errors"], json!({}));
 }
 
 #[tokio::test]
@@ -611,7 +611,7 @@ async fn session_cookie_failure_keeps_staged_errors_in_the_persisted_session() {
     );
     assert_eq!(final_response.status(), 200);
     let final_page: serde_json::Value = serde_json::from_str(&body(final_response).await).unwrap();
-    assert_eq!(final_page["props"]["errors"], json!({"cookie": {}}));
+    assert_eq!(final_page["props"]["errors"], json!({}));
 }
 
 #[tokio::test]
@@ -682,7 +682,7 @@ async fn session_write_failure_keeps_staged_errors_in_the_persisted_session() {
     );
     assert_eq!(final_response.status(), 200);
     let final_page: serde_json::Value = serde_json::from_str(&body(final_response).await).unwrap();
-    assert_eq!(final_page["props"]["errors"], json!({"write": {}}));
+    assert_eq!(final_page["props"]["errors"], json!({}));
 }
 
 #[tokio::test]
@@ -772,7 +772,7 @@ async fn try_data_failure_reflashes_aged_session_values_before_resolve() {
     );
     assert_eq!(final_response.status(), 200);
     let final_page: serde_json::Value = serde_json::from_str(&body(final_response).await).unwrap();
-    assert_eq!(final_page["props"]["errors"], json!({"eager": {}}));
+    assert_eq!(final_page["props"]["errors"], json!({}));
     assert!(final_page.get("flash").is_none());
     assert!(final_page.get("preserveFragment").is_none());
     assert!(final_page.get("clearHistory").is_none());
@@ -1004,7 +1004,7 @@ async fn infallible_builder_panic_recovery_preserves_persisted_session_values() 
         send_get(address, "/render", Some(&cookie), Some("panic_builder")).await;
     assert_eq!(status, 200);
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(page["props"]["errors"], json!({"panic_builder": {}}));
+    assert_eq!(page["props"]["errors"], json!({}));
     assert!(page.get("flash").is_none());
     assert!(page.get("preserveFragment").is_none());
     assert!(page.get("clearHistory").is_none());
@@ -1040,7 +1040,7 @@ async fn infallible_data_panic_recovery_preserves_persisted_session_values() {
     let (status, _, body) = send_get(address, "/render", Some(&cookie), Some("panic_data")).await;
     assert_eq!(status, 200);
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(page["props"]["errors"], json!({"panic_data": {}}));
+    assert_eq!(page["props"]["errors"], json!({}));
     assert!(page.get("flash").is_none());
     assert!(page.get("preserveFragment").is_none());
     assert!(page.get("clearHistory").is_none());

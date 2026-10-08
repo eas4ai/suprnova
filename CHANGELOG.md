@@ -223,6 +223,50 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   exact `BigInt`, as Laravel's `preserve_big_integers` does. Off by
   default; when off nothing is wrapped and the flag is absent (JE-04,
   JE-05).
+- **`Inertia::back(status, fallback)` and
+  `InertiaConfig::store_previous_url`.** `back` is Laravel's
+  `Inertia::back()`: the request's `Referer` when it is a path on this host
+  under the public root, else the session's previous URL, else the
+  fallback, else `/` (RF-18). `store_previous_url` (on by default) turns the
+  previous-URL recording of Inertia visits off (MW-06).
+- **Inertia flash on the facade: `Inertia::flash`, `flash_many`,
+  `get_flashed`, `pull_flashed`, `clear_history` and `preserve_fragment`.**
+  `flash` takes a string key or any type implementing the new `FlashKey`
+  trait, such as an application's enum of toast kinds; `get_flashed(&req)`
+  returns exactly what `pull_flashed(&req)` removes (RF-17, RF-19, RF-08,
+  RF-09).
+- **Shared data and render settings on the `Inertia` facade.**
+  `Inertia::share(key, value)`, `share_many`, `share_data` (a
+  `#[derive(Data)]` object's eager fields) and `share_provider` take the
+  forms Laravel's `Inertia::share` takes; `get_shared(key, default)` and
+  `get_shared_all()` read shared data back. `transform_component_using`
+  renames components before they render, and
+  `InertiaConfig::ensure_pages_exist` (with `pages_dir` and
+  `page_extensions`) makes a component with no page file an error naming the
+  component and the directory, for a name given as a string too (RF-02,
+  RF-03, RF-07, RF-15).
+- **SSR controls on the `Inertia` facade.** `Inertia::disable_ssr(bool)`
+  and `disable_ssr_if(fn)` replace the configuration's switch, per request
+  for the function, and can turn SSR on as well as off;
+  `without_ssr(patterns)` adds exclusions; `configure_ssr_request_using(fn)`
+  adjusts the request sent to the worker through the new `SsrRequest`
+  (headers, a bearer token, the timeout), so a worker that needs a token can
+  be reached (RF-11, RF-12, RF-13).
+- **`Inertia::location(url or redirect)`**, Laravel's `Inertia::location`,
+  beside `InertiaResponse::location`, both taking a URL or a `Redirect`
+  through the new `InertiaLocation` (RF-16, HM-04).
+- **Inertia middleware hooks and the stack on a route group.** The
+  `InertiaMiddlewareHooks` trait carries Laravel's overridable middleware
+  decisions (`version`, `share`, `share_once`, `root_view`, `url_resolver`,
+  `on_empty_response`, `on_version_change`, `on_redirect_with_fragment`),
+  each defaulting to the framework's behaviour; `InertiaConfig::hooks`
+  installs an implementation, `DefaultInertiaHooks` is the framework's
+  answer to start from, and `InertiaVisit` is the request an `on_*` hook
+  answers. `Inertia::middleware(&cfg)` is the whole stack as one middleware
+  for a route group, and `InertiaConfig::register_globally(false)` makes
+  `Inertia::install` register it as the named middleware `inertia` instead
+  of on every route, so an API group carries no `Vary: X-Inertia` and has no
+  redirect turned into `303` (MW-08, MW-10).
 
 ### Changed
 
@@ -550,6 +594,66 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   gains an `=`, a repeated key keeps its last value, and `a[]=x` becomes
   `a%5B0%5D=x`. The version 409's `X-Inertia-Location` carries the same
   query. A `url_resolver`'s URL is left as it returns it (RS-07).
+- **An empty Inertia response redirects back as Laravel's does.** An empty
+  `200` on an Inertia visit was answered with `303` to the session's
+  previous URL or `/`, whatever the method, so a `POST` from `/form` with no
+  previous URL landed on `/`. It now goes to the same-origin `Referer`, then
+  the previous URL, then `/`, with `302`, and `303` only for `PUT`, `PATCH`
+  and `DELETE`; a browser follows a `302` after `POST` with a `GET`, so the
+  blanket `303` protected nothing (MW-03, R09).
+- **A redirect with a fragment keeps it on an Inertia visit.** A redirect to
+  `/page#section` reached the client as a plain `302`, and the fragment was
+  lost inside the XHR that followed it. It now arrives as `409` with
+  `X-Inertia-Redirect: /page#section`, which the client visits with the
+  fragment intact, except on a prefetch, which `X-Moz`, `Purpose` or
+  `Sec-Purpose: prefetch` marks (HD-12, HD-13, R06).
+- **Inertia visits record the previous URL.** The session middleware skipped
+  every Inertia visit, so after Inertia navigation `Redirect::back` and a
+  failed validation landed on the last page loaded in full. An Inertia `GET`
+  that matched a route now records its URL, unless it is a prefetch, a
+  Precognition request or a partial reload of the component it rendered,
+  and a browser prefetch no longer records one in the session middleware
+  (MW-06, HD-13).
+- **`errors` under `X-Inertia-Error-Bag` takes Laravel's shape.** With the
+  header, a visit with no session errors got `{"<bag>": {}}` and a session
+  `default` bag was dropped for `{"<bag>": {}}`. It is now `{}` with no
+  errors, `{"<bag>": <default bag>}` with a default bag, and the named bags
+  as they are otherwise (HD-08).
+- **Inertia flash data lives in the session until a page shows it.**
+  `App::flash` kept its value in the request: a request that answered plain
+  JSON lost it, and one that redirected twice dropped it at the second hop.
+  `App::flash`, `Inertia::flash` and `InertiaResponse::flash` now write the
+  session entry `inertia.flash_data`, the next Inertia page emits it under
+  `page.flash` and removes it, and every redirect keeps it for one more
+  request (RF-17, MW-05).
+- **`clearHistory` and `preserveFragment` survive any number of redirects.**
+  `App::clear_history()` and `Redirect::preserve_fragment()` flashed a flag
+  for one request, so a logout that redirected twice rendered the login page
+  without `clearHistory: true` and left the previous user's encrypted
+  history readable. The flags are now the session entries
+  `inertia.clear_history` and `inertia.preserve_fragment`, which last until a
+  page emits them; a flag an earlier release flashed is still read (RF-08,
+  RF-09).
+- **A dotted shared key nests when it is shared.** `App::inertia_share`
+  stored `user.age` as a literal key and nested it at render, so
+  `share("user", {"name": "A"})`, `share("user.age", 3)`, then
+  `share("user", {"name": "B"})` rendered `{"name": "B", "age": 3}`. It now
+  nests at share time as Laravel's `Arr::set` does, and renders
+  `{"name": "B"}` (RF-02).
+- **SSR exclusion patterns match as Laravel's `ExcludesPaths` does.**
+  `ssr_exclude` matched the raw path with `*` stopping at `/`, so
+  `admin/*` copied from a Laravel app excluded nothing (`/admin/users`
+  starts with a slash) and `/admin/*` missed `/admin/users/edit`. Slashes at
+  either end of a pattern are now ignored, `*` matches any characters
+  including `/`, the path is decoded first, and each pattern is also tried
+  against the full URL; `**` keeps working (RF-12).
+- **`InertiaResponse::location` answers a hard navigation with a redirect.**
+  It always answered `409` + `X-Inertia-Location`, which a browser that did
+  not send `X-Inertia` cannot follow, so an OAuth or SSO bounce started
+  outside the SPA dead-ended on a blank page. Under the Inertia middleware it
+  now answers an Inertia visit with the `409` and anything else with a `302`
+  + `Location`, or the `Redirect` it was given, as Laravel's does;
+  `location_for(&req, url)` stays for routes without the middleware (RF-16).
 
 ### Fixed
 

@@ -130,7 +130,8 @@ pub async fn preserve_fragment_example(_req: Request) -> Response {
 /// `true`. Useful for routes that depend on per-request state SSR
 /// can't see (geolocation, session-only flash, etc.) or for debugging.
 ///
-/// Maps to Laravel's `Inertia::disable_ssr()`.
+/// The per-request form of `Inertia::disable_ssr`, which switches SSR for
+/// every request instead.
 pub async fn ssr_opt_out_example(_req: Request) -> Response {
     suprnova::App::disable_ssr_for_request();
     json_response!({

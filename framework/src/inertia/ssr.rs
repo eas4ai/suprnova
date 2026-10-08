@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use crate::error::FrameworkError;
 use crate::inertia::config::SsrConfig;
+use crate::inertia::prop::InertiaRequestExt;
 
 // Note: we don't define a typed request struct - the `@inertiajs/*/server`
 // `createServer()` workers accept the raw page object JSON envelope.
@@ -31,6 +32,59 @@ pub struct SsrResponse {
     /// Prerendered application shell HTML to inject into the response body.
     #[serde(default)]
     pub body: String,
+}
+
+/// The request the framework sends to the SSR worker, as
+/// [`Inertia::configure_ssr_request_using`](crate::Inertia::configure_ssr_request_using)
+/// sees it - Laravel's `PendingRequest` for the SSR server.
+///
+/// A worker behind a proxy or on another host may want a token, a tenant
+/// header or a longer timeout for one kind of page; the configurator adds
+/// them here. The page object is the body and is not changed.
+#[derive(Debug, Clone)]
+pub struct SsrRequest {
+    url: String,
+    headers: Vec<(String, String)>,
+    timeout: Duration,
+}
+
+impl SsrRequest {
+    /// The worker's render URL the request is posted to.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The headers added so far, beyond the content type, length and host
+    /// the framework sets itself.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// The time the whole call may take before the response falls back to
+    /// CSR (or fails, under `ssr_throw_on_error`).
+    pub fn timeout_duration(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Add a header to the request. A name or value that is not a valid
+    /// HTTP header makes the call fail, which the SSR error handling then
+    /// treats like any other worker failure.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Add `Authorization: Bearer <token>`.
+    pub fn bearer_token(self, token: impl AsRef<str>) -> Self {
+        let value = format!("Bearer {}", token.as_ref());
+        self.header("Authorization", value)
+    }
+
+    /// Replace the timeout of the whole call.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 // Per-request opt-out for SSR. Mirrors Laravel's
@@ -99,22 +153,41 @@ fn missing_bundle_reason(config: &SsrConfig) -> Option<String> {
     ))
 }
 
+/// Whether SSR runs for `request`: Laravel's `HttpGateway::ssrIsEnabled`.
+///
+/// The condition `Inertia::disable_ssr` or `disable_ssr_if` set decides
+/// when there is one, so it can turn SSR on as well as off; otherwise the
+/// configuration does. The per-request opt-out
+/// ([`disable_ssr_for_request`]) then turns it off, and so does an
+/// exclusion pattern from the configuration or `Inertia::without_ssr`
+/// matching the path or the full URL.
+fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
+    let registry = crate::App::inertia_registry();
+    let runtime = registry.runtime();
+    if !runtime.ssr_enabled_for(config.enabled, request) || is_disabled_for_request() {
+        return false;
+    }
+    let added = runtime.ssr_exclusions();
+    if config.excluded_paths.is_empty() && added.is_empty() {
+        return true;
+    }
+    let full_url = request.full_url();
+    let excluded = |patterns: &[String]| {
+        crate::inertia::config::excluded_by(patterns, request.path(), Some(&full_url))
+    };
+    !(excluded(&config.excluded_paths) || excluded(&added))
+}
+
 /// Render via the SSR worker. Returns `Ok(Some(_))` when SSR succeeded,
-/// `Ok(None)` when SSR was disabled, the path was excluded, or the
+/// `Ok(None)` when SSR was disabled, the request was excluded, or the
 /// configured bundle doesn't exist on disk (caller falls back to CSR),
 /// and `Err` only when `throw_on_error` is true.
 pub(crate) async fn render(
     config: &SsrConfig,
-    path: &str,
+    request: &dyn InertiaRequestExt,
     page: &serde_json::Value,
 ) -> Result<Option<SsrResponse>, FrameworkError> {
-    if !config.enabled {
-        return Ok(None);
-    }
-    if is_disabled_for_request() {
-        return Ok(None);
-    }
-    if config.is_path_excluded(path) {
+    if !ssr_runs_for(config, request) {
         return Ok(None);
     }
     if let Some(msg) = missing_bundle_reason(config) {
@@ -128,9 +201,16 @@ pub(crate) async fn render(
 
     let body = serde_json::to_vec(page)
         .map_err(|e| FrameworkError::internal(format!("SSR page serialization failed: {e}")))?;
-    let url = format!("{}/render", config.url.trim_end_matches('/'));
+    let request = crate::App::inertia_registry()
+        .runtime()
+        .configure_ssr_request(SsrRequest {
+            url: format!("{}/render", config.url.trim_end_matches('/')),
+            headers: Vec::new(),
+            timeout: config.timeout,
+        });
+    let url = request.url.clone();
 
-    let result = post_json(&url, body, config.timeout, config.max_response_bytes).await;
+    let result = post_json(&request, body, config.max_response_bytes).await;
     match result {
         Ok(resp) => Ok(Some(resp)),
         Err(e) => {
@@ -206,11 +286,12 @@ fn shared_client() -> &'static hyper_util::client::legacy::Client<
 /// timeout` in the worst case - exactly the "a hung worker shouldn't
 /// block real users" guarantee that doc promises.
 async fn post_json(
-    url: &str,
+    request: &SsrRequest,
     body: Vec<u8>,
-    timeout: Duration,
     max_response_bytes: usize,
 ) -> Result<SsrResponse, String> {
+    let url = request.url.as_str();
+    let timeout = request.timeout;
     use http_body_util::{BodyExt, Full, Limited};
     use hyper::Request;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -236,12 +317,16 @@ async fn post_json(
         parsed.port_u16().unwrap_or(scheme_default_port)
     );
 
-    let req = Request::builder()
+    let mut builder = Request::builder()
         .method("POST")
         .uri(url)
         .header(CONTENT_TYPE, "application/json")
         .header(CONTENT_LENGTH, body.len())
-        .header("Host", host_port)
+        .header("Host", host_port);
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    let req = builder
         .body(Full::new(bytes::Bytes::from(body)))
         .map_err(|e| format!("request build: {e}"))?;
 
@@ -284,6 +369,18 @@ async fn post_json(
 mod tests {
     use super::*;
 
+    /// A request at `path` for the render calls below.
+    struct At(&'static str);
+
+    impl InertiaRequestExt for At {
+        fn path(&self) -> &str {
+            self.0
+        }
+        fn header(&self, _name: &str) -> Option<&str> {
+            None
+        }
+    }
+
     #[test]
     fn ssr_disabled_when_config_disabled() {
         let cfg = SsrConfig::default();
@@ -294,7 +391,7 @@ mod tests {
     async fn render_returns_none_when_disabled() {
         let cfg = SsrConfig::default();
         let page = serde_json::json!({"component": "Home"});
-        let result = render(&cfg, "/foo", &page).await.unwrap();
+        let result = render(&cfg, &At("/foo"), &page).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -306,7 +403,7 @@ mod tests {
             ..SsrConfig::default()
         };
         let page = serde_json::json!({"component": "Admin"});
-        let result = render(&cfg, "/admin/users", &page).await.unwrap();
+        let result = render(&cfg, &At("/admin/users"), &page).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -325,7 +422,7 @@ mod tests {
         // short-circuit before any connection attempt - proven by this
         // resolving immediately rather than waiting out `config.timeout`.
         let started = std::time::Instant::now();
-        let result = render(&cfg, "/", &page).await.unwrap();
+        let result = render(&cfg, &At("/"), &page).await.unwrap();
         assert!(result.is_none());
         assert!(
             started.elapsed() < cfg.timeout,
@@ -360,7 +457,7 @@ mod tests {
             ..SsrConfig::default()
         };
         let page = serde_json::json!({"component": "Home"});
-        let result = render(&cfg, "/", &page).await.unwrap();
+        let result = render(&cfg, &At("/"), &page).await.unwrap();
         assert!(result.is_none());
         let msg = captured
             .lock()
@@ -471,14 +568,16 @@ mod tests {
         let page = serde_json::json!({"component": "Home"});
 
         let started = std::time::Instant::now();
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), render(&cfg, "/", &page))
-                .await
-                .expect(
-                    "render() must resolve within cfg.timeout for the body phase too, \
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            render(&cfg, &At("/"), &page),
+        )
+        .await
+        .expect(
+            "render() must resolve within cfg.timeout for the body phase too, \
                  not hang past this test's own outer safety-net timeout",
-                )
-                .unwrap();
+        )
+        .unwrap();
 
         assert!(result.is_none(), "a stalled body must fall back to CSR");
         assert!(
