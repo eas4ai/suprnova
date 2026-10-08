@@ -1622,9 +1622,6 @@ pub fn confirm(
     let decisions = approvals(plan, options, project, prompter)?;
     let terminal = prompter.is_terminal();
     for pin in &plan.pins {
-        if options.yes {
-            continue;
-        }
         if !terminal {
             return Err(RegistryError::Declined(format!(
                 "{} {}; pinning a key needs a terminal, and --yes does not pin one. To pin it by hand, add to suprnova.toml:\n[live.libraries.\"{}\"]\nkey = \"{}\"\nNothing was written.",
