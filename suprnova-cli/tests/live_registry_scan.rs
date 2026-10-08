@@ -1182,6 +1182,65 @@ fn reg_032_a_member_read_off_a_literal_is_the_built_in_method_it_inherits() {
     );
 }
 
+/// REG-032: `getRootNode()` returns the document for a node in it, as
+/// `ownerDocument` does, whatever node it is called on, and `Object(value)`
+/// returns the value itself, so the result of either is the page to the
+/// rule that refuses assigning a method of the page: assigning `open` on
+/// `document.getRootNode()` is refused as `document.open = f` is.
+#[test]
+fn reg_032_the_root_node_and_the_object_of_the_page_are_the_page() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "document.getRootNode().open = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    this.getRootNode().close = () => {};\n  }\n}\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export function f(el) {\n  el.getRootNode().append = () => {};\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const root = document.body.getRootNode();\nroot.open = () => null;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "document.body.getRootNode.call(document).open = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    const root = this.getRootNode.bind(this);\n    root().open = () => null;\n  }\n}\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "document[\"getRootNode\"]().contains = () => true;\n",
+            "script-builtin",
+            1,
+        ),
+        ("Object(document).open = () => null;\n", "script-builtin", 1),
+        ("Object(location).reload = () => {};\n", "script-builtin", 1),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "export class A extends HTMLElement {\n  connectedCallback() {\n    this.getRootNode().title = \"x\";\n    this.getRootNode().body.hidden = false;\n  }\n}\n",
+        "const o = {};\nObject(o).open = true;\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: other scripts reach a built-in function's code through its
 /// `call`, `apply` and `bind` (`Array.prototype.slice.call(list)`), and a
 /// value the script did not make may hold any built-in method under any

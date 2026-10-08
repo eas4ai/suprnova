@@ -3317,8 +3317,10 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// `history`. A name is followed to its initializer, default and
     /// assignments, and a parameter to the arguments each call of its
     /// function by name passes; a value the scan does not follow (a
-    /// destructured name, an import, what a call returns) is not, because
-    /// [`Self::held_builtin`] stops a built-in before it enters one. Past
+    /// destructured name, an import, what most calls return) is not,
+    /// because [`Self::held_builtin`] stops a built-in before it enters one.
+    /// Two calls are followed ([`Self::call_reaches`]): `Object(value)`
+    /// returns the value, and `getRootNode()` the page. Past
     /// [`MAX_TRACE_DEPTH`] the answer is yes, so a chain too long to follow
     /// is refused rather than admitted.
     fn reaches(
@@ -3373,14 +3375,129 @@ impl<'a, 'c> Walker<'a, 'c> {
             Expression::AwaitExpression(await_expr) => {
                 self.reaches(root, &await_expr.argument, depth + 1, seen)
             }
-            Expression::ChainExpression(chain) => chain
-                .expression
-                .as_member_expression()
-                .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            Expression::CallExpression(call) => self.call_reaches(root, call, depth, seen),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => self.call_reaches(root, call, depth, seen),
+                other => other
+                    .as_member_expression()
+                    .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            },
             other => other
                 .as_member_expression()
                 .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
         }
+    }
+
+    /// [`Self::reaches`] for what a call returns (REG-032). `Object(value)`
+    /// returns the value itself, so it reaches what the value reaches.
+    /// `getRootNode()` returns the document for any node in it, as
+    /// `ownerDocument` does, whatever node it is called on, so it is the
+    /// page: `document.getRootNode()` is `document`. Any other call returns
+    /// a value the scan does not follow.
+    fn call_reaches(
+        &self,
+        root: Root,
+        call: &CallExpression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if let Expression::Identifier(callee) = unparen(&call.callee)
+            && callee.name == "Object"
+            && self.bound(callee).is_none()
+        {
+            return call
+                .arguments
+                .first()
+                .and_then(Argument::as_expression)
+                .is_some_and(|value| self.reaches(root, value, depth + 1, seen));
+        }
+        root == Root::Page
+            && self.invokes(
+                &call.callee,
+                "getRootNode",
+                &|_| true,
+                depth + 1,
+                &mut BTreeSet::new(),
+            )
+    }
+
+    /// Whether a callee may invoke the method `name` read off a receiver
+    /// `receiver` admits, or the global function of that name: the method
+    /// itself, borrowed with `call` or `apply`, bound with `bind`, or held
+    /// in a name (REG-032). Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn invokes(
+        &self,
+        callee: &Expression<'a>,
+        name: &str,
+        receiver: &dyn Fn(&Expression<'a>) -> bool,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let member = match unparen(callee) {
+            Expression::Identifier(reference) => {
+                return match self.bound(reference) {
+                    None => reference.name == name && ADMITTED_GLOBALS.contains(&name),
+                    Some(id) => {
+                        if !seen.insert(id) {
+                            return false;
+                        }
+                        let Some(binding) = self.binding(id) else {
+                            return false;
+                        };
+                        binding
+                            .init
+                            .into_iter()
+                            .chain(binding.param_default)
+                            .chain(binding.assignments.iter().copied())
+                            .chain(self.passed_arguments(binding))
+                            .any(|value| self.invokes(value, name, receiver, depth + 1, seen))
+                    }
+                };
+            }
+            Expression::SequenceExpression(sequence) => {
+                return sequence
+                    .expressions
+                    .last()
+                    .is_some_and(|last| self.invokes(last, name, receiver, depth + 1, seen));
+            }
+            Expression::ConditionalExpression(conditional) => {
+                return self.invokes(&conditional.consequent, name, receiver, depth + 1, seen)
+                    || self.invokes(&conditional.alternate, name, receiver, depth + 1, seen);
+            }
+            Expression::LogicalExpression(logical) => {
+                return self.invokes(&logical.left, name, receiver, depth + 1, seen)
+                    || self.invokes(&logical.right, name, receiver, depth + 1, seen);
+            }
+            // `f.bind(...)` returns `f` bound.
+            Expression::CallExpression(call) => {
+                return unparen(&call.callee)
+                    .as_member_expression()
+                    .filter(|member| member.static_property_name() == Some("bind"))
+                    .is_some_and(|member| {
+                        self.invokes(member.object(), name, receiver, depth + 1, seen)
+                    });
+            }
+            Expression::ChainExpression(chain) => match chain.expression.as_member_expression() {
+                Some(member) => member,
+                None => return false,
+            },
+            other => match other.as_member_expression() {
+                Some(member) => member,
+                None => return false,
+            },
+        };
+        let named = self
+            .member_names(member)
+            .is_some_and(|names| names.iter().any(|candidate| candidate == name));
+        if named && receiver(member.object()) {
+            return true;
+        }
+        // `f.call(...)` and `f.apply(...)` invoke `f`.
+        matches!(member.static_property_name(), Some("call" | "apply"))
+            && self.invokes(member.object(), name, receiver, depth + 1, seen)
     }
 
     /// [`Self::reaches`] for the old value of a logical assignment's target.
