@@ -510,8 +510,17 @@ pub struct SsrConfig {
     /// Default `false`, as Laravel's `inertia.ssr.ensure_runtime_exists`.
     pub ensure_runtime_exists: bool,
     /// Where SSR is dispatched in development with the Vite dev server
-    /// running, at `/__inertia_ssr`; `None` uses the dev server's own URL.
-    /// Laravel's `inertia.ssr.hot_url` (PAR-058).
+    /// running, at `/__inertia_ssr`: Laravel's `inertia.ssr.hot_url`. The
+    /// Vite dev server renders the page from source, so no SSR bundle or
+    /// worker process is needed while developing.
+    ///
+    /// `None` (the default) uses the dev server's own URL,
+    /// [`InertiaConfig::vite_dev_server`]: in development the
+    /// configuration fills this in when a first visit is dispatched, and in
+    /// production it is ignored, as Laravel only goes hot while Vite runs.
+    /// Hot mode skips the bundle check. When nothing accepts a connection
+    /// at the hot address, the dev server is not running and the visit
+    /// takes the worker path at [`url`](Self::url) instead.
     pub hot_url: Option<String>,
     /// When `true` (the default), a first visit is sent to the worker only
     /// when [`detect_ssr_bundle`](crate::detect_ssr_bundle) finds a bundle:
@@ -535,6 +544,9 @@ impl std::fmt::Debug for SsrConfig {
             .field("on_error", &self.on_error.as_ref().map(|_| "<closure>"))
             .field("max_response_bytes", &self.max_response_bytes)
             .field("bundle_path", &self.bundle_path)
+            .field("runtime", &self.runtime)
+            .field("ensure_runtime_exists", &self.ensure_runtime_exists)
+            .field("hot_url", &self.hot_url)
             .field("ensure_bundle_exists", &self.ensure_bundle_exists)
             .finish()
     }
@@ -888,7 +900,8 @@ impl InertiaConfig {
     }
 
     /// Set where SSR is dispatched in development with the Vite dev server
-    /// running; see [`SsrConfig::hot_url`].
+    /// running, when it is not the dev server itself; see
+    /// [`SsrConfig::hot_url`].
     pub fn ssr_hot_url(mut self, url: impl Into<String>) -> Self {
         self.ssr.hot_url = Some(url.into());
         self
@@ -973,6 +986,31 @@ impl InertiaConfig {
     pub fn asset_url(mut self, url: impl Into<String>) -> Self {
         self.asset_url = Some(url.into());
         self
+    }
+
+    /// The SSR settings a first visit is dispatched with (PAR-058): in
+    /// development [`SsrConfig::hot_url`] defaults to the Vite dev server's
+    /// URL, and in production it is cleared, since nothing runs hot there.
+    ///
+    /// Resolved here rather than by the builders, so the order of
+    /// `development`, `production`, `vite_dev_server` and `ssr_hot_url`
+    /// calls does not matter. Production with no hot URL, the common case,
+    /// borrows the settings without a copy.
+    pub(crate) fn ssr_for_dispatch(&self) -> std::borrow::Cow<'_, SsrConfig> {
+        use std::borrow::Cow;
+        match (self.development, self.ssr.hot_url.is_some()) {
+            (true, true) | (false, false) => Cow::Borrowed(&self.ssr),
+            (true, false) => {
+                let mut ssr = self.ssr.clone();
+                ssr.hot_url = Some(self.vite_dev_server.clone());
+                Cow::Owned(ssr)
+            }
+            (false, true) => {
+                let mut ssr = self.ssr.clone();
+                ssr.hot_url = None;
+                Cow::Owned(ssr)
+            }
+        }
     }
 
     /// The asset version this config reports, in Laravel's order.
