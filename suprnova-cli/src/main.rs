@@ -12,6 +12,7 @@ pub mod ui;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::console_forward::ConsoleCommand;
 use commands::queue_failed::FailedJobs;
+use commands::ssr::SsrCommand;
 
 #[derive(Parser)]
 #[command(name = "suprnova")]
@@ -494,53 +495,35 @@ enum Commands {
     /// Install workflow migrations
     #[command(name = "workflow:install")]
     WorkflowInstall,
-    /// Launch the Inertia SSR worker in the foreground
+    /// Run the Inertia SSR worker in the foreground, through the app binary
     ///
-    /// Refuses without a bundle, or without the runtime when
-    /// SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS is true, stops a worker still
-    /// running at SUPRNOVA_SSR_URL, then runs the worker, forwarding Ctrl-C
-    /// and SIGTERM to it and exiting with its status.
+    /// Runs `cargo run --bin <package> -- ssr:start` from the project
+    /// directory, so the Inertia configuration the application installed
+    /// decides the bundle, the runtime and the checks. Forwards Ctrl-C and
+    /// SIGTERM to the application and exits with its status.
     #[command(name = "ssr:start")]
     SsrStart {
-        /// Runtime to launch the worker under (node, bun, deno, or a path).
-        /// Falls back to SUPRNOVA_SSR_RUNTIME env, then "node".
+        /// Run the bundle under this runtime (node, bun, deno, or a path)
+        /// instead of the configured one.
         #[arg(long)]
         runtime: Option<String>,
-        /// Path to the built SSR bundle. Falls back to SUPRNOVA_SSR_BUNDLE
-        /// env, then the first conventional path that exists
-        /// (frontend/bootstrap/ssr/ssr.js first).
-        #[arg(long)]
-        bundle: Option<String>,
     },
-    /// Stop the Inertia SSR worker
+    /// Stop the Inertia SSR worker, through the app binary
     ///
-    /// Sends GET {url}/shutdown; the worker exits without answering.
+    /// Runs the application binary's `ssr:stop`, which sends GET /shutdown
+    /// to the worker at the configured URL.
     #[command(name = "ssr:stop")]
     SsrStop {
         /// Succeed when no worker is running.
         #[arg(long)]
         graceful: bool,
-        /// SSR worker URL. Falls back to SUPRNOVA_SSR_URL env, then
-        /// http://127.0.0.1:13714.
-        #[arg(long)]
-        url: Option<String>,
-        /// Request timeout in milliseconds.
-        #[arg(long, default_value = "2000")]
-        timeout_ms: u64,
     },
-    /// Check the Inertia SSR worker's health
+    /// Check the Inertia SSR worker's health, through the app binary
     ///
-    /// Succeeds when the worker's GET {url}/health answers 2xx.
+    /// Runs the application binary's `ssr:check`, which asks the installed
+    /// SSR gateway's health check.
     #[command(name = "ssr:check")]
-    SsrCheck {
-        /// SSR worker URL. Falls back to SUPRNOVA_SSR_URL env, then
-        /// http://127.0.0.1:13714.
-        #[arg(long)]
-        url: Option<String>,
-        /// Request timeout in milliseconds.
-        #[arg(long, default_value = "2000")]
-        timeout_ms: u64,
-    },
+    SsrCheck,
     /// Generate a new APP_KEY (32-byte AES-256, base64 URL-safe, no padding)
     #[command(name = "key:generate")]
     KeyGenerate {
@@ -795,18 +778,14 @@ fn main() {
         Commands::WorkflowInstall => {
             commands::workflow_install::run();
         }
-        Commands::SsrStart { runtime, bundle } => {
-            commands::ssr_start::run(runtime, bundle);
+        Commands::SsrStart { runtime } => {
+            commands::ssr::run(SsrCommand::Start { runtime });
         }
-        Commands::SsrStop {
-            graceful,
-            url,
-            timeout_ms,
-        } => {
-            commands::ssr_stop::run(url, timeout_ms, graceful);
+        Commands::SsrStop { graceful } => {
+            commands::ssr::run(SsrCommand::Stop { graceful });
         }
-        Commands::SsrCheck { url, timeout_ms } => {
-            commands::ssr_check::run(url, timeout_ms);
+        Commands::SsrCheck => {
+            commands::ssr::run(SsrCommand::Check);
         }
         Commands::KeyGenerate { show } => {
             commands::key_generate::run(show);

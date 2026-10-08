@@ -1,11 +1,13 @@
 //! The `suprnova` CLI's `ssr:start`, `ssr:stop` and `ssr:check`.
 //!
-//! The `inssr_` tests (PAR-061) run the CLI binary against a fake worker, a
-//! TCP listener the test drives, and a fake runtime, a shell script written
-//! to a temporary directory. Where the CLI's output is compared with what
-//! `suprnova::console::ssr` prints in this process for the same
-//! configuration, the test is the proof that the CLI runs the shared
-//! implementation the application binary runs.
+//! The CLI runs the project's application binary's command of the same name
+//! (PAR-061), so the `inssr_` tests run the CLI binary in a temporary
+//! project whose `cargo` is a shell script earlier on `PATH`, the pattern
+//! `serve_dev_processes.rs` uses: the script records the arguments and the
+//! directory it was called with, and answers with the output, the exit
+//! status or the signal handling a test gives it. What the application's
+//! commands do with the installed configuration is tested where they live,
+//! in the framework's `tests/console/ssr.rs`.
 //!
 //! The end-to-end proof for T31 - `suprnova new` -> `vite build --ssr` ->
 //! `suprnova ssr:start` -> a hard-navigation HTML response contains the
@@ -86,12 +88,16 @@ fn enable_ssr(project: &Path) {
     std::fs::write(&path, patched).expect("write patched bootstrap.rs");
 }
 
-/// Poll `ssr:check` until it reports the worker healthy or `budget` runs out.
-fn wait_for_ssr_healthy(budget: Duration) {
+/// Poll `ssr:check` in `project` until it reports the worker healthy or
+/// `budget` runs out.
+fn wait_for_ssr_healthy(project: &Path, budget: Duration) {
     let deadline = Instant::now() + budget;
     loop {
         let ok = Command::new(cli_binary())
-            .args(["ssr:check", "--timeout-ms", "500"])
+            .arg("ssr:check")
+            .current_dir(project)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -128,6 +134,25 @@ fn get_body(addr: std::net::SocketAddr) -> String {
 struct KillOnDrop(Child);
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Stops `suprnova ssr:start` as a supervisor does, with `SIGTERM`, which
+/// the CLI forwards to the application and the application to its worker.
+/// A `SIGKILL` would end the CLI alone and leave both running.
+struct TerminateOnDrop(Child);
+impl Drop for TerminateOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(self.0.id()) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        #[cfg(not(unix))]
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -176,7 +201,16 @@ fn scaffolded_ssr_entry_produces_server_rendered_html() {
         "vite build --ssr must produce frontend/bootstrap/ssr/ssr.js"
     );
 
-    let _ssr_worker = KillOnDrop(
+    // `ssr:start` and `ssr:check` run the application binary through
+    // `cargo run`; building it first keeps the compile out of the health
+    // check's budget.
+    let mut build = Command::new(env!("CARGO"));
+    build
+        .args(["build", "--bin", project_name])
+        .current_dir(&project);
+    run_ok(build, "cargo build");
+
+    let _ssr_worker = TerminateOnDrop(
         Command::new(cli_binary())
             .arg("ssr:start")
             .current_dir(&project)
@@ -185,7 +219,7 @@ fn scaffolded_ssr_entry_produces_server_rendered_html() {
             .spawn()
             .expect("spawn ssr:start"),
     );
-    wait_for_ssr_healthy(Duration::from_secs(30));
+    wait_for_ssr_healthy(&project, Duration::from_secs(30));
 
     let backend_port: u16 = 18765;
     let addr: std::net::SocketAddr = format!("127.0.0.1:{backend_port}").parse().unwrap();
@@ -221,7 +255,7 @@ fn scaffolded_ssr_entry_produces_server_rendered_html() {
 }
 
 // ---------------------------------------------------------------------------
-// PAR-061: the CLI runs the shared implementation
+// PAR-061: the CLI runs the application binary's command
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -229,163 +263,147 @@ mod inssr {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
-    use suprnova::SsrConfig;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines};
+    use tokio::process::{Child, ChildStdout};
 
     use super::cli_binary;
 
-    /// The environment the CLI's SSR commands read, cleared for every run
-    /// so the developer's own shell cannot change what a test sees.
-    const SSR_ENV: [&str; 4] = [
-        "SUPRNOVA_SSR_URL",
-        "SUPRNOVA_SSR_RUNTIME",
-        "SUPRNOVA_SSR_BUNDLE",
-        "SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS",
-    ];
+    /// The package of the test project, so the binary the CLI must name.
+    const PACKAGE: &str = "ssr_app";
 
-    /// What the fake worker does with a request.
-    #[derive(Clone, Copy)]
-    enum Reply {
-        /// Close the connection without an answer, as the Inertia SSR
-        /// server does when `/shutdown` makes it exit.
-        Close,
-        /// Answer with this status.
-        Status(u16),
-        /// Hold the connection open and never answer.
-        Hang,
+    /// The three commands, each of which runs the application's own.
+    const COMMANDS: [&str; 3] = ["ssr:start", "ssr:stop", "ssr:check"];
+
+    /// How `cargo` was called.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Call {
+        args: Vec<String>,
+        dir: PathBuf,
     }
 
-    /// One request the fake worker received.
-    #[derive(Debug, Clone)]
-    struct Seen {
-        path: String,
-        /// Whether the marker file existed when the request arrived: the
-        /// fake runtime creates it, so `false` means no worker had started.
-        marker_existed: bool,
+    /// A temporary project, a `bin` directory whose `cargo` goes on `PATH`
+    /// before the real one, and the record that `cargo` writes, side by
+    /// side so the record is not inside the project.
+    struct Project {
+        dir: TempDir,
     }
 
-    struct FakeWorker {
-        url: String,
-        seen: Arc<Mutex<Vec<Seen>>>,
-    }
+    impl Project {
+        /// A project whose manifest names the package [`PACKAGE`].
+        fn new() -> Self {
+            Self::with_manifest(Some(&format!(
+                "[package]\nname = \"{PACKAGE}\"\nversion = \"0.1.0\"\n"
+            )))
+        }
 
-    impl FakeWorker {
-        async fn start(shutdown: Reply, health: Reply, marker: Option<PathBuf>) -> Self {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind the fake worker");
-            let url = format!("http://{}", listener.local_addr().expect("local address"));
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let record = Arc::clone(&seen);
-            tokio::spawn(async move {
-                let mut held = Vec::new();
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let path = read_request_path(&mut stream).await;
-                    record.lock().unwrap().push(Seen {
-                        path: path.clone(),
-                        marker_existed: marker.as_ref().is_some_and(|m| m.exists()),
-                    });
-                    let reply = match path.as_str() {
-                        "/shutdown" => shutdown,
-                        "/health" => health,
-                        _ => Reply::Status(404),
-                    };
-                    match reply {
-                        Reply::Close => drop(stream),
-                        Reply::Hang => held.push(stream),
-                        Reply::Status(status) => {
-                            let response = format!(
-                                "HTTP/1.1 {status} Fake\r\ncontent-length: 0\r\n\
-                                 connection: close\r\n\r\n"
-                            );
-                            let _ = stream.write_all(response.as_bytes()).await;
-                            let _ = stream.shutdown().await;
-                        }
-                    }
+        /// A project directory with `manifest` as its `Cargo.toml`, or with
+        /// none.
+        fn with_manifest(manifest: Option<&str>) -> Self {
+            let project = Self {
+                dir: tempfile::tempdir().expect("a temporary directory"),
+            };
+            for dir in [project.root(), project.bin(), project.record()] {
+                std::fs::create_dir_all(dir).expect("create a directory");
+            }
+            if let Some(manifest) = manifest {
+                std::fs::write(project.root().join("Cargo.toml"), manifest)
+                    .expect("write the manifest");
+            }
+            project
+        }
+
+        fn root(&self) -> PathBuf {
+            self.dir.path().join("project")
+        }
+
+        fn bin(&self) -> PathBuf {
+            self.dir.path().join("bin")
+        }
+
+        fn record(&self) -> PathBuf {
+            self.dir.path().join("record")
+        }
+
+        /// Put a `cargo` in `bin` that records its arguments and working
+        /// directory, then runs `body`.
+        fn cargo(&self, body: &str) {
+            let path = self.bin().join("cargo");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n\
+                     pwd -P > '{dir}'\n\
+                     for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > '{args}'\n\
+                     {body}\n",
+                    dir = self.record().join("dir").display(),
+                    args = self.record().join("args").display(),
+                ),
+            )
+            .expect("write the fake cargo");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("make the fake cargo executable");
+        }
+
+        /// How `cargo` was last called, or `None` when it never ran.
+        fn call(&self) -> Option<Call> {
+            let args = std::fs::read_to_string(self.record().join("args")).ok()?;
+            let dir = std::fs::read_to_string(self.record().join("dir"))
+                .expect("cargo recorded its directory before its arguments");
+            Some(Call {
+                args: args.lines().map(str::to_owned).collect(),
+                dir: PathBuf::from(dir.trim_end()),
+            })
+        }
+
+        /// Forget the last call, so the next one is recorded alone.
+        fn forget(&self) {
+            for name in ["args", "dir"] {
+                match std::fs::remove_file(self.record().join(name)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => panic!("forget the call: {e}"),
                 }
-            });
-            Self { url, seen }
-        }
-
-        fn seen(&self) -> Vec<Seen> {
-            self.seen.lock().unwrap().clone()
-        }
-
-        fn paths(&self) -> Vec<String> {
-            self.seen().into_iter().map(|s| s.path).collect()
-        }
-    }
-
-    /// Read a request's head and return its path. The whole head is read,
-    /// so closing the connection afterwards is a clean close, not a reset.
-    async fn read_request_path(stream: &mut tokio::net::TcpStream) -> String {
-        let mut head = Vec::new();
-        let mut buf = [0u8; 1024];
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-            match stream.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => head.extend_from_slice(&buf[..n]),
             }
         }
-        String::from_utf8_lossy(&head)
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .to_owned()
-    }
 
-    /// A loopback URL nothing listens on, so a connection is refused at
-    /// once. A privileged port, because no test can bind one.
-    fn refusing_url() -> String {
-        for port in 1..1024u16 {
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
-                return format!("http://{addr}");
-            }
+        /// The CLI with `args`, in the project, with `bin` first on `PATH`.
+        fn cli(&self, args: &[&str]) -> tokio::process::Command {
+            let path = format!(
+                "{}:{}",
+                self.bin().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            self.cli_with_path(args, &path)
         }
-        panic!("every privileged loopback port accepted a connection");
-    }
 
-    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write the script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("make the script executable");
-        path
-    }
-
-    fn bundle(dir: &Path) -> PathBuf {
-        let path = dir.join("ssr.js");
-        std::fs::write(&path, "// the SSR bundle\n").expect("write the bundle");
-        path
-    }
-
-    fn path_str(path: &Path) -> String {
-        path.to_str().expect("a UTF-8 temporary path").to_owned()
-    }
-
-    /// The CLI with `args`, in `cwd`, with only the SSR environment given.
-    fn cli(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(cli_binary());
-        command
-            .args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        for name in SSR_ENV {
-            command.env_remove(name);
+        /// The CLI with `args`, in the project, with `path` as all of `PATH`.
+        fn cli_with_path(&self, args: &[&str], path: &str) -> tokio::process::Command {
+            let mut command = tokio::process::Command::new(cli_binary());
+            command
+                .args(args)
+                .current_dir(self.root())
+                .env("PATH", path)
+                .stdin(Stdio::null())
+                .kill_on_drop(true);
+            command
         }
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        command
+    }
+
+    /// The arguments the CLI must give `cargo` for `app_args`.
+    fn cargo_args(app_args: &[&str]) -> Vec<String> {
+        ["run", "--bin", PACKAGE, "--"]
+            .iter()
+            .chain(app_args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
     }
 
     /// What a command exited with and printed.
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug)]
     struct Ran {
         code: i32,
         out: String,
@@ -404,286 +422,284 @@ mod inssr {
         }
     }
 
-    fn ran(code: i32, out: Vec<u8>, err: Vec<u8>) -> Ran {
-        Ran {
-            code,
-            out: String::from_utf8(out).expect("UTF-8 output"),
-            err: String::from_utf8(err).expect("UTF-8 errors"),
-        }
-    }
-
-    /// What the shared `stop` prints in this process for `config`.
-    async fn shared_stop(config: &SsrConfig, graceful: bool) -> Ran {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = suprnova::console::ssr::stop(config, graceful, &mut out, &mut err)
-            .await
-            .expect("ssr::stop");
-        ran(code, out, err)
-    }
-
-    /// What the shared `check` prints in this process for `config`.
-    async fn shared_check(config: &SsrConfig) -> Ran {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = suprnova::console::ssr::check(config, &mut out, &mut err)
-            .await
-            .expect("ssr::check");
-        ran(code, out, err)
-    }
-
-    /// The configuration the CLI builds from `--url` and `--timeout-ms`.
-    fn flags_config(url: &str, timeout_ms: u64) -> SsrConfig {
-        SsrConfig {
-            enabled: true,
-            url: url.to_owned(),
-            timeout: Duration::from_millis(timeout_ms),
-            ..SsrConfig::default()
-        }
-    }
-
-    // -- ssr:start ----------------------------------------------------------
+    // -- what the CLI runs ----------------------------------------------------
 
     #[tokio::test]
-    async fn inssr_cli_start_fails_without_a_bundle() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn inssr_cli_start_runs_the_applications_ssr_start_with_the_runtime() {
+        let project = Project::new();
+        project.cargo("exit 0");
 
-        let ran = run(&mut cli(
-            &["ssr:start"],
-            dir.path(),
-            &[("SUPRNOVA_SSR_URL", &refusing_url())],
-        ))
-        .await;
+        let ran = run(&mut project.cli(&["ssr:start", "--runtime", "bun"])).await;
 
-        assert_eq!(ran.code, 1, "{ran:?}");
-        assert!(
-            ran.err.contains("Inertia SSR bundle not found.")
-                && ran.err.contains("SUPRNOVA_SSR_BUNDLE"),
-            "the shared message, naming how to set the bundle: {}",
-            ran.err
-        );
+        assert_eq!(ran.code, 0, "{ran:?}");
+        let call = project.call().expect("the CLI ran cargo");
+        assert_eq!(call.args, cargo_args(&["ssr:start", "--runtime=bun"]));
     }
 
     #[tokio::test]
-    async fn inssr_cli_start_fails_naming_a_configured_bundle_that_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing-ssr.js");
+    async fn inssr_cli_start_turns_no_environment_into_flags() {
+        let project = Project::new();
+        project.cargo("exit 0");
 
-        let ran = run(&mut cli(
-            &["ssr:start", "--bundle", &path_str(&missing)],
-            dir.path(),
-            &[("SUPRNOVA_SSR_URL", &refusing_url())],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 1, "{ran:?}");
-        assert_eq!(
-            ran.err,
-            format!(
-                "Inertia SSR bundle not found at the configured path: \"{}\"\n",
-                missing.display()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_start_warns_and_runs_a_conventional_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let conventional = dir.path().join("frontend/bootstrap/ssr");
-        std::fs::create_dir_all(&conventional).unwrap();
-        std::fs::write(conventional.join("ssr.mjs"), "// the SSR bundle\n").unwrap();
-        let runtime = script(dir.path(), "runtime", "echo \"rendering $1\"");
-
-        let ran = run(&mut cli(
-            &["ssr:start"],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &refusing_url()),
-                ("SUPRNOVA_SSR_BUNDLE", "build/missing-ssr.js"),
-                ("SUPRNOVA_SSR_RUNTIME", &path_str(&runtime)),
-            ],
-        ))
+        let ran = run(project
+            .cli(&["ssr:start"])
+            .env("SUPRNOVA_SSR_URL", "http://127.0.0.1:1")
+            .env("SUPRNOVA_SSR_RUNTIME", "deno")
+            .env("SUPRNOVA_SSR_BUNDLE", "build/ssr.js")
+            .env("SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS", "true"))
         .await;
 
         assert_eq!(ran.code, 0, "{ran:?}");
+        let call = project.call().expect("the CLI ran cargo");
         assert_eq!(
-            ran.err,
-            "Inertia SSR bundle not found at the configured path: \"build/missing-ssr.js\"\n\
-             Using a default bundle instead: \"frontend/bootstrap/ssr/ssr.mjs\"\n"
-        );
-        assert_eq!(ran.out, "rendering frontend/bootstrap/ssr/ssr.mjs\n");
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_start_refuses_a_missing_runtime_when_ensure_runtime_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = bundle(dir.path());
-
-        let ran = run(&mut cli(
-            &[
-                "ssr:start",
-                "--bundle",
-                &path_str(&bundle),
-                "--runtime",
-                "suprnova-inssr-no-such-runtime",
-            ],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &refusing_url()),
-                ("SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS", "true"),
-            ],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 1, "{ran:?}");
-        assert_eq!(
-            ran.err,
-            "SSR runtime \"suprnova-inssr-no-such-runtime\" could not be found.\n"
+            call.args,
+            cargo_args(&["ssr:start"]),
+            "the installed configuration decides the URL, the runtime and the bundle"
         );
     }
 
     #[tokio::test]
-    async fn inssr_cli_start_finds_a_runtime_on_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        script(&bin, "inssr-fake-node", "echo \"ran $1\"");
-        let bundle = bundle(dir.path());
-        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        )))
-        .unwrap();
+    async fn inssr_cli_stop_passes_graceful_through() {
+        let project = Project::new();
+        project.cargo("exit 0");
 
-        let ran = run(cli(
-            &["ssr:start", "--bundle", &path_str(&bundle)],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &refusing_url()),
-                ("SUPRNOVA_SSR_RUNTIME", "inssr-fake-node"),
-                ("SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS", "1"),
-            ],
+        for args in [&["ssr:stop", "--graceful"][..], &["ssr:stop"]] {
+            project.forget();
+            let ran = run(&mut project.cli(args)).await;
+
+            assert_eq!(ran.code, 0, "{args:?}: {ran:?}");
+            let call = project.call().expect("the CLI ran cargo");
+            assert_eq!(call.args, cargo_args(args), "{args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_check_runs_the_applications_ssr_check() {
+        let project = Project::new();
+        project.cargo("exit 0");
+
+        let ran = run(&mut project.cli(&["ssr:check"])).await;
+
+        assert_eq!(ran.code, 0, "{ran:?}");
+        let call = project.call().expect("the CLI ran cargo");
+        assert_eq!(call.args, cargo_args(&["ssr:check"]));
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_runs_the_application_from_the_project_directory() {
+        let project = Project::new();
+        project.cargo("exit 0");
+        let root = std::fs::canonicalize(project.root()).expect("the project's real path");
+
+        for command in COMMANDS {
+            project.forget();
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 0, "{command}: {ran:?}");
+            let call = project.call().expect("the CLI ran cargo");
+            assert_eq!(call.dir, root, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_has_no_configuration_flags_of_its_own() {
+        let project = Project::new();
+        project.cargo("exit 0");
+
+        for args in [
+            &["ssr:start", "--bundle", "build/ssr.js"][..],
+            &["ssr:start", "--url", "http://127.0.0.1:13714"],
+            &["ssr:start", "--ensure-runtime-exists"],
+            &["ssr:stop", "--url", "http://127.0.0.1:13714"],
+            &["ssr:stop", "--timeout-ms", "500"],
+            &["ssr:check", "--url", "http://127.0.0.1:13714"],
+            &["ssr:check", "--timeout-ms", "500"],
+        ] {
+            let ran = run(&mut project.cli(args)).await;
+
+            assert_eq!(ran.code, 2, "{args:?}: the flag is refused: {ran:?}");
+            assert!(
+                ran.err.contains("unexpected argument"),
+                "{args:?}: {}",
+                ran.err
+            );
+            assert_eq!(project.call(), None, "{args:?}: cargo never ran");
+        }
+    }
+
+    // -- what the CLI passes back ---------------------------------------------
+
+    #[tokio::test]
+    async fn inssr_cli_relays_the_applications_stdout_and_stderr() {
+        let project = Project::new();
+        project.cargo("printf 'rendering\\n'\nprintf 'a problem\\n' >&2\nexit 0");
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 0, "{command}: {ran:?}");
+            assert_eq!(
+                ran.out, "rendering\n",
+                "{command}: the application's output"
+            );
+            assert_eq!(
+                ran.err, "a problem\n",
+                "{command}: the application's errors"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_exits_with_the_applications_status() {
+        let project = Project::new();
+        project.cargo("exit 3");
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 3, "{command}: {ran:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_exits_128_plus_the_signal_that_ended_the_application() {
+        let project = Project::new();
+        project.cargo("kill -KILL $$");
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 128 + 9, "{command}: {ran:?}");
+        }
+    }
+
+    // -- what the CLI refuses ---------------------------------------------------
+
+    #[tokio::test]
+    async fn inssr_cli_fails_outside_a_project_naming_the_reason() {
+        let project = Project::with_manifest(None);
+        project.cargo("exit 0");
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 1, "{command}: {ran:?}");
+            assert!(
+                ran.err.contains("No Cargo.toml found"),
+                "{command}: {}",
+                ran.err
+            );
+            assert_eq!(project.call(), None, "{command}: cargo never ran");
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_fails_on_a_manifest_without_a_package_naming_the_reason() {
+        let project = Project::with_manifest(Some("[workspace]\nmembers = []\n"));
+        project.cargo("exit 0");
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli(&[command])).await;
+
+            assert_eq!(ran.code, 1, "{command}: {ran:?}");
+            assert!(
+                ran.err
+                    .contains("Could not find package name in Cargo.toml"),
+                "{command}: {}",
+                ran.err
+            );
+            assert_eq!(project.call(), None, "{command}: cargo never ran");
+        }
+    }
+
+    #[tokio::test]
+    async fn inssr_cli_names_the_cargo_run_it_could_not_start() {
+        // `bin` holds no `cargo`, and it is all of `PATH`.
+        let project = Project::new();
+        let path = project.bin().display().to_string();
+
+        for command in COMMANDS {
+            let ran = run(&mut project.cli_with_path(&[command], &path)).await;
+
+            assert_eq!(ran.code, 1, "{command}: {ran:?}");
+            assert!(
+                ran.err
+                    .contains(&format!("cargo run --bin {PACKAGE} -- {command}")),
+                "{command}: the error names what could not run: {}",
+                ran.err
+            );
+        }
+    }
+
+    // -- signals ----------------------------------------------------------------
+
+    /// A `cargo` that says `ready` once it runs, prints `application got
+    /// <signal> <count>` for each `SIGINT` or `SIGTERM` it receives, and
+    /// exits with 7 at the `stop_after`th. It writes its own process id and
+    /// its sleeper's to `pids`.
+    fn signal_recording_cargo(pids: &Path, stop_after: usize) -> String {
+        format!(
+            "n=0\n\
+             got() {{\n\
+             \x20 n=$((n + 1))\n\
+             \x20 echo \"application got $1 $n\"\n\
+             \x20 if [ \"$n\" -ge {stop_after} ]; then kill \"$sleeper\"; exit 7; fi\n\
+             }}\n\
+             trap 'got INT' INT\n\
+             trap 'got TERM' TERM\n\
+             sleep 1000 >/dev/null 2>&1 &\n\
+             sleeper=$!\n\
+             echo \"$$ $sleeper\" > '{pids}'\n\
+             echo ready\n\
+             while kill -0 \"$sleeper\" 2>/dev/null; do wait \"$sleeper\"; done",
+            pids = pids.display()
         )
-        .env("PATH", path))
-        .await;
-
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, format!("ran {}\n", bundle.display()));
     }
 
-    #[tokio::test]
-    async fn inssr_cli_start_rejects_an_ensure_runtime_exists_it_cannot_read() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let ran = run(&mut cli(
-            &["ssr:start"],
-            dir.path(),
-            &[("SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS", "sometimes")],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 1, "{ran:?}");
-        assert!(
-            ran.err.contains("SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS") && ran.err.contains("sometimes"),
-            "{}",
-            ran.err
-        );
+    /// Read the CLI's stdout into `out` up to the line `awaited`. `false`
+    /// when the CLI exited or its output ended first.
+    async fn read_until(
+        lines: &mut Lines<BufReader<ChildStdout>>,
+        child: &mut Child,
+        out: &mut String,
+        awaited: &str,
+    ) -> bool {
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => line.expect("read the CLI's stdout"),
+                _ = child.wait() => return false,
+            };
+            let Some(line) = line else {
+                return false;
+            };
+            out.push_str(&line);
+            out.push('\n');
+            if line == awaited {
+                return true;
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn inssr_cli_start_stops_a_running_worker_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("started");
-        let worker =
-            FakeWorker::start(Reply::Close, Reply::Status(200), Some(marker.clone())).await;
-        let runtime = script(
-            dir.path(),
-            "runtime",
-            &format!("touch '{}'\necho started", marker.display()),
-        );
-        let bundle = bundle(dir.path());
-
-        let ran = run(&mut cli(
-            &["ssr:start", "--bundle", &path_str(&bundle)],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &worker.url),
-                ("SUPRNOVA_SSR_RUNTIME", &path_str(&runtime)),
-            ],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(worker.paths(), vec!["/shutdown".to_owned()]);
-        assert!(
-            !worker.seen()[0].marker_existed,
-            "the shutdown came before the new worker started"
-        );
-        assert_eq!(ran.out, "started\n");
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_start_reports_stderr_and_exits_with_the_workers_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = bundle(dir.path());
-        let runtime = script(
-            dir.path(),
-            "runtime",
-            "echo rendering\necho 'a problem' >&2\nexit 3",
-        );
-
-        let ran = run(&mut cli(
-            &["ssr:start", "--bundle", &path_str(&bundle)],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &refusing_url()),
-                ("SUPRNOVA_SSR_RUNTIME", &path_str(&runtime)),
-            ],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 3, "{ran:?}");
-        assert_eq!(ran.out, "rendering\n");
-        assert_eq!(ran.err, "a problem\n");
-    }
-
-    /// Start `ssr:start`, wait until the worker says it is ready, send the
-    /// CLI `signal`, and return what it printed.
+    /// Run `ssr:start` under a `cargo` that records the signals it receives,
+    /// send the CLI alone each of `signals`, the first once the application
+    /// is ready and each next one once the application reported the one
+    /// before, and return what the CLI printed and exited with.
     ///
-    /// The worker writes its process ids to a file. A CLI that did not
-    /// forward the signal dies of it and leaves the worker running, holding
-    /// the output pipe open; the worker is then killed by those ids so the
-    /// test can finish and report.
-    async fn signal_a_running_start(signal: nix::sys::signal::Signal) -> Ran {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
-
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pids");
-        let runtime = script(
-            dir.path(),
-            "runtime",
-            &format!(
-                "trap 'echo \"worker got TERM\"; kill $sleeper; exit 0' TERM\n\
-                 trap 'echo \"worker got INT\"; kill $sleeper; exit 0' INT\n\
-                 sleep 1000 >/dev/null 2>&1 &\n\
-                 sleeper=$!\n\
-                 echo \"$$ $sleeper\" > '{}'\n\
-                 echo ready\n\
-                 wait $sleeper",
-                pids.display()
-            ),
-        );
-        let bundle = bundle(dir.path());
-        let mut child = cli(
-            &["ssr:start", "--bundle", &path_str(&bundle)],
-            dir.path(),
-            &[
-                ("SUPRNOVA_SSR_URL", &refusing_url()),
-                ("SUPRNOVA_SSR_RUNTIME", &path_str(&runtime)),
-            ],
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the CLI");
+    /// A CLI that did not forward a signal dies of it and leaves the
+    /// application running, holding the output pipe open; the application
+    /// is then killed by the ids it wrote so the test can finish and report.
+    async fn signal_a_running_start(signals: &[Signal]) -> Ran {
+        let project = Project::new();
+        let pids = project.record().join("pids");
+        project.cargo(&signal_recording_cargo(&pids, signals.len()));
+        let mut child = project
+            .cli(&["ssr:start"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the CLI");
+        let cli =
+            Pid::from_raw(i32::try_from(child.id().expect("the CLI runs")).expect("a process id"));
 
         let mut stderr = child.stderr.take().expect("the CLI's stderr");
         let errors = tokio::spawn(async move {
@@ -693,20 +709,20 @@ mod inssr {
         });
         let mut lines = BufReader::new(child.stdout.take().expect("the CLI's stdout")).lines();
         let mut out = String::new();
-        while let Some(line) = lines.next_line().await.expect("read the CLI's stdout") {
-            out.push_str(&line);
-            out.push('\n');
-            if line == "ready" {
+
+        let mut awaited = "ready".to_owned();
+        for (sent, signal) in signals.iter().enumerate() {
+            if !read_until(&mut lines, &mut child, &mut out, &awaited).await {
                 break;
             }
+            kill(cli, *signal).expect("signal the CLI");
+            awaited = format!(
+                "application got {} {}",
+                signal.as_str().trim_start_matches("SIG"),
+                sent + 1
+            );
         }
-        assert!(
-            out.contains("ready\n"),
-            "the worker never said it was ready: {out}"
-        );
 
-        let cli_pid = Pid::from_raw(child.id().expect("the CLI runs") as i32);
-        kill(cli_pid, signal).expect("signal the CLI");
         let status = child.wait().await.expect("wait for the CLI");
         if status.code().is_none() {
             let ids = std::fs::read_to_string(&pids).unwrap_or_default();
@@ -721,162 +737,42 @@ mod inssr {
             out.push_str(&line);
             out.push('\n');
         }
-        let err = errors.await.unwrap();
+        let err = errors.await.expect("read the CLI's stderr");
         Ran {
             code: status
                 .code()
-                .unwrap_or_else(|| panic!("the CLI died of {signal}: {out} {err}")),
+                .unwrap_or_else(|| panic!("the CLI died of a signal: {out} {err}")),
             out,
             err,
         }
     }
 
     #[tokio::test]
-    async fn inssr_cli_start_forwards_sigterm_to_the_worker() {
-        let ran = signal_a_running_start(nix::sys::signal::Signal::SIGTERM).await;
+    async fn inssr_cli_start_forwards_sigint_to_the_application() {
+        let ran = signal_a_running_start(&[Signal::SIGINT]).await;
 
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, "ready\nworker got TERM\n");
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
+        assert_eq!(ran.out, "ready\napplication got INT 1\n");
     }
 
     #[tokio::test]
-    async fn inssr_cli_start_forwards_sigint_to_the_worker() {
-        let ran = signal_a_running_start(nix::sys::signal::Signal::SIGINT).await;
+    async fn inssr_cli_start_forwards_sigterm_to_the_application() {
+        let ran = signal_a_running_start(&[Signal::SIGTERM]).await;
 
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, "ready\nworker got INT\n");
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
+        assert_eq!(ran.out, "ready\napplication got TERM 1\n");
     }
 
-    // -- ssr:stop -----------------------------------------------------------
-
+    /// The application's `ssr:start` kills its worker at a second signal, so
+    /// the CLI forwards every signal, not the first alone.
     #[tokio::test]
-    async fn inssr_cli_stop_succeeds_when_the_worker_closes_the_connection() {
-        let dir = tempfile::tempdir().unwrap();
-        let worker = FakeWorker::start(Reply::Close, Reply::Status(200), None).await;
+    async fn inssr_cli_start_forwards_a_second_signal_as_well() {
+        let ran = signal_a_running_start(&[Signal::SIGINT, Signal::SIGINT]).await;
 
-        let ran = run(&mut cli(
-            &["ssr:stop", "--url", &worker.url],
-            dir.path(),
-            &[],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, "Inertia SSR server stopped.\n");
-        assert_eq!(worker.paths(), vec!["/shutdown".to_owned()]);
+        assert_eq!(ran.code, 7, "the application's status: {ran:?}");
         assert_eq!(
-            ran,
-            shared_stop(&flags_config(&worker.url, 2000), false).await,
-            "the CLI prints what the shared stop prints"
+            ran.out,
+            "ready\napplication got INT 1\napplication got INT 2\n"
         );
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_stop_with_graceful_succeeds_when_no_worker_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = refusing_url();
-
-        let graceful = run(&mut cli(
-            &["ssr:stop", "--graceful"],
-            dir.path(),
-            &[("SUPRNOVA_SSR_URL", &url)],
-        ))
-        .await;
-        assert_eq!(graceful.code, 0, "{graceful:?}");
-        assert_eq!(graceful.out, "Inertia SSR server is not running.\n");
-        assert_eq!(graceful, shared_stop(&flags_config(&url, 2000), true).await);
-
-        let plain = run(&mut cli(&["ssr:stop", "--url", &url], dir.path(), &[])).await;
-        assert_eq!(plain.code, 1, "{plain:?}");
-        assert_eq!(plain.err, "Unable to connect to Inertia SSR server.\n");
-        assert_eq!(plain, shared_stop(&flags_config(&url, 2000), false).await);
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_stop_fails_when_the_worker_keeps_running() {
-        let dir = tempfile::tempdir().unwrap();
-        for (shutdown, timeout) in [(Reply::Status(200), "2000"), (Reply::Hang, "200")] {
-            let worker = FakeWorker::start(shutdown, Reply::Status(200), None).await;
-
-            let ran = run(&mut cli(
-                &[
-                    "ssr:stop",
-                    "--graceful",
-                    "--url",
-                    &worker.url,
-                    "--timeout-ms",
-                    timeout,
-                ],
-                dir.path(),
-                &[],
-            ))
-            .await;
-
-            assert_eq!(ran.code, 1, "{ran:?}");
-            assert_eq!(ran.err, "Unable to connect to Inertia SSR server.\n");
-        }
-    }
-
-    // -- ssr:check ----------------------------------------------------------
-
-    #[tokio::test]
-    async fn inssr_cli_check_prints_what_the_shared_check_prints() {
-        let dir = tempfile::tempdir().unwrap();
-        for health in [Reply::Status(500), Reply::Hang] {
-            let worker = FakeWorker::start(Reply::Close, health, None).await;
-
-            let ran = run(&mut cli(
-                &["ssr:check", "--url", &worker.url, "--timeout-ms", "200"],
-                dir.path(),
-                &[],
-            ))
-            .await;
-
-            assert_eq!(ran.code, 1, "a worker whose /health fails: {ran:?}");
-            assert_eq!(
-                ran,
-                shared_check(&flags_config(&worker.url, 200)).await,
-                "the CLI prints what the shared check prints"
-            );
-        }
-    }
-
-    /// Needs the HTTP gateway's health check (`HttpGateway::is_healthy`,
-    /// PAR-060): without it the gateway has none, and `ssr:check` says so.
-    #[tokio::test]
-    async fn inssr_cli_check_succeeds_against_a_healthy_worker() {
-        let dir = tempfile::tempdir().unwrap();
-        let worker = FakeWorker::start(Reply::Close, Reply::Status(200), None).await;
-
-        let ran = run(&mut cli(
-            &["ssr:check"],
-            dir.path(),
-            &[("SUPRNOVA_SSR_URL", &worker.url)],
-        ))
-        .await;
-
-        assert_eq!(ran.code, 0, "{ran:?}");
-        assert_eq!(ran.out, "Inertia SSR server is running.\n");
-        assert_eq!(worker.paths(), vec!["/health".to_owned()]);
-    }
-
-    #[tokio::test]
-    async fn inssr_cli_check_and_stop_refuse_a_url_without_a_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        for command in ["ssr:check", "ssr:stop"] {
-            let ran = run(&mut cli(
-                &[command, "--url", "127.0.0.1:13714"],
-                dir.path(),
-                &[],
-            ))
-            .await;
-
-            assert_eq!(ran.code, 1, "{command}: {ran:?}");
-            assert!(
-                ran.err.contains("http://") && ran.err.contains("\"127.0.0.1:13714\""),
-                "{command}: the error names the URL and the scheme it needs: {}",
-                ran.err
-            );
-        }
     }
 }
