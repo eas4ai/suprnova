@@ -724,3 +724,191 @@ Falsifier: with `datetime_cast = "native"` or `"naive"`, a model's managed times
 Mechanism: `par-laravel-defaults`.
 Rationale: Issue #137; the schema setting reaches the migrations through `#[suprnova::main]` because migrations build their schema at run time, where no macro reads `Cargo.toml`, and compiling it in keeps one schema for every environment.
 Status: Agreed 2026-10-04
+
+
+## Inertia protocol
+
+The developer's rulings of 2026-10-07 on the parity map ("I am going to
+accept your recommendations", 16:14; every row defaults to build toward
+Laravel's behaviour) cover the Inertia server adapter, inertia-laravel 3.5.1
+and the client's protocol in Inertia.js 3.8.0: the headers, props
+resolution, prop types, JSON encoding, middleware, response factory,
+response shape and the request bodies the client sends. The map rows are
+listed in `docs/superpowers/notes/parity-rulings-2026-10-07.md` (untracked);
+the application-owned root document rows (RF-01, RS-02, RS-05, BL-04) are
+RDOC-001 to RDOC-004 and RDOC-006, and the client nonce row (H03) is
+RDOC-005, built with SEC-003. Laravel adapter references cite
+`reference/inertia-laravel-3.5.1/src/`.
+
+[PAR-046] A request MUST count as an Inertia visit when its `X-Inertia`
+header holds any value but an empty string or `0`, as PHP's boolean cast
+reads it, and every Inertia JSON response MUST carry `X-Inertia: true`.
+The asset version MUST resolve, in order, from the configured asset URL
+setting when one is set, else from the Vite manifest's hash, else to the
+empty string; `Inertia::version(value or function)` MUST set it at run time
+and `Inertia::get_version()` MUST read it. On an Inertia `GET` whose
+`X-Inertia-Version` differs from the current version the server MUST
+answer `409 Conflict` before the handler runs, with `X-Inertia-Location`
+holding the request's absolute URL (scheme, host, path and query) and
+`X-Inertia-Version` holding the current version; a visit by any other
+method MUST pass through, as today.
+Falsifier: a request with `X-Inertia: 1` gets the HTML document, or one with `X-Inertia: 0` or an empty header gets JSON; with no asset URL setting and no manifest the version is `1.0`; the version 409 lacks `X-Inertia-Version` or carries a relative `X-Inertia-Location`; or a version set with `Inertia::version` differs from what `get_version` returns or what the 409 compares against.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows HD-01, HD-10, MW-02, MW-11, R04 and RF-05; Laravel's `Request::inertia()` casts the header to a boolean, and the client reads `X-Inertia-Version` on the 409 to spare async visits a forced reload.
+Status: Agreed 2026-10-07
+
+[PAR-047] On a partial reload (`X-Inertia-Partial-Component` naming the
+page's component) the server MUST read `X-Inertia-Partial-Data` and
+`X-Inertia-Partial-Except` as comma lists whose empty segments are dropped
+and whose entries are not trimmed, and treat an empty header as absent;
+`except` applies after `only`, and `always` props ignore both. A dotted
+entry MUST narrow literal values only: a prop whose value came from a
+resolver or a prop object ships whole when its path or an ancestor is
+selected, and an entry whose path resolves to nothing yields `[]`. An
+`optional` or `defer` prop MUST resolve on a partial reload whenever its
+path passes the `only` and `except` lists, a reload with `except` alone
+included. `merge` and `once` instructions MUST be emitted only when an
+`only` entry is the prop or an ancestor of it; a deeper entry ships the
+whole prop with no instruction; and a `once` prop the client already holds
+(not deferred) emits its `onceProps` entry and no `mergeProps` entry.
+Falsifier: with `X-Inertia-Partial-Data: a,,b` a prop named `b ` is selected or `a` dropped; an empty `X-Inertia-Partial-Data` yields no props; `only: users.name` on a resolver-backed `users` drops its other fields; `only: missing.path` yields anything but `[]`; a partial reload with `X-Inertia-Partial-Except: x` alone omits an optional or deferred prop whose path is not `x`; `only: items.data` on a merge prop `items` emits a `mergeProps` entry; or a held `once` prop appears in `mergeProps`.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows HD-03, HD-04, PR-07, PR-08, PR-12, PR-13 and PT-01; the client receives different data from Laravel's `PropsResolver` today, and the manual's divergence entry on narrowing goes.
+Status: Agreed 2026-10-07
+
+[PAR-048] An empty `200` on an Inertia visit MUST become a redirect back:
+to the `Referer` when it passes the same-origin check the validation
+redirect applies, else to the session's previous URL, else to the fallback,
+else to `/`, with status `302`, or `303` for `PUT`, `PATCH` and `DELETE`;
+`Inertia::back(status, fallback)` MUST follow the same order. A redirect on
+an Inertia visit whose `Location` carries a `#fragment` MUST become `409
+Conflict` with `X-Inertia-Redirect` holding the location, unless the
+request is a prefetch (`X-Moz`, `Purpose` or `Sec-Purpose` equal to
+`prefetch`); a prefetch MUST record no previous URL either. An Inertia `GET`
+that matched a route and is not a prefetch, not precognitive and not a
+partial reload of the same component MUST record the session's previous URL
+while `store_previous_url` (default on) is set. With `X-Inertia-Error-Bag`
+the `errors` prop MUST be `{<bag>: <default bag>}` when the session holds a
+default bag, `{}` when it holds no errors, and the named bags alone
+otherwise.
+Falsifier: an empty 200 on an Inertia `POST` with a same-origin `Referer` redirects elsewhere than the `Referer`, or with a status other than 302; one on `PUT` is not 303; a redirect to `/page#section` on an Inertia visit arrives as a plain 302, or as a 409 when the request carries `Sec-Purpose: prefetch`; an Inertia GET visit leaves the previous URL unchanged with `store_previous_url` on, or changes it when off or on a partial reload of the same component; or the `errors` prop with `X-Inertia-Error-Bag: form` and no session errors is not `{}`.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows HD-08, HD-12, HD-13, MW-03, MW-06, R06, R09 and RF-18; browsers and fetch follow a 302 after `POST` as `GET`, so the 303-for-every-method rule protected nothing, and the open-redirect check on previous URLs stays.
+Status: Agreed 2026-10-07
+
+[PAR-049] The `Inertia` facade MUST expose at run time what Laravel's
+`ResponseFactory` does: `share` taking a key and value, a map, a Data
+object or a provider, a dotted key nesting at share time; `get_shared(key,
+default)` and `get_shared_all()`; `version` and `get_version` (PAR-046);
+`transform_component_using(fn)` rewriting a component name before render,
+a `None` result keeping the name; `disable_ssr(bool or fn(&Request) ->
+bool)` deciding per request, able to turn SSR on as well as off;
+`without_ssr(patterns)` excluding paths with Laravel's rules (leading and
+trailing slashes trimmed, `*` matching any characters, each pattern tried
+against the path and the full URL); `configure_ssr_request_using(fn)`
+adjusting the request sent to the SSR server; `location(url or redirect)`
+answering `409` with `X-Inertia-Location` to an Inertia visit and a `302`
+redirect otherwise, `location_for` kept; and an `ensure_pages_exist`
+setting that makes rendering a component with no page file under the
+configured pages directory an error, for a name given as a string as well
+as through the macro.
+Falsifier: `share("a.b", 1)` is read back as a flat `a.b` key; `get_shared("missing", 7)` is not 7; a transformer returning `Some("Other")` renders the original component; `disable_ssr(|r| r.path() == "/no")` leaves SSR off for `/yes` when the configuration has it off, or on for `/no`; `without_ssr("admin/*")` fails to exclude `/admin/users` or excludes `/adminx`; the SSR request lacks a header set through `configure_ssr_request_using`; `location("/x")` on a request without `X-Inertia` answers 409; or with `ensure_pages_exist` on, `InertiaResponse::new("Missing")` renders 200.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows HM-04, RF-02, RF-03, RF-07, RF-11, RF-12, RF-13, RF-15 and RF-16; a Laravel application's `Inertia::` calls port by name, and the manual's always-409 claim for `location` is wrong for 3.5.1.
+Status: Agreed 2026-10-07
+
+[PAR-050] Inertia flash data (`Inertia::flash` with a key, a map or an
+enum key, and `InertiaResponse::flash`) MUST live in the session under
+`inertia.flash_data`, be emitted as `page.flash` and pulled when a page is
+rendered, be kept when the response is a redirect, and be readable and
+removable with `Inertia::get_flashed(request)` and `pull_flashed(request)`.
+The `clear_history` and `preserve_fragment` flags MUST persist in the
+session until a page response emits them (`clearHistory: true`,
+`preserveFragment: true`), however many redirects come first;
+`Redirect::preserve_fragment()` MUST set the flag.
+Falsifier: flash set on a request that answers a redirect, followed by a second redirect, is gone at the page after it; `get_flashed` returns nothing for data `pull_flashed` would remove; a logout that calls `clear_history` and answers two redirects renders the next page without `clearHistory: true`; or a `preserve_fragment` set before two redirects is not emitted.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows RF-08, RF-09, RF-17, RF-19 and MW-05; a one-request flash lets a logout followed by two redirects leave private pages in the history.
+Status: Agreed 2026-10-07
+
+[PAR-051] A page's props and the shared props MUST accept any number of
+provider values (a Data object or a type implementing
+`ProvidesInertiaProperties`), each expanded at render with a render
+context of the component name and the request, and a prop value MAY
+implement `ProvidesInertiaProperty` to be converted with a property
+context of its key path, its sibling props and the request. The page
+object MUST carry `sharedProps`, the top-level segment of every shared key
+with `errors` included when the validation redirect shares it, while
+`expose_shared_props` (default on) is set, and omit it when unset.
+Falsifier: two providers given to a response lose either's keys; a provider sees a component name other than the page's; a `ProvidesInertiaProperty` value is converted without its key path or its siblings; `sharedProps` lacks `errors` after a validation failure or lists a nested key; or it is present with `expose_shared_props` off.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows PR-01, PR-03 and PR-04; the client reads `sharedProps` during instant visits, and the shared-data provider already shows the context form.
+Status: Agreed 2026-10-07
+
+[PAR-052] Merge props MUST take `append(path or paths, match_on)` and
+`prepend(path or paths, match_on)` at nested paths, the two-argument form
+adding `{path}.{match_on}` to `matchPropsOn`, and `match_on` MUST replace
+the list on each call, emitted as `{path}.{field}`. `once` props MUST take
+`as(key or enum)`, `until(DateTime, Duration or seconds)`, `fresh(bool)`
+and `once(bool, as, until)`, with `expiresAt` in milliseconds from the
+expiry, the server's refusal of a stale client claim kept;
+`Inertia::share_once(key, fn)` MUST return a once prop taking the same
+options. A `scroll` prop MUST default its wrapper to `data`, take
+`match_on` relative to the prop and emit it as `{key}.{path}` with no
+wrapper prefix, carry metadata from a length-aware, simple or cursor
+paginator (page name, current, previous and next, encoded cursors) or from
+a `ProvidesScrollMetadata` value or a function of the loaded value, and,
+when deferred, announce the bare key in `mergeProps` on the first visit and
+`{key}.{wrapper}` when the data arrives.
+Falsifier: `append(["a.items", "b"], "id")` emits anything but both merge paths with `a.items.id` and `b.id` in `matchPropsOn`; `match_on("x").match_on("y")` emits both; `once` with `until(60)` emits an `expiresAt` other than now plus 60 s in milliseconds; `share_once` cannot take `as` or `fresh`; a scroll prop `posts` with `match_on("data.id")` emits `posts.data.data.id`; a cursor paginator's current page or custom page name is missing from `scrollProps`; or a deferred scroll prop announces `{key}.data` on the first visit.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows PT-06, PT-07, PT-10, PT-11, PT-12, PT-13, PT-14 and PT-15; the merge, once and scroll instructions are shapes the client reads, so a difference changes what the page shows.
+Status: Agreed 2026-10-07
+
+[PAR-053] The page JSON written into the first-visit `<script>` MUST
+escape `<` and `>` as `<` and `>`, and `/` as today. A page
+that cannot be encoded MUST answer an error response, never a `200` with an
+empty page. With `preserve_big_integers` (configuration or
+`InertiaResponse::preserve_big_integers(bool)`) every integer beyond plus
+or minus 9007199254740991 in props and flash, at any depth, MUST be emitted
+as `{"$bigint": "<digits>"}` and the page MUST carry `preserveBigIntegers:
+true`.
+Falsifier: a prop holding `<!--<script>` reaches the first-visit document unescaped, so a DOM parser finds no mount element; a serializer that fails yields 200; with `preserve_big_integers` on, 9007199254740993 is emitted as a JSON number or the flag is missing; or with it off an integer is wrapped.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows JE-01, JE-03, JE-04, JE-05 and H02; a confirmed defect (a prop swallows the closing script tag and the mount element) and the client's exact-integer restoration.
+Status: Agreed 2026-10-07
+
+[PAR-054] An application MUST be able to replace the Inertia middleware's
+decisions through a hook trait (`version`, `share`, `share_once`,
+`root_view`, `url_resolver`, `on_empty_response`, `on_version_change` and
+`on_redirect_with_fragment`, each defaulting to the framework's behaviour)
+and to register the Inertia middleware stack on a route group instead of
+globally, so a group without it emits no `Vary: X-Inertia` and no Inertia
+conversion.
+Falsifier: an `on_empty_response` hook returning a 204 still yields the redirect back; an `on_version_change` hook returning a page still yields the 409; a route group registered without the Inertia stack carries `Vary: X-Inertia` or has its 302 turned into 303; or a group registered with it lacks them.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows MW-08 and MW-10; a hook trait fits the framework's pattern, and an API group should not carry the Inertia headers.
+Status: Agreed 2026-10-07
+
+[PAR-055] A request body the Inertia client sends MUST be read as the
+client shapes it: `multipart/form-data` with bracketed and indexed names
+(`photos[0]`, `user[name]`, `tags[]`), and the same names in a URL-encoded
+body or a `GET` query string, MUST decode into nested form data (objects
+for bracketed keys, lists for `[]` and indexed keys, files where a part
+carries a filename), so a form request and `Request::input` read
+`user.name` and `tags` as Laravel does, and a multipart body MUST NOT
+answer `415`.
+Falsifier: a multipart `POST` with `photos[0]` and `user[name]` answers 415, or a form request declaring `user.name` reads nothing; `GET /items?filters[status]=x&tags[]=a&tags[]=b` yields a flat `filters[status]` key or a `tags` of one element; or an indexed name decodes out of order.
+Mechanism: `par-inertia-protocol`.
+Rationale: Rows P16 and P17; the client sends file forms as multipart with bracketed names and GET data in brackets format, so a drop-in form fails today.
+Status: Agreed 2026-10-07
+
+[PAR-056] The page object's `url` MUST carry the request's path and its
+query string normalised as Laravel's `fullUrl` does through Symfony: pairs
+parsed, sorted by key, and re-encoded per RFC 3986 (space as `%20`,
+reserved characters percent-encoded), so the client's comparison of page
+URLs matches Laravel's.
+Falsifier: a request to `/s?b=2&a=1%20x` yields a page `url` other than `/s?a=1%20x&b=2`; or one to `/s?a=%2Fx` yields `a=/x`.
+Mechanism: `par-inertia-protocol`.
+Rationale: Row RS-07, settled from Symfony 7.3 `Request::normalizeQueryString`.
+Status: Agreed 2026-10-07
