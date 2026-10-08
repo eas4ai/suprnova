@@ -596,6 +596,34 @@ pub mod react {
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/react/src/app.css.tpl")
     }
+    /// `src/lib/app.ts`: the application's name, the tab title callback and
+    /// the layout resolver both entries pass to `createInertiaApp`. Takes
+    /// the project's title, which names the application in the tab.
+    pub fn app_module(project_title: &str) -> String {
+        include_str!("files/frontend/react/src/lib/app.ts.tpl")
+            .replace("{project_title}", project_title)
+    }
+    /// The persistent layout of every page outside `auth/`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/react/src/layouts/AppLayout.tsx.tpl")
+    }
+    /// The persistent layout of the pages under `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/react/src/layouts/GuestLayout.tsx.tpl")
+    }
+    /// The toast both layouts show from the page's flash data.
+    pub fn flash_toast() -> &'static str {
+        include_str!("files/frontend/react/src/components/FlashToast.tsx.tpl")
+    }
+    /// The signed-in user's notes, rendered by `controllers::notes::index`.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Notes/Index.tsx.tpl")
+    }
+    /// One of the signed-in user's notes, rendered by
+    /// `controllers::notes::show`.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Notes/Show.tsx.tpl")
+    }
 }
 
 pub mod svelte {
@@ -861,6 +889,25 @@ pub fn scaffold_frontend(
                 .map_err(|e| format!("Failed to write src/vite-env.d.ts: {}", e))?;
             fs::write(lib.join("lang.ts"), react::lang())
                 .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
+            let app_module = react::app_module(&crate::commands::new::to_title_case(project_name));
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            let notes = pages.join("Notes");
+            for d in [&layouts, &components, &notes] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            for (path, content) in [
+                (lib.join("app.ts"), app_module.as_str()),
+                (layouts.join("AppLayout.tsx"), react::app_layout()),
+                (layouts.join("GuestLayout.tsx"), react::guest_layout()),
+                (components.join("FlashToast.tsx"), react::flash_toast()),
+                (notes.join("Index.tsx"), react::notes_index_page()),
+                (notes.join("Show.tsx"), react::notes_show_page()),
+            ] {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
         }
     }
 

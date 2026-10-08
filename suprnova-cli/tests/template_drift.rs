@@ -1499,12 +1499,27 @@ fn the_api_scaffold_does_not_install_inertia() {
 
 #[test]
 fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
+    // The react kit's entry is a top-level `createInertiaApp` call, which the
+    // Inertia Vite plugin wraps in `createServer` from
+    // `@inertiajs/react/server` for a production SSR build
+    // (`packages/vite/src/frameworks/react.ts` in Inertia 3.8.0); the entry
+    // must not start a server of its own, and the config must name it as
+    // the plugin's SSR entry.
+    let react = read("src/templates/files/frontend/react/src/ssr.tsx.tpl");
+    assert!(
+        react.lines().any(|line| line == "createInertiaApp({")
+            && !react.contains("import createServer"),
+        "react's ssr entry must be the top-level createInertiaApp call the Inertia \
+         plugin wraps; got:\n{react}"
+    );
+    let config = read("src/templates/files/frontend/react/vite.config.ts.tpl");
+    assert!(
+        config.contains("import inertia from '@inertiajs/vite'")
+            && config.contains("inertia({ ssr: 'src/ssr.tsx' })"),
+        "react's vite.config.ts must run the Inertia plugin on src/ssr.tsx; got:\n{config}"
+    );
+
     for (frontend, tpl, package) in [
-        (
-            "react",
-            "src/templates/files/frontend/react/src/ssr.tsx.tpl",
-            "@inertiajs/react",
-        ),
         (
             "svelte",
             "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
@@ -1839,11 +1854,12 @@ fn the_starter_inertia_props_match_the_starter_controllers() {
         suprnova_cli::commands::generate_types::PageTypes::default(),
     );
 
+    // The react kit types the notes pages and the flash toast of the kit
+    // contract, whose handlers this branch's controller templates do not
+    // have yet; `kit_pages.rs`'s
+    // `kit_react_types_are_what_generate_types_writes_for_the_kit_contract`
+    // holds it to the generator's output for them instead.
     for (frontend, shipped) in [
-        (
-            "react",
-            suprnova_cli::templates::react::inertia_props_types(),
-        ),
         (
             "svelte",
             suprnova_cli::templates::svelte::inertia_props_types(),
@@ -1859,8 +1875,9 @@ fn the_starter_inertia_props_match_the_starter_controllers() {
     }
 }
 
-/// Validation errors reach a scaffolded auth page through `useForm().errors`,
-/// never through a page prop.
+/// Validation errors reach a scaffolded auth page through its form (the
+/// `Form` component's `errors` in react, `useForm().errors` in svelte and
+/// vue), never through a page prop.
 ///
 /// The framework seeds `errors` on every Inertia page from the
 /// session-flashed validation bag. Through v2.0.0 the auth controller
@@ -1882,13 +1899,13 @@ fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
             "react",
             "Login",
             suprnova_cli::templates::react::login_page(),
-            "errors } = useForm(",
+            "{({ errors, processing }) => (",
         ),
         (
             "react",
             "Register",
             suprnova_cli::templates::react::register_page(),
-            "errors } = useForm(",
+            "{({ errors, processing }) => (",
         ),
         (
             "svelte",
@@ -2385,7 +2402,10 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
             }
         });
     }
-    assert_eq!(pages, 21, "seven pages for each of the three frontends");
+    assert_eq!(
+        pages, 23,
+        "seven pages each for svelte and vue, nine for react (with Notes/Index and Notes/Show)"
+    );
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
 
@@ -2616,8 +2636,9 @@ fn intt_no_kit_page_types_root_by_hand() {
         "these kit pages pass usePage a type argument: {offenders:?}"
     );
     assert_eq!(
-        readers, 21,
-        "the seven pages of each kit that build URLs read `root` through usePage()"
+        readers, 23,
+        "the pages of each kit that build URLs (seven in svelte and vue, nine in \
+         react) read `root` through usePage()"
     );
 }
 

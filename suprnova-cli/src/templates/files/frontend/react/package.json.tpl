@@ -7,16 +7,18 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "build:ssr": "vite build --ssr src/ssr.tsx",
+    "check": "tsc --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
     "@fluent/bundle": "^0.19.1",
-    "@inertiajs/core": "^3.6.1",
-    "@inertiajs/react": "^3.6.1",
+    "@inertiajs/core": "^3.8.0",
+    "@inertiajs/react": "^3.8.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@inertiajs/vite": "^3.8.0",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.3",

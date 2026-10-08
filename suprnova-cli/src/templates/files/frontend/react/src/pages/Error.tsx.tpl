@@ -1,4 +1,4 @@
-import { usePage } from '@inertiajs/react'
+import { Head, Link, usePage } from '@inertiajs/react'
 import { useLang } from '../lib/lang'
 
 // These props come from the framework, not from one of your handlers:
@@ -29,7 +29,8 @@ export default function ErrorPage({ status, message, request_id }: ErrorProps) {
   const { t } = useLang()
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+      <Head title={String(status)} />
       <div className="max-w-md w-full text-center space-y-4">
         <h1 className="text-6xl font-extrabold text-gray-900">{status}</h1>
         <p className="text-lg text-gray-700">{message}</p>
@@ -39,9 +40,9 @@ export default function ErrorPage({ status, message, request_id }: ErrorProps) {
           </p>
         )}
         <p>
-          <a href={`${root}/`} className="text-indigo-600 hover:text-indigo-500">
+          <Link href={`${root}/`} className="text-indigo-600 hover:text-indigo-500">
             {t('error-go-home')}
-          </a>
+          </Link>
         </p>
       </div>
     </div>

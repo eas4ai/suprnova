@@ -24,11 +24,27 @@ export interface HomeProps {
 export interface LoginProps {
 }
 
+export interface NoteShowProps {
+  note: NoteView;
+}
+
+export interface NoteView {
+  id: number;
+  title: string;
+  body: string | null;
+  created_at: string;
+}
+
 export interface RegisterProps {
 }
 
 export interface ResetPasswordProps {
   token: string;
+}
+
+export interface Toast {
+  kind: unknown;
+  message: string;
 }
 
 export interface VerifyEmailProps {
@@ -38,6 +54,7 @@ export interface VerifyEmailProps {
 export interface Pages {
   "Dashboard": DashboardProps;
   "Home": HomeProps;
+  "Notes/Show": NoteShowProps;
   "auth/ForgotPassword": ForgotPasswordProps;
   "auth/Login": LoginProps;
   "auth/Register": RegisterProps;
@@ -57,5 +74,6 @@ declare module '@inertiajs/core' {
   export interface InertiaConfig {
     sharedPageProps: SharedProps;
     errorValueType: string;
+    flashDataType: Toast;
   }
 }

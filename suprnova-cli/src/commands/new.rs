@@ -327,7 +327,10 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn to_title_case(s: &str) -> String {
+/// The project's display title, from its directory name: `my-shop` and
+/// `my_shop` both become `My Shop`. The scaffold names the application with
+/// it in `bootstrap.rs`'s default title and in the React kit's tab titles.
+pub(crate) fn to_title_case(s: &str) -> String {
     s.replace(['-', '_'], " ")
         .split_whitespace()
         .map(|word| {
