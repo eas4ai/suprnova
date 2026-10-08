@@ -293,7 +293,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   so a burst holds at most the limit times one hash's memory. A hash keeps
   its place under the limit until it returns, even when its caller stops
   waiting. `0` or a value that is not a whole number is refused when the
-  hashing configuration loads (#146).
+  hashing configuration loads; a blank value is the setting left unset.
+  The two dummy hashes Magnetar's verifier warms as it is built run under
+  the limit too, instead of inline on the runtime worker that installs the
+  engines (#146).
 - **A WebSocket upgrade no longer waits behind the shutdown drain.** The
   registry of WebSocket handler tasks sat behind an async lock that the
   shutdown drain held for up to its 5 s deadline, so an upgrade in flight

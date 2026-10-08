@@ -569,14 +569,18 @@ async fn build_default_engines(
     } else {
         PasswordTarget::Argon2id
     };
-    let verifier = Arc::new(
+    // Building the verifier warms one dummy hash per format. That is hash
+    // work, so it runs on the blocking pool under the process-wide limit
+    // like a sign-in's (RTC-001), not inline on this async worker.
+    let verifier = magnetar::password::run_hash_work(|| {
         PasswordVerifier::new(
             Arc::new(StandardPasswordHashDriver),
             PasswordHashConfig::default(),
         )
-        .map_err(map_error)?
-        .with_target(target),
-    );
+    })
+    .await
+    .map_err(map_error)?;
+    let verifier = Arc::new(verifier.with_target(target));
     let password = Arc::new(PasswordAuthService::new(
         storage.clone(),
         storage.clone(),

@@ -15,6 +15,7 @@
 //! Laravel could not verify the hash left in place.
 
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use secrecy::{ExposeSecret, SecretString};
@@ -302,12 +303,12 @@ where
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return work();
     };
-    let permit = Arc::clone(&hash_work_gate().permits)
-        .acquire_owned()
-        .await
-        .map_err(|error| Error::Internal {
-            message: format!("password hash work limit is closed: {error}"),
-        })?;
+    let waiting = Waiting::start();
+    let acquired = Arc::clone(&hash_work_gate().permits).acquire_owned().await;
+    drop(waiting);
+    let permit = acquired.map_err(|error| Error::Internal {
+        message: format!("password hash work limit is closed: {error}"),
+    })?;
     runtime
         .spawn_blocking(move || {
             let _permit = permit;
@@ -317,6 +318,36 @@ where
         .map_err(|error| Error::Internal {
             message: format!("password hash work did not complete: {error}"),
         })?
+}
+
+/// Pieces of hash work waiting for a permit at this moment.
+static HASH_WORK_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// One piece of hash work's wait for a permit, counted while it lasts and
+/// uncounted when it ends, however it ends: a caller that stops waiting
+/// drops the wait with its future.
+struct Waiting;
+
+impl Waiting {
+    fn start() -> Self {
+        HASH_WORK_WAITING.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        HASH_WORK_WAITING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How many pieces of hash work are waiting for a permit right now: the
+/// work past the limit, waiting as tasks that hold no thread. A diagnostic
+/// for an operator's metrics, and for a test that proves work waits at the
+/// limit rather than running past it.
+#[must_use]
+pub fn hash_work_waiting() -> usize {
+    HASH_WORK_WAITING.load(Ordering::SeqCst)
 }
 
 /// The highest cost bcrypt takes: a cost above it is no hash bcrypt wrote.
