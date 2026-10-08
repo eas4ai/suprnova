@@ -277,7 +277,8 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "SSR",
         &[
             ("ssr:start", "Launch Inertia SSR worker (foreground)"),
-            ("ssr:check", "Verify SSR worker is reachable"),
+            ("ssr:stop", "Stop the SSR worker"),
+            ("ssr:check", "Check the SSR worker's health"),
         ],
     ),
     (

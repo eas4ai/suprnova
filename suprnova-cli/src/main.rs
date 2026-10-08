@@ -482,25 +482,49 @@ enum Commands {
     #[command(name = "workflow:install")]
     WorkflowInstall,
     /// Launch the Inertia SSR worker in the foreground
+    ///
+    /// Refuses without a bundle, or without the runtime when
+    /// SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS is true, stops a worker still
+    /// running at SUPRNOVA_SSR_URL, then runs the worker, forwarding Ctrl-C
+    /// and SIGTERM to it and exiting with its status.
     #[command(name = "ssr:start")]
     SsrStart {
-        /// Runtime to launch the worker under (node, bun, deno).
+        /// Runtime to launch the worker under (node, bun, deno, or a path).
         /// Falls back to SUPRNOVA_SSR_RUNTIME env, then "node".
         #[arg(long)]
         runtime: Option<String>,
-        /// Path to the built SSR bundle. Falls back to
-        /// SUPRNOVA_SSR_BUNDLE env, then frontend/bootstrap/ssr/ssr.js.
+        /// Path to the built SSR bundle. Falls back to SUPRNOVA_SSR_BUNDLE
+        /// env, then the first conventional path that exists
+        /// (frontend/bootstrap/ssr/ssr.js first).
         #[arg(long)]
         bundle: Option<String>,
     },
-    /// Verify the Inertia SSR worker is reachable
+    /// Stop the Inertia SSR worker
+    ///
+    /// Sends GET {url}/shutdown; the worker exits without answering.
+    #[command(name = "ssr:stop")]
+    SsrStop {
+        /// Succeed when no worker is running.
+        #[arg(long)]
+        graceful: bool,
+        /// SSR worker URL. Falls back to SUPRNOVA_SSR_URL env, then
+        /// http://127.0.0.1:13714.
+        #[arg(long)]
+        url: Option<String>,
+        /// Request timeout in milliseconds.
+        #[arg(long, default_value = "2000")]
+        timeout_ms: u64,
+    },
+    /// Check the Inertia SSR worker's health
+    ///
+    /// Succeeds when the worker's GET {url}/health answers 2xx.
     #[command(name = "ssr:check")]
     SsrCheck {
         /// SSR worker URL. Falls back to SUPRNOVA_SSR_URL env, then
         /// http://127.0.0.1:13714.
         #[arg(long)]
         url: Option<String>,
-        /// Connect timeout in milliseconds.
+        /// Request timeout in milliseconds.
         #[arg(long, default_value = "2000")]
         timeout_ms: u64,
     },
@@ -752,6 +776,13 @@ fn main() {
         }
         Commands::SsrStart { runtime, bundle } => {
             commands::ssr_start::run(runtime, bundle);
+        }
+        Commands::SsrStop {
+            graceful,
+            url,
+            timeout_ms,
+        } => {
+            commands::ssr_stop::run(url, timeout_ms, graceful);
         }
         Commands::SsrCheck { url, timeout_ms } => {
             commands::ssr_check::run(url, timeout_ms);

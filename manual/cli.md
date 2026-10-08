@@ -158,8 +158,9 @@ See [Workflows](workflows.md).
 
 | Command | Description |
 |---|---|
-| `suprnova ssr:start [--runtime node\|bun\|deno] [--bundle <path>]` | Launch the Inertia SSR worker in the foreground. Falls back to `SUPRNOVA_SSR_RUNTIME` env, then `node`; bundle falls back to `SUPRNOVA_SSR_BUNDLE`, then `frontend/bootstrap/ssr/ssr.js`. |
-| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | Verify the SSR worker's `GET /health` route answers 2xx. Falls back to `SUPRNOVA_SSR_URL`, then `http://127.0.0.1:13714`. Timeout default 2000 ms. |
+| `suprnova ssr:start [--runtime node\|bun\|deno\|<path>] [--bundle <path>]` | Launch the Inertia SSR worker in the foreground, with the checks of the application binary's `ssr:start` ([Console](console.md#ssr-commands)). Runtime falls back to `SUPRNOVA_SSR_RUNTIME` env, then `node`; bundle falls back to `SUPRNOVA_SSR_BUNDLE`, then the first conventional path that exists (`frontend/bootstrap/ssr/ssr.js` first). Refuses a runtime it can't find when `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` is true, stops a worker still running at `SUPRNOVA_SSR_URL` first, forwards Ctrl-C and `SIGTERM` to the worker, and exits with its status. |
+| `suprnova ssr:stop [--graceful] [--url <url>] [--timeout-ms N]` | Send the SSR worker `GET /shutdown`. Exits 0 when the worker closes the connection, or with `--graceful` when no worker can be connected to. Falls back to `SUPRNOVA_SSR_URL`, then `http://127.0.0.1:13714`. Timeout default 2000 ms. |
+| `suprnova ssr:check [--url <url>] [--timeout-ms N]` | Check the SSR worker's health through the SSR gateway: its `GET /health` route answers 2xx. Falls back to `SUPRNOVA_SSR_URL`, then `http://127.0.0.1:13714`. Timeout default 2000 ms. |
 
 See [Inertia SSR](frontend.md) for the production setup.
 

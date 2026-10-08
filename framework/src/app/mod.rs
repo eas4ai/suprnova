@@ -297,6 +297,27 @@ enum Commands {
     },
     /// Bring the application out of maintenance mode
     Up,
+    /// Start the Inertia SSR server in the foreground, with the installed
+    /// Inertia configuration. Mirrors `php artisan inertia:start-ssr`.
+    #[command(name = "ssr:start")]
+    SsrStart {
+        /// The runtime to run the bundle with (node, bun, deno or a path)
+        /// instead of the configured one.
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    /// Stop the Inertia SSR server at the installed configuration's URL.
+    /// Mirrors `php artisan inertia:stop-ssr`.
+    #[command(name = "ssr:stop")]
+    SsrStop {
+        /// Exit successfully when the SSR server is not running.
+        #[arg(long)]
+        graceful: bool,
+    },
+    /// Check the Inertia SSR server's health through the SSR gateway.
+    /// Mirrors `php artisan inertia:check-ssr`.
+    #[command(name = "ssr:check")]
+    SsrCheck,
 }
 
 impl Commands {
@@ -314,7 +335,10 @@ impl Commands {
             | Commands::MigrateRollback { .. }
             | Commands::MigrateFresh { .. }
             | Commands::SchemaDump { .. } => ProcessBoot::Migrations,
-            Commands::ScheduleList { .. } => ProcessBoot::Core,
+            Commands::ScheduleList { .. }
+            | Commands::SsrStart { .. }
+            | Commands::SsrStop { .. }
+            | Commands::SsrCheck => ProcessBoot::Core,
             Commands::Down { .. } | Commands::Up => ProcessBoot::Maintenance,
             Commands::Serve { .. }
             | Commands::WebRun { .. }
@@ -857,8 +881,10 @@ where
     /// Register an HTTP-only bootstrap function.
     ///
     /// Runs only when this process is the web server (`serve` / `web:run`),
-    /// after [`bootstrap`](Self::bootstrap) and before routes are built. The
-    /// worker and console subcommands (`queue:work`, `schedule:work`,
+    /// after [`bootstrap`](Self::bootstrap) and before routes are built, and
+    /// for the `ssr:start`, `ssr:stop` and `ssr:check` commands, which read
+    /// the Inertia configuration `Inertia::install` retains and bind no port.
+    /// The worker and console subcommands (`queue:work`, `schedule:work`,
     /// `schedule:run`, `workflow:work`, `migrate*`, `down` / `up`) never run
     /// it.
     ///
@@ -1080,6 +1106,11 @@ where
     /// - `migrate:fresh`: Drop and re-run all migrations
     /// - `schedule:*`: Scheduler commands
     /// - `down` / `up`: Enter / leave maintenance mode
+    /// - `ssr:start` / `ssr:stop` / `ssr:check`: Run, stop and check the
+    ///   Inertia SSR server
+    ///
+    /// The process exits with status 1 when the command fails, and
+    /// `ssr:start` exits with the status its SSR server exited with.
     pub async fn run(self) {
         let cli = Cli::parse();
         // Configuration is loaded by `#[suprnova::main]` *before* the
@@ -1126,9 +1157,11 @@ where
     /// runtime starts), a boot that fails, or a command that fails. The
     /// error's [`FrameworkError::message`] is the text [`Self::run`] would
     /// print; a command that already printed its own report (a
-    /// `schedule:run` task that failed) returns a
-    /// [silent](FrameworkError::is_silent) error. `--help` and `--version`
-    /// print what they print and return `Ok(())`.
+    /// `schedule:run` task that failed, an `ssr:*` command that failed)
+    /// returns a [silent](FrameworkError::is_silent) error. An `ssr:start`
+    /// whose SSR server exited with a status other than 0 or 1 returns an
+    /// error naming the status, where [`Self::run`] exits with it. `--help`
+    /// and `--version` print what they print and return `Ok(())`.
     ///
     /// # Errors
     ///
@@ -1156,15 +1189,23 @@ where
         };
         crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
             .map_err(FrameworkError::internal)?;
-        self.run_cli(cli, Failures::Return).await
+        match self.run_cli(cli, Failures::Return).await? {
+            0 => Ok(()),
+            // The command printed why it failed.
+            1 => Err(FrameworkError::silent()),
+            status => Err(failed(format!("the command exited with status {status}"))),
+        }
     }
 
     /// [`Self::run_cli`] at the executable boundary: a failure is printed,
     /// unless it already reported itself, and ends the process with exit
-    /// status 1.
+    /// status 1, and a command that reported another status ends it with
+    /// that one.
     async fn run_cli_or_exit(self, cli: Cli) {
-        if self.run_cli(cli, Failures::Print).await.is_err() {
-            std::process::exit(1);
+        match self.run_cli(cli, Failures::Print).await {
+            Ok(0) => {}
+            Ok(status) => std::process::exit(status),
+            Err(_) => std::process::exit(1),
         }
     }
 
@@ -1177,7 +1218,11 @@ where
     /// bootstrap started, and the file log channels are flushed. With
     /// [`Failures::Print`] the failure is printed on stderr before that,
     /// where the commands printed it before they returned errors.
-    async fn run_cli(self, cli: Cli, failures: Failures) -> Result<(), FrameworkError> {
+    ///
+    /// `Ok` carries the exit status: 0, or the status an `ssr:*` command
+    /// ended with after it printed its own report. A `FrameworkError` has no
+    /// room for `ssr:start`'s, which is the status of the SSR server it ran.
+    async fn run_cli(self, cli: Cli, failures: Failures) -> Result<i32, FrameworkError> {
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
         // CLI commands, and scheduled tasks all see registered gates - not
@@ -1212,6 +1257,9 @@ where
             None | Some(Commands::Serve { .. } | Commands::WebRun { .. })
         ) && boot != ProcessBoot::Migrations;
 
+        // The exit status of a command that succeeded or reported its own
+        // failure; only the `ssr:*` commands set anything but 0.
+        let mut status = 0;
         let result = match cli.command {
             None
             | Some(Commands::Serve { no_migrate: false })
@@ -1350,6 +1398,27 @@ where
                 .await
             }
             Some(Commands::Up) => Self::run_up(boot, bootstrap_fn).await,
+            Some(Commands::SsrStart { runtime }) => Self::run_ssr(
+                boot,
+                bootstrap_fn,
+                http_bootstrap_fn,
+                SsrCommand::Start { runtime },
+            )
+            .await
+            .map(|code| status = code),
+            Some(Commands::SsrStop { graceful }) => Self::run_ssr(
+                boot,
+                bootstrap_fn,
+                http_bootstrap_fn,
+                SsrCommand::Stop { graceful },
+            )
+            .await
+            .map(|code| status = code),
+            Some(Commands::SsrCheck) => {
+                Self::run_ssr(boot, bootstrap_fn, http_bootstrap_fn, SsrCommand::Check)
+                    .await
+                    .map(|code| status = code)
+            }
         };
         if let (Err(e), Failures::Print) = (&result, failures)
             && !e.is_silent()
@@ -1367,7 +1436,7 @@ where
         // Every command ends here; the file log channels buffer, and nothing
         // a worker wrote before it ended may be lost.
         crate::logging::Log::flush();
-        result
+        result.map(|()| status)
     }
 
     async fn run_server_internal(
@@ -2175,6 +2244,62 @@ where
         println!("Application is now live.");
         Ok(())
     }
+
+    /// `ssr:start`, `ssr:stop` and `ssr:check`: the shared implementation in
+    /// [`crate::console::ssr`], with the Inertia configuration the
+    /// application installed. Returns the exit status the command reported.
+    ///
+    /// Both hooks run, the HTTP one too: `Inertia::install` belongs to the
+    /// HTTP stack, and the scaffold calls it in `http_bootstrap`, so a
+    /// process that ran only `bootstrap` would have no configuration to read.
+    /// Nothing binds a port. The core boot follows, as for `schedule:list`;
+    /// the commands use no runtime driver.
+    async fn run_ssr(
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+        http_bootstrap_fn: Option<BootstrapFn>,
+        command: SsrCommand,
+    ) -> Result<i32, FrameworkError> {
+        let name = command.name();
+        Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
+        process_boot::boot_after_hook(boot)
+            .await
+            .map_err(|e| failed(format!("suprnova: {name} bootstrap error: {e}")))?;
+        let Some(inertia) = crate::App::inertia_registry().installed_config() else {
+            return Err(failed(format!(
+                "suprnova: {name} reads the Inertia configuration, and none is installed. \
+                 Call `Inertia::install(&config)` in the application's `bootstrap` or \
+                 `http_bootstrap` hook."
+            )));
+        };
+        let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+        match command {
+            SsrCommand::Start { runtime } => {
+                crate::console::ssr::start(&inertia.ssr, runtime, &mut out, &mut err).await
+            }
+            SsrCommand::Stop { graceful } => {
+                crate::console::ssr::stop(&inertia.ssr, graceful, &mut out, &mut err).await
+            }
+            SsrCommand::Check => crate::console::ssr::check(&inertia.ssr, &mut out, &mut err).await,
+        }
+    }
+}
+
+/// One of the `ssr:*` commands, with its options.
+enum SsrCommand {
+    Start { runtime: Option<String> },
+    Stop { graceful: bool },
+    Check,
+}
+
+impl SsrCommand {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "ssr:start",
+            Self::Stop { .. } => "ssr:stop",
+            Self::Check => "ssr:check",
+        }
+    }
 }
 
 /// What [`Application::run_cli`] does with a failure besides returning it.
@@ -2715,6 +2840,21 @@ mod worker_boot_order_tests {
     #[serial]
     async fn schedule_list_boots_the_hook_services_and_policies() {
         assert_eq!(boot(&["app", "schedule:list"]).await, without_drivers());
+    }
+
+    /// The `ssr:*` commands read the Inertia configuration and talk to the
+    /// SSR server, and use no runtime driver, so a broken queue or mail
+    /// backend cannot stop an operator from starting or stopping SSR.
+    #[tokio::test]
+    #[serial]
+    async fn inssr_the_ssr_commands_boot_the_hook_services_and_policies() {
+        for argv in [
+            &["app", "ssr:start"][..],
+            &["app", "ssr:stop", "--graceful"],
+            &["app", "ssr:check"],
+        ] {
+            assert_eq!(boot(argv).await, without_drivers(), "{argv:?}");
+        }
     }
 
     /// `down` runs the hook: a storage path or a cache store the hook
