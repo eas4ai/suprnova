@@ -35,7 +35,7 @@ mod dispatcher;
 mod queued_listener;
 pub mod testing;
 
-pub use builtins::ErrorOccurred;
+pub use builtins::{ErrorOccurred, SsrErrorType, SsrRenderFailed};
 pub(crate) use dispatcher::drain_queued_at_shutdown;
 pub use dispatcher::{Event as EventFacade, EventDispatcher};
 pub use queued_listener::{DebouncedListener, QueuedListener};

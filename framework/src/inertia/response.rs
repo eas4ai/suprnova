@@ -1589,8 +1589,11 @@ impl InertiaResponse {
                 Some(hooks) => hooks.root_view(req, config),
                 None => config,
             };
+            // In development the dispatch goes hot (PAR-058): the
+            // configuration supplies the Vite dev server as the hot URL.
+            let ssr = config.ssr_for_dispatch();
             let ssr_result = super::ssr_gateway::gateway()
-                .dispatch(&config.ssr, req, &page)
+                .dispatch(&ssr, req, &page)
                 .await?;
             match config.root_template_for(req).application() {
                 Some(template) => build_template_response(

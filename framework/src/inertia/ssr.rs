@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::error::FrameworkError;
+use crate::events::{SsrErrorType, SsrRenderFailed};
 use crate::inertia::config::SsrConfig;
 use crate::inertia::prop::InertiaRequestExt;
 
@@ -150,39 +151,6 @@ pub fn new_disable_ssr_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
-/// Laravel's `HttpGateway::shouldDispatch()`: when
-/// [`SsrConfig::ensure_bundle_exists`] is on and a
-/// [`SsrConfig::bundle_path`] is configured, dispatch is gated on the
-/// built bundle actually being on disk - so a worker that was never
-/// started, or a bundle that was never built, fails fast, before paying
-/// `config.timeout` on a connection that was never going to succeed.
-///
-/// Returns `Some(reason)` when dispatch should be skipped, `None` when
-/// it's fine to proceed - bundle exists, the check is off, or (the
-/// common case for every test in this codebase) no path is configured
-/// at all, which is treated the same as "off": there's nothing to
-/// check. This check runs unconditionally of `throw_on_error` - a
-/// missing bundle is a deployment/build problem the caller should see
-/// in logs, not a request-time failure mode to escalate to a 500, and
-/// that matches `HttpGateway::shouldDispatch()`, which sits entirely
-/// outside the HTTP-error branch `throw_on_error` guards in Laravel too.
-fn missing_bundle_reason(config: &SsrConfig) -> Option<String> {
-    if !config.ensure_bundle_exists {
-        return None;
-    }
-    let bundle_path = config.bundle_path.as_ref()?;
-    if bundle_path.exists() {
-        return None;
-    }
-    Some(format!(
-        "SSR bundle not found at {} (ensure_bundle_exists is on); falling back to CSR. \
-         Run `vite build --ssr`, or turn the check off with \
-         InertiaConfig::ssr_ensure_bundle_exists(false) if the worker's bundle lives \
-         somewhere this process can't see.",
-        bundle_path.display()
-    ))
-}
-
 /// Whether SSR runs for `request`: Laravel's `HttpGateway::ssrIsEnabled`.
 ///
 /// The condition `Inertia::disable_ssr` or `disable_ssr_if` set decides
@@ -208,10 +176,52 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
     !(excluded(&config.excluded_paths) || excluded(&added))
 }
 
+/// Where a first visit is posted, and whether that is the hot endpoint.
+struct Target {
+    url: String,
+    hot: bool,
+}
+
+/// Where a first visit is posted, Laravel's `HttpGateway::dispatch`
+/// order: the hot URL's `/__inertia_ssr` in hot mode, with no bundle check
+/// (PAR-058); else the worker's `/render` when a bundle is found or the
+/// check is off (PAR-057); else `None`, which renders on the client.
+///
+/// The configuration decides hot mode before this runs
+/// (`InertiaConfig::ssr_for_dispatch`, from the hot file): a hot URL here
+/// means hot. The page is serialized only after this, so a visit that
+/// renders on the client never pays for it.
+fn dispatch_target(config: &SsrConfig) -> Option<Target> {
+    if let Some(hot) = config.hot_url.as_deref() {
+        return Some(Target {
+            url: endpoint(hot, "/__inertia_ssr"),
+            hot: true,
+        });
+    }
+    if config.ensure_bundle_exists && detect_bundle(config).is_none() {
+        return None;
+    }
+    Some(Target {
+        url: endpoint(&config.url, "/render"),
+        hot: false,
+    })
+}
+
+/// `base` with `path` appended, the trailing slashes of `base` dropped, as
+/// Laravel's `getProductionUrl` and `getHotUrl` join them.
+fn endpoint(base: &str, path: &str) -> String {
+    format!("{}{path}", base.trim().trim_end_matches('/'))
+}
+
 /// Render via the SSR worker. Returns `Ok(Some(_))` when SSR succeeded,
-/// `Ok(None)` when SSR was disabled, the request was excluded, or the
-/// configured bundle doesn't exist on disk (caller falls back to CSR),
+/// `Ok(None)` when SSR was disabled, the request was excluded, or no
+/// bundle was found while the check is on (caller falls back to CSR),
 /// and `Err` only when `throw_on_error` is true.
+///
+/// A missing bundle is not reported: with SSR on by default, an
+/// application that has no bundle would otherwise log it on every first
+/// visit. Laravel's `HttpGateway::dispatch` returns `null` the same way.
+/// A worker that fails is reported through `report_failure`.
 pub(crate) async fn render(
     config: &SsrConfig,
     request: &dyn InertiaRequestExt,
@@ -220,179 +230,282 @@ pub(crate) async fn render(
     if !ssr_runs_for(config, request) {
         return Ok(None);
     }
-    if let Some(msg) = missing_bundle_reason(config) {
-        if let Some(cb) = &config.on_error {
-            cb(&msg);
-        } else {
-            eprintln!("[inertia] {}", msg);
-        }
+    let Some(target) = dispatch_target(config) else {
         return Ok(None);
-    }
+    };
 
     let body = serde_json::to_vec(page)
         .map_err(|e| FrameworkError::internal(format!("SSR page serialization failed: {e}")))?;
     let request = crate::App::inertia_registry()
         .runtime()
         .configure_ssr_request(SsrRequest {
-            url: format!("{}/render", config.url.trim_end_matches('/')),
+            url: target.url,
             headers: Vec::new(),
             timeout: config.timeout,
         });
-    let url = request.url.clone();
+    let failure = match exchange(&request, Some(body), config.max_response_bytes).await {
+        // A dev server without the Inertia Vite plugin serves no SSR: its
+        // 404 means "render on the client", not a failure to report on
+        // every first visit while developing.
+        Ok(answer) if target.hot && answer.status == reqwest::StatusCode::NOT_FOUND => {
+            tracing::debug!(
+                url = %request.url,
+                "the Vite dev server serves no SSR; the visit renders on the client"
+            );
+            return Ok(None);
+        }
+        Ok(answer) if answer.status.is_success() => return Ok(rendered(&answer.body)),
+        Ok(answer) => error_answer(page, answer.status, &answer.body),
+        Err(transport) => failure(page, transport, SsrErrorType::Connection),
+    };
+    report_failure(config, &request.url, failure).await
+}
 
-    let result = post_json(&request, body, config.max_response_bytes).await;
-    match result {
-        Ok(resp) => Ok(Some(resp)),
-        Err(e) => {
-            if config.throw_on_error {
-                Err(FrameworkError::internal(format!("SSR render failed: {e}")))
-            } else {
-                let msg = format!(
-                    "SSR worker unreachable at {} ({}); falling back to CSR",
-                    url, e
-                );
-                if let Some(cb) = &config.on_error {
-                    cb(&msg);
-                } else {
-                    eprintln!("[inertia] {}", msg);
-                }
-                Ok(None)
-            }
+/// A render failure of `page` with no details beyond the message.
+fn failure(page: &serde_json::Value, error: String, error_type: SsrErrorType) -> SsrRenderFailed {
+    let text = |key: &str, default: &str| {
+        page.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default)
+            .to_string()
+    };
+    SsrRenderFailed {
+        component: text("component", "Unknown"),
+        url: text("url", "/"),
+        error,
+        error_type,
+        hint: None,
+        browser_api: None,
+        stack: None,
+        source_location: None,
+    }
+}
+
+/// The failure a non-2xx answer reports: the worker's error JSON (`error`,
+/// `type`, `hint`, `browserApi`, `stack`, `sourceLocation`), as Laravel's
+/// `handleSsrFailure` reads it, or the status alone when the body is not
+/// such an object.
+fn error_answer(
+    page: &serde_json::Value,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> SsrRenderFailed {
+    let details = match serde_json::from_slice(body) {
+        Ok(serde_json::Value::Object(details)) => details,
+        _ => serde_json::Map::new(),
+    };
+    let text = |key: &str| {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let error = text("error").unwrap_or_else(|| format!("the SSR worker answered {status}"));
+    let error_type =
+        text("type").map_or(SsrErrorType::Unknown, |name| SsrErrorType::from_name(&name));
+    SsrRenderFailed {
+        hint: text("hint"),
+        browser_api: text("browserApi"),
+        stack: text("stack"),
+        source_location: text("sourceLocation"),
+        ..failure(page, error, error_type)
+    }
+}
+
+/// Report a failed render, Laravel's `handleSsrFailure`: dispatch
+/// [`SsrRenderFailed`], then fail the visit under `throw_on_error` with
+/// the component and source location in the message, or else fire the
+/// `on_error` hook (stderr without one) and render on the client.
+///
+/// The event is dispatched inline, before the visit continues, so a
+/// listener sees every failure; it is built and sent only when something
+/// listens for it or a fake records it.
+async fn report_failure(
+    config: &SsrConfig,
+    url: &str,
+    failure: SsrRenderFailed,
+) -> Result<Option<SsrResponse>, FrameworkError> {
+    let message = failure.message();
+    let hook_message = if failure.error_type == SsrErrorType::Connection {
+        format!(
+            "SSR worker unreachable at {url} for component [{}] ({}); falling back to CSR",
+            failure.component, failure.error
+        )
+    } else {
+        format!("{message} (worker at {url}); falling back to CSR")
+    };
+    if crate::events::EventFacade::is_observed::<SsrRenderFailed>()
+        && let Err(error) = crate::events::EventFacade::dispatch(failure).await
+    {
+        tracing::warn!(error = %error, "an SsrRenderFailed listener failed");
+    }
+    if config.throw_on_error {
+        return Err(FrameworkError::internal(message));
+    }
+    match &config.on_error {
+        Some(hook) => hook(&hook_message),
+        None => eprintln!("[inertia] {hook_message}"),
+    }
+    Ok(None)
+}
+
+/// Whether the worker answers `GET {url}/health` with a 2xx within the
+/// timeout, Laravel's `HttpGateway::isHealthy`. The request configurator
+/// applies, so a worker behind a token is checked with it; any failure to
+/// get an answer is unhealthy. The configured worker URL is checked, never
+/// the hot URL, as Laravel's `getProductionUrl` is.
+pub(crate) async fn is_healthy(config: &SsrConfig) -> bool {
+    let request = crate::App::inertia_registry()
+        .runtime()
+        .configure_ssr_request(SsrRequest {
+            url: endpoint(&config.url, "/health"),
+            headers: Vec::new(),
+            timeout: config.timeout,
+        });
+    match exchange(&request, None, config.max_response_bytes).await {
+        Ok(answer) => answer.status.is_success(),
+        Err(error) => {
+            tracing::debug!(url = %request.url, %error, "the SSR health check got no answer");
+            false
         }
     }
 }
 
-/// Process-global hyper client shared across all SSR calls.
+/// The client every SSR call shares, built once for the process: one
+/// connection pool, and rustls for a worker at an `https` URL (SS-14).
 ///
-/// Constructing a `Client` is expensive - it sets up a connection pool
-/// and an HTTP/1.1 handshake state. A per-request `Client` resets the
-/// pool every time, so we keep one for the lifetime of the process.
-/// `hyper_util::client::legacy::Client` is `Clone`-cheap (`Arc` inside)
-/// and `Send + Sync`, so a `OnceLock` works.
-fn shared_client() -> &'static hyper_util::client::legacy::Client<
-    hyper_util::client::legacy::connect::HttpConnector,
-    http_body_util::Full<bytes::Bytes>,
-> {
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
-    use std::sync::OnceLock;
-
-    static SSR_CLIENT: OnceLock<
-        Client<
-            hyper_util::client::legacy::connect::HttpConnector,
-            http_body_util::Full<bytes::Bytes>,
-        >,
-    > = OnceLock::new();
-    SSR_CLIENT.get_or_init(|| Client::builder(TokioExecutor::new()).build_http())
+/// Like the plain HTTP client it replaced, it follows no redirects and
+/// ignores the proxy variables of the environment: the worker's address is
+/// the configuration's, and a proxy set for outbound traffic must not
+/// capture a loopback worker.
+fn shared_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| {
+                    format!(
+                        "build the SSR client: {}",
+                        crate::error::render_error_chain(&e)
+                    )
+                })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
-/// POST JSON to the SSR worker and deserialize the response. Uses
-/// `hyper` directly - we already depend on it, so no extra crate.
-///
-/// Domain 20 audit D20-D: response body is read through
-/// [`http_body_util::Limited`] so a misconfigured or compromised
-/// loopback worker can't return arbitrarily large data and exhaust
-/// memory. The cap is propagated from `SsrConfig::max_response_bytes`
-/// (default 8 MiB). When the body exceeds the cap the Limited wrapper
-/// returns an error which is surfaced as `Err("read body: ...")`;
-/// `render()` then either falls back to CSR or propagates depending on
-/// `throw_on_error`.
-///
-/// Content-Length pre-check: if the worker is honest enough to set
-/// the header but reports a value larger than the cap, the request is
-/// rejected before any body bytes are read.
-///
-/// T31 fix round 1: one `deadline`, computed once, bounds the *whole*
-/// call - awaiting the response headers and reading the response body
-/// both draw down the same shared deadline, rather than each getting a
-/// fresh copy of `timeout`. Before this fix, only the headers phase was
-/// bounded (`tokio::time::timeout` wrapped `client.request(req)` alone);
-/// a worker that accepted the connection, sent headers, then stalled
-/// mid-body could hang `render()` forever, since `Limited::collect()`
-/// has no timeout of its own - `Limited` only bounds body *size*, not
-/// time. `SsrConfig::timeout`'s own doc calls this "the SSR call"'s
-/// timeout, singular, and a per-phase reset would let a pathological
-/// worker (slow headers, then a slow-trickling body) consume up to `2 ×
-/// timeout` in the worst case - exactly the "a hung worker shouldn't
-/// block real users" guarantee that doc promises.
-async fn post_json(
-    request: &SsrRequest,
+/// The status and body the worker answered one call with.
+struct Exchange {
+    status: reqwest::StatusCode,
     body: Vec<u8>,
+}
+
+/// Send `request` to the worker, a `POST` of `body` as JSON or a `GET`
+/// without one, and read the whole answer.
+///
+/// One deadline, computed once, bounds the whole call: awaiting the
+/// response headers and reading the body draw down the same timeout, so a
+/// worker that sends headers and then stalls mid-body cannot hold the
+/// visit past it (T31). The body is capped at `max_response_bytes`
+/// (`SsrConfig::max_response_bytes`, 8 MiB by default), so a misconfigured
+/// or compromised worker cannot exhaust memory: a `Content-Length` over
+/// the cap is refused before any body byte is read, and a body that grows
+/// past it while streaming is abandoned (D20-D).
+async fn exchange(
+    request: &SsrRequest,
+    body: Option<Vec<u8>>,
     max_response_bytes: usize,
-) -> Result<SsrResponse, String> {
-    let url = request.url.as_str();
-    let timeout = request.timeout;
-    use http_body_util::{BodyExt, Full, Limited};
-    use hyper::Request;
-    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
-
-    // One deadline for the whole call, shared by both phases below -
-    // see the T31 fix-round-1 note on this function's doc comment.
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
-
-    // Pick the default port from the URI scheme - defaulting to 80
-    // on every URL (including `https://...`) sent the wrong Host
-    // header for TLS-backed SSR endpoints, which some reverse
-    // proxies reject. When the URI carries an explicit port, use it;
-    // otherwise pick 443 for https and 80 for everything else.
-    let scheme_default_port = match parsed.scheme_str() {
-        Some("https") => 443,
-        _ => 80,
+) -> Result<Exchange, String> {
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let client = shared_client()?;
+    let mut builder = match body {
+        Some(body) => client
+            .post(&request.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
+        None => client.get(&request.url),
     };
-    let host_port = format!(
-        "{}:{}",
-        parsed.host().ok_or("missing host")?,
-        parsed.port_u16().unwrap_or(scheme_default_port)
-    );
-
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(url)
-        .header(CONTENT_TYPE, "application/json")
-        .header(CONTENT_LENGTH, body.len())
-        .header("Host", host_port);
     for (name, value) in &request.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    let req = builder
-        .body(Full::new(bytes::Bytes::from(body)))
-        .map_err(|e| format!("request build: {e}"))?;
 
-    let client = shared_client();
-    let fut = client.request(req);
-    let resp = tokio::time::timeout_at(deadline, fut)
+    let mut response = tokio::time::timeout_at(deadline, builder.send())
         .await
-        .map_err(|_| format!("timeout after {:?} awaiting response headers", timeout))?
-        .map_err(|e| format!("hyper: {e}"))?;
+        .map_err(|_| {
+            format!(
+                "timeout after {:?} awaiting response headers",
+                request.timeout
+            )
+        })?
+        .map_err(|e| crate::error::render_error_chain(&e))?;
+    let status = response.status();
 
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("ssr worker returned {}", status));
-    }
-
-    if let Some(cl) = resp
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        && cl > max_response_bytes
+    if let Some(length) = response.content_length()
+        && length > max_response_bytes as u64
     {
         return Err(format!(
-            "ssr response Content-Length {cl} exceeds cap of \
+            "ssr response Content-Length {length} exceeds cap of \
              {max_response_bytes} bytes (configure via \
              InertiaConfig::ssr_max_response_bytes)"
         ));
     }
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .map_err(|_| format!("timeout after {:?} reading response body", request.timeout))?
+            .map_err(|e| format!("read body: {}", crate::error::render_error_chain(&e)))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if bytes.len() + chunk.len() > max_response_bytes {
+            return Err(format!(
+                "ssr response exceeds cap of {max_response_bytes} bytes \
+                 (configure via InertiaConfig::ssr_max_response_bytes)"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Exchange {
+        status,
+        body: bytes,
+    })
+}
 
-    let limited = Limited::new(resp.into_body(), max_response_bytes);
-    let collected = tokio::time::timeout_at(deadline, limited.collect())
-        .await
-        .map_err(|_| format!("timeout after {:?} reading response body", timeout))?
-        .map_err(|e| format!("read body: {e}"))?;
-    let bytes = collected.to_bytes();
-    serde_json::from_slice::<SsrResponse>(&bytes).map_err(|e| format!("deserialize response: {e}"))
+/// The page a worker's successful answer carries, or `None` when there is
+/// nothing to inline, so the visit renders on the client (SS-02).
+///
+/// Laravel returns `null` when `$response->json()` is empty or falsy, and
+/// that is also what it reads from bytes that are not JSON at all. An
+/// object without a non-empty `body` string is the same case here: the
+/// worker's body carries the page data element and the mount element, so
+/// inlining an empty one left a document the client could not start from.
+/// None of these is reported as a failure. Head entries that are not
+/// strings are left out.
+fn rendered(bytes: &[u8]) -> Option<SsrResponse> {
+    let Ok(serde_json::Value::Object(mut answer)) = serde_json::from_slice(bytes) else {
+        return None;
+    };
+    let body = match answer.remove("body") {
+        Some(serde_json::Value::String(body)) if !body.is_empty() => body,
+        _ => return None,
+    };
+    let head = match answer.remove("head") {
+        Some(serde_json::Value::Array(entries)) => entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                serde_json::Value::String(fragment) => Some(fragment),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(SsrResponse { head, body })
 }
 
 #[cfg(test)]
@@ -412,14 +525,19 @@ mod tests {
     }
 
     #[test]
-    fn ssr_disabled_when_config_disabled() {
+    fn inssr_ssr_is_enabled_by_default() {
         let cfg = SsrConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
+        assert!(cfg.ensure_bundle_exists);
     }
 
     #[tokio::test]
     async fn render_returns_none_when_disabled() {
-        let cfg = SsrConfig::default();
+        let cfg = SsrConfig {
+            enabled: false,
+            ensure_bundle_exists: false,
+            ..SsrConfig::default()
+        };
         let page = serde_json::json!({"component": "Home"});
         let result = render(&cfg, &At("/foo"), &page).await.unwrap();
         assert!(result.is_none());
@@ -502,47 +620,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_bundle_reason_is_none_when_bundle_exists() {
-        let path = std::env::temp_dir().join(format!(
-            "suprnova-ssr-test-bundle-{}.js",
-            std::process::id()
-        ));
+    fn inssr_detect_bundle_finds_the_configured_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("ssr.js");
         std::fs::write(&path, b"").expect("write test bundle");
         let cfg = SsrConfig {
-            enabled: true,
             bundle_path: Some(path.clone()),
-            ensure_bundle_exists: true,
             ..SsrConfig::default()
         };
-        let result = missing_bundle_reason(&cfg);
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_none());
+        assert_eq!(detect_bundle(&cfg), Some(path));
     }
 
     #[test]
-    fn missing_bundle_reason_is_none_when_no_path_is_configured() {
-        // The safe default: `.ssr(url)` alone (no `.ssr_bundle_path`)
-        // must never gate dispatch - this is what keeps every SSR test
-        // in `framework/tests/inertia.rs` behaving exactly as before.
+    fn inssr_detect_bundle_is_none_without_a_bundle() {
+        // `framework/` holds a bundle at none of the conventional paths,
+        // and a configured path that does not exist is not a bundle.
         let cfg = SsrConfig {
-            enabled: true,
-            bundle_path: None,
-            ensure_bundle_exists: true,
-            ..SsrConfig::default()
-        };
-        assert!(missing_bundle_reason(&cfg).is_none());
-    }
-
-    #[test]
-    fn missing_bundle_reason_names_the_path() {
-        let cfg = SsrConfig {
-            enabled: true,
             bundle_path: Some(std::path::PathBuf::from("/nonexistent/ssr.js")),
-            ensure_bundle_exists: true,
             ..SsrConfig::default()
         };
-        let reason = missing_bundle_reason(&cfg).expect("missing bundle must be reported");
-        assert!(reason.contains("/nonexistent/ssr.js"));
+        assert_eq!(detect_bundle(&cfg), None);
+        assert_eq!(detect_bundle(&SsrConfig::default()), None);
     }
 
     /// T31 fix round 1. `post_json`'s header-await was bounded by
@@ -593,6 +691,9 @@ mod tests {
             enabled: true,
             url: format!("http://{local}"),
             timeout: std::time::Duration::from_millis(200),
+            // No bundle on disk here: the check would keep the stalled
+            // worker from being asked at all.
+            ensure_bundle_exists: false,
             ..SsrConfig::default()
         };
         let page = serde_json::json!({"component": "Home"});

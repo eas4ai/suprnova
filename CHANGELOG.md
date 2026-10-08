@@ -267,6 +267,48 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Inertia::install` register it as the named middleware `inertia` instead
   of on every route, so an API group carries no `Vary: X-Inertia` and has no
   redirect turned into `303` (MW-08, MW-10).
+- **The SSR call is a driver you can replace.** The `SsrGateway` trait
+  carries `dispatch`, `is_healthy` and the capabilities `disable`, `except`
+  and `configure_request_using`, each a default an implementation
+  overrides, as Laravel's `Gateway`, `DisablesSsr`, `ExcludesSsrPaths`,
+  `ConfiguresSsrRequests` and `HasHealthCheck` do. `HttpGateway` is the
+  default; `App::bind::<dyn SsrGateway>(Arc::new(..))` makes an
+  application's own gateway render every first visit. `Inertia::disable_ssr`,
+  `disable_ssr_if`, `without_ssr` and `configure_ssr_request_using` act on
+  the bound gateway and log a warning naming the capability it lacks.
+  `Inertia::ssr_is_healthy()` returns the gateway's health: the HTTP
+  gateway asks `GET {url}/health` within the SSR timeout, through the
+  request configurator, `Some(true)` on a 2xx and `Some(false)` otherwise,
+  and `None` means the gateway has no health check. `detect_ssr_bundle` and
+  `CONVENTIONAL_BUNDLE_PATHS` are Laravel's `BundleDetector` (SS-10, SS-13).
+- **`SsrRenderFailed`, the event of a failed SSR render.** It carries the
+  page's component and URL and the worker's error JSON: `error`,
+  `error_type` (an `SsrErrorType`: `browser-api`, `component-resolution`,
+  `render`, `connection` or `unknown`), `hint`, `browser_api`, `stack` and
+  `source_location`. A worker that cannot be reached dispatches it with type
+  `connection` and the transport error. It is dispatched before the visit
+  falls back to the client, and only when something listens or a fake
+  records it (SS-08).
+- **SSR through the Vite dev server in development.** While the Vite hot
+  file exists, a first visit in development is posted to the dev server's
+  `/__inertia_ssr` without the bundle check, so no SSR bundle or worker
+  process is needed while developing. `suprnova serve` writes the dev
+  server's URL to `public/hot` when it starts Vite and removes the file when
+  Vite stops or `serve` exits, as Laravel's Vite plugin does, and the
+  full-stack scaffold ignores `/public/hot`. `SsrConfig::hot_url`
+  (`InertiaConfig::ssr_hot_url`) sends every first visit in development to
+  another address, and `SsrConfig::hot_file` (`InertiaConfig::ssr_hot_file`,
+  default `public/hot`) names another file; the address is the hot URL,
+  else the file's content, else the `vite_dev_server` URL. Without the file
+  the visit takes the worker path, whatever listens at the dev server's
+  port, and production never goes hot. A `404` from the dev server, which
+  serves no SSR without the Inertia Vite plugin, renders on the client
+  quietly (SS-05).
+- **SSR runtime settings.** `SsrConfig::runtime` (`node` by default, or
+  `bun`, `deno` or a path) and `ensure_runtime_exists` (off by default), set
+  with `InertiaConfig::ssr_runtime` and `ssr_ensure_runtime_exists`, are
+  Laravel's `inertia.ssr.runtime` and `ensure_runtime_exists` for
+  `ssr:start`.
 
 - **`Inertia::handle_exceptions_using(callback)` decides every error
   response**, Laravel's `Inertia::handleExceptionsUsing`. The callback
@@ -729,6 +771,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   rather than four, because the callback can be installed after it; with
   neither a callback nor an `error_page` it hands every request on and
   changes nothing.
+- **SSR is on by default, behind bundle detection.** `SsrConfig::enabled`
+  defaulted to `false`, so an application had to opt in to SSR, where
+  Laravel's `inertia.ssr.enabled` is `true`. It is now `true`, with the
+  worker at `http://127.0.0.1:13714`, and while `ensure_bundle_exists` is on
+  (the default) a first visit is sent to the worker only when a bundle is
+  found at `ssr_bundle_path` or at one of the six conventional paths
+  (`frontend/bootstrap/ssr/ssr.js`, `app.js`, `ssr.mjs` and `app.mjs` there,
+  then `public/js/ssr.js` and `public/js/app.js`). An application without a
+  bundle renders on the client as before and never contacts the worker; one
+  with a bundle at a conventional path gets SSR without configuration. Turn
+  SSR off with `InertiaConfig::ssr_disabled()`, and the check off with
+  `ssr_ensure_bundle_exists(false)` for a worker whose bundle this process
+  cannot see (SS-03, SS-04).
+- **A missing SSR bundle is no longer logged.** With a `bundle_path` set and
+  no file there, every first visit wrote "SSR bundle not found" to stderr or
+  the `on_ssr_error` hook. With SSR on by default that would reach the log
+  of every application without a bundle on every first visit, so the visit
+  now renders on the client quietly, as Laravel's gateway returns `null`;
+  `ssr:start` reports a missing bundle. The `on_ssr_error` hook is for
+  worker failures, and under `ssr_throw_on_error` such a visit now fails
+  with Laravel's `SsrException` text, naming the component and, when the
+  worker gave one, the source location: `SSR render failed for component
+  [Dashboard]: window is not defined at resources/js/Pages/Dashboard.vue:12:5`
+  (SS-04, SS-08).
 
 ### Fixed
 
@@ -915,6 +981,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `FrameworkError`, as Laravel's `JsonResponse` throws (JE-03). Encoding a
   `serde_json::Value` page does not fail today, so this closes a path
   rather than one seen in use.
+- **An empty SSR answer renders on the client.** A worker answer of `{}`,
+  or an object without a `body`, was inlined as an empty body, so the first
+  visit's document had neither the page data element nor the mount element
+  and the client could not start. An answer whose JSON is empty, `null`,
+  `false` or not an object, that has no non-empty `body` string, or that is
+  not JSON at all, now renders on the client from the page data, as
+  Laravel returns `null` for it, and is not reported as a failure (SS-02).
+- **SSR workers at `https` URLs are reached.** The SSR client was hyper's
+  plain-HTTP connector, which refused an `https` URL, so a worker behind TLS
+  was never contacted and every first visit fell back to the client. The
+  client now speaks TLS through rustls, the stack the HTTP client facade
+  uses, and keeps the 5 second whole-call timeout over headers and body,
+  the 8 MiB response cap and the refusal of an oversized `Content-Length`
+  (SS-14).
 
 ## 3.2.1 - 2026-10-05
 

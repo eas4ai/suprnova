@@ -266,6 +266,7 @@ async fn rdoc_002_the_ssr_document_is_unchanged() {
         .development(true)
         .vite_dev_server("http://localhost:5765")
         .ssr(format!("http://{addr}"))
+        .ssr_ensure_bundle_exists(false)
         .version("pinned");
     let (status, headers, body) = first_visit(pinned_page().with_config(config)).await;
 
@@ -482,7 +483,8 @@ async fn rdoc_001_the_title_part_is_empty_when_the_ssr_head_carries_a_title() {
     let titled = ssr_worker(&["<title>SSR Title</title>"], ssr_body).await;
     let config = templated()
         .default_title("Default")
-        .ssr(format!("http://{titled}"));
+        .ssr(format!("http://{titled}"))
+        .ssr_ensure_bundle_exists(false);
     let (_, _, body) = first_visit(pinned_page().with_config(config).title("Response")).await;
     assert_eq!(body.matches("<title").count(), 1, "{body}");
     assert!(body.contains("<title>SSR Title</title>"), "{body}");
@@ -490,7 +492,8 @@ async fn rdoc_001_the_title_part_is_empty_when_the_ssr_head_carries_a_title() {
     let untitled = ssr_worker(&["<meta name=\"ssr\" content=\"yes\">"], ssr_body).await;
     let config = templated()
         .default_title("Default")
-        .ssr(format!("http://{untitled}"));
+        .ssr(format!("http://{untitled}"))
+        .ssr_ensure_bundle_exists(false);
     let (_, _, body) = first_visit(pinned_page().with_config(config)).await;
     assert!(body.contains("<title>Default</title>"), "{body}");
 }
@@ -504,15 +507,23 @@ async fn rdoc_001_ssr_is_true_only_when_the_ssr_server_rendered_the_response() {
     let (_, _, body) = first_visit(pinned_page().with_config(templated())).await;
     assert!(body.contains("content=\"csr\""), "no SSR:\n{body}");
 
-    let unreachable = templated().ssr("http://127.0.0.1:1");
+    let unreachable = templated()
+        .ssr("http://127.0.0.1:1")
+        .ssr_ensure_bundle_exists(false);
     let (_, _, body) = first_visit(pinned_page().with_config(unreachable)).await;
     assert!(body.contains("content=\"csr\""), "worker down:\n{body}");
     assert!(!body.contains("content=\"ssr\""), "worker down:\n{body}");
 
     let ssr_body = "<script type=\"application/json\" data-page=\"app\">{}</script><div data-server-rendered=\"true\" id=\"app\"><main>SSR</main></div>";
     let addr = ssr_worker(&["<meta name=\"ssr\" content=\"yes\">"], ssr_body).await;
-    let (_, _, body) =
-        first_visit(pinned_page().with_config(templated().ssr(format!("http://{addr}")))).await;
+    let (_, _, body) = first_visit(
+        pinned_page().with_config(
+            templated()
+                .ssr(format!("http://{addr}"))
+                .ssr_ensure_bundle_exists(false),
+        ),
+    )
+    .await;
     assert!(
         body.contains("<meta name=\"rendered-by\" content=\"ssr\">"),
         "{body}"
