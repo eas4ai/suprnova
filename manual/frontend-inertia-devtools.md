@@ -271,6 +271,14 @@ either way.
   a body first only when its length is declared and at most 256,000
   bytes, and records `too-large` or `streamed` otherwise. Multipart field
   names are kept as sent, not nested.
+- **Redaction matches key parts and the URLs in headers.** Laravel's
+  `RedactsSensitiveData` matches a key whole and redacts no URL in a
+  header. Suprnova also redacts a key when any bracketed or dotted part
+  of it names a redaction key, such as `user[password]` or
+  `auth.password`, and redacts the query of every URL in headers and
+  bodies, `Location` and `Referer` included. The extension's store is a
+  file on disk, and a reset token in a `Location` header is as sensitive
+  as one in the body.
 - **The gate takes a resource.** Suprnova's gate is typed by user and
   resource, so the ability is defined for `(User, ())`, and a guest is
   `()` where Laravel passes `null`.
