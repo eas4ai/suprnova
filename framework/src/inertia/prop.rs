@@ -1190,6 +1190,35 @@ impl PartialFilter {
         self.matched && self.should_include_eager(key)
     }
 
+    /// Whether the prop at `key` carries its `merge` and `once`
+    /// instructions on this response.
+    ///
+    /// Always on a standard visit. On a matched partial reload, only when
+    /// `key` is, or descends from, an `only` entry (when there is an `only`
+    /// list) and neither is nor descends from an `except` entry - Laravel's
+    /// `PropsResolver::isIncludedInPartialMetadata`. An `only` entry deeper
+    /// than the prop (`items.data` for the prop `items`) still selects its
+    /// value, through [`should_include_eager`](Self::should_include_eager),
+    /// but carries no instruction, so the client replaces what it holds
+    /// with the whole prop instead of merging a slice it never asked to
+    /// merge.
+    pub fn should_include_metadata(&self, key: &str) -> bool {
+        if !self.matched {
+            return true;
+        }
+        let in_only = match &self.only {
+            Some(list) => list
+                .iter()
+                .any(|entry| entry == key || dotted_ancestor(entry, key)),
+            None => true,
+        };
+        let in_except = self.except.as_ref().is_some_and(|list| {
+            list.iter()
+                .any(|entry| entry == key || dotted_ancestor(entry, key))
+        });
+        in_only && !in_except
+    }
+
     /// Dispatch the per-prop inclusion predicate.
     ///
     /// Reads the prop's [`Visibility`] and nothing else: `Always`
@@ -1199,12 +1228,11 @@ impl PartialFilter {
     /// sentinel is never included.
     ///
     /// This answers "does the value ship". It deliberately does **not**
-    /// answer "does this prop's metadata ship" - merge, once, and
-    /// deferred metadata are gated by
-    /// [`should_include_eager`](Self::should_include_eager) alone, the
-    /// way Laravel gates them (`inertia-laravel-2.0.25/src/Response.php:553-560`),
-    /// so a deferred prop still carries its merge instruction on the
-    /// visit that skipped its value.
+    /// answer "does this prop's metadata ship" - merge and once
+    /// instructions are gated by
+    /// [`should_include_metadata`](Self::should_include_metadata), the way
+    /// Laravel gates them, so a deferred prop still carries its merge
+    /// instruction on the visit that skipped its value.
     pub fn should_include(&self, key: &str, prop: &Prop) -> bool {
         if prop.is_absent() {
             return false;

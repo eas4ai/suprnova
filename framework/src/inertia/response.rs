@@ -1569,13 +1569,16 @@ async fn resolve_props(
             continue;
         }
 
-        // The metadata gate. Laravel computes every metadata block from
-        // the *unfiltered* prop bag and narrows it with the only/except
-        // lists alone (`inertia-laravel-2.0.25/src/Response.php:553-560`,
-        // `:725-736`), never asking whether the prop resolved. That is
-        // what lets a deferred prop carry its merge instruction on the
-        // very visit that withheld its value.
+        // The metadata gates. Laravel decides a prop's metadata from the
+        // only/except lists, never from whether its value resolved, which
+        // is what lets a deferred prop carry its merge instruction on the
+        // very visit that withheld its value. `passes_lists` is the path
+        // rule a value passes (the key is, descends from, or leads to an
+        // `only` entry); `carries_instructions` is the stricter rule its
+        // `merge` and `once` instructions pass (an `only` entry is the key
+        // or an ancestor), Laravel's `isIncludedInPartialMetadata`.
         let passes_lists = filter.should_include_eager(&key);
+        let carries_instructions = filter.should_include_metadata(&key);
 
         // ---- once ----
         let mut client_has_cached = false;
@@ -1590,7 +1593,7 @@ async fn resolve_props(
             };
             client_has_cached =
                 !prop.is_fresh() && !server_expired && except_once.iter().any(|k| k == &cache_key);
-            if passes_lists {
+            if carries_instructions {
                 metadata.once.insert(
                     cache_key,
                     OnceMetadataEntry {
@@ -1600,6 +1603,13 @@ async fn resolve_props(
                 );
             }
         }
+
+        // A once prop the client already holds, and that is not deferred,
+        // keeps its `onceProps` entry and nothing else: Laravel excludes it
+        // through `excludeAlreadyLoadedProp`, which collects the once
+        // instruction alone. A deferred one goes through the
+        // `IgnoreFirstLoad` branch first and keeps its merge instruction.
+        let held_once = client_has_cached && !prop.is_defer();
 
         // ---- merge ----
         //
@@ -1611,7 +1621,8 @@ async fn resolve_props(
         // appending.
         if prop.scroll_metadata().is_none()
             && let Some(mode) = prop.merge_mode()
-            && passes_lists
+            && carries_instructions
+            && !held_once
             && !reset_keys.iter().any(|k| k == &key)
         {
             for field in prop.match_on_fields() {
@@ -1675,8 +1686,8 @@ async fn resolve_props(
         // so infinite scroll silently stopped after the first
         // navigation.
         //
-        // Gate: `passes_lists`, the same as the once/merge blocks above -
-        // not `filter.should_include(&key, &prop)`. Those two
+        // Gate: the lists, as for the once/merge blocks above - not
+        // `filter.should_include(&key, &prop)`. Those two
         // questions diverge for an `Always` prop: `should_include` is
         // unconditionally `true` for one (it bypasses partial-reload
         // filtering by design), but Laravel's
@@ -1748,9 +1759,15 @@ async fn resolve_props(
         // deep merge already recurses through the entire value, so
         // this block deep-merges at the bare key even when
         // `.scroll_wrap(...)` is also set.
+        //
+        // The merge instruction inside it passes the stricter
+        // `carries_instructions` gate and the held-once rule, like every
+        // other merge instruction; the `scrollProps` entry, the cursor,
+        // needs `passes_lists` alone, as Laravel collects a scroll prop's
+        // cursor for every scroll prop it resolves.
         if passes_lists && let Some(scroll_meta) = prop.scroll_metadata().cloned() {
             let is_reset = reset_keys.iter().any(|k| k == &key);
-            if !is_reset {
+            if !is_reset && carries_instructions && !held_once {
                 let is_deep = prop.merge_mode() == Some(MergeMode::Deep);
                 let path = if is_deep {
                     key.clone()

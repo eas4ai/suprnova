@@ -495,7 +495,7 @@ async fn defer_prop_dot_only_on_the_followup_resolves_and_ships_whole() {
 }
 
 #[tokio::test]
-async fn merge_prop_dot_only_ships_the_value_whole() {
+async fn merge_prop_dot_only_ships_the_value_whole_without_the_merge_instruction() {
     let req = MockReq::new("/feed")
         .inertia()
         .header("X-Inertia-Partial-Component", "Feed")
@@ -518,7 +518,9 @@ async fn merge_prop_dot_only_ships_the_value_whole() {
         page["props"]["feed"],
         serde_json::json!({"items": [{"id": 1}], "meta": {"total": 1}})
     );
-    assert_eq!(page["mergeProps"], serde_json::json!(["feed"]));
+    // An only entry deeper than the prop selects the value but carries no
+    // merge instruction, as Laravel's `isIncludedInPartialMetadata` rules.
+    assert!(page.get("mergeProps").is_none(), "got {page}");
 }
 
 #[tokio::test]

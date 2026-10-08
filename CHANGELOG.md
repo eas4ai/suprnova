@@ -391,6 +391,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   does not exclude. They now resolve whenever their key passes the only
   and except lists, a reload with `except` alone or neither list included;
   a standard visit still leaves them out (PR-07, PT-01).
+- **`merge` and `once` instructions follow Laravel's partial-reload
+  rule.** Any `only` entry that selected a prop also sent its instructions,
+  so `only: ['items.data']` against a merge prop `items` told the client to
+  append a value it had asked for in part, and a `.merge().once()` prop
+  the client already held still sent a `mergeProps` entry beside its
+  `onceProps` entry. `mergeProps` and `onceProps` entries now ship only
+  when an `only` entry names the prop or an ancestor of it, so a deeper
+  entry sends the whole prop with no instruction, and a held once prop
+  that is not deferred sends its `onceProps` entry alone. A scroll prop
+  keeps its `scrollProps` cursor in both cases (PR-12, PR-13).
 
 ### Fixed
 

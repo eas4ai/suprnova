@@ -267,11 +267,22 @@ Two rules are worth knowing before you compose:
   is an optional prop, and `.optional().always()` is an always prop.
   Neither is an error; the earlier call is erased.
 - **Metadata follows the partial-reload lists, not the value.** A prop's
-  `mergeProps`, `onceProps`, and `scrollProps` entries are emitted
-  whenever the key passes `X-Inertia-Partial-Data` and
-  `X-Inertia-Partial-Except`, even on a visit where the value itself is
-  withheld. That is what carries the merge instruction across a deferred
-  prop's two requests. Two consequences follow:
+  `mergeProps` and `onceProps` entries are emitted whenever an
+  `X-Inertia-Partial-Data` entry names the prop or an ancestor of it (or
+  there is no such list) and no `X-Inertia-Partial-Except` entry does,
+  even on a visit where the value itself is withheld. That is what
+  carries the merge instruction across a deferred prop's two requests.
+  Its `scrollProps` entry needs only that the key passes the lists. The
+  consequences:
+  - An entry deeper than the prop selects the prop but carries no
+    instruction: `only: ['items.data']` against a merge prop `items`
+    sends the whole value with no `mergeProps` entry, so the client
+    replaces what it holds, as Laravel's `isIncludedInPartialMetadata`
+    rules. A scroll prop keeps its cursor in that case.
+  - A `.once()` prop the client already holds, and that is not deferred,
+    sends its `onceProps` entry and nothing else - no `mergeProps` entry,
+    since no new value arrives to merge. A held `.scroll().once()` prop
+    keeps its cursor too.
   - An `.always().merge()` prop outside the requested set still sends its
     value and does not send its merge instruction, so the client replaces
     rather than appends.
@@ -522,6 +533,10 @@ instruction - on a full visit where the client reports the value already
 cached, the server skips the resolver and sends no value, as the note
 below describes. What all three change is which metadata blocks ride
 along - see [Composing flags on one prop](#composing-flags-on-one-prop).
+On a partial reload the `merge` and `once` instructions are stricter than
+the value: they ship only when an `only` entry names the prop or an
+ancestor of it, so an entry deeper than the prop (`items.data`) sends the
+prop whole with no instruction.
 
 The handler doesn't have to do anything special - register every prop
 through the builder, and the framework consults the headers when
