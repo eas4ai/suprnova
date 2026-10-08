@@ -1,0 +1,7 @@
+{
+  "name": "evil.view-own-method-capability",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ]
+}

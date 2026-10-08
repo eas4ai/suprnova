@@ -1,0 +1,195 @@
+{
+  "description": "Shared action directive value grammar: the checker (src/checker/directive.rs) and the browser parser (browser/src/directives/parser.ts) both run every case and assert their bounds equal these limits. arguments is null for a bare action name. The name uses the directive token grammar of fixtures/v4/directive-grammar.json.",
+  "limits": {
+    "name": {
+      "maximum_bytes": 64,
+      "initial": "ascii_lowercase",
+      "continuation": [
+        "ascii_lowercase",
+        "ascii_digit",
+        "_",
+        ".",
+        ":",
+        "-"
+      ]
+    },
+    "value_maximum_utf16_units": 2048,
+    "maximum_arguments": 128
+  },
+  "valid": [
+    {
+      "value": "save",
+      "name": "save",
+      "arguments": null
+    },
+    {
+      "value": "save()",
+      "name": "save",
+      "arguments": []
+    },
+    {
+      "value": "save( )",
+      "name": "save",
+      "arguments": []
+    },
+    {
+      "value": "remove(42)",
+      "name": "remove",
+      "arguments": [
+        42
+      ]
+    },
+    {
+      "value": "rename('draft', true)",
+      "name": "rename",
+      "arguments": [
+        "draft",
+        true
+      ]
+    },
+    {
+      "value": "rename(\"draft\",false)",
+      "name": "rename",
+      "arguments": [
+        "draft",
+        false
+      ]
+    },
+    {
+      "value": "set( -1.5e3 ,\tnull\n)",
+      "name": "set",
+      "arguments": [
+        -1500,
+        null
+      ]
+    },
+    {
+      "value": "pick(0)",
+      "name": "pick",
+      "arguments": [
+        0
+      ]
+    },
+    {
+      "value": "pick(-0.25)",
+      "name": "pick",
+      "arguments": [
+        -0.25
+      ]
+    },
+    {
+      "value": "pick(9007199254740991)",
+      "name": "pick",
+      "arguments": [
+        9007199254740991
+      ]
+    },
+    {
+      "value": "pick(2E+2)",
+      "name": "pick",
+      "arguments": [
+        200
+      ]
+    },
+    {
+      "value": "say('it\\'s')",
+      "name": "say",
+      "arguments": [
+        "it's"
+      ]
+    },
+    {
+      "value": "say(\"a\\\"b\")",
+      "name": "say",
+      "arguments": [
+        "a\"b"
+      ]
+    },
+    {
+      "value": "say('\\u00e9\\n\\t\\\\\\/')",
+      "name": "say",
+      "arguments": [
+        "\u00e9\n\t\\/"
+      ]
+    },
+    {
+      "value": "say('\\ud83d\\ude00')",
+      "name": "say",
+      "arguments": [
+        "\ud83d\ude00"
+      ]
+    },
+    {
+      "value": "say('(,)')",
+      "name": "say",
+      "arguments": [
+        "(,)"
+      ]
+    },
+    {
+      "value": "say('')",
+      "name": "say",
+      "arguments": [
+        ""
+      ]
+    },
+    {
+      "value": "orders.reload(1)",
+      "name": "orders.reload",
+      "arguments": [
+        1
+      ]
+    },
+    {
+      "value": "save_2:x.y-z(1)",
+      "name": "save_2:x.y-z",
+      "arguments": [
+        1
+      ]
+    }
+  ],
+  "invalid": [
+    "",
+    "save(",
+    "save(42",
+    "save)",
+    "(42)",
+    "save(42))",
+    "save(,)",
+    "save(1,)",
+    "save(,1)",
+    "save(1 2)",
+    "save(01)",
+    "save(1.)",
+    "save(.5)",
+    "save(+1)",
+    "save(1e)",
+    "save(1e999)",
+    "save(-)",
+    "save(NaN)",
+    "save(Infinity)",
+    "save(undefined)",
+    "save(True)",
+    "save(nul)",
+    "save(truex)",
+    "save(1x)",
+    "save('a)",
+    "save(\"a')",
+    "save('\\x41')",
+    "save('\\ud83d')",
+    "save('\\ude00')",
+    "save('\\u12')",
+    "save('\u0001')",
+    "save(a)",
+    "save([1])",
+    "save({})",
+    "save (1)",
+    "sa ve(1)",
+    "Save(1)",
+    "_save(1)",
+    "1save(1)",
+    "-save(1)",
+    "save.Name(1)",
+    "SAVE"
+  ]
+}

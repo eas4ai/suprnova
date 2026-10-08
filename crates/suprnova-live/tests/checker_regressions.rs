@@ -1,0 +1,922 @@
+//! Checker limits, source stability, and parser-boundary regressions.
+
+mod checker_support;
+
+use proptest::prelude::*;
+use suprnova_live::checker::{
+    CheckerLimits, DiagnosticCode, DiagnosticSeverity, TemplateCatalog, TemplateChecker,
+};
+
+use checker_support::{CHILD_VIEW, MODEL_CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
+
+#[test]
+fn missing_view_include_and_parent_have_distinct_stable_diagnostics() {
+    let registry = registry();
+    let missing_root = TemplateCatalog::new(vec![(
+        view(CHILD_VIEW),
+        include_str!("fixtures/checker/pass/child.html"),
+    )])
+    .expect("template catalog");
+    assert_code(
+        TemplateChecker::new(&registry, &missing_root, CheckerLimits::default())
+            .check_component(&root_name()),
+        DiagnosticCode::MissingView,
+    );
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/checker/fail/missing_include.html"),
+            DiagnosticCode::MissingTemplate,
+        ),
+        (
+            include_str!("fixtures/checker/fail/missing_parent.html"),
+            DiagnosticCode::MissingTemplate,
+        ),
+    ] {
+        assert_code(check(source, CheckerLimits::default()), expected);
+    }
+}
+
+#[test]
+fn diagnostics_have_stable_machine_codes_and_source_locations_without_raw_values() {
+    let report = check(
+        include_str!("fixtures/checker/fail/unknown_action.html"),
+        CheckerLimits::default(),
+    );
+    let diagnostic = report
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code() == DiagnosticCode::UnknownAction)
+        .expect("unknown action diagnostic");
+
+    assert_eq!(
+        diagnostic.path().expect("diagnostic path").as_str(),
+        ROOT_VIEW
+    );
+    assert_eq!((diagnostic.line(), diagnostic.column()), (2, 9));
+    assert_eq!(diagnostic.component(), Some(&root_name()));
+    assert!(!format!("{diagnostic:?}").contains("delete-everything"));
+}
+
+#[test]
+fn every_checker_resource_dimension_is_hard_bounded() {
+    let source = include_str!("fixtures/checker/pass/root.html");
+    let dimensions = [
+        (
+            CheckerLimits::new(16, 128, 8, 32, 512, 64, 32, 32).expect("limits"),
+            DiagnosticCode::SourceLimit,
+        ),
+        (
+            CheckerLimits::new(64 * 1024, 1, 8, 32, 512, 64, 32, 32).expect("limits"),
+            DiagnosticCode::NodeLimit,
+        ),
+        (
+            CheckerLimits::new(64 * 1024, 128, 8, 32, 1, 64, 32, 32).expect("limits"),
+            DiagnosticCode::HtmlTokenLimit,
+        ),
+        (
+            CheckerLimits::new(64 * 1024, 128, 8, 32, 512, 1, 32, 32).expect("limits"),
+            DiagnosticCode::AttributeLimit,
+        ),
+        (
+            CheckerLimits::new(64 * 1024, 128, 8, 32, 512, 64, 1, 32).expect("limits"),
+            DiagnosticCode::StackDepthLimit,
+        ),
+    ];
+    for (limits, expected) in dimensions {
+        assert_code(check(source, limits), expected);
+    }
+    // One tag whose attributes depend on a conditional is checked once per
+    // arm, so it is the shape that needs two branch states at once.
+    assert_code(
+        check(
+            r#"<section><p{% if quiet %} hidden{% endif %}>Text</p></section>"#,
+            CheckerLimits::new(64 * 1024, 128, 8, 1, 512, 64, 32, 32).expect("limits"),
+        ),
+        DiagnosticCode::BranchLimit,
+    );
+
+    let recursive = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/fail/recursive_include.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(
+        &registry(),
+        &recursive,
+        CheckerLimits::new(64 * 1024, 128, 1, 32, 512, 64, 32, 32).expect("limits"),
+    )
+    .check_component(&root_name());
+    assert_code(report, DiagnosticCode::IncludeDepthLimit);
+
+    let diagnostic_limited = check(
+        "<section><button live:click=\"one\"></button><button live:click=\"two\"></button></section>",
+        CheckerLimits::new(1024, 128, 8, 32, 512, 64, 32, 1).expect("limits"),
+    );
+    assert_eq!(diagnostic_limited.diagnostics().len(), 1);
+    assert_code(diagnostic_limited, DiagnosticCode::DiagnosticLimit);
+}
+
+#[test]
+fn expanded_includes_and_inherited_blocks_remain_bounded_and_structural() {
+    let registry = registry();
+    let inherited = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            include_str!("fixtures/checker/fail/inherited_mismatch.html"),
+        ),
+        (
+            view("tests/layout.html"),
+            include_str!("fixtures/checker/pass/layout.html"),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    assert_code(
+        TemplateChecker::new(&registry, &inherited, CheckerLimits::default())
+            .check_component(&root_name()),
+        DiagnosticCode::BranchStackMismatch,
+    );
+
+    let expanded = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            "<section>{% include \"tests/shared.html\" %}</section>",
+        ),
+        (
+            view("tests/shared.html"),
+            "<article><p>included content expands the complete checked branch</p></article>",
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    assert_code(
+        TemplateChecker::new(
+            &registry,
+            &expanded,
+            CheckerLimits::new(80, 128, 8, 32, 512, 64, 32, 32).expect("limits"),
+        )
+        .check_component(&root_name()),
+        DiagnosticCode::SourceLimit,
+    );
+}
+
+#[test]
+fn dynamic_upload_attribute_structure_is_explicitly_unproved_never_statically_proved() {
+    let report = check(r#"<input {{ attrs }}>"#, CheckerLimits::default());
+
+    assert!(!report.is_proved());
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+            && diagnostic.severity() == DiagnosticSeverity::Unproved
+    }));
+}
+
+#[test]
+fn dynamic_iteration_004_directive_values_are_explicitly_unproved() {
+    for source in [
+        r#"<input type="file" live:upload="{{ field }}">"#,
+        r#"<output live:progress="{{ field }}" role="progressbar" aria-label="Upload progress"></output>"#,
+        r#"<section live:stream="{{ subscription }}"></section>"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(!report.is_proved(), "dynamic source was proved: {source}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                    && diagnostic.severity() == DiagnosticSeverity::Unproved
+            }),
+            "missing explicit unproved diagnostic for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+proptest! {
+    #[test]
+    fn arbitrary_bounded_utf8_never_panics_or_exposes_unbounded_diagnostics(
+        source in ".{0,512}"
+    ) {
+        let report = check(
+            &source,
+            CheckerLimits::new(1024, 64, 4, 16, 128, 32, 16, 8).expect("limits"),
+        );
+        prop_assert!(report.diagnostics().len() <= 8);
+    }
+}
+
+// Spec 11 scopes targeted feedback to an action, a field or the island; the
+// checker once resolved every feedback target as an action.
+#[test]
+fn a_feedback_directive_targets_a_model_field_or_an_action() {
+    let registry = registry();
+    let nested = |feedback: &str| {
+        TemplateCatalog::new(vec![
+            (
+                view(ROOT_VIEW),
+                format!(
+                    r#"<section live:component="tests.model-child" live:key="model-child">
+                           <input live:model.change="avatar">
+                           <span hidden live:{feedback}></span>
+                       </section>"#
+                ),
+            ),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html").to_owned(),
+            ),
+            (view(MODEL_CHILD_VIEW), "<div></div>".to_owned()),
+        ])
+        .expect("nested island template catalog")
+    };
+    let proved = TemplateChecker::new(
+        &registry,
+        &nested(r#"queued.show="avatar""#),
+        CheckerLimits::default(),
+    )
+    .check_component(&root_name());
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    let unknown = TemplateChecker::new(
+        &registry,
+        &nested(r#"loading.show="nowhere""#),
+        CheckerLimits::default(),
+    )
+    .check_component(&root_name());
+    assert_code(unknown, DiagnosticCode::UnknownAction);
+}
+
+/// LIVE-024: a template keys a morph scope with `live:key` alone, the one
+/// stable-key attribute the checker validates and the runtime reads; the
+/// engine's `data-suprnova-live-key` spelling is not a directive and a
+/// duplicate `live:key` is still refused.
+#[test]
+fn live_key_alone_names_a_keyed_scope_and_a_duplicate_is_refused() {
+    let proved = check(
+        r#"<details live:key="notes" live:preserve.self><summary>Notes</summary><p>Body</p></details>
+           <ul><li live:key="one">One</li><li live:key="two">Two</li></ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    let duplicate = check(
+        r#"<details live:key="notes" live:preserve.self><summary>Notes</summary></details>
+           <p live:key="notes">Twice</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!duplicate.is_proved());
+    assert_code(duplicate, DiagnosticCode::DuplicateKey);
+}
+
+/// A macro that splices `caller()`, as the library's validation summary does.
+const SUMMARY_VIEW: &str = "tests/summary.html";
+const SUMMARY_MACRO: &str = r#"{% macro summary(action) %}<section live:error.live.polite="{{ action }}"><h2>Please correct</h2>{{ caller() }}</section>{% endmacro %}"#;
+
+fn check_with_summary(root: &str) -> suprnova_live::checker::CheckReport {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (view(ROOT_VIEW), root.to_owned()),
+        (view(SUMMARY_VIEW), SUMMARY_MACRO.to_owned()),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name())
+}
+
+/// LIVE-025: an empty call block is empty caller content, so everything the
+/// view renders after the call is still checked. Before the fix the empty
+/// caller rendered zero branches and this view proved clean.
+#[test]
+fn checker_proof_covers_the_view_after_an_empty_call_block() {
+    let report = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}{% endcall %}
+           <button type="button" live:click="no_such_action">Probe</button>"#,
+    );
+    assert!(!report.is_proved());
+    assert_code(report, DiagnosticCode::UnknownAction);
+
+    let clean = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}{% endcall %}
+           <button type="button" live:click="refresh">Refresh</button>"#,
+    );
+    assert!(clean.is_proved(), "{:?}", clean.diagnostics());
+}
+
+/// LIVE-025: a call block with content splices it once, and a failure inside
+/// the caller content is still reported.
+#[test]
+fn checker_proof_checks_caller_content() {
+    let report = check_with_summary(
+        r#"{% import "tests/summary.html" as s %}{% call s::summary("save") %}<button type="button" live:click="no_such_action">Inside</button>{% endcall %}"#,
+    );
+    assert!(!report.is_proved());
+    assert_code(report, DiagnosticCode::UnknownAction);
+}
+
+/// LIVE-027: error feedback may target an action the component declares, the
+/// scope a validation summary names, or a declared field; an undeclared
+/// name and a secret field are still refused.
+#[test]
+fn live_error_target_is_a_declared_field_or_action() {
+    for source in [
+        r#"<section live:error.live.polite="save"><h2>Please correct</h2></section>"#,
+        r#"<p live:error="query"></p>"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+    let unknown = check(r#"<p live:error="nowhere"></p>"#, CheckerLimits::default());
+    assert!(!unknown.is_proved());
+    let secret = check(r#"<p live:error="secret"></p>"#, CheckerLimits::default());
+    assert_code(secret, DiagnosticCode::ForbiddenModel);
+}
+
+/// LIVE-029: a `live:submit` form is refused past the 127 model fields one
+/// request carries with its action. The registry declares one model field,
+/// so the fixture binds the same field names the checker then reports as
+/// unknown; the proposal bound is reported on its own code either way.
+#[test]
+fn submit_form_proposals_are_bounded_by_one_request() {
+    // The test registry declares none of these fields, so each control also
+    // reports an unknown model; room for all of them keeps the bound's own
+    // report from being cut at the default diagnostic ceiling.
+    let limits = CheckerLimits::new(256 * 1024, 8_192, 16, 128, 32_768, 2_048, 256, 1_024)
+        .expect("checker limits within the engine maxima");
+    let form = |fields: usize| {
+        let controls: String = (0..fields)
+            .map(|index| format!(r#"<input aria-label="f{index}" live:model="field_{index}">"#))
+            .collect();
+        format!(r#"<form live:submit.prevent="save">{controls}</form>"#)
+    };
+    let within = check(&form(127), limits);
+    assert!(
+        !within
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit),
+        "127 fields fit one request"
+    );
+    let over = check(&form(128), limits);
+    let reported = over
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit)
+        .count();
+    assert_eq!(reported, 1, "one report per form: {:?}", over.diagnostics());
+
+    let outside = format!(
+        r#"<form live:submit.prevent="save"><input aria-label="q" live:model="query"></form>{}"#,
+        (0..130)
+            .map(|index| format!(r#"<input aria-label="o{index}" live:model="other_{index}">"#))
+            .collect::<String>()
+    );
+    let outside = check(&outside, limits);
+    assert!(
+        !outside
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::SubmitProposalLimit),
+        "controls outside the form do not count"
+    );
+}
+
+/// LIVE-033: a literal key the runtime refuses, one starting with `_`, `-`,
+/// `.` or `:`, fails the check instead of the island's first morph.
+#[test]
+fn live_033_a_literal_key_outside_the_runtime_alphabet_is_refused() {
+    for key in ["-1", "_draft", ".x", ":flash"] {
+        let report = check(
+            &format!(r#"<p live:key="{key}">Keyed</p>"#),
+            CheckerLimits::default(),
+        );
+        assert!(!report.is_proved(), "{key}");
+        assert_code(report, DiagnosticCode::InvalidKey);
+    }
+    let proved = check(r#"<p live:key="1-a">Keyed</p>"#, CheckerLimits::default());
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+}
+
+/// LIVE-033: a key built around `live_key_digest` is measured at the
+/// digest's real length of 33 bytes, so a long literal prefix that pushes the
+/// key past the runtime's 128 bytes is refused here, not at the first morph.
+#[test]
+fn live_033_a_digest_key_is_measured_at_its_rendered_length() {
+    let keyed = |prefix: &str| {
+        check(
+            &format!(
+                r#"<ul>{{% for row in rows %}}<li live:key="{prefix}-{{{{ row|live_key_digest }}}}">{{{{ row }}}}</li>{{% endfor %}}</ul>"#
+            ),
+            CheckerLimits::default(),
+        )
+    };
+    let longest = keyed(&"a".repeat(94));
+    assert!(longest.is_proved(), "{:?}", longest.diagnostics());
+    assert_code(keyed(&"a".repeat(95)), DiagnosticCode::InvalidKey);
+}
+
+/// LIVE-034: the runtime validates every element id inside an island with
+/// the stable-key rule and refuses a repeated one, so the checker does too;
+/// a dynamic part is left to the data, and its literal bytes are judged.
+#[test]
+fn live_034_element_ids_follow_the_runtime_rule() {
+    for id in ["_top", "user[email]", "a b", ""] {
+        let report = check(
+            &format!(r#"<p id="{id}">Text</p>"#),
+            CheckerLimits::default(),
+        );
+        assert!(!report.is_proved(), "{id:?}");
+        assert_code(report, DiagnosticCode::InvalidElementId);
+    }
+    let repeated = check(
+        r#"<p id="notes">One</p><p id="notes">Two</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!repeated.is_proved());
+    assert_code(repeated, DiagnosticCode::DuplicateElementId);
+    let looped = check(
+        r#"<ul>{% for row in rows %}<li id="row">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(!looped.is_proved());
+    assert_code(looped, DiagnosticCode::DuplicateElementId);
+    let dynamic_prefix = check(
+        r#"<ul>{% for row in rows %}<li id="_{{ row }}">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert_code(dynamic_prefix, DiagnosticCode::InvalidElementId);
+    let proved = check(
+        r#"<p id="notes">One</p><p id="notes-2">Two</p>"#,
+        CheckerLimits::default(),
+    );
+    assert!(proved.is_proved(), "{:?}", proved.diagnostics());
+    // The runtime scans neither a template element's inert content nor a
+    // nested island's elements as part of the enclosing island.
+    let inert = check(
+        r#"<p id="notes">One</p><template><p id="notes">Two</p><p id="_draft">Three</p></template>"#,
+        CheckerLimits::default(),
+    );
+    assert!(inert.is_proved(), "{:?}", inert.diagnostics());
+    let registry = registry();
+    let nested = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"<p id="panel">Parent</p><section live:component="tests.model-child" live:key="model-child"><p id="panel">Child</p></section>"#
+                .to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+        (view(MODEL_CHILD_VIEW), "<div></div>".to_owned()),
+    ])
+    .expect("nested island template catalog");
+    let nested = TemplateChecker::new(&registry, &nested, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(
+        nested
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != DiagnosticCode::DuplicateElementId),
+        "{:?}",
+        nested.diagnostics()
+    );
+    let dynamic = check(
+        r#"<ul>{% for row in rows %}<li id="row-{{ row|live_key_digest }}" live:key="row-{{ row|live_key_digest }}">{{ row }}</li>{% endfor %}</ul>"#,
+        CheckerLimits::default(),
+    );
+    assert!(
+        dynamic.diagnostics().iter().all(|diagnostic| !matches!(
+            diagnostic.code(),
+            DiagnosticCode::InvalidElementId
+                | DiagnosticCode::DuplicateElementId
+                | DiagnosticCode::InvalidKey
+        )),
+        "{:?}",
+        dynamic.diagnostics()
+    );
+}
+
+/// LIVE-036: inside a loop, a match arm, or an `if let`, a name the node
+/// binds is that binding, not the macro argument of the same name, so a
+/// model written from it is unproved rather than proved from the argument.
+#[test]
+fn live_036_a_name_a_loop_binds_shadows_the_macro_argument() {
+    let shadowed = check(
+        r#"{% macro bound(name) %}{% for name in names %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(!shadowed.is_proved(), "{:?}", shadowed.diagnostics());
+    let matched = check(
+        r#"{% macro bound(name) %}{% match choice %}{% when Some(name) %}<input live:model.blur="{{ name }}">{% when None %}{% endmatch %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(!matched.is_proved(), "{:?}", matched.diagnostics());
+    let unshadowed = check(
+        r#"{% macro bound(name) %}{% for other in names %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        CheckerLimits::default(),
+    );
+    assert!(unshadowed.is_proved(), "{:?}", unshadowed.diagnostics());
+    // Where the node does not bind the name, the argument still stands: the
+    // else of an `if let`, a match arm binding nothing, and a loop's else.
+    for source in [
+        r#"{% macro bound(name) %}{% if let Some(name) = choice %}<p>{{ name }}</p>{% else %}<input live:model.blur="{{ name }}">{% endif %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        r#"{% macro bound(name) %}{% match choice %}{% when Some(name) %}<p>{{ name }}</p>{% when None %}<input live:model.blur="{{ name }}">{% endmatch %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+        r#"{% macro bound(name) %}{% for name in names %}<p>{{ name }}</p>{% else %}<input live:model.blur="{{ name }}">{% endfor %}{% endmacro %}{% call bound("query") %}{% endcall %}"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
+    }
+}
+
+/// FORM-009: a form renders each control's checked or selected state and the
+/// runtime's correction marker from island data. Each control's conditionals
+/// are checked against that one tag, so ten such controls are a few branch
+/// states, not a million, whatever attribute they render; every arm is still
+/// checked.
+#[test]
+fn form_009_control_state_rendered_from_the_island_does_not_multiply_branch_states() {
+    let controls = |attribute: &str| {
+        (0..10)
+            .map(|index| {
+                format!(
+                    r#"<input type="checkbox" live:model.blur="query"{{% if on{index} %}} {attribute}{{% endif %}}{{% if !authority.is_empty() %}} data-suprnova-live-authoritative="{{{{ authority }}}}"{{% endif %}}>"#
+                )
+            })
+            .collect::<String>()
+    };
+    let state = check(&controls("checked"), CheckerLimits::default());
+    assert!(state.is_proved(), "{:?}", state.diagnostics());
+    let selected = check(
+        r#"<select live:model.blur="query">{% for option in options %}<option value="{{ option.0 }}"{% if option.0 == chosen %} selected{% endif %}>{{ option.1 }}</option>{% endfor %}</select>"#,
+        CheckerLimits::default(),
+    );
+    assert!(selected.is_proved(), "{:?}", selected.diagnostics());
+
+    let disabled = check(&controls("disabled"), CheckerLimits::default());
+    assert!(disabled.is_proved(), "{:?}", disabled.diagnostics());
+    assert_code(
+        check(
+            r#"<input live:model.blur="query"{% if on %} checked live:model.change="missing"{% endif %}>"#,
+            CheckerLimits::default(),
+        ),
+        DiagnosticCode::UnknownModel,
+    );
+    let outside_quotes = check(
+        r#"<input live:model.blur="query"{% if on %} {{ attribute }}{% endif %}>"#,
+        CheckerLimits::default(),
+    );
+    assert!(
+        !outside_quotes.is_proved(),
+        "{:?}",
+        outside_quotes.diagnostics()
+    );
+}
+
+fn check(source: &str, limits: CheckerLimits) -> suprnova_live::checker::CheckReport {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (view(ROOT_VIEW), source.to_owned()),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    TemplateChecker::new(&registry, &catalog, limits).check_component(&root_name())
+}
+
+fn assert_code(report: suprnova_live::checker::CheckReport, expected: DiagnosticCode) {
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == expected),
+        "missing {expected:?}: {:?}",
+        report.diagnostics()
+    );
+}
+
+fn located(report: &suprnova_live::checker::CheckReport, code: DiagnosticCode) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == code)
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+fn independent_conditionals(count: usize, faulty: Option<usize>) -> String {
+    let mut source = String::from("<section>\n");
+    for index in 0..count {
+        let action = if faulty == Some(index) {
+            "missing"
+        } else {
+            "save"
+        };
+        source.push_str(&format!(
+            "{{% if flag{index} %}}<button live:click=\"{action}\">Save {index}</button>{{% else %}}<p id=\"off-{index}\">Off</p>{{% endif %}}\n"
+        ));
+    }
+    source.push_str("</section>");
+    source
+}
+
+/// Independent conditionals add to the work instead of multiplying it: each
+/// arm is checked against the markup around it, and two arms that leave the
+/// same element structure continue as one state. Forty of them, far past
+/// every branch-state ceiling as combinations, check like one.
+#[test]
+fn forty_independent_conditionals_check_without_multiplying() {
+    let report = check(
+        &independent_conditionals(40, None),
+        CheckerLimits::default(),
+    );
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+
+    let shared_close = (0..40)
+        .map(|index| {
+            format!(
+                "{{% if wide{index} %}}<div class=\"wide\">{{% else %}}<div class=\"narrow\">{{% endif %}}<span>{index}</span></div>"
+            )
+        })
+        .collect::<String>();
+    let report = check(
+        &format!("<section>{shared_close}</section>"),
+        CheckerLimits::default(),
+    );
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+
+    let nested = (0..24).fold(String::from("<p>leaf</p>"), |inner, index| {
+        format!("{{% if level{index} %}}<div>{inner}</div>{{% else %}}<p>{index}</p>{{% endif %}}")
+    });
+    let report = check(
+        &format!("<section>{nested}</section>"),
+        CheckerLimits::default(),
+    );
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+}
+
+/// Checking arms in context still finds what one arm alone gets wrong, and
+/// what two arms of different conditionals get wrong together.
+#[test]
+fn a_violation_inside_one_of_forty_conditionals_is_still_found() {
+    let report = check(
+        &independent_conditionals(40, Some(23)),
+        CheckerLimits::default(),
+    );
+    assert_eq!(
+        located(&report, DiagnosticCode::UnknownAction)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>(),
+        vec![25],
+        "{:?}",
+        report.diagnostics()
+    );
+
+    let mut keyed = independent_conditionals(40, None);
+    keyed = keyed.replacen(
+        "{% if flag3 %}",
+        "{% if keyed3 %}<p live:key=\"same\">A</p>{% endif %}{% if flag3 %}",
+        1,
+    );
+    keyed = keyed.replacen(
+        "{% if flag31 %}",
+        "{% if keyed31 %}<p live:key=\"same\">B</p>{% endif %}{% if flag31 %}",
+        1,
+    );
+    let report = check(&keyed, CheckerLimits::default());
+    assert!(
+        !located(&report, DiagnosticCode::DuplicateKey).is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+
+    let mismatched = independent_conditionals(40, None).replacen(
+        "{% else %}<p id=\"off-17\">Off</p>",
+        "{% else %}<div>",
+        1,
+    );
+    let report = check(&mismatched, CheckerLimits::default());
+    assert!(
+        !located(&report, DiagnosticCode::BranchStackMismatch).is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+
+    let teleport = "<section>{% if open %}<template live:teleport=\"#modal\" live:key=\"modal\"><p>Modal</p></template>{% endif %}{% if target %}<div id=\"modal\"></div>{% endif %}</section>";
+    let report = check(teleport, CheckerLimits::default());
+    assert!(
+        !located(&report, DiagnosticCode::AccessibilityViolation).is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+}
+
+/// Combinations are enumerated only where one tag's attributes depend on
+/// several conditionals; past the ceiling, the diagnostic names the
+/// conditional that crossed it.
+#[test]
+fn the_branch_limit_names_the_conditional_that_crossed_it() {
+    let report = check(
+        "<section>\n<input type=\"checkbox\"{% if a %} disabled{% endif %}{% if b %} hidden{% endif %}>\n</section>",
+        CheckerLimits::new(64 * 1024, 128, 8, 3, 512, 64, 32, 32).expect("limits"),
+    );
+    assert_eq!(
+        located(&report, DiagnosticCode::BranchLimit),
+        vec![(2, 53)],
+        "{:?}",
+        report.diagnostics()
+    );
+}
+
+/// The submit bound counts the fields one path binds: two arms binding 64
+/// different fields each, and one more after them, is 65 on every path.
+#[test]
+fn the_submit_bound_counts_one_path_not_the_union_of_arms() {
+    let limits = CheckerLimits::new(256 * 1024, 8_192, 16, 128, 32_768, 2_048, 256, 1_024)
+        .expect("checker limits within the engine maxima");
+    let controls = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|index| {
+                format!(r#"<input aria-label="{prefix}{index}" live:model="{prefix}_{index}">"#)
+            })
+            .collect::<String>()
+    };
+    let form = |tail: usize| {
+        format!(
+            r#"<form live:submit.prevent="save">{{% if wide %}}{}{{% else %}}{}{{% endif %}}{}</form>"#,
+            controls("left", 64),
+            controls("right", 64),
+            controls("tail", tail)
+        )
+    };
+    let within = check(&form(1), limits);
+    assert!(
+        located(&within, DiagnosticCode::SubmitProposalLimit).is_empty(),
+        "{:?}",
+        within
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code() != DiagnosticCode::UnknownModel)
+            .collect::<Vec<_>>()
+    );
+    let over = check(&form(64), limits);
+    assert_eq!(
+        located(&over, DiagnosticCode::SubmitProposalLimit).len(),
+        1,
+        "a path binding 128 fields is still refused"
+    );
+}
+/// A literal attribute value holding `<section` does not move the tag's
+/// reported column, and a loop whose end a comment swallowed is reported
+/// at its own `{% for %}` in the template that holds it.
+#[test]
+fn a_tag_start_inside_an_attribute_value_and_an_unclosed_loop_report_their_own_place() {
+    let unclosed = check(
+        "<p>Open</p>\n  <section title=\"a <section b\">",
+        CheckerLimits::default(),
+    );
+    assert_eq!(
+        located(&unclosed, DiagnosticCode::HtmlSyntax),
+        vec![(2, 3)],
+        "{:?}",
+        unclosed.diagnostics()
+    );
+
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            "<section>\n{% include \"tests/shared.html\" %}\n</section>".to_owned(),
+        ),
+        (
+            view("tests/shared.html"),
+            "<p>x</p>\n{% for item in items %}<i>{{ item }}</i><!-- {% endfor %} -->".to_owned(),
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    let mismatches: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DiagnosticCode::BranchStackMismatch)
+        .map(|diagnostic| {
+            (
+                diagnostic.path().map(|path| path.as_str().to_owned()),
+                diagnostic.line(),
+                diagnostic.column(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mismatches,
+        vec![(Some("tests/shared.html".to_owned()), 2, 1)],
+        "{:?}",
+        report.diagnostics()
+    );
+}
+fn unproved_at(report: &suprnova_live::checker::CheckReport) -> Vec<(u32, u32)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                && diagnostic.severity() == DiagnosticSeverity::Unproved
+        })
+        .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+        .collect()
+}
+
+/// Askama escapes `"&'<>`: enough between tags and inside a quoted
+/// attribute value, not in an unquoted value, an event-handler attribute, or
+/// `script` and `style` text. A dynamic value there is unproved.
+#[test]
+fn a_dynamic_value_where_html_escaping_does_not_hold_is_unproved() {
+    for (line, location) in [
+        ("<div title={{ name }}>x</div>", (2, 6)),
+        (
+            "<button type=\"button\" onclick=\"go('{{ name }}')\">x</button>",
+            (2, 23),
+        ),
+        ("<script>let x = '{{ name }}';</script>", (2, 21)),
+        ("<style>.a { color: {{ color }}; }</style>", (2, 23)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div title=\"{{ name }}\">x</div>",
+        "<div title='{{ name }}'>x</div>",
+        "<p>{{ name }}</p>",
+        "<script>let x = 1;</script><style>.a { color: red; }</style>",
+        "<button type=\"button\" onclick=\"go()\">x</button>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}
+
+/// `linebreaks` and `paragraphbreaks` write `<p>` elements and
+/// `linebreaksbr` writes `<br/>`; inside an element that cannot hold them,
+/// the browser builds a different tree than the one checked.
+#[test]
+fn line_break_filters_are_unproved_where_their_markup_cannot_stand() {
+    for (line, location) in [
+        ("<p>{{ notes|linebreaks }}</p>", (2, 7)),
+        ("<span>{{ notes|paragraphbreaks }}</span>", (2, 10)),
+        ("<ul>{{ notes|linebreaksbr }}</ul>", (2, 8)),
+    ] {
+        let report = check(
+            &format!("<section>\n{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert_eq!(
+            unproved_at(&report),
+            vec![location],
+            "{line}: {:?}",
+            report.diagnostics()
+        );
+    }
+    for line in [
+        "<div>{{ notes|linebreaks }}</div>",
+        "<article>{{ notes|paragraphbreaks }}</article>",
+        "<p>{{ notes|linebreaksbr }}</p>",
+    ] {
+        let report = check(
+            &format!("<section>{line}</section>"),
+            CheckerLimits::default(),
+        );
+        assert!(report.is_proved(), "{line}: {:?}", report.diagnostics());
+    }
+}
