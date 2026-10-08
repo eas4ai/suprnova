@@ -733,6 +733,39 @@ fn intt_a_preserve_call_inside_a_macro_counts_too() {
     assert_wide(&extract_block(&ts, "Numbers"), "number | bigint");
 }
 
+/// The wide integers of `NUMBERS` with `boot`, a function holding `body`,
+/// beside them.
+fn numbers_with_boot(body: &str) -> String {
+    let source =
+        format!("{NUMBERS}\nfn boot(config: InertiaConfig) -> InertiaConfig {{ {body} }}\n");
+    generate_types_string(ScanInput::Source(Box::leak(source.into_boxed_str())))
+}
+
+#[test]
+fn intt_a_parenthesized_false_preserves_nothing() {
+    for call in [
+        "InertiaConfig::new().preserve_big_integers((false))",
+        "config.preserve_big_integers(((false)))",
+        "InertiaConfig::preserve_big_integers(config, (false))",
+    ] {
+        let ts = numbers_with_boot(call);
+        assert_wide(&extract_block(&ts, "Numbers"), "number");
+        assert!(!ts.contains("bigint"), "`{call}` preserves nothing:\n{ts}");
+    }
+}
+
+#[test]
+fn intt_a_parenthesized_false_inside_a_macro_preserves_nothing() {
+    for call in [
+        "bind!(InertiaConfig::new().preserve_big_integers((false))); config",
+        "bind!(config.preserve_big_integers(((false)))); config",
+    ] {
+        let ts = numbers_with_boot(call);
+        assert_wide(&extract_block(&ts, "Numbers"), "number");
+        assert!(!ts.contains("bigint"), "`{call}` preserves nothing:\n{ts}");
+    }
+}
+
 /// A temporary project for the binary: a manifest, so `generate-types`
 /// takes the directory as a project, and `files` under `src/`.
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {

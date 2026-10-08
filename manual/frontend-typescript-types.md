@@ -338,13 +338,16 @@ holds exactly. With big-integer preservation on, the server sends such a
 value as a `{"$bigint": "..."}` marker and the Inertia client turns it
 into a `BigInt`. So the generator types `i64`, `u64`, `i128`, `u128`,
 `isize` and `usize` as `number | bigint` when any `.rs` file under `src/`
-calls `preserve_big_integers(..)` with `true` or with a variable, and as
-`number` otherwise. A literal `false` turns nothing on:
+calls `preserve_big_integers(..)` with anything but a literal `false`,
+such as `true` or a variable, and as `number` otherwise:
 
 ```rust
 // src/bootstrap.rs: every wide integer field becomes `number | bigint`
 Inertia::install(&InertiaConfig::new().preserve_big_integers(true))?;
 ```
+
+A literal `false` turns nothing on, in parentheses too: `(false)` is still
+`false`.
 
 A map key stays `number`: a JSON object key is a string on the wire,
 never a marker, and TypeScript refuses `bigint` as a `Record` key.

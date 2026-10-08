@@ -1290,8 +1290,16 @@ struct PreserveBigIntegersVisitor {
 /// The method and function name [`PreserveBigIntegersVisitor`] looks for.
 const PRESERVE_BIG_INTEGERS: &str = "preserve_big_integers";
 
-/// Whether an argument turns preservation on: anything but `false`.
+/// Whether an argument turns preservation on: anything but `false`, which
+/// parentheses do not change (`(false)` is `false`).
 fn turns_preservation_on(arg: Option<&Expr>) -> bool {
+    let mut arg = arg;
+    while let Some(
+        Expr::Paren(syn::ExprParen { expr, .. }) | Expr::Group(syn::ExprGroup { expr, .. }),
+    ) = arg
+    {
+        arg = Some(expr);
+    }
     !matches!(
         arg,
         Some(Expr::Lit(ExprLit {
@@ -1310,7 +1318,19 @@ fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
         .rsplit(|tree| matches!(tree, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
         .find(|argument| !argument.is_empty())
         .unwrap_or(&[]);
-    !matches!(last, [proc_macro2::TokenTree::Ident(ident)] if ident == "false")
+    match last {
+        [proc_macro2::TokenTree::Ident(ident)] => ident != "false",
+        // `(false)` is `false`: read what the parentheses hold.
+        [proc_macro2::TokenTree::Group(group)]
+            if matches!(
+                group.delimiter(),
+                proc_macro2::Delimiter::Parenthesis | proc_macro2::Delimiter::None
+            ) =>
+        {
+            tokens_turn_preservation_on(group.stream())
+        }
+        _ => true,
+    }
 }
 
 /// Whether `tokens`, or a group nested in them, call
