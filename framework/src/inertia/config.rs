@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::manifest::ViteManifest;
 use super::prop::InertiaRequestExt;
+use super::root_template::{InertiaRootTemplate, RootTemplateChooser};
 
 /// Shared error-observer callback for SSR render failures.
 pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -336,6 +337,10 @@ pub struct InertiaConfig {
     /// the same reason as `manifest`: a boxed closure is not a value a
     /// caller should be constructing by hand.
     pub(crate) url_resolver: Option<UrlResolver>,
+    /// The application's root template for a first visit, chosen per
+    /// request, or `None` for the framework's own document. Set with
+    /// [`root_template`](Self::root_template).
+    pub(crate) root_template: Option<RootTemplateChooser>,
 }
 
 /// SSR (server-side rendering) configuration.
@@ -537,6 +542,7 @@ impl Default for InertiaConfig {
             error_page: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
+            root_template: None,
         }
     }
 }
@@ -854,6 +860,35 @@ impl InertiaConfig {
     {
         self.url_resolver = Some(Arc::new(f));
         self
+    }
+
+    /// Render every first visit through the application's root template,
+    /// an Askama template declared with [`inertia_root`](crate::inertia_root)
+    /// that places the framework's parts in a document of its own: meta
+    /// tags, fonts, a favicon, attributes on `<html>` and `<body>`.
+    ///
+    /// Without one the first visit is the document the framework writes
+    /// itself.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{InertiaConfig, InertiaRootTemplate};
+    ///
+    /// #[suprnova::inertia_root(path = "app.html")]
+    /// pub struct AppDocument;
+    ///
+    /// let cfg = InertiaConfig::new().root_template(InertiaRootTemplate::of::<AppDocument>());
+    /// ```
+    pub fn root_template(mut self, template: InertiaRootTemplate) -> Self {
+        self.root_template = Some(Arc::new(move |_| template));
+        self
+    }
+
+    /// The root document a first visit of `request` renders into.
+    pub(crate) fn root_template_for(&self, request: &dyn InertiaRequestExt) -> InertiaRootTemplate {
+        match &self.root_template {
+            Some(choose) => choose(request),
+            None => InertiaRootTemplate::framework(),
+        }
     }
 
     /// Return the cached Vite manifest. On the first call this reads

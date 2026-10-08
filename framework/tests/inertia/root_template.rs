@@ -1,7 +1,9 @@
 //! The Inertia root document (RDOC-001 to RDOC-004 and RDOC-006).
 //!
 //! Without an application template the first visit is the document the
-//! framework writes itself, pinned here byte for byte (RDOC-002).
+//! framework writes itself, pinned here byte for byte (RDOC-002). With one,
+//! the application's Askama template places the framework's parts
+//! (RDOC-001); the templates live under `framework/tests/templates/inertia/`.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -13,7 +15,9 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use suprnova::testing::TestContainer;
-use suprnova::{Frontend, HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse};
+use suprnova::{
+    Frontend, HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse, InertiaRootTemplate,
+};
 
 /// A request the tests build by hand: its path, query and headers.
 struct MockReq {
@@ -250,7 +254,10 @@ async fn rdoc_002_the_ssr_document_is_unchanged() {
     let _container = TestContainer::fake();
     let ssr_body = "<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\"}</script><div data-server-rendered=\"true\" id=\"app\"><main>SSR</main></div>";
     let addr = ssr_worker(
-        &["<title>SSR Title</title>", "<meta name=\"ssr\" content=\"yes\">"],
+        &[
+            "<title>SSR Title</title>",
+            "<meta name=\"ssr\" content=\"yes\">",
+        ],
         ssr_body,
     )
     .await;
@@ -333,7 +340,231 @@ async fn rdoc_001_the_mount_id_names_the_page_data_and_mount_elements() {
         .mount_id("a\"b<c");
     let (_, _, body) = first_visit(pinned_page().with_config(config)).await;
     assert!(
-        body.contains("data-page=\"a&quot;b&lt;c\">") && body.contains("<div id=\"a&quot;b&lt;c\">"),
+        body.contains("data-page=\"a&quot;b&lt;c\">")
+            && body.contains("<div id=\"a&quot;b&lt;c\">"),
         "{body}"
     );
+}
+
+/// Custom filters the test templates name.
+mod filters {
+    use suprnova::view::{FilterResult, FilterValues};
+
+    /// Always fails, so a template that applies it fails to render after
+    /// writing part of its document.
+    #[suprnova::view_filter]
+    pub fn refuse(_value: &str, _: &dyn FilterValues) -> FilterResult<String> {
+        Err(std::fmt::Error.into())
+    }
+}
+
+/// A root document with markup of its own around every part.
+#[suprnova::inertia_root(path = "inertia/root.html")]
+struct AppDocument;
+
+/// A root document whose last expression fails.
+#[suprnova::inertia_root(path = "inertia/failing.html")]
+struct FailingDocument;
+
+/// A development config that renders through `AppDocument`.
+fn templated() -> InertiaConfig {
+    InertiaConfig::new()
+        .frontend(Frontend::Svelte)
+        .development(true)
+        .vite_dev_server("http://localhost:5765")
+        .version("pinned")
+        .root_template(InertiaRootTemplate::of::<AppDocument>())
+}
+
+/// RDOC-001: a root template places a favicon, meta tags, a `<noscript>`
+/// and attributes on `<html>` and `<body>` of its own.
+#[tokio::test]
+async fn rdoc_001_a_root_template_places_markup_of_its_own() {
+    let _container = TestContainer::fake();
+    let (status, headers, body) = first_visit(pinned_page().with_config(templated())).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(headers, pinned_headers());
+    for own in [
+        "<html lang=\"en\" class=\"h-full\" data-theme=\"dark\">",
+        "<link rel=\"icon\" href=\"/favicon.ico\">",
+        "<meta name=\"description\" content=\"Rendered through the root template\">",
+        "<body class=\"antialiased\">",
+        "<noscript>This page needs JavaScript.</noscript>",
+    ] {
+        assert!(body.contains(own), "missing {own} in:\n{body}");
+    }
+}
+
+/// RDOC-001: the markup parts are placed as markup, never escaped as text:
+/// the title element, the CSRF tag and the Vite tags in the head, and the
+/// page data element (the same page JSON the framework's own document
+/// carries) and the mount element in the body.
+#[tokio::test]
+async fn rdoc_001_the_parts_are_placed_as_markup() {
+    let _container = TestContainer::fake();
+    let (_, _, body) = first_visit(pinned_page().with_config(templated()).title("A & <B>")).await;
+
+    let expected_head = "<title>A &amp; &lt;B&gt;</title>\n\
+         <meta name=\"csrf-token\" content=\"\">\n\
+         <script type=\"module\" src=\"http://localhost:5765/@vite/client\"></script>\n\
+         <script type=\"module\" src=\"http://localhost:5765/src/main.ts\"></script>\n";
+    assert!(body.contains(expected_head), "{body}");
+    let expected_body = format!(
+        "<noscript>This page needs JavaScript.</noscript>\n\
+         <script type=\"application/json\" data-page=\"app\">{PINNED_PAGE_JSON}</script>\n\
+         <div id=\"app\"></div>\n</body>"
+    );
+    assert!(body.contains(&expected_body), "{body}");
+    for escaped in ["&lt;title", "&lt;meta", "&lt;script", "&#60;", "&lt;div"] {
+        assert!(!body.contains(escaped), "{escaped} in:\n{body}");
+    }
+}
+
+/// RDOC-001: `lang`, `csrf_token` and `nonce` are values a template places
+/// itself, escaped like any other value; `nonce` is absent without a nonce
+/// policy.
+#[tokio::test]
+async fn rdoc_001_lang_csrf_token_and_nonce_are_values_the_template_places() {
+    let _container = TestContainer::fake();
+    let session = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        suprnova::session::SessionData::new("id".into(), "tok\"en<1".into()),
+    )));
+    let request = MockReq::new("/home");
+    let response = suprnova::session::session_scope_for_test(
+        session,
+        suprnova::scope_locale(suprnova::Locale::parse("pt-BR").unwrap(), async {
+            pinned_page()
+                .with_config(templated())
+                .resolve(&request)
+                .await
+                .expect("a first visit")
+        }),
+    )
+    .await;
+    let (_, _, body) = parts(response).await;
+
+    assert!(body.contains("<html lang=\"pt-BR\""), "{body}");
+    assert!(
+        body.contains("<meta name=\"csrf-token\" content=\"tok&quot;en&lt;1\">"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<meta name=\"csrf-copy\" content=\"tok&#34;en&#60;1\">"),
+        "{body}"
+    );
+    assert!(!body.contains("name=\"nonce\""), "{body}");
+}
+
+/// RDOC-001: the mount id reaches a root template's page data and mount
+/// elements.
+#[tokio::test]
+async fn rdoc_001_the_mount_id_reaches_a_root_template() {
+    let _container = TestContainer::fake();
+    let (_, _, body) = first_visit(pinned_page().with_config(templated().mount_id("root"))).await;
+
+    assert!(
+        body.contains(&format!(
+            "<script type=\"application/json\" data-page=\"root\">{PINNED_PAGE_JSON}</script>\n<div id=\"root\"></div>"
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("\"app\""), "{body}");
+}
+
+/// RDOC-001: the `title` part is empty when the SSR head carries a
+/// `<title>`, whatever the response or the config set, and present when
+/// the SSR head carries none.
+#[tokio::test]
+async fn rdoc_001_the_title_part_is_empty_when_the_ssr_head_carries_a_title() {
+    let _container = TestContainer::fake();
+    let ssr_body = "<script type=\"application/json\" data-page=\"app\">{}</script><div data-server-rendered=\"true\" id=\"app\"></div>";
+    let titled = ssr_worker(&["<title>SSR Title</title>"], ssr_body).await;
+    let config = templated()
+        .default_title("Default")
+        .ssr(format!("http://{titled}"));
+    let (_, _, body) = first_visit(pinned_page().with_config(config).title("Response")).await;
+    assert_eq!(body.matches("<title").count(), 1, "{body}");
+    assert!(body.contains("<title>SSR Title</title>"), "{body}");
+
+    let untitled = ssr_worker(&["<meta name=\"ssr\" content=\"yes\">"], ssr_body).await;
+    let config = templated()
+        .default_title("Default")
+        .ssr(format!("http://{untitled}"));
+    let (_, _, body) = first_visit(pinned_page().with_config(config)).await;
+    assert!(body.contains("<title>Default</title>"), "{body}");
+}
+
+/// RDOC-001: `ssr` is true only for a response the SSR server rendered,
+/// whose head and body the parts then carry; without SSR, and when the
+/// worker cannot be reached, the template places its fallback.
+#[tokio::test]
+async fn rdoc_001_ssr_is_true_only_when_the_ssr_server_rendered_the_response() {
+    let _container = TestContainer::fake();
+    let (_, _, body) = first_visit(pinned_page().with_config(templated())).await;
+    assert!(body.contains("content=\"csr\""), "no SSR:\n{body}");
+
+    let unreachable = templated().ssr("http://127.0.0.1:1");
+    let (_, _, body) = first_visit(pinned_page().with_config(unreachable)).await;
+    assert!(body.contains("content=\"csr\""), "worker down:\n{body}");
+    assert!(!body.contains("content=\"ssr\""), "worker down:\n{body}");
+
+    let ssr_body = "<script type=\"application/json\" data-page=\"app\">{}</script><div data-server-rendered=\"true\" id=\"app\"><main>SSR</main></div>";
+    let addr = ssr_worker(&["<meta name=\"ssr\" content=\"yes\">"], ssr_body).await;
+    let (_, _, body) =
+        first_visit(pinned_page().with_config(templated().ssr(format!("http://{addr}")))).await;
+    assert!(
+        body.contains("<meta name=\"rendered-by\" content=\"ssr\">"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<meta name=\"ssr\" content=\"yes\">"),
+        "{body}"
+    );
+    assert!(body.contains(ssr_body), "{body}");
+    assert_eq!(body.matches("data-page").count(), 1, "{body}");
+}
+
+/// RDOC-001: a root template that fails to render makes the response an
+/// error naming the template; it neither panics nor sends the part of the
+/// document it wrote before failing.
+#[tokio::test]
+async fn rdoc_001_a_template_that_fails_to_render_is_an_error() {
+    let _container = TestContainer::fake();
+    let config = InertiaConfig::new()
+        .development(true)
+        .version("pinned")
+        .root_template(InertiaRootTemplate::of::<FailingDocument>());
+    let request = MockReq::new("/home");
+    let error = match pinned_page().with_config(config).resolve(&request).await {
+        Ok(response) => panic!("a failed render answered {}", response.status_code()),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("FailingDocument"), "{error}");
+
+    let (status, _, body) = parts(HttpResponse::from(error)).await;
+    assert_eq!(status, 500);
+    for partial in ["<!DOCTYPE", "<html", "csrf-token", "data-page"] {
+        assert!(!body.contains(partial), "{partial} in:\n{body}");
+    }
+}
+
+/// RDOC-001: a root template that names a value the framework does not
+/// supply does not compile.
+#[test]
+fn rdoc_001_a_template_naming_an_unsupplied_value_does_not_compile() {
+    // trybuild compiles each case as a crate of its own under the target
+    // directory, and Askama reads that crate's `templates/`.
+    let target = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("the target directory");
+    let templates = target.join("tests/trybuild/suprnova/templates/inertia");
+    std::fs::create_dir_all(&templates).expect("the trybuild templates directory");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/inertia/compile_fail/unsupplied_value.html"),
+        templates.join("unsupplied_value.html"),
+    )
+    .expect("copy the template");
+    trybuild::TestCases::new().compile_fail("tests/inertia/compile_fail/*.rs");
 }

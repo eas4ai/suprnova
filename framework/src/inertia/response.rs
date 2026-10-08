@@ -1225,7 +1225,16 @@ impl InertiaResponse {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
             let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
-            build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
+            match config.root_template_for(req).application() {
+                Some(template) => build_template_response(
+                    template,
+                    &page,
+                    &config,
+                    title.as_deref(),
+                    ssr_result.as_ref(),
+                )?,
+                None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref()),
+            }
         };
         staged_session.commit();
         Ok(response)
@@ -2372,6 +2381,44 @@ fn build_html_response(
     };
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
+}
+
+/// The first visit through the application's root template (RDOC-001).
+///
+/// The template gets the values the framework's own document is built
+/// from, as parts it places: the same title rule, CSRF token, SSR output,
+/// Vite tags, language and mount id. The page JSON is written into the
+/// template's output by the body part, never into a string of its own.
+fn build_template_response(
+    template: super::root_template::ApplicationTemplate,
+    page: &Value,
+    config: &InertiaConfig,
+    title_override: Option<&str>,
+    ssr: Option<&super::ssr::SsrResponse>,
+) -> Result<HttpResponse, FrameworkError> {
+    let csrf = csrf_token().unwrap_or_default();
+    let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
+    let title = (!contains_title_element(&ssr_head))
+        .then(|| title_override.unwrap_or(config.default_title.as_str()));
+    let assets = if config.development {
+        render_dev_head(config)
+    } else {
+        render_prod_head(config)
+    };
+    let lang = document_language();
+    super::root_template::render(
+        template,
+        super::root_template::RootInputs {
+            page,
+            title,
+            csrf_token: &csrf,
+            ssr_head: &ssr_head,
+            ssr_body: ssr.map(|s| s.body.as_str()),
+            assets: &assets,
+            lang: &lang,
+            mount_id: &config.mount_id,
+        },
+    )
 }
 
 /// Whether an SSR head fragment already carries a `<title>` element.

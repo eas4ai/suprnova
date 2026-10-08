@@ -19,5 +19,6 @@ pub mod images;
 pub mod jobs;
 pub mod media;
 pub mod rate_limit;
+pub mod root_template;
 pub mod sqs;
 pub mod support;

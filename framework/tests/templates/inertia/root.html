@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" class="h-full" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="/favicon.ico">
+<meta name="description" content="Rendered through the root template">
+{{ title }}
+{{ head }}
+{% if ssr %}<meta name="rendered-by" content="ssr">{% else %}<meta name="rendered-by" content="csr">{% endif %}
+<meta name="csrf-copy" content="{{ csrf_token }}">
+{% if let Some(nonce) = nonce %}<meta name="nonce" content="{{ nonce }}">{% endif %}
+</head>
+<body class="antialiased">
+<noscript>This page needs JavaScript.</noscript>
+{{ body }}
+</body>
+</html>
