@@ -225,9 +225,12 @@ Before an entry is written, the value of every key named by
 and response bodies, in prop values, and in the page object. So are the
 query parameters of the same names in the entry's URLs, and the values of
 the `redact_headers` headers. Names are compared without case, so
-`Password` is caught by `password`. A header value or multipart field that
-is not text is stored as `[UNSERIALIZABLE]`, and the rest of the entry is
-kept.
+`Password` is caught by `password`. A name is also caught by any of its
+parts split on `[`, `]` and `.`: the multipart field `user[password]`, the
+prop path `auth.password` and the query parameter `data[0][token]` are all
+redacted, while a longer word such as `passwords` is kept. A header value
+or multipart field that is not text is stored as `[UNSERIALIZABLE]`, and
+the rest of the entry is kept.
 
 ## Recording never breaks a response
 

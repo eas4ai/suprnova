@@ -7,6 +7,11 @@
 //! the same names in the entry's URLs and the values of the redaction
 //! headers. Names are compared without case, so `Password` is caught by
 //! `password`.
+//!
+//! A name is also caught by any of its parts split on `[`, `]` and `.`:
+//! a multipart field keeps its flat name (`user[password]`), and a dotted
+//! prop path keeps its own `propValues` leaf (`auth.password`), so the
+//! whole-name match Laravel makes on PHP's nested arrays would miss both.
 
 use serde_json::Value;
 
@@ -33,9 +38,16 @@ impl Redactor {
         }
     }
 
-    /// Whether `name` is one of the redaction keys.
+    /// Whether `name` names a redaction key: as a whole, or in any of its
+    /// parts split on `[`, `]` and `.`, so the flattened `user[password]`,
+    /// `data[0][token]` and `auth.password` are caught as their nested
+    /// forms are. A longer word (`passwords`) is not a part, so it is kept.
     fn is_sensitive_key(&self, name: &str) -> bool {
         is_listed(&self.keys, name)
+            || name
+                .split(['[', ']', '.'])
+                .filter(|part| !part.is_empty())
+                .any(|part| is_listed(&self.keys, part))
     }
 
     /// Whether `name` is one of the redaction headers.
@@ -53,8 +65,8 @@ impl Redactor {
         self.redact_header_bags(entry);
     }
 
-    /// Replace the value of every object key named by the redaction keys,
-    /// at any depth, by `[REDACTED]`.
+    /// Replace the value of every object key that names a redaction key,
+    /// whole or by a part, at any depth, by `[REDACTED]`.
     pub(crate) fn redact_keys(&self, value: &mut Value) {
         if self.keys.is_empty() {
             return;
@@ -99,9 +111,9 @@ impl Redactor {
     /// `url` with the value of every query parameter named by the
     /// redaction keys replaced by `[REDACTED]`, percent-encoded as a query
     /// writes it. A bracketed name (`filter[secret]`) is caught by any of
-    /// its parts, as Laravel matches nested keys at their own depth. The
-    /// rest of the URL, the other parameters and the fragment are left as
-    /// they were sent.
+    /// its parts, as an object key is, and as Laravel matches nested keys
+    /// at their own depth. The rest of the URL, the other parameters and
+    /// the fragment are left as they were sent.
     pub(crate) fn redact_url(&self, url: &str) -> String {
         if self.keys.is_empty() {
             return url.to_string();
@@ -137,17 +149,14 @@ impl Redactor {
         redacted
     }
 
-    /// Whether the raw query name `name` (`token`, `filter%5Bsecret%5D`)
-    /// names a redaction key in any of its bracketed parts.
+    /// Whether the raw query name `name` (`token`, `filter%5Bsecret%5D`),
+    /// once decoded, names a redaction key by the rule object keys follow.
     fn query_name_is_sensitive(&self, name: &str) -> bool {
         let decoded: String = url::form_urlencoded::parse(name.as_bytes())
             .next()
             .map(|(decoded, _)| decoded.into_owned())
             .unwrap_or_default();
-        decoded
-            .split(['[', ']'])
-            .filter(|part| !part.is_empty())
-            .any(|part| self.is_sensitive_key(part))
+        self.is_sensitive_key(&decoded)
     }
 
     /// Replace the value of every redaction header in the `requestHeaders`
@@ -222,6 +231,47 @@ mod tests {
                 "user": {"Password": REDACTED, "name": "Ada", "tokens": [{"api_key": REDACTED}]},
                 "PASSWORD_CONFIRMATION": REDACTED,
             })
+        );
+    }
+
+    #[test]
+    fn indt_a_flattened_key_is_redacted_when_any_part_names_a_key() {
+        let mut value = json!({
+            "user[password]": "hunter2",
+            "auth.password": "p",
+            "data[0][token]": "t",
+            "filter[secret]": "s",
+            "Profile.API_KEY": "k",
+            "user[name]": "Ada",
+            "passwords": "a longer word",
+            "filter[passwords]": "a longer word too",
+            "nested": {"user[password]": "deep"},
+        });
+        redactor().redact_keys(&mut value);
+        assert_eq!(
+            value,
+            json!({
+                "user[password]": REDACTED,
+                "auth.password": REDACTED,
+                "data[0][token]": REDACTED,
+                "filter[secret]": REDACTED,
+                "Profile.API_KEY": REDACTED,
+                "user[name]": "Ada",
+                "passwords": "a longer word",
+                "filter[passwords]": "a longer word too",
+                "nested": {"user[password]": REDACTED},
+            })
+        );
+    }
+
+    #[test]
+    fn indt_a_configured_key_with_a_separator_is_matched_whole() {
+        let redactor = Redactor::new(&["user.pin".to_string()], &[]);
+        let mut value = json!({"User.PIN": "1234", "pin": "kept", "user": "kept"});
+        redactor.redact_keys(&mut value);
+        assert_eq!(
+            value,
+            json!({"User.PIN": REDACTED, "pin": "kept", "user": "kept"})
         );
     }
 

@@ -1323,6 +1323,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   uses, and keeps the 5 second whole-call timeout over headers and body,
   the 8 MiB response cap and the refusal of an oversized `Content-Length`
   (SS-14).
+- **DevTools redacts a flattened key by its parts.** A multipart field
+  keeps its flat name, so `user[password]=hunter2` was stored under that
+  name, and a dotted prop path such as `auth.password` kept its own
+  `propValues` leaf beside the nested page value. Redaction compared the
+  whole name with each key, so both values reached the entry file as sent.
+  A key is now sensitive when the whole name, or any part of it split on
+  `[`, `]` and `.`, names a redaction key, at any depth of the entry and
+  in query parameter names alike; a longer word such as `passwords` is
+  still kept (DT-07, DT-08).
 
 ## 3.2.1 - 2026-10-05
 
