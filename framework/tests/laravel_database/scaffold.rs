@@ -72,3 +72,8 @@ impl MigratorTrait for Migrator {
 pub async fn migrate(conn: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
     Migrator::up(conn, None).await
 }
+
+/// Roll every migration in [`Migrator`] back in reverse order.
+pub async fn rollback(conn: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
+    Migrator::down(conn, None).await
+}

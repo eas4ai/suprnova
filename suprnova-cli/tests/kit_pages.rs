@@ -206,6 +206,10 @@ mod backend {
                     &migration,
                     &format!("if manager.has_table(\"{table}\").await? {{ return Ok(()); }}")
                 ));
+                assert!(contains(
+                    function(&migration, "down"),
+                    "fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> { Ok(()) }"
+                ));
             }
         });
     }
@@ -225,7 +229,6 @@ mod backend {
                 r#"t.text("body").nullable();"#,
                 r#"t.date_time("created_at")"#,
                 r#"t.date_time("updated_at")"#,
-                r#"Schema::drop_if_exists(manager, "notes")"#,
             ] {
                 assert!(
                     contains(&migration, needle),
@@ -469,7 +472,7 @@ mod backend {
                 "form: StoreNoteRequest",
                 "user_id: user.id,",
                 r#"Inertia::flash("toast", Toast::success("Note saved."))?;"#,
-                r#"redirect!("/notes")"#,
+                r#"Inertia::back(302, Some("/notes")).into()"#,
             ] {
                 assert!(
                     contains(store, needle),
@@ -2116,12 +2119,26 @@ mod vue {
                 !body.contains("@submit"),
                 "{page} still has a native submit handler:\n{body}"
             );
-            if page != "auth/VerifyEmail" {
-                assert!(
-                    body.contains("v-slot=\"{ errors, processing }\""),
-                    "{page} must read `errors` and `processing` from the form's slot:\n{body}"
-                );
-            }
+            assert!(
+                body.contains("v-slot=\"{ errors, processing }\""),
+                "{page} must read `errors` and `processing` from the form's slot:\n{body}"
+            );
+            assert!(
+                body.contains(":disabled=\"processing\""),
+                "{page} must disable its button while processing:\n{body}"
+            );
+        }
+        let verify = read(&src.join("pages/auth/VerifyEmail.vue"));
+        for needle in [
+            "v-for=\"(message, field) in errors\"",
+            ":key=\"field\"",
+            "class=\"text-sm text-red-600\"",
+            "{{ message }}",
+        ] {
+            assert!(
+                verify.contains(needle),
+                "VerifyEmail lacks `{needle}`:\n{verify}"
+            );
         }
         let login = read(&src.join("pages/auth/Login.vue"));
         assert!(

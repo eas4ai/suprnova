@@ -32,9 +32,13 @@ defineProps<VerifyEmailProps>()
       <Form
         :action="`${root}/email/verification-notification`"
         method="post"
-        v-slot="{ processing }"
+        v-slot="{ errors, processing }"
         class="mt-8 space-y-6"
       >
+        <div v-for="(message, field) in errors" :key="field" class="text-sm text-red-600">
+          {{ message }}
+        </div>
+
         <div>
           <button
             type="submit"

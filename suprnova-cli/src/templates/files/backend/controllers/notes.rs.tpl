@@ -12,7 +12,7 @@
 use serde::Deserialize;
 use suprnova::{
     Auth, CursorPaginator, FormRequest, FrameworkError, Inertia, InertiaProps, Model, Request,
-    Response, Validate, ValidationErrors, attrs, handler, inertia_response, redirect,
+    Response, Validate, ValidationErrors, attrs, handler, inertia_response,
 };
 
 use crate::models::note::Note;
@@ -185,7 +185,7 @@ pub async fn show(req: Request, id: u64) -> Response {
 }
 
 /// `POST /notes` - write a note for the signed-in user and return to the
-/// list, which shows the saved toast.
+/// form's page, keeping its search and showing the saved toast.
 ///
 /// A failed rule answers an Inertia visit with a `303` back to the form,
 /// the errors flashed for the page's `Form` component.
@@ -203,5 +203,5 @@ pub async fn store(form: StoreNoteRequest) -> Response {
     .await?;
 
     Inertia::flash("toast", Toast::success("Note saved."))?;
-    redirect!("/notes").into()
+    Inertia::back(302, Some("/notes")).into()
 }

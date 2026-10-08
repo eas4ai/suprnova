@@ -233,7 +233,7 @@ on_every_engine!(scaffold_notes_on_laravels_users =>
     kit_scaffold_notes_belong_to_laravels_users_postgres,
     kit_scaffold_notes_belong_to_laravels_users_mysql);
 
-/// An application's existing notes schema and rows survive the kit migration.
+/// An application's existing notes schema and rows survive migration and rollback.
 async fn scaffold_keeps_existing_notes(engine: Engine) {
     use sea_orm::ConnectionTrait;
 
@@ -249,6 +249,9 @@ async fn scaffold_keeps_existing_notes(engine: Engine) {
     crate::scaffold::migrate(&db.conn)
         .await
         .expect("migrate without replacing the existing notes table");
+    crate::scaffold::rollback(&db.conn)
+        .await
+        .expect("roll back without dropping the existing notes table");
     let rows = db
         .conn
         .query_all_raw(sea_orm::Statement::from_string(

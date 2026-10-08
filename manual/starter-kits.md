@@ -116,7 +116,8 @@ kit pages, all of it over the signed-in user's own data:
   for a note of another user or an id that doesn't exist.
 - `POST /notes`, which validates `title` (1 to 255 characters) and `body`
   (at most 10000 characters), writes the note, flashes a toast, and returns
-  to the list.
+  to the page the form was posted from, preserving its search query, with
+  `/notes` as the fallback.
 - `POST /profile/name`, a JSON handler for the dashboard's name form that
   answers `200` with `{"user": {...}}` or `422` with the framework's
   validation body.

@@ -37,7 +37,10 @@ impl MigrationTrait for Migration {
         .await
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        Schema::drop_if_exists(manager, "notes").await
+    /// Leaves the table. `up` skips a `notes` table that already exists,
+    /// so the table may be an application's, with its notes, and rolling
+    /// back must not drop them.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }
