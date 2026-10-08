@@ -355,6 +355,47 @@ async fn indt_a_non_inertia_write_keeps_no_body_and_an_inertia_write_keeps_its_i
 }
 
 #[tokio::test]
+async fn indt_a_json_body_records_what_it_parses_to_and_malformed_json_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+    for (body, recorded) in [
+        (json!([]), json!([])),
+        (json!({}), json!({})),
+        (Value::Null, Value::Null),
+    ] {
+        let response = client.post("/page").inertia().json(&body).send().await;
+        response.assert_ok();
+        assert_eq!(
+            entry_of(dir.path(), &response)["http"]["requestBody"],
+            json!({"status": "present", "value": recorded}),
+            "the JSON body {body}"
+        );
+    }
+
+    let addr = serve(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&inertia(devtools(dir.path())))),
+    )
+    .await;
+    let malformed = raw_send(
+        addr,
+        "POST",
+        "/upload",
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"application/json"),
+        ],
+        br#"{"a":"#.to_vec(),
+    )
+    .await;
+    assert_eq!(
+        read_entry(dir.path(), &malformed.headers["x-inertia-devtools-id"])["http"]["requestBody"],
+        json!({"status": "present", "value": "{\"a\":"}),
+        "JSON that does not parse is kept as its text"
+    );
+}
+
+#[tokio::test]
 async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
     let dir = tempfile::tempdir().unwrap();
     let addr = serve(

@@ -238,16 +238,6 @@ fn is_json(content_type: Option<&str>) -> bool {
     })
 }
 
-/// Whether a value is an empty object or list, or `null`.
-fn is_blank(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => map.is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Null => true,
-        _ => false,
-    }
-}
-
 /// Merge the members of `from` into `into`, `from` winning.
 fn merge_into(into: &mut Map<String, Value>, from: Value) {
     if let Value::Object(map) = from {
@@ -296,10 +286,13 @@ async fn request_body(body: RequestBody) -> Value {
             query,
         } => (content_type, bytes, query),
     };
+    // A JSON body is present whatever it parses to, `[]` and `null`
+    // included; one that does not parse is kept as its text, and only a
+    // body of no bytes is `empty`.
     if is_json(content_type.as_deref()) {
         return match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) if !is_blank(&value) => present(value),
-            _ => empty(),
+            Ok(value) => present(value),
+            Err(_) => body_string(&bytes),
         };
     }
     let mut input = Map::new();
