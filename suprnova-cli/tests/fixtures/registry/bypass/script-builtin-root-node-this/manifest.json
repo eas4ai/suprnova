@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-root-node-this",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
