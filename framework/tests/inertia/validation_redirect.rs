@@ -1,7 +1,7 @@
 //! Validation failure → `303` redirect-back on an Inertia visit.
 //!
 //! The Inertia client treats a response with no `X-Inertia` header as
-//! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
+//! non-Inertia (`inertia-3.8.0/packages/core/src/response.ts:75,180-182`)
 //! and hands it to the error modal, so a `422` body never reaches
 //! `form.errors`. These drive `handle_request` over a loopback socket
 //! with real Inertia headers - the only way to exercise the middleware

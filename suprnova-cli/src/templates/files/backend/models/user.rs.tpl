@@ -31,6 +31,11 @@ use suprnova::{
         created_at = suprnova::AsOptionalNaiveDateTime,
         updated_at = suprnova::AsOptionalNaiveDateTime,
     },
+    // `notes()` reaches the notes this user wrote through `notes.user_id`,
+    // the column the convention names for a `HasMany<Note>` on `User`.
+    relations = {
+        notes: HasMany<crate::models::note::Note>,
+    },
 )]
 pub struct User {
     // `BIGINT UNSIGNED` on MySQL, as Laravel's `id()` creates it.

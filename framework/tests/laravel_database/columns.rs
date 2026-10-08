@@ -7,6 +7,7 @@
 use suprnova::{Model, attrs};
 
 use crate::models::LdbPost;
+use crate::models::note::Note;
 use crate::on_every_engine;
 use crate::scaffold::user::User;
 use crate::support::{self, Engine};
@@ -189,3 +190,45 @@ on_every_engine!(scaffold_user_on_laravels_users =>
     ldb_006_scaffold_user_finds_updates_and_creates_sqlite,
     ldb_006_scaffold_user_finds_updates_and_creates_postgres,
     ldb_006_scaffold_user_finds_updates_and_creates_mysql);
+
+/// PAR-080 on a Laravel database: the scaffold's notes migration creates
+/// `notes` with its key into the `users` table Laravel's skeleton created
+/// (`id` unsigned on MySQL), and the scaffold's `Note` reads one user's
+/// notes and no other user's.
+async fn scaffold_notes_on_laravels_users(engine: Engine) {
+    let (db, _) = support::laravel(engine).await;
+    crate::scaffold::migrate(&db.conn).await.expect("migrate");
+    let _bound = support::bind(&db.conn);
+
+    for (user_id, title) in [(1u64, "Taylor's note"), (2u64, "Abigail's note")] {
+        <Note as Model>::create(attrs! {
+            user_id: user_id,
+            title: title,
+            body: Option::<String>::None,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{engine:?}: create a note for user {user_id}: {e}"));
+    }
+    let taylors: Vec<String> = Note::owned_by(1)
+        .get()
+        .await
+        .expect("Taylor's notes")
+        .iter()
+        .map(|note| note.title.clone())
+        .collect();
+    assert_eq!(taylors, ["Taylor's note"], "{engine:?}");
+    assert!(
+        Note::owned_by(1)
+            .filter("title", "Abigail's note")
+            .first()
+            .await
+            .expect("query")
+            .is_none(),
+        "{engine:?}: another user's note is not Taylor's"
+    );
+}
+
+on_every_engine!(scaffold_notes_on_laravels_users =>
+    kit_scaffold_notes_belong_to_laravels_users_sqlite,
+    kit_scaffold_notes_belong_to_laravels_users_postgres,
+    kit_scaffold_notes_belong_to_laravels_users_mysql);

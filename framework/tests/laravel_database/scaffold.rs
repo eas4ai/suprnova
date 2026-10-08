@@ -21,6 +21,9 @@ pub mod m20240101_000003_create_remember_tokens_table;
 #[path = "../../../suprnova-cli/src/templates/files/backend/migrations/create_auth_flow_tokens_table.rs.tpl"]
 pub mod m20240101_000004_create_auth_flow_tokens_table;
 #[rustfmt::skip]
+#[path = "../../../suprnova-cli/src/templates/files/backend/migrations/create_notes_table.rs.tpl"]
+pub mod m20240101_000005_create_notes_table;
+#[rustfmt::skip]
 #[path = "../../../suprnova-cli/src/templates/files/backend/models/user.rs.tpl"]
 pub mod user;
 
@@ -47,6 +50,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
             Box::new(m20240101_000004_create_auth_flow_tokens_table::Migration),
+            Box::new(m20240101_000005_create_notes_table::Migration),
             Box::new(CreateSessionsTable::new(SessionUserKey::Integer)),
             Box::new(suprnova::render_cache::migration::Migration),
             Box::new(CreateJobsTable),

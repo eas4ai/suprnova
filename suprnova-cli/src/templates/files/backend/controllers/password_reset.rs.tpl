@@ -14,9 +14,11 @@
 
 use serde::Deserialize;
 use suprnova::{
-    FormRequest, FrameworkError, InertiaProps, Request, Response, Validate, ValidationErrors,
-    auth_flows::PasswordReset, handler, inertia_response, redirect, url,
+    FormRequest, FrameworkError, Inertia, InertiaProps, Request, Response, Validate,
+    ValidationErrors, auth_flows::PasswordReset, handler, inertia_response, redirect, url,
 };
+
+use crate::props::flash::Toast;
 
 /// Where the mailed link lands: the form that takes the new password.
 const RESET_PATH: &str = "/reset-password";
@@ -68,11 +70,15 @@ pub async fn forgot(req: Request) -> Response {
 /// `POST /forgot-password` - mail a reset link and return to the form.
 ///
 /// The response is the same whether or not the address is on file (or
-/// verified); only a verified account receives mail. `url::to` prefixes
-/// `APP_URL`, so the link works from any inbox.
+/// verified), the toast included; only a verified account receives mail.
+/// `url::to` prefixes `APP_URL`, so the link works from any inbox.
 #[handler]
 pub async fn send_link(form: ForgotPasswordRequest) -> Response {
     PasswordReset::send_link(&form.email, &url::to(RESET_PATH)).await?;
+    Inertia::flash(
+        "toast",
+        Toast::info("If that address is registered, a reset link is on its way."),
+    )?;
     redirect!("/forgot-password").into()
 }
 
@@ -114,5 +120,6 @@ pub async fn reset(form: ResetPasswordRequest) -> Response {
     // session or a remember-me cookie could still act as the old one.
     outcome.sessions_revoked?;
     outcome.remember_tokens_revoked?;
+    Inertia::flash("toast", Toast::success("Your password was reset."))?;
     redirect!("/login").into()
 }

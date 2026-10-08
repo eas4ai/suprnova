@@ -3,7 +3,9 @@
 //! Renders the login/register Inertia pages on GET and validates and
 //! persists credentials on POST. A login continues to `/dashboard`; a
 //! registration mails a verification link and continues to
-//! `/verify-email` (see `email_verification`). Form bodies are extracted
+//! `/verify-email` (see `email_verification`). Each action that succeeds
+//! flashes a toast (`crate::props::flash::Toast`) the page it lands on
+//! shows once. Form bodies are extracted
 //! via `FormRequest`. On an Inertia visit a per-field failure comes back
 //! as a `303` to the form page with the errors flashed, so
 //! `useForm().errors` fills in; a plain REST client still gets the `422`
@@ -20,10 +22,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use suprnova::{
     auth_flows::EmailVerification, handler, inertia_response, redirect, Auth, Credentials,
-    FormRequest, InertiaProps, Request, Response, Validate, ValidationErrors,
+    FormRequest, Inertia, InertiaProps, Request, Response, Validate, ValidationErrors,
 };
 
 use crate::models::user::User;
+use crate::props::flash::Toast;
 
 // ============================================================================
 // Login
@@ -69,7 +72,10 @@ pub async fn login(form: LoginRequest) -> Response {
     )
     .await?
     {
-        Some(_user) => redirect!("/dashboard").into(),
+        Some(_user) => {
+            Inertia::flash("toast", Toast::success("Signed in."))?;
+            redirect!("/dashboard").into()
+        }
         None => Err(invalid_credentials().into()),
     }
 }
@@ -129,6 +135,7 @@ pub async fn register(form: RegisterRequest) -> Response {
     // Log the freshly-created user into the session (fires the Login event).
     Auth::login(Arc::new(user), false).await?;
 
+    Inertia::flash("toast", Toast::success(format!("Welcome, {}.", form.name)))?;
     redirect!("/verify-email").into()
 }
 
@@ -139,5 +146,6 @@ pub async fn register(form: RegisterRequest) -> Response {
 #[handler]
 pub async fn logout(_req: Request) -> Response {
     Auth::logout().await?;
+    Inertia::flash("toast", Toast::info("Signed out."))?;
     redirect!("/").into()
 }

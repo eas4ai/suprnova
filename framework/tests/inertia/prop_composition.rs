@@ -104,7 +104,7 @@ async fn defer_then_merge_announces_on_visit_one_and_merges_on_the_follow_up() {
     // `deferredProps`. The merge metadata rides along because Laravel
     // computes it from the unfiltered prop bag (`Response.php:553-560`)
     // and the client ignores it on a non-partial visit
-    // (`inertia-3.6.1/packages/core/src/response.ts:348-350`).
+    // (`inertia-3.8.0/packages/core/src/response.ts:362-364`).
     let calls = Arc::new(AtomicUsize::new(0));
 
     let resp = InertiaResponse::new("Feed/Index")
@@ -456,7 +456,7 @@ async fn optional_then_once_stays_out_of_the_initial_visit_but_advertises_its_ca
     );
     // The client tolerates an `onceProps` entry whose value is missing -
     // it skips such entries when building `X-Inertia-Except-Once-Props`
-    // (`inertia-3.6.1/packages/core/src/request.ts:179-186`).
+    // (`inertia-3.8.0/packages/core/src/request.ts:197-205`).
     assert_eq!(page["onceProps"]["permissions"]["prop"], "permissions");
 }
 
@@ -686,7 +686,7 @@ async fn a_scroll_prop_ignores_an_explicit_merge_flag_and_uses_the_intent_header
 async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_value() {
     // The client reads a scroll prop's cursor from
     // `currentPage.get().scrollProps?.[propName]`
-    // (`inertia-3.6.1/packages/core/src/infiniteScroll/data.ts:38`). Drop
+    // (`inertia-3.8.0/packages/core/src/infiniteScroll/data.ts:38`). Drop
     // the entry on the visit where `once` short-circuits the resolver and
     // infinite scroll silently stops after the first navigation. A
     // Suprnova-only composition (Laravel's `ScrollProp` is not `Onceable`),

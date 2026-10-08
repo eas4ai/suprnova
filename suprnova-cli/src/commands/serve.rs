@@ -3391,7 +3391,7 @@ mod inertia_vite_plugin_tests {
     #[test]
     fn the_plugin_under_dependencies_is_declared() {
         let frontend = frontend_with(
-            r#"{"dependencies": {"@inertiajs/vue3": "^3.6.1", "@inertiajs/vite": "^3.8.0"}}"#,
+            r#"{"dependencies": {"@inertiajs/vue3": "^3.8.0", "@inertiajs/vite": "^3.8.0"}}"#,
         );
         assert!(inertia_vite_plugin_declared(frontend.path()));
     }
@@ -3412,7 +3412,7 @@ mod inertia_vite_plugin_tests {
             r#"{
                 "name": "@inertiajs/vite",
                 "scripts": {"@inertiajs/vite": "vite"},
-                "dependencies": {"@inertiajs/vue3": "^3.6.1"},
+                "dependencies": {"@inertiajs/vue3": "^3.8.0"},
                 "devDependencies": {"vite": "^8.1.5", "@vitejs/plugin-vue": "^6.0.8"}
             }"#,
         );

@@ -99,9 +99,77 @@ React 19, Vue 3.5) with Tailwind v4 and Inertia v3. See
 [Installation](installation.md) for the scaffold output and
 [Quickstart](quickstart.md) for the first-five-minutes walkthrough.
 
+Behind the authentication group, the scaffold ships the server side of the
+kit pages, all of it over the signed-in user's own data:
+
+- A `notes` table and a `Note` model (`src/models/note.rs`) that belongs to
+  a user, with `Note::owned_by(user_id)` as the one way the handlers read
+  notes.
+- `GET /dashboard`, which sends `stats` deferred (the user's note count
+  and the notes written today) and `recent_notes` optional (the user's
+  five newest notes).
+- `GET /notes`, which lists the user's notes 10 at a time with
+  `cursor_paginate` through `Inertia::paginate`, filtered by the `search`
+  query parameter in title or body without regard to case, and sends
+  `search` back to the page.
+- `GET /notes/{id}`, which shows one of the user's notes and answers `404`
+  for a note of another user or an id that doesn't exist.
+- `POST /notes`, which validates `title` (1 to 255 characters) and `body`
+  (at most 10000 characters), writes the note, flashes a toast, and returns
+  to the list.
+- `POST /profile/name`, a JSON handler for the dashboard's name form that
+  answers `200` with `{"user": {...}}` or `422` with the framework's
+  validation body.
+
+Every page receives the signed-in user, or `null` for a guest, under the
+shared `auth` prop: `bootstrap.rs` shares it with `App::inertia_share_lazy`,
+which reads the request's session for each response that sends it, and
+`SharedData` in `src/props/shared.rs`, marked `#[inertia_props(shared)]`,
+adds `auth` to the generated `SharedProps`. A layout reads
+`usePage().props.auth.user`.
+
+Sign-in, registration, a reset-link request, a password reset, email
+verification, a verification resend, sign-out, and a saved note each flash a
+`Toast` (`src/props/flash.rs`) under the key `toast`. The `Flash` struct
+beside it holds that toast and is marked `#[inertia_props(flash)]`, so
+`suprnova generate-types` names it as Inertia's `flashDataType` and
+`page.flash.toast` is typed in every page.
+
+The routes carry the names Laravel's kits give them: `dashboard`,
+`notes.index`, `notes.show`, `notes.store`, `profile.name`, `login`,
+`register`, `password.request`, `password.email`, `password.reset`,
+`password.update`, `verification.notice`, `verification.send`,
+`verification.verify`, and `logout`.
+
+The dashboard handler shows how each prop travels:
+
+```rust
+#[handler]
+pub async fn index(req: Request) -> Response {
+    let user = Auth::user_as::<User>()
+        .await?
+        .ok_or(FrameworkError::Unauthorized)?;
+    let user_id = user.id;
+
+    Ok(InertiaResponse::new("Dashboard")
+        .defer("stats", move || note_stats(user_id))
+        .optional("recent_notes", move || recent_notes(user_id))
+        .resolve(&req)
+        .await?)
+}
+```
+
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and
 login against the canonical `app_users` table without a frontend.
+
+### Why Suprnova diverges
+
+Laravel's starter kits ship a dashboard with placeholder content and no list
+page. Suprnova's scaffold lists the signed-in user's own notes, so deferred
+and optional props, cursor scrolling, a JSON form, and flashed toasts each
+have a working server to talk to. No handler lists accounts: a directory of
+users would show every member the name and email of every other member.
 
 ## Contributing a starter kit
 
