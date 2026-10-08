@@ -83,6 +83,14 @@ fn router() -> Router {
         .get("/bare", |req: Request| {
             first_visit_document(req, "<p>x</p>")
         })
+        .get("/sized", |req: Request| async move {
+            let page = InertiaResponse::new("Home")
+                .resolve(&req)
+                .await
+                .map_err(HttpResponse::from)?;
+            let length = page.body().len();
+            Ok(page.header("Content-Length", length.to_string()))
+        })
         .into()
 }
 
@@ -644,6 +652,34 @@ async fn indt_the_id_tag_finds_a_closing_body_tag_in_any_case_or_ends_the_docume
         format!("<p>x</p>{}", tag(id)),
         "a document with no closing body tag gets the tag at its end"
     );
+}
+
+#[tokio::test]
+async fn indt_a_tagged_first_visit_never_carries_the_length_of_the_untagged_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+
+    // The handler sets the length of the page it resolved; the tag makes
+    // the document longer, so that length no longer holds.
+    let first = client.get("/sized").send().await;
+    first.assert_ok();
+    let id = first.header("x-inertia-devtools-id").unwrap();
+    let body = first.body_text();
+    let tagged = format!(
+        "<script data-inertia-devtools-id type=\"application/json\">\"{id}\"</script></body>"
+    );
+    assert!(body.contains(&tagged), "{body}");
+    assert!(
+        body.trim_end().ends_with("</html>"),
+        "the whole document: {body}"
+    );
+    if let Some(length) = first.header("content-length") {
+        assert_eq!(
+            length,
+            body.len().to_string(),
+            "the length of what was sent"
+        );
+    }
 }
 
 #[tokio::test]
