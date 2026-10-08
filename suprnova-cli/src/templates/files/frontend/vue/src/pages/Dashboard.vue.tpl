@@ -63,52 +63,57 @@ function saveName() {
   <Head title="Dashboard" />
 
   <div class="space-y-6">
-    <section class="rounded-lg bg-white p-6 shadow">
-      <h2 class="text-lg font-medium text-gray-900">Welcome, {{ profile.name }}!</h2>
-      <p v-if="user" class="mt-1 text-sm text-gray-500">Signed in as {{ user.email }}.</p>
+    <!-- Tall on purpose: recent notes start out of view, so
+         `WhenVisible` loads them only after the visitor scrolls. -->
+    <div class="min-h-screen space-y-6">
+      <section class="rounded-lg bg-white p-6 shadow">
+        <h2 class="text-lg font-medium text-gray-900">Welcome, {{ profile.name }}!</h2>
+        <p v-if="user" class="mt-1 text-sm text-gray-500">Signed in as {{ user.email }}.</p>
 
-      <form class="mt-4 flex flex-wrap items-start gap-3" @submit.prevent="saveName">
-        <div>
-          <label for="name" class="sr-only">Display name</label>
-          <input
-            id="name"
-            v-model="draft"
-            name="name"
-            type="text"
-            required
-            class="block w-64 rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
-          />
-          <p v-if="profile.errors.name" class="mt-1 text-sm text-red-600">
-            {{ profile.errors.name }}
-          </p>
-        </div>
-        <button
-          type="submit"
-          :disabled="profile.processing"
-          class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {{ profile.processing ? 'Saving...' : 'Save name' }}
-        </button>
-      </form>
-    </section>
+        <form class="mt-4 flex flex-wrap items-start gap-3" @submit.prevent="saveName">
+          <div>
+            <label for="name" class="sr-only">Display name</label>
+            <input
+              id="name"
+              v-model="draft"
+              name="name"
+              type="text"
+              required
+              class="block w-64 rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
+            />
+            <p v-if="profile.errors.name" class="mt-1 text-sm text-red-600">
+              {{ profile.errors.name }}
+            </p>
+          </div>
+          <button
+            type="submit"
+            :disabled="profile.processing"
+            class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {{ profile.processing ? 'Saving...' : 'Save name' }}
+          </button>
+        </form>
+      </section>
 
-    <section class="grid gap-4 sm:grid-cols-2">
-      <Deferred data="stats">
-        <template #fallback>
-          <div class="rounded-lg bg-white p-6 text-sm text-gray-500 shadow">Counting your notes...</div>
-          <div class="rounded-lg bg-white p-6 text-sm text-gray-500 shadow">Counting today's notes...</div>
-        </template>
+      <section class="grid gap-4 sm:grid-cols-2">
+        <Deferred data="stats">
+          <template #fallback>
+            <div class="rounded-lg bg-white p-6 text-sm text-gray-500 shadow">Counting your notes...</div>
+            <div class="rounded-lg bg-white p-6 text-sm text-gray-500 shadow">Counting today's notes...</div>
+          </template>
 
-        <div class="rounded-lg bg-white p-6 shadow">
-          <p class="text-sm text-gray-500">Notes</p>
-          <p class="mt-1 text-3xl font-semibold text-gray-900">{{ stats?.notes }}</p>
-        </div>
-        <div class="rounded-lg bg-white p-6 shadow">
-          <p class="text-sm text-gray-500">Written today</p>
-          <p class="mt-1 text-3xl font-semibold text-gray-900">{{ stats?.written_today }}</p>
-        </div>
-      </Deferred>
-    </section>
+          <div class="rounded-lg bg-white p-6 shadow">
+            <p class="text-sm text-gray-500">Notes</p>
+            <p class="mt-1 text-3xl font-semibold text-gray-900">{{ stats?.notes }}</p>
+          </div>
+          <div class="rounded-lg bg-white p-6 shadow">
+            <p class="text-sm text-gray-500">Written today</p>
+            <p class="mt-1 text-3xl font-semibold text-gray-900">{{ stats?.written_today }}</p>
+          </div>
+        </Deferred>
+      </section>
+
+    </div>
 
     <section class="rounded-lg bg-white p-6 shadow">
       <div class="flex items-center justify-between">
@@ -117,7 +122,7 @@ function saveName() {
       </div>
 
       <!-- Below the fold: `recent_notes` loads when this scrolls into view. -->
-      <WhenVisible data="recent_notes" :buffer="200">
+      <WhenVisible data="recent_notes">
         <template #fallback>
           <p class="mt-4 text-sm text-gray-500">Loading your recent notes...</p>
         </template>
