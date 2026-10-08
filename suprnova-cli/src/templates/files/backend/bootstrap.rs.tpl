@@ -57,7 +57,9 @@ pub struct AppDocument;
 /// database and the auth provider. The HTTP stack (global middleware and
 /// `Inertia::install`) lives in [`register_http_stack`], wired separately
 /// via `.http_bootstrap(...)` in `cmd/main.rs`, so it never runs on a
-/// worker or console process that ships no built frontend assets.
+/// worker or console process that ships no built frontend assets. The
+/// `ssr:*` commands run it, since they read the Inertia configuration it
+/// installs.
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
@@ -86,14 +88,17 @@ pub async fn register() {
 
 /// Register the global middleware chain and the Inertia layer.
 ///
-/// Called only on the server path, via
+/// Called on the server path, via
 /// `.http_bootstrap(|| async { bootstrap::register_http_stack() })` in
-/// `cmd/main.rs` - after [`register`], never on the queue, schedule, or
-/// workflow workers, and never on the console binary. That split matters
-/// because `Inertia::install` below fails closed in production when the
-/// built frontend manifest is missing, which is exactly the state of a
-/// worker or console container image that ships no `public/assets`.
-/// Keeping this hook separate lets those images boot.
+/// `cmd/main.rs` - after [`register`] - and by the `ssr:start`, `ssr:stop`
+/// and `ssr:check` commands, which read the Inertia configuration installed
+/// below. Never on the queue, schedule, or workflow workers, and never on
+/// the console binary. That split matters because `Inertia::install` below
+/// fails closed in production when the built frontend manifest is missing,
+/// which is exactly the state of a worker or console container image that
+/// ships no `public/assets`. Keeping this hook separate lets those images
+/// boot; an image that runs the `ssr:*` commands needs the manifest, as one
+/// that serves does.
 ///
 /// Order matters and mirrors the comments below: session before Inertia
 /// (the version middleware re-flashes the session before it bounces a
