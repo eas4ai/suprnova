@@ -99,6 +99,22 @@ React 19, Vue 3.5) with Tailwind v4 and Inertia v3. See
 [Installation](installation.md) for the scaffold output and
 [Quickstart](quickstart.md) for the first-five-minutes walkthrough.
 
+The Vue kit (`--frontend vue`) runs on Inertia 3.8 and its Vite plugin, and
+each page shows part of the client at work:
+
+- `Dashboard.vue` loads the note counts as a deferred prop with `Deferred`,
+  polls them with `usePoll`, loads the recent notes with `WhenVisible`, and
+  saves the display name through `useHttp` with an optimistic update.
+- `Notes/Index.vue` creates a note with `Form`, remembers its search with
+  `useRemember`, scrolls the signed-in user's notes with `InfiniteScroll`, and
+  opens a note as an instant visit from a prefetching `Link`.
+- `Notes/Show.vue` shows one of the signed-in user's notes.
+- The five pages under `auth/` submit through `Form`.
+- `layouts/AppLayout.vue` and `layouts/GuestLayout.vue`, applied through the
+  `layout` option, carry the navigation, the sign-out button and the
+  flash toast from `components/FlashToast.vue`, and every page titles its tab
+  with `Head`.
+
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and
 login against the canonical `app_users` table without a frontend.
