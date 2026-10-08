@@ -111,14 +111,9 @@ pub struct Request {
 /// A value a route binding resolved, held until the handler takes it.
 pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 
-/// The values a route's bindings resolved, by handler argument, kept in the
-/// request's extensions rather than in a field: a request is moved by value
-/// through every middleware, and each move copies the struct, so a field
-/// would grow every frame of a deep middleware stack. The mutex makes the
-/// cell `Sync` and `Clone`, which the extension map requires; the value is
-/// taken out once.
 /// The type name of the handler of the route the request matched, kept in
-/// the request's extensions.
+/// the request's extensions so Inertia DevTools can show the route's action
+/// without the router at hand.
 #[derive(Clone, Copy)]
 struct RouteAction(&'static str);
 
@@ -127,6 +122,12 @@ struct RouteAction(&'static str);
 #[derive(Clone)]
 struct RouteName(Option<String>);
 
+/// The values a route's bindings resolved, by handler argument, kept in the
+/// request's extensions rather than in a field: a request is moved by value
+/// through every middleware, and each move copies the struct, so a field
+/// would grow every frame of a deep middleware stack. The mutex makes the
+/// cell `Sync` and `Clone`, which the extension map requires; the value is
+/// taken out once.
 #[derive(Clone)]
 struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
