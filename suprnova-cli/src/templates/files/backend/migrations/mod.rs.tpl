@@ -4,6 +4,7 @@ mod m20240101_000001_create_users_table;
 mod m20240101_000002_create_sessions_table;
 mod m20240101_000003_create_remember_tokens_table;
 mod m20240101_000004_create_auth_flow_tokens_table;
+mod m20240101_000005_create_notes_table;
 
 pub struct Migrator;
 
@@ -15,6 +16,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
             Box::new(m20240101_000004_create_auth_flow_tokens_table::Migration),
+            // After the users table: each note references its owner.
+            Box::new(m20240101_000005_create_notes_table::Migration),
             // Moves a `sessions` table an earlier scaffold created into the
             // Laravel 13 layout, keeping every session; does nothing to any
             // other `sessions` table.

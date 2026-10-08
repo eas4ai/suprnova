@@ -419,6 +419,8 @@ pub(crate) fn create_project(
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/models"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
+    fs::create_dir_all(project_path.join("src/props"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/migrations"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
@@ -555,6 +557,20 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/controllers/password_reset.rs: {}", e))?;
 
+    // Write src/controllers/notes.rs
+    fs::write(
+        project_path.join("src/controllers/notes.rs"),
+        templates::notes_controller(),
+    )
+    .map_err(|e| format!("Failed to write src/controllers/notes.rs: {}", e))?;
+
+    // Write src/controllers/profile.rs
+    fs::write(
+        project_path.join("src/controllers/profile.rs"),
+        templates::profile_controller(),
+    )
+    .map_err(|e| format!("Failed to write src/controllers/profile.rs: {}", e))?;
+
     // Write src/config/mod.rs
     fs::write(
         project_path.join("src/config/mod.rs"),
@@ -641,6 +657,25 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/models/user.rs: {}", e))?;
 
+    // Write src/models/note.rs
+    fs::write(
+        project_path.join("src/models/note.rs"),
+        templates::note_model(),
+    )
+    .map_err(|e| format!("Failed to write src/models/note.rs: {}", e))?;
+
+    // Write src/props/mod.rs and src/props/flash.rs
+    fs::write(
+        project_path.join("src/props/mod.rs"),
+        templates::props_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/props/mod.rs: {}", e))?;
+    fs::write(
+        project_path.join("src/props/flash.rs"),
+        templates::flash_props(),
+    )
+    .map_err(|e| format!("Failed to write src/props/flash.rs: {}", e))?;
+
     // Write src/migrations/mod.rs
     fs::write(
         project_path.join("src/migrations/mod.rs"),
@@ -682,6 +717,12 @@ pub(crate) fn create_project(
             e
         )
     })?;
+
+    fs::write(
+        project_path.join("src/migrations/m20240101_000005_create_notes_table.rs"),
+        templates::create_notes_migration(),
+    )
+    .map_err(|e| format!("Failed to write create_notes_table migration: {}", e))?;
 
     // Note: migrations are now integrated into the main binary
     // Run with: ./app migrate
