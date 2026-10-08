@@ -1835,6 +1835,23 @@ handler's answer, and the callback doesn't see it. Neither are Inertia
 protocol responses: pages, and anything carrying `X-Inertia-Location` or
 `X-Inertia-Redirect`.
 
+Responses from outside the Inertia stack reach the callback too, at the
+server. A middleware registered before `Inertia::install` that answers
+without calling `next` - `CsrfMiddleware`'s `419`, `TimeoutMiddleware`'s
+`503`, an outer rate limiter's `429` - never hands its response to the
+error-response middleware, and neither does a panic that only the
+server's boundary catches. The server runs the same decision after the
+whole stack for every error response that nothing inside the stack
+decided, so your callback, or the default callback, sees those as well,
+once each. The callback gets the same request, error, and response there.
+`with_shared_data()` still adds the shared registry and the shared
+providers, but every request scope a middleware opened has closed by
+then: the page has no session data, renders in the default locale, and
+gets none of the `share` and `share_once` hooks. To keep those on such a
+page, register `InertiaErrorPageMiddleware` yourself, outside the
+middleware whose answers it should cover - see
+[Where the page is rendered](#where-the-page-is-rendered).
+
 Validation failures never reach the callback either. A `422` whose body
 carries an `errors` object is a validation result, and
 `InertiaValidationRedirectMiddleware` owns it: an Inertia visit gets the

@@ -1173,15 +1173,8 @@ async fn handle_request_inner(
             //    handlers / logs see the wire-level verb (HEAD vs GET);
             //    middleware that needs to discriminate the two can still
             //    check `request.method()`.
-            // The visit's facts for `Inertia::location` and `Inertia::back`, on
-            // every dispatched request; the Inertia middleware refines them with
-            // the application's hooks inside this scope.
-            let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
-            let http_response = crate::inertia::visit::scope(
-                visit,
-                execute_chain_safely(chain, request, handler, &method, path, request_id),
-            )
-            .await;
+            let http_response =
+                dispatch_chain(chain, request, handler, &method, path, request_id).await;
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
@@ -1214,22 +1207,9 @@ async fn handle_request_inner(
                 chain.extend(fallback_middleware);
 
                 // 3. Execute chain with fallback handler, catching panics.
-                // The visit's facts for `Inertia::location` and `Inertia::back`, on
-                // every dispatched request; the Inertia middleware refines them with
-                // the application's hooks inside this scope.
-                let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
-                let http_response = crate::inertia::visit::scope(
-                    visit,
-                    execute_chain_safely(
-                        chain,
-                        request,
-                        fallback_handler,
-                        &method,
-                        path,
-                        request_id,
-                    ),
-                )
-                .await;
+                let http_response =
+                    dispatch_chain(chain, request, fallback_handler, &method, path, request_id)
+                        .await;
 
                 // 5xx -> OTel error marker is recorded in
                 // `RequestIdMiddleware` (outermost), where the span is live.
@@ -1264,15 +1244,8 @@ async fn handle_request_inner(
                             >
                     }));
 
-                // The visit's facts for `Inertia::location` and `Inertia::back`, on
-                // every dispatched request; the Inertia middleware refines them with
-                // the application's hooks inside this scope.
-                let visit = std::sync::Arc::new(crate::inertia::visit::Visit::capture(&request));
-                let http_response = crate::inertia::visit::scope(
-                    visit,
-                    execute_chain_safely(chain, request, not_found, &method, path, request_id),
-                )
-                .await;
+                let http_response =
+                    dispatch_chain(chain, request, not_found, &method, path, request_id).await;
 
                 #[cfg(feature = "otel")]
                 if http_response.status_code() >= 500 {
@@ -1301,6 +1274,59 @@ fn into_hyper_in_scope(response: HttpResponse) -> hyper::Response<ServerBody> {
     };
     let (parts, body) = response.into_parts();
     hyper::Response::from_parts(parts, BoxBody::new(scope.body(body)))
+}
+
+/// Serve one request through `chain`: inside the visit scope, under the
+/// panic boundary, then the server's error-response decision (PAR-062).
+///
+/// The three sites that dispatch a request through the middleware chain -
+/// a matched route, the fallback, and the fixed `404` for an unrouted path -
+/// all come through here, so the rule lives once.
+///
+/// The decision runs after [`execute_chain_safely`], for an error response
+/// no Inertia error-response middleware decided: the answer of a middleware
+/// registered before `Inertia::install`, and a panic the boundary caught
+/// outside the stack, reach the application's error callback here. Its
+/// facts are captured before the chain takes the request. It runs inside
+/// the request's `REQUEST_ID` scope, which the panic or the outermost
+/// middleware's return has closed, so its logs carry the id; and a
+/// response it puts in place gets the `X-Request-Id` the outermost
+/// middleware gives every other one.
+async fn dispatch_chain(
+    chain: MiddlewareChain,
+    request: Request,
+    handler: Arc<crate::routing::BoxedHandler>,
+    method: &hyper::Method,
+    path: &str,
+    request_id: RequestId,
+) -> HttpResponse {
+    // The visit's facts for `Inertia::location` and `Inertia::back`, on
+    // every dispatched request; the Inertia middleware refines them with
+    // the application's hooks inside this scope.
+    let visit = Arc::new(crate::inertia::visit::Visit::capture(&request));
+    let decision = crate::inertia::ServerErrorDecision::prepare(&request);
+    // Boxed, as the request future is in `handle_request_with_peer`: this
+    // future holds the chain's and the decision's, and each of the three
+    // dispatch sites would otherwise carry a copy of it on the stack of the
+    // task that polls the request, which overflows with debug on.
+    Box::pin(crate::inertia::visit::scope(visit, async move {
+        let response =
+            execute_chain_safely(chain, request, handler, method, path, request_id.clone()).await;
+        let Some(decision) = decision else {
+            return response;
+        };
+        // Boxed: deciding may render a page, a large future, which only
+        // the requests that reach this line pay for.
+        let decided = crate::logging::REQUEST_ID
+            .scope(request_id.clone(), Box::pin(decision.decide(response)))
+            .await;
+        if decided.header_value("X-Request-Id").is_some() {
+            decided
+        } else {
+            decided.header("X-Request-Id", request_id.as_str())
+        }
+    }))
+    .await
 }
 
 /// Run `chain.execute(request, handler)` with panic recovery.

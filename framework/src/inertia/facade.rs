@@ -516,14 +516,26 @@ impl Inertia {
     /// `Inertia::handleExceptionsUsing($callback)`.
     ///
     /// The callback receives an [`InertiaErrorResponse`](crate::InertiaErrorResponse)
-    /// for each error response that passes through the error-response
-    /// middleware [`install`](Self::install) registers: a handler's or a
+    /// for each error response the framework renders: a handler's or a
     /// middleware's `Err`, a panic in either, the router's `404`, a
     /// middleware's own `{"message": ...}` answer. Every request type is
     /// covered, an API client's included. It returns the value with a
     /// decision - [`render`](crate::InertiaErrorResponse::render) a page,
     /// [`respond_with`](crate::InertiaErrorResponse::respond_with) another
     /// response - or `None`, which keeps the response.
+    ///
+    /// The error-response middleware [`install`](Self::install) registers
+    /// decides what passes through it, inside the request scopes the stack
+    /// opens. The server decides the rest after the whole stack: the
+    /// answer of a middleware registered before `install`, such as a
+    /// `CsrfMiddleware`'s `419` or a `TimeoutMiddleware`'s `503`, and a
+    /// panic the server's boundary caught outside the stack. Decided at the
+    /// server, the callback sees the same request, error and response, and
+    /// [`with_shared_data`](crate::InertiaErrorResponse::with_shared_data)
+    /// reaches the shared registry and providers but no session data, no
+    /// detected locale and none of the middleware hooks' shares, since
+    /// every scope a middleware opened has closed. Each response is
+    /// decided once.
     ///
     /// The callback replaces the rule
     /// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page)
@@ -638,10 +650,12 @@ impl Inertia {
     /// every request on and changes nothing. It is registered whatever the
     /// config says because the callback may be installed after this call.
     ///
-    /// Innermost is the wrong place for an app whose stack answers
-    /// *before* the Inertia layer is reached - a `CsrfMiddleware`, rate
-    /// limiter, or auth guard registered above this call never hands its
-    /// rejection to anything registered inside it. Such an app registers
+    /// A `CsrfMiddleware`, rate limiter, or auth guard registered above
+    /// this call never hands its rejection to anything registered inside
+    /// it. The server decides such a response after the whole stack, by
+    /// the same rule, but every request scope a middleware opened has
+    /// closed by then, so a page rendered there has no session data and
+    /// the default locale. An app that wants those on the page registers
     /// [`InertiaErrorPageMiddleware`] itself, at the position it needs;
     /// `install` sees that registration, logs at `debug`, and skips its
     /// own, leaving both the app's placement and the component the app

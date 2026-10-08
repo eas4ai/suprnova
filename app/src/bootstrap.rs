@@ -326,10 +326,15 @@ pub fn inertia_version() -> String {
 ///    restores the form with its messages rather than surfacing a raw
 ///    `422`; and, innermost, the error-response middleware, which changes
 ///    nothing here because this app sets neither an `error_page` nor an
-///    error callback. `inertia_config()` installs the default version
-///    resolver - a hash of the Vite build manifest - so the version
-///    string tracks the built frontend rather than a literal that
-///    someone has to remember to bump.
+///    error callback. The server runs the same decision after the whole
+///    stack for an error response nothing inside it decided - the `503`
+///    `TimeoutMiddleware` (2) answers, a panic in `LoggingMiddleware` (1) -
+///    which changes nothing here for the same reason. An app that sets
+///    either gets those responses decided without the session and locale
+///    scopes of (4) and (5), which have closed by then.
+///    `inertia_config()` installs the default version resolver - a hash
+///    of the Vite build manifest - so the version string tracks the built
+///    frontend rather than a literal that someone has to remember to bump.
 /// 7. `CsrfMiddleware` - immediately after the session it depends on,
 ///    and holding the same `SessionConfig` the session middleware got so
 ///    the JS-readable `XSRF-TOKEN` cookie carries the session cookie's

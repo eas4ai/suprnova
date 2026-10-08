@@ -834,6 +834,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The error callback sees the error responses from outside the Inertia
+  stack.** `Inertia::handle_exceptions_using` and `InertiaConfig::error_page`
+  decided only what passed through the error-response middleware
+  `Inertia::install` registers. A middleware registered before `install`
+  that answers without calling `next` - `CsrfMiddleware`'s `419`,
+  `TimeoutMiddleware`'s `503`, an outer rate limiter's `429` - and a panic
+  that only the server's boundary caught never reached the callback, so an
+  Inertia visit still got the plain-JSON modal for them. The server now runs
+  the same decision after the whole stack, the panic boundary and the
+  development error page, for every error response nothing inside the stack
+  decided, at each of the three places it dispatches a request. A page
+  decided there carries the shared registry and the shared providers, but
+  no session data, no detected locale and none of the middleware hooks'
+  shares, since every scope a middleware opened has closed.
 - **An error page placed outside the Inertia stack follows a fragment
   redirect.** An `InertiaErrorPageMiddleware` an app registered before
   `Inertia::install` saw the headers middleware's `409` with

@@ -22,18 +22,25 @@
 //! shell, and an API client wants the JSON it has always had. So it lives
 //! in a middleware, the same way
 //! [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
-//! post-processes a `422`.
+//! post-processes a `422`, and in the server after the whole stack, for
+//! the responses no middleware inside the stack sees.
 //!
 //! The middleware hands each error response to the callback
 //! [`Inertia::handle_exceptions_using`](crate::Inertia::handle_exceptions_using)
 //! installed, or, without one, to the default callback for the component
 //! [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names
 //! (PAR-062). With neither, it hands the request on and does nothing else.
-//! [`Inertia::install`](crate::Inertia::install) always registers one. An
-//! app whose stack answers before the Inertia layer is reached - CSRF, a
-//! rate limiter, an auth guard registered above `install` - registers the
-//! middleware itself, further out; see [`InertiaErrorPageMiddleware`] for
-//! where it may sit.
+//! [`Inertia::install`](crate::Inertia::install) always registers one.
+//!
+//! The server runs the same decision once more, after the chain, the panic
+//! boundary and the development error page, for an error response no
+//! middleware decided ([`ServerErrorDecision`]): the answer of a middleware
+//! registered above `install` - CSRF's `419`, a rate limiter's `429`,
+//! `TimeoutMiddleware`'s `503` - and a panic only the server's boundary
+//! caught. A page decided there has none of the request scopes the stack
+//! opened, so an app that wants the visitor's session and locale on it
+//! registers the middleware itself, further out; see
+//! [`InertiaErrorPageMiddleware`] for where it may sit.
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
@@ -69,7 +76,8 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 /// `errors` object, which
 /// [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
 /// owns. Each response is decided once, so a second instance further out
-/// leaves it alone.
+/// leaves it alone, and so does the server, which decides only what no
+/// instance did (see [`ServerErrorDecision`]).
 ///
 /// A page the callback renders goes through the root template
 /// [`InertiaConfig::root_template_with`](crate::InertiaConfig::root_template_with)
@@ -88,12 +96,15 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 /// answers **before** the Inertia layer is reached - a `CsrfMiddleware`
 /// registered above `Inertia::install`, an outer rate limiter, an auth
 /// guard - because a middleware that returns without calling `next` never
-/// hands its response to anything registered inside it. A lapsed session
-/// posting a form is the case that bites: `CsrfMiddleware` answers `419`
-/// with `{"message":"CSRF token mismatch."}`, that response never reaches
-/// the Inertia layer, and the client shows the crash modal this exists to
-/// remove. Register the middleware yourself, outside the one whose
-/// rejections it should cover:
+/// hands its response to anything registered inside it. That response
+/// still reaches the decision: the server runs it after the whole stack.
+/// By then every request scope a middleware opened has closed, so a page
+/// rendered there carries no session data and renders in the default
+/// locale. A lapsed session posting a form is the case that shows it:
+/// `CsrfMiddleware` answers `419` with
+/// `{"message":"CSRF token mismatch."}`, and its error page loses the
+/// visitor's flash and language. Register the middleware yourself, outside
+/// the one whose rejections it should cover:
 ///
 /// ```rust,no_run
 /// use suprnova::{
@@ -158,20 +169,26 @@ impl InertiaErrorPageMiddleware {
     }
 
     /// Who decides this request's error responses, if anyone does.
-    ///
-    /// Read per request from the active container, so a callback or an
-    /// install under `TestContainer::fake()` decides only that test's
-    /// requests.
     fn decider(&self) -> Option<Decider> {
-        let registry = crate::App::inertia_registry();
-        if let Some(callback) = registry.exception_handler() {
-            return Some(Decider::Callback(callback));
-        }
-        self.component
-            .clone()
-            .or_else(|| registry.installed_error_page())
-            .map(Decider::Page)
+        decider(self.component.clone())
     }
+}
+
+/// Who decides the error responses of the request in scope, if anyone
+/// does: the installed callback, else the default callback rendering
+/// `component`, or the installed config's `error_page` when that is `None`.
+///
+/// Read per request from the active container, so a callback or an
+/// install under `TestContainer::fake()` decides only that test's
+/// requests.
+fn decider(component: Option<String>) -> Option<Decider> {
+    let registry = crate::App::inertia_registry();
+    if let Some(callback) = registry.exception_handler() {
+        return Some(Decider::Callback(callback));
+    }
+    component
+        .or_else(|| registry.installed_error_page())
+        .map(Decider::Page)
 }
 
 /// Who decides a request's error responses.
@@ -203,16 +220,87 @@ impl Middleware for InertiaErrorPageMiddleware {
         let was_ok = response.is_ok();
         let http = response.unwrap_or_else(|e| e);
         let restore = |http| if was_ok { Ok(http) } else { Err(http) };
-
-        if http.is_error_decided() || !is_error_response(&http) {
-            return restore(http);
-        }
-        // With debug on, the response the framework would send for a 5xx
-        // a browser or an Inertia visit gets is the development error page
-        // (PAR-012), so that is what the callback receives.
-        let http = crate::error::debug_page::page_for(http);
-        restore(decide(&decider, &captured, http).await.mark_error_decided())
+        restore(decide_once(&decider, &captured, http).await)
     }
+}
+
+/// The decision the server runs after the whole stack (PAR-062), for an
+/// error response no [`InertiaErrorPageMiddleware`] decided.
+///
+/// A middleware that answers without calling `next` hands its response to
+/// nothing registered inside it, and a panic the server's boundary catches
+/// has unwound past every middleware. So the answer of a middleware
+/// registered before [`Inertia::install`](crate::Inertia::install) - CSRF's
+/// `419`, `TimeoutMiddleware`'s `503` - and a panic outside the stack
+/// reach the callback here, after the chain, the panic boundary and, with
+/// debug on, the development error page. The rule is the middleware's: the
+/// same responses, the same decider, the same
+/// [`InertiaErrorResponse`](crate::InertiaErrorResponse), and the result
+/// marked decided.
+///
+/// A page decided here has the request's facts, captured before the chain
+/// took the request, and what `with_shared_data()` reaches outside the
+/// stack: the shared registry (`Inertia::share`, `App::inertia_share`),
+/// the shared providers and the
+/// [`InertiaSharedData`](crate::InertiaSharedData) provider. Every scope a
+/// middleware opened has closed by then, so the page carries no session
+/// data (flash, the errors bag), no locale `LocaleMiddleware` detected, and
+/// none of the middleware hooks' `share`, `share_once` or `version`
+/// answers. A response decided inside the stack keeps all of that, which
+/// is why the middleware stays.
+///
+/// The default callback here renders the component the installed
+/// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names.
+/// A component only an app-placed [`InertiaErrorPageMiddleware`] names
+/// decides only what passes through that instance.
+pub(crate) struct ServerErrorDecision {
+    decider: Decider,
+    captured: CapturedRequest,
+}
+
+impl ServerErrorDecision {
+    /// Capture `request` for the decision, before the chain takes it.
+    ///
+    /// `None` when nobody would decide its error responses: no callback
+    /// and no installed `error_page`, or only the default callback and a
+    /// request it never renders a page for. The middleware hands such a
+    /// request on untouched, and the server captures nothing for it either.
+    pub(crate) fn prepare(request: &Request) -> Option<Self> {
+        let decider = decider(None)?;
+        if matches!(decider, Decider::Page(_)) && audience(request) == Audience::Neither {
+            return None;
+        }
+        Some(Self {
+            decider,
+            captured: CapturedRequest::capture(request),
+        })
+    }
+
+    /// Decide `response`, what the chain answered after the panic
+    /// boundary, unless a middleware already decided it or it is not an
+    /// error response the framework rendered.
+    pub(crate) async fn decide(self, response: HttpResponse) -> HttpResponse {
+        decide_once(&self.decider, &self.captured, response).await
+    }
+}
+
+/// Decide `http` and mark it decided, unless an instance further in
+/// already decided it or it is not an error response the framework
+/// rendered. One function for the middleware and the server, so the rule
+/// lives once.
+async fn decide_once(
+    decider: &Decider,
+    captured: &CapturedRequest,
+    http: HttpResponse,
+) -> HttpResponse {
+    if http.is_error_decided() || !is_error_response(&http) {
+        return http;
+    }
+    // With debug on, the response the framework would send for a 5xx a
+    // browser or an Inertia visit gets is the development error page
+    // (PAR-012), so that is what the callback receives.
+    let http = crate::error::debug_page::page_for(http);
+    decide(decider, captured, http).await.mark_error_decided()
 }
 
 /// Run the rest of the chain under the panic boundary's rule: a panic
