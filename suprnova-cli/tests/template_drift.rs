@@ -2507,3 +2507,33 @@ fn rdoc_006_the_manual_documents_the_root_template() {
         );
     }
 }
+
+/// RDOC-006: the chapters that draw the scaffold's tree list the root
+/// template `templates/app.html` and no `frontend/index.html`, which the
+/// scaffold no longer writes, and the directory tour names the
+/// `AppDocument` declaration.
+#[test]
+fn rdoc_006_the_manual_draws_the_scaffold_with_its_root_template() {
+    for chapter in ["manual/structure.md", "manual/installation.md"] {
+        let text = read_from_repo(chapter);
+        assert!(
+            !text.contains("index.html"),
+            "{chapter} still lists an index.html the scaffold does not write"
+        );
+        assert!(
+            text.contains("├── templates/") && text.contains("app.html"),
+            "{chapter} does not list templates/app.html in the scaffold's tree"
+        );
+    }
+    let structure = read_from_repo("manual/structure.md");
+    for named in [
+        "### `templates/`",
+        "#[suprnova::inertia_root(path = \"app.html\")]",
+        "pub struct AppDocument;",
+    ] {
+        assert!(
+            structure.contains(named),
+            "manual/structure.md does not name {named}"
+        );
+    }
+}
