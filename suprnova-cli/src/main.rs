@@ -210,6 +210,12 @@ enum Commands {
         /// Also generate route types (frontend/src/types/routes.ts)
         #[arg(long)]
         routes: bool,
+
+        /// Type i64, u64, i128, u128, isize and usize as `number | bigint`
+        /// even when no `preserve_big_integers(..)` call under src/ turns
+        /// big-integer preservation on
+        #[arg(long)]
+        big_integers: bool,
     },
     /// Generate a new middleware
     #[command(name = "make:middleware")]
@@ -621,8 +627,14 @@ fn main() {
             output,
             watch,
             routes,
+            big_integers,
         } => {
-            commands::generate_types::run(output, watch, routes);
+            commands::generate_types::run(
+                output,
+                watch,
+                routes,
+                commands::generate_types::GenerateOptions { big_integers },
+            );
         }
         Commands::MakeMiddleware { name } => {
             commands::make_middleware::run(name);

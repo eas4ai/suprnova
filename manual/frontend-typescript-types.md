@@ -29,6 +29,9 @@ suprnova generate-types --watch
 
 # Custom output for the props file
 suprnova generate-types --output frontend/src/types/props.ts
+
+# Type wide integers as `number | bigint` (see Type mapping)
+suprnova generate-types --big-integers
 ```
 
 The route file path is fixed at `frontend/src/types/routes.ts` and the
@@ -119,7 +122,8 @@ equivalents.
 | Rust | TypeScript | Notes |
 |---|---|---|
 | `String`, `&str` | `string` | |
-| `i8`..`i128`, `u8`..`u128`, `isize`, `usize`, `f32`, `f64` | `number` | All numeric primitives collapse to `number` |
+| `i8`, `i16`, `i32`, `u8`, `u16`, `u32`, `f32`, `f64` | `number` | |
+| `i64`, `u64`, `i128`, `u128`, `isize`, `usize` | `number`, or `number \| bigint` when the project preserves big integers | See "Wide integers" below. As a map key, always `number` |
 | `bool` | `boolean` | |
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | The props generator emits `Array<T>`; the routes generator emits `T[]` for form-request fields |
@@ -128,6 +132,28 @@ equivalents.
 | `Field<T>` (from `#[derive(Data)]`) | `field?: T \| null` | Field is optional on the wire |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Lazy props omit the `null` half |
 | Anything else | bare identifier | See "Custom types" below |
+
+### Wide integers
+
+A wide integer can pass 2^53, the largest integer a JavaScript `number`
+holds exactly. With big-integer preservation on, the server sends such a
+value as a `{"$bigint": "..."}` marker and the Inertia client turns it
+into a `BigInt`. So the generator types `i64`, `u64`, `i128`, `u128`,
+`isize` and `usize` as `number | bigint` when any `.rs` file under `src/`
+calls `preserve_big_integers(..)` with `true` or with a variable, and as
+`number` otherwise. A literal `false` turns nothing on:
+
+```rust
+// src/bootstrap.rs: every wide integer field becomes `number | bigint`
+Inertia::install(&InertiaConfig::new().preserve_big_integers(true))?;
+```
+
+A map key stays `number`: a JSON object key is a string on the wire,
+never a marker, and TypeScript refuses `bigint` as a `Record` key.
+
+When the call sits where the scan does not read, such as another crate,
+pass `--big-integers`. `suprnova serve` regenerates without the flag, so
+it follows the call under `src/` alone.
 
 ## Custom types
 

@@ -351,6 +351,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   does when it exits, or, with `--graceful`, when no worker can be
   connected to. An answer, or a connection still open after the timeout
   (2000 ms by default), fails (CM-02).
+- **`suprnova generate-types` types wide integers as `number | bigint` in a
+  project that preserves big integers.** Every integer and float was
+  `number`, so with `preserve_big_integers` on, an `i64` past 2^53 reached
+  the page as a `BigInt` its type called a `number`. `i64`, `u64`, `i128`,
+  `u128`, `isize` and `usize` are now `number | bigint` when a `.rs` file
+  under `src/` calls `preserve_big_integers(..)` with `true` or a variable,
+  or with the new `--big-integers` flag, and `number` otherwise. Narrower
+  integers and floats stay `number`, and a wide map key stays `number`
+  (T03).
 
 ### Changed
 

@@ -5,7 +5,9 @@
 //!   - output_only → included in output type, excluded from input type
 //!   - allow_include → no TS effect (runtime-only)
 
-use suprnova_cli::commands::generate_types::{ScanInput, generate_types_string};
+use suprnova_cli::commands::generate_types::{
+    GenerateOptions, ScanInput, generate_types_string, generate_types_string_with,
+};
 
 const SRC: &str = r#"
 use suprnova::data::Field;
@@ -616,4 +618,176 @@ pub struct EventDto {
         assert!(dto.contains(line), "{line} in {dto}");
     }
     assert!(!ts.contains("unknown"), "got: {ts}");
+}
+
+// PAR-069: the wide integers - `i64`, `u64`, `i128`, `u128`, `isize` and
+// `usize` - can pass 2^53, and with `preserve_big_integers` on, one that
+// does travels as a `{"$bigint": ".."}` marker the Inertia client turns
+// into a `BigInt`. So they are `number | bigint` exactly when the project
+// preserves big integers, and `number` otherwise. Narrower integers and
+// floats are always `number`.
+
+/// One prop struct with every numeric primitive, wrapped where the wide
+/// type changes how it composes.
+const NUMBERS: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct Numbers {
+    pub a_i8: i8,
+    pub a_i16: i16,
+    pub a_i32: i32,
+    pub a_u8: u8,
+    pub a_u16: u16,
+    pub a_u32: u32,
+    pub a_f32: f32,
+    pub a_f64: f64,
+    pub a_i64: i64,
+    pub a_u64: u64,
+    pub a_i128: i128,
+    pub a_u128: u128,
+    pub a_isize: isize,
+    pub a_usize: usize,
+    pub maybe: Option<u64>,
+    pub list: Vec<i64>,
+    pub by_id: std::collections::HashMap<u64, i64>,
+}
+"#;
+
+const NARROW: [&str; 8] = [
+    "  a_i8: number;",
+    "  a_i16: number;",
+    "  a_i32: number;",
+    "  a_u8: number;",
+    "  a_u16: number;",
+    "  a_u32: number;",
+    "  a_f32: number;",
+    "  a_f64: number;",
+];
+
+const WIDE: [&str; 6] = ["a_i64", "a_u64", "a_i128", "a_u128", "a_isize", "a_usize"];
+
+fn assert_narrow_stay_number(block: &str) {
+    for line in NARROW {
+        assert!(block.contains(line), "{line} in:\n{block}");
+    }
+}
+
+fn assert_wide(block: &str, ts_type: &str) {
+    for field in WIDE {
+        let line = format!("  {field}: {ts_type};");
+        assert!(block.contains(&line), "{line} in:\n{block}");
+    }
+}
+
+#[test]
+fn intt_wide_integers_are_number_when_nothing_preserves_big_integers() {
+    let ts = generate_types_string(ScanInput::Source(Box::leak(
+        format!("{NUMBERS}\nfn boot(config: InertiaConfig) -> InertiaConfig {{ config.preserve_big_integers(false) }}\n")
+            .into_boxed_str(),
+    )));
+    let block = extract_block(&ts, "Numbers");
+    assert_wide(&block, "number");
+    assert_narrow_stay_number(&block);
+    assert!(block.contains("  maybe: number | null;"), "{block}");
+    assert!(block.contains("  list: Array<number>;"), "{block}");
+    assert!(
+        !ts.contains("bigint"),
+        "a literal `false` preserves nothing:\n{ts}"
+    );
+}
+
+#[test]
+fn intt_wide_integers_widen_when_src_preserves_big_integers() {
+    for call in [
+        "InertiaConfig::new().preserve_big_integers(true)",
+        "response.preserve_big_integers(on)",
+        "InertiaConfig::preserve_big_integers(config, true)",
+    ] {
+        let source = format!("{NUMBERS}\nfn boot() {{ let _ = {call}; }}\n");
+        let ts = generate_types_string(ScanInput::Source(Box::leak(source.into_boxed_str())));
+        let block = extract_block(&ts, "Numbers");
+        assert_wide(&block, "number | bigint");
+        assert_narrow_stay_number(&block);
+        assert!(
+            block.contains("  maybe: number | bigint | null;"),
+            "{call}:\n{block}"
+        );
+        assert!(
+            block.contains("  list: Array<number | bigint>;"),
+            "{call}:\n{block}"
+        );
+        // A map key is always a JSON string on the wire and never a
+        // `$bigint` marker, and TypeScript refuses `bigint` as a key type.
+        assert!(
+            block.contains("  by_id: Record<number, number | bigint>;"),
+            "{call}:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn intt_a_preserve_call_inside_a_macro_counts_too() {
+    let source = format!(
+        "{NUMBERS}\nfn boot() {{ bind!(InertiaConfig::new().preserve_big_integers(true)); }}\n"
+    );
+    let ts = generate_types_string(ScanInput::Source(Box::leak(source.into_boxed_str())));
+    assert_wide(&extract_block(&ts, "Numbers"), "number | bigint");
+}
+
+/// A temporary project for the binary: a manifest, so `generate-types`
+/// takes the directory as a project, and `files` under `src/`.
+fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create workspace tempdir");
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"types\"\n",
+    )
+    .expect("write manifest");
+    for (path, body) in files {
+        let path = dir.path().join("src").join(path);
+        std::fs::create_dir_all(path.parent().expect("a file under src/"))
+            .expect("create source directory");
+        std::fs::write(path, body).expect("write source");
+    }
+    dir
+}
+
+fn run_generate_types(dir: &tempfile::TempDir, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .arg("generate-types")
+        .args(args)
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn suprnova binary");
+    assert!(
+        out.status.success(),
+        "generate-types {args:?} must succeed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(dir.path().join("frontend/src/types/inertia-props.ts"))
+        .expect("read generated file")
+}
+
+#[test]
+fn intt_the_big_integers_flag_widens_without_a_preserve_call() {
+    let dir = project(&[("props.rs", NUMBERS)]);
+
+    let without = run_generate_types(&dir, &[]);
+    assert_wide(&extract_block(&without, "Numbers"), "number");
+
+    let with = run_generate_types(&dir, &["--big-integers"]);
+    let block = extract_block(&with, "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
+}
+
+#[test]
+fn intt_the_big_integers_option_widens_an_in_memory_scan() {
+    let ts = generate_types_string_with(
+        ScanInput::Source(NUMBERS),
+        GenerateOptions { big_integers: true },
+    );
+    let block = extract_block(&ts, "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
 }
