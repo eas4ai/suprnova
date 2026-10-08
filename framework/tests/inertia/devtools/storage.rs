@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use suprnova::http::text;
 use suprnova::testing::TestClock;
 use suprnova::{
-    HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Prop, Redirect, Request, Response,
-    Router,
+    FromRequest, HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, MultipartRequest,
+    Prop, Redirect, Request, Response, Router,
 };
 
 use super::{client, devtools, entry_ids, entry_of, inertia, raw_send, read_entry, read_index};
@@ -48,7 +48,32 @@ fn router() -> Router {
             Ok(Inertia::location("/reset?token=abc"))
         })
         .get("/text", |_req: Request| async { text("ok") })
+        .post("/flat-login", flat_login)
         .into()
+}
+
+/// A form whose field names are flattened, as a multipart body keeps them;
+/// the extractor parses it and hands the recorder the summary.
+#[derive(MultipartRequest)]
+struct FlatLogin {
+    #[field("user[password]")]
+    password: String,
+    #[field("filter[secret]")]
+    secret: String,
+    #[field("data[0][token]")]
+    token: String,
+    #[field("user[name]")]
+    name: String,
+    #[field("passwords")]
+    passwords: String,
+}
+
+async fn flat_login(req: Request) -> Response {
+    let form = FlatLogin::from_request(req).await?;
+    // The secrets are read and never echoed: a response body is stored as
+    // text, which redaction reads no keys from.
+    let _read = (form.password, form.secret, form.token, form.passwords);
+    text(format!("ok {}", form.name))
 }
 
 /// A `multipart/form-data` body with the boundary `XYZ` holding the text
@@ -258,7 +283,7 @@ async fn indt_a_flattened_form_field_naming_a_redaction_key_is_redacted_before_s
     let reply = raw_send(
         addr,
         "POST",
-        "/login",
+        "/flat-login",
         &[
             ("X-Inertia", b"true"),
             ("Content-Type", b"multipart/form-data; boundary=XYZ"),
