@@ -489,9 +489,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (`precognition` first, then `initial` or `http`, `deferred`, `poll`,
   `partial`, `prefetch`, `navigate`), the request and response headers,
   the request body (an Inertia write's JSON or form input with uploads
-  summarized, up to 256,000 bytes read before the handler) and the
-  response body (the page object, or text up to 256,000 bytes), the route
-  with its handler's type name, and for a rendered page the component, its
+  summarized, read up to the request body cap) and the response body (the
+  page object, or text up to 256,000 bytes), the route with its handler's
+  type name, and for a rendered page the component, its
   page file and the render call's file and line, which
   `InertiaResponse::new`, `inertia_response!`, `Inertia::paginate`,
   `Inertia::data` and `Router::inertia` take through `#[track_caller]`.
@@ -1396,6 +1396,47 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `InertiaResponse::new("Home").with_data(props)` whose struct is defined
   in another file, or a deployment without its Rust sources. Such a prop
   now names the render call's own file and line (DT-03).
+- **DevTools reads a request body as the handler would.** The recorder
+  read a body before the handler only when its length was declared and at
+  most 256,000 bytes, so a longer body was recorded as `too-large` and a
+  chunked one as `streamed`, omissions PAR-072 allows for the response
+  body only. A body whose stream failed answered with the recorder's own
+  `500`, even for a handler that ignores its body. The recorder now reads
+  up to the request body cap (8 MiB by default), with or without a
+  declared length. A body over the cap records `too-large` and reaches the
+  handler whole: unread when its length is declared, else as the bytes
+  read and the rest of the stream, the new `BodyState::Partial`. A failed
+  read records `unreadable` and leaves its error in the new
+  `BodyState::Failed`, which the handler meets only when it reads the body
+  (DT-02, DT-10).
+- **A DevTools JSON request body is recorded whatever it parses to.** A
+  body of `{}`, `[]` or `null`, and JSON that did not parse, were recorded
+  as `empty`. A parsed body is now present whatever its value, one that
+  does not parse is kept as its text, and only a body of 0 bytes is
+  `empty` (DT-02).
+- **DevTools no longer reads an upload before its authorization.** The
+  recorder read a multipart body before the handler, so a
+  `MultipartRequestHooks::authorize` that refused the upload ran after the
+  body was read. A body it could not parse, such as one without its
+  closing boundary, was stored as raw text, which redaction does not look
+  into, a password field included. The multipart extractor now hands
+  DevTools a summary of what it parsed, after authorization. An upload no
+  extractor read records `not-read`, and one whose parse failed records
+  `unparsed`, both with the declared length as `size`; the raw text is
+  never stored. A name sent more than once, or one that ends in `[]`, is
+  now the list of its parts: the entry kept only the last of the three
+  files of a `photos[]` field (DT-02, DT-10).
+- **The DevTools id tag finds a closing body tag in any case.** The tag
+  went before the last literal `</body>`, so a first visit whose root
+  template closed with `</BODY>` or `</Body >` went out with no tag. The
+  closing body tag is now found in any case and with space before its
+  `>`, and a document with none gets the tag at its end (DT-02).
+- **A tagged first visit no longer carries the untagged page's length.**
+  A `Content-Length` the handler set on its page stayed on the longer,
+  tagged document. hyper sent it as it was in a release build, which
+  breaks the HTTP/1 framing, and asserted on the mismatch in a debug
+  build. The header is now dropped when the tag is added, and the server
+  sends the tagged document's length (DT-02, DT-10).
 
 ## 3.2.1 - 2026-10-05
 

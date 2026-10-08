@@ -690,8 +690,16 @@ fn accept_lists_html<'a>(values: impl Iterator<Item = &'a str>) -> bool {
 /// replaces (the app's own `Content-Security-Policy` among them: the page
 /// sets its own); `Transfer-Encoding`; the fields that said how the old
 /// body could be stored or revalidated; and every `X-Inertia*` field,
-/// since the page is not an Inertia response.
+/// since the page is not an Inertia response. Kept among those: the
+/// Inertia DevTools headers, which name the entry recorded for this
+/// request and which every recorded response carries (PAR-072).
 fn header_survives_page(name: &str) -> bool {
+    if crate::inertia::DEVTOOLS_RESPONSE_HEADERS
+        .iter()
+        .any(|devtools| name.eq_ignore_ascii_case(devtools))
+    {
+        return true;
+    }
     let name = name.to_ascii_lowercase();
     !(name.starts_with("content-")
         || name.starts_with("x-inertia")
@@ -1040,6 +1048,9 @@ mod tests {
             "vary",
             "retry-after",
             "www-authenticate",
+            "x-inertia-devtools-id",
+            "X-Inertia-Devtools-Parent-Out",
+            "x-inertia-devtools-base-path",
         ] {
             assert!(header_survives_page(kept), "{kept}");
         }
@@ -1054,6 +1065,7 @@ mod tests {
             "etag",
             "x-inertia",
             "x-inertia-location",
+            "x-inertia-devtools-tab",
         ] {
             assert!(!header_survives_page(dropped), "{dropped}");
         }

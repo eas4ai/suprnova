@@ -7,13 +7,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::FutureExt;
 use serde_json::Value;
 
 use super::config::DevToolsConfig;
 use super::endpoints;
 use super::entry::{self, RequestFacts, Stamp};
-use super::recorder::{self, Recorder, RenderPayload};
+use super::recorder::{self, MultipartOutcome, Recorder, RenderPayload};
 use super::redact::Redactor;
 use super::store::{self, EntriesRepository};
 use super::ulid;
@@ -28,6 +27,10 @@ pub(crate) const PARENT_OUT_HEADER: &str = "X-Inertia-Devtools-Parent-Out";
 /// The response header carrying the path the application is served
 /// under, when it is not the host's root.
 pub(crate) const BASE_PATH_HEADER: &str = "X-Inertia-Devtools-Base-Path";
+/// The response headers recording adds. Every recorded response carries
+/// them (PAR-072), so a page that replaces the response outside the
+/// chain, as the development error page does, keeps them.
+pub(crate) const RESPONSE_HEADERS: [&str; 3] = [ID_HEADER, PARENT_OUT_HEADER, BASE_PATH_HEADER];
 
 /// Records each request for the Inertia DevTools browser extension and
 /// answers the extension's `GET /_inertia/devtools/entries` and
@@ -91,10 +94,10 @@ impl DevToolsMiddleware {
     async fn record(
         &self,
         facts: RequestFacts,
-        payload: Option<RenderPayload>,
+        recorded: Recorded,
         response: HttpResponse,
     ) -> HttpResponse {
-        self.record_with(facts, payload, response, |entry| {
+        self.record_with(facts, recorded, response, |entry| {
             self.redactor.redact_entry(entry);
         })
         .await
@@ -105,10 +108,11 @@ impl DevToolsMiddleware {
     async fn record_with(
         &self,
         facts: RequestFacts,
-        payload: Option<RenderPayload>,
+        recorded: Recorded,
         response: HttpResponse,
         redact: impl FnOnce(&mut Value),
     ) -> HttpResponse {
+        let Recorded { payload, multipart } = recorded;
         let now = crate::clock::now();
         let now_ms = now.timestamp_millis();
         let id = ulid::new_id(u64::try_from(now_ms).unwrap_or_default());
@@ -129,14 +133,17 @@ impl DevToolsMiddleware {
         let tab = facts.tab().map(str::to_string);
         // Building the entry and redacting it run under one guard: a panic
         // in either drops the entry and leaves the response as it is.
-        let built = AssertUnwindSafe(async {
-            let mut entry =
-                entry::build(facts, payload, &response, Stamp { id: &id, at: now }).await;
+        let built = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut entry = entry::build(
+                facts,
+                payload,
+                multipart,
+                &response,
+                Stamp { id: &id, at: now },
+            );
             redact(&mut entry);
             entry
-        })
-        .catch_unwind()
-        .await;
+        }));
         let Ok(entry) = built else {
             tracing::debug!(
                 "Inertia DevTools: building or redacting an entry panicked; the entry is dropped"
@@ -198,14 +205,25 @@ impl DevToolsMiddleware {
     }
 }
 
-/// The body of `response` with the entry id tag before its last `</body>`,
-/// when the response is the first visit of a page: a `200` HTML document
-/// answering a request that is not an Inertia visit, for which a page
-/// rendered. `None` leaves the body as it is.
+/// What the rest of the chain told the recorder: the page a render built
+/// and how the multipart extraction ended.
+#[derive(Debug, Default)]
+struct Recorded {
+    payload: Option<RenderPayload>,
+    multipart: Option<MultipartOutcome>,
+}
+
+/// The body of `response` with the entry id tag before its last closing
+/// body tag, when the response is the first visit of a page: a `200` HTML
+/// document answering a request that is not an Inertia visit, for which a
+/// page rendered. `None` leaves the body as it is.
 ///
 /// The panel of an extension that attaches after the page loaded has only
 /// the document to read the id from. A plain HTML page gets no tag: the
-/// extension reads one as DevTools being on for that page.
+/// extension reads one as DevTools being on for that page. HTML tag names
+/// have no case, so `</BODY>` and `</Body >` are closing body tags too. A
+/// document with none gets the tag at its end: the extension still needs
+/// the id, and a document without `</body>` is still a document.
 fn tag_first_visit(
     facts: &RequestFacts,
     payload: Option<&RenderPayload>,
@@ -224,7 +242,7 @@ fn tag_first_visit(
         return None;
     }
     let body = std::str::from_utf8(response.body()).ok()?;
-    let at = body.rfind("</body>")?;
+    let at = tag_position(body);
     let base = if facts.base_path.is_empty() {
         String::new()
     } else {
@@ -244,6 +262,25 @@ fn tag_first_visit(
     Some(Bytes::from(tagged))
 }
 
+/// Where the id tag goes in `document`: before its last closing body tag,
+/// else at its end.
+fn tag_position(document: &str) -> usize {
+    document
+        .rmatch_indices("</")
+        .map(|(at, _)| at)
+        .find(|&at| is_closing_body_tag(&document[at + 2..]))
+        .unwrap_or(document.len())
+}
+
+/// Whether `rest`, the text after a `</`, closes the body: `body` in any
+/// case, then optional whitespace, then `>`.
+fn is_closing_body_tag(rest: &str) -> bool {
+    let rest = rest.as_bytes();
+    rest.len() > 4
+        && rest[..4].eq_ignore_ascii_case(b"body")
+        && rest[4..].iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'>')
+}
+
 #[async_trait]
 impl Middleware for DevToolsMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
@@ -253,15 +290,16 @@ impl Middleware for DevToolsMiddleware {
         if !self.records || self.is_excepted(&request) {
             return next(request).await;
         }
-        let (request, facts) = match RequestFacts::capture(request).await {
-            Ok(captured) => captured,
-            Err(response) => return Err(response),
-        };
+        let (request, facts) = RequestFacts::capture(request).await;
         let recorder = Arc::new(Recorder::default());
         let response = recorder::scope(Arc::clone(&recorder), next(request)).await;
         let was_ok = response.is_ok();
         let http = response.unwrap_or_else(|response| response);
-        let http = self.record(facts, recorder.take(), http).await;
+        let recorded = Recorded {
+            payload: recorder.take(),
+            multipart: recorder.take_multipart(),
+        };
+        let http = self.record(facts, recorded, http).await;
         if was_ok { Ok(http) } else { Err(http) }
     }
 }
@@ -275,16 +313,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let middleware =
             DevToolsMiddleware::new(DevToolsConfig::new().enabled(true).storage_path(dir.path()));
-        let Ok((_, facts)) = RequestFacts::capture(Request::for_test("GET", "/report")).await
-        else {
-            panic!("a GET with no body is read");
-        };
+        let (_, facts) = RequestFacts::capture(Request::for_test("GET", "/report")).await;
         let response = HttpResponse::text("the handler's body")
             .status(201)
             .header("X-Handler", "yes");
 
         let recorded = middleware
-            .record_with(facts, None, response, |_| panic!("the redaction failed"))
+            .record_with(facts, Recorded::default(), response, |_| {
+                panic!("the redaction failed")
+            })
             .await;
 
         assert_eq!(recorded.status_code(), 201);

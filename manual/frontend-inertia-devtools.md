@@ -101,13 +101,39 @@ The `requestType` is decided in this order:
 The request body is recorded only for an Inertia visit when the request
 writes (`POST`, `PUT`, `PATCH`, `DELETE`); any other write records
 `{"status": "omitted", "reason": "non-inertia-request"}`. A JSON body is
-recorded as JSON. Otherwise the query and form input are recorded, with a
-multipart upload summarized as its `name`, `size` and `mimeType`, never
-its bytes; else the raw text, `empty` when there is none, and `binary`
-when it is not UTF-8. A body is read before the handler only when its
-length is declared and at most 256,000 bytes; the handler then reads the
-copy kept on the request. A longer body records `too-large`, and one of
-unknown length `streamed`, and both are left for the handler untouched.
+recorded as the value it parses to, `{}`, `[]` and `null` included, and as
+its text when it does not parse. Otherwise the query and form input are
+recorded; else the raw text, `empty` when the body has no bytes, and
+`binary` when it is not UTF-8.
+
+DevTools reads the body before the handler, up to the framework's request
+body cap (`suprnova::http::body::global_max_request_body_bytes`, 8 MiB
+unless your bootstrap sets another), whether or not the request declares
+its length. The handler then reads the copy kept on the request. A body
+over the cap records `too-large` and stays whole for the handler, which
+answers its own `413`, or reads all of it under a larger cap of its own,
+such as a `FormRequest` with `max_body_bytes`. A body that fails to arrive
+records `unreadable`, and the handler meets the same error only when it
+reads the body, so a handler that ignores its body answers as it does with
+DevTools off.
+
+DevTools never reads a multipart upload itself. The upload's extractor
+authorizes the request before any byte of the body is read, then parses
+the body and hands DevTools what it parsed: a text part as text, a part
+that is not text as `[UNSERIALIZABLE]`, and a file as its `name`, `size`
+and `mimeType`, never its bytes, after the query. A name sent more than
+once, or one that ends in `[]`, is the list of its parts, so every file
+of a `photos[]` field is listed. An upload no extractor
+read, because authorization refused it or the handler never asked for it,
+records `not-read` with the declared length, and one whose parse failed
+partway records `unparsed`:
+
+```json
+{"status": "omitted", "reason": "not-read", "size": 48213}
+```
+
+The raw text of a multipart body is never kept, so a password in an
+upload form that failed to parse is not stored.
 
 The response body of a rendered page is its page object. Any other
 response records its text when its `Content-Type` is textual (JSON,
@@ -134,11 +160,17 @@ Every recorded response carries:
 The first visit of a page has no response headers the extension can see
 once it attaches, so a `200` HTML document that rendered a page for a
 request that is not an Inertia visit gets the id in the document, before
-its last `</body>`:
+its last closing body tag:
 
 ```html
 <script data-inertia-devtools-id type="application/json">"01JA2B7Q9C3M4N5P6R7S8T9V0W"</script>
 ```
+
+The closing tag is found in any case and with space before its `>`, so a
+root template that ends with `</BODY>` or `</Body >` is tagged too. A
+document with no closing body tag gets the tag at its end. A
+`Content-Length` the handler set on the page is dropped with the tag
+added, and the server sends the length of the tagged document.
 
 Under a public root the tag also carries
 `data-inertia-devtools-base-path="/billing"`. An Inertia visit's JSON and a
@@ -278,11 +310,15 @@ either way.
 - **There is no `devtools.middleware` setting.** The endpoints run inside
   the Inertia stack, inside the session your bootstrap registered above
   it, which is what Laravel's default `web` group gives them.
-- **A request body has a size limit.** Symfony keeps every body in
-  memory; a Rust request streams its body to the handler. DevTools reads
-  a body first only when its length is declared and at most 256,000
-  bytes, and records `too-large` or `streamed` otherwise. Multipart field
-  names are kept as sent, not nested.
+- **A request body is read up to the request body cap.** Symfony keeps
+  every body in memory; a Rust request streams its body to the handler.
+  DevTools reads a body first up to the framework's request body cap, the
+  most an extractor reads, and records a larger one as `too-large`,
+  leaving it for the handler. A multipart upload is never read by
+  DevTools: its extractor summarizes what it parsed, after the request is
+  authorized, so an upload no extractor read is `not-read`, and one whose
+  parse failed is `unparsed`. Multipart field names are kept as sent, not
+  nested: the files of `photos[]` are listed under `photos[]`.
 - **Redaction matches key parts and the URLs in headers.** Laravel's
   `RedactsSensitiveData` matches a key whole and redacts no URL in a
   header. Suprnova also redacts a key when any bracketed or dotted part

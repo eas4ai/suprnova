@@ -1,7 +1,7 @@
 use super::ParamError;
 use super::body::{
-    collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded,
-    is_multipart_form_data, parse_form, parse_json, parse_multipart,
+    collect_after, collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded,
+    is_multipart_form_data, parse_form, parse_json, parse_multipart, read_failure,
 };
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
@@ -10,11 +10,13 @@ use crate::live::attestation::{
     LiveOperation, LiveRequestIdentity, LiveSecurityAttestation, SecurityCheck,
 };
 use bytes::Bytes;
+use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
 /// State of the request body - either still streaming from the wire,
-/// already buffered into memory, or fully consumed.
+/// already buffered into memory, partly read, fully consumed, or failed
+/// to arrive.
 ///
 /// Buffering happens when middleware needs to inspect the body and
 /// still hand the request to downstream handlers (e.g. the CSRF
@@ -28,6 +30,35 @@ pub enum BodyState {
     Buffered(Bytes),
     /// Body was consumed without buffering. Subsequent reads error.
     Consumed,
+    /// A middleware that only observes the request, as Inertia DevTools
+    /// does, read the body and the stream failed. Every later read returns
+    /// this error, the one the read itself would have returned, so the
+    /// handler meets the failure it would have met with no middleware in
+    /// the way, and a handler that never reads the body never meets it.
+    Failed(FrameworkError),
+    /// A middleware that only observes the request read the start of a
+    /// body of undeclared length and stopped at its limit. A read of the
+    /// body reads `read`, then `rest`, so the handler gets the whole body
+    /// under its own cap, as if nothing had read it first.
+    Partial {
+        /// The bytes read so far, the first bytes of the body.
+        read: Bytes,
+        /// The stream after them.
+        rest: hyper::body::Incoming,
+    },
+}
+
+/// What [`Request::read_body_up_to`] found.
+pub(crate) enum BodyRead {
+    /// The whole body, now kept on the request for the handler.
+    Whole(Bytes),
+    /// A body longer than the limit, kept on the request for the handler:
+    /// unread when its length is declared, else as the bytes read and the
+    /// rest of the stream.
+    TooLarge,
+    /// The body failed to arrive, or a middleware consumed it before; the
+    /// request keeps the failure for whoever reads the body next.
+    Failed,
 }
 
 /// HTTP Request wrapper providing Laravel-like access to request data.
@@ -1605,6 +1636,8 @@ impl Request {
                      downstream.",
                 ));
             }
+            BodyState::Failed(error) => return Err(error),
+            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
         };
 
         Ok((
@@ -1645,9 +1678,77 @@ impl Request {
                     "Request body cannot be buffered: it was already consumed",
                 ));
             }
+            BodyState::Failed(error) => return Err(error),
+            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
         };
         self.body = BodyState::Buffered(bytes);
         Ok(self)
+    }
+
+    /// Read the body into the request's cache, as
+    /// [`buffer_body`](Self::buffer_body) does, but keep the request
+    /// whatever the read finds: for a middleware that only observes the
+    /// request and must hand it on as the handler would have received it.
+    ///
+    /// A body whose declared length is over `max_bytes` is left unread. A
+    /// body of undeclared length is read until it ends or runs past
+    /// `max_bytes`; one that runs past is kept as
+    /// [`BodyState::Partial`], so a handler with a larger cap of its own
+    /// still reads all of it. A read that fails leaves the body
+    /// [`BodyState::Failed`] with the error
+    /// [`body_bytes`](Self::body_bytes) would return, so the handler's own
+    /// read returns it too. A body a middleware consumed before stays
+    /// consumed.
+    pub(crate) async fn read_body_up_to(&mut self, max_bytes: usize) -> BodyRead {
+        let content_length = super::body::parse_content_length(&self.parts.headers);
+        match std::mem::replace(&mut self.body, BodyState::Consumed) {
+            BodyState::Buffered(bytes) => {
+                self.body = BodyState::Buffered(bytes.clone());
+                BodyRead::Whole(bytes)
+            }
+            BodyState::Streaming(incoming)
+                if content_length.is_some_and(|length| length > max_bytes as u64) =>
+            {
+                self.body = BodyState::Streaming(incoming);
+                BodyRead::TooLarge
+            }
+            BodyState::Streaming(mut incoming) => {
+                let mut buf: Vec<u8> = Vec::new();
+                while let Some(frame) = incoming.frame().await {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            self.body = BodyState::Failed(read_failure(error));
+                            return BodyRead::Failed;
+                        }
+                    };
+                    // Trailers are dropped, as `collect_body_with_cap` drops them.
+                    if let Ok(data) = frame.into_data() {
+                        buf.extend_from_slice(&data);
+                        if buf.len() > max_bytes {
+                            self.body = BodyState::Partial {
+                                read: Bytes::from(buf),
+                                rest: incoming,
+                            };
+                            return BodyRead::TooLarge;
+                        }
+                    }
+                }
+                buf.shrink_to_fit();
+                let bytes = Bytes::from(buf);
+                self.body = BodyState::Buffered(bytes.clone());
+                BodyRead::Whole(bytes)
+            }
+            BodyState::Partial { read, rest } => {
+                self.body = BodyState::Partial { read, rest };
+                BodyRead::TooLarge
+            }
+            BodyState::Consumed => BodyRead::Failed,
+            BodyState::Failed(error) => {
+                self.body = BodyState::Failed(error);
+                BodyRead::Failed
+            }
+        }
     }
 
     /// Read the cached body bytes set by [`Request::buffer_body`].

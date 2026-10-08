@@ -30,5 +30,6 @@ mod ulid;
 pub(crate) use classify::{ClassifyRequest, classify, errors_meta};
 pub use config::DevToolsConfig;
 pub use middleware::DevToolsMiddleware;
-pub(crate) use recorder::{Collector, current as current_recorder};
+pub(crate) use middleware::RESPONSE_HEADERS as DEVTOOLS_RESPONSE_HEADERS;
+pub(crate) use recorder::{Collector, MultipartReport, current as current_recorder};
 pub(crate) use source::SourceLocation;
