@@ -74,14 +74,14 @@ pub(crate) async fn answer(
     Ok(response)
 }
 
-/// Whether the request may read entries, Laravel's `Authorize`: always in
-/// the `local` environment, since a failing gate would lock a developer
-/// out of their own tools; elsewhere only when the configured gate
-/// ability allows the signed-in user, or a guest when no one is signed
-/// in. A guest is asked about as `()`, as is the resource, so a gate that
+/// Whether the request may read entries, Laravel's `Authorize`: always
+/// when `APP_ENV` names the `local` environment, since a failing gate would
+/// lock a developer out of their own tools; elsewhere, an unset `APP_ENV`
+/// included, only when the configured gate ability allows the signed-in
+/// user, or a guest when no one is signed in. A guest is asked about as `()`, as is the resource, so a gate that
 /// admits users is defined as `Gate::define::<User, ()>(ability, ...)`.
 async fn allows(config: &DevToolsConfig) -> bool {
-    if crate::config::Config::environment() == crate::config::Environment::Local {
+    if super::config::app_env_names_local() {
         return true;
     }
     let Some(ability) = config.gate.as_deref().filter(|gate| !gate.is_empty()) else {

@@ -510,9 +510,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **The DevTools entry endpoints.** `GET /_inertia/devtools/entries`
   lists entries newest first, filtered by `component`, `type`, `exclude`,
   `offset` and `limit`, and `GET /_inertia/devtools/entries/{id}` answers
-  one entry, or `404 {"message": "Not found."}`. The `local` environment
-  is always admitted; elsewhere only the user the configured gate ability
-  allows, else `403 {"message": "Forbidden."}`. An entry request
+  one entry, or `404 {"message": "Not found."}`. An `APP_ENV` naming the
+  `local` environment admits every request; elsewhere, an unset `APP_ENV`
+  included, only the user the configured gate ability allows is admitted,
+  else `403 {"message": "Forbidden."}`. An entry request
   reflashes the session, never becomes the previous URL, and is never
   recorded (DT-05, DT-06, DT-09).
 - **DevTools storage and redaction.** Entries are one JSON file each under

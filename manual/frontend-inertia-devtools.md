@@ -184,10 +184,11 @@ answers before any route:
   `404 {"message": "Not found."}` for an id that is not a ULID or names no
   entry.
 
-In the `local` environment every request is admitted, so a broken gate
-never locks you out of your own tools. Anywhere else a request is admitted
-only when the configured gate ability allows the signed-in user, else the
-answer is `403 {"message": "Forbidden."}`. The gate is asked about the
+When `APP_ENV` names the `local` environment every request is admitted,
+so a broken gate never locks you out of your own tools. Anywhere else, an
+unset `APP_ENV` included, a request is admitted only when the configured
+gate ability allows the signed-in user, else the answer is
+`403 {"message": "Forbidden."}`. The gate is asked about the
 user and `()` as the resource; a guest is asked about as `()`:
 
 ```rust

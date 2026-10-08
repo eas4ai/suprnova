@@ -14,7 +14,7 @@ use suprnova::{
     Redirect, Request, Response, Router,
 };
 
-use super::{app_env, client, devtools, entry_ids, inertia, session_client};
+use super::{app_env, client, devtools, entry_ids, inertia, no_app_env, session_client};
 
 fn router() -> Router {
     Router::new()
@@ -220,6 +220,28 @@ async fn indt_outside_local_only_the_configured_gate_admits_a_request() {
             .append(Inertia::middleware(&inertia(admins))),
     );
     signed_in
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
+}
+
+#[tokio::test]
+async fn indt_without_app_env_the_endpoints_require_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let unset = no_app_env().await;
+    let ungated = client(router(), devtools(dir.path()));
+    let response = ungated.get("/_inertia/devtools/entries").send().await;
+    response.assert_status(403);
+    assert_eq!(
+        response.json(),
+        json!({"message": "Forbidden."}),
+        "an unset APP_ENV is not local: with no gate, no one is admitted"
+    );
+    drop(unset);
+
+    let _local = app_env("local").await;
+    client(router(), devtools(dir.path()))
         .get("/_inertia/devtools/entries")
         .send()
         .await
