@@ -1497,6 +1497,12 @@ fn the_api_scaffold_does_not_install_inertia() {
     );
 }
 
+/// Every SSR entry starts the worker `suprnova ssr:start` runs: it calls
+/// `createServer` from its adapter's `/server` export itself, or it is a
+/// top-level `createInertiaApp(..)` statement that the Inertia Vite plugin
+/// in its Vite config wraps with that call (`packages/vite/src/
+/// ssrTransform.ts`). Only the entry's code counts; a comment naming
+/// `createServer` starts nothing.
 #[test]
 fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
     // The react kit's entry is a top-level `createInertiaApp` call, which the
@@ -1521,6 +1527,9 @@ fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
 
     for (frontend, tpl, package) in [
         (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/ssr.ts.tpl",
+            "@inertiajs/svelte",
         ),
         (
             "vue",
@@ -1529,12 +1538,35 @@ fn every_frontend_ships_an_ssr_entry_that_calls_create_server() {
         ),
     ] {
         let body = read(tpl);
+        let code = code_only(&body);
+        // Top level means unindented: the call inside a `createServer`
+        // callback is indented and is not the statement the plugin wraps.
+        if body
+            .lines()
+            .any(|line| line.starts_with("createInertiaApp("))
+        {
+            let config = code_only(&read(&format!(
+                "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
+            )));
+            assert!(
+                config.contains("import inertia from '@inertiajs/vite'")
+                    && config.contains("inertia("),
+                "{frontend}'s ssr entry leaves createServer to the Inertia Vite plugin, \
+                 so its vite.config.ts must run the plugin; got:\n{config}"
+            );
+            assert!(
+                !code.contains("createServer"),
+                "{frontend}'s ssr entry calls createServer beside the plugin, which adds \
+                 its own; got:\n{body}"
+            );
+            continue;
+        }
         assert!(
-            body.contains("createServer"),
+            code.contains("createServer"),
             "{frontend}'s ssr entry must call createServer() from {package}/server; got:\n{body}"
         );
         assert!(
-            body.contains(&format!("{package}/server")),
+            code.contains(&format!("{package}/server")),
             "{frontend}'s ssr entry must import createServer from its own @inertiajs package"
         );
     }
@@ -1868,13 +1900,14 @@ fn the_starter_inertia_props_match_the_starter_controllers() {
         suprnova_cli::commands::generate_types::PageTypes::default(),
     );
 
-    // The react kit types the notes pages and the flash toast of the kit
-    // contract, whose handlers this branch's controller templates do not
-    // have yet; `kit_pages.rs`'s
-    // `kit_react_types_are_what_generate_types_writes_for_the_kit_contract`
-    // holds it to the generator's output for them instead.
     for (frontend, shipped) in [
         (
+            "svelte",
+            suprnova_cli::templates::svelte::inertia_props_types(),
+        ),
+        (
+            "react",
+            suprnova_cli::templates::react::inertia_props_types(),
         ),
         ("vue", suprnova_cli::templates::vue::inertia_props_types()),
     ] {
@@ -1935,13 +1968,13 @@ fn scaffold_auth_pages_take_validation_errors_from_the_form_not_from_props() {
             "vue",
             "Login",
             suprnova_cli::templates::vue::login_page(),
-            "form.errors.",
+            "v-slot=\"{ errors, processing }\"",
         ),
         (
             "vue",
             "Register",
             suprnova_cli::templates::vue::register_page(),
-            "form.errors.",
+            "v-slot=\"{ errors, processing }\"",
         ),
     ] {
         assert!(
@@ -2415,8 +2448,8 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
         });
     }
     assert_eq!(
-        pages, 25,
-        "nine pages each for svelte and react (with Notes/Index and Notes/Show), seven for vue"
+        pages, 27,
+        "nine pages for each of the three kits, Notes/Index and Notes/Show among them"
     );
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
@@ -2648,9 +2681,8 @@ fn intt_no_kit_page_types_root_by_hand() {
         "these kit pages pass usePage a type argument: {offenders:?}"
     );
     assert_eq!(
-        readers, 25,
-        "the pages of each kit that build URLs (nine in svelte and react, seven in vue) read \
-         `root` through usePage()"
+        readers, 27,
+        "the nine pages of each kit that build URLs read `root` through usePage()"
     );
 }
 

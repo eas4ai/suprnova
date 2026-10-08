@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useForm, usePage } from '@inertiajs/vue3'
+import { Form, Head, Link, usePage } from '@inertiajs/vue3'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -9,28 +8,15 @@ import { useForm, usePage } from '@inertiajs/vue3'
 // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
 const { root } = usePage().props
 
-const form = useForm({
-  email: '',
-})
-
-// The server answers every address the same way, so "sent" is a fact
-// about this submission, not about the account.
-const sent = ref(false)
-
-function submit() {
-  form.post(`${root}/forgot-password`, {
-    onSuccess: () => {
-      sent.value = true
-    },
-  })
-}
+// The server answers every address the same way and says so in the toast
+// it flashes, so the page shows nothing of its own about the account.
 </script>
 
 <template>
-  <div
-    class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
-  >
-    <div class="max-w-md w-full space-y-8">
+  <Head title="Reset your password" />
+
+  <div class="flex items-center justify-center px-4 py-12 sm:px-6 lg:px-8">
+    <div class="w-full max-w-md space-y-8">
       <div>
         <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
           Reset your password
@@ -41,44 +27,44 @@ function submit() {
         </p>
       </div>
 
-      <p v-if="sent" role="status" class="text-center text-sm text-green-700">
-        If that address belongs to a verified account, a reset link is on its way.
-      </p>
-
-      <form class="mt-8 space-y-6" @submit.prevent="submit">
+      <Form
+        :action="`${root}/forgot-password`"
+        method="post"
+        v-slot="{ errors, processing }"
+        class="mt-8 space-y-6"
+      >
         <div>
           <label for="email" class="sr-only">Email address</label>
           <input
             id="email"
-            v-model="form.email"
             name="email"
             type="email"
             autocomplete="email"
             required
-            class="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+            class="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
             placeholder="Email address"
           />
-          <p v-if="form.errors.email" class="mt-1 text-sm text-red-600">
-            {{ form.errors.email }}
+          <p v-if="errors.email" class="mt-1 text-sm text-red-600">
+            {{ errors.email }}
           </p>
         </div>
 
         <div>
           <button
             type="submit"
-            :disabled="form.processing"
-            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            :disabled="processing"
+            class="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
           >
-            {{ form.processing ? 'Sending...' : 'Send reset link' }}
+            {{ processing ? 'Sending...' : 'Send reset link' }}
           </button>
         </div>
 
         <div class="text-center">
-          <a :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
+          <Link :href="`${root}/login`" class="text-indigo-600 hover:text-indigo-500">
             Back to sign in
-          </a>
+          </Link>
         </div>
-      </form>
+      </Form>
     </div>
   </div>
 </template>

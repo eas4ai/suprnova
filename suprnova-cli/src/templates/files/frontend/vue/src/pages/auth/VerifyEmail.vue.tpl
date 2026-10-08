@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useForm, usePage } from '@inertiajs/vue3'
+import { Form, Head, Link, usePage } from '@inertiajs/vue3'
 import type { VerifyEmailProps } from '../../types/inertia-props'
 
 // The public root the server shares with every page (`RootShare`): empty
@@ -10,25 +9,16 @@ import type { VerifyEmailProps } from '../../types/inertia-props'
 // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
 const { root } = usePage().props
 
+// The resend answers with a toast the server flashes, so this page keeps
+// no "sent" state of its own.
 defineProps<VerifyEmailProps>()
-
-const form = useForm({})
-const sent = ref(false)
-
-function resend() {
-  form.post(`${root}/email/verification-notification`, {
-    onSuccess: () => {
-      sent.value = true
-    },
-  })
-}
 </script>
 
 <template>
-  <div
-    class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8"
-  >
-    <div class="max-w-md w-full space-y-8">
+  <Head title="Verify your email address" />
+
+  <div class="flex items-center justify-center px-4 py-12 sm:px-6 lg:px-8">
+    <div class="w-full max-w-md space-y-8">
       <div>
         <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">
           Verify your email address
@@ -39,27 +29,28 @@ function resend() {
         </p>
       </div>
 
-      <p v-if="sent" role="status" class="text-center text-sm text-green-700">
-        A new link has been sent.
-      </p>
-
-      <form class="mt-8 space-y-6" @submit.prevent="resend">
+      <Form
+        :action="`${root}/email/verification-notification`"
+        method="post"
+        v-slot="{ processing }"
+        class="mt-8 space-y-6"
+      >
         <div>
           <button
             type="submit"
-            :disabled="form.processing"
-            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            :disabled="processing"
+            class="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
           >
-            {{ form.processing ? 'Sending...' : 'Resend verification link' }}
+            {{ processing ? 'Sending...' : 'Resend verification link' }}
           </button>
         </div>
+      </Form>
 
-        <div class="text-center">
-          <a :href="`${root}/dashboard`" class="text-indigo-600 hover:text-indigo-500">
-            Continue to your dashboard
-          </a>
-        </div>
-      </form>
+      <div class="text-center text-sm">
+        <Link :href="`${root}/dashboard`" class="text-indigo-600 hover:text-indigo-500">
+          Continue to your dashboard
+        </Link>
+      </div>
     </div>
   </div>
 </template>

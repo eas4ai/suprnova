@@ -657,6 +657,58 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   3.8.0 client, and every citation names its 3.8.0 file and line; the
   frontend chapter and the CSRF chapter name 3.8.0, and the frontend
   chapter lists `@inertiajs/vite` (K01).
+- **The Vue kit runs on Inertia 3.8 and its Vite plugin.** The kit pinned
+  `@inertiajs/vue3` and `@inertiajs/core` at `^3.6.1`, found its pages
+  with a hand-written `import.meta.glob` in each entry, and passed
+  `createInertiaApp` no title, no server head and no nonce. It now declares
+  both packages and `@inertiajs/vite` at `^3.8.0`, and `vite.config.ts`
+  runs `inertia()`. Both entries name their pages with `pages: './pages'`.
+  The SSR entry is the `createInertiaApp(..)` statement the plugin wraps
+  with `createServer`, so `npm run build:ssr` still writes
+  `frontend/bootstrap/ssr/ssr.js`. Because the kit declares the plugin,
+  `suprnova serve` writes the hot file, and with SSR on, a first visit in
+  development renders through the dev server's `/__inertia_ssr` with no
+  worker running. The browser entry
+  passes a `title` callback that appends the application's name, the same
+  name the server's `default_title` uses, `serverHead: true`, and the
+  nonce from `<meta property="csp-nonce">` when the document has one.
+  `npm run check`, `npm run build` and `npm run build:ssr` pass on a fresh
+  scaffold (K01, K05, K18, K19).
+- **Vue kit pages navigate with `Link`, title themselves with `Head`, and
+  share two persistent layouts.** Every page drew its own frame, reached
+  other pages through `<a href>`, which reloads the whole document, and
+  left the tab untitled. The kit now ships `layouts/AppLayout.vue`
+  (navigation, the flash toast and a heading) and `layouts/GuestLayout.vue`
+  for the pages under `auth/`, applied through the `layout` option so a
+  layout stays mounted between two pages that share it. Both show
+  `components/AccountLinks.vue`, which reads the shared `auth.user`: the
+  name and a sign-out `Link` that posts as a button without keeping the
+  page's state, or the sign-in and register links for a guest, so the home
+  and error pages never offer a guest a sign-out. Every
+  application link is a `Link` built from `root`, every page sets its title
+  with `Head`, and the dashboard sets the layout's heading with
+  `setLayoutProps`, which the next page clears (K06, K07, K16).
+- **The Vue kit shows the flash toast.** The server's `page.flash` reached
+  no kit page, so a sign-in, a sign-out or a saved note gave no feedback.
+  `components/FlashToast.vue` renders `page.flash.toast`, typed by the
+  generated `flashDataType`, in both layouts, straight from the page, so it
+  shows once, on the page it was flashed for (K17).
+- **The Vue kit's dashboard and notes pages use Inertia's client features.**
+  The dashboard rendered one eager prop and the kit had no list page, so a
+  new application had nothing to copy for deferred, optional or scroll
+  props. `Dashboard.vue` now renders `stats` inside `Deferred` with a
+  fallback, polls it with `usePoll(10000, { only: ['stats'] })`, loads
+  `recent_notes` with `WhenVisible` when it scrolls into view, and saves the
+  display name through `useHttp` with an optimistic update that a `422`
+  reverts while showing `errors.name`; a saved name reloads the shared
+  `auth` prop, so the layout shows it. The new `Notes/Index.vue` creates a
+  note with `Form`, remembers its search with `useRemember`, lists the
+  signed-in user's notes with `InfiniteScroll`, and opens one as an
+  instant visit to the new `Notes/Show.vue` from a prefetching `Link`
+  whose page props keep the shared props, `root` among them. The
+  five auth pages submit through `Form` in place of `useForm`, read
+  `errors` and `processing` from its slot, and keep the sign-in page's
+  remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
 

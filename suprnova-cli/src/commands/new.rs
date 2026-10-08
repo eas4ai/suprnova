@@ -327,22 +327,6 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The project's display title, from its directory name: `my-shop` and
-/// `my_shop` both become `My Shop`. The scaffold names the application with
-/// it in `bootstrap.rs`'s default title and in the kits' tab titles.
-pub(crate) fn to_title_case(s: &str) -> String {
-    s.replace(['-', '_'], " ")
-        .split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 fn create_api_project(
     project_name: &str,
@@ -617,7 +601,7 @@ pub(crate) fn create_project(
     .map_err(|e| format!("Failed to write src/middleware/authenticate.rs: {}", e))?;
 
     // Write src/bootstrap.rs, titled after the project
-    let title = to_title_case(project_name);
+    let title = templates::project_title(project_name);
     fs::write(
         project_path.join("src/bootstrap.rs"),
         templates::bootstrap(frontend, &title),
