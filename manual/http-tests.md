@@ -525,14 +525,12 @@ AssertableInertia::from_response(&response)
 ```
 
 `version()` checks the page's asset version. The default resolver
-hashes the Vite manifest and falls back to `MANIFEST_VERSION_FALLBACK`
-when no manifest exists yet - assert against that constant rather than
-a hardcoded `"1.0"` in a test that hasn't built a frontend:
+hashes the configured asset URL or the Vite manifest, and the version is
+the empty string when neither exists, as in a test that hasn't built a
+frontend:
 
 ```rust
-use suprnova::MANIFEST_VERSION_FALLBACK;
-
-response.assert_inertia().version(MANIFEST_VERSION_FALLBACK);
+response.assert_inertia().version("");
 ```
 
 `has_flash(key, expected)` reads the page's flash data the same

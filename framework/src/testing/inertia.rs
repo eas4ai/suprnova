@@ -246,10 +246,9 @@ impl AssertableInertia {
     }
 
     /// Assert the page's asset `version`. The default resolver hashes
-    /// the Vite manifest, or falls back to
-    /// [`crate::MANIFEST_VERSION_FALLBACK`] when none exists yet - pass
-    /// that constant rather than hardcoding `"1.0"` in a test that
-    /// hasn't built a frontend.
+    /// the configured asset URL or the Vite manifest, and the version is
+    /// the empty string when neither exists, as in a test that hasn't
+    /// built a frontend.
     pub fn version(&self, expected: &str) -> &Self {
         if self.version != expected {
             self.fail(format!(

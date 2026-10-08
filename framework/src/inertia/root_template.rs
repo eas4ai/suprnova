@@ -316,27 +316,37 @@ impl askama::filters::HtmlSafe for InertiaRootHead<'_> {}
 impl askama::filters::HtmlSafe for InertiaRootBody<'_> {}
 
 /// Writes page JSON into a template's output with every `/` written as
-/// `\/`, so a `</script>` inside a string cannot close the page data
-/// element, the escaping the framework's own document applies.
+/// `\/` and `<` and `>` as `\u003c` and `\u003e`, the escaping the
+/// framework's own document applies: `/` keeps a `</script>` inside a
+/// string from closing the page data element, and `<` and `>` keep a
+/// `<!--` or a `<script` from putting the HTML tokenizer into the escaped
+/// script states, where the real end tag no longer closes it (Laravel's
+/// `JSON_HEX_TAG`).
 ///
 /// `serde_json` writes whole UTF-8 fragments (a string's text between the
-/// characters it escapes, or ASCII), and the split at `/` keeps them
-/// whole, so each write is valid text. A write that was not would fail
-/// the render rather than write something else.
+/// characters it escapes, or ASCII), and the three characters are ASCII,
+/// so the split keeps every fragment valid text. A write that was not
+/// would fail the render rather than write something else.
 struct EscapedPageJson<'f, 'b>(&'f mut fmt::Formatter<'b>);
 
 impl std::io::Write for EscapedPageJson<'_, '_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let text = std::str::from_utf8(bytes)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let mut parts = text.split('/');
-        if let Some(first) = parts.next() {
-            self.0.write_str(first).map_err(std::io::Error::other)?;
+        let mut rest = text;
+        while let Some(at) = rest.find(['/', '<', '>']) {
+            let escape = match rest.as_bytes()[at] {
+                b'<' => "\\u003c",
+                b'>' => "\\u003e",
+                _ => "\\/",
+            };
+            self.0
+                .write_str(&rest[..at])
+                .map_err(std::io::Error::other)?;
+            self.0.write_str(escape).map_err(std::io::Error::other)?;
+            rest = &rest[at + 1..];
         }
-        for part in parts {
-            self.0.write_str("\\/").map_err(std::io::Error::other)?;
-            self.0.write_str(part).map_err(std::io::Error::other)?;
-        }
+        self.0.write_str(rest).map_err(std::io::Error::other)?;
         Ok(bytes.len())
     }
 

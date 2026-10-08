@@ -61,7 +61,7 @@ async fn pfx_005_the_page_url_and_the_version_409_carry_the_root() {
     assert_eq!(conflict.status, 409);
     assert_eq!(
         conflict.header("x-inertia-location").as_deref(),
-        Some("/billing/versioned?sort=name")
+        Some("http://app.test/billing/versioned?sort=name")
     );
 
     let at_host_root = support::get(address, "/page?sort=name", &[("x-inertia", "true")]).await;

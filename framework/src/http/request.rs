@@ -646,11 +646,18 @@ impl Request {
         self.header("content-type")
     }
 
-    /// Check if this is an Inertia XHR request
+    /// Whether this request is an Inertia visit: its `X-Inertia` header
+    /// holds any value but an empty one or `0`.
+    ///
+    /// That is how PHP casts a string to a boolean, and Laravel's
+    /// `Request::inertia()` is that cast, so a client sending `X-Inertia: 1`
+    /// gets the JSON page object from both. The value is read as bytes, as
+    /// PHP reads it, so a header that is not visible ASCII still counts.
     pub fn is_inertia(&self) -> bool {
-        self.header("X-Inertia")
-            .map(|v| v == "true")
-            .unwrap_or(false)
+        self.parts
+            .headers
+            .get("X-Inertia")
+            .is_some_and(|value| crate::inertia::header_is_truthy(value.as_bytes()))
     }
 
     /// Get all cookies from the request

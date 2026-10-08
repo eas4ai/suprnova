@@ -35,11 +35,12 @@ pub trait InertiaRequestExt: Send + Sync {
     }
     /// Look up an HTTP header value by name (case-insensitive per HTTP spec).
     fn header(&self, name: &str) -> Option<&str>;
-    /// Whether this request originated from the Inertia client (`X-Inertia: true`).
+    /// Whether this request is an Inertia visit: `X-Inertia` holds any
+    /// value but an empty one or `0`, as PHP's boolean cast reads it and
+    /// Laravel's `Request::inertia()` does.
     fn is_inertia(&self) -> bool {
         self.header("X-Inertia")
-            .map(|v| v == "true")
-            .unwrap_or(false)
+            .is_some_and(|value| header_is_truthy(value.as_bytes()))
     }
     /// Whether this is a prefetch visit. The Inertia client sets
     /// `Purpose: prefetch` on hover/intent prefetches; handlers can
@@ -92,6 +93,16 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     fn is_prefetch(&self) -> bool {
         (**self).is_prefetch()
     }
+}
+
+/// PHP's boolean cast of a header value: every value but an empty one and
+/// `0` is true.
+///
+/// Laravel reads `X-Inertia` this way (`(bool) $request->header(...)`), so
+/// the request types here share the one rule rather than each comparing
+/// against `"true"`.
+pub(crate) fn header_is_truthy(value: &[u8]) -> bool {
+    !value.is_empty() && value != b"0"
 }
 
 /// Future returned by a prop resolver.
@@ -547,8 +558,8 @@ pub enum MergeMode {
 /// A prop's partial-reload visibility.
 ///
 /// One field rather than three booleans because the three are
-/// contradictory: a prop cannot both bypass partial filtering and
-/// require an explicit request. [`Prop::always`], [`Prop::optional`],
+/// contradictory: a prop cannot both bypass partial filtering and stay
+/// out of a standard visit. [`Prop::always`], [`Prop::optional`],
 /// and [`Prop::defer`] each set this, so the last one called wins and
 /// the earlier one is erased.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -561,8 +572,8 @@ pub enum Visibility {
     /// Included on every response, partial-reload filtering ignored.
     /// Maps to `Inertia::always(...)`.
     Always,
-    /// Never included on a standard visit; included only when the key
-    /// appears in `X-Inertia-Partial-Data`. Maps to
+    /// Never included on a standard visit; on a matching partial reload,
+    /// included whenever the only/except lists allow it. Maps to
     /// `Inertia::optional(...)`.
     Optional,
     /// Like [`Optional`](Self::Optional), and additionally announced
@@ -910,8 +921,9 @@ impl Prop {
         self
     }
 
-    /// Withhold this prop until the client asks for it by name in
-    /// `X-Inertia-Partial-Data`. Maps to `Inertia::optional(...)`.
+    /// Withhold this prop from a standard visit; a matching partial reload
+    /// resolves it whenever its key passes the only/except lists. Maps to
+    /// `Inertia::optional(...)`.
     ///
     /// Erases any earlier [`always`](Self::always) or
     /// [`defer`](Self::defer).
@@ -1536,7 +1548,8 @@ impl Prop {
 ///   takes precedence over the whitelist on conflicts.
 /// - Props flagged [`Visibility::Always`] bypass this filter.
 /// - Props flagged [`Visibility::Optional`] or [`Visibility::Deferred`]
-///   use the explicit-only predicate (must be in `only`).
+///   never ship on a standard visit, and follow the same only/except rule
+///   as every other prop on a matched partial reload.
 /// - The `errors` prop is always returned (handled by the caller).
 #[derive(Debug, Clone, Default)]
 pub struct PartialFilter {
@@ -1545,9 +1558,11 @@ pub struct PartialFilter {
     /// [`Visibility::Standard`] props, and [`Visibility::Optional`] /
     /// [`Visibility::Deferred`] props are excluded outright.
     pub matched: bool,
-    /// Whitelist of prop keys (parsed from `X-Inertia-Partial-Data`).
+    /// Whitelist of prop paths (parsed from `X-Inertia-Partial-Data`).
+    /// `None` when the header is absent or names nothing.
     pub only: Option<Vec<String>>,
-    /// Blacklist of prop keys (parsed from `X-Inertia-Partial-Except`).
+    /// Blacklist of prop paths (parsed from `X-Inertia-Partial-Except`).
+    /// `None` when the header is absent or names nothing.
     pub except: Option<Vec<String>>,
 }
 
@@ -1561,17 +1576,14 @@ impl PartialFilter {
             return Self::default();
         }
 
-        let parse_csv = |raw: &str| -> Vec<String> {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        };
-
         Self {
             matched: true,
-            only: req.header("X-Inertia-Partial-Data").map(parse_csv),
-            except: req.header("X-Inertia-Partial-Except").map(parse_csv),
+            only: req
+                .header("X-Inertia-Partial-Data")
+                .and_then(parse_header_list),
+            except: req
+                .header("X-Inertia-Partial-Except")
+                .and_then(parse_header_list),
         }
     }
 
@@ -1624,56 +1636,67 @@ impl PartialFilter {
         included
     }
 
-    /// Whether an Optional prop with `key` should be included.
+    /// Whether an Optional or Deferred prop with `key` should be included.
     ///
-    /// Per the v3 protocol, Optional props are **never** included on a
-    /// standard visit (or a partial reload targeting another component)
-    /// and **only** included on a matched partial reload when the key
-    /// appears in `X-Inertia-Partial-Data` and not in
-    /// `X-Inertia-Partial-Except`.
+    /// Never on a standard visit, or a partial reload targeting another
+    /// component. On a matched partial reload, whenever `key` passes the
+    /// `only` and `except` lists, the same rule
+    /// [`should_include_eager`](Self::should_include_eager) applies - a
+    /// reload with `X-Inertia-Partial-Except` alone, or with neither list,
+    /// included. That is Laravel's rule: `PropsResolver` skips its
+    /// first-load exclusion of `IgnoreFirstLoad` props on every partial
+    /// request and filters them by path like any other prop.
     ///
-    /// Dot-aware the same way
-    /// [`should_include_eager`](Self::should_include_eager) is:
-    /// `"permissions.read"` in `only` counts as an explicit request for
-    /// `"permissions"`, narrowed later by [`narrow`](Self::narrow) - this
-    /// is what lets a dotted request against a
-    /// `Defer`/`Optional` prop actually trigger its resolver. The
-    /// ancestor form works here too, so a lazily shared `auth.user`
-    /// still resolves under `only=auth`, and a bare `except` entry drops
-    /// every prop key beneath it.
+    /// Dot-aware the same way: `"permissions.read"` in `only` selects
+    /// `"permissions"`, and an ancestor entry selects a dotted prop key, so
+    /// a lazily shared `auth.user` still resolves under `only=auth`.
     pub fn should_include_optional(&self, key: &str) -> bool {
+        self.matched && self.should_include_eager(key)
+    }
+
+    /// Whether the prop at `key` carries its `merge` and `once`
+    /// instructions on this response.
+    ///
+    /// Always on a standard visit. On a matched partial reload, only when
+    /// `key` is, or descends from, an `only` entry (when there is an `only`
+    /// list) and neither is nor descends from an `except` entry - Laravel's
+    /// `PropsResolver::isIncludedInPartialMetadata`. An `only` entry deeper
+    /// than the prop (`items.data` for the prop `items`) still selects its
+    /// value, through [`should_include_eager`](Self::should_include_eager),
+    /// but carries no instruction, so the client replaces what it holds
+    /// with the whole prop instead of merging a slice it never asked to
+    /// merge.
+    pub fn should_include_metadata(&self, key: &str) -> bool {
         if !self.matched {
-            return false;
+            return true;
         }
         let in_only = match &self.only {
-            Some(list) => list.iter().any(|k| entry_selects_key(k, key)),
-            None => return false, // Optional requires explicit request
+            Some(list) => list
+                .iter()
+                .any(|entry| entry == key || dotted_ancestor(entry, key)),
+            None => true,
         };
-        if !in_only {
-            return false;
-        }
-        if let Some(except) = &self.except
-            && except.iter().any(|k| k == key || dotted_ancestor(k, key))
-        {
-            return false;
-        }
-        true
+        let in_except = self.except.as_ref().is_some_and(|list| {
+            list.iter()
+                .any(|entry| entry == key || dotted_ancestor(entry, key))
+        });
+        in_only && !in_except
     }
 
     /// Dispatch the per-prop inclusion predicate.
     ///
     /// Reads the prop's [`Visibility`] and nothing else: `Always`
-    /// bypasses the filter, `Optional` and `Deferred` require the key to
-    /// appear in `X-Inertia-Partial-Data`, and `Standard` follows the
-    /// only/except rules. The absent sentinel is never included.
+    /// bypasses the filter, `Optional` and `Deferred` follow the
+    /// only/except rules on a matched partial reload and are withheld
+    /// otherwise, and `Standard` follows the only/except rules. The absent
+    /// sentinel is never included.
     ///
     /// This answers "does the value ship". It deliberately does **not**
-    /// answer "does this prop's metadata ship" - merge, once, and
-    /// deferred metadata are gated by
-    /// [`should_include_eager`](Self::should_include_eager) alone, the
-    /// way Laravel gates them (`inertia-laravel-2.0.25/src/Response.php:553-560`),
-    /// so a deferred prop still carries its merge instruction on the
-    /// visit that skipped its value.
+    /// answer "does this prop's metadata ship" - merge and once
+    /// instructions are gated by
+    /// [`should_include_metadata`](Self::should_include_metadata), the way
+    /// Laravel gates them, so a deferred prop still carries its merge
+    /// instruction on the visit that skipped its value.
     pub fn should_include(&self, key: &str, prop: &Prop) -> bool {
         if prop.is_absent() {
             return false;
@@ -1685,39 +1708,35 @@ impl PartialFilter {
         }
     }
 
-    /// Narrow a resolved prop's value down to the nested paths named by
-    /// dot-notation entries in `only`/`except`, for the given top-level
-    /// `key`.
+    /// Narrow a literal prop value with the dotted entries of `only` and
+    /// `except`, for the prop at `key`, the way Laravel's `PropsResolver`
+    /// walks a literal array.
     ///
-    /// Laravel walks the dotted path *before* resolution, on the raw,
-    /// often-closure-backed prop bag
-    /// (`inertia-laravel-2.0.25/src/Response.php:273-297`,
-    /// `Arr::get`/`Arr::set`). Suprnova resolves every prop's value
-    /// first - necessarily, since resolvers are async - and narrows the
-    /// already-materialized [`Value`] afterward. The shape this produces
-    /// is exactly what `only=user.name` is documented to mean:
-    /// `{"user": {"name": ...}}`. The client reconstructs the full
-    /// object by deep-merging that slice onto whatever it already holds
-    /// for `user`
-    /// (`inertia-3.6.1/packages/core/src/response.ts:414-425`).
+    /// Each nested path is kept when it passes the lists: it is, descends
+    /// from, or leads to an `only` entry, and it neither is nor descends
+    /// from an `except` entry. Kept objects and lists are walked further;
+    /// a scalar a path reaches ships as it is. `only=user.name` against
+    /// `{"name": .., "email": ..}` gives `{"name": ..}`, and the client
+    /// deep-merges that slice onto the `user` it holds.
     ///
-    /// A path that doesn't resolve against `value` - an unknown field,
-    /// or one that drills through a scalar or an array instead of an
-    /// object - contributes nothing for that path and does not affect
-    /// any other requested path. This is a deliberate divergence from
-    /// Laravel's `Arr::get`, whose missing-key default is `null`: a
-    /// stray `null` here would overwrite a field the client's own
-    /// merge-on-top reconciliation already has cached, which is worse
-    /// than omitting it.
+    /// PHP shapes come along with the walk, since the client receives what
+    /// Laravel sends:
     ///
-    /// Only called for a key that has already passed
-    /// [`should_include`](Self::should_include) or
-    /// [`should_include_eager`](Self::should_include_eager) - this
-    /// method decides shape, not inclusion. The caller must not call it
-    /// for an `Always` prop: Laravel's `resolveAlways` re-injects an
-    /// `AlwaysProp`'s raw, unfiltered value
-    /// (`inertia-laravel-2.0.25/src/Response.php:406-416`), never
-    /// narrowed.
+    /// - A value that had children and kept none is `[]`, so an entry whose
+    ///   path resolves to nothing (`only=user.missing`) yields `[]`.
+    /// - A list is walked by index (`rows.0.id`). One that keeps a prefix
+    ///   of its items stays a list; one that keeps others is an object
+    ///   keyed by the original indexes (`{"1": ..}`), as `json_encode`
+    ///   writes an array whose keys no longer run from 0.
+    /// - A subtree the lists cannot touch is returned as it is.
+    ///
+    /// Only for literal values. A value that came from a resolver or from
+    /// a prop object (`optional`, `defer`, `merge`, `once`, `scroll`,
+    /// `always`) ships whole in Laravel, and the caller does not call this
+    /// for one; the one resolver it does call this for is a flag-free
+    /// resolver under a dotted key, which Laravel's `unpackDotProps` calls
+    /// before the walk. The method decides shape, not inclusion: `key`
+    /// itself has already passed [`should_include`](Self::should_include).
     ///
     /// Public alongside [`should_include_eager`](Self::should_include_eager)
     /// and [`should_include_optional`](Self::should_include_optional): a
@@ -1730,44 +1749,91 @@ impl PartialFilter {
         if !self.matched {
             return value;
         }
-
-        let mut narrowed = if let Some(list) = &self.only {
-            let mut bare = false;
-            let mut nested_paths: Vec<Vec<&str>> = Vec::new();
-            for entry in list {
-                // An exact match asks for the whole prop; so does an
-                // entry naming an ancestor of a dotted prop key
-                // (`only=auth` against the key `auth.user`) - the
-                // requested root contains this prop entire, so there is
-                // no nested path left to trim to.
-                if entry == key || dotted_ancestor(entry, key) {
-                    bare = true;
-                    break;
-                }
-                if let Some(rest) = dotted_child(entry, key) {
-                    nested_paths.push(rest.split('.').collect());
-                }
-            }
-            if bare || nested_paths.is_empty() {
-                value
-            } else {
-                narrow_to_paths(&value, &nested_paths)
-            }
-        } else {
-            value
-        };
-
-        if let Some(except) = &self.except {
-            for entry in except {
-                if let Some(rest) = dotted_child(entry, key) {
-                    let segments: Vec<&str> = rest.split('.').collect();
-                    remove_path(&mut narrowed, &segments);
-                }
-            }
-        }
-
-        narrowed
+        self.narrow_at(key, value)
     }
+
+    /// One step of [`narrow`](Self::narrow): `value` sits at `path`.
+    fn narrow_at(&self, path: &str, value: Value) -> Value {
+        if self.passes_whole(path) {
+            return value;
+        }
+        match value {
+            Value::Object(map) => {
+                let had_children = !map.is_empty();
+                let mut kept = serde_json::Map::new();
+                for (child, nested) in map {
+                    let child_path = format!("{path}.{child}");
+                    if self.should_include_eager(&child_path) {
+                        let nested = self.narrow_at(&child_path, nested);
+                        kept.insert(child, nested);
+                    }
+                }
+                if had_children && kept.is_empty() {
+                    Value::Array(Vec::new())
+                } else {
+                    Value::Object(kept)
+                }
+            }
+            Value::Array(items) => {
+                let mut kept: Vec<(usize, Value)> = Vec::new();
+                for (index, nested) in items.into_iter().enumerate() {
+                    let child_path = format!("{path}.{index}");
+                    if self.should_include_eager(&child_path) {
+                        kept.push((index, self.narrow_at(&child_path, nested)));
+                    }
+                }
+                // Kept items that still run 0, 1, 2, ... are a list.
+                let still_a_list = kept
+                    .iter()
+                    .enumerate()
+                    .all(|(position, (index, _))| position == *index);
+                if still_a_list {
+                    Value::Array(kept.into_iter().map(|(_, nested)| nested).collect())
+                } else {
+                    Value::Object(
+                        kept.into_iter()
+                            .map(|(index, nested)| (index.to_string(), nested))
+                            .collect(),
+                    )
+                }
+            }
+            scalar => scalar,
+        }
+    }
+
+    /// True when the lists can drop nothing below `path`: `path` is, or
+    /// descends from, an `only` entry (or there is no `only` list), and no
+    /// `except` entry names a path below it. The walk returns such a
+    /// subtree untouched instead of rebuilding it.
+    fn passes_whole(&self, path: &str) -> bool {
+        let only_covers = match &self.only {
+            Some(list) => list
+                .iter()
+                .any(|entry| entry == path || dotted_ancestor(entry, path)),
+            None => true,
+        };
+        let except_below = self
+            .except
+            .as_ref()
+            .is_some_and(|list| list.iter().any(|entry| dotted_child(entry, path).is_some()));
+        only_covers && !except_below
+    }
+}
+
+/// Parse an Inertia list header the way Laravel's `PropsResolver::parseHeader`
+/// does: split on `,`, drop the empty segments, and keep every other segment
+/// as it is, spaces included. A header with no entry left counts as absent,
+/// so an empty `X-Inertia-Partial-Data` filters nothing instead of every
+/// prop. Laravel reads `X-Inertia-Partial-Data`, `X-Inertia-Partial-Except`,
+/// `X-Inertia-Reset` and `X-Inertia-Except-Once-Props` with it, and so does
+/// this adapter.
+pub(crate) fn parse_header_list(raw: &str) -> Option<Vec<String>> {
+    let entries: Vec<String> = raw
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// Add Laravel's `{path}.{match_on}` dedupe field for a path that
@@ -1811,96 +1877,6 @@ fn dotted_ancestor(entry: &str, key: &str) -> bool {
 /// [`PartialFilter::should_include_optional`] so the two never drift.
 fn entry_selects_key(entry: &str, key: &str) -> bool {
     entry == key || dotted_child(entry, key).is_some() || dotted_ancestor(entry, key)
-}
-
-/// Build a fresh JSON object containing only the requested nested
-/// `paths` out of `value`. A path that does not resolve - an unknown
-/// key, or a segment that walks into a scalar or an array rather than
-/// an object - contributes nothing and does not affect any other
-/// requested path.
-fn narrow_to_paths(value: &Value, paths: &[Vec<&str>]) -> Value {
-    let mut result = Value::Object(serde_json::Map::new());
-    for path in paths {
-        if let Some(found) = get_path(value, path) {
-            set_path(&mut result, path, found.clone());
-        }
-    }
-    result
-}
-
-/// Walk `path` through `value`'s object nesting, returning the value at
-/// the end. `None` the instant a segment is missing or the current
-/// value is not a JSON object - a dotted path into a scalar or an array
-/// has nothing to find, and is treated exactly like an unknown key.
-fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = value;
-    for segment in path {
-        current = current.as_object()?.get(*segment)?;
-    }
-    Some(current)
-}
-
-/// Write `leaf` into `target` at the nested `path`, creating
-/// intermediate objects as needed. Only ever called with a `target`
-/// that is (or becomes) an object at every level along `path` -
-/// [`narrow_to_paths`] always starts from an empty object, so there is
-/// never a pre-existing non-object value to reconcile with.
-///
-/// This module deliberately does **not** reuse [`super::dotted::arr_get`]
-/// for the walk that backs `set_path`/[`get_path`]/[`remove_path`], even
-/// though both are dot-notation walkers over `serde_json::Value`.
-/// `arr_get` checks for an *exact*, undotted key first
-/// (`object.get(key)` before ever splitting on `.`), mirroring Laravel's
-/// `Arr::get`'s `static::exists($array, $key)` short-circuit - correct at
-/// the *props-array* level, where a literal dotted key like
-/// `"user.name"` can legitimately be one whole top-level prop key rather
-/// than a path. `narrow` operates one level below that: inside an
-/// already-resolved prop's own JSON *value*, where the dotted `only`/
-/// `except` entry is always a path to walk, never a literal key to
-/// match first. Reusing `arr_get` here would silently import the wrong
-/// semantics - a value shaped like `{"a.b": 1}` would match on
-/// `only=["a.b"]` as an exact key instead of failing to resolve `a` then
-/// `b` as a path, which is what this task's dot-notation contract
-/// requires. If a future refactor is tempted to unify these two
-/// walkers, this is why they don't share one.
-fn set_path(target: &mut Value, path: &[&str], leaf: Value) {
-    match path.split_first() {
-        None => {}
-        Some((head, [])) => {
-            if let Some(obj) = target.as_object_mut() {
-                obj.insert((*head).to_string(), leaf);
-            }
-        }
-        Some((head, rest)) => {
-            if let Some(obj) = target.as_object_mut() {
-                let entry = obj
-                    .entry((*head).to_string())
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                set_path(entry, rest, leaf);
-            }
-        }
-    }
-}
-
-/// Delete the value at the nested `path` inside `target`, if present. A
-/// no-op when any intermediate segment is missing or is not an object -
-/// removing something that was never there is not an error.
-fn remove_path(target: &mut Value, path: &[&str]) {
-    match path.split_first() {
-        None => {}
-        Some((head, [])) => {
-            if let Some(obj) = target.as_object_mut() {
-                obj.remove(*head);
-            }
-        }
-        Some((head, rest)) => {
-            if let Some(obj) = target.as_object_mut()
-                && let Some(child) = obj.get_mut(*head)
-            {
-                remove_path(child, rest);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1969,15 +1945,22 @@ mod tests {
     }
 
     #[test]
-    fn optional_excluded_when_only_unset_on_partial() {
-        // Matched filter, no `only` list - optional must remain excluded
-        // because it requires explicit listing.
+    fn optional_included_on_a_partial_reload_without_lists() {
+        // Matched filter, no `only` list: the key passes, so Laravel
+        // resolves the prop.
         let filter = PartialFilter {
             matched: true,
             only: None,
             except: None,
         };
+        assert!(filter.should_include_optional("permissions"));
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["permissions".into()]),
+        };
         assert!(!filter.should_include_optional("permissions"));
+        assert!(filter.should_include_optional("other"));
     }
 
     #[test]
@@ -2022,7 +2005,7 @@ mod tests {
         assert!(!filter.should_include("nope", &eager));
         assert!(filter.should_include("wanted", &lazy));
         assert!(!filter.should_include("nope", &lazy));
-        // Optional and Deferred: explicit request only.
+        // Optional and Deferred: the only/except rules on a partial reload.
         assert!(filter.should_include("wanted", &optional));
         assert!(!filter.should_include("nope", &optional));
         assert!(filter.should_include("wanted", &deferred));
@@ -2473,7 +2456,8 @@ mod tests {
             except: Some(vec!["user.email".into()]),
         };
         let value = json!({"name": "a", "email": "b"});
-        assert_eq!(filter.narrow("user", value), json!({}));
+        // Nothing kept: PHP's empty array.
+        assert_eq!(filter.narrow("user", value), json!([]));
     }
 
     #[test]
@@ -2495,25 +2479,27 @@ mod tests {
     }
 
     #[test]
-    fn narrow_drops_a_path_that_walks_through_a_scalar_intermediate() {
+    fn narrow_keeps_a_scalar_a_deeper_path_runs_into() {
+        // `config.level` leads to `config.level.nested`, so the walk keeps
+        // it, and a scalar ships as it is.
         let filter = PartialFilter {
             matched: true,
             only: Some(vec!["config.level.nested".into(), "config.theme".into()]),
             except: None,
         };
         let value = json!({"theme": "dark", "level": 3});
-        assert_eq!(filter.narrow("config", value), json!({"theme": "dark"}));
+        assert_eq!(
+            filter.narrow("config", value),
+            json!({"theme": "dark", "level": 3})
+        );
     }
 
     // ---- T26 review follow-up: multi-segment recursion + prefix guard --
 
     #[test]
     fn narrow_builds_a_three_segment_nested_object_from_a_dotted_only_entry() {
-        // Pins the recursive arm of `set_path`/`get_path` beyond one
-        // nested level - every other `only` test in this module bottoms
-        // out after a single segment, so this is the only coverage for
-        // `Some((head, rest))` actually recursing instead of just
-        // terminating on `Some((head, []))`.
+        // Pins the walk's recursion beyond one nested level - every other
+        // `only` test in this module bottoms out after a single segment.
         let filter = PartialFilter {
             matched: true,
             only: Some(vec!["user.profile.city".into()]),
@@ -2528,8 +2514,8 @@ mod tests {
 
     #[test]
     fn narrow_removes_a_three_segment_nested_except_path_leaving_siblings() {
-        // The `except` counterpart: pins `remove_path`'s recursive arm
-        // beyond one nested level.
+        // The `except` counterpart: pins the walk's recursion beyond one
+        // nested level.
         let filter = PartialFilter {
             matched: true,
             only: None,

@@ -373,9 +373,10 @@ async fn merge_once_skips_the_resolver_when_the_client_holds_the_cache_key() {
         "the client claims the cache; the resolver must not run"
     );
     assert!(!page["props"].as_object().unwrap().contains_key("plans"));
-    // Both metadata blocks still ship: the client needs `onceProps` to
-    // restore the value and `mergeProps` to know how to fold it.
-    assert_eq!(names(&page, "mergeProps"), vec!["plans".to_string()]);
+    // Only the once instruction ships, as Laravel's
+    // `excludeAlreadyLoadedProp` collects it alone: the client restores
+    // the value from `onceProps`, and no new value arrives to merge.
+    assert!(names(&page, "mergeProps").is_empty(), "got {page}");
     assert_eq!(page["onceProps"]["plans"]["prop"], "plans");
 }
 
@@ -687,11 +688,11 @@ async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_val
     // `currentPage.get().scrollProps?.[propName]`
     // (`inertia-3.6.1/packages/core/src/infiniteScroll/data.ts:38`). Drop
     // the entry on the visit where `once` short-circuits the resolver and
-    // infinite scroll silently stops after the first navigation. Laravel
-    // keeps it: `resolveScrollProps` narrows by `only`/`except` and by the
-    // deferred-on-a-fresh-visit rejection alone, with no `once` rejection
-    // anywhere in `getMergePropsForRequest` (`Response.php:553-560`,
-    // `:700-718`).
+    // infinite scroll silently stops after the first navigation. A
+    // Suprnova-only composition (Laravel's `ScrollProp` is not `Onceable`),
+    // so the cursor rule is ours: it stays. The merge instruction follows
+    // Laravel's rule for a held once prop, which keeps the once
+    // instruction alone (PAR-047).
     let calls = Arc::new(AtomicUsize::new(0));
     let req = MockReq::new("/users")
         .inertia()
@@ -721,10 +722,9 @@ async fn scroll_once_keeps_its_scroll_props_when_the_client_holds_the_cached_val
         "a cached once+scroll prop must still ship its cursor; got {page}"
     );
     assert_eq!(page["scrollProps"]["users"]["reset"], false);
-    assert_eq!(
-        names(&page, "mergeProps"),
-        vec!["users.data".to_string()],
-        "the client needs the merge instruction to fold the restored value; got {page}"
+    assert!(
+        names(&page, "mergeProps").is_empty(),
+        "a held once prop carries its once instruction and no merge instruction; got {page}"
     );
 }
 
@@ -852,10 +852,10 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
 
     // Visit 2 - a matched partial carrying only `X-Inertia-Partial-Except`,
     // naming a different key. `passes_lists` is true (no `only` list to
-    // fail, and `except` names something else), so the metadata ships;
-    // `should_include_optional` still returns false without an explicit
-    // `only` entry, so the value does not. This is the third of the three
-    // gating divergences the scroll block was hoisted to fix.
+    // fail, and `except` names something else), so the metadata ships, and
+    // the value resolves too: an optional prop resolves on any partial
+    // reload whose lists it passes, as Laravel's `IgnoreFirstLoad` props
+    // do (PAR-047).
     let calls = Arc::new(AtomicUsize::new(0));
     let req = MockReq::new("/feed")
         .inertia()
@@ -875,10 +875,11 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
         .unwrap();
     let page = page_of(resp).await;
 
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(
-        !page["props"].as_object().unwrap().contains_key("items"),
-        "an except-only partial is not an explicit request for an optional prop; got {page}"
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        page["props"]["items"],
+        json!({ "data": [{ "id": 1 }] }),
+        "an except-only partial resolves an optional prop it does not except; got {page}"
     );
     assert_eq!(
         names(&page, "mergeProps"),

@@ -127,6 +127,10 @@ pub struct InertiaResponse {
     /// session-flash mechanism mirroring Laravel's
     /// `redirect()->preserveFragment()` chainable.
     preserve_fragment: Option<bool>,
+    /// Per-response override for big-integer markers. `None` defers to
+    /// [`InertiaConfig::preserve_big_integers`]. Maps to Laravel's
+    /// `Response::preserveBigIntegers($bool)`.
+    preserve_big_integers: Option<bool>,
     /// Sidecar map for props registered via `prop_lazy_with_owner`.
     /// Maps the prop key to `(owner_struct_name, field_name)` so
     /// `resolve_props` can run `Prop::passes_include_gate` ahead of the
@@ -300,6 +304,7 @@ impl InertiaResponse {
             encrypt_history: None,
             clear_history: false,
             preserve_fragment: None,
+            preserve_big_integers: None,
             lazy_owned: IndexMap::new(),
             providers: Vec::new(),
             view_data: super::root_template::InertiaViewData::default(),
@@ -595,9 +600,9 @@ impl InertiaResponse {
         }
     }
 
-    /// Attach an optional prop. Never included on standard visits;
-    /// included only when explicitly requested via `X-Inertia-Partial-Data`
-    /// on a matching partial reload. Maps to `Inertia::optional(...)`.
+    /// Attach an optional prop. Never included on standard visits; on a
+    /// matching partial reload, included whenever its key passes the
+    /// only/except lists. Maps to `Inertia::optional(...)`.
     pub fn optional<F, Fut, V>(mut self, key: impl Into<String>, resolver: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -1078,6 +1083,17 @@ impl InertiaResponse {
         self
     }
 
+    /// Send every integer beyond JavaScript's safe range (plus or minus
+    /// 9007199254740991) in props and flash as `{"$bigint": "<digits>"}`,
+    /// with `preserveBigIntegers: true` on the page, so the client restores
+    /// it as an exact `BigInt`; `false` sends plain numbers. Overrides
+    /// [`InertiaConfig::preserve_big_integers`] for this response. Maps to
+    /// Laravel's `Response::preserveBigIntegers($bool)`.
+    pub fn preserve_big_integers(mut self, on: bool) -> Self {
+        self.preserve_big_integers = Some(on);
+        self
+    }
+
     /// Build a `409 Conflict` external-redirect response. The client
     /// performs `window.location = url`, doing a full page navigation
     /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
@@ -1223,6 +1239,7 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            preserve_big_integers,
             lazy_owned,
             providers,
             view_data,
@@ -1348,7 +1365,7 @@ impl InertiaResponse {
             Vec::new()
         };
 
-        let (materialized, metadata) = resolve_props(
+        let (mut materialized, metadata) = resolve_props(
             merged,
             &filter,
             &except_once,
@@ -1379,6 +1396,15 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
+        // Big-integer markers go on the finished props and flash, the
+        // values Laravel's `encodeBigIntegersWhenEnabled` sees.
+        let resolved_preserve_big_integers =
+            preserve_big_integers.unwrap_or(config.preserve_big_integers);
+        if resolved_preserve_big_integers {
+            encode_big_integers_in(&mut materialized);
+            encode_big_integers_in(&mut flash);
+        }
+
         let page = build_page_object(
             &component,
             ResolvedProps {
@@ -1392,12 +1418,13 @@ impl InertiaResponse {
                 encrypt_history: resolved_encrypt_history,
                 clear_history: resolved_clear_history,
                 preserve_fragment: resolved_preserve_fragment,
+                preserve_big_integers: resolved_preserve_big_integers,
             },
             shared_keys,
         );
 
         let response = if is_inertia_request {
-            build_json_response(&page)
+            build_json_response(&page)?
         } else {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
@@ -1411,7 +1438,7 @@ impl InertiaResponse {
                     ssr_result.as_ref(),
                     &view_data,
                 )?,
-                None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref()),
+                None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())?,
             }
         };
         staged_session.commit();
@@ -1436,11 +1463,12 @@ impl InertiaResponse {
             encrypt_history,
             clear_history,
             preserve_fragment,
+            preserve_big_integers,
             lazy_owned,
             providers: _,
             view_data: _,
         } = self;
-        let (materialized, metadata) = resolve_props(
+        let (mut materialized, metadata) = resolve_props(
             props,
             filter,
             &[],
@@ -1480,6 +1508,13 @@ impl InertiaResponse {
             flash.insert(k, v);
         }
 
+        let resolved_preserve_big_integers =
+            preserve_big_integers.unwrap_or(config.preserve_big_integers);
+        if resolved_preserve_big_integers {
+            encode_big_integers_in(&mut materialized);
+            encode_big_integers_in(&mut flash);
+        }
+
         let page = build_page_object(
             &component,
             ResolvedProps {
@@ -1493,6 +1528,7 @@ impl InertiaResponse {
                 encrypt_history: resolved_encrypt_history,
                 clear_history: resolved_clear_history,
                 preserve_fragment: resolved_preserve_fragment,
+                preserve_big_integers: resolved_preserve_big_integers,
             },
             shared_keys,
         );
@@ -1502,10 +1538,16 @@ impl InertiaResponse {
 
     /// Build a `409 Conflict` response indicating an asset version mismatch.
     /// The client follows `X-Inertia-Location` for a fresh full-page visit.
+    ///
+    /// `X-Inertia-Version` carries the current version,
+    /// [`Inertia::get_version`](crate::Inertia::get_version), as the version
+    /// middleware's 409 does: the client reads it so a poll or a background
+    /// prop load does not force a full reload after a deploy.
     pub fn version_conflict(new_url: &str) -> HttpResponse {
         HttpResponse::new()
             .status(409)
             .header("X-Inertia-Location", new_url)
+            .header("X-Inertia-Version", crate::Inertia::get_version())
     }
 }
 
@@ -1566,6 +1608,9 @@ struct PageObjectFlags {
     clear_history: bool,
     /// Emitted as `preserveFragment: true` when set, and omitted otherwise.
     preserve_fragment: bool,
+    /// Emitted as `preserveBigIntegers: true` when set, and omitted
+    /// otherwise; the props and flash then carry `$bigint` markers.
+    preserve_big_integers: bool,
 }
 
 /// Outcome of a single prop's async resolution.
@@ -1591,15 +1636,14 @@ enum TaskOutcome {
     },
 }
 
-/// Parse a CSV header into a deduped list of trimmed, non-empty values.
+/// Parse an Inertia list header (`X-Inertia-Reset`,
+/// `X-Inertia-Except-Once-Props`) by the rule every Inertia list header
+/// follows: split on `,`, empty segments dropped, nothing trimmed, as
+/// Laravel's `PropsResolver::parseHeader` reads it. Empty when the header
+/// is absent or names nothing.
 fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
     req.header(name)
-        .map(|raw| {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
+        .and_then(super::prop::parse_header_list)
         .unwrap_or_default()
 }
 
@@ -1783,13 +1827,16 @@ async fn resolve_props(
             continue;
         }
 
-        // The metadata gate. Laravel computes every metadata block from
-        // the *unfiltered* prop bag and narrows it with the only/except
-        // lists alone (`inertia-laravel-2.0.25/src/Response.php:553-560`,
-        // `:725-736`), never asking whether the prop resolved. That is
-        // what lets a deferred prop carry its merge instruction on the
-        // very visit that withheld its value.
+        // The metadata gates. Laravel decides a prop's metadata from the
+        // only/except lists, never from whether its value resolved, which
+        // is what lets a deferred prop carry its merge instruction on the
+        // very visit that withheld its value. `passes_lists` is the path
+        // rule a value passes (the key is, descends from, or leads to an
+        // `only` entry); `carries_instructions` is the stricter rule its
+        // `merge` and `once` instructions pass (an `only` entry is the key
+        // or an ancestor), Laravel's `isIncludedInPartialMetadata`.
         let passes_lists = filter.should_include_eager(&key);
+        let carries_instructions = filter.should_include_metadata(&key);
 
         // ---- once ----
         let mut client_has_cached = false;
@@ -1805,7 +1852,7 @@ async fn resolve_props(
             };
             client_has_cached =
                 !prop.is_fresh() && !server_expired && except_once.iter().any(|k| k == &cache_key);
-            if passes_lists {
+            if carries_instructions {
                 metadata.once.insert(
                     cache_key,
                     OnceMetadataEntry {
@@ -1815,6 +1862,13 @@ async fn resolve_props(
                 );
             }
         }
+
+        // A once prop the client already holds, and that is not deferred,
+        // keeps its `onceProps` entry and nothing else: Laravel excludes it
+        // through `excludeAlreadyLoadedProp`, which collects the once
+        // instruction alone. A deferred one goes through the
+        // `IgnoreFirstLoad` branch first and keeps its merge instruction.
+        let held_once = client_has_cached && !prop.is_defer();
 
         // ---- merge ----
         //
@@ -1826,7 +1880,8 @@ async fn resolve_props(
         // appending.
         if !prop.is_scroll()
             && let Some(mode) = prop.merge_mode()
-            && passes_lists
+            && carries_instructions
+            && !held_once
             && !reset_keys.iter().any(|k| k == &key)
         {
             for field in prop.match_on_fields() {
@@ -1859,8 +1914,8 @@ async fn resolve_props(
         // `posts` is `posts.data.id`, which the client matches against the
         // `posts.data` merge path.
         //
-        // Gate: `passes_lists`, as for the once and merge blocks above,
-        // and placed above the `continue`s below for the same reason: the
+        // Gate: the lists, as for the once and merge blocks above, and
+        // placed above the `continue`s below for the same reason: the
         // instructions follow the only/except lists, not whether the value
         // resolved. An `Always` scroll prop outside the requested set still
         // ships its value but no merge instruction, or the client would
@@ -1870,11 +1925,17 @@ async fn resolve_props(
         // its entry is recorded when the value resolves (`scroll_entry`
         // carries the `reset` flag there) and not on a visit that
         // withholds the value.
+        //
+        // The merge instruction passes the stricter `carries_instructions`
+        // gate and the held-once rule, like every other merge instruction;
+        // the `scrollProps` entry, the cursor, needs `passes_lists` alone,
+        // as Laravel collects a scroll prop's cursor for every scroll prop
+        // it resolves.
         let mut scroll_entry: Option<bool> = None;
         if passes_lists && prop.is_scroll() {
             let is_reset = reset_keys.iter().any(|k| k == &key);
             let announced_only = prop.is_defer() && !filter.matched;
-            if !is_reset {
+            if !is_reset && carries_instructions && !held_once {
                 for field in prop.match_on_fields() {
                     metadata.match_props_on.push(format!("{key}.{field}"));
                 }
@@ -1968,14 +2029,13 @@ async fn resolve_props(
 
         // ---- value ----
         let rescue = prop.is_defer() && prop.rescues();
-        // `Always` bypasses partial-reload filtering entirely - dot
-        // notation included. Laravel re-injects the raw, unfiltered
-        // `AlwaysProp` value after the only/except rebuild rather than
-        // narrowing it (`inertia-laravel-2.0.25/src/Response.php:406-416`,
-        // `resolveAlways`), so an always-visible prop must reach the
-        // client whole even when the request's `X-Inertia-Partial-Data`
-        // names a nested path inside it.
-        let narrow_value = prop.visibility() != Visibility::Always && !is_errors_bag;
+        // Dotted `only`/`except` entries narrow literal values only. A
+        // value that came from a resolver or a prop object - `always`
+        // included, whatever the request names inside it - ships whole,
+        // as Laravel's `PropsResolver::resolveProps` stops filtering below
+        // a value that was not a literal array. The errors bag is never
+        // narrowed either.
+        let narrow_value = !is_errors_bag && narrows_as_literal(&key, &prop);
         registered.push(key.clone());
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
@@ -2245,6 +2305,58 @@ fn rescued_outcome(key: String, e: FrameworkError) -> TaskOutcome {
     TaskOutcome::Rescued { key }
 }
 
+/// The largest integer JavaScript represents exactly, `2^53 - 1`.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Replace every integer in `values` beyond plus or minus
+/// [`MAX_SAFE_INTEGER`], at any depth, with `{"$bigint": "<digits>"}`, the
+/// marker the Inertia client restores as a `BigInt`. Laravel's
+/// `PreservesBigIntegers::encodeBigIntegers`. Floats are not integers and
+/// stay as they are, as do object keys.
+fn encode_big_integers_in(values: &mut serde_json::Map<String, Value>) {
+    for value in values.values_mut() {
+        encode_big_integers(value);
+    }
+}
+
+/// [`encode_big_integers_in`] for one value, in place.
+fn encode_big_integers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            let beyond = match (number.as_u64(), number.as_i64()) {
+                (Some(unsigned), _) => unsigned > MAX_SAFE_INTEGER,
+                (None, Some(signed)) => signed.unsigned_abs() > MAX_SAFE_INTEGER,
+                (None, None) => false,
+            };
+            if beyond {
+                let mut marker = serde_json::Map::with_capacity(1);
+                marker.insert("$bigint".to_string(), Value::String(number.to_string()));
+                *value = Value::Object(marker);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(encode_big_integers),
+        Value::Object(map) => map.values_mut().for_each(encode_big_integers),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+/// Whether Laravel's resolver would walk this prop's value as a literal,
+/// so dotted `only`/`except` entries narrow it.
+///
+/// A flag-free prop with a materialized value is a literal array in
+/// Laravel's terms. Every flag makes it a prop object (`AlwaysProp`,
+/// `OptionalProp`, `DeferProp`, `MergeProp`, `OnceProp`, `ScrollProp`),
+/// whose resolved value ships whole. A flag-free resolver ships whole too,
+/// except under a dotted key: Laravel's `unpackDotProps` calls a dotted
+/// key's closure before the walk, which leaves its value a literal.
+fn narrows_as_literal(key: &str, prop: &Prop) -> bool {
+    let flag_free = prop.visibility() == Visibility::Standard
+        && prop.merge_mode().is_none()
+        && !prop.is_once()
+        && prop.scroll_metadata().is_none();
+    flag_free && (prop.as_value().is_some() || (prop.has_resolver() && key.contains('.')))
+}
+
 fn build_page_object(
     component: &str,
     resolved: ResolvedProps,
@@ -2262,6 +2374,7 @@ fn build_page_object(
         encrypt_history,
         clear_history,
         preserve_fragment,
+        preserve_big_integers,
     } = flags;
     let mut page = serde_json::Map::new();
     page.insert(
@@ -2272,7 +2385,7 @@ fn build_page_object(
     page.insert("url".to_string(), Value::String(url));
     page.insert(
         "version".to_string(),
-        Value::String(config.version.resolve()),
+        Value::String(config.resolved_version()),
     );
 
     // Per spec, `encryptHistory` / `clearHistory` / `preserveFragment`
@@ -2286,6 +2399,9 @@ fn build_page_object(
     }
     if preserve_fragment {
         page.insert("preserveFragment".to_string(), Value::Bool(true));
+    }
+    if preserve_big_integers {
+        page.insert("preserveBigIntegers".to_string(), Value::Bool(true));
     }
 
     if !flash.is_empty() {
@@ -2489,28 +2605,61 @@ fn to_value_or_err<V: Serialize>(key: &str, value: &V) -> Result<Value, Framewor
     })
 }
 
-fn build_json_response(page: &Value) -> HttpResponse {
-    // Serialized from the borrowed page, the same bytes `HttpResponse::json`
-    // writes, without first cloning the whole page to hand it over.
-    let body = serde_json::to_vec(page).unwrap_or_else(|_| b"{}".to_vec());
-    HttpResponse::bytes_body(body, "application/json")
-        .header("X-Inertia", "true")
-        .header("Vary", "X-Inertia")
+/// The error a page that cannot be encoded answers with: a `500`, never a
+/// `200` with an empty page, as Laravel's `JsonResponse` throws on an
+/// encoding failure.
+fn page_encoding_error(error: &serde_json::Error) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "the Inertia page object could not be encoded as JSON: {error}"
+    ))
 }
 
-/// Writes JSON into a buffer with every `/` backslash-escaped, so a
-/// `</script>` inside a string field cannot close the page's script tag.
+/// The JSON page object an Inertia visit answers with.
 ///
-/// Escaping byte by byte is sound: in UTF-8 the byte `0x2F` only ever
-/// encodes `/` itself, never part of a longer character.
+/// Generic over the page so a test can hand it a value the encoder
+/// refuses; the framework always passes the page `Value`.
+fn build_json_response<P: Serialize + ?Sized>(page: &P) -> Result<HttpResponse, FrameworkError> {
+    // Serialized from the borrowed page, the same bytes `HttpResponse::json`
+    // writes, without first cloning the whole page to hand it over.
+    let body = serde_json::to_vec(page).map_err(|error| page_encoding_error(&error))?;
+    Ok(HttpResponse::bytes_body(body, "application/json")
+        .header("X-Inertia", "true")
+        .header("Vary", "X-Inertia"))
+}
+
+/// Writes JSON into a buffer with `/` backslash-escaped and `<` and `>`
+/// written as `\u003c` and `\u003e`, so nothing inside a string field can
+/// end or change the state of the page's `<script>` element.
+///
+/// `/` keeps a `</script>` from closing the element. `<` and `>` keep a
+/// `<!--` or a `<script` from putting the HTML tokenizer into the escaped
+/// script states, where the real `</script>` no longer closes the element
+/// and the mount element after it becomes script text: what Laravel's
+/// `JSON_HEX_TAG` and Inertia 3.7.1's initial page JSON prevent. (The name
+/// is the first escape it wrote.)
+///
+/// The three characters are not JSON syntax, so they only occur inside
+/// strings, where both escapes are valid JSON. Escaping byte by byte is
+/// sound: in UTF-8 the bytes `0x2F`, `0x3C` and `0x3E` only ever encode
+/// those characters themselves, never part of a longer character. The
+/// escapes go straight into the one document buffer, with no copy of the
+/// page (MEM-003).
 struct SlashEscaping<'a>(&'a mut Vec<u8>);
 
 impl std::io::Write for SlashEscaping<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let mut rest = bytes;
-        while let Some(at) = rest.iter().position(|byte| *byte == b'/') {
+        while let Some(at) = rest
+            .iter()
+            .position(|byte| matches!(byte, b'/' | b'<' | b'>'))
+        {
+            let escape: &[u8] = match rest[at] {
+                b'<' => b"\\u003c",
+                b'>' => b"\\u003e",
+                _ => b"\\/",
+            };
             self.0.extend_from_slice(&rest[..at]);
-            self.0.extend_from_slice(b"\\/");
+            self.0.extend_from_slice(escape);
             rest = &rest[at + 1..];
         }
         self.0.extend_from_slice(rest);
@@ -2522,12 +2671,18 @@ impl std::io::Write for SlashEscaping<'_> {
     }
 }
 
-fn build_html_response(
-    page: &Value,
+/// The first-visit HTML document, the page JSON written into its
+/// `<script>` element.
+///
+/// Generic over the page for the same reason as [`build_json_response`].
+/// A page that cannot be encoded is an error, not a document with an
+/// empty page.
+fn build_html_response<P: Serialize + ?Sized>(
+    page: &P,
     config: &InertiaConfig,
     title_override: Option<&str>,
     ssr: Option<&super::ssr::SsrResponse>,
-) -> HttpResponse {
+) -> Result<HttpResponse, FrameworkError> {
     let title = title_override.unwrap_or(&config.default_title);
     let csrf = csrf_token().unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
@@ -2550,9 +2705,11 @@ fn build_html_response(
     //   produce duplicate IDs and break hydration.
     // - Non-SSR path: we emit the same shape ourselves with an empty
     //   mount div. Inside the script tag the JSON is raw (NOT
-    //   HTML-attribute-encoded) and every `/` is backslash-escaped so a
+    //   HTML-attribute-encoded): every `/` is backslash-escaped so a
     //   literal `</script>` substring inside a string field can't
-    //   terminate the tag - this matches `buildSSRBody`'s escape.
+    //   terminate the tag, and `<` and `>` are `\u003c` and `\u003e` so a
+    //   `<!--<script>` can't stop the real end tag from closing it - this
+    //   matches `buildSSRBody`'s escape and Laravel's `JSON_HEX_TAG`.
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
 
     // A page that renders its own `<title>` through Inertia's `Head`
@@ -2596,11 +2753,8 @@ fn build_html_response(
         html.extend_from_slice(b"<script type=\"application/json\" data-page=\"");
         html.extend_from_slice(mount_id.as_bytes());
         html.extend_from_slice(b"\">");
-        let page_at = html.len();
-        if serde_json::to_writer(SlashEscaping(&mut html), page).is_err() {
-            html.truncate(page_at);
-            html.extend_from_slice(b"{}");
-        }
+        serde_json::to_writer(SlashEscaping(&mut html), page)
+            .map_err(|error| page_encoding_error(&error))?;
         html.extend_from_slice(b"</script>\n<div id=\"");
         html.extend_from_slice(mount_id.as_bytes());
         html.extend_from_slice(b"\"></div>\n</body>\n</html>");
@@ -2609,7 +2763,7 @@ fn build_html_response(
             .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
     };
 
-    HttpResponse::html(html).header("Vary", "X-Inertia")
+    Ok(HttpResponse::html(html).header("Vary", "X-Inertia"))
 }
 
 /// The first visit through the application's root template (RDOC-001).
@@ -2849,13 +3003,19 @@ fn render_prod_head(config: &InertiaConfig) -> String {
 ///
 /// The default derivation is an application path and always gets the root;
 /// a resolver's root-relative path gets it unless it is already under the
-/// root. Either `String` is owned here and becomes the URL itself when it
-/// keeps its bytes, as it does at the host root, so the first page does not
-/// copy its URL a second time (MEM-003).
+/// root. Its query is normalised as Laravel's `fullUrl()` normalises it
+/// through Symfony - pairs parsed, sorted by key, re-encoded per RFC 3986 -
+/// so the client compares the same page URLs Laravel sends (PAR-056); a
+/// resolver's URL is the application's own and is left as it returns it.
+/// Either `String` is owned here and becomes the URL itself when it keeps
+/// its bytes, as it does at the host root with a query already in that
+/// form, so the first page does not copy its URL a second time (MEM-003).
 fn page_url(resolver: Option<&super::config::UrlResolver>, req: &dyn InertiaRequestExt) -> String {
     match resolver {
         Some(resolve_url) => crate::routing::root::rooted_owned(resolve_url(req)),
-        None => crate::routing::root::prefixed_owned(req.path_and_query()),
+        None => crate::routing::root::prefixed_owned(
+            super::query_string::normalize_path_and_query(req.path_and_query()),
+        ),
     }
 }
 
@@ -3032,7 +3192,7 @@ mod tests {
         let obj = page.as_object().unwrap();
         assert_eq!(obj["component"], Value::String("Home".into()));
         assert_eq!(obj["url"], Value::String("/home".into()));
-        assert_eq!(obj["version"], Value::String("1.0".into()));
+        assert_eq!(obj["version"], Value::String(String::new()));
 
         let props = obj["props"].as_object().unwrap();
         assert_eq!(props["title"], Value::String("Welcome".into()));
@@ -3230,5 +3390,32 @@ mod tests {
         );
         // Distinct from `location`: must NOT carry X-Inertia-Location.
         assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
+    }
+
+    /// A page the JSON encoder refuses, standing in for any value it
+    /// cannot write.
+    struct Unencodable;
+
+    impl Serialize for Unencodable {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("this page cannot be encoded"))
+        }
+    }
+
+    /// PAR-053 (JE-03): Laravel's `JsonResponse` throws on an encoding
+    /// failure, so the client gets an error, never a `200` carrying `{}`.
+    #[test]
+    fn inp_a_page_that_cannot_be_encoded_answers_an_error_not_an_empty_page() {
+        let Err(json) = build_json_response(&Unencodable) else {
+            panic!("an Inertia visit must not get a 200 with an empty page");
+        };
+        assert_eq!(json.status_code(), 500);
+        assert!(json.to_string().contains("cannot be encoded"), "{json}");
+
+        let Err(html) = build_html_response(&Unencodable, &InertiaConfig::default(), None, None)
+        else {
+            panic!("a first visit must not get a 200 with an empty page");
+        };
+        assert_eq!(html.status_code(), 500);
     }
 }

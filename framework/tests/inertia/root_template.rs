@@ -135,7 +135,7 @@ fn pinned_headers() -> Vec<(String, String)> {
     ]
 }
 
-const PINNED_PAGE_JSON: &str = r#"{"component":"Home","props":{"errors":{},"message":"<\/script> & café"},"url":"\/home","version":"pinned"}"#;
+const PINNED_PAGE_JSON: &str = r#"{"component":"Home","props":{"errors":{},"message":"\u003c\/script\u003e & café"},"url":"\/home","version":"pinned","sharedProps":["errors"]}"#;
 
 /// RDOC-002: in development with the React preamble the document is
 /// today's, byte for byte.
@@ -308,7 +308,7 @@ async fn rdoc_002_the_inertia_visit_is_unchanged() {
     );
     assert_eq!(
         body,
-        r#"{"component":"Home","props":{"errors":{},"message":"</script> & café"},"url":"/home","version":"pinned"}"#
+        r#"{"component":"Home","props":{"errors":{},"message":"</script> & café"},"url":"/home","version":"pinned","sharedProps":["errors"]}"#
     );
 }
 

@@ -70,9 +70,10 @@ impl VersionResolver {
     /// If you have measured that and want it gone, resolve once at boot:
     /// `InertiaConfig::new().version(VersionResolver::from_manifest(p).resolve())`.
     ///
-    /// A missing or unreadable file resolves to
-    /// [`MANIFEST_VERSION_FALLBACK`] rather than erroring: in
-    /// development there is no build to hash.
+    /// A missing or unreadable file resolves to the empty string rather
+    /// than erroring: in development there is no build to hash. Laravel's
+    /// `Middleware::version` returns `null` in that case, and its page
+    /// carries `""`.
     pub fn from_manifest(path: impl Into<PathBuf>) -> Self {
         Self::Manifest(path.into())
     }
@@ -99,6 +100,23 @@ impl From<&str> for VersionResolver {
     }
 }
 
+/// `None` is the empty version, as Laravel casts a `null` version to `""`.
+impl From<Option<String>> for VersionResolver {
+    fn from(version: Option<String>) -> Self {
+        Self::Static(version.unwrap_or_default())
+    }
+}
+
+/// A function is called on every read, as Laravel calls a version closure.
+impl<F> From<F> for VersionResolver
+where
+    F: Fn() -> String + Send + Sync + 'static,
+{
+    fn from(f: F) -> Self {
+        Self::Dynamic(Arc::new(f))
+    }
+}
+
 impl std::fmt::Debug for VersionResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -109,24 +127,31 @@ impl std::fmt::Debug for VersionResolver {
     }
 }
 
-/// Asset version reported when a [`VersionResolver::Manifest`] cannot
-/// read its file. Matches the framework's historical default, so an app
-/// that has never built its frontend behaves exactly as it did before
-/// manifest hashing became the default.
+/// The asset version a [`VersionResolver::Manifest`] reported when it
+/// could not read its file, before the version followed Laravel's order.
+///
+/// Kept so code that names it still compiles. No resolver returns it any
+/// more: with no asset URL and no manifest the version is the empty
+/// string, which is what Laravel's page carries when its
+/// `Middleware::version` finds nothing to hash.
 pub const MANIFEST_VERSION_FALLBACK: &str = "1.0";
 
-/// Hex of the first 16 bytes of the manifest's SHA-256.
+/// Hex of the first 16 bytes of the SHA-256 of `bytes`.
 ///
 /// Not a secret - a stable, bounded-length identifier that changes iff
-/// the built assets change. 128 bits is far past where a collision would
+/// its source changes. 128 bits is far past where a collision would
 /// matter for a cache-busting token, and the truncation keeps the value
 /// short enough to sit in a request header without comment.
+fn version_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(bytes)[..16])
+}
+
+/// [`version_hash`] of the manifest's bytes, or the empty string when the
+/// file cannot be read.
 fn manifest_version(path: &std::path::Path) -> String {
     match std::fs::read(path) {
-        Ok(bytes) => {
-            use sha2::{Digest, Sha256};
-            hex::encode(&Sha256::digest(&bytes)[..16])
-        }
+        Ok(bytes) => version_hash(&bytes),
         Err(e) => {
             // `debug!`, not `warn!`: in development the manifest
             // legitimately doesn't exist (Vite serves from memory) and
@@ -136,9 +161,9 @@ fn manifest_version(path: &std::path::Path) -> String {
             tracing::debug!(
                 path = %path.display(),
                 error = %e,
-                "Inertia asset version: manifest unreadable, using the static fallback"
+                "Inertia asset version: manifest unreadable, the version is empty"
             );
-            MANIFEST_VERSION_FALLBACK.to_string()
+            String::new()
         }
     }
 }
@@ -217,8 +242,10 @@ pub struct InertiaConfig {
     pub entry_point: String,
     /// Asset version source for cache busting / version-mismatch
     /// detection. Defaults to [`VersionResolver::Manifest`], hashing
-    /// [`manifest_path`](Self::manifest_path); see [`VersionResolver`]
-    /// for the static and dynamic alternatives.
+    /// [`manifest_path`](Self::manifest_path), with the
+    /// [`asset_url`](Self::asset_url) setting's hash ahead of it when one is
+    /// set and the empty string when neither is there; see
+    /// [`VersionResolver`] for the static and dynamic alternatives.
     pub version: VersionResolver,
     /// `true` during local development (loads via the Vite dev server);
     /// `false` for production (loads built assets from `/assets/`).
@@ -269,6 +296,22 @@ pub struct InertiaConfig {
     /// `/assets`). Combined with the manifest entry's `file` field to
     /// produce the final `<script src>` / `<link href>` URL.
     pub assets_base_url: String,
+    /// The URL the built assets are published under when it changes with
+    /// each deploy, such as a CDN path that carries a build id. Laravel's
+    /// `app.asset_url` (`ASSET_URL`).
+    ///
+    /// When it is set and not empty, the default asset version is its
+    /// hash rather than the manifest's, the order Laravel's
+    /// `Middleware::version` uses: a deploy that publishes under a new URL
+    /// moves the version even where the manifest is not on this host. An
+    /// explicit [`version`](Self::version) or
+    /// [`version_with`](Self::version_with) ignores it.
+    ///
+    /// Defaults to the `ASSET_URL` environment variable when it is set and
+    /// not empty, the variable Laravel's `app.asset_url` reads, and to
+    /// `None` otherwise. [`asset_url`](Self::asset_url) on the builder wins
+    /// over the environment.
+    pub asset_url: Option<String>,
     /// Whether a session-flashed validation bag surfaces every message
     /// per field (`{ email: ["a", "b"] }`) or only the first
     /// (`{ email: "a" }`).
@@ -290,6 +333,15 @@ pub struct InertiaConfig {
     /// shares the validation errors. Off, the page carries no
     /// `sharedProps` and the shared values still ship as props.
     pub expose_shared_props: bool,
+    /// Whether every integer beyond JavaScript's safe range (plus or minus
+    /// 9007199254740991) in props and flash is sent as
+    /// `{"$bigint": "<digits>"}`, with `preserveBigIntegers: true` on the
+    /// page, so the client restores it as an exact `BigInt` instead of a
+    /// rounded number. A 64-bit database id past 2^53 otherwise reaches
+    /// the browser off by a few. Laravel's `inertia.preserve_big_integers`;
+    /// default `false`. A response overrides it with
+    /// [`InertiaResponse::preserve_big_integers`](crate::InertiaResponse::preserve_big_integers).
+    pub preserve_big_integers: bool,
     /// Maximum number of lazy/deferred/once/shared prop resolvers that
     /// run concurrently for a single response.
     ///
@@ -518,6 +570,16 @@ fn vite_dev_server_from_env() -> String {
     format!("http://localhost:{port}")
 }
 
+/// The `ASSET_URL` environment variable, trimmed, when it names something.
+/// Laravel's `app.asset_url` reads the same variable, so a deployment that
+/// sets it for a Laravel app moves the Inertia asset version here too.
+fn asset_url_from_env() -> Option<String> {
+    std::env::var("ASSET_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 impl Default for InertiaConfig {
     fn default() -> Self {
         let frontend = Frontend::detect_from_env();
@@ -544,8 +606,10 @@ impl Default for InertiaConfig {
             ssr: SsrConfig::default(),
             manifest_path,
             assets_base_url: "/assets".to_string(),
+            asset_url: asset_url_from_env(),
             with_all_errors: false,
             expose_shared_props: true,
+            preserve_big_integers: false,
             max_concurrent_resolvers: 16,
             // `None` so an app upgrading into this release keeps the
             // exact error bodies it had. Opting in is one builder call.
@@ -783,6 +847,39 @@ impl InertiaConfig {
     /// `{base}/{file}`.
     pub fn assets_base_url(mut self, url: impl Into<String>) -> Self {
         self.assets_base_url = url.into();
+        self
+    }
+
+    /// Set the URL the built assets are published under, in place of the
+    /// `ASSET_URL` environment variable's. While the version source is the
+    /// default (no [`version`](Self::version) or
+    /// [`version_with`](Self::version_with)), the asset version becomes
+    /// this URL's hash. See the [`asset_url`](Self::asset_url) field.
+    pub fn asset_url(mut self, url: impl Into<String>) -> Self {
+        self.asset_url = Some(url.into());
+        self
+    }
+
+    /// The asset version this config reports, in Laravel's order.
+    ///
+    /// An explicit [`version`](Self::version) or
+    /// [`version_with`](Self::version_with) is returned as it resolves.
+    /// The default source tries the [`asset_url`](Self::asset_url) setting
+    /// first, then the Vite manifest's hash, then the empty string.
+    pub(crate) fn resolved_version(&self) -> String {
+        match (&self.version, self.asset_url.as_deref()) {
+            (VersionResolver::Manifest(_), Some(url)) if !url.is_empty() => {
+                version_hash(url.as_bytes())
+            }
+            (version, _) => version.resolve(),
+        }
+    }
+
+    /// Send integers beyond JavaScript's safe range as `$bigint` markers.
+    /// See the [`preserve_big_integers`](Self::preserve_big_integers)
+    /// field.
+    pub fn preserve_big_integers(mut self, on: bool) -> Self {
+        self.preserve_big_integers = on;
         self
     }
 

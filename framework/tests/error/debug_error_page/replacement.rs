@@ -287,3 +287,28 @@ async fn with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page()
         navigation.body
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn inp_with_debug_on_a_visit_sending_x_inertia_1_gets_the_page() {
+    // `X-Inertia` counts for any value PHP reads as true (PAR-046), here as
+    // in `Request::is_inertia`, so the app's Inertia error page, which
+    // already answers this visit, gives way to the page.
+    let _debug = debug_mode(true, &[]).await;
+
+    let reply =
+        inertia_request(&[("X-Inertia", "1"), ("X-Requested-With", "XMLHttpRequest")]).await;
+
+    assert_debug_page(&reply, 500);
+    assert_page_shows(&reply, &[INVOICE_ERROR, LEDGER_ERROR, DISK_ERROR]);
+
+    // `0` is false in PHP: the request is no page audience, lists no
+    // `text/html`, and keeps the JSON error.
+    let reply = get(routes(), "/invoice", &[("X-Inertia", "0")]).await;
+    assert_eq!(reply.status, 500, "body: {}", reply.body);
+    assert!(
+        reply.content_type().starts_with("application/json"),
+        "X-Inertia: 0 must keep the JSON error; got content-type {:?}",
+        reply.content_type()
+    );
+}
