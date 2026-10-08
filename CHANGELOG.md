@@ -1001,8 +1001,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   place of `usePage<{ root: string }>()`, typed by the augmentation. The
   `Error` page keeps its inline props, since no handler renders it with a
   struct. A project upgrading with its own `declare module
-  '@inertiajs/core'` block, in a `.ts` or `.d.ts` file under
-  `frontend/src` such as `global.d.ts`, keeps it: `generate-types` and
+  '@inertiajs/core'` block, in a `.ts`, `.tsx`, `.mts` or `.cts` file
+  under `frontend/src` such as `global.d.ts`, keeps it: `generate-types` and
   `serve` then write `inertia-props.ts` without the augmentation or its
   `import '@inertiajs/core'` and print a notice naming that file (`serve`
   once, not on every save), since two augmentations merge key by key and

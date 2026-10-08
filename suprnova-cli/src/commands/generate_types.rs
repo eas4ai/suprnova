@@ -2515,10 +2515,17 @@ const FRONTEND_SOURCES: &str = "frontend/src";
 /// The module a project augments to type `usePage()`.
 const INERTIA_CORE: &str = "@inertiajs/core";
 
-/// The first `.ts` file (`.d.ts` included) under `frontend/src`, in name
-/// order, that declares `module '@inertiajs/core'`, relative to the
-/// project; `output_path`, the file this pass writes, never counts, since
-/// it holds the generated augmentation itself.
+/// The extensions of the TypeScript files that may augment
+/// `@inertiajs/core`; a declaration file (`.d.ts`, `.d.mts`, `.d.cts`)
+/// ends in one of them too. A `.vue` or `.svelte` script block is not
+/// read: an ambient module declaration belongs in a TypeScript file.
+const TYPESCRIPT_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
+
+/// The first TypeScript file under `frontend/src` (see
+/// [`TYPESCRIPT_EXTENSIONS`]), in name order, that declares
+/// `module '@inertiajs/core'`, relative to the project; `output_path`, the
+/// file this pass writes, never counts, since it holds the generated
+/// augmentation itself.
 ///
 /// A project that types `usePage()` with its own augmentation, as
 /// Inertia's docs describe, would otherwise get a second one from the
@@ -2548,7 +2555,11 @@ fn find_own_augmentation(
         let entry = entry
             .map_err(|error| failure(error.path().unwrap_or(&root), "scan", error.to_string()))?;
         let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "ts") {
+        if !path.extension().is_some_and(|extension| {
+            TYPESCRIPT_EXTENSIONS
+                .iter()
+                .any(|typescript| extension == *typescript)
+        }) {
             continue;
         }
         let metadata = match fs::metadata(path) {
@@ -2609,7 +2620,8 @@ fn past_whitespace(text: &str) -> Option<&str> {
     (rest.len() < text.len()).then_some(rest)
 }
 
-/// The line that says a project's own augmentation types `usePage()`.
+/// The line that says a project's own augmentation types `usePage()`: the
+/// `.ts`, `.tsx`, `.mts` or `.cts` file at `path` declares the module.
 fn own_augmentation_notice(path: &Path) -> String {
     format!(
         "{} declares module '{INERTIA_CORE}', so the project's own augmentation types \
@@ -2620,7 +2632,10 @@ fn own_augmentation_notice(path: &Path) -> String {
 }
 
 /// Says once that a project's own augmentation types `usePage()`, for a
-/// command that regenerates on every save.
+/// command that regenerates on every save. The augmentation is a
+/// `declare module '@inertiajs/core'` block in a `.ts`, `.tsx`, `.mts` or
+/// `.cts` file under `frontend/src` (`.d.ts` and the other declaration
+/// files included), other than the generated file.
 ///
 /// The notice matters the first time a pass leaves the augmentation out,
 /// and again when the file that declares the module changes; repeated on

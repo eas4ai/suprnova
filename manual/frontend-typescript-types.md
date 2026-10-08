@@ -341,8 +341,9 @@ A project that typed `usePage()` before the generator did has its own
 `declare module '@inertiajs/core'` block, often in
 `frontend/src/global.d.ts`. The generator does not write a second one
 beside it: two augmentations merge key by key, and a key both set to
-different types fails the type check. When a `.ts` or `.d.ts` file under
-`frontend/src`, other than the generated file itself, declares
+different types fails the type check. When a `.ts`, `.tsx`, `.mts` or
+`.cts` file under `frontend/src` (declaration files such as `.d.ts`
+included), other than the generated file itself, declares
 `module '@inertiajs/core'` (in single or double quotes), `inertia-props.ts`
 keeps `Pages`, `SharedProps`, `Errors` and `PageProps` and writes no
 augmentation and no `import '@inertiajs/core'`. `generate-types` says so,
@@ -353,9 +354,11 @@ naming the file:
 ```
 
 `serve` prints the same line once, at start-up, and a regeneration on save
-repeats it only when another file declares the module. A `.ts` file under
-`frontend/src` that cannot be read stops the generation with its path, as
-an unreadable Rust source does, since it may hold the declaration.
+repeats it only when another file declares the module. A `.vue` or
+`.svelte` script block is not read: an ambient module declaration belongs
+in a TypeScript file. A TypeScript file under `frontend/src` that cannot
+be read stops the generation with its path, as an unreadable Rust source
+does, since it may hold the declaration.
 
 You can go either way:
 
