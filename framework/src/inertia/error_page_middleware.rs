@@ -45,6 +45,12 @@ use super::InertiaResponse;
 /// See the module documentation for why this is a middleware and not a
 /// branch inside the error-to-response conversion.
 ///
+/// A browser navigation's page renders through the root template
+/// [`InertiaConfig::root_template_with`](crate::InertiaConfig::root_template_with)
+/// picks for the request as it arrived, so an error under `/admin` keeps
+/// the admin shell. It carries no view data: the handler that would have
+/// set it failed or never ran.
+///
 /// # Registering it yourself
 ///
 /// [`Inertia::install`](crate::Inertia::install) registers this
@@ -186,7 +192,9 @@ impl Middleware for InertiaErrorPageMiddleware {
 
         // Rendered under the root captured before the handler ran, so the
         // page's URL, its Vite tags and its shared props name the root the
-        // request arrived under (PFX-002).
+        // request arrived under (PFX-002). The root template is the one the
+        // chooser picks for the captured request, and the page has no view
+        // data of its own (RDOC-006).
         let root = std::sync::Arc::clone(&captured.root);
         match crate::routing::root::scope(root, page.resolve(&captured)).await {
             Ok(rendered) => restore(

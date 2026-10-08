@@ -685,3 +685,102 @@ async fn rdoc_004_a_response_without_view_data_hands_the_template_none() {
     let html = visit("/", pinned_page().with_config(chosen())).await;
     assert!(!html.contains("og:description"), "{html}");
 }
+
+/// Answers every request it guards with the `403` an authorization check
+/// gives.
+struct Deny;
+
+#[async_trait::async_trait]
+impl suprnova::Middleware for Deny {
+    async fn handle(
+        &self,
+        _request: suprnova::Request,
+        _next: suprnova::Next,
+    ) -> suprnova::Response {
+        Err(
+            HttpResponse::json(serde_json::json!({ "message": "This action is unauthorized." }))
+                .status(403),
+        )
+    }
+}
+
+/// Serves `router` behind `registry` on a loopback port until the test
+/// ends.
+async fn serve(router: suprnova::Router, registry: suprnova::MiddlewareRegistry) -> SocketAddr {
+    let router = std::sync::Arc::new(router);
+    let registry = std::sync::Arc::new(registry);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("its address");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let router = router.clone();
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let router = router.clone();
+                    let registry = registry.clone();
+                    async move {
+                        Ok::<_, Infallible>(suprnova::handle_request(router, registry, req).await)
+                    }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+/// RDOC-006: an Inertia error page renders through the root template the
+/// chooser picks for the captured request (B for `/admin/*`, A elsewhere),
+/// with no view data, for an unrouted path's `404` and a denied path's
+/// `403` alike.
+#[tokio::test]
+async fn rdoc_006_error_pages_render_through_the_chosen_template_without_view_data() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "rdoc_006_error_pages_render_through_the_chosen_template_without_view_data",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::Inertia::install(&chosen().error_page("Error")).expect("a development install");
+    let router: suprnova::Router = suprnova::Router::new()
+        .get("/admin/y", |_req| async {
+            let page: suprnova::Response = Ok(HttpResponse::text("never reached"));
+            page
+        })
+        .middleware(Deny)
+        .into();
+    let addr = serve(router, suprnova::MiddlewareRegistry::from_global()).await;
+    let browser = [(
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    )];
+
+    for (path, status) in [("/admin/x", 404), ("/admin/y", 403)] {
+        let (got, _, body) = crate::http_wire::request(addr, "GET", path, &browser).await;
+        assert_eq!(got, status, "{path}: {body}");
+        assert!(
+            body.contains("<meta name=\"layout\" content=\"admin\">"),
+            "{path}: {body}"
+        );
+        assert!(
+            page_data(&body).contains("\"component\":\"Error\""),
+            "{path}: {body}"
+        );
+        assert!(!body.contains("og:description"), "{path}: {body}");
+    }
+
+    let (got, _, body) = crate::http_wire::request(addr, "GET", "/elsewhere", &browser).await;
+    assert_eq!(got, 404, "{body}");
+    assert!(
+        body.contains("Rendered through the root template"),
+        "{body}"
+    );
+    assert!(!body.contains("content=\"admin\""), "{body}");
+}
