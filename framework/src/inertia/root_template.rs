@@ -63,8 +63,8 @@ pub struct InertiaRootTemplate {
 /// An application's template: its name, for errors, and its renderer.
 #[derive(Clone, Copy)]
 pub(crate) struct ApplicationTemplate {
-    pub(crate) name: &'static str,
-    pub(crate) render: RenderFn,
+    name: &'static str,
+    render: RenderFn,
 }
 
 impl InertiaRootTemplate {

@@ -2409,8 +2409,9 @@ fn build_html_response(
 ///
 /// The template gets the values the framework's own document is built
 /// from, as parts it places: the same title rule, CSRF token, SSR output,
-/// Vite tags, language and mount id, and the response's view data. The page JSON is written into the
-/// template's output by the body part, never into a string of its own.
+/// Vite tags, language and mount id, and the response's view data. The
+/// page JSON is written into the template's output by the body part, never
+/// into a string of its own.
 fn build_template_response(
     template: super::root_template::ApplicationTemplate,
     page: &Value,
