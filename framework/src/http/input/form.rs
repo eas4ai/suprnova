@@ -19,6 +19,7 @@ use std::str::FromStr;
 
 use serde::de::{self, DeserializeOwned, DeserializeSeed, IntoDeserializer, Visitor};
 
+use super::multipart::{FormFile, FormNotUtf8, UPLOADED_FILE, offer_placeholder};
 use super::nested::{Array, Key, Nested, Node};
 use super::placeholder::Placeholder;
 use super::{
@@ -40,10 +41,14 @@ pub(super) fn read_nested<T: DeserializeOwned>(
 ) -> Result<T, InputError> {
     let present = fields.map(|fields| form.present(fields));
     let collector = Collector::default();
-    let error = match T::deserialize(FormInput {
+    let read = T::deserialize(FormInput {
         form,
         collector: &collector,
-    }) {
+    });
+    if let Some(error) = collector.take_failed() {
+        return Err(InputError::Failed(error));
+    }
+    let error = match read {
         Ok(value) if !collector.has_failures() => return Ok(value),
         Ok(_) => None,
         Err(error) => Some(error),
@@ -174,6 +179,12 @@ fn read_node<'de, S: DeserializeSeed<'de>>(
         Node::Text(text) => seed.deserialize(FormValue {
             text: &text,
             path: Some(path),
+            collector,
+        }),
+        Node::NotUtf8 => seed.deserialize(FormNotUtf8 { path, collector }),
+        Node::File(file) => seed.deserialize(FormFile {
+            file: *file,
+            path,
             collector,
         }),
         Node::Array(array) => seed.deserialize(FormArray {
@@ -381,12 +392,21 @@ impl<'de> de::Deserializer<'de> for FormValue<'_, '_> {
         visitor.visit_some(self)
     }
 
+    /// Text where an `UploadedFile` belongs is a field's failure
+    /// (`validation-file`); a name is never a file.
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        visitor.visit_newtype_struct(self)
+        if name != UPLOADED_FILE {
+            return visitor.visit_newtype_struct(self);
+        }
+        if self.record(FieldFailure::File) {
+            offer_placeholder(visitor)
+        } else {
+            Err(de::Error::custom("a name is not a file"))
+        }
     }
 
     fn deserialize_enum<V: Visitor<'de>>(
@@ -493,12 +513,19 @@ impl<'de> de::Deserializer<'de> for FormNull<'_, '_> {
         visitor.visit_none()
     }
 
+    /// An `UploadedFile` sent empty, as Inertia sends a `null` file, is
+    /// missing.
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        visitor.visit_newtype_struct(self)
+        if name == UPLOADED_FILE {
+            self.collector.record(self.path, FieldFailure::Required);
+            offer_placeholder(visitor)
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     required! {
@@ -635,12 +662,19 @@ impl<'de> de::Deserializer<'de> for FormArray<'_, '_, '_> {
         visitor.visit_some(self)
     }
 
+    /// An array where an `UploadedFile` belongs is a field's failure
+    /// (`validation-file`).
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        visitor.visit_newtype_struct(self)
+        if name == UPLOADED_FILE {
+            self.collector.record(self.path, FieldFailure::File);
+            offer_placeholder(visitor)
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     fn deserialize_ignored_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {

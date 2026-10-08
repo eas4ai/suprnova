@@ -201,10 +201,10 @@ full path, the same notation Laravel uses. A nested struct contributes
 
 Index `1` is the second element - the first element passed and is absent
 from the bag. Bind the key straight through on the client:
-`form.errors['items.1.name']`. A form body sends the same fields under
-bracketed names, `shipping_address[street]` and `items[1][name]`, which
-read into the same structs and fail under the same dotted keys; see
-[nested names and lists](#nested-names-and-lists).
+`form.errors['items.1.name']`. A form body or a multipart body sends the
+same fields under bracketed names, `shipping_address[street]` and
+`items[1][name]`, which read into the same structs and fail under the same
+dotted keys; see [nested names and lists](#nested-names-and-lists).
 
 ### Renamed fields
 
@@ -420,11 +420,14 @@ streaming byte counter during read.
 
 - `application/x-www-form-urlencoded` → parsed as a form, as described in
   [empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
+- `multipart/form-data` → the parts parsed as a form by the same rules, each
+  file part filling an `UploadedFile` field, as described in
+  [files in a form request](#files-in-a-form-request)
 - `application/json` or any `application/*+json` suffix → parsed via `serde_json`
 - Anything else (including a missing header) → rejected with HTTP 415
   Unsupported Media Type, before the body is read
 
-For multipart bodies (`multipart/form-data`), see
+For an upload that checks each file while the body streams in, see
 [file uploads](#file-uploads-multipartrequest) below.
 
 ## Empty values, repeated names, and fields that don't parse
@@ -540,9 +543,11 @@ pub async fn update(form: UpdateProfile) -> Response {
 
 A form sends nested data under names with brackets, and Laravel reads them
 as nested arrays. The Inertia client writes such names when it puts a `GET`
-visit's data in the query string, and an HTML form can name its inputs the
-same way. A form request, `req.input()`, `req.form()` and `req.query_into()`
-read them as PHP's `parse_str` does:
+visit's data in the query string and when it sends a form that holds a file
+as `multipart/form-data`, and an HTML form can name its inputs the same way.
+A form request, `req.input()`, `req.form()` and `req.query_into()` read them
+as PHP's `parse_str` does, in a url-encoded body, a multipart body and a
+query string alike:
 
 - `user[name]=Ada` is the member `name` of `user`. It fills a nested struct
   field, and a `serde_json::Value` reads it as `{"user": {"name": "Ada"}}`.
@@ -655,6 +660,56 @@ pub async fn store(form: CreateUserRequest) -> Response {
     json_response!({ "user": user })
 }
 ```
+
+## Files in a form request
+
+The Inertia client sends a form that holds a file as `multipart/form-data`:
+a list of files under `photos[0]`, `photos[1]` (or `photos[]` when the
+application asks for brackets), and nested fields under names such as
+`user[name]`. A form request reads that body. Text parts read as a
+url-encoded body reads, and a part with a file name fills an
+`UploadedFile<V>` field, where `V` is a validator, or a tuple of them, from
+`suprnova::http::upload::validators`:
+
+```rust
+use suprnova::http::upload::UploadedFile;
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
+use suprnova::{handler, json_response, request, Response};
+
+#[request]
+pub struct StoreAlbum {
+    #[validate(length(min = 1))]
+    pub title: String,
+    pub photos: Vec<UploadedFile<(ImageFile, MaxSize<5_242_880>)>>,
+    pub cover: Option<UploadedFile<ImageFile>>,
+}
+
+#[handler]
+pub async fn store(form: StoreAlbum) -> Response {
+    // Each photo is in memory or in a temp file depending on its size.
+    json_response!({ "title": form.title, "photos": form.photos.len() })
+}
+```
+
+- An empty part, which is how Inertia sends a `null` file, and an empty
+  file input both leave an `Option<UploadedFile>` `None` and a required
+  `UploadedFile` missing.
+- A file its validators refuse fails under its input name, `photos.1` for
+  the second photo, with the validator's message. Text where a file belongs
+  fails with `validation-file`, and a file where text belongs with
+  `validation-string`.
+- `req.input()` reads a multipart body the same way. A `serde_json::Value`
+  holds `null` where a file was sent, as Laravel's `input()` reads a file
+  field.
+- An `UploadedFile` reads only from a multipart body. In a JSON body the
+  field fails with a `422`.
+
+The body is capped at the form request's `max_body_bytes`, as every body it
+reads is, and the parts take the part ceiling and the in-memory limit of
+the multipart settings below: a file part above the limit goes to a temp
+file, and a text part above it answers `413`. The validators run once the
+whole body is read. `#[derive(MultipartRequest)]`, below, checks each file
+while it streams in, and stops reading at the byte that breaks a `MaxSize`.
 
 ## File uploads (`MultipartRequest`)
 

@@ -19,6 +19,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use validator::Validate;
 
+use suprnova::http::upload::UploadedFile;
+use suprnova::http::upload::validators::MaxSize;
 use suprnova::{FormRequest, HttpResponse, MiddlewareRegistry, Request, Router, handle_request};
 
 /// How long a test waits for a response before it calls the server stuck.
@@ -368,4 +370,292 @@ async fn inp_request_input_reads_nested_names_from_a_urlencoded_body() {
         reply.json(),
         json!({ "user": { "name": "Ada" }, "photos": ["a", "b"] })
     );
+}
+
+// ── A multipart body ──
+
+const BOUNDARY: &str = "inpboundary";
+
+fn multipart() -> String {
+    format!("multipart/form-data; boundary={BOUNDARY}")
+}
+
+/// A multipart body of `parts`: a name, a file name for a file part, and
+/// the bytes.
+fn multipart_body(parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+    crate::common::build_multipart_body(BOUNDARY, parts).to_vec()
+}
+
+#[tokio::test]
+async fn inp_a_form_request_reads_a_multipart_body_with_bracketed_and_indexed_names() {
+    let reply = send(
+        profile_route(),
+        "POST",
+        "/profile",
+        Some(&multipart()),
+        multipart_body(&[
+            ("user[name]", None, b"Ada"),
+            ("tags[1]", None, b"b"),
+            ("user[email]", None, b"ada@example.com"),
+            ("tags[0]", None, b"a"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(
+        reply.json(),
+        json!({ "name": "Ada", "email": "ada@example.com", "tags": ["a", "b"] })
+    );
+
+    // The rules run on the nested data, named by the path.
+    let reply = send(
+        profile_route(),
+        "POST",
+        "/profile",
+        Some(&multipart()),
+        multipart_body(&[
+            ("user[name]", None, b"A"),
+            ("user[email]", None, b"nope"),
+            ("tags[]", None, b"a"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["user.email", "user.name"]);
+}
+
+#[tokio::test]
+async fn inp_a_multipart_part_that_is_not_text_fails_under_its_path() {
+    // A file where text belongs, and text that is not UTF-8.
+    let reply = send(
+        profile_route(),
+        "POST",
+        "/profile",
+        Some(&multipart()),
+        multipart_body(&[
+            ("user[name]", Some("name.txt"), b"Ada"),
+            ("user[email]", None, b"ada@example.com"),
+            ("tags[0]", None, b"a"),
+            ("tags[1]", None, &[0xff, 0xfe]),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["tags.1", "user.name"]);
+    let body = reply.json();
+    assert_eq!(
+        body["errors"]["user.name"][0],
+        "The user.name field must be a string."
+    );
+}
+
+#[tokio::test]
+async fn inp_request_input_reads_a_multipart_body() {
+    let router: Router = Router::new()
+        .post("/echo", |req: Request| async move {
+            let input: Value = req.input().await?;
+            Ok(HttpResponse::json(input))
+        })
+        .into();
+    let reply = send(
+        router,
+        "POST",
+        "/echo",
+        Some(&multipart()),
+        multipart_body(&[
+            ("user[name]", None, b"Ada"),
+            ("photos[0]", Some("a.png"), b"png bytes"),
+            ("tags[]", None, b"a"),
+            ("tags[]", None, b""),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    // A file holds no text: a `serde_json::Value` reads `null` in its
+    // place, as Laravel's `input()` reads a file field.
+    assert_eq!(
+        reply.json(),
+        json!({ "user": { "name": "Ada" }, "photos": [null], "tags": ["a", null] })
+    );
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct Note {
+    text: String,
+}
+
+impl FormRequest for Note {
+    fn max_body_bytes() -> usize {
+        256
+    }
+}
+
+fn note_route() -> Router {
+    Router::new()
+        .post("/note", |req: Request| async move {
+            let note = Note::extract(req).await?;
+            Ok(HttpResponse::json(json!({ "text": note.text })))
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn inp_a_multipart_form_request_keeps_its_body_cap() {
+    let small = multipart_body(&[("text", None, b"hi")]);
+    assert!(small.len() <= 256, "{}", small.len());
+    let reply = send(note_route(), "POST", "/note", Some(&multipart()), small).await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json(), json!({ "text": "hi" }));
+
+    let reply = send(
+        note_route(),
+        "POST",
+        "/note",
+        Some(&multipart()),
+        multipart_body(&[("text", None, &[b'x'; 512])]),
+    )
+    .await;
+    assert_eq!(reply.status, 413, "{}", reply.text());
+}
+
+// ── Files in a form request ──
+
+#[suprnova::request]
+struct Album {
+    #[validate(length(min = 1))]
+    title: String,
+    photos: Vec<UploadedFile>,
+    cover: Option<UploadedFile<MaxSize<16>>>,
+}
+
+/// A route that reads an `Album` and echoes its files' names and bytes.
+fn album_route() -> Router {
+    Router::new()
+        .post("/album", |req: Request| async move {
+            let album = Album::extract(req).await?;
+            let mut photos = Vec::new();
+            for photo in &album.photos {
+                let bytes = photo.bytes().await?;
+                photos.push(json!({
+                    "name": photo.file_name,
+                    "body": String::from_utf8_lossy(&bytes),
+                }));
+            }
+            Ok(HttpResponse::json(json!({
+                "title": album.title,
+                "photos": photos,
+                "cover": album.cover.as_ref().map(|cover| cover.file_name.clone()),
+            })))
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn inp_a_form_request_takes_files_from_bracketed_and_indexed_names() {
+    // Inertia sends a list of files with indexes by default, and with
+    // brackets when an application asks for them.
+    for (first, second) in [("photos[1]", "photos[0]"), ("photos[]", "photos[]")] {
+        let (first_body, second_body): (&[u8], &[u8]) = if first == "photos[1]" {
+            (b"second", b"first")
+        } else {
+            (b"first", b"second")
+        };
+        let (first_name, second_name) = if first == "photos[1]" {
+            ("b.txt", "a.txt")
+        } else {
+            ("a.txt", "b.txt")
+        };
+        let reply = send(
+            album_route(),
+            "POST",
+            "/album",
+            Some(&multipart()),
+            multipart_body(&[
+                ("title", None, b"Trip"),
+                (first, Some(first_name), first_body),
+                (second, Some(second_name), second_body),
+                ("cover", Some("c.png"), b"cover"),
+            ]),
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{first}: {}", reply.text());
+        assert_eq!(
+            reply.json(),
+            json!({
+                "title": "Trip",
+                "photos": [
+                    { "name": "a.txt", "body": "first" },
+                    { "name": "b.txt", "body": "second" },
+                ],
+                "cover": "c.png",
+            }),
+            "{first}"
+        );
+    }
+
+    // Inertia sends a `null` file as an empty part.
+    let reply = send(
+        album_route(),
+        "POST",
+        "/album",
+        Some(&multipart()),
+        multipart_body(&[("title", None, b"Trip"), ("cover", None, b"")]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["photos"]);
+}
+
+#[tokio::test]
+async fn inp_a_file_that_fails_is_named_by_its_path() {
+    let reply = send(
+        album_route(),
+        "POST",
+        "/album",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("photos[0]", Some("a.txt"), b"first"),
+            ("photos[1]", None, b"not a file"),
+            ("cover", Some("c.png"), b"more than sixteen bytes"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["cover", "photos.1"]);
+    let body = reply.json();
+    assert_eq!(
+        body["errors"]["photos.1"][0],
+        "The photos.1 field must be a file."
+    );
+    let cover = body["errors"]["cover"][0]
+        .as_str()
+        .expect("a message for the cover");
+    assert!(cover.contains("kilobytes"), "{cover}");
+}
+
+#[tokio::test]
+async fn inp_a_file_field_reads_only_a_multipart_body() {
+    // Text where a file belongs, url-encoded.
+    let reply = send(
+        album_route(),
+        "POST",
+        "/album",
+        Some(FORM),
+        b"title=Trip&photos[]=a".to_vec(),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["photos.0"]);
+
+    // And in JSON, which carries no file.
+    let reply = send(
+        album_route(),
+        "POST",
+        "/album",
+        Some("application/json"),
+        br#"{"title": "Trip", "photos": ["a"]}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
 }

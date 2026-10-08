@@ -28,6 +28,8 @@ use std::ops::Range;
 use indexmap::IndexMap;
 use url::form_urlencoded;
 
+use crate::http::upload::{MultipartPayload, MultipartValue, UploadedFileBacking, leaves_file_out};
+
 /// How many bracketed levels a name may have, PHP's default
 /// `max_input_nesting_level`. It also bounds the depth the deserializer
 /// recurses to, whatever the body.
@@ -37,8 +39,30 @@ const MAX_DEPTH: usize = 64;
 pub(super) enum Node<'a> {
     /// A value as sent. An empty one is `null`.
     Text(Cow<'a, str>),
+    /// A multipart text part whose bytes are not UTF-8, which no type
+    /// reads.
+    NotUtf8,
+    /// A multipart part that carries a file.
+    File(Box<FilePart>),
     /// The members of bracketed names.
     Array(Box<Array<'a>>),
+}
+
+/// A multipart file part as the parser kept it: what an `UploadedFile` is
+/// made of.
+pub(super) struct FilePart {
+    /// Where the bytes are, in memory or in a temp file.
+    pub(super) backing: UploadedFileBacking,
+    /// The part's size in bytes.
+    pub(super) size: u64,
+    /// The file name the client gave.
+    pub(super) file_name: Option<String>,
+    /// The `Content-Type` the client gave.
+    pub(super) content_type: Option<String>,
+    /// The extension the content's magic bytes name.
+    pub(super) inferred_extension: Option<&'static str>,
+    /// The first bytes of the part, at most 16 KiB.
+    pub(super) sniff: Vec<u8>,
 }
 
 /// The members bracketed names put under one place, as a PHP array holds
@@ -136,7 +160,7 @@ impl<'a> Node<'a> {
         }
         match self {
             Self::Array(array) => Some(array),
-            Self::Text(_) => None,
+            Self::Text(_) | Self::NotUtf8 | Self::File(_) => None,
         }
     }
 }
@@ -230,6 +254,44 @@ impl<'a> Nested<'a> {
                 set_path(place, keys, value);
             }
         }
+    }
+}
+
+impl Nested<'static> {
+    /// The parts of a multipart body, in the order they were sent.
+    ///
+    /// An empty text part, which is how the Inertia client sends `null`,
+    /// and a file part with no file name and no bytes, which is how a
+    /// browser sends an empty file input, both read as `null`.
+    pub(super) fn from_multipart(
+        payload: MultipartPayload,
+        fields: Option<&'static [&'static str]>,
+    ) -> Self {
+        let mut nested = Self::new(fields);
+        for (name, value) in payload.fields {
+            let node = match value {
+                MultipartValue::Text(text) => Node::Text(Cow::Owned(text)),
+                MultipartValue::NonUtf8Text(_) => Node::NotUtf8,
+                file if leaves_file_out(&file) => Node::Text(Cow::Borrowed("")),
+                MultipartValue::File {
+                    backing,
+                    size,
+                    file_name,
+                    content_type,
+                    inferred_extension,
+                    sniff,
+                } => Node::File(Box::new(FilePart {
+                    backing,
+                    size,
+                    file_name,
+                    content_type,
+                    inferred_extension,
+                    sniff,
+                })),
+            };
+            nested.insert(Cow::Owned(name), node);
+        }
+        nested
     }
 }
 

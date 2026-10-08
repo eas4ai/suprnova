@@ -1,7 +1,7 @@
 use super::ParamError;
 use super::body::{
-    collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded, parse_form,
-    parse_json,
+    collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded,
+    is_multipart_form_data, parse_form, parse_json, parse_multipart,
 };
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
@@ -1248,12 +1248,8 @@ impl Request {
     /// with the errors. Any other failure is a 422 that words it.
     pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
         let q = self.query().unwrap_or("");
-        crate::http::input::parse_form_input(q.as_bytes()).map_err(|error| match error {
-            crate::http::input::InputError::Fields(errors) => FrameworkError::Validation(errors),
-            crate::http::input::InputError::Other(message) => {
-                FrameworkError::domain(format!("query parse: {message}"), 422)
-            }
-        })
+        crate::http::input::parse_form_input(q.as_bytes())
+            .map_err(|error| error.into_framework_error("query parse"))
     }
 
     /// Returns the matched route pattern (e.g. `/users/{id}`) when the
@@ -1694,10 +1690,19 @@ impl Request {
     ///
     /// - `application/json` -> JSON parsing
     /// - `application/x-www-form-urlencoded` -> Form parsing
+    /// - `multipart/form-data` -> the parts read as a form, as the Inertia
+    ///   client sends a form with a file: bracketed and indexed names are
+    ///   nested, and a file part fills an `UploadedFile` field
     /// - Otherwise -> JSON parsing (default)
+    ///
+    /// Every body is capped at the global request body cap
+    /// ([`global_max_request_body_bytes`]).
     ///
     /// Consumes the request since the body can only be read once.
     pub async fn input<T: DeserializeOwned>(self) -> Result<T, FrameworkError> {
+        if self.content_type().is_some_and(is_multipart_form_data) {
+            return parse_multipart(self, global_max_request_body_bytes()).await;
+        }
         let (parts, bytes) = self.body_bytes().await?;
 
         match parts.content_type.as_deref() {

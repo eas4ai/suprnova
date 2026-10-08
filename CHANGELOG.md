@@ -332,6 +332,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A drop-in Inertia form with a file, and a `GET` filter form, read as the
+  client shapes them.** The Inertia client sends a form that holds a file
+  as `multipart/form-data` under bracketed and indexed names (`user[name]`,
+  `photos[0]`), and a `GET` visit's data as `filters[status]=x&tags[]=a`.
+  A form request answered `415` for the multipart body, and every reader
+  matched names literally, so `filters[status]=x` arrived as one literal
+  key and a field declared as `user.name` read nothing. Bracketed and
+  indexed names in a url-encoded body, a multipart body and a query string
+  now decode into nested data as PHP's `parse_str` reads them: objects,
+  lists in index order, up to 64 levels deep. A form request and
+  `Request::input` read a multipart body, an `UploadedFile` field takes a
+  part that carries a file and runs its validators, and a field that fails
+  is named by its dotted path (`user.name`, `photos.1`). A multipart body
+  stays under the form request's `max_body_bytes` (8 MiB by default) and
+  the multipart part ceiling (1,000 parts).
 - **JPEGs from the built-in driver show the right colours everywhere.** The
   `oxideav` driver wrote RGB samples behind a JFIF header, so libjpeg-based
   decoders, ImageMagick and most browsers among them, showed the wrong

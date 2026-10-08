@@ -1309,7 +1309,7 @@ pub enum Taken<T> {
 /// (an empty file input). One rule for both the extractor and the parser,
 /// so the part the parser checks for a field that holds one file is the
 /// part the extractor takes.
-fn leaves_file_out(value: &MultipartValue) -> bool {
+pub(crate) fn leaves_file_out(value: &MultipartValue) -> bool {
     match value {
         MultipartValue::Text(text) => text.is_empty(),
         MultipartValue::NonUtf8Text(_) => false,
