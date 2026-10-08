@@ -279,36 +279,51 @@ import { Link, router } from '@inertiajs/react'
 
 The Vue kit reaches every application route through `Link`. Each URL starts
 from `root`, the public root the server shares with every page, so one build
-runs at `/` and under a path prefix. The sign-out is a `Link` that posts,
-rendered as a button:
+runs at `/` and under a path prefix. The account links read the signed-in
+user the server shares as `auth.user`. The sign-out is a `Link` that posts,
+rendered as a button. A posting link keeps the page's state by default, so
+it passes `:preserve-state="false"`, and the layout props the page set do not
+follow the visitor to the sign-in page:
 
 ```vue
-<!-- frontend/src/layouts/AppLayout.vue (navigation) -->
+<!-- frontend/src/components/AccountLinks.vue, without its classes -->
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Link, usePage } from '@inertiajs/vue3'
 
-const { root } = usePage().props
+const page = usePage()
+const { root } = page.props
+const user = computed(() => page.props.auth.user)
 </script>
 
 <template>
-  <Link :href="`${root}/dashboard`">Dashboard</Link>
-  <Link :href="`${root}/notes`">Notes</Link>
-  <Link :href="`${root}/logout`" method="post" as="button">Sign out</Link>
+  <template v-if="user">
+    <span>{{ user.name }}</span>
+    <Link :href="`${root}/logout`" method="post" as="button" :preserve-state="false">
+      Sign out
+    </Link>
+  </template>
+  <template v-else>
+    <Link :href="`${root}/login`">Sign in</Link>
+    <Link :href="`${root}/register`">Register</Link>
+  </template>
 </template>
 ```
 
 A row of `Notes/Index.vue` prefetches its note on hover and opens it as an
 instant visit: `component` and `page-props` let the client render
 `Notes/Show` from the row at once, and the server's answer replaces it when
-it arrives. The search box navigates programmatically, keeping the page's
-state and starting the infinite list over:
+it arrives. `page-props` takes the function form, which keeps the shared
+props, `root` among them, on that first render; the object form would drop
+them until the server answers. The search box navigates programmatically,
+keeping the page's state and starting the infinite list over:
 
 ```vue
 <Link
   :href="`${root}/notes/${note.id}`"
   prefetch
   component="Notes/Show"
-  :page-props="{ note }"
+  :page-props="(_props, shared) => ({ ...shared, note })"
 >
   {{ note.title }}
 </Link>
@@ -465,15 +480,19 @@ function withRememberFlag(data: Record<string, FormDataConvertible>) {
 
 For a JSON endpoint outside page visits, the dashboard's display-name form
 uses `useHttp`. `optimistic` shows the new name before the server answers; a
-`422` puts the old name back and fills `errors.name`:
+`422` puts the old name back and fills `errors.name`. A saved name reloads the
+shared `auth` prop, so the layout shows it too:
 
 ```ts
-const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: props.user.name })
-const draft = ref(props.user.name)
+const page = usePage()
+const user = computed(() => page.props.auth.user)
+
+const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: user.value?.name ?? '' })
+const draft = ref(user.value?.name ?? '')
 
 function saveName() {
   return profile.optimistic(() => ({ name: draft.value })).post(`${root}/profile/name`, {
-    onSuccess: (response) => router.replaceProp('user', response.user),
+    onSuccess: () => router.reload({ only: ['auth'] }),
   })
 }
 ```
@@ -671,24 +690,26 @@ createInertiaApp({
 ```
 
 A layout given this way stays mounted across visits between two pages that
-share it; only the page inside it changes. It receives the page's props, so
-`user` is there on the dashboard, and the props a page sets with
+share it; only the page inside it changes. It reads the signed-in user from
+the shared `auth.user`, so a guest on the home page sees the sign-in links
+rather than a sign-out, and it receives the props a page sets with
 `setLayoutProps`:
 
 ```vue
 <!-- frontend/src/layouts/AppLayout.vue (structure) -->
 <script setup lang="ts">
+import AccountLinks from '../components/AccountLinks.vue'
 import FlashToast from '../components/FlashToast.vue'
 
 defineProps<{
   heading?: string
-  user?: { name: string }
 }>()
 </script>
 
 <template>
   <div class="min-h-screen bg-gray-100">
-    <!-- the navigation Links and the signed-in user's name -->
+    <!-- the Dashboard and Notes Links for a signed-in user, then: -->
+    <AccountLinks />
     <FlashToast />
     <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <h1 v-if="heading" class="mb-6 text-2xl font-semibold text-gray-900">{{ heading }}</h1>

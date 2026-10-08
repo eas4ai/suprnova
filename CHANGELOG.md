@@ -547,18 +547,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   share two persistent layouts.** Every page drew its own frame, reached
   other pages through `<a href>`, which reloads the whole document, and
   left the tab untitled. The kit now ships `layouts/AppLayout.vue`
-  (navigation, the signed-in user, a sign-out `Link` that posts as a
-  button, the flash toast, and a heading) and `layouts/GuestLayout.vue`
+  (navigation, the flash toast and a heading) and `layouts/GuestLayout.vue`
   for the pages under `auth/`, applied through the `layout` option so a
-  layout stays mounted between two pages that share it. Every
+  layout stays mounted between two pages that share it. Both show
+  `components/AccountLinks.vue`, which reads the shared `auth.user`: the
+  name and a sign-out `Link` that posts as a button without keeping the
+  page's state, or the sign-in and register links for a guest, so the home
+  and error pages never offer a guest a sign-out. Every
   application link is a `Link` built from `root`, every page sets its title
   with `Head`, and the dashboard sets the layout's heading with
   `setLayoutProps`, which the next page clears (K06, K07, K16).
 - **The Vue kit shows the flash toast.** The server's `page.flash` reached
   no kit page, so a sign-in, a sign-out or a saved note gave no feedback.
-  `components/FlashToast.vue` renders the page's `toast` in both layouts,
-  straight from the page, so it shows once, on the page it was flashed
-  for (K17).
+  `components/FlashToast.vue` renders `page.flash.toast`, typed by the
+  generated `flashDataType`, in both layouts, straight from the page, so it
+  shows once, on the page it was flashed for (K17).
 - **The Vue kit's dashboard and notes pages use Inertia's client features.**
   The dashboard rendered one eager prop and the kit had no list page, so a
   new application had nothing to copy for deferred, optional or scroll
@@ -566,10 +569,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   fallback, polls it with `usePoll(10000, { only: ['stats'] })`, loads
   `recent_notes` with `WhenVisible` when it scrolls into view, and saves the
   display name through `useHttp` with an optimistic update that a `422`
-  reverts while showing `errors.name`. The new `Notes/Index.vue` creates a
+  reverts while showing `errors.name`; a saved name reloads the shared
+  `auth` prop, so the layout shows it. The new `Notes/Index.vue` creates a
   note with `Form`, remembers its search with `useRemember`, lists the
   signed-in user's notes with `InfiniteScroll`, and opens one as an
-  instant visit to the new `Notes/Show.vue` from a prefetching `Link`. The
+  instant visit to the new `Notes/Show.vue` from a prefetching `Link`
+  whose page props keep the shared props, `root` among them. The
   five auth pages submit through `Form` in place of `useForm`, read
   `errors` and `processing` from its slot, and keep the sign-in page's
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).

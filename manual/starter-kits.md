@@ -111,9 +111,11 @@ each page shows part of the client at work:
 - `Notes/Show.vue` shows one of the signed-in user's notes.
 - The five pages under `auth/` submit through `Form`.
 - `layouts/AppLayout.vue` and `layouts/GuestLayout.vue`, applied through the
-  `layout` option, carry the navigation, the sign-out button and the
-  flash toast from `components/FlashToast.vue`, and every page titles its tab
-  with `Head`.
+  `layout` option, carry the navigation, the flash toast from
+  `components/FlashToast.vue`, and the account links from
+  `components/AccountLinks.vue`: the signed-in user's name and a sign-out
+  button, or the sign-in and register links for a guest. Every page titles
+  its tab with `Head`.
 
 For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and
