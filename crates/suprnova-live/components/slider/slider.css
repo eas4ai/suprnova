@@ -1,0 +1,15 @@
+.sn-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--sn-density-gap);
+}
+
+.sn-slider-input {
+  flex: 1;
+}
+
+.sn-slider-value {
+  min-inline-size: 3ch;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
