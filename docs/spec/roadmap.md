@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: inertia-devtools
+Current: inertia-starter-kits
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -583,6 +583,38 @@ Requirements: PAR-071, PAR-072, PAR-073, PAR-074, PAR-075, PAR-061, PAR-068
    revised text, `par-inertia-testing` rebound on PAR-068's.
    Done when the three pass on a committed tree, the manual passages are
    in place, and the review is recorded.
+
+## inertia-starter-kits
+
+Requirements: PAR-076, PAR-077, PAR-078, PAR-079, PAR-080, PAR-071, PAR-074
+
+40. inertia-starter-kits - the fifth of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build at 17:23: the three starter
+   kits on Inertia.js 3.8.0, the fifteen build rows of the starter-kit
+   group (K01, K05, K06, K07, K10, K11, K12, K13, K14, K15, K16, K17, K18,
+   K19 and K21), K10 met by PAR-068 already; with PAR-071 and PAR-074 reworded to name
+   `APP_ENV=local` under the developer's ruling of 2026-10-08 14:25
+   (decision 01M4EC8TAKX6XXKXBTT7K5S60M).
+   Delivery: PAR-076 to PAR-079 in `suprnova-cli/src/templates/files/frontend/{svelte,react,vue}/`
+   (manifests at `^3.8.0` with `@inertiajs/vite`, the Vite configs and
+   entries on the plugin, layouts, the flash toast, `Link`, `Head`, `Form`,
+   the dashboard and notes pages with `Deferred`, `WhenVisible`,
+   `InfiniteScroll`, `usePoll`, `usePrefetch`, `useRemember`, `useHttp`,
+   optimistic updates and instant visits) and PAR-080 in
+   `suprnova-cli/src/templates/files/backend/` (the dashboard, notes and
+   profile handlers, the flash struct, the routes); `suprnova new` writing
+   the new files; the 3.8.0 citations in `framework/src/inertia/`, the
+   scaffold comments and `manual/csrf.md`; the dogfood `app/frontend` on
+   the same packages with `Link`, `Head` and `InfiniteScroll` on its users
+   page; the mechanism's tests in `suprnova-cli/tests/kit_pages.rs`,
+   `kit_typecheck.rs` and `kit_browser.rs` with its Playwright suite;
+   `manual/starter-kits.md`, `manual/frontend-pages.md` and
+   `manual/frontend.md` updated; the changelog.
+   Mechanisms: `par-starter-kits` (the `kit_` text tests over fresh
+   scaffolds, the type-check and build of each kit, and the browser suite
+   over a built scaffold).
+   Done when it passes on a committed tree, the manual passages are in
+   place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

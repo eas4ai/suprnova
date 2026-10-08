@@ -1169,8 +1169,10 @@ PAR-068 revised to name `Inertia::share_data` and to type the errors under
 `with_all_errors(true)`.
 
 [PAR-071] DevTools recording MUST be gated by `InertiaConfig::devtools`:
-`enabled` unset records in the `Local` environment only, `true` and
-`false` decide outright; a request whose path matches one of the `except`
+`enabled` unset records only when `APP_ENV` is set and names `local`
+(an unset `APP_ENV`, which the framework otherwise reads as local, does
+not: the developer, 2026-10-08 14:25), `true` and `false` decide
+outright; a request whose path matches one of the `except`
 patterns (Laravel's `Request::is` rule: `*` matches any characters, the
 leading slash dropped; default `_inertia/devtools*` and `_suprnova/*`) is
 not recorded. Recording MUST never change the response the request gets:
@@ -1178,7 +1180,7 @@ a failure anywhere in recording (an unserializable value, a misconfigured
 redaction list, a storage error) is swallowed and the entry dropped, a
 storage write failure is logged once at warn and suppresses recording for
 30 seconds, and with devtools off no header, tag or entry is produced.
-Falsifier: with `enabled` unset a `Local` request leaves no entry or a `Production` request leaves one; with `enabled(false)` a `Local` request leaves an entry, or with `enabled(true)` a `Production` request leaves none; a request to `/_inertia/devtools/entries` or `/_suprnova/health` is recorded; a request under an `except` pattern of its own is recorded; a prop value that cannot be serialized, or a storage path that cannot be written, changes the status, body or headers of the response beyond the devtools headers; or a write failure is logged on every request.
+Falsifier: with `enabled` unset a request under `APP_ENV=local` leaves no entry or one under an unset or production `APP_ENV` leaves one; with `enabled(false)` a request under `APP_ENV=local` leaves an entry, or with `enabled(true)` one under a production `APP_ENV` leaves none; a request to `/_inertia/devtools/entries` or `/_suprnova/health` is recorded; a request under an `except` pattern of its own is recorded; a prop value that cannot be serialized, or a storage path that cannot be written, changes the status, body or headers of the response beyond the devtools headers; or a write failure is logged on every request.
 Mechanism: `par-inertia-devtools`.
 Rationale: Rows DT-01 and DT-10; Laravel's `DevTools::enabled` defaults to the `local` environment, `devtools.except` skips its own and other tooling's paths, and `RequestRecorder::respondedWith` swallows every failure so a passive observer cannot turn the user's response into a 500.
 Status: Agreed 2026-10-08
@@ -1239,14 +1241,15 @@ Status: Agreed 2026-10-08
 filtered by `component`, `type` and `exclude` (comma lists of request
 types), `offset` and `limit`, and `GET /_inertia/devtools/entries/{id}`
 with the stored entry, `404 {"message": "Not found."}` for an id that is
-not a ULID or names no entry; a request is allowed in the `Local`
-environment always and elsewhere only when the configured
+not a ULID or names no entry; a request is allowed always when
+`APP_ENV` is set and names `local` (never for an unset `APP_ENV`: the
+developer, 2026-10-08 14:25) and elsewhere only when the configured
 `devtools.gate` ability allows the request's user (a guest when none),
 else `403 {"message": "Forbidden."}`; the endpoints MUST run inside the
 Inertia middleware stack with the session in scope, reflash the session,
 count as XHR so they never become the previous URL, and never be
 recorded.
-Falsifier: `entries` lists oldest first or ignores `component=Home`, `type=navigate,partial`, `exclude=poll`, `offset` or `limit`; `entries/not-a-ulid` or an unknown ULID answers anything but `404 {"message": "Not found."}`; a `Production` request with no gate configured, or one the gate denies, answers anything but `403 {"message": "Forbidden."}`, or a `Local` request is denied; an entry request ages the flash a `POST` left, or becomes the previous URL; or an entry request leaves an entry.
+Falsifier: `entries` lists oldest first or ignores `component=Home`, `type=navigate,partial`, `exclude=poll`, `offset` or `limit`; `entries/not-a-ulid` or an unknown ULID answers anything but `404 {"message": "Not found."}`; a request under an unset or production `APP_ENV` with no gate configured, or one the gate denies, answers anything but `403 {"message": "Forbidden."}`, or a `Local` request is denied; an entry request ages the flash a `POST` left, or becomes the previous URL; or an entry request leaves an entry.
 Mechanism: `par-inertia-devtools`.
 Rationale: Rows DT-05, DT-06 and DT-09; Laravel's `EntriesController`, `Authorize`, `PreserveFlashData` and `PreventPreviousUrlTracking`, since the extension fetches an entry the moment the headers arrive, racing the redirect the app is about to follow.
 Status: Agreed 2026-10-08
@@ -1268,4 +1271,99 @@ be serialized by `[UNSERIALIZABLE]`.
 Falsifier: an entry file is missing or unreadable as JSON, or the index does not list it; an entry 25 hours old survives a request after the prune interval, or one 1 hour old is pruned; a tab with 101 entries at the default limit keeps the oldest; a stored entry carries a `password` value, a `Cookie` header's value, or `?token=abc` unredacted, or a `Password` key escapes by case; or an unserializable prop leaf drops the entry.
 Mechanism: `par-inertia-devtools`.
 Rationale: Rows DT-07 and DT-08; Laravel's `EntriesRepository`, `EntryStore` and `RedactsSensitiveData`, and the extension reads the index for its list and the files for detail.
+Status: Agreed 2026-10-08
+
+## Starter kits on Inertia 3.8
+
+The fifth parity round the developer ordered on 2026-10-07 (17:35): the
+fifteen build rows of the starter-kit group (K01, K05, K06, K07, K10, K11,
+K12, K13, K14, K15, K16, K17, K18, K19 and K21) on Inertia.js 3.8.0. K20
+is settled (Laravel's own kits register with Inertia's `Form` and no live
+validation) and K10 is met by PAR-068 (the kits declare `@inertiajs/core`
+and read `usePage()` typed by the generated augmentation). The rows'
+siblings are built: the multipart request bodies of P16 (PAR-05x), the
+cursor metadata of O19, the hot file of S07 (PAR-058) and the types of
+T02 (PAR-068); the client nonce row H03 stays with RDOC-005 in the
+security-headers commitment, and the kits read the nonce element it
+describes. Client references cite `reference/inertia-3.8.0/packages/`.
+
+[PAR-076] Every starter kit (`svelte`, `react`, `vue`) MUST declare its
+adapter, `@inertiajs/core` and `@inertiajs/vite` at `^3.8.0`; resolve its
+pages through the Vite plugin's `pages` shorthand (`pages: './pages'`, no
+hand-written `import.meta.glob`); build its SSR entry through the plugin so
+`npm run build:ssr` lands `frontend/bootstrap/ssr/ssr.js`, the path
+`suprnova ssr:start` reads (PAR-061); and pass `createInertiaApp` a
+`title` callback that appends the application's name, `serverHead: true`,
+and `nonce` read from the document's `<meta property="csp-nonce">` when
+one is present (RDOC-005's element; `undefined` on the server and when the
+document has none). Each kit MUST have a `check` script that type-checks
+it, and `npm run check`, `npm run build` and `npm run build:ssr` MUST pass
+on a fresh scaffold. Suprnova's sources, the scaffold's comments and the
+manual MUST cite the Inertia.js client at 3.8.0, not 3.6.1.
+Falsifier: a kit manifest names an `@inertiajs/*` package below `^3.8.0` or lacks `@inertiajs/vite`; an entry resolves pages with its own glob, or passes no `title`, `serverHead` or `nonce`; `npm run check`, `npm run build` or `npm run build:ssr` fails on a fresh scaffold, or the SSR bundle lands anywhere but `frontend/bootstrap/ssr/ssr.js`; a tracked source, template or manual line cites `inertia-3.6.1` or pins `^3.6.1`.
+Mechanism: `par-starter-kits`.
+Rationale: Rows K01, K05, K18 and K19; Inertia 3.8.0 is current, its Vite plugin (`packages/vite/src/index.ts`) owns page resolution and the development SSR endpoint PAR-058's hot file already sends first visits to, and `createInertiaApp`'s `nonce`, `serverHead` and `title` options (`packages/core/src/types.ts`) are what a page needs under a CSP, for head tags set from Rust, and for a titled tab.
+Status: Agreed 2026-10-08
+
+[PAR-077] Every in-application navigation in a kit page or layout MUST be
+a `Link` (an external URL stays an anchor), the sign-out a `Link` with
+`method="post"` rendered `as="button"`, and the users list's rows MUST
+prefetch on hover; every page MUST set its title with `Head`; each kit
+MUST ship a guest layout for the pages under `auth/` and an application
+layout (navigation, the signed-in user, the flash toast) for every other
+page, both applied through `createInertiaApp`'s `layout` option so a
+layout keeps its state across visits between its pages, and the dashboard
+MUST set the layout's heading with `setLayoutProps`, which the next page
+that sets none does not show.
+Falsifier: a kit page or layout reaches an application route through an `<a href>`, or a page renders without `Head`; a page outside `auth/` renders without the application layout, or the layout remounts between two application pages so state kept in it resets; the dashboard's heading set with `setLayoutProps` does not show, or shows on the next page.
+Mechanism: `par-starter-kits`.
+Rationale: Rows K06, K07 and K16; the adapters' `Link` and `Head` and the `layout` option with `setLayoutProps` (`packages/core/src/layout.ts`) keep a new application's chrome mounted and its tab titled, where the kits' anchors reload the document on every click and each page renders its own frame.
+Status: Agreed 2026-10-08
+
+[PAR-078] The scaffold MUST declare a flash struct marked
+`#[inertia_props(flash)]` carrying a `toast` with a kind and a message,
+flash one through `Inertia::flash` after sign-in, registration, a
+password-reset link request, a password reset, email verification, a
+verification resend and sign-out, and each kit's layouts MUST show
+`page.flash`'s toast once, typed by the generated `flashDataType`.
+Falsifier: a sign-in, registration, reset request, reset, verification, resend or sign-out shows no toast on the page it lands on, or the toast shows again on the next visit; the flash struct lacks the marker, so `usePage().flash` is untyped.
+Mechanism: `par-starter-kits`.
+Rationale: Row K17; the server sends `page.flash` and the generator types it (PAR-068), but no kit page read it, so a new application showed no feedback after any action.
+Status: Agreed 2026-10-08
+
+[PAR-079] Each kit's dashboard MUST render a `stats` prop deferred, with
+`Deferred` and a fallback; a `recent_notes` prop marked optional, loaded
+with `WhenVisible` when scrolled into view; poll `stats` with `usePoll` on
+`only: ['stats']`; and let the signed-in user change their display name
+through `useHttp` with an optimistic update, the new name showing before
+the server answers and a 422 reverting it and showing the field's error.
+A `Notes/Index` page MUST list the signed-in user's own notes with
+`InfiniteScroll` over `Inertia::paginate` of a cursor paginator, remember
+its `search` filter with `useRemember`, create a note through the `Form`
+component, and open a note through an instant visit (a `Link` naming
+`component="Notes/Show"` and `pageProps` from the row, so the show page
+renders from the row before the server answers). Every auth page (Login,
+Register, ForgotPassword, ResetPassword and the VerifyEmail resend) MUST
+submit through the `Form` component, showing its `errors` and disabling
+its button while `processing`. No kit page MUST list or show another
+user's account or note.
+Falsifier: a kit dashboard or notes page lacks one of `Deferred`, `WhenVisible`, `usePoll`, `useHttp`, `InfiniteScroll`, `useRemember`, `Form` or an instant-visit `Link`; the name change waits for the server before showing, or keeps the new name after a 422; the notes list requests page numbers instead of cursors; an auth page submits with `useForm` or a native submit handler; a kit page lists other users or shows another user's note.
+Mechanism: `par-starter-kits`.
+Rationale: Rows K11, K12, K13, K14, K15 and K21; the server already resolves deferred, optional, merge and scroll props and sends cursor metadata, and its 422 body carries `errors`, but no kit page used the client components and hooks that consume them, so a new application had nothing to copy. The list is the signed-in user's own notes: Laravel's kits ship no list page, and a directory of accounts would hand every member every other member's name and email.
+Status: Agreed 2026-10-08
+
+[PAR-080] The scaffold's backend MUST ship what those pages need, behind
+the same authentication as the dashboard: a `notes` table and model owned
+by a user; the dashboard handler sending the signed-in user, `stats`
+deferred (counts of the user's own notes) and `recent_notes` optional (the
+user's five newest); a notes index with `cursor_paginate` over the user's
+own notes filtered by a `search` query parameter through
+`Inertia::paginate`; a notes show that answers `404` for a note of another
+user; a notes store validating `title` and flashing a toast; a `POST
+/profile/name` JSON handler answering `200` with the user or `422` with
+`errors` through the framework's validation; and a fresh scaffold MUST
+compile against the framework it pins.
+Falsifier: a fresh scaffold fails `cargo check`; `GET /notes` answers without cursor `scrollProps`, lists another user's note, or a second page is requested by number; `GET /notes/{id}` of another user's note answers anything but `404`; `POST /profile/name` with an empty name answers anything but `422` with `errors.name`; a signed-out request to `/notes` or `/profile/name` is not sent to the sign-in page.
+Mechanism: `par-starter-kits`.
+Rationale: Rows K12, K14 and K21 need a server the page can scroll, post JSON to and update; the scaffold's dashboard handler sent one eager prop and nothing paginated, and the data a new application already has is its own users, which no member should browse.
 Status: Agreed 2026-10-08
