@@ -211,10 +211,13 @@ records their routes and `Inertia::install` registers a global
 
 Each entry is one JSON file, `<storage_path>/<id>.json`, written to a
 temporary file and renamed into place. `_meta.json` lists every entry's
-`__meta`, newest first, and is rewritten under a file lock, so several
-processes can record into one directory; when it is missing or unreadable
-it is rebuilt from the entry files. A `.gitignore` in the directory keeps
-it out of your repository.
+`__meta`, newest first. Each rewrite holds a lock on `_meta.lock`, so
+several processes can record into one directory, and renames a complete
+new list over `_meta.json`, so an interrupted rewrite leaves the previous
+list in place. When `_meta.json` is missing, empty or not a JSON list, it
+is rebuilt from the entry files before it is read or rewritten, so the
+next recorded request, prune and tab limit still see every stored entry.
+A `.gitignore` in the directory keeps it out of your repository.
 
 After a request, entries older than `ttl_hours` are pruned when the last
 prune, noted in `_last_prune`, is at least `prune_interval_secs` old. A

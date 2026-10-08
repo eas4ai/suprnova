@@ -164,6 +164,31 @@ async fn indt_a_tab_keeps_its_newest_100_entries() {
 }
 
 #[tokio::test]
+async fn indt_a_request_after_the_index_is_lost_keeps_every_entry_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), devtools(dir.path()));
+    let id_of = |response: &suprnova::testing::TestResponse| {
+        response
+            .header("x-inertia-devtools-id")
+            .unwrap()
+            .to_string()
+    };
+    let first = id_of(&client.get("/text").send().await);
+    std::fs::remove_file(dir.path().join("_meta.json")).unwrap();
+    let second = id_of(&client.get("/text").send().await);
+    std::fs::write(dir.path().join("_meta.json"), "").unwrap();
+    let third = id_of(&client.get("/text").send().await);
+
+    let listed: Vec<String> = read_index(dir.path())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|meta| meta["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(listed, vec![third, second, first]);
+}
+
+#[tokio::test]
 async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storage() {
     let dir = tempfile::tempdir().unwrap();
     let client = client(router(), devtools(dir.path()));
