@@ -321,17 +321,21 @@ pub fn inertia_version() -> String {
 ///    `X-Inertia-Location` on an `X-Inertia-Version` mismatch, re-flashing
 ///    the session first so a flashed error survives the client's
 ///    follow-up full-page GET; `302` → `303` on non-GET Inertia
-///    redirects; a `422` carrying an `errors` object turned into the
-///    redirect-back the Inertia client expects, so a failed validation
-///    restores the form with its messages rather than surfacing a raw
-///    `422`; and, innermost, the error-response middleware, which changes
-///    nothing here because this app sets neither an `error_page` nor an
-///    error callback. The server runs the same decision after the whole
-///    stack for an error response nothing inside it decided - the `503`
-///    `TimeoutMiddleware` (2) answers, a panic in `LoggingMiddleware` (1) -
-///    which changes nothing here for the same reason. An app that sets
-///    either gets those responses decided without the session and locale
-///    scopes of (4) and (5), which have closed by then.
+///    redirects; the error-response middleware, which changes nothing
+///    here because this app sets neither an `error_page` nor an error
+///    callback; and, innermost, a `422` carrying an `errors` object turned
+///    into the redirect-back the Inertia client expects, so a failed
+///    validation restores the form with its messages rather than
+///    surfacing a raw `422`. The error-response middleware sits outside
+///    that redirect, so an Inertia visit's validation failure would reach
+///    a callback as the redirect back, not as a `422`, while a JSON
+///    client's `422` would reach it as it is. The server runs the same
+///    decision after the whole stack for an error response nothing inside
+///    it decided - the `503` `TimeoutMiddleware` (2) answers, a panic in
+///    `LoggingMiddleware` (1) - which changes nothing here for the same
+///    reason. An app that sets either gets those responses decided
+///    without the session and locale scopes of (4) and (5), which have
+///    closed by then.
 ///    `inertia_config()` installs the default version resolver - a hash
 ///    of the Vite build manifest - so the version string tracks the built
 ///    frontend rather than a literal that someone has to remember to bump.

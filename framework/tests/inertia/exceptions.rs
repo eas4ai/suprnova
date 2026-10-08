@@ -612,9 +612,26 @@ async fn inssr_an_inertia_posts_validation_failure_never_reaches_the_callback() 
 }
 
 #[tokio::test]
-async fn inssr_a_json_clients_validation_failure_never_reaches_the_callback() {
+async fn inssr_a_json_clients_validation_failure_reaches_the_callback() {
     let _container = TestContainer::fake();
     let (mut client, _slot, calls) = teapot_client().await;
+
+    let reply = client.send("POST", "/register", JSON_CLIENT).await;
+
+    assert_eq!(
+        reply.status, 418,
+        "a JSON client's 422 is an error response the callback decides, as \
+         Laravel's respondUsing hands it every rendered exception; got {reply:?}"
+    );
+    assert_eq!(reply.body, "I'm a teapot");
+    assert_eq!(*calls.lock().unwrap(), 1);
+
+    // A callback returning `None` keeps the 422 with its errors.
+    let (kept, seen) = counter();
+    Inertia::handle_exceptions_using(move |_error| {
+        *seen.lock().unwrap() += 1;
+        None
+    });
 
     let reply = client.send("POST", "/register", JSON_CLIENT).await;
 
@@ -622,11 +639,29 @@ async fn inssr_a_json_clients_validation_failure_never_reaches_the_callback() {
     let body: serde_json::Value = serde_json::from_str(&reply.body)
         .unwrap_or_else(|e| panic!("expected the validation body ({e}): {}", reply.body));
     assert_eq!(body["errors"]["email"][0], "The email field is required.");
+    assert_eq!(*kept.lock().unwrap(), 1, "the callback decided the 422");
+}
+
+#[tokio::test]
+async fn inssr_the_default_callback_keeps_a_json_clients_validation_failure() {
+    let _container = TestContainer::fake();
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registry = MiddlewareRegistry::new()
+        .append(SeededSessionScope(slot))
+        .append(Inertia::middleware(&config().error_page("Error")));
+    let mut client = Client::new(serve(routes(), registry).await);
+
+    let reply = client.send("POST", "/register", JSON_CLIENT).await;
+
     assert_eq!(
-        *calls.lock().unwrap(),
-        0,
-        "a validation result is not an error for the callback"
+        reply.status, 422,
+        "the default callback renders only for an Inertia visit or a request that \
+         wants HTML; got {reply:?}"
     );
+    assert_eq!(reply.header("x-inertia"), None, "{reply:?}");
+    let body: serde_json::Value = serde_json::from_str(&reply.body)
+        .unwrap_or_else(|e| panic!("expected the validation body ({e}): {}", reply.body));
+    assert_eq!(body["errors"]["email"][0], "The email field is required.");
 }
 
 // ---------------------------------------------------------------------

@@ -320,10 +320,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and `response()`, which with debug on is the development error page where
   that page applies. It returns `render(component, props)` for an Inertia
   page at the original status, `respond_with(response)` for any other
-  response, or `None` to keep the response. A validation failure, a `422`
-  whose body carries an `errors` object, never reaches the callback: the
-  validation redirect owns it, so an Inertia form still goes back with its
-  errors flashed. A rendered page carries the shared props, the middleware
+  response, or `None` to keep the response. A JSON client's validation
+  `422` reaches the callback like any other error, as in Laravel; an
+  Inertia visit's validation failure reaches it as the `303` back to the
+  form, since the error-response middleware sits outside the validation
+  redirect, so an Inertia form still goes back with its errors flashed. A
+  rendered page carries the shared props, the middleware
   hooks' `share` and `share_once` included, only after
   `with_shared_data()`. `InertiaConfig::error_page` is now the default
   callback and keeps its rule; an app that sets both gets its callback. A
@@ -847,7 +849,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   decided, at each of the three places it dispatches a request. A page
   decided there carries the shared registry and the shared providers, but
   no session data, no detected locale and none of the middleware hooks'
-  shares, since every scope a middleware opened has closed.
+  shares, since every scope a middleware opened has closed. A JSON
+  client's validation `422`, `{message, errors}`, was also kept from the
+  callback: the error-response middleware sat inside the validation
+  redirect and skipped every `422` with an `errors` object so it would not
+  replace an Inertia visit's before the redirect back. It now sits outside
+  the redirect, which turns an Inertia visit's `422` into the `303` first,
+  and the `422` exclusion is gone; the default callback still keeps every
+  `422`.
 - **An error page placed outside the Inertia stack follows a fragment
   redirect.** An `InertiaErrorPageMiddleware` an app registered before
   `Inertia::install` saw the headers middleware's `409` with

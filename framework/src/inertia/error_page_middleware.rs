@@ -68,16 +68,25 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 /// an empty body, a JSON object with a string `message`, the router's
 /// `404 Not Found`. It runs the chain inside it under the panic boundary's
 /// rule, so a handler that panics reaches the callback as a `500` with the
-/// panic's report. Three kinds of response are never handed over: one a
-/// handler built itself in some other shape, which is the handler's
-/// answer; an Inertia protocol response (`X-Inertia`,
-/// `X-Inertia-Location`, `X-Inertia-Redirect`), which is an instruction to
-/// the client; and a validation result, a `422` whose JSON body carries an
-/// `errors` object, which
-/// [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
-/// owns. Each response is decided once, so a second instance further out
-/// leaves it alone, and so does the server, which decides only what no
-/// instance did (see [`ServerErrorDecision`]).
+/// panic's report. A validation failure's `422` is handed over like any
+/// other, as Laravel hands a `ValidationException` to its callback: a JSON
+/// client's `{message, errors}` and a Precognition dry run's. Two kinds of
+/// response are never handed over: one a handler built itself in some
+/// other shape, which is the handler's answer; and an Inertia protocol
+/// response (`X-Inertia`, `X-Inertia-Location`, `X-Inertia-Redirect`),
+/// which is an instruction to the client. Each response is decided once,
+/// so a second instance further out leaves it alone, and so does the
+/// server, which decides after the whole stack only what no instance did.
+///
+/// An Inertia visit's validation failure never reaches the callback as a
+/// `422`, because this sits **outside**
+/// [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware):
+/// by the time the response passes back out through here, the redirect has
+/// made it the `303` back to the form with the errors flashed, which is not
+/// an error. Inside the redirect, this would see the `422` first, and a
+/// callback that replaced it would break every Inertia form. Placing it
+/// outside rather than deciding a JSON client's `422` only at the server
+/// keeps that decision inside the request scopes the stack opens.
 ///
 /// A page the callback renders goes through the root template
 /// [`InertiaConfig::root_template_with`](crate::InertiaConfig::root_template_with)
@@ -87,10 +96,11 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 ///
 /// # Registering it yourself
 ///
-/// [`Inertia::install`](crate::Inertia::install) registers this
-/// **innermost** of the Inertia layer, which is the right place for almost
-/// every app: the scaffold registers `CsrfMiddleware` and the rest of its
-/// stack *after* that call, so their responses pass back out through it.
+/// [`Inertia::install`](crate::Inertia::install) registers this inside
+/// the rest of the Inertia layer and just outside the validation redirect,
+/// which is the right place for almost every app: the scaffold registers
+/// `CsrfMiddleware` and the rest of its stack *after* that call, so their
+/// responses pass back out through it.
 ///
 /// It is the wrong place for an app that registers a middleware which
 /// answers **before** the Inertia layer is reached - a `CsrfMiddleware`
@@ -140,6 +150,10 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 /// request scope it opened. Registered above those two, every error page
 /// loses the visitor's session and locale. Then: before the middleware
 /// whose rejections it should cover, and nowhere further out than that.
+/// And before `Inertia::install`, so it sits outside the validation
+/// redirect: registered after that call, it would see an Inertia visit's
+/// validation `422` before the redirect back is built, and a callback that
+/// replaced it would break the form.
 pub struct InertiaErrorPageMiddleware {
     /// The component the default callback renders. `None` for the instance
     /// `Inertia::install` registers, which reads the installed config's
@@ -326,10 +340,7 @@ async fn run_catching_panics(captured: &CapturedRequest, chain: MiddlewareFuture
 /// Whether `response` is an error response the framework rendered, the
 /// ones the callback is handed. See [`InertiaErrorPageMiddleware`].
 fn is_error_response(response: &HttpResponse) -> bool {
-    if !(400..=599).contains(&response.status_code())
-        || is_protocol_response(response)
-        || is_validation_result(response)
-    {
+    if !(400..=599).contains(&response.status_code()) || is_protocol_response(response) {
         return false;
     }
     response.error_report().is_some()
@@ -345,20 +356,6 @@ fn is_protocol_response(response: &HttpResponse) -> bool {
         .any(|v| v.eq_ignore_ascii_case("true"))
         || response.header_value("X-Inertia-Location").is_some()
         || response.header_value("X-Inertia-Redirect").is_some()
-}
-
-/// Whether `response` is a validation result: a `422` whose JSON body
-/// carries an `errors` object, the framework's
-/// `{"message": .., "errors": {..}}`. The validation redirect owns it: it
-/// turns an Inertia visit's `422` into the redirect back to the form with
-/// the errors flashed, and an API client or a Precognition dry run reads
-/// the errors off it. A callback that rendered it would break every form.
-fn is_validation_result(response: &HttpResponse) -> bool {
-    response.status_code() == 422
-        && !response.is_streaming()
-        && serde_json::from_slice::<Value>(response.body())
-            .ok()
-            .is_some_and(|body| body.get("errors").is_some_and(Value::is_object))
 }
 
 /// Hand `http` to the decider and build what it chose.
@@ -1180,15 +1177,16 @@ mod tests {
             &HttpResponse::from(FrameworkError::domain("gone", 410)).header("X-Inertia", "true")
         ));
 
-        // A validation result belongs to the validation redirect, though it
-        // carries a report. A 422 in any other shape is an error like any
-        // other.
+        // A validation result is an error response like any other, as
+        // Laravel hands a `ValidationException`'s 422 to the callback. An
+        // Inertia visit's never gets here: the validation redirect inside
+        // the middleware has made it the 303 back to the form.
         let mut errors = crate::ValidationErrors::new();
         errors.add("email", "The email field is required.");
         let validation = HttpResponse::from(FrameworkError::validation_errors(errors));
         assert_eq!(validation.status_code(), 422);
         assert!(validation.error_report().is_some());
-        assert!(!is_error_response(&validation));
+        assert!(is_error_response(&validation));
         assert!(is_error_response(&HttpResponse::from(
             FrameworkError::domain("unprocessable", 422)
         )));

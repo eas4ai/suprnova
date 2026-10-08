@@ -545,12 +545,15 @@ impl Inertia {
     /// [`TestContainer::fake`](crate::testing::TestContainer::fake) stays in
     /// that test.
     ///
-    /// A validation failure never reaches the callback: a `422` whose body
-    /// carries an `errors` object belongs to
-    /// [`InertiaValidationRedirectMiddleware`], which turns an Inertia
-    /// visit's `422` into the redirect back to the form. A panic in the
-    /// callback itself reaches the server's panic boundary, as a panic in
-    /// any middleware does.
+    /// A validation failure reaches the callback as the response the
+    /// client would get. A JSON client's `422`, `{message, errors}`, and a
+    /// Precognition dry run's are handed over like any other error. An
+    /// Inertia visit's never arrives as a `422`: the error-response
+    /// middleware sits outside [`InertiaValidationRedirectMiddleware`], so
+    /// by the time the response reaches it, the redirect has made it the
+    /// `303` back to the form with the errors flashed, which is not an
+    /// error. A panic in the callback itself reaches the server's panic
+    /// boundary, as a panic in any middleware does.
     ///
     /// ```rust,no_run
     /// use serde_json::json;
@@ -611,7 +614,7 @@ impl Inertia {
 
     /// Install the standard Inertia protocol middleware globally.
     ///
-    /// Registers four global middlewares in order:
+    /// Registers five global middlewares in order:
     /// 1. [`InertiaHeadersMiddleware`] - sets `Vary: X-Inertia` on every
     ///    response; on an Inertia visit it turns an empty `200` into a
     ///    redirect back (`302`, `303` for `PUT`, `PATCH` and `DELETE`), a
@@ -631,24 +634,27 @@ impl Inertia {
     ///    request is explicitly a GET. Without it, browsers may
     ///    re-submit the original PUT/PATCH/DELETE to the redirect
     ///    target - silently breaking form-create-then-redirect flows.
-    /// 4. [`InertiaValidationRedirectMiddleware`] - turns a validation
+    /// 4. [`InertiaErrorPageMiddleware`], the error-response middleware -
+    ///    hands the framework's own error responses - a `403` denial, an
+    ///    unrouted `404`, a `429`, a `500`, a handler's panic, a JSON
+    ///    client's validation `422` - to the callback
+    ///    [`handle_exceptions_using`](Self::handle_exceptions_using)
+    ///    installed, or, without one, to the default callback that renders
+    ///    the page [`InertiaConfig::error_page`] names, so they stop
+    ///    reaching the client as the plain-JSON error modal. With neither,
+    ///    it hands every request on and changes nothing. It is registered
+    ///    whatever the config says because the callback may be installed
+    ///    after this call. Outside the validation redirect, so an Inertia
+    ///    visit's validation failure reaches it as the `303` back to the
+    ///    form, not as a `422` a callback could replace.
+    /// 5. [`InertiaValidationRedirectMiddleware`] - turns a validation
     ///    `422` on an Inertia visit into a `303` back with the errors
     ///    flashed. Innermost, so it sees the handler's raw `422`; the
-    ///    `303` it emits passes untouched through the `302 → 303`
-    ///    conversion above. Without it the client sees a response with no
-    ///    `X-Inertia` header, treats it as non-Inertia, and shows the
-    ///    error modal instead of populating `form.errors`.
-    ///
-    /// A fifth, the error-response middleware
-    /// ([`InertiaErrorPageMiddleware`]), is registered innermost. It hands
-    /// the framework's own error responses - a `403` denial, an unrouted
-    /// `404`, a `429`, a `500`, a handler's panic - to the callback
-    /// [`handle_exceptions_using`](Self::handle_exceptions_using)
-    /// installed, or, without one, to the default callback that renders
-    /// the page [`InertiaConfig::error_page`] names, so they stop reaching
-    /// the client as the plain-JSON error modal. With neither, it hands
-    /// every request on and changes nothing. It is registered whatever the
-    /// config says because the callback may be installed after this call.
+    ///    `303` it emits passes untouched through the error-response
+    ///    middleware and the `302 → 303` conversion above. Without it the
+    ///    client sees a response with no `X-Inertia` header, treats it as
+    ///    non-Inertia, and shows the error modal instead of populating
+    ///    `form.errors`.
     ///
     /// A `CsrfMiddleware`, rate limiter, or auth guard registered above
     /// this call never hands its rejection to anything registered inside
@@ -660,9 +666,11 @@ impl Inertia {
     /// `install` sees that registration, logs at `debug`, and skips its
     /// own, leaving both the app's placement and the component the app
     /// named intact. `error_page` on the config is then optional. See that
-    /// type's documentation for where it may sit. One registered after
-    /// this call sits inside the one `install` placed; each error response
-    /// is decided once, by the innermost.
+    /// type's documentation for where it may sit. Register it before this
+    /// call: one registered after it sits inside the validation redirect,
+    /// where an Inertia visit's validation failure reaches it as a `422`
+    /// before the redirect back is built. Each error response is decided
+    /// once, by the innermost instance.
     ///
     /// With [`InertiaConfig::register_globally`] off, none of them is
     /// registered globally: `install` registers the whole stack as the
@@ -785,14 +793,15 @@ impl Inertia {
             None => register_global_middleware(version_check),
         }
         register_global_middleware(Inertia303Middleware::new());
-        register_global_middleware(InertiaValidationRedirectMiddleware::new());
-        // Innermost, whatever the config says (PAR-062). It has to see the
-        // response the handler and the route middleware actually produced -
-        // a `403` from `PermissionMiddleware` never reaches the handler at
-        // all - and the default callback declines the `422` the validation
-        // middleware above it is about to bounce. The error callback may be
+        // Whatever the config says (PAR-062): the error callback may be
         // installed after this call, and the middleware reads it, and the
-        // installed `error_page`, per request.
+        // installed `error_page`, per request. Inside the rest of the layer,
+        // so it sees the response the handler and the route middleware
+        // actually produced - a `403` from `PermissionMiddleware` never
+        // reaches the handler at all. Outside the validation redirect
+        // registered next, so an Inertia visit's validation failure reaches
+        // it as the redirect back, while a JSON client's `422` reaches the
+        // callback.
         match error_page_action(crate::middleware::has_global_middleware::<
             InertiaErrorPageMiddleware,
         >()) {
@@ -809,6 +818,7 @@ impl Inertia {
                 );
             }
         }
+        register_global_middleware(InertiaValidationRedirectMiddleware::new());
         Ok(())
     }
 }
@@ -840,8 +850,8 @@ const MIDDLEWARE_NAME: &str = "inertia";
 /// What [`Inertia::install`] does about the error-response middleware.
 #[derive(Debug, PartialEq, Eq)]
 enum ErrorPageAction {
-    /// Register one innermost of the Inertia layer, rendering the installed
-    /// config's `error_page` when no callback is installed.
+    /// Register one just outside the validation redirect, rendering the
+    /// installed config's `error_page` when no callback is installed.
     Register,
     /// The app registered one before `install`. Leave it exactly where the
     /// app put it, rendering the component the app named.
@@ -913,7 +923,7 @@ mod tests {
             after - before,
             5,
             "Inertia::install should register exactly five middlewares (headers + version + 303 \
-             + validation redirect + error responses), got delta={}",
+             + error responses + validation redirect), got delta={}",
             after - before
         );
         // This asserts the count, not the registration ORDER (headers

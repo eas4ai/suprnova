@@ -1852,12 +1852,16 @@ page, register `InertiaErrorPageMiddleware` yourself, outside the
 middleware whose answers it should cover - see
 [Where the page is rendered](#where-the-page-is-rendered).
 
-Validation failures never reach the callback either. A `422` whose body
-carries an `errors` object is a validation result, and
-`InertiaValidationRedirectMiddleware` owns it: an Inertia visit gets the
-redirect back to the form with the errors flashed, and an API client or a
-Precognition dry run gets the `422` with its errors - see
-[Validation failures](#validation-failures).
+A validation failure reaches the callback as the response the client
+would get. An API client's `422`, `{"message": ..., "errors": {...}}`,
+and a Precognition dry run's `422` are handed over like any other error:
+return `None` to keep the errors the client reads off it, since a
+replacement takes them away. An Inertia visit's never arrives as a `422`.
+The error-response middleware sits outside
+`InertiaValidationRedirectMiddleware`, so by the time the response
+reaches it, the redirect has made it the `303` back to the form with the
+errors flashed - see [Validation failures](#validation-failures). The
+default callback keeps every `422`.
 
 With debug mode on, `response()` for a `5xx` that carries an error
 report, sent to a browser or an Inertia visit, is the
