@@ -1462,9 +1462,11 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
         // without calling `next` hands its response to nothing registered
         // inside it, so a `CsrfMiddleware` above this line would answer a
         // lapsed-session form post with `419 {"message":"CSRF token
-        // mismatch."}` that never reaches the error-page middleware - the
-        // Inertia crash modal, on the one flow a user is most likely to
-        // hit. An app that genuinely needs the page further out registers
+        // mismatch."}` that reaches the error page only at the server,
+        // after the whole stack: the session and locale scopes have closed
+        // by then, so the page has no flash and renders in the default
+        // locale, on the one flow a user is most likely to hit. An app that
+        // genuinely needs the page further out registers
         // `InertiaErrorPageMiddleware` itself; the scaffold does not have
         // to, because it puts CSRF here.
         let csrf_at = bootstrap
@@ -1473,9 +1475,8 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
         assert!(
             inertia_at < csrf_at,
             "the {frontend} scaffold registers CsrfMiddleware before \
-             Inertia::install, so its 419 never reaches the error-page \
-             middleware and the client shows the crash modal instead of the \
-             Error page"
+             Inertia::install, so its 419 reaches the Error page only at the \
+             server, without the session's flash and in the default locale"
         );
     }
 }
