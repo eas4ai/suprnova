@@ -938,13 +938,17 @@ Mechanism: `par-inertia-ssr`.
 Rationale: Rows SS-03 and SS-04; Laravel's `inertia.ssr.enabled` defaults to true behind `BundleDetector`, so an application opts out of SSR rather than in, and an application without a bundle sees no change.
 Status: Agreed 2026-10-08
 
-[PAR-058] In development with the Vite dev server running, the framework
-MUST dispatch SSR to the hot URL, `SsrConfig::hot_url` when set, else the
-Vite dev server's URL, at `/__inertia_ssr`, skipping the bundle check;
-otherwise it MUST post to the worker's `/render`.
-Falsifier: in development with the dev server the SSR request goes to `{url}/render`, or a missing bundle stops it; in production the request goes to the hot URL; or a configured `hot_url` is not the address used.
+[PAR-058] In development a first visit MUST go hot, dispatching SSR to
+`{hot url}/__inertia_ssr` and skipping the bundle check, while the hot file
+(`SsrConfig::hot_file`, default `public/hot`) exists or `SsrConfig::hot_url`
+is set: the address is the hot URL, else the file's content, else the Vite
+dev server's URL. `suprnova serve` MUST write the file while it runs Vite
+with `@inertiajs/vite` declared in `frontend/package.json`, and remove it
+when Vite stops. Without the file and without `hot_url`, and always in
+production, the visit MUST post to the worker's `/render`.
+Falsifier: in development with the hot file present the SSR request goes to `{url}/render` or a missing bundle stops it; without the file and without `hot_url` a dev server listening at its port is asked; in production the request goes to the hot URL; a configured `hot_url` is not the address used; or `serve` writes the file when `frontend/package.json` declares no `@inertiajs/vite`.
 Mechanism: `par-inertia-ssr`.
-Rationale: Row SS-05; Laravel's `HttpGateway::dispatch` posts to `{hot url}/__inertia_ssr` when Vite runs hot, which removes the separate SSR process during development.
+Rationale: Row SS-05; Laravel's `HttpGateway::dispatch` posts to `{hot url}/__inertia_ssr` while `Vite::isRunningHot`, the hot file its Vite plugin writes, which removes the separate SSR process during development; the first wording, "with the Vite dev server running", read as a port probe (adversary finding 1 of inertia-ssr-errors-commands, declined).
 Status: Agreed 2026-10-08
 
 [PAR-059] A worker answer whose JSON is empty, `null`, `false` or not an
@@ -1015,4 +1019,130 @@ the default callback keeps.
 Falsifier: a callback returning a 418 for a 404 still yields the error page or the original 404; a callback returning nothing changes the response; a page the callback rendered loses the original status; a rendered page carries shared props without `with_shared_data()`, or `error_page(component)` renders one without them; a handler panic reaches the client without the callback seeing it; a JSON API client's 404 is replaced when the callback returned nothing; or `error_page(component)` alone no longer renders the page for an Inertia visit's 403.
 Mechanism: `par-inertia-ssr`.
 Rationale: Rows EX-01, EX-02, EX-03, EX-06 and EX-07; Laravel decides each rendered error in `handleExceptionsUsing` with `ExceptionResponse`, shared data opt-in, and the one-line `error_page` setup stays as sugar over the default callback.
+Status: Agreed 2026-10-08
+
+## Inertia testing helpers and the TypeScript generator
+
+The third parity round the developer ordered on 2026-10-07 (17:35): the
+sixteen build rows of inertia-laravel 3.5.1's testing surface (TS-01,
+TS-03, TS-06, TS-07, TS-08, TS-10, TS-12, TS-13, TS-14, TS-15 and TS-16)
+and of the Inertia.js 3.8.0 types the generator writes (T01, T02, T03, T05
+and T06). Laravel references cite `reference/inertia-laravel-3.5.1/src/Testing/`
+and `reference/framework-13.35.0/src/Illuminate/Testing/Fluent/`; the
+client types cite `reference/inertia-3.8.0/packages/core/src/types.ts`.
+
+[PAR-063] `suprnova::testing::TestClient` MUST drive requests through the
+framework's request path in-process: built from a router and a middleware
+registry, and optionally the session store and cookie name the test's
+session middleware uses, it sends `get`, `post`, `put`, `patch`, `delete`
+and `send(method, path)` requests with headers, a JSON or form body and an
+Inertia visit's headers (`inertia()`, with the version), over an
+in-memory connection and never a port, carries the session cookie from
+each response to the next request, and returns a `TestResponse` that
+keeps the response's error report and the attached session store. A
+`TestResponse` the client returned MUST reload Inertia pages through the
+same client with no reloader attached by hand.
+Falsifier: a value put in the session by one request is absent from the next request of the same client; a request skips a middleware the registry registers; a response's `error_report()` is `None` for a handler that returned an error; `assert_session_has` on a client response fails for a value the session holds when the client was given the store; or `assert_inertia().reload_only(..)` on a client response panics for a missing reloader.
+Mechanism: `par-inertia-testing`.
+Rationale: Rows TS-01 and TS-10; Laravel's `MakesHttpRequests` is the one test client every `ReloadRequest` and `assertInertia` reaches for, where every Suprnova test file copied its own socket harness.
+Status: Agreed 2026-10-08
+
+[PAR-064] `TestResponse::assert_inertia()` MUST read the page object from
+an `X-Inertia` JSON body or from a first visit's HTML document (its
+`data-page` element), and `assert_inertia_with(callback)` MUST hand the
+page to the callback and return the response for chaining.
+`AssertableInertia::component(name)` MUST also check that a page file for
+`name` exists under the installed configuration's `pages_dir` with one of
+its `page_extensions` while `InertiaConfig::testing_ensure_pages_exist` is
+on, which it is by default, skipping the check when no Inertia
+configuration is installed; `component_exists(name, bool)` MUST decide the
+check for one call.
+Falsifier: `assert_inertia()` panics on a first-visit HTML response that carries a page object; `assert_inertia_with` returns anything but the response or skips the callback; with the default configuration installed and no page file, `component("Missing")` passes, or with `testing_ensure_pages_exist(false)` it fails for the file alone; `component_exists("Missing", false)` checks the file, or `component_exists("Home", true)` passes without one; or `component` checks a file with no configuration installed.
+Mechanism: `par-inertia-testing`.
+Rationale: Rows TS-01 and TS-03; Laravel's `assertInertia` works on the ordinary page response and chains, and `component` checks the page file under `inertia.testing.ensure_pages_exist`, default true, with the view finder that PAR-049's `ensure_pages_exist` already ports.
+Status: Agreed 2026-10-08
+
+[PAR-065] `AssertableInertia` MUST offer Laravel's `AssertableJson` prop
+assertions over dotted paths: `has`, `has_all`, `has_any`, `missing`,
+`missing_all`, `count`, `count_between`, `where_`, `where_not`,
+`where_null`, `where_not_null`, `where_all`, `where_type` (`string`,
+`integer`, `double`, `boolean`, `array`, `null`, joined by `|`),
+`where_all_type`, `where_contains`, and the scoped forms `scope(path,
+callback)`, `first(callback)`, `each(callback)`, `has_with(path,
+callback)` and `has_count_with(path, count, callback)`, each callback
+receiving the nested value as an `AssertableInertia` whose paths and
+messages carry the full dotted path. A scope MUST fail when it ends with a
+prop no assertion in it touched, unless `etc()` was called in it; the root
+level MUST NOT enforce that. Every assertion MUST return `&Self`.
+Falsifier: `has_all(["a", "b"])` passes with `b` absent, or `has_any(["a", "b"])` fails with `a` present; `where_type("n", "integer|null")` fails for `null` or passes for `"1"`; `where_contains("tags", "x")` passes for an array without `x`; `count_between("items", 1, 3)` passes for four items; `scope("user", |u| { u.where_("name", "Ada"); })` passes with an untouched `user.email`, or fails after `u.etc()`; a failure inside `scope("user", ..)` names `user.name` without the prefix; a page with an untouched root prop fails `assert_inertia_with(|page| { page.component("Home"); })`; or `first` or `each` on an empty array passes.
+Mechanism: `par-inertia-testing`.
+Rationale: Row TS-06; ported Laravel tests use scoped, multi-key, type, null and range assertions, and the every-prop-checked rule is how `AssertableJson` catches a prop a page leaks.
+Status: Agreed 2026-10-08
+
+[PAR-066] `AssertableInertia::reload(callback)` MUST replay the page as a
+full reload and assert the same component, url and version, `reload_only`
+and `reload_except` MUST take an optional callback over the reloaded page
+and keep their key checks, and `load_deferred_props(groups, callback)`
+MUST reload only the props of the named deferred groups, every group when
+none is named. A reload MUST go through the client the page came from, or
+through the closure `with_reload` attached, and `ReloadRequest::headers`
+MUST send `X-Inertia`, `X-Inertia-Version` and the partial headers only
+when a list is set.
+Falsifier: `reload(..)` on a response whose reload lands on another component passes; `load_deferred_props(["stats"], ..)` requests a prop of another group; `load_deferred_props([], ..)` leaves a deferred group unrequested; a `reload_only(["users"], |r| ..)` skips its callback; a reload of a client response needs `with_reload`; or a full reload sends `X-Inertia-Partial-Component`.
+Mechanism: `par-inertia-testing`.
+Rationale: Rows TS-07, TS-08 and TS-10; Laravel's `reload` replays through the application and `loadDeferredProps` takes the groups to load.
+Status: Agreed 2026-10-08
+
+[PAR-067] `AssertableInertia` MUST offer `missing_flash(key)`, `to_page()`
+(the whole page: component, props, url, version, flash, and
+`encryptHistory` and `clearHistory` only when the page sets them) and the
+readers `encrypt_history()` and `clear_history()`; `TestResponse` MUST
+offer `inertia_page()`, `inertia_props(path)` (the whole props with no
+path) and `assert_inertia_flash(key, expected)` and
+`assert_inertia_flash_missing(key)`, which read the Inertia flash data
+the session holds after a redirect through the attached session store.
+When the page sets `preserveBigIntegers`, every `{"$bigint": "<digits>"}`
+marker in props and flash MUST be decoded to its integer before any
+assertion or reader sees it.
+Falsifier: `missing_flash("toast")` passes with `toast` flashed; `to_page()` carries `encryptHistory` for a page without it, or lacks `clearHistory` for one with it; `inertia_props(None)` is not the props object, or `inertia_props("user.name")` is not the value; after a redirect that flashed `toast`, `assert_inertia_flash("toast", ..)` fails with the store attached, or `assert_inertia_flash_missing("toast")` passes; or with `preserveBigIntegers` on, `where_("id", 9007199254740993_i64)` fails against the marker.
+Mechanism: `par-inertia-testing`.
+Rationale: Rows TS-12, TS-13, TS-14, TS-15 and TS-16; Laravel's `toArray`, `inertiaPage`, `inertiaProps`, `assertInertiaFlash` and the marker decoding in `fromTestResponse`.
+Status: Agreed 2026-10-08
+
+[PAR-068] `suprnova generate-types` MUST write, beside the props
+interfaces, a `Pages` interface mapping each component name to the props
+interface the handler renders it with, read from `inertia_response!` and
+`InertiaResponse::new` with a typed props struct; a `SharedProps`
+interface holding the framework's `root: string` and the fields of the
+struct `Inertia::share` is given or of the one marked
+`#[inertia_props(shared)]`; `Errors` as `Record<string, string>`;
+`PageProps<C extends keyof Pages>` as `Pages[C] & SharedProps & { errors:
+Errors }`; and a `declare module '@inertiajs/core'` augmentation setting
+`sharedPageProps` to `SharedProps`, `errorValueType` to `string` and
+`flashDataType` to the struct marked `#[inertia_props(flash)]` when one
+exists. The `InertiaProps` derive MUST accept those two markers, and the
+starter kits MUST declare `@inertiajs/core`, ship the generated file in
+that shape, and read `root` through the augmentation.
+Falsifier: a project rendering `Home` with `HomeProps` gets no `Pages` entry `Home: HomeProps`; `SharedProps` lacks `root` or a field of the shared struct; the augmentation is missing or names another `sharedPageProps`; a struct marked `#[inertia_props(flash)]` is not the `flashDataType`; `#[inertia_props(shared)]` fails to compile; a kit's `package.json` lacks `@inertiajs/core`; a kit page types `root` by hand; or a kit's `inertia-props.ts` differs from the generator's output for the kit.
+Mechanism: `par-inertia-testing`.
+Rationale: Rows T01, T02 and T06; Inertia's `Page<SharedProps>.props` is `PageProps & SharedProps & { errors }` and its `InertiaConfig` merging types `usePage()`, and the kits reach `@inertiajs/core` today only by hoisting.
+Status: Agreed 2026-10-08
+
+[PAR-069] The generator MUST map `i64`, `u64`, `i128`, `u128`, `isize` and
+`usize` to `number | bigint` when the project preserves big integers (a
+`preserve_big_integers(true)` call under `src/`, or `--big-integers`), and
+to `number` otherwise; narrower integers and floats MUST stay `number`.
+Falsifier: with `.preserve_big_integers(true)` in `src/bootstrap.rs` an `i64` field is `number`; without it or the flag an `i64` field is `number | bigint`; or an `i32` or `f64` field is anything but `number`.
+Mechanism: `par-inertia-testing`.
+Rationale: Row T03; with `preserveBigIntegers` the client restores a wide integer as a `BigInt`, so the type follows the transport.
+Status: Agreed 2026-10-08
+
+[PAR-070] A generated route helper MUST carry `component` in its
+`UrlMethodPair` when the route's handler renders exactly one Inertia
+component, named in `inertia_response!`, `InertiaResponse::new` or
+`Router::inertia`, and omit it otherwise; `RouteConfig` MUST declare
+`component?: string`.
+Falsifier: the helper of a handler calling `inertia_response!(&req, "Users/Index", ..)` lacks `component: 'Users/Index'`; a handler naming two components gets one of them; a `Router::inertia("/about", "About", ..)` route's helper lacks `About`; or `RouteConfig` has no `component`.
+Mechanism: `par-inertia-testing`.
+Rationale: Row T05; Inertia's `UrlMethodPair.component` lets an instant visit resolve the page without a round trip, which the helper can name since the handler's component is a literal.
 Status: Agreed 2026-10-08

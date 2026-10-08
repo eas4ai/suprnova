@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: inertia-ssr-errors-commands
+Current: inertia-testing-and-types
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -516,6 +516,38 @@ Requirements: PAR-057, PAR-058, PAR-059, PAR-060, PAR-061, PAR-062, RDOC-002, RE
    revised text, `registries` rebound on REG-033's and `registries-scan`
    on REG-032's.
    Done when the four pass on a committed tree, the manual passages are in
+   place, and the review is recorded.
+
+## inertia-testing-and-types
+
+Requirements: PAR-063, PAR-064, PAR-065, PAR-066, PAR-067, PAR-068, PAR-069, PAR-070, PAR-058
+
+38. inertia-testing-and-types - the third of the parity rounds the
+   developer ordered on 2026-10-07 (17:35): inertia-laravel 3.5.1's
+   testing surface and the Inertia.js 3.8.0 types the generator writes,
+   the sixteen build rows of the third group (TS-01, TS-03, TS-06, TS-07,
+   TS-08, TS-10, TS-12, TS-13, TS-14, TS-15, TS-16, T01, T02, T03, T05,
+   T06), with the next-feature item the second round left: PAR-058
+   reworded to name the hot file and the plugin, as the code does.
+   Delivery: PAR-063 to PAR-067 in `framework/src/testing/` (the in-process
+   `TestClient`, `TestResponse` and `AssertableInertia`) with
+   `InertiaConfig::testing_ensure_pages_exist` in `framework/src/inertia/`;
+   PAR-068 to PAR-070 in the `suprnova` CLI's generators
+   (`suprnova-cli/src/commands/generate_types.rs` and `generate_routes.rs`),
+   the `#[inertia_props(shared)]` and `#[inertia_props(flash)]` markers on
+   the derive (`suprnova-macros/`), and the starter kits' `package.json`,
+   generated types file and pages (`suprnova-cli/src/templates/`); the
+   dogfood application's tests on the client and its generated file
+   regenerated; the manual's `http-tests.md` Inertia passages rewritten
+   around the client, `frontend-typescript-types.md` with the page types,
+   the augmentation, the integer mapping and the route component, and
+   `frontend-inertia-responses.md` where SSR hot mode is described; the
+   changelog.
+   Mechanisms: `par-inertia-testing` (the `intt_` tests of the testing and
+   inertia binaries and the unit tests, and the `intt_` tests of the CLI's
+   generator and template drift binaries), `par-inertia-ssr` rebound on
+   PAR-058's revised text.
+   Done when both pass on a committed tree, the manual passages are in
    place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
