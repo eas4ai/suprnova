@@ -656,6 +656,44 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   route the server dispatches, the Inertia middleware installed or not;
   `location_for(&req, url)` stays for code outside a dispatched request
   (RF-16).
+- **A component's script can no longer replace a built-in.** The
+  `live:add` scan refused a change to a built-in prototype, but admitted
+  `Object.keys = f`, `JSON.parse = f` and `Math.random = f`, and a write to
+  a member of a parameter given a built-in member, as
+  `function f(p) { p.call = g } f(Array.prototype.slice)` changes the
+  `call` every other script borrows `slice` with. A write to a member of a
+  built-in object or function is now refused (`script-builtin`) in every
+  form a prototype's is (`=`, `??=`, `+=`, `++`, a destructuring or `for`
+  loop target, `delete`), named directly, through the global object
+  (`globalThis.Object.keys`, `window.JSON.parse`), or through a name that
+  holds one: a variable, a parameter's default, or a parameter a call of
+  its function by name hands one. A member read under a built-in method's
+  name from a value the script did not make (`[].slice`, an element's
+  `addEventListener`) counts as that method, and a method of `document`,
+  `location` or `history` may not be assigned. A built-in is refused where
+  the scan stops following it: passed to anything but a function the
+  script calls by name or a browser API that only calls it back, put in an
+  array or object, written to a member, destructured, returned, thrown or
+  exported. That also names the built-in in
+  `Object.defineProperty(Object, "keys", ...)` and
+  `Reflect.set(Math, "random", f)`, whose calls other checks already
+  refused. The parameter form through a prototype's member is refused as
+  `script-prototype`, as the variable form already was. Calls, reads,
+  comparisons, `map(Number)`, constants such as
+  `Number.MAX_SAFE_INTEGER`, the page's own properties (`document.title`,
+  `location.hash`) and writes to the script's own objects and functions
+  stay admitted. Nineteen bypass fixtures pin it (`script-builtin-alias`,
+  `script-builtin-compound`, `script-builtin-default-parameter`,
+  `script-builtin-define-property`, `script-builtin-delete`,
+  `script-builtin-destructured`, `script-builtin-export`,
+  `script-builtin-function-member`, `script-builtin-globalthis`,
+  `script-builtin-handed-back`, `script-builtin-inherited-method`,
+  `script-builtin-math-random`, `script-builtin-namespace-member`,
+  `script-builtin-page-method`, `script-builtin-parameter`,
+  `script-builtin-reflect-set`, `script-builtin-window`,
+  `script-prototype-member-alias` and
+  `script-prototype-member-parameter`), and the `own-members` accepted
+  fixture pins what stays admitted.
 
 ### Fixed
 

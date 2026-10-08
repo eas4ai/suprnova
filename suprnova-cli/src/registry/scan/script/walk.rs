@@ -13,8 +13,8 @@ use super::super::Finding;
 use super::super::url::{check_constant, srcset_urls};
 use super::lists::{
     ADMITTED_CONSTRUCTORS, ADMITTED_GLOBALS, ADMITTED_METHODS, GLOBAL_OBJECTS, IMPLICITLY_CALLED,
-    READ_ONLY_PROPERTIES, REFUSED_ELEMENTS, REFUSED_PROPERTIES, Rule, URL_ATTRIBUTES,
-    URL_CSS_PROPERTIES, URL_PROPERTIES, constructor_rule_for, rule_for,
+    INHERITED_METHODS, PAGE_OBJECTS, READ_ONLY_PROPERTIES, REFUSED_ELEMENTS, REFUSED_PROPERTIES,
+    Rule, URL_ATTRIBUTES, URL_CSS_PROPERTIES, URL_PROPERTIES, constructor_rule_for, rule_for,
 };
 
 /// How many constant values a traced expression may stand for before the
@@ -59,6 +59,12 @@ pub(super) struct Binding<'a> {
     pub numeric_updates: bool,
     pub calls: Vec<&'a oxc_allocator::Vec<'a, Argument<'a>>>,
     pub escapes: bool,
+    /// Whether another script can import the binding, so what it holds
+    /// leaves the file the scan reads (REG-032).
+    pub exported: bool,
+    /// The function a function declaration binds, whose parameters a call
+    /// by name hands its arguments to.
+    pub declaration: Option<&'a Function<'a>>,
 }
 
 #[derive(Default)]
@@ -76,6 +82,21 @@ pub(super) struct Facts<'a> {
     /// elsewhere names these bindings, not the ones the same names have
     /// where the value is used (REG-032).
     pub resolved: HashMap<u32, Option<Bid>>,
+    /// The class each `this` in an instance context stands for, by the
+    /// offset of the `this` and of the class.
+    pub this_class: HashMap<u32, u32>,
+    /// Every member name a class the script defines gives its instances or
+    /// itself, by the offset of the class: its methods, fields and
+    /// accessors, and each name its code writes on `this`.
+    pub class_members: HashMap<u32, BTreeSet<String>>,
+    /// Every property name the script defines on an object of its own: an
+    /// object literal's key, a class member, a name it writes on a member.
+    /// A method of that name may be the script's, not a browser API's.
+    pub defined_names: BTreeSet<String>,
+    /// The `arguments` binding of each function, by the function's offset:
+    /// a function that reads it receives arguments its parameters do not
+    /// name.
+    pub arguments_of: HashMap<u32, Bid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,10 +108,56 @@ pub(super) enum Phase {
 /// Where an expression stands, for the rules that depend on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pos {
+    /// A value the script stores or hands on where the scan stops
+    /// following it: an argument, an element, a member, a `return`.
     Value,
+    /// A value kept in a name the scan follows to where it is used: the
+    /// initializer or assignment of a variable no other script imports, a
+    /// parameter's default, the argument of a function the script calls
+    /// by name (REG-032).
+    Kept,
+    /// A value used up where it stands: an operand, a test, a key, a
+    /// statement's expression, a callee, a callback a browser API calls.
+    Operand,
     Object,
     Typeof,
     Comparison,
+}
+
+impl Pos {
+    /// Whether the expression is a value at all, which a prototype may not
+    /// be (REG-032).
+    fn value(self) -> bool {
+        matches!(self, Pos::Value | Pos::Kept | Pos::Operand)
+    }
+
+    /// Where a branch of a conditional or logical expression stands: the
+    /// value it yields stands where the whole expression does, but the
+    /// global object never reaches a receiver, a `typeof` or a comparison
+    /// through a branch.
+    fn branch(self) -> Pos {
+        match self {
+            Pos::Value => Pos::Value,
+            Pos::Kept => Pos::Kept,
+            _ => Pos::Operand,
+        }
+    }
+}
+
+/// What a value is traced back to (REG-032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Root {
+    /// A built-in object or function, or a member one hands over:
+    /// `Object`, `window.JSON`, `Object.keys`, `Array.prototype.slice`.
+    BuiltIn,
+    /// A built-in, or a method a value the script did not make inherits
+    /// (`[].slice`, an element's `addEventListener`). Only a write is
+    /// checked against this: the same names are data on the objects a
+    /// script passes around (`result.error`, `page.next`), so reading one
+    /// stays admitted.
+    Method,
+    /// `document`, `location` or `history`: the page itself.
+    Page,
 }
 
 /// How far from a prototype an expression may stand and still count as
@@ -200,6 +267,8 @@ impl<'a, 'c> Walker<'a, 'c> {
                 numeric_updates: false,
                 calls: Vec::new(),
                 escapes: false,
+                exported: false,
+                declaration: None,
             });
         }
         if let Some(scope) = self.scopes.last_mut() {
@@ -413,7 +482,10 @@ impl<'a, 'c> Walker<'a, 'c> {
                 match &export.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                         if let Some(id) = &function.id {
-                            self.declare(id.name.as_str(), Kind::Function);
+                            let bid = self.declare(id.name.as_str(), Kind::Function);
+                            if let Some(binding) = self.binding_mut(bid) {
+                                binding.declaration = Some(function);
+                            }
                         }
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
@@ -460,7 +532,10 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Declaration::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
-                    self.declare(id.name.as_str(), Kind::Function);
+                    let bid = self.declare(id.name.as_str(), Kind::Function);
+                    if let Some(binding) = self.binding_mut(bid) {
+                        binding.declaration = Some(function);
+                    }
                 }
             }
             Declaration::ClassDeclaration(class) => {
@@ -507,14 +582,14 @@ impl<'a, 'c> Walker<'a, 'c> {
             | Statement::DebuggerStatement(_)
             | Statement::EmptyStatement(_) => {}
             Statement::ExpressionStatement(statement) => {
-                self.expr(&statement.expression, Pos::Value);
+                self.expr(&statement.expression, Pos::Operand);
             }
             Statement::DoWhileStatement(statement) => {
                 self.statement(&statement.body);
-                self.expr(&statement.test, Pos::Value);
+                self.expr(&statement.test, Pos::Operand);
             }
             Statement::WhileStatement(statement) => {
-                self.expr(&statement.test, Pos::Value);
+                self.expr(&statement.test, Pos::Operand);
                 self.statement(&statement.body);
             }
             Statement::ForStatement(statement) => {
@@ -539,36 +614,36 @@ impl<'a, 'c> Walker<'a, 'c> {
                     }
                     Some(init) => {
                         if let Some(expression) = init.as_expression() {
-                            self.expr(expression, Pos::Value);
+                            self.expr(expression, Pos::Operand);
                         }
                     }
                     None => {}
                 }
                 if let Some(test) = &statement.test {
-                    self.expr(test, Pos::Value);
+                    self.expr(test, Pos::Operand);
                 }
                 if let Some(update) = &statement.update {
-                    self.expr(update, Pos::Value);
+                    self.expr(update, Pos::Operand);
                 }
                 self.statement(&statement.body);
                 self.scopes.pop();
             }
             Statement::ForInStatement(statement) => {
-                self.expr(&statement.right, Pos::Value);
+                self.expr(&statement.right, Pos::Operand);
                 self.scopes.push(HashMap::new());
                 self.for_left(&statement.left);
                 self.statement(&statement.body);
                 self.scopes.pop();
             }
             Statement::ForOfStatement(statement) => {
-                self.expr(&statement.right, Pos::Value);
+                self.expr(&statement.right, Pos::Operand);
                 self.scopes.push(HashMap::new());
                 self.for_left(&statement.left);
                 self.statement(&statement.body);
                 self.scopes.pop();
             }
             Statement::IfStatement(statement) => {
-                self.expr(&statement.test, Pos::Value);
+                self.expr(&statement.test, Pos::Operand);
                 self.statement(&statement.consequent);
                 if let Some(alternate) = &statement.alternate {
                     self.statement(alternate);
@@ -581,14 +656,14 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             Statement::SwitchStatement(statement) => {
-                self.expr(&statement.discriminant, Pos::Value);
+                self.expr(&statement.discriminant, Pos::Operand);
                 self.scopes.push(HashMap::new());
                 for case in &statement.cases {
                     self.hoist_lexical(&case.consequent);
                 }
                 for case in &statement.cases {
                     if let Some(test) = &case.test {
-                        self.expr(test, Pos::Value);
+                        self.expr(test, Pos::Operand);
                     }
                     for statement in &case.consequent {
                         self.statement(statement);
@@ -636,6 +711,13 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
                 match &export.declaration {
                     Some(Declaration::VariableDeclaration(declaration)) => {
+                        for declarator in &declaration.declarations {
+                            let mut names = Vec::new();
+                            pattern_names(&declarator.id, &mut names);
+                            for name in names {
+                                self.mark_exported(name);
+                            }
+                        }
                         self.variable_declaration(declaration)
                     }
                     Some(Declaration::FunctionDeclaration(function)) => {
@@ -656,6 +738,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                             if let ModuleExportName::IdentifierReference(reference) =
                                 &specifier.local
                             {
+                                if export.source.is_none() {
+                                    self.mark_exported(reference.name.as_str());
+                                }
                                 self.identifier(reference, Pos::Value);
                             }
                         }
@@ -724,19 +809,31 @@ impl<'a, 'c> Walker<'a, 'c> {
                     }
                     _ => None,
                 };
-                self.value_with_owner(init, owner);
+                let pos = self.kept_in(owner);
+                self.value_with_owner(init, owner, pos);
             }
+        }
+    }
+
+    /// Where a value written to a name stands: kept, when the name is a
+    /// binding of the script's that no other script imports, so the scan
+    /// follows the value to where the name is used; a value, otherwise
+    /// (REG-032).
+    fn kept_in(&self, owner: Option<Bid>) -> Pos {
+        match owner.and_then(|id| self.binding(id)) {
+            Some(binding) if !binding.exported => Pos::Kept,
+            _ => Pos::Value,
         }
     }
 
     /// Walks an initializer; a function or arrow assigned to a binding has
     /// that binding as its owner, so its parameters can be traced to its
     /// call sites.
-    fn value_with_owner(&mut self, init: &'a Expression<'a>, owner: Option<Bid>) {
+    fn value_with_owner(&mut self, init: &'a Expression<'a>, owner: Option<Bid>, pos: Pos) {
         match unparen(init) {
             Expression::FunctionExpression(function) => self.function(function, owner, false),
             Expression::ArrowFunctionExpression(arrow) => self.arrow(arrow, owner),
-            _ => self.expr(init, Pos::Value),
+            _ => self.expr(init, pos),
         }
     }
 
@@ -792,7 +889,12 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             self.pattern_defaults(&param.pattern);
             if let Some(initializer) = &param.initializer {
-                self.expr(initializer, Pos::Value);
+                let pos = if matches!(param.pattern, BindingPattern::BindingIdentifier(_)) {
+                    Pos::Kept
+                } else {
+                    Pos::Value
+                };
+                self.expr(initializer, pos);
             }
         }
         if let Some(rest) = &params.rest {
@@ -812,7 +914,12 @@ impl<'a, 'c> Walker<'a, 'c> {
                 binding.function = true;
             }
         }
-        self.declare("arguments", Kind::Implicit);
+        let arguments = self.declare("arguments", Kind::Implicit);
+        if self.phase == Phase::Collect {
+            self.facts
+                .arguments_of
+                .insert(function.span.start, arguments);
+        }
         self.params(&function.params, owner);
         if let Some(body) = &function.body {
             self.hoist_vars(&body.statements);
@@ -832,8 +939,17 @@ impl<'a, 'c> Walker<'a, 'c> {
         self.params(&arrow.params, owner);
         self.hoist_vars(&arrow.body.statements);
         self.hoist_lexical(&arrow.body.statements);
-        for statement in &arrow.body.statements {
-            self.statement(statement);
+        match arrow.body.statements.first() {
+            // `() => value` returns the value, which leaves as a `return`'s
+            // does.
+            Some(Statement::ExpressionStatement(statement)) if arrow.expression => {
+                self.expr(&statement.expression, Pos::Value);
+            }
+            _ => {
+                for statement in &arrow.body.statements {
+                    self.statement(statement);
+                }
+            }
         }
         self.scopes.pop();
         self.this_is_instance.pop();
@@ -863,6 +979,13 @@ impl<'a, 'c> Walker<'a, 'c> {
             let bid = self.declare(id.name.as_str(), Kind::Class);
             if let Some(binding) = self.binding_mut(bid) {
                 binding.class = Some(class);
+            }
+        }
+        if self.phase == Phase::Collect {
+            for element in &class.body.body {
+                if let Some(name) = element.property_key().and_then(PropertyKey::static_name) {
+                    self.class_member(class, name.to_string());
+                }
             }
         }
         for element in &class.body.body {
@@ -918,7 +1041,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn class_key(&mut self, key: &'a PropertyKey<'a>, computed: bool, span: Span) {
         if computed {
             if let Some(expression) = key.as_expression() {
-                self.expr(expression, Pos::Value);
+                self.expr(expression, Pos::Operand);
             }
         } else if let Some(name) = key.static_name()
             && name == "__proto__"
@@ -948,6 +1071,29 @@ impl<'a, 'c> Walker<'a, 'c> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Records a member name a class gives its instances or itself, which
+    /// is also a name the script defines.
+    fn class_member(&mut self, class: &Class<'a>, name: String) {
+        self.facts.defined_names.insert(name.clone());
+        self.facts
+            .class_members
+            .entry(class.span.start)
+            .or_default()
+            .insert(name);
+    }
+
+    /// Records that another script can import the binding a name has here.
+    fn mark_exported(&mut self, name: &str) {
+        if self.phase != Phase::Collect {
+            return;
+        }
+        if let Some(id) = self.lookup(name)
+            && let Some(binding) = self.facts.bindings.get_mut(id)
+        {
+            binding.exported = true;
         }
     }
 
@@ -1056,8 +1202,11 @@ impl<'a, 'c> Walker<'a, 'c> {
         if !self.enter(expr.span()) {
             return;
         }
-        if pos == Pos::Value {
+        if pos.value() {
             self.held_prototype(expr);
+        }
+        if pos == Pos::Value {
+            self.held_builtin(expr);
         }
         self.expr_inner(expr, pos);
         self.leave();
@@ -1074,12 +1223,20 @@ impl<'a, 'c> Walker<'a, 'c> {
             | Expression::Super(_) => {}
             Expression::TemplateLiteral(template) => {
                 for expression in &template.expressions {
-                    self.expr(expression, Pos::Value);
+                    self.expr(expression, Pos::Operand);
                 }
             }
             Expression::Identifier(reference) => self.identifier(reference, pos),
             Expression::MetaProperty(_) => {}
             Expression::ThisExpression(this) => {
+                if self.phase == Phase::Collect
+                    && self.this_is_instance.last().copied().unwrap_or(false)
+                    && let Some(class) = self.classes.last()
+                {
+                    self.facts
+                        .this_class
+                        .insert(this.span.start, class.span.start);
+                }
                 if !self.this_is_instance.last().copied().unwrap_or(false) {
                     self.refuse(
                         "script-this",
@@ -1121,20 +1278,20 @@ impl<'a, 'c> Walker<'a, 'c> {
                 let side = if comparison {
                     Pos::Comparison
                 } else {
-                    Pos::Value
+                    Pos::Operand
                 };
                 self.expr(&binary.left, side);
                 self.expr(&binary.right, side);
             }
             Expression::PrivateInExpression(private) => self.expr(&private.right, Pos::Comparison),
             Expression::LogicalExpression(logical) => {
-                self.expr(&logical.left, Pos::Value);
-                self.expr(&logical.right, Pos::Value);
+                self.expr(&logical.left, pos.branch());
+                self.expr(&logical.right, pos.branch());
             }
             Expression::ConditionalExpression(conditional) => {
-                self.expr(&conditional.test, Pos::Value);
-                self.expr(&conditional.consequent, Pos::Value);
-                self.expr(&conditional.alternate, Pos::Value);
+                self.expr(&conditional.test, Pos::Operand);
+                self.expr(&conditional.consequent, pos.branch());
+                self.expr(&conditional.alternate, pos.branch());
             }
             Expression::CallExpression(call) => self.call(call),
             Expression::ChainExpression(chain) => match &chain.expression {
@@ -1165,7 +1322,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             Expression::SequenceExpression(sequence) => {
                 let last = sequence.expressions.len().saturating_sub(1);
                 for (index, expression) in sequence.expressions.iter().enumerate() {
-                    self.expr(expression, if index == last { pos } else { Pos::Value });
+                    self.expr(expression, if index == last { pos } else { Pos::Operand });
                 }
             }
             Expression::TaggedTemplateExpression(tagged) => {
@@ -1183,12 +1340,12 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::UnaryExpression(unary) => {
                 if unary.operator == UnaryOperator::Delete {
-                    self.prototype_delete(unary);
+                    self.member_delete(unary);
                 }
                 let inner = if unary.operator == UnaryOperator::Typeof {
                     Pos::Typeof
                 } else {
-                    Pos::Value
+                    Pos::Operand
                 };
                 self.expr(&unary.argument, inner);
             }
@@ -1219,9 +1376,15 @@ impl<'a, 'c> Walker<'a, 'c> {
         for property in &object.properties {
             match property {
                 ObjectPropertyKind::ObjectProperty(property) => {
+                    if self.phase == Phase::Collect
+                        && !property.computed
+                        && let Some(name) = property.key.static_name()
+                    {
+                        self.facts.defined_names.insert(name.to_string());
+                    }
                     if property.computed {
                         if let Some(key) = property.key.as_expression() {
-                            self.expr(key, Pos::Value);
+                            self.expr(key, Pos::Operand);
                         }
                     } else if let Some(name) = property.key.static_name()
                         && name == "__proto__"
@@ -1301,7 +1464,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     fn computed_key(&mut self, key: &'a Expression<'a>, span: Span) {
-        self.expr(key, Pos::Value);
+        self.expr(key, Pos::Operand);
         match self.trace(key, 0) {
             Some(values) => {
                 for value in values {
@@ -1340,7 +1503,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 if self.is_global_object(object) {
                     match self.trace(&computed.expression, 0) {
                         Some(values) => {
-                            self.expr(&computed.expression, Pos::Value);
+                            self.expr(&computed.expression, Pos::Operand);
                             for value in values {
                                 self.property_name(&value, computed.span, write);
                                 if !write && !self.global_admitted(&value) {
@@ -1353,7 +1516,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                             }
                         }
                         None => {
-                            self.expr(&computed.expression, Pos::Value);
+                            self.expr(&computed.expression, Pos::Operand);
                             self.refuse(
                                 "script-computed",
                                 computed.span,
@@ -1399,13 +1562,31 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             None => self.assignment_target(&assignment.left, value, !simple),
         }
+        // `a ||= b` may leave `b` in `a`. The name stays opaque to constant
+        // tracing, but what it may hold is followed like an assignment's
+        // value (REG-032).
+        if self.phase == Phase::Collect
+            && matches!(
+                assignment.operator,
+                AssignmentOperator::LogicalOr
+                    | AssignmentOperator::LogicalAnd
+                    | AssignmentOperator::LogicalNullish
+            )
+            && let Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier)) =
+                assignment.left.as_simple_assignment_target()
+            && let Some(id) = self.lookup(identifier.name.as_str())
+            && let Some(binding) = self.facts.bindings.get_mut(id)
+        {
+            binding.assignments.push(&assignment.right);
+        }
         let owner = match (assignment.left.as_simple_assignment_target(), simple) {
             (Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier)), true) => {
                 self.lookup(identifier.name.as_str())
             }
             _ => None,
         };
-        self.value_with_owner(&assignment.right, owner);
+        let pos = self.kept_in(owner);
+        self.value_with_owner(&assignment.right, owner, pos);
     }
 
     fn assignment_target(
@@ -1535,14 +1716,17 @@ impl<'a, 'c> Walker<'a, 'c> {
                     // Every member write reaches this arm: an assignment of
                     // any operator, `++` or `--`, a destructuring target and
                     // a `for` loop's target (REG-032).
-                    if self.check()
-                        && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
-                    {
-                        self.refuse(
-                            "script-prototype",
-                            member.span(),
-                            "assigning a member of a prototype changes it".to_string(),
-                        );
+                    if self.check() {
+                        if self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
+                        {
+                            self.refuse(
+                                "script-prototype",
+                                member.span(),
+                                "assigning a member of a prototype changes it".to_string(),
+                            );
+                        } else {
+                            self.builtin_write(member, member.span(), "assigning");
+                        }
                     }
                     if let Some(name) = self.member_name(member) {
                         if opaque && checked_write(&name) {
@@ -1615,6 +1799,12 @@ impl<'a, 'c> Walker<'a, 'c> {
     ) {
         if self.is_global_object(member.object()) {
             self.facts.written_globals.insert(name.to_string());
+        }
+        self.facts.defined_names.insert(name.to_string());
+        if matches!(unparen(member.object()), Expression::ThisExpression(_))
+            && let Some(class) = self.classes.last().copied()
+        {
+            self.class_member(class, name.to_string());
         }
         let callable = value.is_some_and(is_function_expression);
         if let MemberExpression::PrivateFieldExpression(private) = member {
@@ -1701,7 +1891,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                 if let Some(member) = other.as_member_expression() {
                     self.member_access(member, false);
                 } else {
-                    self.expr(other, Pos::Value);
+                    self.expr(other, Pos::Operand);
                 }
             }
         }
@@ -1717,12 +1907,13 @@ impl<'a, 'c> Walker<'a, 'c> {
             binding.calls.push(&call.arguments);
         }
         self.callee_walk(&call.callee);
-        for argument in &call.arguments {
+        for (index, argument) in call.arguments.iter().enumerate() {
             match argument {
                 Argument::SpreadElement(spread) => self.expr(&spread.argument, Pos::Value),
                 other => {
                     if let Some(expression) = other.as_expression() {
-                        self.expr(expression, Pos::Value);
+                        let pos = self.argument_pos(callee, &call.arguments, index);
+                        self.expr(expression, pos);
                     }
                 }
             }
@@ -2085,12 +2276,26 @@ impl<'a, 'c> Walker<'a, 'c> {
     fn new_expression(&mut self, new: &'a NewExpression<'a>) {
         let callee = unparen(&new.callee);
         self.constructor_target(callee, new.span);
-        for argument in &new.arguments {
+        let rule = match callee {
+            Expression::Identifier(reference)
+                if self.check() && self.bound(reference).is_none() =>
+            {
+                constructor_rule_for(reference.name.as_str())
+            }
+            _ => None,
+        };
+        for (index, argument) in new.arguments.iter().enumerate() {
             match argument {
                 Argument::SpreadElement(spread) => self.expr(&spread.argument, Pos::Value),
                 other => {
                     if let Some(expression) = other.as_expression() {
-                        self.expr(expression, Pos::Value);
+                        let pos = match rule {
+                            Some(Rule::Callbacks(indices)) if indices.contains(&index) => {
+                                Pos::Operand
+                            }
+                            _ => Pos::Value,
+                        };
+                        self.expr(expression, pos);
                     }
                 }
             }
@@ -2153,7 +2358,7 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             Expression::ClassExpression(class) => self.class(class),
             other => {
-                self.expr(other, Pos::Value);
+                self.expr(other, Pos::Operand);
                 let admitted = other.as_member_expression().is_some_and(|member| {
                     self.is_global_object(member.object())
                         && member
@@ -2721,8 +2926,9 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     /// Refuses `delete` of a member of a prototype or of a value read from
-    /// one, which changes it as a write does (REG-032).
-    fn prototype_delete(&mut self, unary: &'a UnaryExpression<'a>) {
+    /// one, of a built-in, or of a page object's method, which changes it
+    /// as a write does (REG-032).
+    fn member_delete(&mut self, unary: &'a UnaryExpression<'a>) {
         if !self.check() {
             return;
         }
@@ -2730,14 +2936,17 @@ impl<'a, 'c> Walker<'a, 'c> {
             Expression::ChainExpression(chain) => chain.expression.as_member_expression(),
             other => other.as_member_expression(),
         };
-        if let Some(member) = member
-            && self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
-        {
+        let Some(member) = member else {
+            return;
+        };
+        if self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new()) {
             self.refuse(
                 "script-prototype",
                 unary.span,
                 "deleting a member of a prototype changes it".to_string(),
             );
+        } else {
+            self.builtin_write(member, unary.span, "deleting");
         }
     }
 
@@ -2746,10 +2955,12 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// member named `prototype` or `__proto__`, by a static name or a
     /// computed key that traces to one; what `getPrototypeOf` returns; a
     /// sequence, conditional, logical or assignment expression that may
-    /// yield one; or a binding the script initializes, defaults or assigns
-    /// from one. A value the scan cannot see, a parameter's argument or a
-    /// destructured name, is not followed: [`Self::held_prototype`] refuses
-    /// a prototype where it would enter one.
+    /// yield one; a binding the script initializes, defaults or assigns
+    /// from one; and, with [`Reach::Through`], a parameter whose function
+    /// a call by name hands one, as `f(Array.prototype.slice)` hands `slice`.
+    /// A destructured name is not followed: [`Self::held_prototype`]
+    /// refuses a prototype where it would enter one, and
+    /// [`Self::held_builtin`] a value read from one.
     fn prototype(
         &self,
         expr: &Expression<'a>,
@@ -2794,12 +3005,20 @@ impl<'a, 'c> Walker<'a, 'c> {
                 let Some(binding) = self.binding(id) else {
                     return false;
                 };
-                binding
+                if binding
                     .init
                     .into_iter()
                     .chain(binding.param_default)
                     .chain(binding.assignments.iter().copied())
                     .any(|value| self.prototype(value, reach, depth + 1, seen))
+                {
+                    return true;
+                }
+                reach == Reach::Through
+                    && self
+                        .passed_arguments(binding)
+                        .into_iter()
+                        .any(|argument| self.prototype(argument, reach, depth + 1, seen))
             }
             other => other
                 .as_member_expression()
@@ -2845,6 +3064,440 @@ impl<'a, 'c> Walker<'a, 'c> {
             MemberExpression::PrivateFieldExpression(_) => false,
         };
         named && !self.script_method(member, "getPrototypeOf")
+    }
+
+    // ----- built-ins -----------------------------------------------------
+
+    /// Refuses a built-in used as a value where the scan stops following
+    /// it (REG-032): an argument to anything but a function the script
+    /// calls by name or a browser API that only calls it back, an element
+    /// or property of an object, a member it is written to, a destructured
+    /// name, a `return`, a `yield`, a `throw`, and a binding another script
+    /// imports. There it would reach code that changes a member of it out
+    /// of the scan's sight: `Object.defineProperty(Object, "keys", ...)`,
+    /// `Promise.resolve(Math).then((m) => { m.random = f; })`. A prototype
+    /// itself is the prototype rule's to refuse.
+    fn held_builtin(&mut self, expr: &'a Expression<'a>) {
+        if !self.check()
+            || matches!(
+                expr,
+                Expression::ParenthesizedExpression(_)
+                    | Expression::SequenceExpression(_)
+                    | Expression::ConditionalExpression(_)
+                    | Expression::LogicalExpression(_)
+                    | Expression::AwaitExpression(_)
+            )
+            || self.prototype(expr, Reach::Itself, 0, &mut BTreeSet::new())
+            || !self.reaches(Root::BuiltIn, expr, 0, &mut BTreeSet::new())
+        {
+            return;
+        }
+        let what = self.builtin_text(expr);
+        self.refuse(
+            "script-builtin",
+            expr.span(),
+            format!("{what} is a built-in, passed on here where the scan stops following it; a script may call a built-in, read from it, compare it or keep it in a name, but may not pass it on, because the scan cannot follow it to where a member of it is changed"),
+        );
+    }
+
+    /// Refuses a write or a `delete` of a member of a built-in, or of a
+    /// method of the page (REG-032). Either changes, for every script on the
+    /// page, a function or object the browser provides: `Object.keys = f`,
+    /// `p.call = g` where `p` holds `Object.keys`, `document.createElement
+    /// = f`.
+    fn builtin_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
+        let object = member.object();
+        if self.reaches(Root::Method, object, 0, &mut BTreeSet::new()) {
+            let what = self.builtin_text(object);
+            self.refuse(
+                "script-builtin",
+                span,
+                format!(
+                    "{verb} a member of {what} changes a built-in for every script on the page"
+                ),
+            );
+            return;
+        }
+        let Some(names) = self.member_names(member) else {
+            return;
+        };
+        if let Some(name) = names.iter().find(|name| inherited_method(name))
+            && self.reaches(Root::Page, object, 0, &mut BTreeSet::new())
+        {
+            let page = match path_text(object) {
+                Some(path) if PAGE_OBJECTS.contains(&path.as_str()) => format!("`{path}`"),
+                _ => "the page".to_string(),
+            };
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on {page} replaces a built-in function every script on the page calls"),
+            );
+        }
+    }
+
+    /// Whether an expression may evaluate to what `root` names: with
+    /// [`Root::BuiltIn`], a built-in object or function or a member one
+    /// hands over (`Object`, `window.JSON`, `Object.keys`, what `super`
+    /// reads); with [`Root::Method`], also a method any value inherits
+    /// (`[].slice`); with [`Root::Page`], `document`, `location` or
+    /// `history`. A name is followed to its initializer, default and
+    /// assignments, and a parameter to the arguments each call of its
+    /// function by name passes; a value the scan does not follow (a
+    /// destructured name, an import, what a call returns) is not, because
+    /// [`Self::held_builtin`] stops a built-in before it enters one. Past
+    /// [`MAX_TRACE_DEPTH`] the answer is yes, so a chain too long to follow
+    /// is refused rather than admitted.
+    fn reaches(
+        &self,
+        root: Root,
+        expr: &Expression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        match unparen(expr) {
+            Expression::Identifier(reference) => match self.bound(reference) {
+                None => {
+                    let name = reference.name.as_str();
+                    match root {
+                        Root::BuiltIn | Root::Method => builtin_global(name),
+                        Root::Page => PAGE_OBJECTS.contains(&name),
+                    }
+                }
+                Some(id) => self.binding_reaches(root, id, depth + 1, seen),
+            },
+            // `super` reads the parent class, a built-in such as
+            // `HTMLElement` for a custom element.
+            Expression::Super(_) => root != Root::Page,
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.reaches(root, last, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.reaches(root, &conditional.consequent, depth + 1, seen)
+                    || self.reaches(root, &conditional.alternate, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.reaches(root, &logical.left, depth + 1, seen)
+                    || self.reaches(root, &logical.right, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => match assignment.operator {
+                AssignmentOperator::Assign => {
+                    self.reaches(root, &assignment.right, depth + 1, seen)
+                }
+                // `a ||= b` yields `a` or `b`.
+                AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::LogicalNullish => {
+                    self.reaches(root, &assignment.right, depth + 1, seen)
+                        || self.target_reaches(root, &assignment.left, depth + 1, seen)
+                }
+                _ => false,
+            },
+            Expression::AwaitExpression(await_expr) => {
+                self.reaches(root, &await_expr.argument, depth + 1, seen)
+            }
+            Expression::ChainExpression(chain) => chain
+                .expression
+                .as_member_expression()
+                .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            other => other
+                .as_member_expression()
+                .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+        }
+    }
+
+    /// [`Self::reaches`] for the old value of a logical assignment's target.
+    fn target_reaches(
+        &self,
+        root: Root,
+        target: &AssignmentTarget<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        match target.as_simple_assignment_target() {
+            Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier)) => self
+                .bound(identifier)
+                .is_some_and(|id| self.binding_reaches(root, id, depth, seen)),
+            Some(other) => other
+                .as_member_expression()
+                .is_some_and(|member| self.member_reaches(root, member, depth, seen)),
+            None => false,
+        }
+    }
+
+    /// [`Self::reaches`] for a binding: its initializer, default and
+    /// assignments, and, for a parameter, each argument a call of its
+    /// function by name passes in its place.
+    fn binding_reaches(&self, root: Root, id: Bid, depth: usize, seen: &mut BTreeSet<Bid>) -> bool {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        binding
+            .init
+            .into_iter()
+            .chain(binding.param_default)
+            .chain(binding.assignments.iter().copied())
+            .chain(self.passed_arguments(binding))
+            .any(|value| self.reaches(root, value, depth, seen))
+    }
+
+    /// [`Self::reaches`] for a member expression.
+    fn member_reaches(
+        &self,
+        root: Root,
+        member: &MemberExpression<'a>,
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        let object = member.object();
+        let names = self.member_names(member);
+        let named = |test: &dyn Fn(&str) -> bool| {
+            names
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|name| test(name)))
+        };
+        if self.is_global_object(object) {
+            return match root {
+                Root::BuiltIn | Root::Method => named(&builtin_global),
+                Root::Page => named(&|name| PAGE_OBJECTS.contains(&name)),
+            };
+        }
+        match root {
+            Root::BuiltIn | Root::Method => {
+                if let MemberExpression::PrivateFieldExpression(_) = member {
+                    // A private field holds only what the script stores in
+                    // it, and a built-in is never stored in a member.
+                    return false;
+                }
+                let constant = names.as_ref().is_some_and(|names| {
+                    !names.is_empty() && names.iter().all(|name| constant_name(name))
+                });
+                (!constant && self.reaches(root, object, depth + 1, seen))
+                    || (root == Root::Method
+                        && names.as_ref().is_some_and(|names| {
+                            names.iter().any(|name| {
+                                inherited_method(name) && !self.own_member(object, name)
+                            })
+                        }))
+            }
+            Root::Page => {
+                named(&|name| name == "ownerDocument")
+                    || (named(&|name| name == "location")
+                        && self.reaches(root, object, depth + 1, seen))
+            }
+        }
+    }
+
+    /// The names a member expression reads, when the scan can list them: a
+    /// static name, or the constants a computed key traces to.
+    fn member_names(&self, member: &MemberExpression<'a>) -> Option<Vec<String>> {
+        match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                Some(vec![member.property.name.to_string()])
+            }
+            MemberExpression::ComputedMemberExpression(member) => self.trace(&member.expression, 0),
+            MemberExpression::PrivateFieldExpression(member) => {
+                Some(vec![format!("#{}", member.field.name)])
+            }
+        }
+    }
+
+    /// Whether a member is one the script gave the object itself, so a
+    /// method of that name is the script's own, not one the object
+    /// inherits: a member a class it defines declares or writes on `this`,
+    /// read from `this` in that class or from a constant it built with
+    /// `new`, or a key of an object literal, read from the literal or a
+    /// constant it initializes.
+    fn own_member(&self, object: &Expression<'a>, name: &str) -> bool {
+        let class_has = |class: u32| {
+            self.facts
+                .class_members
+                .get(&class)
+                .is_some_and(|members| members.contains(name))
+        };
+        match unparen(object) {
+            Expression::ThisExpression(this) => self
+                .facts
+                .this_class
+                .get(&this.span.start)
+                .is_some_and(|class| class_has(*class)),
+            Expression::ObjectExpression(object) => object_defines(object, name),
+            Expression::Identifier(reference) => {
+                let Some(binding) = self.bound(reference).and_then(|id| self.binding(id)) else {
+                    return false;
+                };
+                if binding.kind != Kind::Const {
+                    return false;
+                }
+                match binding.init.map(unparen) {
+                    Some(Expression::ObjectExpression(object)) => object_defines(object, name),
+                    Some(Expression::NewExpression(new)) => match unparen(&new.callee) {
+                        Expression::Identifier(class) => self
+                            .bound(class)
+                            .and_then(|id| self.binding(id))
+                            .and_then(|binding| binding.class)
+                            .is_some_and(|class| class_has(class.span.start)),
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The arguments each call of a parameter's function by name passes in
+    /// the parameter's place. A spread argument is left out: its elements
+    /// are an array's, where a built-in never goes.
+    fn passed_arguments(&self, binding: &Binding<'a>) -> Vec<&'a Expression<'a>> {
+        if binding.kind != Kind::Param {
+            return Vec::new();
+        }
+        let Some(function) = binding.param_of.and_then(|owner| self.binding(owner)) else {
+            return Vec::new();
+        };
+        function
+            .calls
+            .iter()
+            .filter_map(|arguments| arguments.get(binding.param_index))
+            .filter_map(Argument::as_expression)
+            .collect()
+    }
+
+    /// Where an argument of a call stands (REG-032): kept, when it is
+    /// handed to a parameter the scan follows; used up, when a browser API
+    /// only calls it back; a value, otherwise.
+    fn argument_pos(
+        &self,
+        callee: &Expression<'a>,
+        arguments: &[Argument<'a>],
+        index: usize,
+    ) -> Pos {
+        if !self.check() {
+            return Pos::Value;
+        }
+        // A spread shifts the arguments after it to parameters the scan
+        // cannot name.
+        if arguments
+            .iter()
+            .any(|argument| matches!(argument, Argument::SpreadElement(_)))
+        {
+            return Pos::Value;
+        }
+        if let Expression::Identifier(reference) = unparen(callee)
+            && let Some(id) = self.bound(reference)
+        {
+            return if self.traced_parameter(id, index) {
+                Pos::Kept
+            } else {
+                Pos::Value
+            };
+        }
+        if self.browser_callback(callee, index) {
+            Pos::Operand
+        } else {
+            Pos::Value
+        }
+    }
+
+    /// Whether every function a binding holds takes the argument at
+    /// `index` in a plain parameter the scan follows to its uses, and none
+    /// reads `arguments`, through which the argument would arrive
+    /// unfollowed.
+    fn traced_parameter(&self, id: Bid, index: usize) -> bool {
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        if binding.opaque || binding.numeric_updates {
+            return false;
+        }
+        match binding.kind {
+            Kind::Function => {
+                binding.assignments.is_empty()
+                    && binding.declaration.is_some_and(|function| {
+                        plain_parameter(&function.params, index) && !self.reads_arguments(function)
+                    })
+            }
+            Kind::Const | Kind::Let | Kind::Var => {
+                let mut any = false;
+                for value in binding
+                    .init
+                    .into_iter()
+                    .chain(binding.assignments.iter().copied())
+                {
+                    any = true;
+                    let traced = match unparen(value) {
+                        Expression::FunctionExpression(function) => {
+                            plain_parameter(&function.params, index)
+                                && !self.reads_arguments(function)
+                        }
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            plain_parameter(&arrow.params, index)
+                        }
+                        _ => false,
+                    };
+                    if !traced {
+                        return false;
+                    }
+                }
+                any
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a function reads its `arguments`.
+    fn reads_arguments(&self, function: &Function<'a>) -> bool {
+        self.facts
+            .arguments_of
+            .get(&function.span.start)
+            .and_then(|id| self.binding(*id))
+            .is_none_or(|binding| binding.escapes)
+    }
+
+    /// Whether a call is to a browser API that takes the argument at
+    /// `index` only to call it back (`map(Number)`, `then(console.log)`): a
+    /// global function, or a method whose name the script does not define
+    /// on any object of its own, which would make the receiver possibly the
+    /// script's own object rather than the API.
+    fn browser_callback(&self, callee: &Expression<'a>, index: usize) -> bool {
+        let callee = match unparen(callee) {
+            Expression::ChainExpression(chain) => match chain.expression.as_member_expression() {
+                Some(member) => member,
+                None => return false,
+            },
+            other => match other.as_member_expression() {
+                Some(member) => member,
+                None => {
+                    return matches!(other, Expression::Identifier(reference)
+                        if self.bound(reference).is_none()
+                            && is_callback(rule_for(reference.name.as_str()), index));
+                }
+            },
+        };
+        let Some(name) = callee.static_property_name() else {
+            return false;
+        };
+        !self.facts.defined_names.contains(name)
+            && is_callback(self.member_rules(callee).into_iter().next(), index)
+    }
+
+    /// How a refusal names a built-in.
+    fn builtin_text(&self, expr: &Expression<'a>) -> String {
+        match (unparen(expr), path_text(expr)) {
+            (Expression::Identifier(reference), Some(path)) if self.bound(reference).is_some() => {
+                format!("`{path}`, which holds a built-in,")
+            }
+            (_, Some(path)) => format!("`{path}`"),
+            (_, None) => "a built-in".to_string(),
+        }
     }
 
     // ----- tracing -------------------------------------------------------
@@ -3016,6 +3669,76 @@ impl<'a, 'c> Walker<'a, 'c> {
             }
             _ => false,
         }
+    }
+}
+
+/// Whether a global the script does not declare names a built-in object or
+/// function: an admitted global that is neither the global object, nor a
+/// primitive value, nor the page (REG-032).
+fn builtin_global(name: &str) -> bool {
+    ADMITTED_GLOBALS.contains(&name)
+        && !GLOBAL_OBJECTS.contains(&name)
+        && !PAGE_OBJECTS.contains(&name)
+        && !matches!(name, "undefined" | "NaN" | "Infinity")
+}
+
+/// Whether a member name is a constant's: all capitals, digits and
+/// underscores, as the language's (`Math.PI`, `Number.MAX_SAFE_INTEGER`)
+/// and the DOM's (`Node.ELEMENT_NODE`) are. Each is a number, never an
+/// object or a function, so reading one hands over no built-in.
+fn constant_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Whether a member name is a built-in method's, which a value the script
+/// did not make inherits.
+fn inherited_method(name: &str) -> bool {
+    ADMITTED_METHODS.contains(&name) || INHERITED_METHODS.contains(&name)
+}
+
+/// Whether the parameter at `index` is a plain name, which the scan
+/// follows, rather than a pattern, a rest parameter or none at all.
+fn plain_parameter(params: &FormalParameters<'_>, index: usize) -> bool {
+    params
+        .items
+        .get(index)
+        .is_some_and(|param| matches!(param.pattern, BindingPattern::BindingIdentifier(_)))
+}
+
+/// Whether an argument rule calls back the argument at `index`.
+fn is_callback(rule: Option<Rule>, index: usize) -> bool {
+    match rule {
+        Some(Rule::Callbacks(indices)) => indices.contains(&index),
+        Some(Rule::Timer) => index == 0,
+        _ => false,
+    }
+}
+
+/// Whether an object literal gives itself a member of this name.
+fn object_defines(object: &ObjectExpression<'_>, name: &str) -> bool {
+    object.properties.iter().any(|property| {
+        matches!(property, ObjectPropertyKind::ObjectProperty(property)
+            if !property.computed
+                && property.key.static_name().is_some_and(|key| key == name))
+    })
+}
+
+/// A static member path from a name, `this` or `super`, as a refusal
+/// quotes it: `Object.keys`, `this.ownerDocument`.
+fn path_text(expr: &Expression<'_>) -> Option<String> {
+    match unparen(expr) {
+        Expression::Identifier(reference) => Some(reference.name.to_string()),
+        Expression::ThisExpression(_) => Some("this".to_string()),
+        Expression::Super(_) => Some("super".to_string()),
+        Expression::StaticMemberExpression(member) => Some(format!(
+            "{}.{}",
+            path_text(&member.object)?,
+            member.property.name
+        )),
+        _ => None,
     }
 }
 
