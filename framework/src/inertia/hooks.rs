@@ -271,7 +271,7 @@ impl Middleware for VersionChangeHook {
 /// Built by [`Inertia::middleware`](crate::Inertia::middleware) from an
 /// [`InertiaConfig`]: the headers middleware (`Vary`, the redirect rules,
 /// the previous URL and the hooks), the version check, the `302 → 303`
-/// rule, the validation redirect, and the error-response middleware, in
+/// rule, the error-response middleware, and the validation redirect, in
 /// the order [`Inertia::install`](crate::Inertia::install)
 /// registers them globally. A route outside the groups that carry it gets
 /// none of them: no `Vary: X-Inertia`, no conversion.
@@ -291,19 +291,20 @@ impl InertiaMiddleware {
 
 /// The Inertia middlewares for `config`, outermost first.
 pub(crate) fn stack(config: &InertiaConfig) -> Vec<BoxedMiddleware> {
-    let mut stack = vec![
+    vec![
         into_boxed(super::InertiaHeadersMiddleware::from_config(config)),
         version_middleware(config),
         into_boxed(super::Inertia303Middleware::new()),
+        // Always present: the error callback can be installed after the
+        // stack is built, and without one or an `error_page` the middleware
+        // hands the request on and changes nothing. Outside the validation
+        // redirect, so an Inertia visit's validation failure reaches it as
+        // the redirect back, not as a `422` (PAR-062).
+        into_boxed(super::InertiaErrorPageMiddleware::with_component(
+            config.error_page.clone(),
+        )),
         into_boxed(super::InertiaValidationRedirectMiddleware::new()),
-    ];
-    // Always present: the error callback can be installed after the stack
-    // is built, and without one or an `error_page` the middleware hands
-    // the request on and changes nothing.
-    stack.push(into_boxed(
-        super::InertiaErrorPageMiddleware::with_component(config.error_page.clone()),
-    ));
-    stack
+    ]
 }
 
 /// The version middleware for `config`, comparing against the `version`

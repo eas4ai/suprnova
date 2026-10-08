@@ -711,19 +711,22 @@ impl Middleware for RejectsLikeCsrf {
 
 /// With only the default placement, a middleware registered *outside*
 /// `Inertia::install` answers before the error-page middleware exists in
-/// the chain, and its JSON reaches the client exactly as it did before.
-/// This is the whole reason an app ever registers the middleware itself.
+/// the chain, so nothing inside the stack decides its response. The server
+/// does, after the whole stack (PAR-062): the installed `error_page` turns
+/// the `419` into the page, without the request scopes the stack would
+/// have opened, which is the reason an app still registers the middleware
+/// itself.
 ///
-/// The other side of this boundary - the same `419` becoming a page once
-/// the app places the middleware outside it - lives in
+/// The app-placed side of this boundary - the same `419` becoming a page
+/// inside the session - lives in
 /// `framework/tests/inertia_error_page_placement.rs`, which needs a global
 /// middleware registry that starts empty and therefore needs its own test
 /// binary.
 #[tokio::test]
-async fn with_the_default_placement_a_419_answered_first_is_still_raw_json() {
+async fn with_the_default_placement_a_419_answered_first_becomes_the_page_at_the_server() {
     if crate::own_process_async::delegate(
         module_path!(),
-        "with_the_default_placement_a_419_answered_first_is_still_raw_json",
+        "with_the_default_placement_a_419_answered_first_becomes_the_page_at_the_server",
     )
     .await
     {
@@ -746,14 +749,17 @@ async fn with_the_default_placement_a_419_answered_first_is_still_raw_json() {
     )
     .await;
 
-    assert_eq!(status, 419);
-    assert!(
-        !headers.contains_key("x-inertia"),
-        "a middleware that answers before the Inertia layer is reached hands \
-         its response to nothing inside it; got {headers:?}"
+    assert_eq!(status, 419, "the page keeps the rejection's status");
+    assert_eq!(
+        headers.get("x-inertia").map(String::as_str),
+        Some("true"),
+        "a middleware that answers before the Inertia layer is reached still has \
+         its response decided at the server; got {headers:?}"
     );
-    let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
-    assert_eq!(parsed["message"], "CSRF token mismatch.");
+    let page = page_object(&body);
+    assert_eq!(page["component"], ERROR_PAGE);
+    assert_eq!(page["props"]["status"], 419);
+    assert_eq!(page["props"]["message"], "CSRF token mismatch.");
 }
 
 // ---------------------------------------------------------------------

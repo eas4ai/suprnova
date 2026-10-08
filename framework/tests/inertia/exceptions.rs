@@ -7,9 +7,12 @@
 //!
 //! Every test runs the real Inertia stack (`Inertia::middleware`) as global
 //! middleware behind a loopback server, so the router's own `404` passes
-//! through it too. The callback lives on the test's own container
-//! (`TestContainer::fake`); the server runs on the test's thread, so the
-//! request sees it.
+//! through it too. The server is `protocol_harness::serve`, which answers
+//! each connection with the in-process `handle_request` adapter, the
+//! function `Server::run` calls, so the decision the server runs after the
+//! whole stack runs here too. The callback lives on the test's own
+//! container (`TestContainer::fake`); the server runs on the test's thread,
+//! so the request sees it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,9 +23,9 @@ use serial_test::serial;
 use suprnova::indexmap::IndexMap;
 use suprnova::testing::TestContainer;
 use suprnova::{
-    FrameworkError, HttpResponse, Inertia, InertiaConfig, InertiaErrorPageMiddleware,
-    InertiaMiddlewareHooks, InertiaRequestExt, MiddlewareRegistry, Prop, Redirect, Request,
-    Response, Router, ValidationErrors,
+    CsrfMiddleware, FrameworkError, HttpResponse, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, InertiaMiddlewareHooks, InertiaRequestExt, Middleware,
+    MiddlewareRegistry, Next, Prop, Redirect, Request, Response, Router, ValidationErrors,
 };
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
@@ -609,9 +612,26 @@ async fn inssr_an_inertia_posts_validation_failure_never_reaches_the_callback() 
 }
 
 #[tokio::test]
-async fn inssr_a_json_clients_validation_failure_never_reaches_the_callback() {
+async fn inssr_a_json_clients_validation_failure_reaches_the_callback() {
     let _container = TestContainer::fake();
     let (mut client, _slot, calls) = teapot_client().await;
+
+    let reply = client.send("POST", "/register", JSON_CLIENT).await;
+
+    assert_eq!(
+        reply.status, 418,
+        "a JSON client's 422 is an error response the callback decides, as \
+         Laravel's respondUsing hands it every rendered exception; got {reply:?}"
+    );
+    assert_eq!(reply.body, "I'm a teapot");
+    assert_eq!(*calls.lock().unwrap(), 1);
+
+    // A callback returning `None` keeps the 422 with its errors.
+    let (kept, seen) = counter();
+    Inertia::handle_exceptions_using(move |_error| {
+        *seen.lock().unwrap() += 1;
+        None
+    });
 
     let reply = client.send("POST", "/register", JSON_CLIENT).await;
 
@@ -619,11 +639,216 @@ async fn inssr_a_json_clients_validation_failure_never_reaches_the_callback() {
     let body: serde_json::Value = serde_json::from_str(&reply.body)
         .unwrap_or_else(|e| panic!("expected the validation body ({e}): {}", reply.body));
     assert_eq!(body["errors"]["email"][0], "The email field is required.");
+    assert_eq!(*kept.lock().unwrap(), 1, "the callback decided the 422");
+}
+
+#[tokio::test]
+async fn inssr_the_default_callback_keeps_a_json_clients_validation_failure() {
+    let _container = TestContainer::fake();
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registry = MiddlewareRegistry::new()
+        .append(SeededSessionScope(slot))
+        .append(Inertia::middleware(&config().error_page("Error")));
+    let mut client = Client::new(serve(routes(), registry).await);
+
+    let reply = client.send("POST", "/register", JSON_CLIENT).await;
+
     assert_eq!(
-        *calls.lock().unwrap(),
-        0,
-        "a validation result is not an error for the callback"
+        reply.status, 422,
+        "the default callback renders only for an Inertia visit or a request that \
+         wants HTML; got {reply:?}"
     );
+    assert_eq!(reply.header("x-inertia"), None, "{reply:?}");
+    let body: serde_json::Value = serde_json::from_str(&reply.body)
+        .unwrap_or_else(|e| panic!("expected the validation body ({e}): {}", reply.body));
+    assert_eq!(body["errors"]["email"][0], "The email field is required.");
+}
+
+// ---------------------------------------------------------------------
+// Responses from outside the Inertia stack reach the callback at the server
+// ---------------------------------------------------------------------
+
+/// What [`OuterUnavailable`] fails with. A 5xx body never shows it.
+const OUTER_FAILURE: &str = "the ledger replica is 40 minutes behind";
+
+/// What [`OuterPanic`] panics with.
+const OUTER_PANIC: &str = "the ledger lock table is poisoned";
+
+/// Answers every request itself, before the Inertia stack is reached: a
+/// `503` built from an error, the shape `TimeoutMiddleware` answers a
+/// request it cancelled with.
+struct OuterUnavailable;
+
+#[async_trait::async_trait]
+impl Middleware for OuterUnavailable {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(FrameworkError::domain(OUTER_FAILURE, 503).into())
+    }
+}
+
+/// Panics before the Inertia stack is reached, so only the server's panic
+/// boundary catches it.
+struct OuterPanic;
+
+#[async_trait::async_trait]
+impl Middleware for OuterPanic {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        panic!("{OUTER_PANIC}");
+    }
+}
+
+/// A client of `routes()` with `outer` registered before the Inertia stack
+/// `config` builds, the order an app gets by registering `outer` before
+/// `Inertia::install`.
+async fn client_behind(outer: impl Middleware + 'static, config: &InertiaConfig) -> Client {
+    let registry = MiddlewareRegistry::new()
+        .append(outer)
+        .append(Inertia::middleware(config));
+    Client::new(serve(routes(), registry).await)
+}
+
+/// Installs a callback that answers every error response with a `418` and
+/// records the status it was handed.
+fn install_teapot() -> Arc<Mutex<Vec<u16>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Inertia::handle_exceptions_using(move |error| {
+        record.lock().unwrap().push(error.status());
+        Some(error.respond_with(HttpResponse::text("I'm a teapot").status(418)))
+    });
+    seen
+}
+
+#[tokio::test]
+async fn inssr_a_503_from_a_middleware_registered_before_the_stack_reaches_the_callback() {
+    let _container = TestContainer::fake();
+    let seen = install_teapot();
+    let mut client = client_behind(OuterUnavailable, &config()).await;
+
+    for (audience, headers) in [
+        ("an Inertia visit", INERTIA_VISIT),
+        ("a browser navigation", BROWSER),
+        ("a JSON client", JSON_CLIENT),
+    ] {
+        let reply = client.send("GET", "/forbidden", headers).await;
+        assert_eq!(reply.status, 418, "{audience}: {reply:?}");
+        assert_eq!(reply.body, "I'm a teapot", "{audience}");
+        assert!(
+            reply.header("x-request-id").is_some(),
+            "{audience}: a response decided at the server still carries the request id; \
+             got {reply:?}"
+        );
+    }
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![503, 503, 503],
+        "the callback decides the outer 503 once per request"
+    );
+}
+
+#[tokio::test]
+async fn inssr_a_csrf_rejection_registered_before_the_stack_gets_the_callbacks_answer() {
+    let _container = TestContainer::fake();
+    let seen = install_teapot();
+    // No session, so no token: `CsrfMiddleware` answers 419 without
+    // calling `next`.
+    let mut client = client_behind(CsrfMiddleware::new(), &config()).await;
+
+    let reply = client
+        .send(
+            "POST",
+            "/register",
+            &[
+                ("X-Inertia", "true"),
+                ("X-Inertia-Version", VERSION),
+                ("Accept", "text/html, application/xhtml+xml"),
+            ],
+        )
+        .await;
+
+    assert_eq!(reply.status, 418, "{reply:?}");
+    assert_eq!(reply.body, "I'm a teapot");
+    assert_eq!(*seen.lock().unwrap(), vec![419], "the callback saw the 419");
+}
+
+#[tokio::test]
+#[serial]
+async fn inssr_a_panic_in_a_middleware_registered_before_the_stack_reaches_the_callback() {
+    let _debug = debug_off().await;
+    let _container = TestContainer::fake();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Inertia::handle_exceptions_using(move |error| {
+        record.lock().unwrap().push((
+            error.status(),
+            error.error().is_panic(),
+            error.error().chain().to_vec(),
+            error.error().panic_location().is_some(),
+        ));
+        let status = error.status();
+        Some(error.render("Error", json!({ "status": status })))
+    });
+    let mut client = client_behind(OuterPanic, &config()).await;
+
+    let reply = client.send("GET", "/forbidden", INERTIA_VISIT).await;
+
+    assert_eq!(reply.status, 500, "{reply:?}");
+    assert_eq!(reply.header("x-inertia"), Some("true"), "{reply:?}");
+    assert_eq!(reply.page()["component"], "Error");
+    assert_eq!(reply.page()["props"]["status"], 500);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(500, true, vec![OUTER_PANIC.to_string()], true)],
+        "the callback sees the panic the server's boundary caught, with its report"
+    );
+}
+
+#[tokio::test]
+async fn inssr_a_callback_returning_nothing_keeps_an_outer_503_for_a_json_client() {
+    let _container = TestContainer::fake();
+    let (calls, seen) = counter();
+    Inertia::handle_exceptions_using(move |_error| {
+        *seen.lock().unwrap() += 1;
+        None
+    });
+    let mut client = client_behind(OuterUnavailable, &config()).await;
+
+    let reply = client.send("GET", "/forbidden", JSON_CLIENT).await;
+
+    assert_eq!(*calls.lock().unwrap(), 1, "the callback decides the 503");
+    assert_json_error(&reply, 503, "Internal Server Error");
+}
+
+#[tokio::test]
+async fn inssr_a_page_decided_at_the_server_carries_the_installed_shared_data() {
+    let _container = TestContainer::fake();
+    Inertia::share("app_name", "Ledger").unwrap();
+    Inertia::handle_exceptions_using(|error| {
+        let status = error.status();
+        Some(
+            error
+                .render("Error", json!({ "status": status }))
+                .with_shared_data(),
+        )
+    });
+    let mut client = client_behind(OuterUnavailable, &config().hooks(SharingHooks)).await;
+
+    let reply = client.send("GET", "/forbidden", INERTIA_VISIT).await;
+
+    assert_eq!(reply.status, 503, "{reply:?}");
+    assert_eq!(reply.header("x-inertia"), Some("true"), "{reply:?}");
+    let props = reply.page()["props"].clone();
+    assert_eq!(props["status"], 503, "{props}");
+    assert_eq!(
+        props["app_name"], "Ledger",
+        "the shared registry reaches a page decided at the server; got {props}"
+    );
+    for hook in ["path", "plans"] {
+        assert!(
+            props.get(hook).is_none(),
+            "the middleware hooks run inside the stack the outer 503 never reached; got {props}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------

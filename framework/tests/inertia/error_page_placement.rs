@@ -1,15 +1,17 @@
 //! An app that places the Inertia error page middleware itself.
 //!
-//! `Inertia::install` puts `InertiaErrorPageMiddleware` innermost of the
-//! Inertia layer, which covers the handler, the route middleware, and
-//! everything registered *after* the install. It cannot cover anything
-//! registered above it: a middleware that answers without calling `next`
-//! hands its response to nothing registered inside it. An app whose
-//! `CsrfMiddleware` sits above the install therefore answers a
-//! lapsed-session form post with `419 {"message":"CSRF token mismatch."}`
-//! that reaches the Inertia client as header-less JSON - the crash modal
-//! the error page exists to remove. The fix is for the app to register the
-//! middleware itself, further out, and for `install` to leave it alone.
+//! `Inertia::install` puts `InertiaErrorPageMiddleware` inside the rest of
+//! the Inertia layer, just outside the validation redirect, which covers
+//! the handler, the route middleware, and everything registered *after*
+//! the install. Nothing inside the stack covers what is registered above
+//! it: a middleware that answers without calling `next` hands its response
+//! to nothing registered inside it. An app whose `CsrfMiddleware` sits
+//! above the install therefore answers a lapsed-session form post with
+//! `419 {"message":"CSRF token mismatch."}` that only the server's decision
+//! after the whole stack turns into the error page, once the session and
+//! locale scopes have closed. The fix is for the app to register the
+//! middleware itself, further out but inside those scopes, and for
+//! `install` to leave it alone.
 //!
 //! **Why this is its own test binary.** The global middleware registry is
 //! process-global, and the shape under test needs it to start *empty*: the
