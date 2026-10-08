@@ -329,6 +329,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key completed before; about 4,800 do now. Acceptance, rejection and
   retry-after answers are unchanged, and no request fails with "rate
   limiter poisoned" any more, since the shard locks do not poison (#148).
+- **`suprnova new` ships a root template in place of `frontend/index.html`.**
+  The server never served that file: Vite builds from the entry module, and
+  the first visit was the framework's own document, titled `Suprnova` on
+  every page. A new project has `templates/app.html`, declared as
+  `AppDocument` with `#[inertia_root]` in `src/bootstrap.rs`, which renders
+  every first visit through it and sets the project's name as the default
+  title. The Dockerfile `suprnova docker:init` writes copies `templates/`
+  into the stage that compiles the application, since Askama reads
+  templates at compile time; it copied only `cmd/` and `src/`, so that
+  build could not find a root template or a Live view.
 
 ### Fixed
 
