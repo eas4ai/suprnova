@@ -901,6 +901,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prints Laravel's messages: `Inertia SSR server is running.`, `Inertia SSR
   server is not running.`, or `The SSR gateway does not support health
   checks.`, exiting 0 or 1 (CM-03, SS-10).
+- **The starter kits declare `@inertiajs/core` and read `root` through the
+  generated types.** A kit reached `@inertiajs/core` only because its
+  adapter depends on it and npm hoists it, and the generated
+  `inertia-props.ts` now augments that package. Each kit's `package.json`
+  declares `@inertiajs/core` at `^3.6.1` beside its adapter, and the 21 kit
+  pages that build URLs from `root` read it with a bare `usePage()` in
+  place of `usePage<{ root: string }>()`, typed by the augmentation. The
+  `Error` page keeps its inline props, since no handler renders it with a
+  struct (T06).
 
 ### Fixed
 

@@ -2372,7 +2372,7 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
                     offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
                 }
             }
-            if !body.contains("usePage<{ root: string }>().props") || !body.contains("${root}/") {
+            if !body.contains("usePage().props") || !body.contains("${root}/") {
                 offenders.push(format!(
                     "{}: builds no URL from the `root` prop",
                     path.display()
@@ -2548,4 +2548,70 @@ fn rdoc_006_the_manual_draws_the_scaffold_with_its_root_template() {
             "manual/structure.md does not name {named}"
         );
     }
+}
+
+/// PAR-068: the generated `inertia-props.ts` augments `@inertiajs/core`,
+/// so every kit declares it beside its adapter instead of reaching it
+/// through the adapter's own dependency, which only hoisting makes
+/// importable. Each kit's TypeScript program includes `src/types/`, so the
+/// augmentation is part of every type check.
+#[test]
+fn intt_every_kit_declares_inertias_core_and_type_checks_the_generated_types() {
+    for (frontend, adapter) in [
+        ("svelte", "@inertiajs/svelte"),
+        ("react", "@inertiajs/react"),
+        ("vue", "@inertiajs/vue3"),
+    ] {
+        let manifest: serde_json::Value = serde_json::from_str(&read(&format!(
+            "src/templates/files/frontend/{frontend}/package.json.tpl"
+        )))
+        .unwrap_or_else(|e| panic!("{frontend}'s package.json parses: {e}"));
+        let dependencies = &manifest["dependencies"];
+        assert_eq!(
+            dependencies["@inertiajs/core"], dependencies[adapter],
+            "{frontend}'s package.json must declare @inertiajs/core at its \
+             adapter's version; got {dependencies}"
+        );
+
+        let tsconfig: serde_json::Value = serde_json::from_str(&read(&format!(
+            "src/templates/files/frontend/{frontend}/tsconfig.json.tpl"
+        )))
+        .unwrap_or_else(|e| panic!("{frontend}'s tsconfig.json parses: {e}"));
+        let include = tsconfig["include"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{frontend}'s tsconfig.json has an include list"));
+        assert!(
+            include
+                .iter()
+                .any(|glob| matches!(glob.as_str(), Some("src" | "src/**/*.ts"))),
+            "{frontend}'s tsconfig.json must include src/types/*.ts; got {include:?}"
+        );
+    }
+}
+
+/// PAR-068: the generated augmentation types `root`, so no kit page types
+/// it by hand; a page reads it through a bare `usePage()`.
+#[test]
+fn intt_no_kit_page_types_root_by_hand() {
+    let mut offenders = Vec::new();
+    let mut readers = 0usize;
+    for frontend in FRONTENDS {
+        let dir = cli_root().join(format!("src/templates/files/frontend/{frontend}/src/pages"));
+        visit(&dir, &mut |path, body| {
+            if body.contains("usePage<") {
+                offenders.push(path.display().to_string());
+            }
+            if body.contains("const { root } = usePage().props") {
+                readers += 1;
+            }
+        });
+    }
+    assert!(
+        offenders.is_empty(),
+        "these kit pages pass usePage a type argument: {offenders:?}"
+    );
+    assert_eq!(
+        readers, 21,
+        "the seven pages of each kit that build URLs read `root` through usePage()"
+    );
 }
