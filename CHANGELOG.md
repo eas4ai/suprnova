@@ -12,23 +12,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   or group to validate a draft without running the handler body. A passing
   request answers `204` with `Precognition-Success: true`; every marked
   response carries `Precognition: true`, and every response from the route
-  adds `Precognition` to `Vary` (PAR-081, PAR-082).
+  adds `Precognition` to `Vary`.
   - `Precognition-Validate-Only` narrows rules before every validation
     stage, including the asynchronous hook. Names match exactly, with
     `*` matching one segment; an empty list validates no fields. An
     unlisted parse failure does not block the answer, and after-validation
-    hook errors are never filtered (PAR-083).
+    hook errors are never filtered.
   - Live validation reads query data for `GET` and `DELETE`, multipart
-    files and fields, and inline `Request::validate::<T>()` (PAR-084).
+    files and fields, and inline `Request::validate::<T>()`.
   - A marked request neither saves the session nor becomes the previous
-    URL, so live validation leaves flash data for the next page (PAR-085).
+    URL, so live validation leaves flash data for the next page.
   - The `422` message summarises the first error and the count of the
-    rest, with the field-keyed `errors` bag kept (PAR-086).
+    rest, with the field-keyed `errors` bag kept.
   - `with_precognition()` sends the request header, and
     `assert_successful_precognition()` checks the status and success
     header. The new [Precognition chapter](manual/precognition.md) covers
     the Inertia 3.8 Vue, React and Svelte clients, uploads, narrowed rules
-    and side effects (PAR-087, PAR-088).
+    and side effects.
 
 - **The Svelte kit on Inertia 3.8 and its Vite plugin.** The kit pinned
   `@inertiajs/svelte` and `@inertiajs/core` to the 3.6 client, globbed its
@@ -737,7 +737,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request
   answered the header; a route without the middleware now handles it as
-  a real request (PAR-081).
+  a real request.
 
 - **Inertia DevTools recording is opt-in.** `APP_ENV=local` used to turn
   recording and the entries endpoints on without configuration. An
