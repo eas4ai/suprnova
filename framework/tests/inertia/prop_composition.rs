@@ -388,7 +388,8 @@ async fn merge_once_with_a_custom_cache_key_and_expiry() {
                 .merge()
                 .once()
                 .as_key("roles")
-                .until(4_070_908_800_000),
+                // A moment; an integer would be seconds from now (PAR-052).
+                .until(chrono::DateTime::from_timestamp_millis(4_070_908_800_000).unwrap()),
         )
         .resolve(&MockReq::new("/billing").inertia())
         .await
@@ -414,7 +415,7 @@ async fn once_fresh_beats_the_client_cache_claim_on_a_composed_prop() {
             counted(calls.clone(), json!([{ "id": 9 }]))
                 .merge()
                 .once()
-                .fresh(),
+                .fresh(true),
         )
         .resolve(&req)
         .await
@@ -524,7 +525,8 @@ async fn defer_once_stops_announcing_the_key_after_the_client_has_it() {
 #[tokio::test]
 async fn defer_once_announces_again_once_the_server_side_expiry_has_passed() {
     // Epoch + 1ms is long past, so the server refuses to honour the
-    // client's cache claim (Domain 20 audit D20-C).
+    // client's cache claim (Domain 20 audit D20-C). A moment, not an
+    // integer: `until(1)` is one second from now (PAR-052).
     let req = MockReq::new("/dash")
         .inertia()
         .header("X-Inertia-Except-Once-Props", "rates");
@@ -534,7 +536,7 @@ async fn defer_once_announces_again_once_the_server_side_expiry_has_passed() {
             Prop::lazy(|| async { json!({ "usd": 1 }) })
                 .defer()
                 .once()
-                .until(1),
+                .until(chrono::DateTime::from_timestamp_millis(1).unwrap()),
         )
         .resolve(&req)
         .await

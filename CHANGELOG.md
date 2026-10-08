@@ -137,6 +137,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.append_at(["a.items", "b"], "id")` on a prop `feed` emits
   `mergeProps: ["feed.a.items", "feed.b"]` and `matchPropsOn:
   ["feed.a.items.id", "feed.b.id"]`.
+- **Once props take Laravel's options.** `until` takes a moment or a
+  span, as Laravel's `until(DateTimeInterface|DateInterval|int)` does: a
+  `DateTime<Utc>`, a `std::time::Duration`, a `chrono::Duration` or whole
+  seconds, through the new `OnceUntil`. `fresh` takes a `bool`,
+  `OnceOptions::once(false)` turns the flag off, `Prop::once_with(options)`
+  sets the flag, key and expiry in one call (Laravel's `once($value, $as,
+  $until)`), and `as_key` takes an enum whose `Display` names the key.
+  `expiresAt` is the expiry in milliseconds counted in whole seconds, as
+  Laravel counts it. The server still refuses a client's cache claim
+  past a `DateTime` deadline, which Laravel leaves to the client.
 
 ### Changed
 
@@ -344,6 +354,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   emitted `matchPropsOn: ["posts.x", "posts.y"]` and now emits
   `["posts.y"]`; name several fields in one call with
   `.match_on(["x", "y"])`.
+- **`until` on a once prop reads an integer as seconds from now**, as
+  Laravel's `until(60)` does, where it read an absolute timestamp in
+  milliseconds: `.until(60)` emitted `expiresAt: 60` and now emits the
+  render time plus 60 seconds. Pass a `DateTime<Utc>` for a fixed
+  deadline (`chrono::DateTime::from_timestamp_millis(ms)`). `fresh()` on
+  `Prop` and `OnceOptions` takes a `bool`: write `.fresh(true)`.
 
 ### Fixed
 

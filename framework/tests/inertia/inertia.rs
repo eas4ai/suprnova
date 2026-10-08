@@ -1660,13 +1660,17 @@ async fn once_with_fresh_ignores_except_header() {
     let counter = call_count.clone();
 
     let resp = InertiaResponse::new("Billing")
-        .once_with("plans", suprnova::OnceOptions::new().fresh(), move || {
-            let c = counter.clone();
-            async move {
-                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 99}]))
-            }
-        })
+        .once_with(
+            "plans",
+            suprnova::OnceOptions::new().fresh(true),
+            move || {
+                let c = counter.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, suprnova::FrameworkError>(serde_json::json!([{"id": 99}]))
+                }
+            },
+        )
         .resolve(&req)
         .await
         .unwrap();
@@ -1709,7 +1713,10 @@ async fn once_with_until_emits_expires_at() {
     let resp = InertiaResponse::new("Dashboard")
         .once_with(
             "rates",
-            suprnova::OnceOptions::new().until(1_700_000_000_000),
+            // A moment in the future; an integer would be seconds from
+            // now, and a past moment is clamped to the render (PAR-052).
+            suprnova::OnceOptions::new()
+                .until(chrono::DateTime::from_timestamp_millis(4_070_908_800_000).unwrap()),
             || async { Ok::<_, suprnova::FrameworkError>(serde_json::json!({})) },
         )
         .resolve(&req)
@@ -1720,7 +1727,7 @@ async fn once_with_until_emits_expires_at() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     let entry = page["onceProps"]["rates"].as_object().unwrap();
-    assert_eq!(entry["expiresAt"], serde_json::json!(1_700_000_000_000_i64));
+    assert_eq!(entry["expiresAt"], serde_json::json!(4_070_908_800_000_i64));
 }
 
 #[tokio::test]
@@ -1749,7 +1756,8 @@ async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
     let resp = InertiaResponse::new("Dashboard")
         .once_with(
             "rates",
-            suprnova::OnceOptions::new().until(past_expires_ms),
+            suprnova::OnceOptions::new()
+                .until(chrono::DateTime::from_timestamp_millis(past_expires_ms).unwrap()),
             move || {
                 let flag = flag.clone();
                 async move {
@@ -1946,7 +1954,8 @@ async fn once_with_future_until_honours_client_cache_header() {
     let _resp = InertiaResponse::new("Dashboard")
         .once_with(
             "rates",
-            suprnova::OnceOptions::new().until(future_expires_ms),
+            suprnova::OnceOptions::new()
+                .until(chrono::DateTime::from_timestamp_millis(future_expires_ms).unwrap()),
             move || {
                 let flag = flag.clone();
                 async move {

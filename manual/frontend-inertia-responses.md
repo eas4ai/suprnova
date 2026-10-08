@@ -253,7 +253,7 @@ The flags fall into five groups:
 | Visibility | `.always()`, `.optional()`, `.defer()` | Mutually exclusive; the last call wins |
 | Defer detail | `.group(name)`, `.rescue()` | Read only when the prop is deferred |
 | Merge | `.merge()`, `.prepend()`, `.deep_merge()`, `.append_at(paths, match_on)`, `.prepend_at(paths, match_on)`, `.match_on(fields)`, `.merge_with_path(path)` | How the client folds the value in, and at which path |
-| Client cache | `.once()`, `.as_key(key)`, `.until(ms)`, `.fresh()` | Whether the client keeps the value across navigations |
+| Client cache | `.once()`, `.once_with(options)`, `.as_key(key)`, `.until(moment or span)`, `.fresh(bool)` | Whether the client keeps the value across navigations - see [Once props](#once-props) |
 | Scroll | `.scroll(metadata)`, `.scroll_wrap(key)` | Infinite-scroll `scrollProps` entry plus unconditional merge metadata; `.scroll_wrap` read only when `.scroll` is set |
 
 Sources are `Prop::eager(value)`, `Prop::lazy(closure)`,
@@ -298,6 +298,56 @@ and `.prepend()` on a scroll prop are redundant and not read.
 `.deep_merge()` is the exception: it routes the prop into
 `deepMergeProps` instead of `mergeProps`, the same way Laravel's
 `ScrollProp` does.
+
+### Once props
+
+A once prop is resolved the first time a page needs it and then kept by
+the client across navigations: on later visits the client lists its key
+in `X-Inertia-Except-Once-Props` and the server skips the resolver. The
+options are Laravel's:
+
+```rust
+use suprnova::{InertiaResponse, OnceOptions, Prop};
+use serde_json::json;
+
+InertiaResponse::new("Billing/Index")
+    // Inertia::once(fn () => ...)->as('plans')->until(3600)
+    .once_with("planCatalog", OnceOptions::new().as_key("plans").until(3600), || async {
+        Ok::<_, suprnova::FrameworkError>(load_plans().await?)
+    })
+    // The same options on a composed prop.
+    .prop(
+        "rates",
+        Prop::lazy(|| async { json!({ "usd": 1 }) })
+            .defer()
+            .once()
+            .until(suprnova::chrono::Duration::minutes(5))
+            .fresh(false),
+    )
+```
+
+| Option | Laravel | Effect |
+|---|---|---|
+| `.as_key(key)` | `as($key)` | The cache key the client dedupes on, the prop's name by default. A string, or an enum whose `Display` names the key |
+| `.until(span or moment)` | `until($delay)` | When the client drops its copy. A whole number of seconds, a `std::time::Duration` or a `chrono::Duration` counts from the render; a `DateTime<Utc>` is that moment |
+| `.fresh(bool)` | `fresh($value)` | `true` resolves even when the client claims a copy; `false` honours the claim again |
+| `OnceOptions::once(bool)` | `once($value)` | `false` turns the flag off, leaving an ordinary prop |
+
+`Prop::once_with(options)` and `InertiaResponse::once_with(key, options,
+resolver)` take all of them at once, Laravel's `once($value, $as,
+$until)`; a setting the options leave unset keeps what the prop already
+has.
+
+The page object carries the expiry as `onceProps.<key>.expiresAt`, in
+milliseconds since the epoch, counted in whole seconds as Laravel counts
+it: `.until(60)` on a page rendered at second `t` gives `(t + 60) * 1000`.
+A moment already past gives the render moment.
+
+The server also enforces a moment itself, which Laravel leaves to the
+client: once `.until(deadline)` has passed, a client that still lists the
+key in `X-Inertia-Except-Once-Props` gets a fresh value instead of nothing,
+so a stale client cannot pin an old value. A span is counted from each
+render, so it is the client's own expiry that ends it.
 
 ### Merge strategies and infinite scroll
 

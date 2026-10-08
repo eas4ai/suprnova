@@ -628,9 +628,11 @@ impl InertiaResponse {
     }
 
     /// Attach a once prop with explicit options
-    /// ([`OnceOptions::until`](crate::OnceOptions::until),
+    /// ([`OnceOptions::once`](crate::OnceOptions::once),
+    /// [`OnceOptions::until`](crate::OnceOptions::until),
     /// [`OnceOptions::as_key`](crate::OnceOptions::as_key),
-    /// [`OnceOptions::fresh`](crate::OnceOptions::fresh)).
+    /// [`OnceOptions::fresh`](crate::OnceOptions::fresh)) - Laravel's
+    /// `Inertia::once(fn () => ...)->once($value, $as, $until)`.
     pub fn once_with<F, Fut, V>(
         mut self,
         key: impl Into<String>,
@@ -643,16 +645,7 @@ impl InertiaResponse {
         V: Serialize + 'static,
     {
         let resolver = make_resolver(resolver);
-        let mut prop = Prop::from_resolver(resolver).once();
-        if let Some(cache_key) = options.cache_key {
-            prop = prop.as_key(cache_key);
-        }
-        if let Some(expires_at) = options.expires_at {
-            prop = prop.until(expires_at);
-        }
-        if options.fresh {
-            prop = prop.fresh();
-        }
+        let prop = Prop::from_resolver(resolver).once_with(options);
         self.put_prop(key.into(), prop);
         self
     }
@@ -1524,7 +1517,8 @@ async fn resolve_props(
     materialized.insert(ERRORS_KEY.to_string(), seeded_errors);
 
     let mut tasks: Vec<TaskFuture> = Vec::new();
-    let now_ms = crate::clock::now().timestamp_millis();
+    let now = crate::clock::now();
+    let now_ms = now.timestamp_millis();
     // The keys that reach the page, in registration order. Eager values
     // land in `materialized` at once and resolver values only after every
     // task finishes, so the map alone records which source was faster,
@@ -1584,7 +1578,8 @@ async fn resolve_props(
             // Domain 20 audit D20-C: the server owns the expiry. Without
             // this a stale client can hold `X-Inertia-Except-Once-Props`
             // past the `until(...)` deadline and never see a fresh value.
-            let server_expired = match prop.once_expires_at() {
+            let expires_at = prop.once_expires_at_for(now);
+            let server_expired = match expires_at {
                 Some(ts) => now_ms >= ts,
                 None => false,
             };
@@ -1595,7 +1590,7 @@ async fn resolve_props(
                     cache_key,
                     OnceMetadataEntry {
                         prop_name: key.clone(),
-                        expires_at: prop.once_expires_at(),
+                        expires_at,
                     },
                 );
             }

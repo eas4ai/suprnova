@@ -291,41 +291,150 @@ pub trait ProvidesScrollMetadata {
     }
 }
 
-/// Builder for the options passed to
-/// [`InertiaResponse::once_with`](crate::InertiaResponse::once_with).
-#[derive(Debug, Clone, Default)]
+/// When a once prop's cached value expires - what `until` accepts.
+///
+/// Laravel's `until(DateTimeInterface|DateInterval|int $delay)`
+/// (`inertia-laravel-3.5.1/src/ResolvesOnce.php`): a moment, or a span
+/// counted from the render. Build one from a `DateTime<Utc>`, a
+/// `std::time::Duration`, a `chrono::TimeDelta`, or a whole number of
+/// seconds, so `.until(60)` means one minute from now, as it does in
+/// Laravel.
+///
+/// The page object's `expiresAt` is that moment in milliseconds since
+/// the epoch, counted in whole seconds as Laravel's `availableAt` does: a
+/// span gives `(now + seconds) * 1000`, a moment in the past gives the
+/// render moment itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnceUntil {
+    /// Expire at this moment.
+    At(chrono::DateTime<chrono::Utc>),
+    /// Expire this many seconds after the page renders.
+    After(i64),
+}
+
+impl OnceUntil {
+    /// A span of `seconds`, counted from the render.
+    pub fn seconds(seconds: i64) -> Self {
+        Self::After(seconds)
+    }
+
+    /// The expiry in milliseconds since the epoch for a page rendered at
+    /// `now`. Saturates rather than overflows, so an absurd span is a
+    /// far-future expiry, never a panic.
+    pub fn expires_at_ms(&self, now: chrono::DateTime<chrono::Utc>) -> i64 {
+        let now_secs = now.timestamp();
+        let secs = match *self {
+            Self::At(at) => at.timestamp().max(now_secs),
+            Self::After(seconds) => now_secs.saturating_add(seconds),
+        };
+        secs.saturating_mul(1000)
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for OnceUntil {
+    fn from(at: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::At(at)
+    }
+}
+
+impl From<std::time::Duration> for OnceUntil {
+    fn from(span: std::time::Duration) -> Self {
+        Self::After(i64::try_from(span.as_secs()).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<chrono::TimeDelta> for OnceUntil {
+    fn from(span: chrono::TimeDelta) -> Self {
+        Self::After(span.num_seconds())
+    }
+}
+
+impl From<i64> for OnceUntil {
+    fn from(seconds: i64) -> Self {
+        Self::After(seconds)
+    }
+}
+
+impl From<i32> for OnceUntil {
+    fn from(seconds: i32) -> Self {
+        Self::After(i64::from(seconds))
+    }
+}
+
+impl From<u32> for OnceUntil {
+    fn from(seconds: u32) -> Self {
+        Self::After(i64::from(seconds))
+    }
+}
+
+impl From<u64> for OnceUntil {
+    fn from(seconds: u64) -> Self {
+        Self::After(i64::try_from(seconds).unwrap_or(i64::MAX))
+    }
+}
+
+/// The options of a once prop in one value: Laravel's
+/// `once(bool $value, ?string $as, $until)` plus `fresh`.
+///
+/// Taken by [`InertiaResponse::once_with`](crate::InertiaResponse::once_with)
+/// and [`Prop::once_with`]. A setting left unset keeps what the prop
+/// already has, as Laravel's `once()` leaves `as` and `until` alone when
+/// they are `null`.
+#[derive(Debug, Clone)]
 pub struct OnceOptions {
+    pub(crate) once: bool,
     pub(crate) cache_key: Option<String>,
-    pub(crate) expires_at: Option<i64>,
-    pub(crate) fresh: bool,
+    pub(crate) until: Option<OnceUntil>,
+    pub(crate) fresh: Option<bool>,
+}
+
+impl Default for OnceOptions {
+    fn default() -> Self {
+        Self {
+            once: true,
+            cache_key: None,
+            until: None,
+            fresh: None,
+        }
+    }
 }
 
 impl OnceOptions {
-    /// Build an `OnceOptions` with defaults (no override, no expiry, not fresh).
+    /// Build an `OnceOptions` with defaults: once on, no key override, no
+    /// expiry, freshness unchanged.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Override the cache key the client uses to dedupe this prop.
-    /// Defaults to the prop's name. Map to `Inertia::once()->as('key')`.
-    pub fn as_key(mut self, key: impl Into<String>) -> Self {
-        self.cache_key = Some(key.into());
+    /// Turn the once flag on or off - Laravel's `once($value)`. With
+    /// `false` the prop is an ordinary prop: no `onceProps` entry, and the
+    /// client's `X-Inertia-Except-Once-Props` claim is not consulted.
+    pub fn once(mut self, on: bool) -> Self {
+        self.once = on;
         self
     }
 
-    /// Expire the cached value at the given millis-since-epoch timestamp.
-    /// The client invalidates and refetches once now() exceeds this.
-    /// Maps to `Inertia::once()->until($timestamp)`.
-    pub fn until(mut self, expires_at_ms: i64) -> Self {
-        self.expires_at = Some(expires_at_ms);
+    /// Override the cache key the client uses to dedupe this prop - a
+    /// string, or an enum whose `Display` names the key (Laravel's
+    /// `as(BackedEnum|UnitEnum|string)`). Defaults to the prop's name.
+    pub fn as_key(mut self, key: impl std::fmt::Display) -> Self {
+        self.cache_key = Some(key.to_string());
         self
     }
 
-    /// Force the resolver to run even when the client claims to have a
-    /// cached value via `X-Inertia-Except-Once-Props`. Server-side override.
-    /// Maps to `Inertia::once()->fresh()`.
-    pub fn fresh(mut self) -> Self {
-        self.fresh = true;
+    /// Expire the cached value at a moment or after a span - see
+    /// [`OnceUntil`]. `.until(60)` is one minute from the render, as
+    /// Laravel's `until(60)` is.
+    pub fn until(mut self, until: impl Into<OnceUntil>) -> Self {
+        self.until = Some(until.into());
+        self
+    }
+
+    /// Resolve even when the client claims to hold a cached value via
+    /// `X-Inertia-Except-Once-Props` (`true`), or honour the claim
+    /// (`false`). Laravel's `fresh(bool $value = true)`.
+    pub fn fresh(mut self, on: bool) -> Self {
+        self.fresh = Some(on);
         self
     }
 }
@@ -443,7 +552,7 @@ pub struct Prop {
     /// Read only when `once` is set.
     once_key: Option<String>,
     /// Read only when `once` is set.
-    expires_at: Option<i64>,
+    until: Option<OnceUntil>,
     /// Read only when `once` is set.
     fresh: bool,
     scroll: Option<ScrollMetadata>,
@@ -493,7 +602,7 @@ impl std::fmt::Debug for Prop {
         }
         if self.once {
             s.field("once_key", &self.once_key)
-                .field("expires_at", &self.expires_at)
+                .field("until", &self.until)
                 .field("fresh", &self.fresh);
         }
         if let Some(meta) = &self.scroll {
@@ -605,7 +714,7 @@ impl Prop {
             prepend_paths: Vec::new(),
             once: false,
             once_key: None,
-            expires_at: None,
+            until: None,
             fresh: false,
             scroll: None,
             scroll_wrap: None,
@@ -878,34 +987,60 @@ impl Prop {
         self
     }
 
+    /// Set the once flag, cache key, expiry and freshness in one call -
+    /// Laravel's `once(bool $value, ?string $as, $until)`. A setting the
+    /// options leave unset keeps what the prop already has, so
+    /// `.as_key("x").once_with(OnceOptions::new())` keeps the key `x`.
+    pub fn once_with(mut self, options: OnceOptions) -> Self {
+        self.once = options.once;
+        if let Some(key) = options.cache_key {
+            self.once_key = Some(key);
+        }
+        if let Some(until) = options.until {
+            self.until = Some(until);
+        }
+        if let Some(fresh) = options.fresh {
+            self.fresh = fresh;
+        }
+        self
+    }
+
     /// Override the cache key the client dedupes on. Defaults to the
     /// prop's own name; override it so several pages can share one
-    /// cached value under different prop names. Maps to
-    /// `Inertia::once()->as('key')`.
+    /// cached value under different prop names. Takes a string, or an
+    /// enum whose `Display` names the key - Laravel's
+    /// `as(BackedEnum|UnitEnum|string)`, where Rust has no backing value
+    /// to read.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn as_key(mut self, key: impl Into<String>) -> Self {
-        self.once_key = Some(key.into());
+    pub fn as_key(mut self, key: impl std::fmt::Display) -> Self {
+        self.once_key = Some(key.to_string());
         self
     }
 
-    /// Expire the cached value at the given millis-since-epoch
-    /// timestamp. The server stops honouring the client's cache claim
-    /// past this point, so a stale client cannot pin an old value
-    /// forever. Maps to `Inertia::once()->until($timestamp)`.
+    /// Expire the cached value at a moment, or after a span counted from
+    /// the render - see [`OnceUntil`]. `.until(60)` is one minute from
+    /// now and `.until(deadline)` is that moment, as Laravel's `until`
+    /// reads them; the page object carries the expiry as `expiresAt`.
+    ///
+    /// The server also refuses a client's cache claim once a moment has
+    /// passed, which Laravel leaves to the client: a stale client cannot
+    /// pin an old value past its deadline. A span is counted from each
+    /// render, so it is the client's own expiry that ends it.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn until(mut self, expires_at_ms: i64) -> Self {
-        self.expires_at = Some(expires_at_ms);
+    pub fn until(mut self, until: impl Into<OnceUntil>) -> Self {
+        self.until = Some(until.into());
         self
     }
 
-    /// Resolve even when the client claims to hold a cached value.
-    /// Maps to `Inertia::once()->fresh()`.
+    /// Resolve even when the client claims to hold a cached value
+    /// (`true`), or honour the claim again (`false`). Laravel's
+    /// `fresh(bool $value = true)`.
     ///
     /// Read only when [`once`](Self::once) is set.
-    pub fn fresh(mut self) -> Self {
-        self.fresh = true;
+    pub fn fresh(mut self, on: bool) -> Self {
+        self.fresh = on;
         self
     }
 
@@ -1060,9 +1195,22 @@ impl Prop {
             .unwrap_or_else(|| prop_key.to_string())
     }
 
-    /// The cached value's expiry in millis since the epoch, if any.
+    /// The cached value's expiry in millis since the epoch, if any,
+    /// for a page rendered now (see [`OnceUntil::expires_at_ms`]).
     pub fn once_expires_at(&self) -> Option<i64> {
-        self.expires_at
+        self.once_expires_at_for(crate::clock::now())
+    }
+
+    /// The expiry [`until`](Self::until) set, as given.
+    pub fn once_until(&self) -> Option<OnceUntil> {
+        self.until
+    }
+
+    /// The cached value's expiry in millis since the epoch for a page
+    /// rendered at `now`. One response reads one moment for every prop,
+    /// so two props with the same span expire together.
+    pub(crate) fn once_expires_at_for(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        self.until.map(|until| until.expires_at_ms(now))
     }
 
     /// Whether the server refuses the client's cache claim for this prop.
@@ -1852,9 +2000,9 @@ mod tests {
             .once()
             .as_key("roles")
             .until(42)
-            .fresh();
+            .fresh(true);
         assert_eq!(p.once_cache_key("memberRoles"), "roles");
-        assert_eq!(p.once_expires_at(), Some(42));
+        assert_eq!(p.once_until(), Some(OnceUntil::After(42)));
         assert!(p.is_fresh());
     }
 

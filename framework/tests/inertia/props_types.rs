@@ -147,3 +147,208 @@ async fn inp_match_on_replaces_the_list_on_each_call() {
 
     assert_eq!(names(&page, "matchPropsOn"), ["posts.y"]);
 }
+
+// ---- PAR-052: once options ----
+
+/// A fixed render moment, so an expiry computed from "now" is exact.
+fn render_moment() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_800_000_000, 250_000_000).expect("a valid timestamp")
+}
+
+/// A once prop's resolver that counts its runs.
+fn counted_rates(
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> impl Fn() -> std::future::Ready<Result<Value, suprnova::FrameworkError>> + Send + Sync + 'static
+{
+    move || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Ok(json!({ "usd": 1 })))
+    }
+}
+
+#[tokio::test]
+async fn inp_once_until_seconds_emits_now_plus_the_seconds_in_milliseconds() {
+    // Laravel's `until(60)`: `expiresAt` is (now + 60 s) * 1000, the
+    // seconds counted from the render.
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Dashboard").once_with(
+        "rates",
+        suprnova::OnceOptions::new().until(60),
+        counted_rates(calls),
+    );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(
+        page["onceProps"]["rates"]["expiresAt"],
+        json!((1_800_000_000_i64 + 60) * 1000)
+    );
+}
+
+#[tokio::test]
+async fn inp_once_until_a_date_emits_that_moment_in_milliseconds() {
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let at = chrono::DateTime::from_timestamp(1_800_003_600, 0).expect("a valid timestamp");
+    let response =
+        InertiaResponse::new("Dashboard").prop("rates", Prop::eager(json!({})).once().until(at));
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(
+        page["onceProps"]["rates"]["expiresAt"],
+        json!(1_800_003_600_000_i64)
+    );
+}
+
+#[tokio::test]
+async fn inp_once_until_a_duration_emits_now_plus_the_duration() {
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let response = InertiaResponse::new("Dashboard")
+        .prop(
+            "rates",
+            Prop::eager(json!({}))
+                .once()
+                .until(std::time::Duration::from_secs(90)),
+        )
+        .prop(
+            "plans",
+            Prop::eager(json!({}))
+                .once()
+                .until(chrono::TimeDelta::minutes(2)),
+        );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(
+        page["onceProps"]["rates"]["expiresAt"],
+        json!((1_800_000_000_i64 + 90) * 1000)
+    );
+    assert_eq!(
+        page["onceProps"]["plans"]["expiresAt"],
+        json!((1_800_000_000_i64 + 120) * 1000)
+    );
+}
+
+#[tokio::test]
+async fn inp_once_until_a_past_date_refuses_the_client_cache_claim() {
+    // The server-side refusal stays: a client claiming a value whose
+    // deadline has passed gets a fresh one.
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let past = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("a valid timestamp");
+    let response = InertiaResponse::new("Dashboard").once_with(
+        "rates",
+        suprnova::OnceOptions::new().until(past),
+        counted_rates(calls.clone()),
+    );
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "rates");
+    let page = page_of(response, &req).await;
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(page["props"]["rates"], json!({ "usd": 1 }));
+}
+
+#[tokio::test]
+async fn inp_once_fresh_takes_a_bool() {
+    let claim = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "rates");
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Dashboard").once_with(
+        "rates",
+        suprnova::OnceOptions::new().fresh(true),
+        counted_rates(calls.clone()),
+    );
+    page_of(response, &claim).await;
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "fresh(true) resolves despite the client's claim"
+    );
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Dashboard").prop(
+        "rates",
+        Prop::lazy(|| async { json!({ "usd": 1 }) })
+            .once()
+            .fresh(true)
+            .fresh(false),
+    );
+    let page = page_of(response, &claim).await;
+    assert!(
+        !page["props"].as_object().unwrap().contains_key("rates"),
+        "fresh(false) honours the client's claim; got {page}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn inp_once_false_turns_the_once_flag_off() {
+    // Laravel's `once(false)`: the prop is an ordinary prop again, with
+    // no `onceProps` entry and no regard for the client's claim.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = InertiaResponse::new("Dashboard").once_with(
+        "rates",
+        suprnova::OnceOptions::new().once(false),
+        counted_rates(calls.clone()),
+    );
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "rates");
+    let page = page_of(response, &req).await;
+
+    assert!(
+        !page.as_object().unwrap().contains_key("onceProps"),
+        "{page}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn inp_once_with_sets_the_flag_key_and_expiry_in_one_call() {
+    // Laravel's `once(true, 'plans', 60)` on any prop.
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let response = InertiaResponse::new("Billing").prop(
+        "planCatalog",
+        Prop::eager(json!([])).once_with(
+            suprnova::OnceOptions::new()
+                .once(true)
+                .as_key("plans")
+                .until(60),
+        ),
+    );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(
+        page["onceProps"]["plans"],
+        json!({ "prop": "planCatalog", "expiresAt": (1_800_000_000_i64 + 60) * 1000 })
+    );
+}
+
+/// A cache key named by an enum, Laravel's `as(Plan::Pro)`.
+enum PlanKey {
+    Pro,
+}
+
+impl std::fmt::Display for PlanKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanKey::Pro => f.write_str("plan-pro"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn inp_once_as_key_takes_an_enum() {
+    let response = InertiaResponse::new("Billing")
+        .prop("plan", Prop::eager(json!({})).once().as_key(PlanKey::Pro))
+        .once_with(
+            "other",
+            suprnova::OnceOptions::new().as_key(PlanKey::Pro),
+            || async { Ok::<_, suprnova::FrameworkError>(json!(1)) },
+        );
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["onceProps"]["plan-pro"]["prop"], "other");
+}
