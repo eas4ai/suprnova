@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::manifest::ViteManifest;
 use super::prop::InertiaRequestExt;
+use super::root_template::{InertiaRootTemplate, RootTemplateChooser};
 
 /// Shared error-observer callback for SSR render failures.
 pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -237,6 +238,14 @@ pub struct InertiaConfig {
     /// Default `<title>` for the HTML shell. Per-response title overrides
     /// via `InertiaResponse::title(...)`.
     pub default_title: String,
+    /// The id of the first visit's mount element and the `data-page`
+    /// attribute of its page data element. Default `app`.
+    ///
+    /// The Inertia client looks both up by the `id` given to
+    /// `createInertiaApp` (and to `createServer` under SSR), `app` unless
+    /// the application names another, so the two must agree. Set it with
+    /// [`mount_id`](Self::mount_id).
+    pub mount_id: String,
     /// Whether Inertia responses encrypt their browser history state by
     /// default. Maps to Laravel's `config('inertia.history.encrypt')`.
     /// Overridable per-request via `EncryptHistoryMiddleware` and
@@ -337,6 +346,10 @@ pub struct InertiaConfig {
     /// the same reason as `manifest`: a boxed closure is not a value a
     /// caller should be constructing by hand.
     pub(crate) url_resolver: Option<UrlResolver>,
+    /// The application's root template for a first visit, chosen per
+    /// request, or `None` for the framework's own document. Set with
+    /// [`root_template`](Self::root_template).
+    pub(crate) root_template: Option<RootTemplateChooser>,
 }
 
 /// SSR (server-side rendering) configuration.
@@ -526,6 +539,7 @@ impl Default for InertiaConfig {
             development: !crate::config::Environment::detect().is_production(),
             frontend,
             default_title: "Suprnova".to_string(),
+            mount_id: "app".to_string(),
             encrypt_history_default: false,
             ssr: SsrConfig::default(),
             manifest_path,
@@ -538,6 +552,7 @@ impl Default for InertiaConfig {
             error_page: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
+            root_template: None,
         }
     }
 }
@@ -638,6 +653,25 @@ impl InertiaConfig {
     /// Set the default `<title>` used when a page doesn't supply one.
     pub fn default_title(mut self, title: impl Into<String>) -> Self {
         self.default_title = title.into();
+        self
+    }
+
+    /// Name the first visit's mount element: the `id` of the element the
+    /// client mounts on and the `data-page` attribute of the element that
+    /// carries the page data. Default `app`.
+    ///
+    /// Set it to the `id` the frontend passes to `createInertiaApp`; a
+    /// client mounting on an id the document does not carry finds no
+    /// element and renders nothing.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new().mount_id("root");
+    /// # let _ = cfg;
+    /// ```
+    pub fn mount_id(mut self, id: impl Into<String>) -> Self {
+        self.mount_id = id.into();
         self
     }
 
@@ -845,6 +879,63 @@ impl InertiaConfig {
     {
         self.url_resolver = Some(Arc::new(f));
         self
+    }
+
+    /// Render every first visit through one application root template,
+    /// an Askama template declared with [`inertia_root`](crate::inertia_root)
+    /// that places the framework's parts in a document of its own: meta
+    /// tags, fonts, a favicon, attributes on `<html>` and `<body>`.
+    ///
+    /// Without one the first visit is the document the framework writes
+    /// itself. [`root_template_with`](Self::root_template_with) chooses per
+    /// request instead.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{InertiaConfig, InertiaRootTemplate};
+    ///
+    /// #[suprnova::inertia_root(path = "app.html")]
+    /// pub struct AppDocument;
+    ///
+    /// let cfg = InertiaConfig::new().root_template(InertiaRootTemplate::of::<AppDocument>());
+    /// ```
+    pub fn root_template(mut self, template: InertiaRootTemplate) -> Self {
+        self.root_template = Some(Arc::new(move |_| template));
+        self
+    }
+
+    /// Choose each first visit's root document from its request: its path,
+    /// query and headers, through [`InertiaRequestExt`]. Laravel's
+    /// `rootView(Request)`.
+    ///
+    /// The chooser also picks the document of an Inertia error page, which
+    /// holds only the request captured before the handler ran. Return
+    /// [`InertiaRootTemplate::framework`] for the framework's own document.
+    ///
+    /// ```rust,ignore
+    /// use suprnova::{InertiaConfig, InertiaRootTemplate};
+    ///
+    /// let cfg = InertiaConfig::new().root_template_with(|req| {
+    ///     if req.path().starts_with("/admin") {
+    ///         InertiaRootTemplate::of::<AdminDocument>()
+    ///     } else {
+    ///         InertiaRootTemplate::of::<AppDocument>()
+    ///     }
+    /// });
+    /// ```
+    pub fn root_template_with<F>(mut self, chooser: F) -> Self
+    where
+        F: Fn(&dyn InertiaRequestExt) -> InertiaRootTemplate + Send + Sync + 'static,
+    {
+        self.root_template = Some(Arc::new(chooser));
+        self
+    }
+
+    /// The root document a first visit of `request` renders into.
+    pub(crate) fn root_template_for(&self, request: &dyn InertiaRequestExt) -> InertiaRootTemplate {
+        match &self.root_template {
+            Some(choose) => choose(request),
+            None => InertiaRootTemplate::framework(),
+        }
     }
 
     /// Return the cached Vite manifest. On the first call this reads

@@ -185,6 +185,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `PropertyContext` of its key path, its sibling props and the request,
   so a price can format itself with the page's currency. No value type
   received its key path, siblings or request before.
+- **An application-owned Inertia root document.** The framework wrote every
+  first visit's whole document itself, so an application had no place for
+  its own favicon, fonts, meta tags or attributes on `<html>` and `<body>`.
+  `#[inertia_root(path = "app.html")]` declares an Askama template under
+  `templates/` that receives the framework's parts (`title`, `head`, `body`,
+  `lang`, `csrf_token`, `nonce`, `ssr` and `view`), checked at compile time,
+  and `InertiaConfig::root_template` renders every first visit through it.
+  `root_template_with` chooses the template per request, Laravel's
+  `rootView(Request)`, and error pages go through the same choice;
+  `InertiaResponse::with_view_data` hands the template values of any
+  serializable type that never reach the page props, Laravel's
+  `withViewData`. The page JSON is written straight into the template's
+  output: a first visit with a 1 MiB prop allocates 5,386,301 bytes
+  through a template against 5,386,925 through the framework's document,
+  and a 3 MiB page comes back whole. A template
+  that fails to render is an error response, never part of a document.
+  `InertiaConfig::mount_id` names the mount element and the page data
+  element, `app` by default, for a client that mounts on another id. Without
+  a template the first visit is byte for byte what it was.
 
 ### Changed
 
@@ -420,6 +439,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with the other shared keys. `InertiaConfig::expose_shared_props(false)`
   leaves `sharedProps` out of the page object, Laravel's
   `inertia.expose_shared_prop_keys`; it is on by default.
+- **`suprnova new` ships a root template in place of `frontend/index.html`.**
+  The server never served that file: Vite builds from the entry module, and
+  the first visit was the framework's own document, titled `Suprnova` on
+  every page. A new project has `templates/app.html`, declared as
+  `AppDocument` with `#[inertia_root]` in `src/bootstrap.rs`, which renders
+  every first visit through it and sets the project's name as the default
+  title. The Dockerfile `suprnova docker:init` writes copies `templates/`
+  into the stage that compiles the application, since Askama reads
+  templates at compile time; it copied only `cmd/` and `src/`, so that
+  build could not find a root template or a Live view.
 
 ### Fixed
 

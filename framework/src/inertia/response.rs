@@ -137,6 +137,9 @@ pub struct InertiaResponse {
     /// [`ProvidesInertiaProperties`] values given by
     /// [`provide`](Self::provide), expanded at render in this order.
     providers: Vec<Arc<dyn ProvidesInertiaProperties>>,
+    /// Values for the root template only, never the page props. Maps to
+    /// `Inertia::render(...)->withViewData(...)`.
+    view_data: super::root_template::InertiaViewData,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -299,6 +302,7 @@ impl InertiaResponse {
             preserve_fragment: None,
             lazy_owned: IndexMap::new(),
             providers: Vec::new(),
+            view_data: super::root_template::InertiaViewData::default(),
         }
     }
 
@@ -334,6 +338,45 @@ impl InertiaResponse {
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
+    }
+
+    /// Hand the root template a value under `key` for this response,
+    /// replacing an earlier one; Laravel's `withViewData`.
+    ///
+    /// The value reaches only the application's
+    /// [root template](crate::InertiaConfig::root_template), which reads it
+    /// with `view.get("key")`, and never the page props: an Inertia visit's
+    /// JSON and the first visit's page data leave it out. Use it for what
+    /// the first-load HTML must carry without running JavaScript, such as
+    /// the meta tags a link preview reads. The framework's own document
+    /// places none.
+    ///
+    /// Any serializable value: placed with `{{ value }}`, a string displays
+    /// as itself and any other value as its JSON. A `Serialize` impl that
+    /// fails panics, as [`with`](Self::with) does;
+    /// [`try_with_view_data`](Self::try_with_view_data) returns the error.
+    pub fn with_view_data<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
+        let value = to_value_or_die(&value);
+        self.view_data.insert(key.into(), value);
+        self
+    }
+
+    /// Fallible sibling of [`with_view_data`](Self::with_view_data): returns
+    /// an error naming `key` when the value's `Serialize` impl fails.
+    pub fn try_with_view_data<V: Serialize>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Result<Self, FrameworkError> {
+        let key = key.into();
+        let value = serde_json::to_value(&value).map_err(|e| {
+            reflash_session_values_after_eager_error(FrameworkError::internal(format!(
+                "InertiaResponse view data `{key}` failed to serialize: {e} \
+                 (the value's Serialize impl returned Err)"
+            )))
+        })?;
+        self.view_data.insert(key, value);
+        Ok(self)
     }
 
     /// Register `prop` under `key`, replacing any earlier prop there.
@@ -1123,7 +1166,7 @@ impl InertiaResponse {
     ///   embedded in a sibling `<script type="application/json"
     ///   data-page="app">` element next to the empty `<div id="app">`
     ///   mount node - the Inertia 3 contract that `getInitialPageFromDOM`
-    ///   reads.
+    ///   reads. Both carry [`InertiaConfig::mount_id`], `app` by default.
     pub async fn resolve<R: InertiaRequestExt>(
         self,
         req: &R,
@@ -1182,6 +1225,7 @@ impl InertiaResponse {
             preserve_fragment,
             lazy_owned,
             providers,
+            view_data,
         } = self;
 
         // Page URL: path AND query, or the app's resolver. The client
@@ -1358,7 +1402,17 @@ impl InertiaResponse {
             // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
             // page-object response and never needs prerender.
             let ssr_result = super::ssr::render(&config.ssr, req.path(), &page).await?;
-            build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())
+            match config.root_template_for(req).application() {
+                Some(template) => build_template_response(
+                    template,
+                    &page,
+                    &config,
+                    title.as_deref(),
+                    ssr_result.as_ref(),
+                    &view_data,
+                )?,
+                None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref()),
+            }
         };
         staged_session.commit();
         Ok(response)
@@ -1384,6 +1438,7 @@ impl InertiaResponse {
             preserve_fragment,
             lazy_owned,
             providers: _,
+            view_data: _,
         } = self;
         let (materialized, metadata) = resolve_props(
             props,
@@ -2536,20 +2591,66 @@ fn build_html_response(
         html.push_str("\n</body>\n</html>");
         html
     } else {
+        let mount_id = escape_html_attr(&config.mount_id);
         let mut html = html.into_bytes();
-        html.extend_from_slice(b"<script type=\"application/json\" data-page=\"app\">");
+        html.extend_from_slice(b"<script type=\"application/json\" data-page=\"");
+        html.extend_from_slice(mount_id.as_bytes());
+        html.extend_from_slice(b"\">");
         let page_at = html.len();
         if serde_json::to_writer(SlashEscaping(&mut html), page).is_err() {
             html.truncate(page_at);
             html.extend_from_slice(b"{}");
         }
-        html.extend_from_slice(b"</script>\n<div id=\"app\"></div>\n</body>\n</html>");
+        html.extend_from_slice(b"</script>\n<div id=\"");
+        html.extend_from_slice(mount_id.as_bytes());
+        html.extend_from_slice(b"\"></div>\n</body>\n</html>");
         // Only UTF-8 was written: the JSON serializer's output and ASCII.
         String::from_utf8(html)
             .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
     };
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
+}
+
+/// The first visit through the application's root template (RDOC-001).
+///
+/// The template gets the values the framework's own document is built
+/// from, as parts it places: the same title rule, CSRF token, SSR output,
+/// Vite tags, language and mount id, and the response's view data. The
+/// page JSON is written into the template's output by the body part, never
+/// into a string of its own.
+fn build_template_response(
+    template: super::root_template::ApplicationTemplate,
+    page: &Value,
+    config: &InertiaConfig,
+    title_override: Option<&str>,
+    ssr: Option<&super::ssr::SsrResponse>,
+    view_data: &super::root_template::InertiaViewData,
+) -> Result<HttpResponse, FrameworkError> {
+    let csrf = csrf_token().unwrap_or_default();
+    let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
+    let title = (!contains_title_element(&ssr_head))
+        .then(|| title_override.unwrap_or(config.default_title.as_str()));
+    let assets = if config.development {
+        render_dev_head(config)
+    } else {
+        render_prod_head(config)
+    };
+    let lang = document_language();
+    super::root_template::render(
+        template,
+        super::root_template::RootInputs {
+            page,
+            title,
+            csrf_token: &csrf,
+            ssr_head: &ssr_head,
+            ssr_body: ssr.map(|s| s.body.as_str()),
+            assets: &assets,
+            lang: &lang,
+            mount_id: &config.mount_id,
+            view: view_data,
+        },
+    )
 }
 
 /// Whether an SSR head fragment already carries a `<title>` element.

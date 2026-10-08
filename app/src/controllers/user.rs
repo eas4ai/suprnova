@@ -46,6 +46,9 @@ async fn index_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     );
 
     Inertia::paginate("Users/Index", "users", projected)
+        // View data reaches the root template, which places it as the
+        // description meta tag a link preview reads, and never the props.
+        .with_view_data("description", "Every user of Suprnova's dogfood app")
         .resolve(&req)
         .await
 }

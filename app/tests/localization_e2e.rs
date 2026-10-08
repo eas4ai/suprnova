@@ -388,3 +388,47 @@ async fn inertia_response_carries_the_lang_shared_prop() {
         "catalog.hash must be present when a translator is bound: {body}"
     );
 }
+
+/// RDOC-001 and RDOC-004 in the dogfood app: a browser's first visit
+/// renders through the app's root template (`templates/app.html`), with the
+/// negotiated locale as the document's language, the default title the app
+/// sets, and the users page's view data as a meta tag that stays out of the
+/// page props.
+#[tokio::test]
+async fn a_first_visit_renders_through_the_app_root_template() {
+    let (addr, _lock) = spawn_app().await;
+
+    let (status, body) = get(
+        addr,
+        "/users",
+        &[
+            ("Accept", "text/html,application/xhtml+xml"),
+            ("Accept-Language", "es"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, 200, "body: {body}");
+    assert!(body.contains("<html lang=\"es\">"), "{body}");
+    assert!(
+        body.contains("<meta name=\"color-scheme\" content=\"light dark\" />"),
+        "{body}"
+    );
+    assert!(body.contains("<title>Suprnova App</title>"), "{body}");
+    assert!(
+        body.contains("<noscript>The Suprnova dogfood app needs JavaScript.</noscript>"),
+        "{body}"
+    );
+    let description = "Every user of Suprnova&#39;s dogfood app";
+    assert!(
+        body.contains(&format!(
+            "<meta name=\"description\" content=\"{description}\" />"
+        )),
+        "{body}"
+    );
+    let open = "<script type=\"application/json\" data-page=\"app\">";
+    let start = body.find(open).expect("the page data element") + open.len();
+    let page = &body[start..start + body[start..].find("</script>").expect("its end")];
+    assert!(page.contains("\"component\":\"Users\\/Index\""), "{page}");
+    assert!(!page.contains("Every user of"), "{page}");
+}

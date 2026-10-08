@@ -321,11 +321,13 @@ pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware, InertiaConfig,
     InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt,
-    InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
-    InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
-    MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
-    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata,
-    SsrConfig, SsrResponse, VersionResolver, Visibility, ViteManifest,
+    InertiaResponse, InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts,
+    InertiaRootTemplate, InertiaRootTitle, InertiaSharedData, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware, InertiaViewData, InertiaViewValue, IntoInertiaData,
+    MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
+    PartialFilter, Prop, PropEntry, PropFuture, PropResolver, ProvidesScrollMetadata,
+    ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrResponse, VersionResolver, Visibility,
+    ViteManifest,
 };
 // The PAR-051 and PAR-052 prop types (providers, merge paths, once and
 // scroll options), kept on their own line so the list above stays stable.
@@ -722,6 +724,7 @@ pub use suprnova_macros::command;
 pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;
+pub use suprnova_macros::inertia_root;
 pub use suprnova_macros::injectable;
 pub use suprnova_macros::live;
 pub use suprnova_macros::main;

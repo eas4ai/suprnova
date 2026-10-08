@@ -20,6 +20,7 @@ mod factory;
 mod handler;
 mod inertia;
 mod inertia_pages;
+mod inertia_root;
 mod injectable;
 mod input_names;
 mod live;
@@ -87,6 +88,18 @@ pub fn live(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn view(args: TokenStream, item: TokenStream) -> TokenStream {
     view::expand_view(args, item)
+}
+
+/// Declares an application's Inertia root document: the Askama template
+/// under `templates/` a first visit renders into, receiving the framework's
+/// parts (`title`, `head`, `body`, `lang`, `csrf_token`, `nonce`, `ssr`).
+///
+/// Sits on a unit struct the application names in
+/// `InertiaConfig::root_template`. The template is checked at compile
+/// time against the parts, so naming anything else fails the build.
+#[proc_macro_attribute]
+pub fn inertia_root(args: TokenStream, item: TokenStream) -> TokenStream {
+    inertia_root::expand_inertia_root(args, item)
 }
 
 /// Declares a custom checked-template filter without importing Askama directly.

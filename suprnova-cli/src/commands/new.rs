@@ -424,6 +424,11 @@ pub(crate) fn create_project(
 
     // Frontend directories + files are created by templates::scaffold_frontend below.
 
+    // Askama templates: the Inertia root document, and the Live views
+    // `suprnova live:make` adds under templates/live/.
+    fs::create_dir_all(project_path.join("templates"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
+
     // Public assets directory (for production builds)
     fs::create_dir_all(project_path.join("public/assets"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
@@ -592,12 +597,21 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/middleware/authenticate.rs: {}", e))?;
 
-    // Write src/bootstrap.rs
+    // Write src/bootstrap.rs, titled after the project
+    let title = to_title_case(project_name);
     fs::write(
         project_path.join("src/bootstrap.rs"),
-        templates::bootstrap(frontend),
+        templates::bootstrap(frontend, &title),
     )
     .map_err(|e| format!("Failed to write src/bootstrap.rs: {}", e))?;
+
+    // Write templates/app.html - the root document every Inertia first
+    // visit renders into, which src/bootstrap.rs declares
+    fs::write(
+        project_path.join("templates/app.html"),
+        templates::app_root_template(),
+    )
+    .map_err(|e| format!("Failed to write templates/app.html: {}", e))?;
 
     // Write src/actions/mod.rs
     fs::write(
@@ -680,8 +694,7 @@ pub(crate) fn create_project(
     .map_err(|e| format!("Failed to write lang/en/app.ftl: {}", e))?;
 
     // === Frontend files ===
-    let title = to_title_case(project_name);
-    templates::scaffold_frontend(project_path, project_name, &title, frontend)?;
+    templates::scaffold_frontend(project_path, project_name, frontend)?;
 
     // portless.json (opt-in via --with-portless) - maps the app's fixed
     // backend port to https://<package_name>.localhost for `portless run`.
