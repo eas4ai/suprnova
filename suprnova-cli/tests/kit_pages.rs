@@ -184,6 +184,32 @@ mod backend {
         });
     }
 
+    /// The configuration call opts each kit into DevTools recording.
+    #[test]
+    fn kit_bootstrap_opts_into_inertia_devtools() {
+        each_kit(|app| {
+            let bootstrap = app.read("src/bootstrap.rs");
+            assert!(contains(&bootstrap, ".devtools(DevToolsConfig::new())"));
+            assert!(bootstrap.contains("DevToolsConfig,"));
+        });
+    }
+
+    #[test]
+    fn kit_notes_migration_leaves_an_existing_table_as_it_is() {
+        each_kit(|app| {
+            for table in ["users", "notes"] {
+                let number = if table == "users" { "000001" } else { "000005" };
+                let migration = app.read(&format!(
+                    "src/migrations/m20240101_{number}_create_{table}_table.rs"
+                ));
+                assert!(contains(
+                    &migration,
+                    &format!("if manager.has_table(\"{table}\").await? {{ return Ok(()); }}")
+                ));
+            }
+        });
+    }
+
     /// PAR-080: a `notes` table owned by a user, and the model on both
     /// sides of the relation.
     #[test]

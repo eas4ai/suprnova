@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 #[allow(unused_imports)]
 use suprnova::{
-    bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware,
+    bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DevToolsConfig,
     EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig,
     InertiaRootTemplate, LocaleMiddleware, LocaleShare, OriginPolicy, RootShare, SessionConfig,
     SessionMiddleware, DB,
@@ -202,6 +202,9 @@ pub fn register_http_stack() {
             .frontend(Frontend::{frontend_variant})
             .default_title("{project_title}")
             .root_template(InertiaRootTemplate::of::<AppDocument>())
+            // Record in local development for the Inertia DevTools browser extension.
+            // enabled(false) or INERTIA_DEVTOOLS_ENABLED=false turns it off.
+            .devtools(DevToolsConfig::new())
             .error_page("Error"),
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");

@@ -30,10 +30,10 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, CsrfMiddleware, DB, EloquentUserProvider, EventFacade, FrameworkError, IncludeMiddleware,
-    Inertia, InertiaConfig, InertiaRequestExt, InertiaRootTemplate, InertiaSharedData,
-    LocaleMiddleware, LocaleShare, Prop, SessionBlock, SessionConfig, SessionMiddleware, Storage,
-    SupervisorRegistry, UserProvider, bind, global_middleware,
+    App, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider, EventFacade, FrameworkError,
+    IncludeMiddleware, Inertia, InertiaConfig, InertiaRequestExt, InertiaRootTemplate,
+    InertiaSharedData, LocaleMiddleware, LocaleShare, Prop, SessionBlock, SessionConfig,
+    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -232,6 +232,9 @@ pub fn inertia_config() -> InertiaConfig {
     InertiaConfig::new()
         .default_title("Suprnova App")
         .root_template(InertiaRootTemplate::of::<AppDocument>())
+        // Record in local development for the Inertia DevTools browser extension.
+        // enabled(false) or INERTIA_DEVTOOLS_ENABLED=false turns it off.
+        .devtools(DevToolsConfig::new())
 }
 
 /// The Inertia asset version this app advertises.
