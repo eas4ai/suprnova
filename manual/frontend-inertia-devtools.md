@@ -4,18 +4,21 @@ The Inertia DevTools browser extension shows each request an Inertia
 application answered: what kind of visit it was, which component rendered,
 each prop with its kind and where it came from, and the request and
 response themselves. The extension reads that from the server, so the
-server has to record it. Suprnova records each request as an entry, as
-inertia-laravel 3.5.1's `DevTools` does, and serves the entries to the
-extension.
+server has to record it. Once the application calls
+`InertiaConfig::devtools(DevToolsConfig::new())`, Suprnova records in local
+development (`APP_ENV=local`) and serves entries to the extension, as
+inertia-laravel 3.5.1's `DevTools` does. An application that never calls it
+records nothing and serves no entries.
 
 ## Enable DevTools
 
-DevTools is on when `APP_ENV` names the `local` environment and off
-everywhere else, an unset `APP_ENV` included. The `.env` file of a new
-project sets `APP_ENV=local`, so its development server records without
-any setup, while a test run with no `APP_ENV` records nothing. To decide
-outright, set `INERTIA_DEVTOOLS_ENABLED`, or pass a `DevToolsConfig` to
-`InertiaConfig::devtools`:
+Opt in with `InertiaConfig::devtools(DevToolsConfig::new())`. A new
+project's bootstrap makes this call, and its `.env` sets `APP_ENV=local`.
+With `enabled` unset, a configured instance records only when `APP_ENV`
+is set and names `local`; an unset `APP_ENV` records nothing. Once opted
+in, `enabled(..)` and `INERTIA_DEVTOOLS_ENABLED` decide outright, and a
+builder call wins over the variable. Without the configuration call,
+there is no recording or entries endpoint, even with the variable set:
 
 ```rust
 use suprnova::{DevToolsConfig, Inertia, InertiaConfig};
@@ -298,6 +301,10 @@ either way.
 
 ### Why Suprnova diverges
 
+- **The configuration call is the install.** Laravel records once its
+  DevTools package is installed. Here an application opts in with
+  `InertiaConfig::devtools(DevToolsConfig::new())`, so an application that
+  upgrades the framework records nothing until it asks.
 - **Sources come from the compiler.** Laravel finds a render or share call
   by walking a backtrace and reflects on a route's controller. Here the
   calls take `#[track_caller]`, so a source is exact; the cost is that a
@@ -337,10 +344,12 @@ either way.
   per process: a failing directory does not pause recording into another.
 - **DevTools reads `APP_ENV` itself.** Laravel's unset `APP_ENV` is
   `production`, while Suprnova's `Environment::detect` reads an unset one
-  as `local`. So DevTools reads the variable itself and records only when
-  it is set to `local`, or with `enabled(true)`. That is why a test run
-  with no `APP_ENV` records nothing, and a scaffolded project, whose `.env`
-  sets it, does.
+  as `local`. After the application opts in, DevTools reads the variable
+  itself and records only when it is set to `local` if `enabled` is unset.
+  `enabled(..)` and `INERTIA_DEVTOOLS_ENABLED` decide outright. A new
+  project's bootstrap opts in and its `.env` sets `APP_ENV=local`; an
+  application that never calls `devtools(..)` records nothing and serves
+  no entries.
 
 ## Next
 

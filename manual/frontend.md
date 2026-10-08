@@ -278,9 +278,10 @@ into a `303` back to the form page with the errors flashed).
 separate registration; `Inertia::install` makes all five the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install)
 for the full registration order and what each middleware closes.
 
-When `APP_ENV` names the `local` environment, `install` also registers
-the recorder of the Inertia DevTools browser extension, outermost of the
-Inertia layer, which stores an entry for each request and answers the
+With `.devtools(DevToolsConfig::new())`, `install` also registers the
+recorder of the Inertia DevTools browser extension when `APP_ENV=local`.
+It sits outermost in the Inertia layer, stores an entry for each request
+and answers the
 extension's `/_inertia/devtools/entries` endpoints. See
 [Inertia DevTools](frontend-inertia-devtools.md) to switch it on elsewhere,
 gate it, or turn it off.

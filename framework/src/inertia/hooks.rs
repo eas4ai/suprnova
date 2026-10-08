@@ -295,9 +295,11 @@ impl InertiaMiddleware {
 /// recorder when DevTools is enabled, so an entry sees the response the
 /// rest of the stack produced, then the protocol middlewares.
 pub(crate) fn stack(config: &InertiaConfig) -> Vec<BoxedMiddleware> {
-    let devtools = config.devtools_config();
     let mut stack = Vec::with_capacity(6);
-    if devtools.is_enabled() {
+    if let Some(devtools) = config
+        .devtools_config()
+        .filter(|config| config.is_enabled())
+    {
         stack.push(into_boxed(super::DevToolsMiddleware::new(devtools)));
     }
     stack.extend([

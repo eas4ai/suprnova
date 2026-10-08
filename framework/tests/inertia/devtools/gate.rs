@@ -5,11 +5,114 @@ use std::collections::HashMap;
 
 use suprnova::http::text;
 use suprnova::{
-    DevToolsConfig, HttpResponse, Inertia, InertiaResponse, MiddlewareRegistry, Request, Router,
+    DevToolsConfig, HttpResponse, Inertia, InertiaConfig, InertiaResponse, MiddlewareRegistry,
+    Request, Router,
 };
 
 use super::{app_env, client, devtools, entry_ids, inertia, no_app_env};
 use crate::protocol_harness::{Client, serve};
+
+#[tokio::test]
+async fn indt_without_the_configuration_call_the_stack_records_nothing_in_local() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "indt_without_the_configuration_call_the_stack_records_nothing_in_local",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = app_env("local").await;
+    let dir = tempfile::tempdir().unwrap();
+    suprnova::use_storage_path(dir.path());
+    let config = InertiaConfig::new().development(true).version("");
+    let client = suprnova::testing::TestClient::new(
+        router(),
+        MiddlewareRegistry::new().append(Inertia::middleware(&config)),
+    );
+    let page = client.get("/page").send().await;
+    page.assert_ok();
+    assert_eq!(page.header("x-inertia-devtools-id"), None);
+    assert_eq!(page.header("x-inertia-devtools-parent-out"), None);
+    assert!(!page.body_text().contains("data-inertia-devtools-id"));
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_status(404);
+    assert!(!dir.path().join("inertia-devtools").exists());
+}
+
+#[tokio::test]
+async fn indt_without_the_configuration_call_install_records_nothing_in_local() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "indt_without_the_configuration_call_install_records_nothing_in_local",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = app_env("local").await;
+    let dir = tempfile::tempdir().unwrap();
+    suprnova::use_storage_path(dir.path());
+    Inertia::install(&InertiaConfig::new().development(true).version("")).unwrap();
+    let client = suprnova::testing::TestClient::new(router(), MiddlewareRegistry::from_global());
+    let page = client.get("/page").send().await;
+    page.assert_ok();
+    assert_eq!(page.header("x-inertia-devtools-id"), None);
+    assert!(!page.body_text().contains("data-inertia-devtools-id"));
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_status(404);
+    assert!(!dir.path().join("inertia-devtools").exists());
+}
+
+#[tokio::test]
+async fn indt_without_the_configuration_call_group_install_serves_no_entries() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "indt_without_the_configuration_call_group_install_serves_no_entries",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = app_env("local").await;
+    let before = suprnova::middleware::global_middleware_count();
+    Inertia::install(
+        &InertiaConfig::new()
+            .development(true)
+            .register_globally(false),
+    )
+    .unwrap();
+    assert_eq!(suprnova::middleware::global_middleware_count(), before);
+    let client = suprnova::testing::TestClient::new(router(), MiddlewareRegistry::from_global());
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_status(404);
+}
+
+#[tokio::test]
+async fn indt_the_configuration_call_opts_into_recording_in_local() {
+    let _env = app_env("local").await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = client(router(), DevToolsConfig::new().storage_path(dir.path()));
+    let page = client.get("/page").send().await;
+    page.assert_ok();
+    assert!(page.header("x-inertia-devtools-id").is_some());
+    assert!(page.body_text().contains("data-inertia-devtools-id"));
+    assert_eq!(entry_ids(dir.path()).len(), 1);
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
+}
 
 fn router() -> Router {
     Router::new()

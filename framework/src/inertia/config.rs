@@ -1218,9 +1218,9 @@ impl InertiaConfig {
 
     /// Set the Inertia DevTools settings: whether requests are recorded
     /// for the browser extension, where entries are stored, and what is
-    /// redacted. See [`DevToolsConfig`](crate::DevToolsConfig); without
-    /// this call the defaults apply, which record only when `APP_ENV`
-    /// names the `local` environment.
+    /// redacted. Without this call nothing is recorded and no entry
+    /// endpoints are served. See [`DevToolsConfig`](crate::DevToolsConfig):
+    /// with `enabled` unset, recording requires `APP_ENV=local`.
     ///
     /// ```rust,no_run
     /// use suprnova::{DevToolsConfig, InertiaConfig};
@@ -1233,13 +1233,10 @@ impl InertiaConfig {
         self
     }
 
-    /// The Inertia DevTools settings this configuration carries, the
-    /// defaults when none were set.
-    pub(crate) fn devtools_config(&self) -> super::devtools::DevToolsConfig {
-        match &self.devtools {
-            Some(config) => config.as_ref().clone(),
-            None => super::devtools::DevToolsConfig::default(),
-        }
+    /// The settings of an opted-in DevTools instance, absent until the
+    /// application calls `devtools`.
+    pub(crate) fn devtools_config(&self) -> Option<super::devtools::DevToolsConfig> {
+        self.devtools.as_ref().map(|config| config.as_ref().clone())
     }
 
     /// Choose whether [`crate::Inertia::install`] registers the stack on

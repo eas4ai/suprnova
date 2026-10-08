@@ -9,6 +9,11 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // A notes table that already exists, including one a Laravel
+        // application created, is left as it is.
+        if manager.has_table("notes").await? {
+            return Ok(());
+        }
         Schema::create(manager, "notes", |t| {
             // `BIGINT UNSIGNED` on MySQL, as Laravel's `id()` creates it;
             // the `Note` model reads it into a `u64`.
