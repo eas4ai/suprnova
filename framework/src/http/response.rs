@@ -47,17 +47,17 @@ pub struct HttpResponse {
     /// response's extensions, never into a header or the body. Boxed so a
     /// response without one, the common case, grows by one pointer.
     error_report: Option<Box<ErrorReport>>,
-    /// Whether the Inertia error-response middleware already decided this
-    /// response, through the application's callback or the default one.
-    /// In process only: [`Self::into_hyper`] turns it into an
-    /// `ErrorResponseDecided` extension, and the development error page
-    /// leaves such a response alone, as an outer error-response middleware
-    /// does.
+    /// Whether the Inertia error-response decision, in the middleware or at
+    /// the server, already decided this response, through the application's
+    /// callback or the default one. In process only: [`Self::into_hyper`]
+    /// turns it into an `ErrorResponseDecided` extension, and the
+    /// development error page leaves such a response alone, as an outer
+    /// error-response middleware and the server's decision do.
     error_decided: bool,
 }
 
 /// The in-process mark of a response the Inertia error-response
-/// middleware decided. It rides in the hyper response's extensions so the
+/// decision decided. It rides in the hyper response's extensions so the
 /// development error page, applied around the whole chain, does not undo
 /// the application's decision.
 #[derive(Debug, Clone, Copy)]
@@ -423,13 +423,13 @@ impl HttpResponse {
     }
 
     /// Mark this response as decided by the Inertia error-response
-    /// middleware, so nothing outside it decides it again.
+    /// decision, so nothing outside it decides it again.
     pub(crate) fn mark_error_decided(mut self) -> Self {
         self.error_decided = true;
         self
     }
 
-    /// Whether the Inertia error-response middleware already decided this
+    /// Whether the Inertia error-response decision already decided this
     /// response.
     pub(crate) fn is_error_decided(&self) -> bool {
         self.error_decided

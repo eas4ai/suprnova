@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 use serial_test::serial;
 
 use suprnova::testing::TestContainer;
-use suprnova::{Inertia, InertiaConfig, MiddlewareRegistry};
+use suprnova::{Inertia, InertiaConfig, Middleware, MiddlewareRegistry, Next, Request, Response};
 
 use super::{
     BROWSER, DISK_ERROR, INERTIA_VISIT, INVOICE_ERROR, LEDGER_ERROR, PANIC_MESSAGE, Reply,
-    SessionScope, assert_debug_page, assert_page_shows, debug_mode, ledger_routes, request,
+    SessionScope, assert_debug_page, assert_page_shows, chain, debug_mode, ledger_routes, request,
 };
 
 /// The Inertia stack `config` builds, inside a session, as global
@@ -141,4 +141,57 @@ async fn inssr_with_debug_on_error_page_keeps_the_development_error_page() {
 
     assert_debug_page(&reply, 500);
     assert_page_shows(&reply, &[INVOICE_ERROR, LEDGER_ERROR, DISK_ERROR]);
+}
+
+/// What [`OuterUnavailable`]'s error chain says, outermost first.
+const REPLICA_ERROR: &str = "reading the ledger replica failed";
+const LAG_ERROR: &str = "replica ledger-2 is 40 minutes behind";
+const LINK_ERROR: &str = "the replication link is down";
+
+/// Answers every request itself, before the session and the Inertia stack
+/// are reached: a `503` built from an error chain, the shape
+/// `TimeoutMiddleware` answers a request it cancelled with.
+struct OuterUnavailable;
+
+#[async_trait::async_trait]
+impl Middleware for OuterUnavailable {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        let error = chain(REPLICA_ERROR, LAG_ERROR, LINK_ERROR);
+        Err(suprnova::HttpResponse::from(error).status(503))
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn inssr_with_debug_on_the_callback_receives_the_development_page_for_an_outer_503() {
+    let _debug = debug_mode(true, &[]).await;
+    let _container = TestContainer::fake();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Inertia::handle_exceptions_using(move |error| {
+        let response = error.response();
+        record.lock().unwrap().push((
+            error.status(),
+            response.header_value("Content-Type").map(str::to_string),
+            String::from_utf8_lossy(response.body()).contains(REPLICA_ERROR),
+        ));
+        None
+    });
+    let registry = stack(&config()).prepend(OuterUnavailable);
+
+    let reply = super::exchange(
+        ledger_routes(),
+        registry,
+        request("GET", "/invoice", BROWSER, ""),
+    )
+    .await;
+
+    assert_debug_page(&reply, 503);
+    assert_page_shows(&reply, &[REPLICA_ERROR, LAG_ERROR, LINK_ERROR]);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(503, Some("text/html; charset=utf-8".to_string()), true)],
+        "a middleware registered before the Inertia stack reaches the callback at the \
+         server, which hands it the development error page"
+    );
 }

@@ -36,6 +36,7 @@ pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, 
 pub use conversion_middleware::Inertia303Middleware;
 pub use encrypt_middleware::EncryptHistoryMiddleware;
 pub use error_page_middleware::InertiaErrorPageMiddleware;
+pub(crate) use error_page_middleware::ServerErrorDecision;
 pub use exceptions::InertiaErrorResponse;
 pub use facade::Inertia;
 pub use flash::FlashKey;

@@ -21,10 +21,11 @@
 //! place of the app's Inertia error page for those responses.
 //!
 //! The Inertia error-response middleware builds the page earlier, inside
-//! the chain, with [`page_for`]: the application's error callback receives
-//! the page as the response the framework would send (PAR-062), and what
-//! the callback decides stands. The server leaves a response that
-//! middleware decided as it is.
+//! the chain, with [`page_for`], and so does the error-response decision
+//! the server runs after the chain: the application's error callback
+//! receives the page as the response the framework would send (PAR-062),
+//! and what the callback decides stands. This step leaves a decided
+//! response as it is.
 //!
 //! # What it never shows
 //!
@@ -121,9 +122,9 @@ pub(crate) fn note_request_id(request_id: &str) {
 /// `response` as the client gets it with debug on: the page in its place
 /// when PAR-012 asks for it, else `response` as it is.
 ///
-/// For the Inertia error-response middleware, which hands the result to the
-/// application's error callback. Outside a request served with debug on it
-/// returns `response` as it is.
+/// For the Inertia error-response decision, in the middleware and at the
+/// server, which hands the result to the application's error callback.
+/// Outside a request served with debug on it returns `response` as it is.
 pub(crate) fn page_for(response: HttpResponse) -> HttpResponse {
     match SERVING.try_with(Arc::clone) {
         Ok(serving) => serving.replace_framework_response(response),
@@ -208,7 +209,7 @@ impl DebugRequest {
     fn replace(&self, response: hyper::Response<Body>) -> hyper::Response<Body> {
         let status = response.status();
         if !self.replaces(status.as_u16())
-            // The Inertia error-response middleware decided it: the page is
+            // The Inertia error-response decision decided it: the page is
             // already in place, or the application chose another answer.
             || response
                 .extensions()

@@ -6,7 +6,8 @@
 //! error-response middleware ([`InertiaErrorPageMiddleware`], which
 //! [`Inertia::install`](crate::Inertia::install) registers) hands it an
 //! [`InertiaErrorResponse`] for every error response that passes through,
-//! and sends what the callback decides.
+//! and sends what the callback decides. The server hands it every error
+//! response no middleware decided, after the whole stack.
 //! [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) is the
 //! same mechanism with a callback the framework supplies.
 //!
@@ -155,6 +156,13 @@ impl<'a> InertiaErrorResponse<'a> {
     /// [`InertiaSharedData`](crate::InertiaSharedData) provider) and the
     /// middleware hooks' `share` and `share_once`. Without it the page
     /// carries only its own props.
+    ///
+    /// For a response the server decides after the whole stack, such as
+    /// the answer of a middleware registered before
+    /// [`Inertia::install`](crate::Inertia::install), the shared registry
+    /// and providers are included, but every request scope a middleware
+    /// opened has closed: no session data, no detected locale, and none of
+    /// the middleware hooks' shares.
     pub fn with_shared_data(mut self) -> Self {
         self.shared_data = true;
         self
