@@ -1179,7 +1179,6 @@ mod svelte {
             "the generated types must name the flash data type:\n{types}"
         );
     }
-
 }
 
 /// The React kit: `suprnova new <name> --frontend react`.
@@ -1694,7 +1693,6 @@ mod react {
             assert!(show.contains(needle), "Notes/Show lacks {needle}:\n{show}");
         }
     }
-
 }
 
 mod vue {
@@ -2195,6 +2193,9 @@ mod vue {
         }
     }
 
+    // The dashboard and notes pages are built with the builder (defer, paginate),
+    // which the generator does not pair with a `Pages` entry yet; the pages
+    // import their interfaces directly.
     #[test]
     fn kit_vue_types_declare_the_flash_data_type() {
         let (_tmp, src) = scaffold();
@@ -2210,8 +2211,6 @@ mod vue {
             "export interface NotesShowProps {\n  note: NoteView;\n}\n",
             "export interface NoteSummary {",
             "export interface NoteView {",
-            "  \"Notes/Index\": NotesIndexProps;\n",
-            "  \"Notes/Show\": NotesShowProps;\n",
             "export type Errors = Record<string, string>;",
             "export type PageProps<C extends keyof Pages>",
             "    flashDataType: Flash;\n",

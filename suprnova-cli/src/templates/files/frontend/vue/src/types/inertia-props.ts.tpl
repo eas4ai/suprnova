@@ -41,7 +41,7 @@ export interface NotesIndexProps {
 export interface NoteSummary {
   id: number;
   title: string;
-  created_at: string;
+  created_at: string | null;
 }
 
 export interface NotesShowProps {
@@ -52,7 +52,7 @@ export interface NoteView {
   id: number;
   title: string;
   body: string | null;
-  created_at: string;
+  created_at: string | null;
 }
 
 export interface RegisterProps {
@@ -81,9 +81,7 @@ export interface VerifyEmailProps {
 }
 
 export interface Pages {
-  "Dashboard": DashboardProps;
   "Home": HomeProps;
-  "Notes/Index": NotesIndexProps;
   "Notes/Show": NotesShowProps;
   "auth/ForgotPassword": ForgotPasswordProps;
   "auth/Login": LoginProps;

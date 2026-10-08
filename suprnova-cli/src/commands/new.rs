@@ -327,7 +327,6 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 fn create_api_project(
     project_name: &str,
     package_name: &str,
