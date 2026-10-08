@@ -77,9 +77,12 @@ because the extension reads it:
 - `props` and `propValues` - each prop of a rendered page with its kind,
   and the value the client received. See
   [Props and where they come from](#props-and-where-they-come-from).
-- `route` - the route's `name`, its pattern as `uri`, the `method` for a
-  rendered page, and the handler's type name as `action`
-  (`app::controllers::users::index`).
+- `route` - the `name` of the route that matched, its pattern as `uri`,
+  the `method` for a rendered page, and the handler's type name as
+  `action` (`app::controllers::users::index`). The name belongs to the
+  route's method as well as its pattern, so `GET /users` named
+  `users.index` and `POST /users` named `users.store` each record their
+  own.
 - `renderSource` - the file and line of the call that built the page.
 - `componentPath` - the page file under `InertiaConfig::pages_dir`, when
   there is one.

@@ -1333,6 +1333,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the text of `'...'`, `"..."` and template literals set aside, so only a
   declaration in code counts, and a comment between `declare`, `module`
   and the name no longer hides a real one (T02).
+- **A DevTools entry and `Request::route_name` name the route that
+  matched by its method.** The router kept one process-wide table from
+  name to pattern, and a request's name was looked up by its pattern
+  alone, so `GET /users` named `users.index` and `POST /users` named
+  `users.store` both reported whichever name the table listed first, and
+  an unnamed `PUT /users` reported one of them too. The router now records
+  each name against the method and pattern it was given for, through
+  `.name(..)`, a route group's names and a resource's names, and the
+  server sets the matched route's name on the request, so each method
+  reports its own and an unnamed one reports none. A request that never
+  went through dispatch still falls back to the pattern lookup (DT-04).
 
 ## 3.2.1 - 2026-10-05
 

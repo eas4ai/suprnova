@@ -122,6 +122,11 @@ pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
 #[derive(Clone, Copy)]
 struct RouteAction(&'static str);
 
+/// The name of the route the request matched, `None` for an unnamed one,
+/// kept in the request's extensions once the server has dispatched it.
+#[derive(Clone)]
+struct RouteName(Option<String>);
+
 #[derive(Clone)]
 struct RouteBindings(std::sync::Arc<std::sync::Mutex<Option<Vec<Option<RouteBound>>>>>);
 
@@ -1288,11 +1293,29 @@ impl Request {
         self.route_pattern.as_deref()
     }
 
+    /// Record the name of the route the request matched, `None` for an
+    /// unnamed route. Called by the server with the name the router holds
+    /// for the matched method and pattern.
+    pub(crate) fn set_route_name(&mut self, name: Option<String>) {
+        self.parts.extensions.insert(RouteName(name));
+    }
+
     /// Returns the matched route's registered NAME (the value from
     /// `.name("users.show")`) when one was set, or `None` for an
     /// unnamed route or an unmatched request. Mirrors Laravel's
     /// `Request::route()->getName()`.
+    ///
+    /// A request the server dispatched carries the name of the route that
+    /// matched, by method and pattern, so `GET /users` named `users.index`
+    /// and `POST /users` named `users.store` each report their own. A
+    /// request that never went through dispatch, such as one a test builds
+    /// with [`with_route_pattern`](Self::with_route_pattern), falls back to
+    /// a name registered for its pattern under any method, which is
+    /// ambiguous when two methods on one path carry different names.
     pub fn route_name(&self) -> Option<String> {
+        if let Some(RouteName(name)) = self.parts.extensions.get::<RouteName>() {
+            return name.clone();
+        }
         let pattern = self.route_pattern.as_deref()?;
         crate::routing::route_name_for_pattern(pattern)
     }
