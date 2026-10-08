@@ -319,10 +319,13 @@ pub struct InertiaConfig {
     /// Default `false`, matching Laravel's
     /// `Inertia\Middleware::$withAllErrors` and Inertia's own
     /// `ErrorValue = string`. Set `true` when your pages render every
-    /// message for a field; the client-side type then needs the matching
-    /// `errorValueType: string[]` module augmentation. Applies to errors
-    /// drained from the session flash only - an `errors` prop a handler
-    /// sets itself passes through as-is.
+    /// message for a field. `suprnova generate-types` reads the call under
+    /// `src/` and writes the matching client types, `Errors` as
+    /// `Record<string, string[]>` and `errorValueType: string[]` in the
+    /// `@inertiajs/core` augmentation it generates, so the pages are typed
+    /// for the array shape. Applies to errors drained from the session
+    /// flash only - an `errors` prop a handler sets itself passes through
+    /// as-is.
     pub with_all_errors: bool,
     /// Whether the page object lists the shared props' top-level keys
     /// under `sharedProps` - Laravel's `inertia.expose_shared_prop_keys`.

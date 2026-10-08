@@ -375,7 +375,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   marked `#[inertia_props(shared)]`), `Errors`, `PageProps<C>`, and a
   `declare module '@inertiajs/core'` block setting `sharedPageProps`,
   `errorValueType` and, for a struct marked `#[inertia_props(flash)]`,
-  `flashDataType`, so `usePage()` is typed with no argument. The
+  `flashDataType`, so `usePage()` is typed with no argument. `Errors` is
+  `Record<string, string>` and `errorValueType` is `string`, or both say
+  `string[]` when a `with_all_errors(..)` call under `src/` passes anything
+  but a literal `false` (read as `preserve_big_integers(..)` is), since the
+  server then sends every message per field as an array. The
   `InertiaProps` derive takes the two markers and refuses any other form.
   A component rendered with two structs, two shared or two
   flash structs, or a struct named like a generated declaration fails the
@@ -996,7 +1000,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   pages that build URLs from `root` read it with a bare `usePage()` in
   place of `usePage<{ root: string }>()`, typed by the augmentation. The
   `Error` page keeps its inline props, since no handler renders it with a
-  struct (T06).
+  struct. A project upgrading with its own `declare module
+  '@inertiajs/core'` block, in a `.ts`, `.tsx`, `.mts` or `.cts` file
+  under `frontend/src` such as `global.d.ts`, keeps it: `generate-types` and
+  `serve` then write `inertia-props.ts` without the augmentation or its
+  `import '@inertiajs/core'` and print a notice naming that file (`serve`
+  once, not on every save), since two augmentations merge key by key and
+  fail the type check on any key they set to different types. Delete the
+  hand-written block and regenerate to get the generated augmentation, with
+  `root` and the shared struct typed (T06).
 - **`TestResponse::assert_inertia()` reads a first visit.** It refused any
   response without `X-Inertia: true`, so the HTML document a plain `GET` of
   a page route returns could only be asserted through

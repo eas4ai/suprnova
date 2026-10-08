@@ -1832,7 +1832,12 @@ fn the_starter_lang_keys_match_the_starter_catalog() {
 fn the_starter_inertia_props_match_the_starter_controllers() {
     let dir = tempfile::tempdir().expect("tempdir");
     let structs = scan_scaffold_controllers(dir.path());
-    let expected = suprnova_cli::commands::generate_types::generate_typescript(&structs);
+    // The scaffold leaves `with_all_errors` off, so the page types are the
+    // defaults.
+    let expected = suprnova_cli::commands::generate_types::generate_typescript(
+        &structs,
+        suprnova_cli::commands::generate_types::PageTypes::default(),
+    );
 
     for (frontend, shipped) in [
         (
