@@ -22,11 +22,11 @@ use suprnova::testing::TestContainer;
 use suprnova::{
     FrameworkError, HttpResponse, Inertia, InertiaConfig, InertiaErrorPageMiddleware,
     InertiaMiddlewareHooks, InertiaRequestExt, MiddlewareRegistry, Prop, Redirect, Request,
-    Response, Router,
+    Response, Router, ValidationErrors,
 };
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
-use crate::protocol_harness::{Client, Reply, serve};
+use crate::protocol_harness::{Client, Reply, SeededSessionScope, serve};
 
 /// The asset version the stack and every Inertia visit agree on, so the
 /// version check lets the visits through.
@@ -76,6 +76,14 @@ fn routes() -> Router {
         // An external redirect: `409` and `X-Inertia-Location`.
         .get("/away", |_req: Request| async {
             let response: Response = Ok(Inertia::location("https://example.com/ledger"));
+            response
+        })
+        // A validation failure, shaped exactly like a `FormRequest`
+        // extraction failure.
+        .post("/register", |_req: Request| async {
+            let mut errors = ValidationErrors::new();
+            errors.add("email", "The email field is required.");
+            let response: Response = Err(FrameworkError::validation_errors(errors).into());
             response
         })
         .into()
@@ -539,6 +547,82 @@ async fn inssr_inertia_protocol_responses_are_never_handed_to_the_callback() {
         *calls.lock().unwrap(),
         0,
         "an Inertia protocol response is an instruction to the client, not an error"
+    );
+}
+
+/// A client of `routes()` inside a session, behind the Inertia stack, with
+/// a callback that answers every error response with a `418`, and the
+/// count of the callback's calls.
+async fn teapot_client() -> (
+    Client,
+    Arc<Mutex<Option<suprnova::session::SessionData>>>,
+    Arc<Mutex<u32>>,
+) {
+    let (calls, seen) = counter();
+    Inertia::handle_exceptions_using(move |error| {
+        *seen.lock().unwrap() += 1;
+        Some(error.respond_with(HttpResponse::text("I'm a teapot").status(418)))
+    });
+    // The validation redirect flashes the errors into the session.
+    let slot = suprnova::session::new_session_slot_for_test();
+    let registry = MiddlewareRegistry::new()
+        .append(SeededSessionScope(slot.clone()))
+        .append(Inertia::middleware(&config()));
+    (Client::new(serve(routes(), registry).await), slot, calls)
+}
+
+#[tokio::test]
+async fn inssr_an_inertia_posts_validation_failure_never_reaches_the_callback() {
+    let _container = TestContainer::fake();
+    let (mut client, slot, calls) = teapot_client().await;
+
+    let reply = client
+        .send(
+            "POST",
+            "/register",
+            &[
+                ("X-Inertia", "true"),
+                ("X-Inertia-Version", VERSION),
+                ("Referer", "http://localhost/register"),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reply.status, 303,
+        "the validation redirect owns a validation failure; got {reply:?}"
+    );
+    assert_eq!(reply.header("location"), Some("/register"), "{reply:?}");
+    let flashed: serde_json::Value = slot
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .get("_flash.new.errors.default")
+        .expect("the errors must be flashed for the form");
+    assert_eq!(flashed["email"][0], "The email field is required.");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "a validation result is the validation redirect's, not an error for the callback"
+    );
+}
+
+#[tokio::test]
+async fn inssr_a_json_clients_validation_failure_never_reaches_the_callback() {
+    let _container = TestContainer::fake();
+    let (mut client, _slot, calls) = teapot_client().await;
+
+    let reply = client.send("POST", "/register", JSON_CLIENT).await;
+
+    assert_eq!(reply.status, 422, "{reply:?}");
+    let body: serde_json::Value = serde_json::from_str(&reply.body)
+        .unwrap_or_else(|e| panic!("expected the validation body ({e}): {}", reply.body));
+    assert_eq!(body["errors"]["email"][0], "The email field is required.");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "a validation result is not an error for the callback"
     );
 }
 

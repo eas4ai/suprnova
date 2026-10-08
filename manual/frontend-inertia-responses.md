@@ -1835,9 +1835,12 @@ handler's answer, and the callback doesn't see it. Neither are Inertia
 protocol responses: pages, and anything carrying `X-Inertia-Location` or
 `X-Inertia-Redirect`.
 
-A `422` reaches the callback before `InertiaValidationRedirectMiddleware`
-turns it into the redirect back to the form. Return `None` for it, as
-the default callback does, or the form loses its errors.
+Validation failures never reach the callback either. A `422` whose body
+carries an `errors` object is a validation result, and
+`InertiaValidationRedirectMiddleware` owns it: an Inertia visit gets the
+redirect back to the form with the errors flashed, and an API client or a
+Precognition dry run gets the `422` with its errors - see
+[Validation failures](#validation-failures).
 
 With debug mode on, `response()` for a `5xx` that carries an error
 report, sent to a browser or an Inertia visit, is the

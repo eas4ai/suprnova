@@ -61,11 +61,15 @@ use super::{InertiaRequestExt, InertiaResponse, Prop};
 /// an empty body, a JSON object with a string `message`, the router's
 /// `404 Not Found`. It runs the chain inside it under the panic boundary's
 /// rule, so a handler that panics reaches the callback as a `500` with the
-/// panic's report. A response a handler built itself in some other shape
-/// is the handler's answer, and an Inertia protocol response
-/// (`X-Inertia`, `X-Inertia-Location`, `X-Inertia-Redirect`) is an
-/// instruction to the client: neither is handed over. Each response is
-/// decided once, so a second instance further out leaves it alone.
+/// panic's report. Three kinds of response are never handed over: one a
+/// handler built itself in some other shape, which is the handler's
+/// answer; an Inertia protocol response (`X-Inertia`,
+/// `X-Inertia-Location`, `X-Inertia-Redirect`), which is an instruction to
+/// the client; and a validation result, a `422` whose JSON body carries an
+/// `errors` object, which
+/// [`InertiaValidationRedirectMiddleware`](crate::InertiaValidationRedirectMiddleware)
+/// owns. Each response is decided once, so a second instance further out
+/// leaves it alone.
 ///
 /// A page the callback renders goes through the root template
 /// [`InertiaConfig::root_template_with`](crate::InertiaConfig::root_template_with)
@@ -234,7 +238,10 @@ async fn run_catching_panics(captured: &CapturedRequest, chain: MiddlewareFuture
 /// Whether `response` is an error response the framework rendered, the
 /// ones the callback is handed. See [`InertiaErrorPageMiddleware`].
 fn is_error_response(response: &HttpResponse) -> bool {
-    if !(400..=599).contains(&response.status_code()) || is_protocol_response(response) {
+    if !(400..=599).contains(&response.status_code())
+        || is_protocol_response(response)
+        || is_validation_result(response)
+    {
         return false;
     }
     response.error_report().is_some()
@@ -250,6 +257,20 @@ fn is_protocol_response(response: &HttpResponse) -> bool {
         .any(|v| v.eq_ignore_ascii_case("true"))
         || response.header_value("X-Inertia-Location").is_some()
         || response.header_value("X-Inertia-Redirect").is_some()
+}
+
+/// Whether `response` is a validation result: a `422` whose JSON body
+/// carries an `errors` object, the framework's
+/// `{"message": .., "errors": {..}}`. The validation redirect owns it: it
+/// turns an Inertia visit's into the redirect back to the form with the
+/// errors flashed, and an API client or a Precognition dry run reads the
+/// errors off it. A callback that rendered it would break every form.
+fn is_validation_result(response: &HttpResponse) -> bool {
+    response.status_code() == 422
+        && !response.is_streaming()
+        && serde_json::from_slice::<Value>(response.body())
+            .ok()
+            .is_some_and(|body| body.get("errors").is_some_and(Value::is_object))
 }
 
 /// Hand `http` to the decider and build what it chose.
@@ -1070,6 +1091,19 @@ mod tests {
         assert!(!is_error_response(
             &HttpResponse::from(FrameworkError::domain("gone", 410)).header("X-Inertia", "true")
         ));
+
+        // A validation result belongs to the validation redirect, though it
+        // carries a report. A 422 in any other shape is an error like any
+        // other.
+        let mut errors = crate::ValidationErrors::new();
+        errors.add("email", "The email field is required.");
+        let validation = HttpResponse::from(FrameworkError::validation_errors(errors));
+        assert_eq!(validation.status_code(), 422);
+        assert!(validation.error_report().is_some());
+        assert!(!is_error_response(&validation));
+        assert!(is_error_response(&HttpResponse::from(
+            FrameworkError::domain("unprocessable", 422)
+        )));
     }
 
     #[test]

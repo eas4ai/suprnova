@@ -278,13 +278,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and `response()`, which with debug on is the development error page where
   that page applies. It returns `render(component, props)` for an Inertia
   page at the original status, `respond_with(response)` for any other
-  response, or `None` to keep the response. A rendered page carries the
-  shared props, the middleware hooks' `share` and `share_once` included,
-  only after `with_shared_data()`. `InertiaConfig::error_page` is now the
-  default callback and keeps its rule; an app that sets both gets its
-  callback. A later call replaces the callback, which lives on the active
-  container, so a callback installed under `TestContainer::fake()` stays in
-  that test (EX-01, EX-02, EX-03, EX-06, EX-07).
+  response, or `None` to keep the response. A validation failure, a `422`
+  whose body carries an `errors` object, never reaches the callback: the
+  validation redirect owns it, so an Inertia form still goes back with its
+  errors flashed. A rendered page carries the shared props, the middleware
+  hooks' `share` and `share_once` included, only after
+  `with_shared_data()`. `InertiaConfig::error_page` is now the default
+  callback and keeps its rule; an app that sets both gets its callback. A
+  later call replaces the callback, which lives on the active container, so
+  a callback installed under `TestContainer::fake()` stays in that test
+  (EX-01, EX-02, EX-03, EX-06, EX-07).
 
 ### Changed
 

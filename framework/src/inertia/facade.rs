@@ -486,11 +486,12 @@ impl Inertia {
     /// [`TestContainer::fake`](crate::testing::TestContainer::fake) stays in
     /// that test.
     ///
-    /// A `422` reaches the callback before
-    /// [`InertiaValidationRedirectMiddleware`] turns it into the redirect
-    /// back to the form; return `None` for it, or the form loses its
-    /// errors. A panic in the callback itself reaches the server's panic
-    /// boundary, as a panic in any middleware does.
+    /// A validation failure never reaches the callback: a `422` whose body
+    /// carries an `errors` object belongs to
+    /// [`InertiaValidationRedirectMiddleware`], which turns an Inertia
+    /// visit's into the redirect back to the form. A panic in the callback
+    /// itself reaches the server's panic boundary, as a panic in any
+    /// middleware does.
     ///
     /// ```rust,no_run
     /// use serde_json::json;
