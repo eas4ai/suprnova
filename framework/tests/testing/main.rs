@@ -7,6 +7,7 @@ mod common;
 mod migrations;
 
 pub mod assertable_inertia;
+pub mod intt_red;
 pub mod clock;
 pub mod clock_reads;
 pub mod registry_clears;
