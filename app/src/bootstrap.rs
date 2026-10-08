@@ -247,7 +247,7 @@ pub fn inertia_config() -> InertiaConfig {
 /// protocol have to send the value the server will accept. Resolved
 /// rather than hardcoded so it tracks the built frontend: with a Vite
 /// manifest present it is that manifest's hash, and without one it is
-/// the framework's static fallback.
+/// the empty string.
 pub fn inertia_version() -> String {
     inertia_config().version.resolve()
 }
