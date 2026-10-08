@@ -61,9 +61,102 @@ impl Parse for InertiaResponseInput {
     }
 }
 
+/// What `#[inertia_props(..)]` marks a props struct as. The derive's output
+/// is the same either way: `suprnova generate-types` reads the marker off
+/// the source to type Inertia's `sharedPageProps` or `flashDataType` with
+/// the struct's interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PropsMarker {
+    /// `#[inertia_props(shared)]`: the props every page shares.
+    Shared,
+    /// `#[inertia_props(flash)]`: the flash data a page receives.
+    Flash,
+}
+
+/// The forms `#[inertia_props(..)]` accepts, for every error that refuses
+/// another.
+const ACCEPTED_MARKERS: &str = "expected `#[inertia_props(shared)]` or `#[inertia_props(flash)]`";
+
+/// Read `#[inertia_props(..)]` off a props struct.
+///
+/// A struct carries at most one marker, once. Any other argument, a marker
+/// given twice, both markers, or the attribute on a field is an error: the
+/// generator would otherwise read a marker the author did not mean, or
+/// none at all, and type the page props wrongly without a word.
+pub(crate) fn props_marker(input: &DeriveInput) -> syn::Result<Option<PropsMarker>> {
+    if let syn::Data::Struct(data) = &input.data {
+        for field in &data.fields {
+            if let Some(attr) = field
+                .attrs
+                .iter()
+                .find(|attr| attr.path().is_ident("inertia_props"))
+            {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    format!(
+                        "`#[inertia_props(..)]` goes on the struct, not on a field; \
+                         {ACCEPTED_MARKERS}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut found: Option<(PropsMarker, syn::Path)> = None;
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("inertia_props"))
+    {
+        let syn::Meta::List(list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(attr, ACCEPTED_MARKERS));
+        };
+        let arguments = list
+            .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
+            .map_err(|error| syn::Error::new(error.span(), ACCEPTED_MARKERS))?;
+        if arguments.is_empty() {
+            return Err(syn::Error::new_spanned(attr, ACCEPTED_MARKERS));
+        }
+        for argument in arguments {
+            let syn::Meta::Path(path) = argument else {
+                return Err(syn::Error::new_spanned(argument, ACCEPTED_MARKERS));
+            };
+            let marker = if path.is_ident("shared") {
+                PropsMarker::Shared
+            } else if path.is_ident("flash") {
+                PropsMarker::Flash
+            } else {
+                return Err(syn::Error::new_spanned(path, ACCEPTED_MARKERS));
+            };
+            match &found {
+                None => found = Some((marker, path)),
+                Some((earlier, _)) if *earlier == marker => {
+                    return Err(syn::Error::new_spanned(
+                        path,
+                        "this `#[inertia_props(..)]` marker is given twice; give it once",
+                    ));
+                }
+                Some(_) => {
+                    return Err(syn::Error::new_spanned(
+                        path,
+                        "a props struct is the shared props or the flash data, not both; \
+                         give it `#[inertia_props(shared)]` or `#[inertia_props(flash)]`",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(found.map(|(marker, _)| marker))
+}
+
 /// Implementation for the `InertiaProps` derive macro
 pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    // Checked for its errors only: the marker changes what the generator
+    // writes, not what the derive writes.
+    if let Err(error) = props_marker(&input) {
+        return error.to_compile_error().into();
+    }
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -604,6 +697,114 @@ mod tests {
         assert_eq!(
             track_inputs(expansion.clone(), &[]).to_string(),
             expansion.to_string()
+        );
+    }
+
+    /// The marker `#[inertia_props(..)]` gives a struct, or the error the
+    /// derive reports for it.
+    fn marker_of(input: DeriveInput) -> Result<Option<PropsMarker>, String> {
+        props_marker(&input).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn intt_the_two_markers_are_read_off_the_struct() {
+        assert_eq!(
+            marker_of(parse_quote! {
+                #[inertia_props(shared)]
+                struct AppShared { app_name: String }
+            }),
+            Ok(Some(PropsMarker::Shared))
+        );
+        assert_eq!(
+            marker_of(parse_quote! {
+                #[inertia_props(flash)]
+                struct Toast { message: String }
+            }),
+            Ok(Some(PropsMarker::Flash))
+        );
+        assert_eq!(
+            marker_of(parse_quote! {
+                #[serde(rename_all = "camelCase")]
+                struct Plain { app_name: String }
+            }),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn intt_any_other_marker_names_the_accepted_forms() {
+        for input in [
+            parse_quote! {
+                #[inertia_props(global)]
+                struct A { a: String }
+            },
+            parse_quote! {
+                #[inertia_props]
+                struct A { a: String }
+            },
+            parse_quote! {
+                #[inertia_props()]
+                struct A { a: String }
+            },
+            parse_quote! {
+                #[inertia_props(shared = true)]
+                struct A { a: String }
+            },
+            parse_quote! {
+                #[inertia_props = "shared"]
+                struct A { a: String }
+            },
+        ] {
+            let error = marker_of(input).expect_err("only `shared` and `flash` are markers");
+            assert!(
+                error.contains("`#[inertia_props(shared)]`")
+                    && error.contains("`#[inertia_props(flash)]`"),
+                "the error must name both accepted forms; got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn intt_one_struct_cannot_carry_both_markers() {
+        for input in [
+            parse_quote! {
+                #[inertia_props(shared, flash)]
+                struct A { a: String }
+            },
+            parse_quote! {
+                #[inertia_props(shared)]
+                #[inertia_props(flash)]
+                struct A { a: String }
+            },
+        ] {
+            let error = marker_of(input).expect_err("shared and flash exclude each other");
+            assert!(error.contains("not both"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn intt_a_marker_given_twice_is_refused() {
+        let error = marker_of(parse_quote! {
+            #[inertia_props(shared)]
+            #[inertia_props(shared)]
+            struct A { a: String }
+        })
+        .expect_err("a repeated marker is a mistake");
+        assert!(error.contains("twice"), "got: {error}");
+    }
+
+    #[test]
+    fn intt_a_marker_on_a_field_is_refused() {
+        let error = marker_of(parse_quote! {
+            struct A {
+                #[inertia_props(shared)]
+                a: String,
+            }
+        })
+        .expect_err("the markers describe the whole struct");
+        assert!(
+            error.contains("on the struct, not on a field"),
+            "got: {error}"
         );
     }
 }

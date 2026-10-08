@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,24 @@ pub struct InertiaPropsStruct {
     /// Generic type parameter names (e.g. `["T"]` for `struct Foo<T>`).
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    /// What the struct types beside its own interface: the shared props or
+    /// the flash data.
+    pub role: Option<PropsRole>,
+    /// The page components the sources render with this struct as their
+    /// props, sorted. Each becomes an entry of the generated `Pages`.
+    pub components: Vec<String>,
+}
+
+/// What a props struct types beside its own interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropsRole {
+    /// The props every page shares: the struct marked
+    /// `#[inertia_props(shared)]`, or the one `Inertia::share_data` is given.
+    /// Its fields join `root` in the generated `SharedProps`.
+    Shared,
+    /// The flash data: the struct marked `#[inertia_props(flash)]`. It
+    /// becomes Inertia's `flashDataType`.
+    Flash,
 }
 
 /// Flags derived from `#[data(...)]` field attributes.
@@ -60,7 +78,17 @@ pub struct StructField {
 #[derive(Debug, Clone)]
 pub enum RustType {
     String,
+    /// `i8` to `i32`, `u8` to `u32`, `f32` and `f64`: always a JavaScript
+    /// number.
     Number,
+    /// `i64`, `u64`, `i128`, `u128`, `isize` and `usize`, emitted as
+    /// `number | bigint`. A value can pass 2^53, the largest integer a
+    /// JavaScript number holds exactly, and with `preserve_big_integers` on
+    /// such a value travels as a `{"$bigint": ".."}` marker the Inertia
+    /// client turns into a `BigInt`. A scan of a project that does not
+    /// preserve big integers turns every one into [`RustType::Number`] (see
+    /// `settle_wide_integers`).
+    WideInteger,
     Bool,
     Option(Box<RustType>),
     Vec(Box<RustType>),
@@ -180,8 +208,8 @@ impl InertiaPropsVisitor {
 
                 match ident.as_str() {
                     "String" | "str" => RustType::String,
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
-                    | "u64" | "u128" | "usize" | "f32" | "f64" => RustType::Number,
+                    "i8" | "i16" | "i32" | "u8" | "u16" | "u32" | "f32" | "f64" => RustType::Number,
+                    "i64" | "i128" | "isize" | "u64" | "u128" | "usize" => RustType::WideInteger,
                     "bool" => RustType::Bool,
                     "Option" => {
                         if let PathArguments::AngleBracketed(args) = &segment.arguments
@@ -254,6 +282,20 @@ impl InertiaPropsVisitor {
             _ => RustType::Custom("unknown".to_string()),
         }
     }
+}
+
+/// The role `#[inertia_props(shared)]` or `#[inertia_props(flash)]` gives
+/// a struct. The derive refuses any other form, so anything else here is
+/// code that does not compile, and is read as no marker.
+fn props_role_marker(attrs: &[Attribute]) -> Option<PropsRole> {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("inertia_props"))
+        .find_map(|attr| match attr.parse_args::<syn::Ident>().ok()? {
+            ident if ident == "shared" => Some(PropsRole::Shared),
+            ident if ident == "flash" => Some(PropsRole::Flash),
+            _ => None,
+        })
 }
 
 /// Parse `#[data(...)]` attributes on a field into `DataFieldFlags`.
@@ -520,6 +562,14 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                     .map(|tp| tp.ident.to_string())
                     .collect(),
                 fields,
+                // Only the `InertiaProps` derive registers the attribute, so
+                // only its structs can carry a marker.
+                role: if self.has_inertia_props_derive(&node.attrs) {
+                    props_role_marker(&node.attrs)
+                } else {
+                    None
+                },
+                components: Vec::new(),
             };
             if derived {
                 self.structs.push(parsed);
@@ -544,24 +594,524 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
 // best-effort entry point.
 #[allow(dead_code)]
 pub fn scan_inertia_props(project_path: &Path) -> Vec<InertiaPropsStruct> {
-    let src_path = project_path.join("src");
-    let mut derived = Vec::new();
-    let mut plain = Vec::new();
-    visit_path_into(&src_path, &mut derived, &mut plain);
-    resolve_reachable(derived, plain)
+    let mut scan = SourceScan::default();
+    visit_path_into(&project_path.join("src"), &mut scan);
+    scan.finish(GenerateOptions::default()).structs
 }
 
-/// Walk a directory tree, collecting derived structs into `derived` and every
-/// other named-field struct into `plain`.
-fn visit_path_into(
-    root: &Path,
-    derived: &mut Vec<InertiaPropsStruct>,
-    plain: &mut Vec<InertiaPropsStruct>,
-) {
+/// Everything one pass over the Rust sources collects, before the plain
+/// structs are resolved (see [`SourceScan::finish`]).
+#[derive(Default)]
+struct SourceScan {
+    /// Structs deriving `InertiaProps` or `Data`.
+    derived: Vec<InertiaPropsStruct>,
+    /// Every other named-field struct, so a prop field can reach a nested
+    /// DTO that never derived anything.
+    plain: Vec<InertiaPropsStruct>,
+    /// The file that declares each struct, for messages; the first
+    /// declaration of a name wins, as it does in [`resolve_reachable`].
+    struct_files: HashMap<String, PathBuf>,
+    /// Some `preserve_big_integers(..)` call passes anything but a literal
+    /// `false` (see [`PreserveBigIntegersVisitor`]).
+    preserves_big_integers: bool,
+    /// Every place a page is rendered, with the file it is in.
+    renders: Vec<(PathBuf, RenderSite)>,
+    /// The struct each `Inertia::share_data(..)` call is given.
+    shared_data: Vec<String>,
+}
+
+/// A finished scan: the structs to emit, and the conflicts that keep the
+/// checked path from writing them.
+struct FinishedScan {
+    structs: Vec<InertiaPropsStruct>,
+    /// One sentence per conflict, sorted. A conflict leaves the structs in
+    /// a shape [`generate_typescript`] still renders deterministically, so
+    /// the best-effort entry points can ignore it.
+    conflicts: Vec<String>,
+}
+
+/// The names the generated file declares beside the props interfaces. A
+/// project struct of one of these names would declare it twice.
+const GENERATED_DECLARATIONS: [&str; 4] = ["Pages", "SharedProps", "Errors", "PageProps"];
+
+impl SourceScan {
+    /// Collect what one parsed file, at `path`, declares and calls.
+    fn visit_file(&mut self, path: &Path, syntax: &syn::File) {
+        let mut structs = InertiaPropsVisitor::new();
+        structs.visit_file(syntax);
+        for s in structs.structs.iter().chain(&structs.plain_structs) {
+            self.struct_files
+                .entry(s.name.clone())
+                .or_insert_with(|| path.to_path_buf());
+        }
+        self.derived.extend(structs.structs);
+        self.plain.extend(structs.plain_structs);
+
+        let mut preserve = PreserveBigIntegersVisitor::default();
+        preserve.visit_file(syntax);
+        self.preserves_big_integers |= preserve.found;
+
+        let mut calls = InertiaCallVisitor::default();
+        calls.visit_file(syntax);
+        self.renders.extend(
+            calls
+                .renders
+                .into_iter()
+                .map(|site| (path.to_path_buf(), site)),
+        );
+        self.shared_data.extend(calls.shared_data);
+    }
+
+    /// The structs to emit: the plain structs the derived ones and the
+    /// render sites reach resolved (see [`resolve_reachable`]), the wide
+    /// integers settled for this project (see [`settle_wide_integers`]),
+    /// and each struct given the components it renders and its role.
+    fn finish(mut self, options: GenerateOptions) -> FinishedScan {
+        // A page rendered with a plain struct, one that derives only
+        // `Serialize`, is typed by it, so it is emitted like a derived one.
+        let derived_names: HashSet<String> = self.derived.iter().map(|s| s.name.clone()).collect();
+        let rendered: HashSet<String> = self
+            .renders
+            .iter()
+            .filter_map(|(_, site)| site.props.clone())
+            .filter(|name| !derived_names.contains(name))
+            .collect();
+        let mut promoted: HashSet<String> = HashSet::new();
+        let (roots, plain): (Vec<_>, Vec<_>) = std::mem::take(&mut self.plain)
+            .into_iter()
+            .partition(|s| rendered.contains(&s.name) && promoted.insert(s.name.clone()));
+        self.derived.extend(roots);
+
+        let mut structs = resolve_reachable(std::mem::take(&mut self.derived), plain);
+        if !(options.big_integers || self.preserves_big_integers) {
+            settle_wide_integers(&mut structs);
+        }
+
+        let mut conflicts = Vec::new();
+        self.assign_components(&mut structs, &mut conflicts);
+        self.assign_roles(&mut structs, &mut conflicts);
+        for s in &structs {
+            if GENERATED_DECLARATIONS.contains(&s.name.as_str()) {
+                conflicts.push(format!(
+                    "struct `{}` ({}) has the name of a declaration the generated file \
+                     writes; rename it, since `{}` would be declared twice",
+                    s.name,
+                    self.file_of(&s.name),
+                    s.name
+                ));
+            }
+        }
+        conflicts.sort();
+        FinishedScan { structs, conflicts }
+    }
+
+    /// Where the struct `name` is declared, for a message.
+    fn file_of(&self, name: &str) -> String {
+        self.struct_files
+            .get(name)
+            .map_or_else(|| "src".to_string(), |path| path.display().to_string())
+    }
+
+    /// Give each struct the components rendered with it. A component
+    /// rendered with two structs is a conflict, and goes to neither.
+    fn assign_components(&self, structs: &mut [InertiaPropsStruct], conflicts: &mut Vec<String>) {
+        // A generic struct has no single interface to name: `Pages` would
+        // need its type arguments, which the call site does not spell out.
+        let pairable: HashSet<String> = structs
+            .iter()
+            .filter(|s| s.type_params.is_empty())
+            .map(|s| s.name.clone())
+            .collect();
+        let mut by_component: BTreeMap<&str, BTreeMap<&str, BTreeSet<String>>> = BTreeMap::new();
+        for (path, site) in &self.renders {
+            if let (Some(component), Some(props)) = (&site.component, &site.props)
+                && pairable.contains(props)
+            {
+                by_component
+                    .entry(component)
+                    .or_default()
+                    .entry(props)
+                    .or_default()
+                    .insert(path.display().to_string());
+            }
+        }
+        for (component, props) in by_component {
+            if props.len() > 1 {
+                let named: Vec<String> = props
+                    .iter()
+                    .map(|(name, files)| {
+                        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+                        format!("`{name}` ({})", files.join(", "))
+                    })
+                    .collect();
+                conflicts.push(format!(
+                    "the component `{component}` is rendered with {}; a page has one props \
+                     type, so render it with one struct or give each its own component",
+                    named.join(" and ")
+                ));
+                continue;
+            }
+            if let Some((name, _)) = props.first_key_value()
+                && let Some(s) = structs.iter_mut().find(|s| s.name == *name)
+            {
+                s.components.push(component.to_string());
+            }
+        }
+    }
+
+    /// Give the struct `Inertia::share_data` is given the shared role, and
+    /// check that one struct at most holds each role.
+    fn assign_roles(&self, structs: &mut [InertiaPropsStruct], conflicts: &mut Vec<String>) {
+        for name in &self.shared_data {
+            if let Some(s) = structs.iter_mut().find(|s| s.name == *name)
+                && s.role.is_none()
+            {
+                s.role = Some(PropsRole::Shared);
+            }
+        }
+        for (role, what, marker) in [
+            (
+                PropsRole::Shared,
+                "shared props",
+                "`#[inertia_props(shared)]` or `Inertia::share_data`",
+            ),
+            (PropsRole::Flash, "flash data", "`#[inertia_props(flash)]`"),
+        ] {
+            let holders: Vec<String> = structs
+                .iter()
+                .filter(|s| s.role == Some(role))
+                .map(|s| format!("`{}` ({})", s.name, self.file_of(&s.name)))
+                .collect();
+            if holders.len() > 1 {
+                conflicts.push(format!(
+                    "the {what} are typed by more than one struct, {}, each named by \
+                     {marker}; keep one",
+                    holders.join(" and ")
+                ));
+            }
+        }
+    }
+}
+
+/// One place the sources render an Inertia page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderSite {
+    /// The component's name, or `None` when the call does not give it as a
+    /// string literal.
+    pub(crate) component: Option<String>,
+    /// The struct the page's props are, when the call names one; checked
+    /// against the scanned structs later.
+    pub(crate) props: Option<String>,
+}
+
+/// Finds the calls that render an Inertia page and the struct a page's
+/// props are, and the struct `Inertia::share_data` shares.
+///
+/// A page is rendered by `inertia_response!(req, "Name", props)`, by
+/// `InertiaResponse::new("Name")` (whose chain may add a struct with
+/// `.with_data(..)` or `.try_with_data(..)`), and by the facade's
+/// `Inertia::data("Name", dto)`, `Inertia::try_data` and
+/// `Inertia::paginate`. Props are a struct when the expression is a struct
+/// literal, a call through the struct's path (`Props::new(..)`), or a bare
+/// path that may name a unit struct.
+#[derive(Default)]
+pub(crate) struct InertiaCallVisitor {
+    pub(crate) renders: Vec<RenderSite>,
+    pub(crate) shared_data: Vec<String>,
+}
+
+/// The last two segments of a path expression, as `(type, function)`:
+/// `("InertiaResponse", "new")` for `suprnova::InertiaResponse::new`.
+fn last_two_segments(func: &Expr) -> Option<(String, String)> {
+    let Expr::Path(path) = func else {
+        return None;
+    };
+    let mut segments = path.path.segments.iter().rev();
+    let function = segments.next()?.ident.to_string();
+    let owner = segments.next()?.ident.to_string();
+    Some((owner, function))
+}
+
+/// The string a component argument holds, or `None` for anything but a
+/// string literal.
+fn component_literal(arg: Option<&Expr>) -> Option<String> {
+    arg.and_then(string_literal)
+}
+
+/// The struct an expression builds, when it names one by its path: a
+/// struct literal, a call through the struct's path (`Props::new(..)`,
+/// `Props::default()`), or a bare path (a unit struct, or a constant such
+/// as `Props::EMPTY`). Whether the name is a scanned struct is checked
+/// later.
+fn props_struct_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Struct(literal) => type_segment(&literal.path),
+        Expr::Call(call) => match &*call.func {
+            Expr::Path(path) => type_segment(&path.path),
+            _ => None,
+        },
+        Expr::Path(path) => type_segment(&path.path),
+        Expr::Paren(inner) => props_struct_name(&inner.expr),
+        Expr::Reference(inner) => props_struct_name(&inner.expr),
+        _ => None,
+    }
+}
+
+/// The last segment of `path` written like a type: in PascalCase, so not a
+/// module or function (`snake_case`) and not a constant (`SCREAMING_CASE`).
+/// `Self` names no struct the scan can see.
+fn type_segment(path: &syn::Path) -> Option<String> {
+    path.segments
+        .iter()
+        .rev()
+        .map(|segment| segment.ident.to_string())
+        .find(|name| {
+            name.starts_with(|first: char| first.is_ascii_uppercase())
+                && (name.len() == 1 || name.chars().any(|ch| ch.is_ascii_lowercase()))
+        })
+        .filter(|name| name != "Self")
+}
+
+/// Parse an `inertia_response!` input the way the macro does: a request,
+/// the component, then props, which are typed when they start with an
+/// identifier and JSON-like when they start with a brace.
+fn inertia_response_site(tokens: proc_macro2::TokenStream) -> Option<RenderSite> {
+    let parser = |input: syn::parse::ParseStream| -> syn::Result<RenderSite> {
+        input.parse::<Expr>()?;
+        input.parse::<Token![,]>()?;
+        let component = input.parse::<Expr>()?;
+        input.parse::<Token![,]>()?;
+        let props = if input.peek(syn::Ident) {
+            props_struct_name(&input.parse::<Expr>()?)
+        } else {
+            None
+        };
+        input.parse::<proc_macro2::TokenStream>()?;
+        Ok(RenderSite {
+            component: string_literal(&component),
+            props,
+        })
+    };
+    syn::parse::Parser::parse2(parser, tokens).ok()
+}
+
+impl InertiaCallVisitor {
+    /// Record an `InertiaResponse::new(..)` chain whose outermost call is
+    /// `top`, and visit what the chain's calls are given. `false` when
+    /// `top` is not such a chain.
+    fn visit_response_chain(&mut self, top: &syn::ExprMethodCall) -> bool {
+        let mut calls = vec![top];
+        let mut receiver = &*top.receiver;
+        let root = loop {
+            match receiver {
+                Expr::MethodCall(call) => {
+                    calls.push(call);
+                    receiver = &call.receiver;
+                }
+                Expr::Try(inner) => receiver = &inner.expr,
+                Expr::Await(inner) => receiver = &inner.base,
+                Expr::Paren(inner) => receiver = &inner.expr,
+                Expr::Call(call) => break call,
+                _ => return false,
+            }
+        };
+        if last_two_segments(&root.func) != Some(("InertiaResponse".to_string(), "new".to_string()))
+        {
+            return false;
+        }
+
+        let structs: BTreeSet<String> = calls
+            .iter()
+            .filter(|call| call.method == "with_data" || call.method == "try_with_data")
+            .filter_map(|call| call.args.first().and_then(props_struct_name))
+            .collect();
+        // A page built from two structs has no one interface to name.
+        let props = match structs.len() {
+            1 => structs.into_iter().next(),
+            _ => None,
+        };
+        self.renders.push(RenderSite {
+            component: component_literal(root.args.first()),
+            props,
+        });
+
+        for arg in &root.args {
+            self.visit_expr(arg);
+        }
+        for call in calls {
+            for arg in &call.args {
+                self.visit_expr(arg);
+            }
+        }
+        true
+    }
+}
+
+impl<'ast> Visit<'ast> for InertiaCallVisitor {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if !self.visit_response_chain(node) {
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Some((owner, function)) = last_two_segments(&node.func) {
+            match (owner.as_str(), function.as_str()) {
+                ("InertiaResponse", "new") | ("Inertia", "paginate") => {
+                    self.renders.push(RenderSite {
+                        component: component_literal(node.args.first()),
+                        props: None,
+                    });
+                }
+                ("Inertia", "data" | "try_data") => self.renders.push(RenderSite {
+                    component: component_literal(node.args.first()),
+                    props: node.args.iter().nth(1).and_then(props_struct_name),
+                }),
+                ("Inertia", "share_data") => {
+                    if let Some(name) = node.args.first().and_then(props_struct_name) {
+                        self.shared_data.push(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "inertia_response")
+            && let Some(site) = inertia_response_site(node.tokens.clone())
+        {
+            self.renders.push(site);
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+/// Turn every [`RustType::WideInteger`] into [`RustType::Number`]: in a
+/// project that does not preserve big integers, the server sends a wide
+/// integer as a plain JSON number and the client reads a `number`.
+fn settle_wide_integers(structs: &mut [InertiaPropsStruct]) {
+    fn settle(ty: &mut RustType) {
+        match ty {
+            RustType::WideInteger => *ty = RustType::Number,
+            RustType::Option(inner)
+            | RustType::Vec(inner)
+            | RustType::Field(inner)
+            | RustType::Prop(inner) => settle(inner),
+            RustType::HashMap(key, val) => {
+                settle(key);
+                settle(val);
+            }
+            _ => {}
+        }
+    }
+    for s in structs {
+        for f in &mut s.fields {
+            settle(&mut f.ty);
+        }
+    }
+}
+
+/// Finds a call that turns big-integer preservation on:
+/// `.preserve_big_integers(arg)` on `InertiaConfig` or `InertiaResponse`,
+/// or the same function called through its path.
+///
+/// Any argument but a literal `false` counts. A literal `true` turns it on,
+/// and a variable may: a type that says `number | bigint` for a value that
+/// arrives as a `number` costs a check the compiler asks for, where one
+/// that says `number` for a value that arrives as a `BigInt` breaks
+/// arithmetic at run time. A call inside a macro is read from its tokens,
+/// since `syn` does not parse a macro's input.
+#[derive(Default)]
+struct PreserveBigIntegersVisitor {
+    found: bool,
+}
+
+/// The method and function name [`PreserveBigIntegersVisitor`] looks for.
+const PRESERVE_BIG_INTEGERS: &str = "preserve_big_integers";
+
+/// Whether an argument turns preservation on: anything but `false`.
+fn turns_preservation_on(arg: Option<&Expr>) -> bool {
+    !matches!(
+        arg,
+        Some(Expr::Lit(ExprLit {
+            lit: Lit::Bool(flag),
+            ..
+        })) if !flag.value
+    )
+}
+
+/// The token form of [`turns_preservation_on`], for a call inside a macro:
+/// `tokens` is everything inside the call's parentheses, and its last
+/// comma-separated argument decides.
+fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    let last = trees
+        .rsplit(|tree| matches!(tree, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
+        .find(|argument| !argument.is_empty())
+        .unwrap_or(&[]);
+    !matches!(last, [proc_macro2::TokenTree::Ident(ident)] if ident == "false")
+}
+
+/// Whether `tokens`, or a group nested in them, call
+/// `preserve_big_integers(..)` with anything but `false`.
+fn macro_tokens_preserve(tokens: proc_macro2::TokenStream) -> bool {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    trees.iter().enumerate().any(|(at, tree)| match tree {
+        proc_macro2::TokenTree::Ident(ident) if ident == PRESERVE_BIG_INTEGERS => {
+            matches!(
+                trees.get(at + 1),
+                Some(proc_macro2::TokenTree::Group(group))
+                    if group.delimiter() == proc_macro2::Delimiter::Parenthesis
+                        && tokens_turn_preservation_on(group.stream())
+            )
+        }
+        proc_macro2::TokenTree::Group(group) => macro_tokens_preserve(group.stream()),
+        _ => false,
+    })
+}
+
+impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == PRESERVE_BIG_INTEGERS && turns_preservation_on(node.args.last()) {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = &*node.func
+            && path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == PRESERVE_BIG_INTEGERS)
+            && turns_preservation_on(node.args.last())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if macro_tokens_preserve(node.tokens.clone()) {
+            self.found = true;
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+/// Walk a directory tree into `scan`, skipping what cannot be read.
+fn visit_path_into(root: &Path, scan: &mut SourceScan) {
     // These public best-effort scan paths predate fallible generation APIs.
     // File generation uses `visit_path_into_checked` directly so it can
     // refuse to overwrite an artifact after an incomplete scan.
-    drop(visit_path_into_checked(root, derived, plain));
+    drop(visit_path_into_checked(root, scan));
 }
 
 #[derive(Debug)]
@@ -573,25 +1123,27 @@ struct ScanFailure {
 
 impl ScanFailure {
     fn new(root: &Path, path: &Path, operation: &'static str, detail: String) -> Self {
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        let path = match (root.file_name(), relative.as_os_str().is_empty()) {
-            (Some(root_name), true) => PathBuf::from(root_name),
-            (Some(root_name), false) if relative != path => PathBuf::from(root_name).join(relative),
-            _ => path.to_path_buf(),
-        };
         Self {
-            path,
+            path: display_path(root, path),
             operation,
             detail,
         }
     }
 }
 
-fn visit_path_into_checked(
-    root: &Path,
-    derived: &mut Vec<InertiaPropsStruct>,
-    plain: &mut Vec<InertiaPropsStruct>,
-) -> Vec<ScanFailure> {
+/// `path` as a message names it: from the scanned directory's own name
+/// (`src/controllers/home.rs`), or whole when it lies outside that
+/// directory.
+fn display_path(root: &Path, path: &Path) -> PathBuf {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    match (root.file_name(), relative.as_os_str().is_empty()) {
+        (Some(root_name), true) => PathBuf::from(root_name),
+        (Some(root_name), false) if relative != path => PathBuf::from(root_name).join(relative),
+        _ => path.to_path_buf(),
+    }
+}
+
+fn visit_path_into_checked(root: &Path, scan: &mut SourceScan) -> Vec<ScanFailure> {
     // `sort_by_file_name` is not cosmetic. The output file is checked in,
     // so the walk order becomes the declaration order in a tracked
     // artifact - and an unsorted `WalkDir` yields whatever order the
@@ -611,15 +1163,10 @@ fn visit_path_into_checked(
                 Err(ScanFailure::new(root, &path, "scan", error.to_string()))
             }
         });
-    visit_entries_into_checked(root, entries, derived, plain)
+    visit_entries_into_checked(root, entries, scan)
 }
 
-fn visit_entries_into_checked<I>(
-    root: &Path,
-    entries: I,
-    derived: &mut Vec<InertiaPropsStruct>,
-    plain: &mut Vec<InertiaPropsStruct>,
-) -> Vec<ScanFailure>
+fn visit_entries_into_checked<I>(root: &Path, entries: I, scan: &mut SourceScan) -> Vec<ScanFailure>
 where
     I: IntoIterator<Item = Result<PathBuf, ScanFailure>>,
 {
@@ -656,10 +1203,7 @@ where
             }
         };
 
-        let mut visitor = InertiaPropsVisitor::new();
-        visitor.visit_file(&syntax);
-        derived.extend(visitor.structs);
-        plain.extend(visitor.plain_structs);
+        scan.visit_file(&display_path(root, &path), &syntax);
     }
 
     failures.sort_by(|left, right| {
@@ -671,11 +1215,33 @@ where
     failures
 }
 
-fn scan_inertia_props_checked(project_path: &Path) -> Result<Vec<InertiaPropsStruct>, String> {
+fn scan_project_checked(
+    project_path: &Path,
+    options: GenerateOptions,
+) -> Result<Vec<InertiaPropsStruct>, String> {
+    let finished = scan_project_with_failures(project_path, options)?;
+    if finished.conflicts.is_empty() {
+        return Ok(finished.structs);
+    }
+    let mut message = format!(
+        "The Inertia types conflict in {} place(s); generated types were left unchanged:",
+        finished.conflicts.len()
+    );
+    for conflict in finished.conflicts {
+        message.push_str(&format!("\n- {conflict}"));
+    }
+    Err(message)
+}
+
+/// Scan `project_path/src`, failing on any file that cannot be found, read
+/// or parsed, since a partial scan would write a partial artifact.
+fn scan_project_with_failures(
+    project_path: &Path,
+    options: GenerateOptions,
+) -> Result<FinishedScan, String> {
     let src_path = project_path.join("src");
-    let mut derived = Vec::new();
-    let mut plain = Vec::new();
-    let failures = visit_path_into_checked(&src_path, &mut derived, &mut plain);
+    let mut scan = SourceScan::default();
+    let failures = visit_path_into_checked(&src_path, &mut scan);
     if !failures.is_empty() {
         let mut message = format!(
             "Rust source scan failed with {} error(s); generated types were left unchanged:",
@@ -692,7 +1258,7 @@ fn scan_inertia_props_checked(project_path: &Path) -> Result<Vec<InertiaPropsStr
         return Err(message);
     }
 
-    Ok(resolve_reachable(derived, plain))
+    Ok(scan.finish(options))
 }
 
 /// Promote plain (underived) structs reachable from the derived roots' fields
@@ -836,20 +1402,28 @@ fn references_json(structs: &[InertiaPropsStruct]) -> bool {
 /// can't see) degrades to `unknown`, so the emitted `.ts` never references an
 /// undeclared identifier that would fail `tsc`/`svelte-check`. `is_resolved_custom`
 /// is the single source of truth shared with the unresolved-ref diagnostic.
+///
+/// A map key is a JSON string on the wire, never a `$bigint` marker, and
+/// TypeScript refuses `bigint` as a `Record` key, so a wide integer key is
+/// `number`.
 fn rust_type_to_ts(ty: &RustType, known: &HashSet<String>, generics: &[String]) -> String {
+    let nested = |inner: &RustType| rust_type_to_ts(inner, known, generics);
     match ty {
         RustType::String => "string".to_string(),
         RustType::Number => "number".to_string(),
+        RustType::WideInteger => "number | bigint".to_string(),
         RustType::Bool => "boolean".to_string(),
-        RustType::Option(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
-        RustType::Vec(inner) => format!("Array<{}>", rust_type_to_ts(inner, known, generics)),
-        RustType::HashMap(key, val) => format!(
-            "Record<{}, {}>",
-            rust_type_to_ts(key, known, generics),
-            rust_type_to_ts(val, known, generics)
-        ),
-        RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
-        RustType::Prop(inner) => rust_type_to_ts(inner, known, generics),
+        RustType::Option(inner) => format!("{} | null", nested(inner)),
+        RustType::Vec(inner) => format!("Array<{}>", nested(inner)),
+        RustType::HashMap(key, val) => {
+            let key = match &**key {
+                RustType::WideInteger => "number".to_string(),
+                other => nested(other),
+            };
+            format!("Record<{key}, {}>", nested(val))
+        }
+        RustType::Field(inner) => format!("{} | null", nested(inner)),
+        RustType::Prop(inner) => nested(inner),
         RustType::Json => {
             if known.contains(JSON_VALUE_NAME) {
                 // The project owns the name; the alias stood down (see
@@ -1161,26 +1735,122 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
     out
 }
 
+/// Settings for one generation pass that the Rust sources do not decide.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GenerateOptions {
+    /// `--big-integers`: emit the wide integers as `number | bigint` even
+    /// when no `preserve_big_integers(..)` call under `src/` turns
+    /// preservation on, for a project that turns it on where the scan does
+    /// not look, such as in another crate.
+    pub big_integers: bool,
+}
+
 /// Generate TypeScript interfaces from the structs.
 ///
-/// This is the canonical emission path; both the file-write entry point and
-/// the in-memory `generate_types_string` helper call through here.
+/// This is the canonical emission path for the whole file; the file-write
+/// entry point calls through here. What the rest of the sources decide is
+/// already in `structs`: the scan settles the wide integers and gives each
+/// struct its components and its role before emission.
+///
+/// After the props interfaces come the page declarations: `Pages`, mapping
+/// each component to its props interface; `SharedProps`, the framework's
+/// `root` and the shared struct's fields; `Errors` and `PageProps<C>`,
+/// which is what Inertia's `Page.props` is for that component; and the
+/// `@inertiajs/core` augmentation that types `usePage()` with no argument.
 pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
+    let mut output = String::new();
+    output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
+    output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
+    // The augmentation at the end merges into `@inertiajs/core`'s
+    // `InertiaConfig` only when this file imports the module; without the
+    // import, `declare module` would declare a new module instead.
+    output.push_str("import '@inertiajs/core';\n\n");
+    output.push_str(&render_structs(structs));
+    output.push_str(&render_page_declarations(structs));
+    end_with_single_newline(output)
+}
+
+/// The declarations that type a page beside the props interfaces, each
+/// followed by a blank line.
+fn render_page_declarations(structs: &[InertiaPropsStruct]) -> String {
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
+
+    // Sorted by component; on a conflict the scan reports, the struct
+    // that sorts first keeps the component, so the output stays a function
+    // of the input.
+    let mut pages: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut by_name: Vec<&InertiaPropsStruct> = structs.iter().collect();
+    by_name.sort_by(|a, b| a.name.cmp(&b.name));
+    for s in &by_name {
+        for component in &s.components {
+            pages.entry(component).or_insert(&s.name);
+        }
+    }
+    let mut out = String::from("export interface Pages {\n");
+    for (component, props) in pages {
+        out.push_str(&format!("  {}: {props};\n", ts_string_key(component)));
+    }
+    out.push_str("}\n\n");
+
+    // The framework shares `root` itself and writes it after every other
+    // shared prop, so a shared struct's own `root` field never arrives.
+    out.push_str("export interface SharedProps {\n  root: string;\n");
+    let role = |role: PropsRole| by_name.iter().find(|s| s.role == Some(role));
+    if let Some(shared) = role(PropsRole::Shared) {
+        // A lazy field is left out of a shared `Data` object, as
+        // `Inertia::share_data` leaves it out: a shared prop has no
+        // `?include=` gate.
+        for f in shared.fields.iter().filter(|f| {
+            f.in_output && !f.data_flags.input_only && !f.data_flags.lazy && f.name != "root"
+        }) {
+            let marker = if f.may_be_absent {
+                "?"
+            } else {
+                optional_marker(&f.ty)
+            };
+            out.push_str(&format!(
+                "  {}{marker}: {};\n",
+                ts_property_key(&f.name),
+                rust_type_to_ts(&f.ty, &known, &[])
+            ));
+        }
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("export type Errors = Record<string, string>;\n\n");
+    out.push_str(
+        "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n\n",
+    );
+
+    out.push_str("declare module '@inertiajs/core' {\n  export interface InertiaConfig {\n");
+    out.push_str("    sharedPageProps: SharedProps;\n    errorValueType: string;\n");
+    if let Some(flash) = role(PropsRole::Flash) {
+        out.push_str(&format!("    flashDataType: {};\n", flash.name));
+    }
+    out.push_str("  }\n}\n");
+    out
+}
+
+/// A property key that is always quoted, as `Pages` writes component
+/// names: `"auth/Login"` and `"Home"` alike.
+fn ts_string_key(name: &str) -> String {
+    serde_json::Value::String(name.to_owned()).to_string()
+}
+
+/// The `JsonValue` alias when something needs it, then one interface (or an
+/// output and an input pair) per struct, each followed by a blank line.
+fn render_structs(structs: &[InertiaPropsStruct]) -> String {
     let sorted = topological_sort(structs);
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
 
     let mut output = String::new();
-    output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
-    output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
     if json_alias_needed(structs, &known) {
         output.push_str(JSON_VALUE_ALIAS);
     }
-
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
     }
-
-    end_with_single_newline(output)
+    output
 }
 
 /// Trim a finished emission to exactly one trailing newline.
@@ -1214,41 +1884,29 @@ pub enum ScanInput {
     Walk(std::path::PathBuf),
 }
 
-/// Generate TypeScript type declarations from a given source, returning the
-/// result as a `String` without writing to disk.
-///
-/// Both the test harness and `generate_types_to_file` delegate here so that
-/// a single emission path is always exercised.
+/// Generate the struct declarations from a given source, returning them as
+/// a `String` without writing to disk: the props interfaces of the file,
+/// without its header, its import and its page declarations, with the
+/// default [`GenerateOptions`].
 // Used exclusively from integration tests (suprnova-cli/tests/), which are
 // separate compilation units invisible to the dead_code lint on the binary target.
 #[allow(dead_code)]
 pub fn generate_types_string(input: ScanInput) -> String {
-    let structs: Vec<InertiaPropsStruct> = match input {
+    generate_types_string_with(input, GenerateOptions::default())
+}
+
+/// [`generate_types_string`] with explicit [`GenerateOptions`], so a test
+/// can set what a command-line flag sets without a filesystem.
+pub fn generate_types_string_with(input: ScanInput, options: GenerateOptions) -> String {
+    let mut scan = SourceScan::default();
+    match input {
         ScanInput::Source(src) => {
             let syntax = syn::parse_file(src).expect("ScanInput::Source: invalid Rust");
-            let mut visitor = InertiaPropsVisitor::new();
-            visitor.visit_file(&syntax);
-            resolve_reachable(visitor.structs, visitor.plain_structs)
+            scan.visit_file(Path::new("src/lib.rs"), &syntax);
         }
-        ScanInput::Walk(root) => {
-            let mut derived = Vec::new();
-            let mut plain = Vec::new();
-            visit_path_into(&root, &mut derived, &mut plain);
-            resolve_reachable(derived, plain)
-        }
-    };
-
-    // Emit without the file-level header comment so tests get clean output.
-    let sorted = topological_sort(&structs);
-    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
-    let mut output = String::new();
-    if json_alias_needed(&structs, &known) {
-        output.push_str(JSON_VALUE_ALIAS);
+        ScanInput::Walk(root) => visit_path_into(&root, &mut scan),
     }
-    for s in sorted {
-        output.push_str(&emit_ts_for_struct(s, &known));
-    }
-    end_with_single_newline(output)
+    end_with_single_newline(render_structs(&scan.finish(options).structs))
 }
 
 /// Atomically replace `path` with `contents`, but only when they differ from
@@ -1459,11 +2117,15 @@ impl GenerationOutcome {
 ///
 /// If any Rust source cannot be discovered, read, or parsed, generation fails
 /// before the existing output file or its parent directory is touched.
+/// `options` carries what the command line sets: `generate-types` and
+/// `serve` pass the same ones to the first run and to every regeneration
+/// their watchers make.
 pub fn generate_types_to_file(
     project_path: &Path,
     output_path: &Path,
+    options: GenerateOptions,
 ) -> Result<GenerationOutcome, String> {
-    let structs = scan_inertia_props_checked(project_path)?;
+    let structs = scan_project_checked(project_path, options)?;
 
     // Surface prop fields that reference un-generatable types (degraded to
     // `unknown` in the output) so the missing derive is fixed at the source.
@@ -1892,7 +2554,7 @@ fn report_up_to_date(output_path: &Path) {
 }
 
 /// Main entry point for the generate-types command
-pub fn run(output: Option<String>, watch: bool, routes: bool) {
+pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateOptions) {
     let project_path = Path::new(".");
 
     // Validate Suprnova project
@@ -1908,7 +2570,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
 
     ui::info("Scanning for InertiaProps structs...");
 
-    match generate_types_to_file(project_path, &output_path) {
+    match generate_types_to_file(project_path, &output_path, options) {
         Ok(outcome) if outcome.count == 0 => {
             ui::warning("No InertiaProps structs found.");
             report_generation(&output_path, &outcome);
@@ -1949,7 +2611,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
 
     if watch {
         ui::hint("Watching for changes...");
-        if let Err(e) = start_watcher(project_path, &output_path, &lang_keys_output) {
+        if let Err(e) = start_watcher(project_path, &output_path, &lang_keys_output, options) {
             ui::error(&format!("Failed to start watcher: {}", e));
             std::process::exit(1);
         }
@@ -1990,6 +2652,7 @@ fn start_watcher(
     project_path: &Path,
     output_path: &Path,
     lang_keys_output: &Path,
+    options: GenerateOptions,
 ) -> Result<(), String> {
     use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -2049,7 +2712,7 @@ fn start_watcher(
 
         if due.rust {
             ui::hint("Detected changes, regenerating types...");
-            match generate_types_to_file(&project_path, &output_path) {
+            match generate_types_to_file(&project_path, &output_path, options) {
                 Ok(outcome) if outcome.wrote => {
                     ui::success(&format!("Regenerated {} type(s)", outcome.count));
                 }
@@ -2142,7 +2805,7 @@ mod watch_loop_tests {
         while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
 
         assert_eq!(
-            generate_types_to_file(dir.path(), &out)
+            generate_types_to_file(dir.path(), &out, GenerateOptions::default())
                 .expect("first run")
                 .count,
             1
@@ -2377,13 +3040,14 @@ mod file_shape_tests {
     #[test]
     fn the_alias_and_every_declaration_keep_their_separating_blank_line() {
         // Only the end of the file changes. The blank line between the
-        // header, the `JsonValue` alias, and each interface is the
-        // readable shape the issue asked to preserve.
+        // header, the `@inertiajs/core` import, the `JsonValue` alias, and
+        // each declaration is the readable shape the issue asked to
+        // preserve.
         let ts = generate_typescript(&parse(TWO));
         assert_single_trailing_newline(&ts);
         assert!(
-            ts.contains("regenerate.\n\nexport type JsonValue"),
-            "header and alias stay separated:\n{ts}"
+            ts.contains("regenerate.\n\nimport '@inertiajs/core';\n\nexport type JsonValue"),
+            "header, import and alias stay separated:\n{ts}"
         );
         assert!(
             ts.contains("};\n\nexport interface"),
@@ -2393,11 +3057,13 @@ mod file_shape_tests {
             ts.contains("}\n\nexport interface"),
             "interfaces stay separated:\n{ts}"
         );
-        assert_eq!(
-            ts.matches("export interface").count(),
-            2,
-            "both structs are still emitted:\n{ts}"
-        );
+        for name in ["A", "B"] {
+            assert_eq!(
+                ts.matches(&format!("export interface {name} {{")).count(),
+                1,
+                "both structs are still emitted:\n{ts}"
+            );
+        }
     }
 
     #[test]
@@ -2803,13 +3469,15 @@ mod write_if_changed_tests {
         .expect("seed props.rs");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let first_run = generate_types_to_file(dir.path(), &out).expect("first run");
+        let first_run = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("first run");
         assert_eq!(first_run.count, 1);
         assert!(first_run.wrote, "a first run really does write the file");
         let first = fs::read_to_string(&out).expect("read output");
         let before = set_old_mtime(&out);
 
-        let second_run = generate_types_to_file(dir.path(), &out).expect("second run");
+        let second_run = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("second run");
         assert_eq!(second_run.count, 1, "the same struct is still emitted");
         assert!(
             !second_run.wrote,
@@ -2833,7 +3501,8 @@ mod write_if_changed_tests {
         .expect("seed props.rs");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        let populated = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("populated run");
         assert_eq!(populated.count, 1);
         assert!(populated.wrote);
         assert!(
@@ -2844,7 +3513,8 @@ mod write_if_changed_tests {
 
         fs::write(&props, "pub struct PlainRustType;\n").expect("remove final props derive");
 
-        let emptied = generate_types_to_file(dir.path(), &out).expect("empty run");
+        let emptied = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("empty run");
         assert_eq!(emptied.count, 0);
         assert!(
             emptied.wrote,
@@ -2855,7 +3525,8 @@ mod write_if_changed_tests {
         assert!(!empty_output.contains("HomeProps"));
         let before = set_old_mtime(&out);
 
-        let unchanged = generate_types_to_file(dir.path(), &out).expect("unchanged empty run");
+        let unchanged = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("unchanged empty run");
         assert_eq!(unchanged.count, 0);
         assert!(!unchanged.wrote, "identical empty output is unchanged");
         assert_eq!(mtime(&out), before, "empty rerun must not rewrite");
@@ -2870,7 +3541,8 @@ mod write_if_changed_tests {
         fs::write(&props, "pub struct PlainRustType;\n").expect("seed plain Rust");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        let empty = generate_types_to_file(dir.path(), &out).expect("first empty run");
+        let empty = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("first empty run");
         assert_eq!(empty.count, 0);
         assert!(empty.wrote, "a missing artifact must be created");
         assert_eq!(
@@ -2879,7 +3551,8 @@ mod write_if_changed_tests {
         );
         let before = set_old_mtime(&out);
 
-        let unchanged = generate_types_to_file(dir.path(), &out).expect("second empty run");
+        let unchanged = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("second empty run");
         assert_eq!(unchanged.count, 0);
         assert!(!unchanged.wrote);
         assert_eq!(mtime(&out), before);
@@ -2890,7 +3563,8 @@ mod write_if_changed_tests {
         )
         .expect("add props derive");
 
-        let populated = generate_types_to_file(dir.path(), &out).expect("populated run");
+        let populated = generate_types_to_file(dir.path(), &out, GenerateOptions::default())
+            .expect("populated run");
         assert_eq!(populated.count, 1);
         assert!(populated.wrote);
         assert!(
@@ -2916,7 +3590,7 @@ mod write_if_changed_tests {
         fs::write(&out, "// last complete output\n").expect("seed output");
         let before = set_old_mtime(&out);
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("an incomplete Rust parse must abort generation"),
         };
@@ -2948,7 +3622,7 @@ mod write_if_changed_tests {
         let out = dir.path().join("inertia-props.ts");
         fs::write(&out, "// last complete output\n").expect("seed output");
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("a Rust source read failure must abort generation"),
         };
@@ -2966,7 +3640,7 @@ mod write_if_changed_tests {
         let output_parent = dir.path().join("frontend/src/types");
         let out = output_parent.join("inertia-props.ts");
 
-        let error = match generate_types_to_file(dir.path(), &out) {
+        let error = match generate_types_to_file(dir.path(), &out, GenerateOptions::default()) {
             Err(error) => error,
             Ok(_) => panic!("a missing src directory must not look like an empty project"),
         };
@@ -2995,16 +3669,15 @@ mod write_if_changed_tests {
             "scan",
             "fixture traversal failure".to_string(),
         );
-        let mut derived = Vec::new();
-        let mut plain = Vec::new();
-        let failures = visit_entries_into_checked(
-            &src,
-            [Ok(props), Err(traversal_failure)],
-            &mut derived,
-            &mut plain,
-        );
+        let mut scan = SourceScan::default();
+        let failures =
+            visit_entries_into_checked(&src, [Ok(props), Err(traversal_failure)], &mut scan);
 
-        assert_eq!(derived.len(), 1, "the valid file must be visited first");
+        assert_eq!(
+            scan.derived.len(),
+            1,
+            "the valid file must be visited first"
+        );
         assert_eq!(failures.len(), 1, "the later walk error must not be lost");
         assert_eq!(failures[0].path, PathBuf::from("src/z_unreadable"));
         assert_eq!(failures[0].operation, "scan");
