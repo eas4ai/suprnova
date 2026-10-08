@@ -267,6 +267,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Inertia::install` register it as the named middleware `inertia` instead
   of on every route, so an API group carries no `Vary: X-Inertia` and has no
   redirect turned into `303` (MW-08, MW-10).
+- **`ssr:start`, `ssr:stop` and `ssr:check` on the application binary**,
+  Laravel's `inertia:start-ssr`, `inertia:stop-ssr` and `inertia:check-ssr`.
+  They read the Inertia configuration the application installed, so they
+  start, stop and check the worker first visits dispatch to; they run both
+  bootstrap hooks, since the scaffold installs Inertia in `http_bootstrap`,
+  bind no port and boot no runtime driver, and fail naming
+  `Inertia::install` when nothing is installed. `ssr:start --runtime`
+  overrides `InertiaConfig::ssr_runtime`, and the command exits with the
+  status its worker exited with (CM-01, CM-02, CM-03, SS-10).
+- **`suprnova ssr:stop {--graceful} [--url] [--timeout-ms]`**, the CLI's
+  `inertia:stop-ssr`: it sends `GET {url}/shutdown` and succeeds when the
+  worker closes the connection without an answer, as the Inertia SSR server
+  does when it exits, or, with `--graceful`, when no worker can be
+  connected to. An answer, or a connection still open after the timeout
+  (2000 ms by default), fails (CM-02).
 
 ### Changed
 
@@ -656,6 +671,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   route the server dispatches, the Inertia middleware installed or not;
   `location_for(&req, url)` stays for code outside a dispatched request
   (RF-16).
+- **`suprnova ssr:start` makes Laravel's checks before it starts a worker.**
+  It ran `runtime bundle` with any configuration: it started a worker with
+  SSR switched off, looked for one bundle path only, never checked the
+  runtime, started a second worker beside a running one, and died of a
+  `SIGTERM` that left its worker running. It now runs the shared
+  `suprnova::console::ssr::start`, as the application binary's `ssr:start`
+  does: it finds the bundle as the SSR dispatch does (the configured path,
+  then the six conventional paths, warning when the configured one is
+  missing and a conventional one runs), refuses a runtime it cannot find
+  when `SUPRNOVA_SSR_ENSURE_RUNTIME_EXISTS` is true, asks a worker at
+  `SUPRNOVA_SSR_URL` to shut down first, forwards Ctrl-C and `SIGTERM` to
+  the worker as `SIGTERM` (a second one kills it), and reports each line of
+  the worker's stderr as an error (CM-01).
+- **`suprnova ssr:check` asks the SSR gateway's health check.** It probed
+  `/health` with a client of its own, so its answer could differ from the
+  health check the framework uses, and its messages and exit codes were
+  its own (2 for a URL without a scheme). It now runs the shared
+  `suprnova::console::ssr::check` over the HTTP gateway's health check and
+  prints Laravel's messages: `Inertia SSR server is running.`, `Inertia SSR
+  server is not running.`, or `The SSR gateway does not support health
+  checks.`, exiting 0 or 1 (CM-03, SS-10).
 
 ### Fixed
 
