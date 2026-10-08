@@ -34,6 +34,7 @@ use std::sync::OnceLock;
 pub mod builtins;
 mod io;
 pub mod output;
+pub mod ssr;
 pub mod testing;
 mod typed;
 
