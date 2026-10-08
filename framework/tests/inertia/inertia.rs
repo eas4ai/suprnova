@@ -3781,7 +3781,7 @@ mod version_mw {
             .headers()
             .get("X-Inertia-Location")
             .expect("X-Inertia-Location header");
-        assert_eq!(location, "/users");
+        assert_eq!(location, "http://localhost/users");
     }
 
     #[tokio::test]
@@ -3844,7 +3844,7 @@ mod version_mw {
             .headers()
             .get("X-Inertia-Location")
             .expect("X-Inertia-Location header");
-        assert_eq!(location, "/users?page=3&q=alice");
+        assert_eq!(location, "http://localhost/users?page=3&q=alice");
     }
 
     /// Boot a one-shot HTTP server that resolves an `InertiaResponse`
@@ -3902,8 +3902,9 @@ mod version_mw {
     #[tokio::test]
     async fn page_url_and_the_version_bounce_url_agree_on_a_real_request() {
         // A 409 version bounce and the page object it bounces to must name
-        // the same URL, query string included; otherwise a stale-asset
-        // reload lands on page 1 while the page object still says page 3.
+        // the same path and query; otherwise a stale-asset reload lands on
+        // page 1 while the page object still says page 3. The bounce is
+        // absolute, as Laravel's `fullUrl()` is, and the page URL is not.
         // Both derive from `InertiaRequestExt::path_and_query`, and this
         // drives each through a real request for the same URI so any drift
         // between them fails here, not in a browser.
@@ -3920,14 +3921,15 @@ mod version_mw {
             .to_str()
             .unwrap()
             .to_string();
-        assert_eq!(location, "/users?page=3&q=alice");
+        assert_eq!(location, "http://localhost/users?page=3&q=alice");
 
         // (b) the Inertia page object's `url`, for the same URI.
         let page_url = resolve_page_url(uri).await;
         assert_eq!(page_url, "/users?page=3&q=alice");
 
-        // (c) byte-for-byte agreement.
-        assert_eq!(location, page_url);
+        // (c) the bounce is the page URL made absolute, as Laravel's
+        // `fullUrl()` is.
+        assert_eq!(location, format!("http://localhost{page_url}"));
     }
 }
 
@@ -4302,8 +4304,8 @@ fn mock_req_path_and_query_matches_hyper_uris_derivation() {
     // `hyper::Uri::path_and_query()` would for the same URI, so the
     // MockReq-based tests above are exercising a faithful stand-in.
     // The real pin - that `InertiaVersionMiddleware`'s `X-Inertia-Location`
-    // and `InertiaResponse::resolve`'s `page.url` agree byte-for-byte
-    // through a REAL `crate::http::Request` - lives in
+    // is `InertiaResponse::resolve`'s `page.url` made absolute, through a
+    // REAL `crate::http::Request` - lives in
     // `version_mw::page_url_and_the_version_bounce_url_agree_on_a_real_request`,
     // since both now derive their string through the single
     // `InertiaRequestExt::path_and_query` implementation on `Request`

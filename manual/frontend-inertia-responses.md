@@ -847,11 +847,16 @@ a browser that follows a `409` with no `Location` header has nowhere to go.
 
 Inertia versions the asset manifest so a long-lived client doesn't try
 to mount a page from yesterday's bundle against today's server. When
-the client's `X-Inertia-Version` header doesn't match the server's
-configured version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
-responds with `409 Conflict` and an `X-Inertia-Location` header naming
-the new URL - the Inertia client picks that up and does a full page
-reload, picking up the new bundle.
+the client's `X-Inertia-Version` header on a `GET` doesn't match the
+server's current version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
+responds with `409 Conflict` before the handler runs. `X-Inertia-Location`
+holds the request's absolute URL (scheme, host, path and query, as
+Laravel's `fullUrl()` gives it), and `X-Inertia-Version` holds the current
+version. The Inertia client does a full page reload at that URL, picking up
+the new bundle; for a poll or a background prop load it reads the version
+header instead, so an asynchronous request does not force the reload. A
+visit by any other method passes through: the `GET` its redirect leads to
+gets the 409.
 
 The bounce re-flashes the session first. The client answers a 409 with a
 full-page GET, and that GET is a fresh request - without the re-flash, a
@@ -1479,8 +1484,9 @@ finished document to correct it.
 it is what back/forward navigation and `router.reload()` replay - drop the
 query and every paginated or filtered page silently resets to page one.
 `InertiaVersionMiddleware` derives its `X-Inertia-Location` from the
-request's path and query too, so by default a 409 asset-version bounce
-lands the browser on exactly the URL the page object named.
+request's path and query too, made absolute with the request's scheme and
+host, so by default a 409 asset-version bounce lands the browser on
+exactly the URL the page object named.
 
 Override the derivation with `url_resolver` when the URL the client should
 record differs from the one that arrived - a locale prefix the SPA doesn't

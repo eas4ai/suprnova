@@ -354,6 +354,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   wins. `MANIFEST_VERSION_FALLBACK` stays exported, but no resolver returns
   it now, and a client that holds `1.0` from before the upgrade is
   bounced once (MW-11).
+- **The asset-version 409 names an absolute URL and the current
+  version.** `InertiaVersionMiddleware` answered a stale Inertia `GET` with
+  a root-relative `X-Inertia-Location` (`/users?page=3`) and no version, so
+  the client forced a full reload even for a poll or a background prop
+  load. The 409 now carries the request's absolute URL
+  (`http://example.test/users?page=3`, scheme and host as
+  `Request::scheme_and_http_host` reads them, a trusted proxy's forwarded
+  host included) and `X-Inertia-Version` with the current version, as
+  Laravel's `onVersionChange` does. It still answers before the handler
+  runs, and a visit by another method still passes through (MW-02, HD-10,
+  R04).
 
 ### Fixed
 

@@ -98,7 +98,7 @@ async fn inp_inertia_version_sets_what_get_version_reads_and_the_409_compares() 
         Inertia::get_version,
     ));
     let addr = spawn_server(page_router(), registry, 2).await;
-    let (stale, _, _) = request(
+    let (stale, headers, _) = request(
         addr,
         "GET",
         "/page",
@@ -106,6 +106,10 @@ async fn inp_inertia_version_sets_what_get_version_reads_and_the_409_compares() 
     )
     .await;
     assert_eq!(stale, 409, "the version set at run time is the current one");
+    assert_eq!(
+        headers.get("x-inertia-version").map(String::as_str),
+        Some("v9")
+    );
     let (current, _, _) = request(
         addr,
         "GET",
@@ -136,4 +140,45 @@ fn inp_inertia_version_takes_a_function_or_none() {
     // Laravel casts `null` to "".
     Inertia::version(None::<String>);
     assert_eq!(Inertia::get_version(), "");
+}
+
+#[tokio::test]
+async fn inp_the_version_409_names_the_absolute_url_and_the_current_version() {
+    // The client follows `X-Inertia-Location` with a hard visit and reads
+    // `X-Inertia-Version` to spare async visits a forced reload (R04).
+    let registry = MiddlewareRegistry::new().append(InertiaVersionMiddleware::new("v2"));
+    let addr = spawn_server(page_router(), registry, 2).await;
+    let (status, headers, _body) = request(
+        addr,
+        "GET",
+        "/page?q=rust",
+        &[("X-Inertia", "true"), ("X-Inertia-Version", "v1")],
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        headers.get("x-inertia-location").map(String::as_str),
+        Some("http://localhost/page?q=rust"),
+        "the location must be absolute: scheme, host, path and query"
+    );
+    assert_eq!(
+        headers.get("x-inertia-version").map(String::as_str),
+        Some("v2"),
+        "the 409 must carry the current version"
+    );
+}
+
+#[tokio::test]
+async fn inp_a_stale_version_on_a_post_passes_through() {
+    let registry = MiddlewareRegistry::new().append(InertiaVersionMiddleware::new("v2"));
+    let addr = spawn_server(page_router(), registry, 2).await;
+    let (status, _headers, body) = request(
+        addr,
+        "POST",
+        "/page",
+        &[("X-Inertia", "true"), ("X-Inertia-Version", "v1")],
+    )
+    .await;
+    assert_eq!(status, 200, "only a GET answers 409");
+    assert_eq!(body, "posted", "the handler ran");
 }

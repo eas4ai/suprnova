@@ -3,9 +3,10 @@
 //! Per the Inertia v3 protocol (see `core-concepts/the-protocol.mdx`),
 //! Inertia GET requests carry an `X-Inertia-Version` header. The server
 //! compares that to its configured version; on mismatch the server returns
-//! `409 Conflict` with an `X-Inertia-Location` header pointing at the
-//! current URL. The client then performs a full-page visit to pick up the
-//! new assets.
+//! `409 Conflict` with an `X-Inertia-Location` header holding the current
+//! absolute URL and an `X-Inertia-Version` header holding the current
+//! version. The client then performs a full-page visit to pick up the new
+//! assets.
 //!
 //! Non-GET requests are exempt - the spec says version mismatch on
 //! POST/PUT/PATCH/DELETE resolves naturally on the redirect that follows
@@ -44,8 +45,10 @@ use async_trait::async_trait;
 use super::InertiaRequestExt;
 
 /// Asset-version mismatch detector. Compares the request's
-/// `X-Inertia-Version` against the configured version and returns
-/// `409 + X-Inertia-Location: <url>` on mismatch.
+/// `X-Inertia-Version` against the configured version and, on an Inertia
+/// `GET` that does not match, returns `409` with `X-Inertia-Location`
+/// holding the request's absolute URL and `X-Inertia-Version` holding the
+/// current version, before the handler runs.
 ///
 /// Accepts either a static version string or a dynamic resolver via
 /// [`VersionResolver`]. The dynamic resolver runs on every request so
@@ -119,16 +122,33 @@ impl Middleware for InertiaVersionMiddleware {
         // of this one for it to bite.
         crate::session::session_mut(|session| session.reflash());
 
-        // Goes through `InertiaRequestExt::path_and_query` - the same
-        // trait method the Inertia page object's `url` field uses - so the
-        // bounce and the page object it bounces to name the same URL
-        // whenever the page object uses the default derivation. A
-        // configured `url_resolver` changes only the page object; the
-        // bounce stays on the URL that arrived, since that is the one the
-        // browser can fetch. That URL carries the public root (PFX-005).
-        let url = crate::routing::root::prefixed(&request.path_and_query());
+        // The current version goes back with the bounce: the client reads
+        // `X-Inertia-Version` on a 409 so a poll or a background prop load
+        // that lands on a deploy does not force a full reload (Laravel's
+        // `onVersionChange`).
         Err(HttpResponse::new()
             .status(409)
-            .header("X-Inertia-Location", url))
+            .header("X-Inertia-Location", absolute_location(&request))
+            .header("X-Inertia-Version", server_version))
+    }
+}
+
+/// The URL the 409 bounces the client to: the request's absolute URL, as
+/// Laravel's `onVersionChange` names it with `$request->fullUrl()`.
+///
+/// Scheme and host come from [`Request::scheme_and_http_host`], so a
+/// trusted proxy's forwarded host and scheme are honoured and nothing else
+/// is. The path and query go through `InertiaRequestExt::path_and_query`,
+/// the same derivation the page object's `url` uses, so the bounce and the
+/// page it bounces to name the same path whenever the page object uses the
+/// default derivation; a configured `url_resolver` changes only the page
+/// object, because the bounce has to name a URL the browser can fetch. The
+/// path carries the public root (PFX-005). A request that names no host
+/// keeps the root-relative URL rather than inventing one.
+fn absolute_location(request: &Request) -> String {
+    let path = crate::routing::root::prefixed(&request.path_and_query());
+    match request.scheme_and_http_host() {
+        Some(origin) => format!("{origin}{path}"),
+        None => path,
     }
 }

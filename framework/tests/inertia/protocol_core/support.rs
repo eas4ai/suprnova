@@ -102,8 +102,8 @@ pub(super) async fn spawn_server(
     addr
 }
 
-/// A router whose `/page` renders an Inertia page through a real
-/// `Request`.
+/// A router whose `GET /page` renders an Inertia page through a real
+/// `Request`, and whose `POST /page` answers plain text.
 pub(super) fn page_router() -> Router {
     Router::new()
         .get("/page", |req: Request| async move {
@@ -114,6 +114,9 @@ pub(super) fn page_router() -> Router {
                 .await
                 .map_err(HttpResponse::from);
             response
+        })
+        .post("/page", |_req: Request| async {
+            suprnova::http::text("posted")
         })
         .into()
 }
