@@ -1,5 +1,0 @@
-{
-  "name": "acme.disclosure",
-  "files": ["disclosure.html", "disclosure.css", "disclosure.js"],
-  "elements": ["acme-disclosure"]
-}
