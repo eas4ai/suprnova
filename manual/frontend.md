@@ -58,11 +58,12 @@ across the three.
    +-------------------------------------------------+
 ```
 
-The first request returns an HTML shell with the initial page object
-embedded in the mount node's `data-page` attribute. Subsequent visits
-go through `<Link>` / `router.visit`, send `X-Inertia: true`, and get
-back a JSON page object - the adapter swaps the component without a
-full reload.
+The first request returns an HTML shell with the initial page object as
+JSON in a `<script type="application/json" data-page="app">` element, the
+sibling just before the empty `<div id="app">` mount node - where the
+Inertia 3 client reads it. Subsequent visits go through `<Link>` /
+`router.visit`, send `X-Inertia: true`, and get back a JSON page object -
+the adapter swaps the component without a full reload.
 
 ## A complete page round-trip
 
