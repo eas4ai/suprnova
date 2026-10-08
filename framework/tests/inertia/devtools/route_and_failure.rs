@@ -40,7 +40,6 @@ fn router() -> Router {
             response
         })
         .name("indt.members.store")
-        .into()
 }
 
 #[tokio::test]
