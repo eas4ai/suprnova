@@ -202,11 +202,11 @@ pub(crate) fn is_form_urlencoded(content_type: &str) -> bool {
 /// `null` before any rule runs. So an empty value is left out, which is how
 /// `null` reaches a typed field: an `Option` is `None` and a required field
 /// is missing, a `String` included. A name sent more than once keeps its
-/// last value, as PHP does. A name that ends in `[]`, PHP's mark for a
-/// list, is read as a list under the name without the brackets, with its
-/// empty elements left out. The multipart extractor reads a form by the
-/// same rules, so a form gives a handler the same values whichever way it
-/// is posted.
+/// last value, as PHP does. A name with brackets is nested data, as PHP's
+/// `parse_str` reads it: `user[name]` is the member `name` of `user`,
+/// `tags[]` appends to the list `tags`, and `photos[1]` is an element of
+/// the list `photos`, read in index order, with empty elements `null` in
+/// their places.
 ///
 /// A field that is missing or does not parse answers as a validation
 /// failure, a 422 whose `errors` names every such field under its input

@@ -201,7 +201,10 @@ full path, the same notation Laravel uses. A nested struct contributes
 
 Index `1` is the second element - the first element passed and is absent
 from the bag. Bind the key straight through on the client:
-`form.errors['items.1.name']`.
+`form.errors['items.1.name']`. A form body sends the same fields under
+bracketed names, `shipping_address[street]` and `items[1][name]`, which
+read into the same structs and fail under the same dotted keys; see
+[nested names and lists](#nested-names-and-lists).
 
 ### Renamed fields
 
@@ -452,9 +455,10 @@ words in any case.
 
 A name sent more than once keeps its last value, as PHP does. The body
 `title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
-`null`. A name that ends in `[]` is a list: `tags[]=rust&tags[]=web` fills a
-`tags: Vec<String>` field. `req.form()`, the form-urlencoded branch of
-`req.input()`, and `req.query_into()` read by the same rules.
+`null`. A name with brackets is nested data, as the next section describes:
+`tags[]=rust&tags[]=web` fills a `tags: Vec<String>` field. `req.form()`,
+the form-urlencoded branch of `req.input()`, and `req.query_into()` read by
+the same rules.
 
 A field that is missing, or whose value doesn't parse as its type, answers
 the way a failing rule does: a `422` whose `errors` names every such field
@@ -524,12 +528,74 @@ pub async fn update(form: UpdateProfile) -> Response {
   request with a field that doesn't parse hears about the parse failures
   alone. Laravel checks every rule at once. A struct can't be built while a
   field has no value of its type, and the rules run on the struct.
-- A JSON object nested in the body reports its first missing field, and a
-  field after that object in the body is checked once the object reads.
-  Missing fields at the top of the body are all reported at once.
+- A JSON object nested in the body, or a nested object in a form
+  (`shipping_address[street]`), reports its first missing field, and a
+  field after that object is checked once the object reads. Missing fields
+  at the top of the body are all reported at once.
 - A Precognition request that asks about a field which parses, while
   another field doesn't, gets those other fields' errors rather than a
   `204`: the rules for the field it asked about haven't run.
+
+## Nested names and lists
+
+A form sends nested data under names with brackets, and Laravel reads them
+as nested arrays. The Inertia client writes such names when it puts a `GET`
+visit's data in the query string, and an HTML form can name its inputs the
+same way. A form request, `req.input()`, `req.form()` and `req.query_into()`
+read them as PHP's `parse_str` does:
+
+- `user[name]=Ada` is the member `name` of `user`. It fills a nested struct
+  field, and a `serde_json::Value` reads it as `{"user": {"name": "Ada"}}`.
+- `tags[]=a&tags[]=b` is a list, in the order sent.
+- `photos[1]=b&photos[0]=a` is a list in index order, `["a", "b"]`. A gap
+  leaves no hole: `ids[5]=x&ids[1]=y` gives `["y", "x"]`.
+- A key that isn't an integer makes an object, so `filters[status]=x` and
+  `filters[sort]=name` fill a `filters` struct.
+- Names nest to any depth up to 64 levels: `items[0][name]` is the `name` of
+  the first item. A name nested deeper is dropped, with what was read under
+  its first part, as PHP drops it.
+- An empty value is `null` at every depth, as at the top.
+
+The `OrderRequest` above reads this body, and a filter page reads its query
+the same way:
+
+```text
+shipping_address[street]=1+Main+St&shipping_address[city]=Springfield&items[]=a&items[]=b
+```
+
+```rust
+use serde::Deserialize;
+use suprnova::{handler, json_response, Request, Response};
+
+#[derive(Deserialize)]
+struct Filters {
+    status: Option<String>,
+    sort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Listing {
+    filters: Option<Filters>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    // GET /items?filters[status]=open&tags[]=rust&tags[]=web
+    let listing: Listing = req.query_into()?;
+    let status = listing.filters.and_then(|filters| filters.status);
+    json_response!({ "status": status, "tags": listing.tags })
+}
+```
+
+A field that fails is named by its path with dots, as Laravel names it:
+`items[3]=x` read into `items: Vec<u32>` fails as `items.3`, and a missing
+`shipping_address[city]` as `shipping_address.city`. The client binds these
+keys as they are: `form.errors['items.3']`.
+
+`req.query_params()` and `req.query_param(...)` read the query's pairs as
+sent, so a bracketed name is one key there: `req.query_param("filters[status]")`.
 
 ## Reading the body directly
 
@@ -1142,7 +1208,9 @@ let q: SearchQuery = req.query_into()?;
 ```
 
 `query_into` reads the query as a form body reads: `?page=` leaves `page`
-`None`, `?q=a&q=b` gives `b`, and `?tags[]=a&tags[]=b` fills `tags`. A field
+`None`, `?q=a&q=b` gives `b`, `?tags[]=a&tags[]=b` fills `tags`, and
+`?filters[status]=x` fills a nested `filters` struct, as
+[nested names and lists](#nested-names-and-lists) describes. A field
 that is missing or doesn't parse answers as a form request's does: a `422`
 whose `errors` names each such field with its catalog message, so an
 Inertia visit is redirected back with them. A query that fails for another

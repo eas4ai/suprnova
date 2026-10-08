@@ -11,12 +11,14 @@
 //! is missing required fields is asked again until it names no new one.
 //!
 //! [`parse_form_input`] is the url-encoded reader for bodies and query
-//! strings. [`json_field_failures`] reads nothing: it runs only after
+//! strings. It reads bracketed and indexed names (`user[name]`, `tags[]`,
+//! `photos[0]`) as nested data, as PHP does for Laravel. [`json_field_failures`] reads nothing: it runs only after
 //! `serde_json` refused a body, to name the fields that made it fail, so
 //! what a JSON body accepts stays exactly what `serde_json` accepts.
 
 mod form;
 mod json;
+mod nested;
 mod placeholder;
 
 use std::cell::RefCell;

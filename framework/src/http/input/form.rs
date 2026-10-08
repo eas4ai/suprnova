@@ -1,25 +1,25 @@
 //! The url-encoded reader: a form body or a query string into a typed value.
 //!
 //! It reads the pairs as Laravel's request holds them once PHP has parsed
-//! them and `ConvertEmptyStringsToNull` has run. An empty value is `null`:
-//! the name is still there, holding `null`, so a map or a
-//! `serde_json::Value` sees a cleared field apart from one never sent, an
-//! `Option` reads `None`, and a field that cannot hold `null` is missing.
-//! A name sent more than once keeps its last value. A name that ends in
-//! `[]` is a list, read under the name without the brackets, its empty
-//! elements `null` in their places. A value is read as `serde_urlencoded`
-//! reads one, through the field type's `FromStr`, except a `bool`, which
-//! reads what forms send, and a value that does not parse is recorded
-//! under its input name with the key for the field's type, as the
+//! them and `ConvertEmptyStringsToNull` has run. A bracketed or indexed name
+//! is nested data, read as [`super::nested`] describes: `user[name]` is the
+//! member `name` of `user`, and `tags[]` and `photos[0]` are elements of a
+//! list, in index order. An empty value is `null`: the name is still there,
+//! holding `null`, so a map or a `serde_json::Value` sees a cleared field
+//! apart from one never sent, an `Option` reads `None`, and a field that
+//! cannot hold `null` is missing. A name sent more than once keeps its last
+//! value. A value is read as `serde_urlencoded` reads one, through the field
+//! type's `FromStr`, except a `bool`, which reads what forms send, and a
+//! value that does not parse is recorded under its input name, joined with
+//! dots (`user.name`, `tags.1`), with the key for the field's type, as the
 //! multipart extractor files it.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use serde::de::{self, DeserializeOwned, DeserializeSeed, IntoDeserializer, Visitor};
-use url::form_urlencoded;
 
+use super::nested::{Array, Key, Nested, Node};
 use super::placeholder::Placeholder;
 use super::{
     Collector, FieldError, InputError, Stop, join, record_missing_fields, struct_field_names,
@@ -29,7 +29,15 @@ use crate::http::upload::{FieldFailure, parse_form_bool};
 /// Read url-encoded `bytes` into `T`, failing field by field.
 pub(crate) fn parse_form_input<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, InputError> {
     let fields = struct_field_names::<T>();
-    let form = Form::index(bytes, fields);
+    read_nested(Nested::from_urlencoded(bytes, fields), fields)
+}
+
+/// Read nested form data into `T`, failing field by field. `fields` are
+/// the names `form` was read for, `T`'s field names.
+pub(super) fn read_nested<T: DeserializeOwned>(
+    form: Nested<'_>,
+    fields: Option<&'static [&'static str]>,
+) -> Result<T, InputError> {
     let present = fields.map(|fields| form.present(fields));
     let collector = Collector::default();
     let error = match T::deserialize(FormInput {
@@ -52,116 +60,17 @@ pub(crate) fn parse_form_input<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, I
     )))
 }
 
-/// Url-encoded input indexed for a read: where each name the read uses was
-/// last sent, and the elements of each list.
-///
-/// Only the names a struct reads are indexed, so the index holds one entry
-/// per field however many names the client sends. Any other name a struct
-/// ignores, or refuses at once when it denies unknown fields, so those pass
-/// through as they were sent. A target with no fixed names, such as a map,
-/// indexes every name.
-struct Form<'a> {
-    bytes: &'a [u8],
-    /// The names a read uses, or `None` for every name.
-    tracked: Option<HashSet<&'static str>>,
-    /// For each indexed name that is not a list, the position of its last
-    /// pair.
-    last: HashMap<Cow<'a, str>, usize>,
-    /// Each indexed list, by its name without the brackets.
-    lists: HashMap<Cow<'a, str>, List<'a>>,
-}
-
-/// The pairs of one list name.
-struct List<'a> {
-    /// The position of the list's first pair, where the read meets it.
-    first: usize,
-    /// How many pairs the list has, null elements included.
-    count: usize,
-    /// The elements, each with its index among the list's pairs, which
-    /// names its error as the multipart extractor names a part's. An empty
-    /// element is `null`.
-    items: Vec<(usize, Cow<'a, str>)>,
-}
-
-/// What one read entry holds.
-enum Entry<'a> {
-    One(Cow<'a, str>),
-    List(Vec<(usize, Cow<'a, str>)>),
-}
-
-impl<'a> Form<'a> {
-    fn index(bytes: &'a [u8], fields: Option<&'static [&'static str]>) -> Self {
-        let mut form = Form {
-            bytes,
-            tracked: fields.map(|fields| fields.iter().copied().collect()),
-            last: HashMap::new(),
-            lists: HashMap::new(),
-        };
-        for (at, (name, value)) in form_urlencoded::parse(bytes).enumerate() {
-            match list_name(name) {
-                Ok(base) => {
-                    if form.tracks(&base) {
-                        let list = form.lists.entry(base).or_insert_with(|| List {
-                            first: at,
-                            count: 0,
-                            items: Vec::new(),
-                        });
-                        list.items.push((list.count, value));
-                        list.count += 1;
-                    }
-                }
-                Err(name) => {
-                    if form.tracks(&name) {
-                        form.last.insert(name, at);
-                    }
-                }
-            }
-        }
-        form
-    }
-
-    fn tracks(&self, name: &str) -> bool {
-        self.tracked
-            .as_ref()
-            .is_none_or(|tracked| tracked.contains(name))
-    }
-
-    /// Which of `fields` the read hands the struct a value for.
-    fn present(&self, fields: &'static [&'static str]) -> Vec<&'static str> {
-        fields
-            .iter()
-            .copied()
-            .filter(|field| self.lists.contains_key(*field) || self.last.contains_key(*field))
-            .collect()
-    }
-}
-
-/// `Ok` with `name` less its trailing `[]`, PHP's mark for a list, or
-/// `Err(name)` for a name that is not a list.
-fn list_name(name: Cow<'_, str>) -> Result<Cow<'_, str>, Cow<'_, str>> {
-    if !name.ends_with("[]") {
-        return Err(name);
-    }
-    Ok(match name {
-        Cow::Borrowed(name) => Cow::Borrowed(&name[..name.len() - 2]),
-        Cow::Owned(mut name) => {
-            name.truncate(name.len() - 2);
-            Cow::Owned(name)
-        }
-    })
-}
-
-/// The top-level deserializer of a url-encoded read.
+/// The top-level deserializer of a form read.
 struct FormInput<'a, 'c> {
-    form: Form<'a>,
+    form: Nested<'a>,
     collector: &'c Collector,
 }
 
 impl<'a, 'c> FormInput<'a, 'c> {
     fn entries(self) -> Entries<'a, 'c> {
         Entries {
-            pairs: form_urlencoded::parse(self.form.bytes).enumerate(),
-            form: self.form,
+            names: self.form.names.into_iter(),
+            untracked: self.form.untracked,
             collector: self.collector,
             pending: None,
         }
@@ -205,38 +114,25 @@ impl<'de> de::Deserializer<'de> for FormInput<'_, '_> {
     }
 }
 
-/// The entries of a read, in the order their names were first or last
-/// sent: a name that is not a list where its last pair is, a list where
-/// its first pair is.
+/// The top-level entries of a read, each name once, in the order it was
+/// first sent, then the first name the read does not use.
 struct Entries<'a, 'c> {
-    form: Form<'a>,
-    pairs: std::iter::Enumerate<form_urlencoded::Parse<'a>>,
+    names: indexmap::map::IntoIter<Cow<'a, str>, Node<'a>>,
+    untracked: Option<Cow<'a, str>>,
     collector: &'c Collector,
     /// The entry whose key was read and whose value is next.
-    pending: Option<(Cow<'a, str>, Entry<'a>)>,
+    pending: Option<(Cow<'a, str>, Node<'a>)>,
 }
 
 impl<'a> Entries<'a, '_> {
-    fn next_entry(&mut self) -> Option<(Cow<'a, str>, Entry<'a>)> {
-        for (at, (name, value)) in self.pairs.by_ref() {
-            let list = name
-                .strip_suffix("[]")
-                .and_then(|base| self.form.lists.get_mut(base));
-            if let Some(list) = list {
-                if list.first == at {
-                    let items = std::mem::take(&mut list.items);
-                    if let Ok(base) = list_name(name) {
-                        return Some((base, Entry::List(items)));
-                    }
-                }
-                continue;
-            }
-            let read_as_sent = name.ends_with("[]") || !self.form.tracks(&name);
-            if read_as_sent || self.form.last.get(name.as_ref()) == Some(&at) {
-                return Some((name, Entry::One(value)));
-            }
-        }
-        None
+    fn next_entry(&mut self) -> Option<(Cow<'a, str>, Node<'a>)> {
+        // A name the read does not use is only ever ignored or refused by
+        // its name, so its value is never read.
+        self.names.next().or_else(|| {
+            self.untracked
+                .take()
+                .map(|name| (name, Node::Text(Cow::Borrowed(""))))
+        })
     }
 }
 
@@ -247,11 +143,11 @@ impl<'de> de::MapAccess<'de> for Entries<'_, '_> {
         &mut self,
         seed: K,
     ) -> Result<Option<K::Value>, Self::Error> {
-        let Some((name, entry)) = self.next_entry() else {
+        let Some((name, node)) = self.next_entry() else {
             return Ok(None);
         };
         let key = seed.deserialize(FormValue::key(&name, self.collector));
-        self.pending = Some((name, entry));
+        self.pending = Some((name, node));
         key.map(Some)
     }
 
@@ -259,25 +155,32 @@ impl<'de> de::MapAccess<'de> for Entries<'_, '_> {
         &mut self,
         seed: S,
     ) -> Result<S::Value, Self::Error> {
-        let Some((name, entry)) = self.pending.take() else {
+        let Some((name, node)) = self.pending.take() else {
             return Err(de::Error::custom("a value was read before its name"));
         };
-        match entry {
-            Entry::One(text) if text.is_empty() => seed.deserialize(FormNull {
-                path: &name,
-                collector: self.collector,
-            }),
-            Entry::One(text) => seed.deserialize(FormValue {
-                text: &text,
-                path: Some(&name),
-                collector: self.collector,
-            }),
-            Entry::List(items) => seed.deserialize(FormList {
-                items: &items,
-                path: &name,
-                collector: self.collector,
-            }),
-        }
+        read_node(seed, node, &name, self.collector)
+    }
+}
+
+/// Read `node`, the value at the input name `path`, with `seed`.
+fn read_node<'de, S: DeserializeSeed<'de>>(
+    seed: S,
+    node: Node<'_>,
+    path: &str,
+    collector: &Collector,
+) -> Result<S::Value, FieldError> {
+    match node {
+        Node::Text(text) if text.is_empty() => seed.deserialize(FormNull { path, collector }),
+        Node::Text(text) => seed.deserialize(FormValue {
+            text: &text,
+            path: Some(path),
+            collector,
+        }),
+        Node::Array(array) => seed.deserialize(FormArray {
+            array: *array,
+            path,
+            collector,
+        }),
     }
 }
 
@@ -291,10 +194,10 @@ impl<'de> de::SeqAccess<'de> for Pairs<'_, '_> {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, Self::Error> {
-        let Some((name, entry)) = self.0.next_entry() else {
+        let Some((name, node)) = self.0.next_entry() else {
             return Ok(None);
         };
-        self.0.pending = Some((name, entry));
+        self.0.pending = Some((name, node));
         seed.deserialize(Pair {
             entries: &mut self.0,
             read: 0,
@@ -631,16 +534,21 @@ impl<'de> de::Deserializer<'de> for FormNull<'_, '_> {
     }
 }
 
-/// The elements of a list name, read as a sequence of text values.
-struct FormList<'v, 'c> {
-    items: &'v [(usize, Cow<'v, str>)],
-    path: &'v str,
+/// The members of bracketed names at the input name `path`.
+///
+/// An array whose keys are all indexes is a list, read in index order; any
+/// array also reads as a map or a struct, by its keys. A list is read as a
+/// list wherever the type asks for any value, as a `serde_json::Value`
+/// does, and an array with another key as a map.
+struct FormArray<'a, 'p, 'c> {
+    array: Array<'a>,
+    path: &'p str,
     collector: &'c Collector,
 }
 
-/// A list where one value belongs: recorded under the list's name, with
+/// An array where one value belongs: recorded under the array's name, with
 /// the key for the type asked for, and a placeholder stands in.
-macro_rules! not_a_list {
+macro_rules! not_a_value {
     ($($method:ident($($arg:ident: $ty:ty),*) => $failure:ident;)*) => {$(
         fn $method<V: Visitor<'de>>(self, $($arg: $ty,)* visitor: V) -> Result<V::Value, Self::Error> {
             self.collector.record(self.path, FieldFailure::$failure);
@@ -649,14 +557,28 @@ macro_rules! not_a_list {
     )*};
 }
 
-impl<'de> de::Deserializer<'de> for FormList<'_, '_> {
+impl<'de> de::Deserializer<'de> for FormArray<'_, '_, '_> {
     type Error = FieldError;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if self.array.is_list() {
+            de::Deserializer::deserialize_seq(self, visitor)
+        } else {
+            de::Deserializer::deserialize_map(self, visitor)
+        }
+    }
+
+    /// The elements in index order. An array with a key that is no index
+    /// is no list: recorded as a format failure.
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         let (path, collector) = (self.path, self.collector);
+        let Some(items) = self.array.into_list() else {
+            collector.record(path, FieldFailure::Format);
+            return de::Deserializer::deserialize_seq(Placeholder, visitor);
+        };
         visitor
             .visit_seq(Items {
-                items: self.items.iter(),
+                items: items.into_iter(),
                 path,
                 collector,
             })
@@ -667,6 +589,46 @@ impl<'de> de::Deserializer<'de> for FormList<'_, '_> {
                 }
                 _ => error,
             })
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        de::Deserializer::deserialize_seq(self, visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        de::Deserializer::deserialize_seq(self, visitor)
+    }
+
+    /// The members by key. A struct that misses a required member records
+    /// it under `path`, `user.name` for `name` in `user`.
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        let (path, collector) = (self.path, self.collector);
+        visitor
+            .visit_map(Members {
+                members: self.array.into_members(),
+                path,
+                collector,
+                pending: None,
+            })
+            .map_err(|error| collector.settle_missing(path, error))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        de::Deserializer::deserialize_map(self, visitor)
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -685,7 +647,7 @@ impl<'de> de::Deserializer<'de> for FormList<'_, '_> {
         visitor.visit_unit()
     }
 
-    not_a_list! {
+    not_a_value! {
         deserialize_bool() => Boolean;
         deserialize_i8() => Integer;
         deserialize_i16() => Integer;
@@ -706,22 +668,15 @@ impl<'de> de::Deserializer<'de> for FormList<'_, '_> {
         deserialize_byte_buf() => Format;
         deserialize_unit() => Format;
         deserialize_unit_struct(name: &'static str) => Format;
-        deserialize_map() => Format;
-        deserialize_struct(name: &'static str, fields: &'static [&'static str]) => Format;
         deserialize_enum(name: &'static str, variants: &'static [&'static str]) => Format;
         deserialize_identifier() => Format;
     }
-
-    serde::forward_to_deserialize_any! {
-        seq tuple tuple_struct
-    }
 }
 
-/// The elements of a [`FormList`], each a field's value under
-/// `name.index`.
-struct Items<'i, 'v, 'c> {
-    items: std::slice::Iter<'i, (usize, Cow<'v, str>)>,
-    path: &'i str,
+/// The elements of a list, each a field's value under `path.index`.
+struct Items<'a, 'p, 'c> {
+    items: std::vec::IntoIter<(i64, Node<'a>)>,
+    path: &'p str,
     collector: &'c Collector,
 }
 
@@ -732,28 +687,58 @@ impl<'de> de::SeqAccess<'de> for Items<'_, '_, '_> {
         &mut self,
         seed: S,
     ) -> Result<Option<S::Value>, Self::Error> {
-        let Some((index, text)) = self.items.next() else {
+        let Some((index, node)) = self.items.next() else {
             return Ok(None);
         };
-        let path = join(self.path, index);
-        if text.is_empty() {
-            return seed
-                .deserialize(FormNull {
-                    path: &path,
-                    collector: self.collector,
-                })
-                .map(Some);
-        }
-        seed.deserialize(FormValue {
-            text,
-            path: Some(&path),
-            collector: self.collector,
-        })
-        .map(Some)
+        read_node(seed, node, &join(self.path, index), self.collector).map(Some)
     }
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.items.len())
+    }
+}
+
+/// The members of an array read as a map, each a field's value under
+/// `path.key`.
+struct Members<'a, 'p, 'c> {
+    members: indexmap::map::IntoIter<Key<'a>, Node<'a>>,
+    path: &'p str,
+    collector: &'c Collector,
+    /// The member whose key was read and whose value is next.
+    pending: Option<(Cow<'a, str>, Node<'a>)>,
+}
+
+impl<'de> de::MapAccess<'de> for Members<'_, '_, '_> {
+    type Error = FieldError;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some((key, node)) = self.members.next() else {
+            return Ok(None);
+        };
+        let name = match key {
+            Key::Index(index) => Cow::Owned(index.to_string()),
+            Key::Name(name) => name,
+        };
+        let key = seed.deserialize(FormValue::key(&name, self.collector));
+        self.pending = Some((name, node));
+        key.map(Some)
+    }
+
+    fn next_value_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        seed: S,
+    ) -> Result<S::Value, Self::Error> {
+        let Some((name, node)) = self.pending.take() else {
+            return Err(de::Error::custom("a value was read before its name"));
+        };
+        read_node(seed, node, &join(self.path, &name), self.collector)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.members.len())
     }
 }
 
