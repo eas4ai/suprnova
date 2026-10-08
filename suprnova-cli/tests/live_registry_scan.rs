@@ -1061,6 +1061,127 @@ fn reg_032_a_built_in_method_reached_through_any_value_or_the_page_is_refused() 
     );
 }
 
+/// Each script of `scripts` that a scan refuses, described with every
+/// finding the scan made.
+fn refused_scripts(scripts: &[&str]) -> Vec<String> {
+    scripts
+        .iter()
+        .filter_map(|script| {
+            let report = scan_widget_script(script);
+            (!report.accepted()).then(|| {
+                format!(
+                    "{script:?} was refused: {}",
+                    report
+                        .findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            })
+        })
+        .collect()
+}
+
+/// REG-032: a member read off a literal is the built-in method the literal
+/// inherits, whatever its name, so the scan needs no list of names for it:
+/// `(0).toPrecision` is `Number.prototype.toPrecision`, `"".anchor` and
+/// `[].copyWithin` are the string's and the array's, and an operator's
+/// result (`-1`, `"a" + 1`, `typeof x`) is a primitive like a literal. A
+/// write to any member of one is refused, and so is passing one where the
+/// scan stops following it, read off the literal or off a constant that
+/// holds it. A class that extends a built-in inherits its statics the same
+/// way, so a static the class does not declare is the built-in's. What a
+/// literal holds itself (a string's or an array's `length` and indices, a
+/// regular expression's `lastIndex`, `source` and flags) and a class's own
+/// statics stay admitted, and so does a parameter that is a string in one
+/// call and an object in another: the scan reads no `typeof` test, so it
+/// follows no literal into a parameter or a variable.
+#[test]
+fn reg_032_a_member_read_off_a_literal_is_the_built_in_method_it_inherits() {
+    let cases: &[(&str, &str, u32)] = &[
+        ("(0).toPrecision.call = () => \"\";\n", "script-builtin", 1),
+        ("(0).toPrecision.label = \"x\";\n", "script-builtin", 1),
+        ("(1.5).toExponential.label = \"x\";\n", "script-builtin", 1),
+        ("\"\".anchor.label = \"x\";\n", "script-builtin", 1),
+        ("`${1}`.substr.label = \"x\";\n", "script-builtin", 1),
+        ("true.x.label = 1;\n", "script-builtin", 1),
+        ("(1n).x.label = 1;\n", "script-builtin", 1),
+        ("/x/.compile.label = 1;\n", "script-builtin", 1),
+        ("[].copyWithin.label = 1;\n", "script-builtin", 1),
+        ("[1, 2].toSpliced.label = 1;\n", "script-builtin", 1),
+        ("(0)[\"toPrecision\"].label = 1;\n", "script-builtin", 1),
+        ("(0).toPrecision.call.label = 1;\n", "script-builtin", 1),
+        ("(-1).toPrecision.label = 1;\n", "script-builtin", 1),
+        ("(\"a\" + 1).anchor.label = 1;\n", "script-builtin", 1),
+        ("(typeof 0).big.label = 1;\n", "script-builtin", 1),
+        ("delete \"\".anchor.label;\n", "script-builtin", 1),
+        (
+            "const n = 0;\nn.toPrecision.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const re = /x/;\nre.compile.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        ("export const p = (0).toPrecision;\n", "script-builtin", 1),
+        (
+            "const n = 0;\nexport const p = n.toPrecision;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "Promise.resolve([].copyWithin).then((m) => {\n  m.label = 1;\n});\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "(class extends Array {}).of.label = 1;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "class A extends Promise {}\nA.withResolvers.label = 1;\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "class A extends Map {}\nclass B extends A {}\nB.groupBy.label = 1;\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "class A extends Array {\n  of = 1;\n}\nA.of.label = 1;\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "const A = class extends Array {};\nexport const of = A.of;\n",
+            "script-builtin",
+            2,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "export const n = (s) => Math.max(\"abc\".length, [1, 2].length, s);\n",
+        "export const re = [/x/g.source, /x/g.flags, /x/g.lastIndex, \"ab\"[1]];\n",
+        "const label = \"x\";\nexport const size = [label.length, label[0]];\n",
+        "const cells = [];\nexport const fill = (text) => {\n  cells[0].textContent = text;\n};\n",
+        "export class A extends HTMLElement {\n  static config = {};\n}\nA.config.open = true;\n",
+        "export const trimmed = (s) => \" a \".trim() + `${s}`.toUpperCase();\n",
+        "function labelOf(option) {\n  return typeof option === \"string\" ? option : option.label;\n}\nexport const labels = [labelOf(\"x\"), labelOf({ label: \"y\" })];\n",
+        "function highlight(target) {\n  const el = typeof target === \"string\" ? document.querySelector(target) : target;\n  el.style.outline = \"1px solid\";\n}\nhighlight(\"#x\");\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: the scan follows a built-in only through names: a variable, and
 /// a parameter of a function the script calls by name. Anywhere else it
 /// would leave for code the scan cannot follow (a destructured name, an

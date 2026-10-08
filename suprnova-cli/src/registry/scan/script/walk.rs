@@ -3331,6 +3331,9 @@ impl<'a, 'c> Walker<'a, 'c> {
                                 inherited_method(name) && !self.own_member(object, name)
                             })
                         }))
+                    || names.as_ref().is_some_and(|names| {
+                        self.literal_inherits(object, names, depth + 1, &mut BTreeSet::new())
+                    })
             }
             Root::Page => {
                 named(&|name| name == "ownerDocument")
@@ -3352,6 +3355,145 @@ impl<'a, 'c> Walker<'a, 'c> {
                 Some(vec![format!("#{}", member.field.name)])
             }
         }
+    }
+
+    /// Whether a member read off `object` under one of `names` may be a
+    /// method the value inherits from a built-in because the value is a
+    /// literal or an operator's result, whose kind the scan knows
+    /// (REG-032). Whatever the name, a member that a primitive, an array or
+    /// a regular expression does not hold itself is its prototype's, a
+    /// built-in every script shares: `(0).toPrecision`, `(-1).toPrecision`,
+    /// `"".anchor`, `[].copyWithin`, `/x/.compile`. What each holds itself
+    /// is data: a string's or an array's `length` and indices, a regular
+    /// expression's `lastIndex`, `source` and flags. A class inherits the
+    /// statics of the class it extends, so one it does not declare is its
+    /// parent's, and a built-in's at the root (`class A extends Promise {}`
+    /// hands over `Promise.withResolvers`). A name counts only when it can
+    /// hold nothing else: a constant initialized with the literal, or a
+    /// class never reassigned. A parameter or a variable is not followed,
+    /// because the scan reads no `typeof` test: `typeof o === "string" ? o :
+    /// o.label` reads `label` only off an object, though a call passes `o` a
+    /// string. An object or function literal inherits only from
+    /// `Object.prototype` and `Function.prototype`, whose methods' names the
+    /// lists already hold. Past [`MAX_TRACE_DEPTH`] the answer is yes.
+    fn literal_inherits(
+        &self,
+        object: &Expression<'a>,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        let inherited =
+            |own: &dyn Fn(&str) -> bool| names.iter().any(|name| !index_name(name) && !own(name));
+        match unparen(object) {
+            Expression::ArrayExpression(_) => inherited(&|name| name == "length"),
+            Expression::RegExpLiteral(_) => inherited(&regexp_data),
+            Expression::ClassExpression(class) => self.class_inherits(class, names, depth, seen),
+            Expression::Identifier(reference) => self
+                .bound(reference)
+                .is_some_and(|id| self.binding_literal_inherits(id, names, depth + 1, seen)),
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.literal_inherits(last, names, depth + 1, seen)),
+            Expression::ConditionalExpression(conditional) => {
+                self.literal_inherits(&conditional.consequent, names, depth + 1, seen)
+                    || self.literal_inherits(&conditional.alternate, names, depth + 1, seen)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.literal_inherits(&logical.left, names, depth + 1, seen)
+                    || self.literal_inherits(&logical.right, names, depth + 1, seen)
+            }
+            Expression::AssignmentExpression(assignment) => match assignment.operator {
+                AssignmentOperator::Assign => {
+                    self.literal_inherits(&assignment.right, names, depth + 1, seen)
+                }
+                // `a ||= b` yields `a`, which is not followed, or `b`.
+                AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::LogicalNullish => {
+                    self.literal_inherits(&assignment.right, names, depth + 1, seen)
+                }
+                // `a += b` and the other arithmetic forms yield a primitive.
+                _ => inherited(&|name| name == "length"),
+            },
+            Expression::AwaitExpression(await_expr) => {
+                self.literal_inherits(&await_expr.argument, names, depth + 1, seen)
+            }
+            other if primitive_result(other) => inherited(&|name| name == "length"),
+            _ => false,
+        }
+    }
+
+    /// [`Self::literal_inherits`] for a name that can hold only one value:
+    /// a class the script declares and never reassigns, or a constant
+    /// initialized with a literal, an operator's result or a class.
+    fn binding_literal_inherits(
+        &self,
+        id: Bid,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(binding) = self.binding(id) else {
+            return false;
+        };
+        if binding.opaque || !binding.assignments.is_empty() {
+            return false;
+        }
+        match binding.kind {
+            Kind::Class => binding
+                .class
+                .is_some_and(|class| self.class_inherits(class, names, depth, seen)),
+            Kind::Const => binding.init.is_some_and(|init| {
+                let value = unparen(init);
+                (primitive_result(value)
+                    || matches!(
+                        value,
+                        Expression::ArrayExpression(_)
+                            | Expression::RegExpLiteral(_)
+                            | Expression::ClassExpression(_)
+                    ))
+                    && self.literal_inherits(value, names, depth, seen)
+            }),
+            _ => false,
+        }
+    }
+
+    /// [`Self::literal_inherits`] for a class: a static it does not declare
+    /// is the one the class it extends has, which is inherited when that
+    /// class is a built-in or inherits it in turn. A class's `prototype`,
+    /// `length` and `name` are its own, and a constant's name
+    /// (`ELEMENT_NODE`) is a number.
+    fn class_inherits(
+        &self,
+        class: &Class<'a>,
+        names: &[String],
+        depth: usize,
+        seen: &mut BTreeSet<Bid>,
+    ) -> bool {
+        let undeclared: Vec<String> = names
+            .iter()
+            .filter(|name| {
+                !index_name(name)
+                    && !constant_name(name)
+                    && !matches!(name.as_str(), "prototype" | "length" | "name")
+                    && !declares_static(class, name)
+            })
+            .cloned()
+            .collect();
+        let Some(parent) = &class.super_class else {
+            return false;
+        };
+        !undeclared.is_empty()
+            && (self.reaches(Root::BuiltIn, parent, depth + 1, &mut BTreeSet::new())
+                || self.literal_inherits(parent, &undeclared, depth + 1, seen))
     }
 
     /// Whether a member is one the script gave the object itself, so a
@@ -3534,13 +3676,18 @@ impl<'a, 'c> Walker<'a, 'c> {
             && is_callback(self.member_rules(callee).into_iter().next(), index)
     }
 
-    /// How a refusal names a built-in.
+    /// How a refusal names a built-in: by its path, or, read off a literal
+    /// or what a call returns, by the member read (`(0).toPrecision` is
+    /// `.toPrecision`).
     fn builtin_text(&self, expr: &Expression<'a>) -> String {
         match (unparen(expr), path_text(expr)) {
             (Expression::Identifier(reference), Some(path)) if self.bound(reference).is_some() => {
                 format!("`{path}`, which holds a built-in,")
             }
             (_, Some(path)) => format!("`{path}`"),
+            (Expression::StaticMemberExpression(member), None) => {
+                format!("`.{}`", member.property.name)
+            }
             (_, None) => "a built-in".to_string(),
         }
     }
@@ -3759,6 +3906,58 @@ fn constant_name(name: &str) -> bool {
 /// did not make inherits.
 fn inherited_method(name: &str) -> bool {
     ADMITTED_METHODS.contains(&name) || INHERITED_METHODS.contains(&name)
+}
+
+/// Whether a member name is an index, which names an element or a
+/// character, never a method.
+fn index_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether a member name is data a regular expression holds itself or
+/// reads from its flags, rather than a method it inherits.
+fn regexp_data(name: &str) -> bool {
+    matches!(
+        name,
+        "lastIndex"
+            | "source"
+            | "flags"
+            | "global"
+            | "ignoreCase"
+            | "multiline"
+            | "dotAll"
+            | "unicode"
+            | "unicodeSets"
+            | "sticky"
+            | "hasIndices"
+    )
+}
+
+/// Whether an expression always yields a primitive: a literal other than a
+/// regular expression, or what an operator returns. Its members are the
+/// methods its type's prototype holds.
+fn primitive_result(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr,
+        Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::UnaryExpression(_)
+            | Expression::BinaryExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::PrivateInExpression(_)
+    )
+}
+
+/// Whether a class declares a static member of this name.
+fn declares_static(class: &Class<'_>, name: &str) -> bool {
+    class
+        .body
+        .body
+        .iter()
+        .any(|element| element.r#static() && element.static_name().is_some_and(|key| key == name))
 }
 
 /// Whether the parameter at `index` is a plain name, which the scan
