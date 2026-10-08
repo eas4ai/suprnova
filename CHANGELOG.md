@@ -375,7 +375,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prefix. It now refuses an absolute path, even to the component's own
   script, as it refuses a URL (`script-import`), and the refusal says the
   specifier must be a relative path (`./` or `../`) to a script of the
-  component or of a component it depends on.
+  component or of a component it depends on. A relative path with one
+  `../` more than the component is deep (`../../../acme-ui/x/x.js` from
+  `acme-ui/x/`) is refused for the same reason: the browser resolves it
+  outside the prefix, while the scan used to drop the extra step and
+  compare the rest as if it had stayed inside.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

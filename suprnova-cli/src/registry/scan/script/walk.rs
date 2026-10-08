@@ -2458,13 +2458,27 @@ impl<'a, 'c> Walker<'a, 'c> {
         let resolved = if let Some(relative) = specifier.strip_prefix("./") {
             Some(format!("{base}{relative}"))
         } else if let Some(mut rest) = specifier.strip_prefix("../") {
+            // Each `../` leaves one directory. One that leaves the
+            // components' root would resolve, under a path prefix
+            // (PFX-006), to a URL outside the prefix that no component
+            // owns, so it is refused; the directories it did leave are
+            // not compared against the admitted scripts.
             let mut segments: Vec<&str> = base.trim_matches('/').split('/').collect();
-            segments.pop();
+            let mut inside = segments.pop().is_some();
             while let Some(next) = rest.strip_prefix("../") {
-                segments.pop();
+                inside &= segments.pop().is_some();
                 rest = next;
             }
-            Some(format!("/{}/{rest}", segments.join("/")))
+            if inside {
+                let directory = segments.join("/");
+                Some(if directory.is_empty() {
+                    format!("/{rest}")
+                } else {
+                    format!("/{directory}/{rest}")
+                })
+            } else {
+                None
+            }
         } else {
             // An absolute path names the asset route with no path prefix
             // (PFX-006), so it breaks under one, even to an own script.
