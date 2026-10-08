@@ -13,8 +13,9 @@ use super::super::Finding;
 use super::super::url::{check_constant, srcset_urls};
 use super::lists::{
     ADMITTED_CONSTRUCTORS, ADMITTED_GLOBALS, ADMITTED_METHODS, GLOBAL_OBJECTS, IMPLICITLY_CALLED,
-    INHERITED_METHODS, PAGE_OBJECTS, READ_ONLY_PROPERTIES, REFUSED_ELEMENTS, REFUSED_PROPERTIES,
-    Rule, URL_ATTRIBUTES, URL_CSS_PROPERTIES, URL_PROPERTIES, constructor_rule_for, rule_for,
+    INHERITED_METHODS, PAGE_METHODS, PAGE_OBJECTS, READ_ONLY_PROPERTIES, REFUSED_ELEMENTS,
+    REFUSED_PROPERTIES, Rule, URL_ATTRIBUTES, URL_CSS_PROPERTIES, URL_PROPERTIES,
+    constructor_rule_for, rule_for,
 };
 
 /// How many constant values a traced expression may stand for before the
@@ -3149,11 +3150,12 @@ impl<'a, 'c> Walker<'a, 'c> {
     /// method of the page (REG-032). Either changes, for every script on the
     /// page, a function or object the browser provides: `Object.keys = f`,
     /// `p.call = g` where `p` holds `Object.keys`, `document.createElement
-    /// = f`. `call`, `apply` and `bind`, through which every script borrows
-    /// a built-in method that any value may hold
-    /// (`Math.random().toPrecision`), are refused by name on every value the
-    /// script did not make, because the scan cannot follow every path to
-    /// one.
+    /// = f`. Two kinds of name are refused on every value the script did not
+    /// make, because the scan cannot follow every path to what they change:
+    /// a method of the page, which `getRootNode()`, a `parentNode` or an
+    /// event's `currentTarget` may hand over as `document`, and `call`,
+    /// `apply` and `bind`, through which every script borrows a built-in
+    /// method that any value may hold (`Math.random().toPrecision`).
     fn builtin_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
         let object = member.object();
         if self.reaches(Root::Method, object, 0, &mut BTreeSet::new()) {
@@ -3184,8 +3186,21 @@ impl<'a, 'c> Walker<'a, 'c> {
             );
             return;
         }
+        let page = names
+            .iter()
+            .find(|name| PAGE_METHODS.contains(&name.as_str()));
         let borrowing = names.iter().find(|name| borrowing_method(name));
-        if borrowing.is_none() || self.made_by_script(object, 0, &mut BTreeSet::new()) {
+        if (page.is_none() && borrowing.is_none())
+            || self.made_by_script(object, 0, &mut BTreeSet::new())
+        {
+            return;
+        }
+        if let Some(name) = page {
+            self.refuse(
+                "script-builtin",
+                span,
+                format!("{verb} `{name}` on a value the script did not make may replace the page's own `{name}`: the page reaches a script through calls, elements and events the scan does not follow (`getRootNode()` returns `document`), so only an object the script made may take a member of that name"),
+            );
             return;
         }
         if let Some(name) = borrowing

@@ -1241,6 +1241,99 @@ fn reg_032_the_root_node_and_the_object_of_the_page_are_the_page() {
     );
 }
 
+/// REG-032: the page reaches a script through more paths than the scan
+/// follows: `getRootNode()`, `parentNode`, an event's `currentTarget`, an
+/// array, an object, a promise or a function that hands it back, and `this`
+/// in a method the page calls as a listener. A method of the page
+/// (`createElement`, `querySelector`, `addEventListener`, `pushState` and
+/// the rest of the page's own methods) written on any of them replaces the
+/// page's, so writing one is refused on every value but one the script
+/// made: an object, array, function or class literal, or a new instance of
+/// a standard constructor. An instance of a class of the script's own does
+/// not count, because its constructor may return `document`.
+#[test]
+fn reg_032_a_page_method_written_on_a_value_the_script_did_not_make_is_refused() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "document.getRootNode().createElement = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "[document][0].getElementById = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "({ d: document }).d.querySelector = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "function doc() {\n  return document;\n}\ndoc().createElement = () => null;\n",
+            "script-builtin",
+            4,
+        ),
+        (
+            "(() => document)().createTextNode = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "Promise.resolve(document).then((d) => {\n  d.querySelectorAll = () => [];\n});\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "document.documentElement.parentNode.createElement = () => null;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export function f(event) {\n  event.currentTarget.addEventListener = () => {};\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "const o = {};\no.d = history;\no.d.pushState = () => {};\n",
+            "script-builtin",
+            3,
+        ),
+        (
+            "export class A extends HTMLElement {\n  connectedCallback() {\n    document.addEventListener(\"click\", this.onClick);\n  }\n  onClick() {\n    this.createElement = () => null;\n  }\n}\n",
+            "script-builtin",
+            6,
+        ),
+        (
+            "delete document.getRootNode().createElement;\n",
+            "script-builtin",
+            1,
+        ),
+        (
+            "export function f(n) {\n  n[\"getElementById\"] = () => null;\n}\n",
+            "script-builtin",
+            2,
+        ),
+        (
+            "class Shim {\n  constructor() {\n    return document;\n  }\n  querySelector() {}\n}\nconst shim = new Shim();\nshim.querySelector = () => null;\n",
+            "script-builtin",
+            8,
+        ),
+    ];
+    let mut failures = missing_cases(cases);
+    failures.extend(refused_scripts(&[
+        "const api = { createElement() {} };\napi.createElement = () => null;\n",
+        "const shim = new Map();\nshim.querySelector = () => null;\n",
+        "({ addEventListener: null }).addEventListener = () => {};\n",
+    ]));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// REG-032: other scripts reach a built-in function's code through its
 /// `call`, `apply` and `bind` (`Array.prototype.slice.call(list)`), and a
 /// value the script did not make may hold any built-in method under any
