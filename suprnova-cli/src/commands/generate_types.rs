@@ -612,8 +612,11 @@ struct SourceScan {
     /// declaration of a name wins, as it does in [`resolve_reachable`].
     struct_files: HashMap<String, PathBuf>,
     /// Some `preserve_big_integers(..)` call passes anything but a literal
-    /// `false` (see [`PreserveBigIntegersVisitor`]).
+    /// `false` (see [`SwitchCallVisitor`]).
     preserves_big_integers: bool,
+    /// Some `with_all_errors(..)` call passes anything but a literal
+    /// `false` (see [`SwitchCallVisitor`]).
+    keeps_all_errors: bool,
     /// Every place a page is rendered, with the file it is in.
     renders: Vec<(PathBuf, RenderSite)>,
     /// The struct each `Inertia::share_data(..)` call is given.
@@ -624,6 +627,9 @@ struct SourceScan {
 /// checked path from writing them.
 struct FinishedScan {
     structs: Vec<InertiaPropsStruct>,
+    /// What the page declarations read from the sources beside the
+    /// structs.
+    page: PageTypes,
     /// One sentence per conflict, sorted. A conflict leaves the structs in
     /// a shape [`generate_typescript`] still renders deterministically, so
     /// the best-effort entry points can ignore it.
@@ -647,9 +653,9 @@ impl SourceScan {
         self.derived.extend(structs.structs);
         self.plain.extend(structs.plain_structs);
 
-        let mut preserve = PreserveBigIntegersVisitor::default();
-        preserve.visit_file(syntax);
-        self.preserves_big_integers |= preserve.found;
+        self.preserves_big_integers |=
+            SwitchCallVisitor::turned_on_in(PRESERVE_BIG_INTEGERS, syntax);
+        self.keeps_all_errors |= SwitchCallVisitor::turned_on_in(WITH_ALL_ERRORS, syntax);
 
         let mut calls = InertiaCallVisitor::default();
         calls.visit_file(syntax);
@@ -702,7 +708,17 @@ impl SourceScan {
             }
         }
         conflicts.sort();
-        FinishedScan { structs, conflicts }
+        FinishedScan {
+            structs,
+            // Whether the project augments `@inertiajs/core` itself is read
+            // from `frontend/src`, not from these sources; see
+            // `find_own_augmentation`.
+            page: PageTypes {
+                all_errors: self.keeps_all_errors,
+                own_augmentation: false,
+            },
+            conflicts,
+        }
     }
 
     /// Where the struct `name` is declared, for a message.
@@ -1272,27 +1288,45 @@ fn settle_wide_integers(structs: &mut [InertiaPropsStruct]) {
     }
 }
 
-/// Finds a call that turns big-integer preservation on:
-/// `.preserve_big_integers(arg)` on `InertiaConfig` or `InertiaResponse`,
-/// or the same function called through its path.
+/// Finds a call that turns one of `InertiaConfig`'s boolean switches on:
+/// `.name(arg)` as a method, or the same function called through its path
+/// (`InertiaConfig::name(config, arg)`). The scan reads two:
+/// [`PRESERVE_BIG_INTEGERS`] and [`WITH_ALL_ERRORS`].
 ///
-/// Any argument but a literal `false` counts. A literal `true` turns it on,
-/// and a variable may: a type that says `number | bigint` for a value that
-/// arrives as a `number` costs a check the compiler asks for, where one
-/// that says `number` for a value that arrives as a `BigInt` breaks
-/// arithmetic at run time. A call inside a macro is read from its tokens,
-/// since `syn` does not parse a macro's input.
-#[derive(Default)]
-struct PreserveBigIntegersVisitor {
+/// Any argument but a literal `false` counts. A literal `true` turns the
+/// switch on, and a variable may. For big integers the costs are uneven: a
+/// type that says `number | bigint` for a value that arrives as a `number`
+/// costs a check the compiler asks for, where one that says `number` for a
+/// value that arrives as a `BigInt` breaks arithmetic at run time. The
+/// errors switch reads the same rule, so one sentence in the manual covers
+/// both, and a project that calls the switch at all is one that turns it
+/// on somewhere. A call inside a macro is read from its tokens, since `syn`
+/// does not parse a macro's input.
+struct SwitchCallVisitor {
+    /// The method and function name to look for.
+    name: &'static str,
     found: bool,
 }
 
-/// The method and function name [`PreserveBigIntegersVisitor`] looks for.
+impl SwitchCallVisitor {
+    /// Whether some call in `syntax` turns the switch `name` on.
+    fn turned_on_in(name: &'static str, syntax: &syn::File) -> bool {
+        let mut visitor = Self { name, found: false };
+        visitor.visit_file(syntax);
+        visitor.found
+    }
+}
+
+/// The switch that sends wide integers as `$bigint` markers.
 const PRESERVE_BIG_INTEGERS: &str = "preserve_big_integers";
 
-/// Whether an argument turns preservation on: anything but `false`, which
+/// The switch that keeps every validation message per field, so the
+/// errors arrive as arrays.
+const WITH_ALL_ERRORS: &str = "with_all_errors";
+
+/// Whether an argument turns a switch on: anything but `false`, which
 /// parentheses do not change (`(false)` is `false`).
-fn turns_preservation_on(arg: Option<&Expr>) -> bool {
+fn turns_switch_on(arg: Option<&Expr>) -> bool {
     let mut arg = arg;
     while let Some(
         Expr::Paren(syn::ExprParen { expr, .. }) | Expr::Group(syn::ExprGroup { expr, .. }),
@@ -1309,10 +1343,10 @@ fn turns_preservation_on(arg: Option<&Expr>) -> bool {
     )
 }
 
-/// The token form of [`turns_preservation_on`], for a call inside a macro:
+/// The token form of [`turns_switch_on`], for a call inside a macro:
 /// `tokens` is everything inside the call's parentheses, and its last
 /// comma-separated argument decides.
-fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
+fn tokens_turn_switch_on(tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     let last = trees
         .rsplit(|tree| matches!(tree, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
@@ -1327,33 +1361,33 @@ fn tokens_turn_preservation_on(tokens: proc_macro2::TokenStream) -> bool {
                 proc_macro2::Delimiter::Parenthesis | proc_macro2::Delimiter::None
             ) =>
         {
-            tokens_turn_preservation_on(group.stream())
+            tokens_turn_switch_on(group.stream())
         }
         _ => true,
     }
 }
 
-/// Whether `tokens`, or a group nested in them, call
-/// `preserve_big_integers(..)` with anything but `false`.
-fn macro_tokens_preserve(tokens: proc_macro2::TokenStream) -> bool {
+/// Whether `tokens`, or a group nested in them, call the switch `name`
+/// with anything but `false`.
+fn macro_tokens_turn_on(name: &str, tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     trees.iter().enumerate().any(|(at, tree)| match tree {
-        proc_macro2::TokenTree::Ident(ident) if ident == PRESERVE_BIG_INTEGERS => {
+        proc_macro2::TokenTree::Ident(ident) if ident == name => {
             matches!(
                 trees.get(at + 1),
                 Some(proc_macro2::TokenTree::Group(group))
                     if group.delimiter() == proc_macro2::Delimiter::Parenthesis
-                        && tokens_turn_preservation_on(group.stream())
+                        && tokens_turn_switch_on(group.stream())
             )
         }
-        proc_macro2::TokenTree::Group(group) => macro_tokens_preserve(group.stream()),
+        proc_macro2::TokenTree::Group(group) => macro_tokens_turn_on(name, group.stream()),
         _ => false,
     })
 }
 
-impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
+impl<'ast> Visit<'ast> for SwitchCallVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == PRESERVE_BIG_INTEGERS && turns_preservation_on(node.args.last()) {
+        if node.method == self.name && turns_switch_on(node.args.last()) {
             self.found = true;
         }
         syn::visit::visit_expr_method_call(self, node);
@@ -1365,8 +1399,8 @@ impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == PRESERVE_BIG_INTEGERS)
-            && turns_preservation_on(node.args.last())
+                .is_some_and(|segment| segment.ident == self.name)
+            && turns_switch_on(node.args.last())
         {
             self.found = true;
         }
@@ -1374,7 +1408,7 @@ impl<'ast> Visit<'ast> for PreserveBigIntegersVisitor {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if macro_tokens_preserve(node.tokens.clone()) {
+        if macro_tokens_turn_on(self.name, node.tokens.clone()) {
             self.found = true;
         }
         syn::visit::visit_macro(self, node);
@@ -1493,10 +1527,10 @@ where
 fn scan_project_checked(
     project_path: &Path,
     options: GenerateOptions,
-) -> Result<Vec<InertiaPropsStruct>, String> {
+) -> Result<FinishedScan, String> {
     let finished = scan_project_with_failures(project_path, options)?;
     if finished.conflicts.is_empty() {
-        return Ok(finished.structs);
+        return Ok(finished);
     }
     let mut message = format!(
         "The Inertia types conflict in {} place(s); generated types were left unchanged:",
@@ -2010,6 +2044,26 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
     out
 }
 
+/// What the page declarations read from the project beside the structs.
+///
+/// The default is a project that leaves `with_all_errors` off, the
+/// framework's default; the file-write entry point reads the real value
+/// from the sources, so only a caller that renders structs it scanned some
+/// other way passes one by hand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageTypes {
+    /// Some `with_all_errors(..)` call under `src/` turns it on, so the
+    /// server sends every message per field as an array and `Errors` and
+    /// `errorValueType` say `string[]` in place of `string`.
+    pub all_errors: bool,
+    /// A file under `frontend/src` other than the generated one declares
+    /// `module '@inertiajs/core'` itself, so the generated file writes
+    /// neither the augmentation nor the import it needs. Two
+    /// augmentations would merge key by key, and one key set to two
+    /// different types is a type error in the project's own check.
+    pub own_augmentation: bool,
+}
+
 /// Settings for one generation pass that the Rust sources do not decide.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GenerateOptions {
@@ -2032,22 +2086,28 @@ pub struct GenerateOptions {
 /// `root` and the shared struct's fields; `Errors` and `PageProps<C>`,
 /// which is what Inertia's `Page.props` is for that component; and the
 /// `@inertiajs/core` augmentation that types `usePage()` with no argument.
-pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
+/// What `page` carries is decided by the project as a whole rather than by
+/// one struct: whether the errors are arrays, and whether the project
+/// augments `@inertiajs/core` itself, in which case the file leaves the
+/// augmentation, and the import it needs, to the project.
+pub fn generate_typescript(structs: &[InertiaPropsStruct], page: PageTypes) -> String {
     let mut output = String::new();
     output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
     // The augmentation at the end merges into `@inertiajs/core`'s
     // `InertiaConfig` only when this file imports the module; without the
     // import, `declare module` would declare a new module instead.
-    output.push_str("import '@inertiajs/core';\n\n");
+    if !page.own_augmentation {
+        output.push_str("import '@inertiajs/core';\n\n");
+    }
     output.push_str(&render_structs(structs));
-    output.push_str(&render_page_declarations(structs));
+    output.push_str(&render_page_declarations(structs, page));
     end_with_single_newline(output)
 }
 
 /// The declarations that type a page beside the props interfaces, each
-/// followed by a blank line.
-fn render_page_declarations(structs: &[InertiaPropsStruct]) -> String {
+/// followed by a blank line but the augmentation, which ends the file.
+fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> String {
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
 
     // Sorted by component; on a conflict the scan reports, the struct
@@ -2092,13 +2152,27 @@ fn render_page_declarations(structs: &[InertiaPropsStruct]) -> String {
     }
     out.push_str("}\n\n");
 
-    out.push_str("export type Errors = Record<string, string>;\n\n");
+    // One message per field by default, as Inertia's own `ErrorValue` says;
+    // every message, as an array, under `with_all_errors(true)`.
+    let error_value = if page.all_errors {
+        "string[]"
+    } else {
+        "string"
+    };
+    out.push_str(&format!(
+        "export type Errors = Record<string, {error_value}>;\n\n"
+    ));
     out.push_str(
         "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n\n",
     );
 
+    if page.own_augmentation {
+        return out;
+    }
     out.push_str("declare module '@inertiajs/core' {\n  export interface InertiaConfig {\n");
-    out.push_str("    sharedPageProps: SharedProps;\n    errorValueType: string;\n");
+    out.push_str(&format!(
+        "    sharedPageProps: SharedProps;\n    errorValueType: {error_value};\n"
+    ));
     if let Some(flash) = role(PropsRole::Flash) {
         out.push_str(&format!("    flashDataType: {};\n", flash.name));
     }
@@ -2375,6 +2449,11 @@ pub struct GenerationOutcome {
     /// removed when it went stale. `false` means the emitted content was
     /// byte-identical to what was already there.
     pub wrote: bool,
+    /// The file, relative to the project, that declares
+    /// `module '@inertiajs/core'` itself when the props pass found one, so
+    /// the generated file carries no augmentation; see
+    /// [`AugmentationNotice`]. Always `None` for the message ids.
+    pub own_augmentation: Option<PathBuf>,
 }
 
 impl GenerationOutcome {
@@ -2391,7 +2470,10 @@ impl GenerationOutcome {
 /// Generate types and write to the output file.
 ///
 /// If any Rust source cannot be discovered, read, or parsed, generation fails
-/// before the existing output file or its parent directory is touched.
+/// before the existing output file or its parent directory is touched, and
+/// so does a `.ts` file under `frontend/src` that cannot be read while the
+/// pass looks for the project's own `@inertiajs/core` augmentation (see
+/// [`GenerationOutcome::own_augmentation`]).
 /// `options` carries what the command line sets: `generate-types` and
 /// `serve` pass the same ones to the first run and to every regeneration
 /// their watchers make.
@@ -2400,7 +2482,11 @@ pub fn generate_types_to_file(
     output_path: &Path,
     options: GenerateOptions,
 ) -> Result<GenerationOutcome, String> {
-    let structs = scan_project_checked(project_path, options)?;
+    let FinishedScan {
+        structs, mut page, ..
+    } = scan_project_checked(project_path, options)?;
+    let own_augmentation = find_own_augmentation(project_path, output_path)?;
+    page.own_augmentation = own_augmentation.is_some();
 
     // Surface prop fields that reference un-generatable types (degraded to
     // `unknown` in the output) so the missing derive is fixed at the source.
@@ -2412,13 +2498,168 @@ pub fn generate_types_to_file(
             .map_err(|e| format!("Failed to create output directory: {}", e))?;
     }
 
-    let typescript = generate_typescript(&structs);
+    let typescript = generate_typescript(&structs, page);
     let wrote = write_if_changed(output_path, &typescript)?;
 
     Ok(GenerationOutcome {
         count: structs.len(),
         wrote,
+        own_augmentation,
     })
+}
+
+/// Where a project's frontend sources live, relative to its root: the
+/// tree read for an augmentation of `@inertiajs/core` the project wrote.
+const FRONTEND_SOURCES: &str = "frontend/src";
+
+/// The module a project augments to type `usePage()`.
+const INERTIA_CORE: &str = "@inertiajs/core";
+
+/// The extensions of the TypeScript files that may augment
+/// `@inertiajs/core`; a declaration file (`.d.ts`, `.d.mts`, `.d.cts`)
+/// ends in one of them too. A `.vue` or `.svelte` script block is not
+/// read: an ambient module declaration belongs in a TypeScript file.
+const TYPESCRIPT_EXTENSIONS: [&str; 4] = ["ts", "tsx", "mts", "cts"];
+
+/// The first TypeScript file under `frontend/src` (see
+/// [`TYPESCRIPT_EXTENSIONS`]), in name order, that declares
+/// `module '@inertiajs/core'`, relative to the project; `output_path`, the
+/// file this pass writes, never counts, since it holds the generated
+/// augmentation itself.
+///
+/// A project that types `usePage()` with its own augmentation, as
+/// Inertia's docs describe, would otherwise get a second one from the
+/// generator, and the two merge key by key: one key set to two different
+/// types fails the project's type check on a file it did not write. A
+/// file the walk cannot read is an error rather than a skip, as a Rust
+/// source is, since it may hold that declaration.
+fn find_own_augmentation(
+    project_path: &Path,
+    output_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let root = project_path.join(FRONTEND_SOURCES);
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let failure = |path: &Path, operation: &str, detail: String| {
+        format!(
+            "Frontend source scan failed; generated types were left unchanged:\n- {}: {operation} \
+             failed: {detail}",
+            path.strip_prefix(project_path).unwrap_or(path).display()
+        )
+    };
+    let generated = fs::canonicalize(output_path).ok();
+    // Sorted, so the file a notice names does not depend on the order the
+    // filesystem lists a directory in.
+    for entry in WalkDir::new(&root).sort_by_file_name() {
+        let entry = entry
+            .map_err(|error| failure(error.path().unwrap_or(&root), "scan", error.to_string()))?;
+        let path = entry.path();
+        if !path.extension().is_some_and(|extension| {
+            TYPESCRIPT_EXTENSIONS
+                .iter()
+                .any(|typescript| extension == *typescript)
+        }) {
+            continue;
+        }
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            // A dangling link, such as an editor's lock file, holds nothing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(failure(path, "read", error.to_string())),
+        };
+        if !metadata.is_file() || path == output_path {
+            continue;
+        }
+        if let (Some(generated), Ok(this)) = (&generated, fs::canonicalize(path))
+            && *generated == this
+        {
+            continue;
+        }
+        let text = fs::read(path).map_err(|error| failure(path, "read", error.to_string()))?;
+        if declares_inertia_core(&String::from_utf8_lossy(&text)) {
+            return Ok(Some(
+                path.strip_prefix(project_path)
+                    .unwrap_or(path)
+                    .to_path_buf(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether `text` declares `module '@inertiajs/core'`, in either quote and
+/// with any whitespace between the words: the form an augmentation takes.
+/// Importing the module, or declaring another one, is not that.
+fn declares_inertia_core(text: &str) -> bool {
+    text.match_indices("declare").any(|(at, keyword)| {
+        if text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        {
+            return false;
+        }
+        let Some(rest) = past_whitespace(&text[at + keyword.len()..])
+            .and_then(|rest| rest.strip_prefix("module"))
+            .and_then(past_whitespace)
+        else {
+            return false;
+        };
+        ['\'', '"'].into_iter().any(|quote| {
+            rest.strip_prefix(quote)
+                .and_then(|rest| rest.strip_prefix(INERTIA_CORE))
+                .is_some_and(|rest| rest.starts_with(quote))
+        })
+    })
+}
+
+/// `text` past its leading whitespace, when it starts with some.
+fn past_whitespace(text: &str) -> Option<&str> {
+    let rest = text.trim_start();
+    (rest.len() < text.len()).then_some(rest)
+}
+
+/// The line that says a project's own augmentation types `usePage()`: the
+/// `.ts`, `.tsx`, `.mts` or `.cts` file at `path` declares the module.
+fn own_augmentation_notice(path: &Path) -> String {
+    format!(
+        "{} declares module '{INERTIA_CORE}', so the project's own augmentation types \
+         usePage() and the generated types add none; remove that declaration to use the \
+         generated one",
+        path.display()
+    )
+}
+
+/// Says once that a project's own augmentation types `usePage()`, for a
+/// command that regenerates on every save. The augmentation is a
+/// `declare module '@inertiajs/core'` block in a `.ts`, `.tsx`, `.mts` or
+/// `.cts` file under `frontend/src` (`.d.ts` and the other declaration
+/// files included), other than the generated file.
+///
+/// The notice matters the first time a pass leaves the augmentation out,
+/// and again when the file that declares the module changes; repeated on
+/// every save it would bury the regeneration lines `serve` and
+/// `generate-types --watch` print.
+#[derive(Debug, Default)]
+pub struct AugmentationNotice {
+    /// The file the last notice named, or `None` when the last pass found
+    /// none.
+    announced: Option<PathBuf>,
+}
+
+impl AugmentationNotice {
+    /// The notice to print after a pass whose
+    /// [`GenerationOutcome::own_augmentation`] is `found`: the line naming
+    /// the file when it differs from what the last pass found, and `None`
+    /// while it stays the same or when there is none.
+    pub fn after(&mut self, found: Option<&Path>) -> Option<String> {
+        if self.announced.as_deref() == found {
+            return None;
+        }
+        self.announced = found.map(Path::to_path_buf);
+        found.map(own_augmentation_notice)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -2788,6 +3029,7 @@ pub fn generate_lang_keys_to_file(
         return Ok(GenerationOutcome {
             count: 0,
             wrote: removed,
+            own_augmentation: None,
         });
     }
 
@@ -2802,6 +3044,7 @@ pub fn generate_lang_keys_to_file(
     Ok(GenerationOutcome {
         count: ids.len(),
         wrote,
+        own_augmentation: None,
     })
 }
 
@@ -2845,13 +3088,19 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
 
     ui::info("Scanning for InertiaProps structs...");
 
+    // Carried into the watcher, so a regeneration names the project's own
+    // augmentation only when the first pass did not.
+    let mut augmentation = AugmentationNotice::default();
     match generate_types_to_file(project_path, &output_path, options) {
-        Ok(outcome) if outcome.count == 0 => {
-            ui::warning("No InertiaProps structs found.");
-            report_generation(&output_path, &outcome);
-        }
         Ok(outcome) => {
-            ui::info(&format!("Found {} InertiaProps struct(s)", outcome.count));
+            if outcome.count == 0 {
+                ui::warning("No InertiaProps structs found.");
+            } else {
+                ui::info(&format!("Found {} InertiaProps struct(s)", outcome.count));
+            }
+            if let Some(notice) = augmentation.after(outcome.own_augmentation.as_deref()) {
+                ui::info(&notice);
+            }
             report_generation(&output_path, &outcome);
         }
         Err(e) => {
@@ -2886,7 +3135,13 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
 
     if watch {
         ui::hint("Watching for changes...");
-        if let Err(e) = start_watcher(project_path, &output_path, &lang_keys_output, options) {
+        if let Err(e) = start_watcher(
+            project_path,
+            &output_path,
+            &lang_keys_output,
+            options,
+            augmentation,
+        ) {
             ui::error(&format!("Failed to start watcher: {}", e));
             std::process::exit(1);
         }
@@ -2923,11 +3178,15 @@ fn generate_route_types(project_path: &Path) {
 /// doesn't exist yet, and a project growing a `lang/` dir mid-`serve` is
 /// outside what this needs to handle; rerunning `generate-types --watch`
 /// picks it up.
+///
+/// `augmentation` holds what the first pass said about the project's own
+/// `@inertiajs/core` augmentation, so a regeneration repeats nothing.
 fn start_watcher(
     project_path: &Path,
     output_path: &Path,
     lang_keys_output: &Path,
     options: GenerateOptions,
+    mut augmentation: AugmentationNotice,
 ) -> Result<(), String> {
     use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -2988,10 +3247,16 @@ fn start_watcher(
         if due.rust {
             ui::hint("Detected changes, regenerating types...");
             match generate_types_to_file(&project_path, &output_path, options) {
-                Ok(outcome) if outcome.wrote => {
-                    ui::success(&format!("Regenerated {} type(s)", outcome.count));
+                Ok(outcome) => {
+                    if let Some(notice) = augmentation.after(outcome.own_augmentation.as_deref()) {
+                        ui::info(&notice);
+                    }
+                    if outcome.wrote {
+                        ui::success(&format!("Regenerated {} type(s)", outcome.count));
+                    } else {
+                        report_up_to_date(&output_path);
+                    }
                 }
-                Ok(_) => report_up_to_date(&output_path),
                 Err(e) => {
                     ui::error(&format!("Failed to regenerate: {}", e));
                 }
@@ -3172,7 +3437,7 @@ mod json_value_tests {
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
 
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains(JSON_ALIAS), "alias missing from:\n{ts}");
         assert!(
             ts.contains("errors: JsonValue | null;"),
@@ -3187,7 +3452,9 @@ mod json_value_tests {
              pub payload: Value,\n}\n",
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        assert!(generate_typescript(&structs).contains("payload: JsonValue;"));
+        assert!(
+            generate_typescript(&structs, PageTypes::default()).contains("payload: JsonValue;")
+        );
     }
 
     #[test]
@@ -3199,7 +3466,7 @@ mod json_value_tests {
              pub struct Value {\n    pub inner: String,\n}\n",
         );
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(ts.contains("export interface Value {"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
@@ -3211,7 +3478,7 @@ mod json_value_tests {
             "#[derive(InertiaProps)]\npub struct A {\n    pub a: serde_json::Value,\n}\n\
              #[derive(InertiaProps)]\npub struct B {\n    pub b: serde_json::Value,\n}\n",
         );
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert_eq!(
             ts.matches("export type JsonValue").count(),
             1,
@@ -3222,7 +3489,7 @@ mod json_value_tests {
     #[test]
     fn the_alias_is_absent_when_nothing_references_it() {
         let structs = parse("#[derive(InertiaProps)]\npub struct A {\n    pub a: String,\n}\n");
-        assert!(!generate_typescript(&structs).contains("JsonValue"));
+        assert!(!generate_typescript(&structs, PageTypes::default()).contains("JsonValue"));
     }
 
     #[test]
@@ -3236,7 +3503,7 @@ mod json_value_tests {
             "#[derive(InertiaProps)]\npub struct P {\n    pub payload: serde_json::Value,\n}\n\
              #[derive(InertiaProps)]\npub struct JsonValue {\n    pub inner: String,\n}\n",
         );
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
 
         assert_eq!(
             ts.matches("export type JsonValue").count(),
@@ -3261,7 +3528,7 @@ mod json_value_tests {
         let structs =
             parse("#[derive(InertiaProps)]\npub struct P<Value> {\n    pub v: Value,\n}\n");
         assert_eq!(unresolved(&structs), Vec::<String>::new());
-        let ts = generate_typescript(&structs);
+        let ts = generate_typescript(&structs, PageTypes::default());
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
     }
@@ -3302,14 +3569,14 @@ mod file_shape_tests {
 
     #[test]
     fn the_emitted_file_ends_with_exactly_one_newline() {
-        assert_single_trailing_newline(&generate_typescript(&parse(ONE)));
+        assert_single_trailing_newline(&generate_typescript(&parse(ONE), PageTypes::default()));
     }
 
     #[test]
     fn an_empty_scan_still_ends_with_exactly_one_newline() {
         // No structs: the header alone is the file, and the header used to
         // end in the same blank line a struct did.
-        assert_single_trailing_newline(&generate_typescript(&[]));
+        assert_single_trailing_newline(&generate_typescript(&[], PageTypes::default()));
     }
 
     #[test]
@@ -3318,7 +3585,7 @@ mod file_shape_tests {
         // header, the `@inertiajs/core` import, the `JsonValue` alias, and
         // each declaration is the readable shape the issue asked to
         // preserve.
-        let ts = generate_typescript(&parse(TWO));
+        let ts = generate_typescript(&parse(TWO), PageTypes::default());
         assert_single_trailing_newline(&ts);
         assert!(
             ts.contains("regenerate.\n\nimport '@inertiajs/core';\n\nexport type JsonValue"),
@@ -3360,7 +3627,11 @@ mod reportable_regeneration_tests {
     use super::*;
 
     fn outcome(count: usize, wrote: bool) -> GenerationOutcome {
-        GenerationOutcome { count, wrote }
+        GenerationOutcome {
+            count,
+            wrote,
+            own_augmentation: None,
+        }
     }
 
     #[test]
@@ -3796,7 +4067,7 @@ mod write_if_changed_tests {
             "removing the final declaration must mutate the generated artifact"
         );
         let empty_output = fs::read_to_string(&out).expect("read empty output");
-        assert_eq!(empty_output, generate_typescript(&[]));
+        assert_eq!(empty_output, generate_typescript(&[], PageTypes::default()));
         assert!(!empty_output.contains("HomeProps"));
         let before = set_old_mtime(&out);
 
@@ -3822,7 +4093,7 @@ mod write_if_changed_tests {
         assert!(empty.wrote, "a missing artifact must be created");
         assert_eq!(
             fs::read_to_string(&out).expect("read empty module"),
-            generate_typescript(&[])
+            generate_typescript(&[], PageTypes::default())
         );
         let before = set_old_mtime(&out);
 

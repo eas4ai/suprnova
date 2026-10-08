@@ -11,7 +11,7 @@ Three files, written into `frontend/src/types/`:
 
 | File | Contents |
 |---|---|
-| `inertia-props.ts` | One `export interface` per prop struct, then the page declarations: `Pages`, `SharedProps`, `Errors`, `PageProps<C>` and the `@inertiajs/core` augmentation - always written |
+| `inertia-props.ts` | One `export interface` per prop struct, then the page declarations: `Pages`, `SharedProps`, `Errors`, `PageProps<C>` and, unless the project declares its own (see [Upgrading a project with its own augmentation](#upgrading-a-project-with-its-own-augmentation)), the `@inertiajs/core` augmentation - the file is always written |
 | `routes.ts` | A `controllers` object and `routes` named-lookup map derived from `src/routes.rs` - written only with `--routes` |
 | `lang-keys.ts` | A `MessageKey` string-literal union of every Fluent message id in the default locale's catalog, fallback parents included - written only when `lang/` yields any ids (see [Message keys](#message-keys)) |
 
@@ -305,13 +305,70 @@ const { root } = usePage().props               // root: string
 `errorValueType: string` types each validation error as the one message
 per field that Suprnova sends by default. With
 `InertiaConfig::with_all_errors(true)`, a field carries every message as an
-array, which this type does not describe.
+array, and the generator types it that way: when any `.rs` file under
+`src/` calls `with_all_errors(..)` with anything but a literal `false`,
+`Errors` is `Record<string, string[]>` and `errorValueType` is `string[]`:
+
+```rust
+// src/bootstrap.rs: every field's errors become `string[]`
+Inertia::install(&InertiaConfig::new().with_all_errors(true))?;
+```
+
+```typescript
+export type Errors = Record<string, string[]>;
+
+declare module '@inertiajs/core' {
+  export interface InertiaConfig {
+    sharedPageProps: SharedProps;
+    errorValueType: string[];
+  }
+}
+```
+
+The call is read the way `preserve_big_integers(..)` is (see "Wide
+integers" below): `true` or a variable turns it on, and `false`, in
+parentheses or not, leaves `string`.
 
 The starter kits declare `@inertiajs/core` in `package.json`, since the
 augmentation names it, and their `tsconfig.json` includes `src/types/`, so
 the augmentation is part of every type check. The file declares `Pages`,
 `SharedProps`, `Errors` and `PageProps`, so a project struct with one of
 those names is an error: rename the struct.
+
+### Upgrading a project with its own augmentation
+
+A project that typed `usePage()` before the generator did has its own
+`declare module '@inertiajs/core'` block, often in
+`frontend/src/global.d.ts`. The generator does not write a second one
+beside it: two augmentations merge key by key, and a key both set to
+different types fails the type check. When a `.ts`, `.tsx`, `.mts` or
+`.cts` file under `frontend/src` (declaration files such as `.d.ts`
+included), other than the generated file itself, declares
+`module '@inertiajs/core'` (in single or double quotes), `inertia-props.ts`
+keeps `Pages`, `SharedProps`, `Errors` and `PageProps` and writes no
+augmentation and no `import '@inertiajs/core'`. `generate-types` says so,
+naming the file:
+
+```text
+→ frontend/src/global.d.ts declares module '@inertiajs/core', so the project's own augmentation types usePage() and the generated types add none; remove that declaration to use the generated one
+```
+
+`serve` prints the same line once, at start-up, and a regeneration on save
+repeats it only when another file declares the module. A `.vue` or
+`.svelte` script block is not read: an ambient module declaration belongs
+in a TypeScript file. A TypeScript file under `frontend/src` that cannot
+be read stops the generation with its path, as an unreadable Rust source
+does, since it may hold the declaration.
+
+You can go either way:
+
+- Keep the hand-written block. It types `usePage()` as it did, and the
+  generator stays out of its way; keep it in step with the server
+  yourself, `errorValueType` included.
+- Delete the block, or the file when it holds nothing else, and run
+  `suprnova generate-types`. The generated augmentation then types
+  `usePage()` with `root`, the shared struct's fields and the errors the
+  server sends.
 
 ## Type mapping
 
@@ -730,9 +787,11 @@ Inertia types `usePage()` through a `declare module '@inertiajs/core'`
 block you write by hand, in a `global.d.ts`, and keep in step with the
 server. Suprnova generates that block into `inertia-props.ts`, from the
 struct your handlers share and the struct you mark as flash data, so the
-shared props cannot drift from the server either. Keep no hand-written
-`InertiaConfig` augmentation beside it: the two would merge, and a key
-both set to different types is a type error.
+shared props cannot drift from the server either. A project that already
+has a hand-written block keeps it, and the generator steps aside: it
+writes no augmentation of its own, since the two would merge and a key
+both set to different types is a type error (see [Upgrading a project with
+its own augmentation](#upgrading-a-project-with-its-own-augmentation)).
 
 ## Next
 

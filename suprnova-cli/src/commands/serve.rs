@@ -1397,6 +1397,11 @@ pub fn run(
         }
     };
 
+    // What the start-up generation said about the project's own
+    // `@inertiajs/core` augmentation, handed to the type watcher so a
+    // regeneration that finds the same file repeats nothing.
+    let mut augmentation = super::generate_types::AugmentationNotice::default();
+
     // Generate TypeScript types on startup (unless skipped or frontend-only)
     if !skip_types && !frontend_only && has_frontend {
         let project_path = Path::new(".");
@@ -1411,11 +1416,15 @@ pub fn run(
             type_options,
         ) {
             Ok(outcome) => {
+                let own_augmentation = augmentation.after(outcome.own_augmentation.as_deref());
                 if !json {
                     let (empty_hint, notice) =
                         startup_type_generation_notices(outcome.count, &output_path, outcome.wrote);
                     if let Some(hint) = empty_hint {
                         ui::hint(hint);
+                    }
+                    if let Some(own_augmentation) = own_augmentation {
+                        ui::info(&own_augmentation);
                     }
                     if outcome.wrote {
                         ui::success(&notice);
@@ -1656,7 +1665,7 @@ pub fn run(
     if !skip_types && !frontend_only && has_frontend {
         let shutdown_watcher = manager.shutdown.clone();
         thread::spawn(move || {
-            start_type_watcher(shutdown_watcher, mode, type_options);
+            start_type_watcher(shutdown_watcher, mode, type_options, augmentation);
         });
     }
 
@@ -2160,11 +2169,16 @@ fn start_migration_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 /// diagnostic in this file.
 ///
 /// `type_options` are the ones the start-up generation used, so a
-/// regeneration on save writes the same types `--big-integers` asked for.
+/// regeneration on save writes the same types `--big-integers` asked for,
+/// and `augmentation` holds what that generation said about the project's
+/// own `@inertiajs/core` augmentation, so a regeneration names the file
+/// only when it changed. Like the other informational lines, that notice
+/// is not printed under `--json`.
 fn start_type_watcher(
     shutdown: Arc<AtomicBool>,
     mode: OutputMode,
     type_options: super::generate_types::GenerateOptions,
+    mut augmentation: super::generate_types::AugmentationNotice,
 ) {
     let (tx, rx) = channel();
     let src_path = Path::new("src");
@@ -2252,11 +2266,19 @@ fn start_type_watcher(
         let due = schedule.due(Instant::now());
 
         if due.rust {
-            match super::generate_types::generate_types_to_file(
+            let generated = super::generate_types::generate_types_to_file(
                 project_path,
                 &output_path,
                 type_options,
-            ) {
+            );
+            // Said before the regeneration's own line, which follows it.
+            if let Ok(outcome) = &generated
+                && let Some(notice) = augmentation.after(outcome.own_augmentation.as_deref())
+                && !mode.is_json()
+            {
+                println!("{} {}", style("[types]").blue(), notice);
+            }
+            match generated {
                 Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
