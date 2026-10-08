@@ -2166,10 +2166,12 @@ the `.vite_dev_server(...)` URL when the file is empty.
 the worker path with its bundle check, whatever listens at the dev server's
 port. Production never goes hot.
 
-A dev server without the Inertia Vite plugin answers `/__inertia_ssr` with
-a `404`. That visit renders on the client quietly: no `SsrRenderFailed`, no
-`on_ssr_error` call, and no error under `ssr_throw_on_error`. Any other
-error status from the dev server is a failure like the worker's.
+A dev server that answers `/__inertia_ssr` with an error status is a
+failure like the worker's: the visit dispatches `SsrRenderFailed`, calls the
+`on_ssr_error` hook and renders on the client, or fails under
+`ssr_throw_on_error`. A `404` from a dev server without the plugin, reached
+through `.ssr_hot_url(...)` or a hot file written by hand, is reported the
+same way.
 
 ### Worker failures and `SsrRenderFailed`
 
@@ -2324,10 +2326,7 @@ Laravel's Vite plugin writes `public/hot` while the dev server runs. Here
 `suprnova serve`, which starts Vite, writes and removes the file, and only
 when `frontend/package.json` declares `@inertiajs/vite`, the plugin that
 makes the dev server serve SSR. Run Vite on its own (`npm run dev`) and the
-backend does not go hot unless you set `.ssr_hot_url(...)`. A `404` from the hot endpoint renders on the
-client quietly, where Laravel dispatches `SsrRenderFailed`: the starter
-kits do not ship the Inertia Vite plugin, so every first visit would
-report a failure while you develop.
+backend does not go hot unless you set `.ssr_hot_url(...)`.
 
 Laravel sets no SSR timeout of its own and inherits its HTTP client's
 30 seconds. Suprnova keeps 5 seconds (`ssr_timeout`): a hung worker would

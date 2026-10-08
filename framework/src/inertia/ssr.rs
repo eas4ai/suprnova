@@ -176,12 +176,6 @@ fn ssr_runs_for(config: &SsrConfig, request: &dyn InertiaRequestExt) -> bool {
     !(excluded(&config.excluded_paths) || excluded(&added))
 }
 
-/// Where a first visit is posted, and whether that is the hot endpoint.
-struct Target {
-    url: String,
-    hot: bool,
-}
-
 /// Where a first visit is posted, Laravel's `HttpGateway::dispatch`
 /// order: the hot URL's `/__inertia_ssr` in hot mode, with no bundle check
 /// (PAR-058); else the worker's `/render` when a bundle is found or the
@@ -190,21 +184,16 @@ struct Target {
 /// The configuration decides hot mode before this runs
 /// (`InertiaConfig::ssr_for_dispatch`, from the hot file): a hot URL here
 /// means hot. The page is serialized only after this, so a visit that
-/// renders on the client never pays for it.
-fn dispatch_target(config: &SsrConfig) -> Option<Target> {
+/// renders on the client never pays for it. Both targets' answers are read
+/// the same way (PAR-059).
+fn dispatch_target(config: &SsrConfig) -> Option<String> {
     if let Some(hot) = config.hot_url.as_deref() {
-        return Some(Target {
-            url: endpoint(hot, "/__inertia_ssr"),
-            hot: true,
-        });
+        return Some(endpoint(hot, "/__inertia_ssr"));
     }
     if config.ensure_bundle_exists && detect_bundle(config).is_none() {
         return None;
     }
-    Some(Target {
-        url: endpoint(&config.url, "/render"),
-        hot: false,
-    })
+    Some(endpoint(&config.url, "/render"))
 }
 
 /// `base` with `path` appended, the trailing slashes of `base` dropped, as
@@ -221,7 +210,11 @@ fn endpoint(base: &str, path: &str) -> String {
 /// A missing bundle is not reported: with SSR on by default, an
 /// application that has no bundle would otherwise log it on every first
 /// visit. Laravel's `HttpGateway::dispatch` returns `null` the same way.
-/// A worker that fails is reported through `report_failure`.
+/// A worker that fails is reported through `report_failure`, and so is the
+/// Vite dev server in hot mode: any non-2xx answer from either, a `404`
+/// from a dev server without the Inertia Vite plugin included, is the
+/// worker's error answer, as Laravel reads it (PAR-059). `suprnova serve`
+/// writes the hot file only for a frontend that declares that plugin.
 pub(crate) async fn render(
     config: &SsrConfig,
     request: &dyn InertiaRequestExt,
@@ -230,7 +223,7 @@ pub(crate) async fn render(
     if !ssr_runs_for(config, request) {
         return Ok(None);
     }
-    let Some(target) = dispatch_target(config) else {
+    let Some(url) = dispatch_target(config) else {
         return Ok(None);
     };
 
@@ -239,21 +232,11 @@ pub(crate) async fn render(
     let request = crate::App::inertia_registry()
         .runtime()
         .configure_ssr_request(SsrRequest {
-            url: target.url,
+            url,
             headers: Vec::new(),
             timeout: config.timeout,
         });
     let failure = match exchange(&request, Some(body), config.max_response_bytes).await {
-        // A dev server without the Inertia Vite plugin serves no SSR: its
-        // 404 means "render on the client", not a failure to report on
-        // every first visit while developing.
-        Ok(answer) if target.hot && answer.status == reqwest::StatusCode::NOT_FOUND => {
-            tracing::debug!(
-                url = %request.url,
-                "the Vite dev server serves no SSR; the visit renders on the client"
-            );
-            return Ok(None);
-        }
         Ok(answer) if answer.status.is_success() => return Ok(rendered(&answer.body)),
         Ok(answer) => error_answer(page, answer.status, &answer.body),
         Err(transport) => failure(page, transport, SsrErrorType::Connection),
