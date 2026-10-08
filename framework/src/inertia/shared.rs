@@ -35,6 +35,7 @@
 use super::config::InertiaConfig;
 use super::dotted;
 use super::prop::{InertiaRequestExt, OnceOptions, OnceUntil, Prop, PropResolver};
+use super::providers::ProvidesInertiaProperties;
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
@@ -155,6 +156,9 @@ pub struct InertiaRegistry {
     /// Shared with every [`SharedOnceProp`] handle, which writes its
     /// options through to the entry it was returned for.
     shares: Arc<RwLock<Vec<StaticEntry>>>,
+    /// Shared [`ProvidesInertiaProperties`] values, expanded per render
+    /// after the keyed shares, in registration order.
+    providers: RwLock<Vec<Arc<dyn ProvidesInertiaProperties>>>,
     provider: RwLock<Option<Arc<dyn InertiaSharedData>>>,
     /// The config `Inertia::install` was given, if it has been called.
     ///
@@ -174,6 +178,7 @@ impl InertiaRegistry {
     pub fn new() -> Self {
         Self {
             shares: Arc::new(RwLock::new(Vec::new())),
+            providers: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
             config: RwLock::new(None),
         }
@@ -273,6 +278,32 @@ impl InertiaRegistry {
             }
         }
         id
+    }
+
+    /// Share a [`ProvidesInertiaProperties`] value: every Inertia response
+    /// expands it with its [`RenderContext`](super::RenderContext) and takes
+    /// its props as shared props - Laravel's `Inertia::share($provider)`.
+    /// Any number can be shared; they expand after the keyed shares, in
+    /// the order they were shared, and their keys count as shared keys
+    /// for `sharedProps`.
+    ///
+    /// **Poison policy** (Domain 20 audit D20-A): on lock poison the
+    /// registration is skipped and a `tracing::error!` is emitted.
+    pub fn share_provider(&self, provider: impl ProvidesInertiaProperties + 'static) {
+        match lock::write(&self.providers, "inertia shared providers") {
+            Ok(mut providers) => providers.push(Arc::new(provider)),
+            Err(_) => {
+                tracing::error!("Inertia shared providers lock poisoned; skipping share_provider.");
+            }
+        }
+    }
+
+    /// The shared providers, in registration order. Internal use by
+    /// `InertiaResponse::resolve`.
+    pub(crate) fn shared_providers(
+        &self,
+    ) -> Result<Vec<Arc<dyn ProvidesInertiaProperties>>, FrameworkError> {
+        Ok(lock::read(&self.providers, "inertia shared providers")?.clone())
     }
 
     /// Register the singleton [`InertiaSharedData`] implementation.
@@ -389,10 +420,11 @@ impl InertiaRegistry {
         }
     }
 
-    /// Clear every entry from the static share registry - Laravel's
-    /// `Inertia::flushShared()` (`ResponseFactory.php:120-123`). Does not
-    /// touch the trait-provider registration (`register_trait`); there is
-    /// no per-request state there to flush.
+    /// Clear every entry from the static share registry, shared
+    /// [`ProvidesInertiaProperties`] values included - Laravel's
+    /// `Inertia::flushShared()`, which empties the one shared array they
+    /// all live in. Does not touch the trait-provider registration
+    /// (`register_trait`); there is no per-request state there to flush.
     ///
     /// **Poison policy** (Domain 20 audit D20-A): on lock poison the flush
     /// is skipped and a `tracing::error!` is logged, matching `upsert`.
@@ -401,6 +433,12 @@ impl InertiaRegistry {
             Ok(mut reg) => reg.clear(),
             Err(_) => {
                 tracing::error!("Inertia share registry lock poisoned; skipping flush_shared.");
+            }
+        }
+        match lock::write(&self.providers, "inertia shared providers") {
+            Ok(mut providers) => providers.clear(),
+            Err(_) => {
+                tracing::error!("Inertia shared providers lock poisoned; skipping flush_shared.");
             }
         }
     }

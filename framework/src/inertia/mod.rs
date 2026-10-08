@@ -16,6 +16,7 @@ pub(crate) mod flash;
 mod headers_middleware;
 mod manifest;
 mod prop;
+mod providers;
 mod response;
 mod root_share;
 mod shared;
@@ -36,6 +37,7 @@ pub use prop::{
     Visibility,
 };
 pub use prop::{MergePaths, OnceUntil};
+pub use providers::{ProvidesInertiaProperties, RenderContext};
 pub(crate) use response::escape_html_attr;
 pub use response::{InertiaResponse, IntoInertiaData, PropEntry};
 pub use root_share::RootShare;

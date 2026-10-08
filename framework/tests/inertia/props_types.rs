@@ -729,3 +729,131 @@ async fn inp_deferred_scroll_lazy_loads_nothing_on_the_first_visit() {
     assert_eq!(names(&page, "mergeProps"), ["posts.data"]);
     assert_eq!(page["scrollProps"]["posts"]["nextPage"], 2);
 }
+
+// ---- PAR-051: prop providers ----
+
+/// A provider that expands into one prop and records what it was given.
+struct SeenBy {
+    key: &'static str,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl suprnova::ProvidesInertiaProperties for SeenBy {
+    fn to_inertia_properties(
+        &self,
+        context: &suprnova::RenderContext<'_>,
+    ) -> Result<suprnova::indexmap::IndexMap<String, Prop>, suprnova::FrameworkError> {
+        self.seen.lock().expect("the record lock").push((
+            context.component().to_string(),
+            context.request().path().to_string(),
+        ));
+        let mut props = suprnova::indexmap::IndexMap::new();
+        props.insert(self.key.to_string(), Prop::eager(json!(self.key)));
+        Ok(props)
+    }
+}
+
+#[tokio::test]
+async fn inp_two_page_providers_both_expand_with_the_render_context() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let response = InertiaResponse::new("Dashboard")
+        .provide(SeenBy {
+            key: "stats",
+            seen: seen.clone(),
+        })
+        .with("title", "Home")
+        .provide(SeenBy {
+            key: "team",
+            seen: seen.clone(),
+        });
+    let page = page_of(response, &MockReq::new("/dash").inertia()).await;
+
+    assert_eq!(page["props"]["stats"], "stats");
+    assert_eq!(page["props"]["team"], "team");
+    assert_eq!(page["props"]["title"], "Home");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("Dashboard".to_string(), "/dash".to_string()),
+            ("Dashboard".to_string(), "/dash".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn inp_a_page_prop_wins_over_a_provider_key() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let response = InertiaResponse::new("Dashboard")
+        .with("stats", "explicit")
+        .provide(SeenBy { key: "stats", seen });
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["props"]["stats"], "explicit");
+}
+
+#[tokio::test]
+async fn inp_shared_providers_expand_per_render_and_are_shared_keys() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = suprnova::App::inertia_registry();
+    registry.share_provider(SeenBy {
+        key: "auth",
+        seen: seen.clone(),
+    });
+    registry.share_provider(SeenBy {
+        key: "locale",
+        seen: seen.clone(),
+    });
+
+    let page = page_of(
+        InertiaResponse::new("Settings"),
+        &MockReq::new("/settings").inertia(),
+    )
+    .await;
+
+    assert_eq!(page["props"]["auth"], "auth");
+    assert_eq!(page["props"]["locale"], "locale");
+    let shared = names(&page, "sharedProps");
+    assert!(shared.contains(&"auth".to_string()), "{page}");
+    assert!(shared.contains(&"locale".to_string()), "{page}");
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        ("Settings".to_string(), "/settings".to_string())
+    );
+
+    suprnova::App::flush_inertia_shared();
+    let page = page_of(
+        InertiaResponse::new("Settings"),
+        &MockReq::new("/").inertia(),
+    )
+    .await;
+    assert!(
+        page["props"].get("auth").is_none(),
+        "flush clears shared providers too, as Laravel's flushShared does; got {page}"
+    );
+}
+
+#[derive(suprnova::Data, validator::Validate)]
+struct ProfileData {
+    name: String,
+}
+
+#[derive(suprnova::Data, validator::Validate)]
+struct BillingData {
+    plan: String,
+}
+
+#[tokio::test]
+async fn inp_a_response_takes_several_data_objects() {
+    let response = InertiaResponse::new("Account")
+        .with_data(ProfileData {
+            name: "Ada".to_string(),
+        })
+        .with_data(BillingData {
+            plan: "pro".to_string(),
+        });
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["props"]["name"], "Ada");
+    assert_eq!(page["props"]["plan"], "pro");
+}

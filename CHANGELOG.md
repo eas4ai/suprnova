@@ -168,6 +168,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   cursor parameter; it was always `null`. `Paginator` (the simple
   paginator) takes a page parameter name, `with_page_name`, used by its
   URLs and its `pageName`, where it was fixed to `page`.
+- **Prop providers, page and shared.** A type implementing
+  `ProvidesInertiaProperties` expands into props once per render with a
+  `RenderContext` of the page component and the request, Laravel's
+  interface of the same name. A page takes any number with
+  `InertiaResponse::provide`, the shared props any number with
+  `InertiaRegistry::share_provider`; shared providers' keys count as
+  shared keys, and `flush_shared` clears them. A page also takes any
+  number of `#[derive(Data)]` objects with `with_data` (and
+  `try_with_data`), where it took one, through `Inertia::data`, with no
+  request or component context.
 
 ### Changed
 

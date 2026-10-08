@@ -6,6 +6,7 @@ use super::prop::{
     DeferOptions, InertiaRequestExt, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop,
     PropResolver, PropSource, ScrollMetadata, Visibility,
 };
+use super::providers::{ProvidesInertiaProperties, RenderContext};
 use crate::container::App;
 use crate::csrf::csrf_token;
 use crate::error::FrameworkError;
@@ -131,6 +132,9 @@ pub struct InertiaResponse {
     /// plain lazy path every other resolver-backed prop takes. Keyed by
     /// the same string as `props`.
     lazy_owned: IndexMap<String, (&'static str, &'static str)>,
+    /// [`ProvidesInertiaProperties`] values given by
+    /// [`provide`](Self::provide), expanded at render in this order.
+    providers: Vec<Arc<dyn ProvidesInertiaProperties>>,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -292,6 +296,7 @@ impl InertiaResponse {
             clear_history: false,
             preserve_fragment: None,
             lazy_owned: IndexMap::new(),
+            providers: Vec::new(),
         }
     }
 
@@ -471,20 +476,66 @@ impl InertiaResponse {
     ///   `?include=` + allowlist gate applies at resolution time.
     pub fn from_data_props(component: &'static str, props: Vec<(String, PropEntry)>) -> Self {
         let mut r = Self::new(component);
+        r.put_data_props(props);
+        r
+    }
+
+    /// Add a `#[derive(Data)]` object's props to this response, any number
+    /// of them - Laravel's page props taking several Data objects
+    /// (PAR-051). Lazy fields keep the `?include=` and allowlist gate they
+    /// have under [`Inertia::data`](crate::Inertia::data); a later prop
+    /// under the same key replaces an earlier one.
+    ///
+    /// Panics where [`Inertia::data`](crate::Inertia::data) does, on a
+    /// field whose `Serialize` impl fails; the request's panic boundary
+    /// turns that into a 500. Use [`try_with_data`](Self::try_with_data)
+    /// to handle it instead.
+    pub fn with_data<T: IntoInertiaData>(mut self, data: T) -> Self {
+        self.put_data_props(data.__into_inertia_props());
+        self
+    }
+
+    /// Fallible sibling of [`with_data`](Self::with_data): returns
+    /// `Err(FrameworkError)` naming the field whose `Serialize` impl
+    /// failed instead of panicking.
+    pub fn try_with_data<T: IntoInertiaData>(mut self, data: T) -> Result<Self, FrameworkError> {
+        let props = data
+            .__try_into_inertia_props()
+            .map_err(reflash_session_values_after_eager_error)?;
+        self.put_data_props(props);
+        Ok(self)
+    }
+
+    /// Expand a [`ProvidesInertiaProperties`] value into this page's props
+    /// at render, with the page's [`RenderContext`] - Laravel's provider in
+    /// `Inertia::render($component, [$provider, ...])`.
+    ///
+    /// Give a page any number of them: their props merge in the order they
+    /// were given, a later provider winning over an earlier one, and the
+    /// page's own props (`.with`, `.prop` and the rest) win over every
+    /// provider's, whatever the call order. A provider's props win over
+    /// the shared props.
+    pub fn provide(mut self, provider: impl ProvidesInertiaProperties + 'static) -> Self {
+        self.providers.push(Arc::new(provider));
+        self
+    }
+
+    /// Register the props a `#[derive(Data)]` object produced, routing its
+    /// owner-tagged lazy fields through the include gate.
+    fn put_data_props(&mut self, props: Vec<(String, PropEntry)>) {
         for (k, entry) in props {
             match entry {
                 PropEntry::Eager(v) => {
-                    r.put_prop(k, Prop::eager(v));
+                    self.put_prop(k, Prop::eager(v));
                 }
                 PropEntry::LazyOwned { owner, field, prop }
                 | PropEntry::DeferredOwned { owner, field, prop }
                 | PropEntry::ClosureOwned { owner, field, prop } => {
-                    r.put_prop(k, prop);
-                    r.lazy_owned.insert(field.to_string(), (owner, field));
+                    self.put_prop(k, prop);
+                    self.lazy_owned.insert(field.to_string(), (owner, field));
                 }
             }
         }
-        r
     }
 
     /// Attach an optional prop. Never included on standard visits;
@@ -1116,6 +1167,7 @@ impl InertiaResponse {
             clear_history,
             preserve_fragment,
             lazy_owned,
+            providers,
         } = self;
 
         // Page URL: path AND query, or the app's resolver. The client
@@ -1198,12 +1250,25 @@ impl InertiaResponse {
             track_shared(&mut shared_keys, &k);
             merged.insert(k, v);
         }
+        // Providers expand with the render context (PAR-051): the shared
+        // ones after the keyed shares, and their keys are shared keys; the
+        // page's after every shared layer, under the page's own props.
+        let context = RenderContext::new(&component, req);
+        for provider in registry.shared_providers()? {
+            for (k, v) in provider.to_inertia_properties(&context)? {
+                track_shared(&mut shared_keys, &k);
+                merged.insert(k, v);
+            }
+        }
         if let Some(provider) = registry.trait_provider()? {
             let trait_shared = provider.share(req, &component).await?;
             for (k, v) in trait_shared {
                 track_shared(&mut shared_keys, &k);
                 merged.insert(k, v);
             }
+        }
+        for provider in &providers {
+            merged.extend(provider.to_inertia_properties(&context)?);
         }
         for (k, v) in props {
             // Note: when user props override a shared key, we keep the
@@ -1291,6 +1356,7 @@ impl InertiaResponse {
             clear_history,
             preserve_fragment,
             lazy_owned,
+            providers: _,
         } = self;
         let (materialized, metadata) = resolve_props(
             props,

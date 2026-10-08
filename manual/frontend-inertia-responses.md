@@ -782,9 +782,12 @@ being rendered, so a provider can vary its output by page - see below.
 
 When the same key appears in more than one layer, later writes win:
 
-1. Static registry (`App::inertia_share` / `App::inertia_share_lazy`)
+1. Static registry (`App::inertia_share` / `App::inertia_share_lazy`),
+   then the shared [providers](#prop-providers) in the order they were
+   shared
 2. Per-request trait provider (`InertiaSharedData::share`)
-3. Per-response builder methods (`.with`, `.lazy`, etc.)
+3. The page's [providers](#prop-providers), in the order they were given
+4. Per-response builder methods (`.with`, `.lazy`, etc.)
 
 This lets a handler override a globally-shared default for one page
 without having to unregister anything.
@@ -836,6 +839,63 @@ App::register_inertia_shared(Arc::new(AuthShare));
 ```
 
 Ignore `component` (`_component`) if your provider doesn't need to vary by page.
+
+### Prop providers
+
+A value that stands in for several props implements
+`ProvidesInertiaProperties` - Laravel's interface of the same name. A page
+takes any number of them with `.provide(...)`, the shared props any number
+with `App::inertia_registry().share_provider(...)`, and each one expands
+once per render with a `RenderContext` of the page component and the
+request:
+
+```rust
+use suprnova::{
+    FrameworkError, InertiaResponse, Prop, ProvidesInertiaProperties, RenderContext,
+    indexmap::IndexMap,
+};
+
+pub struct TeamProps {
+    team_id: i64,
+}
+
+impl ProvidesInertiaProperties for TeamProps {
+    fn to_inertia_properties(
+        &self,
+        context: &RenderContext<'_>,
+    ) -> Result<IndexMap<String, Prop>, FrameworkError> {
+        let team_id = self.team_id;
+        let mut props = IndexMap::new();
+        props.insert("teamId".into(), Prop::eager(team_id.into()));
+        // Async work goes in a lazy prop, which runs only when it is sent.
+        props.insert(
+            "members".into(),
+            Prop::lazy(move || async move { load_members(team_id).await }),
+        );
+        if context.component() == "Teams/Settings" {
+            props.insert("canDelete".into(), Prop::eager(true.into()));
+        }
+        Ok(props)
+    }
+}
+
+InertiaResponse::new("Teams/Show")
+    .provide(TeamProps { team_id: 7 })
+    .provide(BillingProps::for_team(7))
+    .with("title", "Team")
+```
+
+Expansion is synchronous, as Laravel's is; a provider returns lazy props
+for work that has to wait. Providers merge in the order they were given,
+a later one winning over an earlier one, and the page's own props win
+over its providers' whatever the call order. Shared providers expand
+after the keyed shares, and their keys are shared keys. A `#[derive(Data)]`
+object works the same way for its fields: `.with_data(dto)` adds one, any
+number of times, with its lazy fields still behind the `?include=`
+allowlist (`try_with_data` is the fallible sibling).
+
+`App::flush_inertia_shared()` clears the shared providers with the keyed
+shares, as Laravel's `flushShared` does.
 
 ## Flash and redirects
 
