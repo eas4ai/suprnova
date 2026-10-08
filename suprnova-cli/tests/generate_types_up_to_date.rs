@@ -148,3 +148,58 @@ fn removing_the_final_props_type_reports_one_mutation_then_up_to_date() {
         "an empty no-op must not claim a mutation; got: {unchanged}"
     );
 }
+
+/// PAR-068: each starter kit ships, byte for byte, the `inertia-props.ts`
+/// that `generate-types` writes for the project `suprnova new` scaffolds
+/// with it. `suprnova serve` regenerates the file on the first `.rs` save,
+/// so a shipped file that differs becomes a diff on a file the user never
+/// edited, and a kit page that types itself off a declaration the
+/// generator does not write stops compiling.
+#[test]
+fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
+    for frontend in ["svelte", "react", "vue"] {
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create tempdir");
+        let name = format!("kit_{frontend}");
+        let out = Command::new(BIN)
+            .args([
+                "new",
+                &name,
+                "--no-interaction",
+                "--no-git",
+                "--frontend",
+                frontend,
+            ])
+            .current_dir(root.path())
+            .output()
+            .expect("spawn suprnova new");
+        assert!(
+            out.status.success(),
+            "`suprnova new --frontend {frontend}` must succeed; output: {}",
+            combined(&out)
+        );
+        let project = root.path().join(&name);
+        let types = project.join("frontend/src/types/inertia-props.ts");
+        let shipped = fs::read_to_string(&types).expect("read the shipped types");
+
+        let out = Command::new(BIN)
+            .arg("generate-types")
+            .current_dir(&project)
+            .output()
+            .expect("spawn suprnova generate-types");
+        let text = combined(&out);
+        assert!(
+            out.status.success(),
+            "{frontend}: generate-types failed: {text}"
+        );
+        assert!(
+            text.contains("./frontend/src/types/inertia-props.ts is up to date"),
+            "{frontend}: generate-types rewrote the shipped file; got: {text}"
+        );
+        assert_eq!(
+            fs::read_to_string(&types).expect("read the regenerated types"),
+            shipped,
+            "{frontend}: the shipped inertia-props.ts differs from what \
+             generate-types writes for the scaffold"
+        );
+    }
+}

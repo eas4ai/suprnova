@@ -6,7 +6,8 @@ export default function ForgotPassword() {
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this page posts to or links is built from it, so one build
   // runs at both.
-  const { root } = usePage<{ root: string }>().props
+  // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
+  const { root } = usePage().props
   const { data, setData, post, processing, errors } = useForm({
     email: '',
   })

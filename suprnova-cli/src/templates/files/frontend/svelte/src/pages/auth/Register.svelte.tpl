@@ -5,7 +5,8 @@
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this page posts to or links is built from it, so one build
   // runs at both.
-  const { root } = usePage<{ root: string }>().props
+  // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
+  const { root } = usePage().props
 
   // Validation errors arrive through the form: a failed submission is a
   // `303` back to this page with the errors flashed, and the Inertia

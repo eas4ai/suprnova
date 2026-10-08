@@ -15,7 +15,7 @@ use syn::{Attribute, Fields, FnArg, ItemFn, ItemStruct, Type};
 use walkdir::WalkDir;
 
 use super::generate_types::{
-    derive_list_names, names_framework_item, serde_input_key, ts_property_key,
+    InertiaCallVisitor, derive_list_names, names_framework_item, serde_input_key, ts_property_key,
 };
 use crate::ui;
 
@@ -70,6 +70,10 @@ pub struct RouteDefinition {
     pub handler_fn: String,     // e.g., "show"
     pub name: Option<String>,   // e.g., "users.show"
     pub path_params: Vec<PathParam>,
+    /// The page component a `Router::inertia(path, component, props)` route
+    /// renders. `None` for a route with a handler, whose component the
+    /// handler's body names (see [`HandlerInfo::components`]).
+    pub component: Option<String>,
 }
 
 /// Information about a handler function
@@ -84,6 +88,24 @@ pub struct HandlerInfo {
     /// its parameters from the path, bound or as a path value, never as
     /// the form request.
     pub args: Vec<(Option<String>, Option<String>)>,
+    /// The page components the handler's body names as string literals in
+    /// `inertia_response!`, `InertiaResponse::new` and the `Inertia`
+    /// facade's render calls, sorted and once each.
+    pub components: Vec<String>,
+    /// The body also renders a component it does not name as a literal,
+    /// so which page it renders is decided at run time.
+    pub renders_unnamed_component: bool,
+}
+
+impl HandlerInfo {
+    /// The one component the handler renders, when its body names exactly
+    /// one and renders no other.
+    pub fn component(&self) -> Option<&str> {
+        match self.components.as_slice() {
+            [component] if !self.renders_unnamed_component => Some(component),
+            _ => None,
+        }
+    }
 }
 
 /// A form request struct definition
@@ -174,11 +196,96 @@ fn collect_routes(tokens: TokenStream, scope: &GroupScope, routes: &mut Vec<Rout
             at = next;
             continue;
         }
+        if let Some((route, next)) = inertia_route_at(&trees, at, scope) {
+            routes.push(route);
+            at = next;
+            continue;
+        }
         if let TokenTree::Group(group) = &trees[at] {
             collect_routes(group.stream(), scope, routes);
         }
         at += 1;
     }
+}
+
+/// The methods that register a route on a `Router`. A route's `.name(..)`
+/// is the one chained before the next of these.
+const REGISTRATIONS: [&str; 8] = [
+    "get", "post", "put", "patch", "delete", "any", "inertia", "view",
+];
+
+/// A `.inertia("path", "Component", props)` call at `at` - the
+/// `Router::inertia` route, which renders its component with no handler -
+/// and the index of the first token after it and its `.name(..)` chain.
+///
+/// The route has no controller, so its helper sits in the `controllers`
+/// object under `inertia`, keyed by its path the way a second route of one
+/// handler is.
+fn inertia_route_at(
+    trees: &[TokenTree],
+    at: usize,
+    scope: &GroupScope,
+) -> Option<(RouteDefinition, usize)> {
+    let (TokenTree::Punct(dot), TokenTree::Ident(method), TokenTree::Group(args)) =
+        (trees.get(at)?, trees.get(at + 1)?, trees.get(at + 2)?)
+    else {
+        return None;
+    };
+    if dot.as_char() != '.' || method != "inertia" || args.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+    let mut parts = comma_separated(args.stream()).into_iter();
+    let path = string_literal(parts.next()?.into_iter().collect())?;
+    let component = parts
+        .next()
+        .and_then(|part| string_literal(part.into_iter().collect()));
+
+    // `.name(..)` and `.middleware(..)` chain off the route; a later
+    // registration starts the next route.
+    let mut next = at + 3;
+    let mut name = None;
+    while let (
+        Some(TokenTree::Punct(dot)),
+        Some(TokenTree::Ident(chained)),
+        Some(TokenTree::Group(chained_args)),
+    ) = (trees.get(next), trees.get(next + 1), trees.get(next + 2))
+    {
+        let chained = chained.to_string();
+        if dot.as_char() != '.' || REGISTRATIONS.contains(&chained.as_str()) {
+            break;
+        }
+        if chained == "name" {
+            name = string_literal(chained_args.stream());
+        }
+        next += 3;
+    }
+
+    let joined = match &scope.path_prefix {
+        Some(prefix) => join_paths(prefix, &path),
+        None => path,
+    };
+    let path = convert_route_params(&joined);
+    let key = sanitize_route_key(path.trim_matches('/'));
+    let path_params = path_param_names(&path)
+        .into_iter()
+        .map(|(name, optional)| PathParam { name, optional })
+        .collect();
+    Some((
+        RouteDefinition {
+            method: HttpMethod::Get,
+            path,
+            handler_module: "inertia".to_string(),
+            handler_fn: if key.is_empty() {
+                "index".to_string()
+            } else {
+                key
+            },
+            name: name.map(|name| format!("{}{name}", scope.name_prefix)),
+            path_params,
+            component,
+        },
+        next,
+    ))
 }
 
 /// `name ! ( ... )` at `at`: the macro's name and the tokens inside it.
@@ -301,6 +408,7 @@ fn route_definition(
         handler_fn,
         name,
         path_params,
+        component: None,
     })
 }
 
@@ -545,11 +653,24 @@ impl<'ast> Visit<'ast> for HandlerVisitor {
         } else {
             Vec::new()
         };
+        let mut calls = InertiaCallVisitor::default();
+        calls.visit_block(&node.block);
+        let renders_unnamed_component = calls.renders.iter().any(|site| site.component.is_none());
+        let mut components: Vec<String> = calls
+            .renders
+            .into_iter()
+            .filter_map(|site| site.component)
+            .collect();
+        components.sort();
+        components.dedup();
+
         self.handlers.push(HandlerInfo {
             name: node.sig.ident.to_string(),
             has_handler_attr: has_handler,
             request_type,
             args,
+            components,
+            renders_unnamed_component,
         });
 
         syn::visit::visit_item_fn(self, node);
@@ -812,6 +933,10 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     output.push_str("  url: string;\n");
     output.push_str("  method: Method;  // 'get' | 'post' | 'put' | 'patch' | 'delete'\n");
     output.push_str("  data?: TData;\n");
+    output
+        .push_str("  // Inertia's `UrlMethodPair.component`: the page the route renders, so an\n");
+    output.push_str("  // instant visit can show it before the server answers.\n");
+    output.push_str("  component?: string;\n");
     output.push_str("}\n\n");
 
     if routes
@@ -934,11 +1059,21 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
 
             // Generate the function body
             let data_prop = if has_data { ", data" } else { "" };
+            let component_prop = route_component(route)
+                .map(|component| format!(", component: {}", ts_single_quoted(component)))
+                .unwrap_or_default();
 
             let comma = if j < module_routes.len() - 1 { "," } else { "" };
             output.push_str(&format!(
-                "    {}: ({}): {} => ({{ url: {}, method: '{}'{} }}){}\n",
-                fn_name, params_signature, return_type, url, method, data_prop, comma
+                "    {}: ({}): {} => ({{ url: {}, method: '{}'{}{} }}){}\n",
+                fn_name,
+                params_signature,
+                return_type,
+                url,
+                method,
+                data_prop,
+                component_prop,
+                comma
             ));
         }
 
@@ -972,6 +1107,23 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
     }
 
     output
+}
+
+/// The page component a route renders: the one a `Router::inertia` route
+/// names, or the one its handler names, when the handler names exactly
+/// one. A handler that names none or several gets none, since an instant
+/// visit to the wrong page is worse than an ordinary one.
+fn route_component(route: &GeneratedRoute) -> Option<&str> {
+    route
+        .definition
+        .component
+        .as_deref()
+        .or_else(|| route.handler_info.as_ref().and_then(HandlerInfo::component))
+}
+
+/// `text` as a single-quoted TypeScript string.
+fn ts_single_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 /// The key each route's helper gets in its module of the `controllers`

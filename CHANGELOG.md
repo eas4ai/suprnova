@@ -351,6 +351,44 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   does when it exits, or, with `--graceful`, when no worker can be
   connected to. An answer, or a connection still open after the timeout
   (2000 ms by default), fails (CM-02).
+- **`suprnova generate-types` types wide integers as `number | bigint` in a
+  project that preserves big integers.** Every integer and float was
+  `number`, so with `preserve_big_integers` on, an `i64` past 2^53 reached
+  the page as a `BigInt` its type called a `number`. `i64`, `u64`, `i128`,
+  `u128`, `isize` and `usize` are now `number | bigint` when a `.rs` file
+  under `src/` calls `preserve_big_integers(..)` with `true` or a variable,
+  or with the new `--big-integers` flag, which `generate-types` and
+  `serve` both take and `serve` keeps for every regeneration on save, and
+  `number` otherwise. Narrower integers and floats stay `number`, and a
+  wide map key stays `number` (T03).
+- **`suprnova generate-types` writes page types and types `usePage()`.**
+  `inertia-props.ts` held only the props interfaces, so a page picked its
+  interface by hand and typed the shared props, `root` included, with an
+  inline `usePage<{ root: string }>()`. The file now opens with
+  `import '@inertiajs/core'` and ends with `Pages`, which maps each
+  component to the struct a handler renders it with (read from
+  `inertia_response!`, `InertiaResponse::new(..).with_data(..)` and
+  `Inertia::data`), `SharedProps` (`root` and the fields of the struct
+  `Inertia::share_data` is given or marked `#[inertia_props(shared)]`),
+  `Errors`, `PageProps<C>`, and a `declare module '@inertiajs/core'` block
+  setting `sharedPageProps`, `errorValueType` and, for a struct marked
+  `#[inertia_props(flash)]`, `flashDataType`, so `usePage()` is typed with
+  no argument. The `InertiaProps` derive takes the two markers and refuses
+  any other form. A component rendered with two structs, two shared or two
+  flash structs, or a struct named like a generated declaration fails the
+  command with every conflict named and leaves the file as it was (T01,
+  T02).
+- **A route helper names the page its route renders.** `routes.ts` helpers
+  returned only `url` and `method`, so `<Link instant>` and `<Form
+  instant>` could not make an instant visit through one. A helper now
+  carries `component`, Inertia's `UrlMethodPair.component`, when its
+  handler names exactly one component as a string literal (in
+  `inertia_response!`, `InertiaResponse::new` or the `Inertia` facade's
+  render calls) or its route is a `Router::inertia` route. A handler naming
+  none, several, or one it computes gets none.
+  `Router::inertia` routes, which `routes.ts` left out, now get helpers
+  under `controllers.inertia`, and `RouteConfig` declares
+  `component?: string` (T05).
 
 ### Changed
 
@@ -875,6 +913,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   prints Laravel's messages: `Inertia SSR server is running.`, `Inertia SSR
   server is not running.`, or `The SSR gateway does not support health
   checks.`, exiting 0 or 1 (CM-03, SS-10).
+- **The starter kits declare `@inertiajs/core` and read `root` through the
+  generated types.** A kit reached `@inertiajs/core` only because its
+  adapter depends on it and npm hoists it, and the generated
+  `inertia-props.ts` now augments that package. Each kit's `package.json`
+  declares `@inertiajs/core` at `^3.6.1` beside its adapter, and the 21 kit
+  pages that build URLs from `root` read it with a bare `usePage()` in
+  place of `usePage<{ root: string }>()`, typed by the augmentation. The
+  `Error` page keeps its inline props, since no handler renders it with a
+  struct (T06).
 
 ### Fixed
 

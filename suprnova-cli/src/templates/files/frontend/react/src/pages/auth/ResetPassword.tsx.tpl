@@ -6,7 +6,8 @@ export default function ResetPassword({ token }: ResetPasswordProps) {
   // at the host root, `/billing` behind a proxy that serves the app there.
   // Every URL this page posts to or links is built from it, so one build
   // runs at both.
-  const { root } = usePage<{ root: string }>().props
+  // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
+  const { root } = usePage().props
   // The token came in on the mailed link's query string and goes back in
   // the form body; the server never reads it from the URL on submit.
   const { data, setData, post, processing, errors, reset } = useForm({

@@ -5,7 +5,9 @@
 //!   - output_only → included in output type, excluded from input type
 //!   - allow_include → no TS effect (runtime-only)
 
-use suprnova_cli::commands::generate_types::{ScanInput, generate_types_string};
+use suprnova_cli::commands::generate_types::{
+    GenerateOptions, ScanInput, generate_types_string, generate_types_string_with,
+};
 
 const SRC: &str = r#"
 use suprnova::data::Field;
@@ -616,4 +618,581 @@ pub struct EventDto {
         assert!(dto.contains(line), "{line} in {dto}");
     }
     assert!(!ts.contains("unknown"), "got: {ts}");
+}
+
+// PAR-069: the wide integers - `i64`, `u64`, `i128`, `u128`, `isize` and
+// `usize` - can pass 2^53, and with `preserve_big_integers` on, one that
+// does travels as a `{"$bigint": ".."}` marker the Inertia client turns
+// into a `BigInt`. So they are `number | bigint` exactly when the project
+// preserves big integers, and `number` otherwise. Narrower integers and
+// floats are always `number`.
+
+/// One prop struct with every numeric primitive, wrapped where the wide
+/// type changes how it composes.
+const NUMBERS: &str = r#"
+#[derive(suprnova::InertiaProps)]
+pub struct Numbers {
+    pub a_i8: i8,
+    pub a_i16: i16,
+    pub a_i32: i32,
+    pub a_u8: u8,
+    pub a_u16: u16,
+    pub a_u32: u32,
+    pub a_f32: f32,
+    pub a_f64: f64,
+    pub a_i64: i64,
+    pub a_u64: u64,
+    pub a_i128: i128,
+    pub a_u128: u128,
+    pub a_isize: isize,
+    pub a_usize: usize,
+    pub maybe: Option<u64>,
+    pub list: Vec<i64>,
+    pub by_id: std::collections::HashMap<u64, i64>,
+}
+"#;
+
+const NARROW: [&str; 8] = [
+    "  a_i8: number;",
+    "  a_i16: number;",
+    "  a_i32: number;",
+    "  a_u8: number;",
+    "  a_u16: number;",
+    "  a_u32: number;",
+    "  a_f32: number;",
+    "  a_f64: number;",
+];
+
+const WIDE: [&str; 6] = ["a_i64", "a_u64", "a_i128", "a_u128", "a_isize", "a_usize"];
+
+fn assert_narrow_stay_number(block: &str) {
+    for line in NARROW {
+        assert!(block.contains(line), "{line} in:\n{block}");
+    }
+}
+
+fn assert_wide(block: &str, ts_type: &str) {
+    for field in WIDE {
+        let line = format!("  {field}: {ts_type};");
+        assert!(block.contains(&line), "{line} in:\n{block}");
+    }
+}
+
+#[test]
+fn intt_wide_integers_are_number_when_nothing_preserves_big_integers() {
+    let ts = generate_types_string(ScanInput::Source(Box::leak(
+        format!("{NUMBERS}\nfn boot(config: InertiaConfig) -> InertiaConfig {{ config.preserve_big_integers(false) }}\n")
+            .into_boxed_str(),
+    )));
+    let block = extract_block(&ts, "Numbers");
+    assert_wide(&block, "number");
+    assert_narrow_stay_number(&block);
+    assert!(block.contains("  maybe: number | null;"), "{block}");
+    assert!(block.contains("  list: Array<number>;"), "{block}");
+    assert!(
+        !ts.contains("bigint"),
+        "a literal `false` preserves nothing:\n{ts}"
+    );
+}
+
+#[test]
+fn intt_wide_integers_widen_when_src_preserves_big_integers() {
+    for call in [
+        "InertiaConfig::new().preserve_big_integers(true)",
+        "response.preserve_big_integers(on)",
+        "InertiaConfig::preserve_big_integers(config, true)",
+    ] {
+        let source = format!("{NUMBERS}\nfn boot() {{ let _ = {call}; }}\n");
+        let ts = generate_types_string(ScanInput::Source(Box::leak(source.into_boxed_str())));
+        let block = extract_block(&ts, "Numbers");
+        assert_wide(&block, "number | bigint");
+        assert_narrow_stay_number(&block);
+        assert!(
+            block.contains("  maybe: number | bigint | null;"),
+            "{call}:\n{block}"
+        );
+        assert!(
+            block.contains("  list: Array<number | bigint>;"),
+            "{call}:\n{block}"
+        );
+        // A map key is always a JSON string on the wire and never a
+        // `$bigint` marker, and TypeScript refuses `bigint` as a key type.
+        assert!(
+            block.contains("  by_id: Record<number, number | bigint>;"),
+            "{call}:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn intt_a_preserve_call_inside_a_macro_counts_too() {
+    let source = format!(
+        "{NUMBERS}\nfn boot() {{ bind!(InertiaConfig::new().preserve_big_integers(true)); }}\n"
+    );
+    let ts = generate_types_string(ScanInput::Source(Box::leak(source.into_boxed_str())));
+    assert_wide(&extract_block(&ts, "Numbers"), "number | bigint");
+}
+
+/// A temporary project for the binary: a manifest, so `generate-types`
+/// takes the directory as a project, and `files` under `src/`.
+fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create workspace tempdir");
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"types\"\n",
+    )
+    .expect("write manifest");
+    for (path, body) in files {
+        let path = dir.path().join("src").join(path);
+        std::fs::create_dir_all(path.parent().expect("a file under src/"))
+            .expect("create source directory");
+        std::fs::write(path, body).expect("write source");
+    }
+    dir
+}
+
+fn run_generate_types(dir: &tempfile::TempDir, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .arg("generate-types")
+        .args(args)
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn suprnova binary");
+    assert!(
+        out.status.success(),
+        "generate-types {args:?} must succeed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(dir.path().join("frontend/src/types/inertia-props.ts"))
+        .expect("read generated file")
+}
+
+#[test]
+fn intt_the_big_integers_flag_widens_without_a_preserve_call() {
+    let dir = project(&[("props.rs", NUMBERS)]);
+
+    let without = run_generate_types(&dir, &[]);
+    assert_wide(&extract_block(&without, "Numbers"), "number");
+
+    let with = run_generate_types(&dir, &["--big-integers"]);
+    let block = extract_block(&with, "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
+}
+
+/// The PAR-069 falsifier as written: the call sits in `src/bootstrap.rs`
+/// and the struct in another file; preservation is a project-wide fact.
+#[test]
+fn intt_a_preserve_call_in_bootstrap_widens_every_file() {
+    let dir = project(&[
+        ("props.rs", NUMBERS),
+        (
+            "bootstrap.rs",
+            "pub fn register() {\n    Inertia::install(&InertiaConfig::new().preserve_big_integers(true))\n        .expect(\"install\");\n}\n",
+        ),
+    ]);
+    let block = extract_block(&run_generate_types(&dir, &[]), "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
+}
+
+#[test]
+fn intt_the_big_integers_option_widens_an_in_memory_scan() {
+    let ts = generate_types_string_with(
+        ScanInput::Source(NUMBERS),
+        GenerateOptions { big_integers: true },
+    );
+    let block = extract_block(&ts, "Numbers");
+    assert_wide(&block, "number | bigint");
+    assert_narrow_stay_number(&block);
+}
+
+// PAR-068: beside the props interfaces, `inertia-props.ts` maps each page
+// component to its props (`Pages`), types the props every page shares
+// (`SharedProps`), and augments `@inertiajs/core`'s `InertiaConfig` so
+// `usePage()` is typed with no argument.
+
+/// Generate the types of a project holding `files` under `src/`, the way
+/// `generate-types` does: the file it writes, or the error it reports.
+fn project_types(files: &[(&str, &str)]) -> Result<String, String> {
+    let dir = project(files);
+    let out = dir.path().join("frontend/src/types/inertia-props.ts");
+    suprnova_cli::commands::generate_types::generate_types_to_file(
+        dir.path(),
+        &out,
+        GenerateOptions::default(),
+    )?;
+    Ok(std::fs::read_to_string(&out).expect("read generated file"))
+}
+
+fn generated(files: &[(&str, &str)]) -> String {
+    project_types(files).unwrap_or_else(|error| panic!("generation failed: {error}"))
+}
+
+/// The declaration that starts with `head` and ends at its closing line.
+fn declaration(ts: &str, head: &str) -> String {
+    let start = ts
+        .find(head)
+        .unwrap_or_else(|| panic!("`{head}` not found in:\n{ts}"));
+    let after = &ts[start..];
+    let end = after.find("\n}\n").map_or(after.len(), |end| end + 3);
+    after[..end].to_string()
+}
+
+const HOME: &str = r#"
+use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct HomeProps {
+    pub title: String,
+}
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    inertia_response!(&req, "Home", HomeProps { title: "Hi".into() })
+}
+
+#[handler]
+pub async fn about(req: Request) -> Response {
+    inertia_response!(&req, "About", { "team_size": 4 })
+}
+"#;
+
+const AUTH: &str = r#"
+use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct LoginProps {}
+
+impl LoginProps {
+    pub fn new() -> Self { Self {} }
+}
+
+#[handler]
+pub async fn show_login(req: Request) -> Response {
+    inertia_response!(&req, "auth/Login", LoginProps::new())
+}
+"#;
+
+const USERS: &str = r#"
+use suprnova::{handler, Data, Inertia, InertiaResponse, Request, Response};
+
+#[derive(Data)]
+pub struct UserDto {
+    pub id: i64,
+    pub name: String,
+}
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    InertiaResponse::new("Users/Show")
+        .with_data(UserDto { id: 1, name: "Ada".into() })
+        .title("Ada")
+        .resolve(&req)
+        .await
+}
+
+#[handler]
+pub async fn edit(req: Request) -> Response {
+    Inertia::data("Users/Edit", UserDto { id: 1, name: "Ada".into() }).resolve(&req).await
+}
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    InertiaResponse::new("Users/Index").with("users", Vec::<String>::new()).resolve(&req).await
+}
+"#;
+
+#[test]
+fn intt_pages_map_each_component_to_the_struct_it_renders_with() {
+    let ts = generated(&[
+        ("controllers/home.rs", HOME),
+        ("controllers/auth.rs", AUTH),
+        ("controllers/users.rs", USERS),
+    ]);
+    assert_eq!(
+        declaration(&ts, "export interface Pages {"),
+        "export interface Pages {\n  \"Home\": HomeProps;\n  \"Users/Edit\": UserDto;\n  \
+         \"Users/Show\": UserDto;\n  \"auth/Login\": LoginProps;\n}\n",
+        "one quoted entry per typed component, sorted by name; `About` and \
+         `Users/Index` render JSON props only:\n{ts}"
+    );
+}
+
+#[test]
+fn intt_page_props_join_a_page_its_shared_props_and_the_errors() {
+    let ts = generated(&[("controllers/home.rs", HOME)]);
+    assert!(
+        ts.contains("export type Errors = Record<string, string>;\n"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(
+            "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n"
+        ),
+        "{ts}"
+    );
+}
+
+#[test]
+fn intt_the_augmentation_types_inertias_config() {
+    let ts = generated(&[("controllers/home.rs", HOME)]);
+    assert!(
+        ts.starts_with(
+            "// This file is auto-generated by Suprnova. Do not edit manually.\n\
+             // Run `suprnova generate-types` to regenerate.\n\n\
+             import '@inertiajs/core';\n\n"
+        ),
+        "the import opens the file, after the header:\n{ts}"
+    );
+    assert!(
+        ts.ends_with(
+            "declare module '@inertiajs/core' {\n  export interface InertiaConfig {\n    \
+             sharedPageProps: SharedProps;\n    errorValueType: string;\n  }\n}\n"
+        ),
+        "without a flash struct, Inertia's own flash type applies:\n{ts}"
+    );
+}
+
+#[test]
+fn intt_shared_props_carry_root_and_the_struct_share_data_is_given() {
+    let ts = generated(&[
+        ("controllers/home.rs", HOME),
+        (
+            "bootstrap.rs",
+            r#"
+use suprnova::{Data, Inertia, inertia::Prop};
+
+#[derive(Data)]
+pub struct AppShared {
+    pub app_name: String,
+    pub root: String,
+    #[data(lazy)]
+    pub stats: Prop<i64>,
+}
+
+pub fn register() {
+    Inertia::share_data(AppShared { app_name: "Suprnova".into(), root: String::new(), stats: Prop::default() })
+        .expect("shared");
+    Inertia::share("appVersion", "1.0").expect("shared");
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        declaration(&ts, "export interface SharedProps {"),
+        "export interface SharedProps {\n  root: string;\n  app_name: string;\n}\n",
+        "the framework's `root`, then the struct's eager fields; a lazy field is \
+         never shared and a per-key share is not typed:\n{ts}"
+    );
+}
+
+#[test]
+fn intt_shared_props_read_the_shared_marker() {
+    let ts = generated(&[
+        ("controllers/home.rs", HOME),
+        (
+            "shared.rs",
+            r#"
+#[derive(suprnova::InertiaProps)]
+#[inertia_props(shared)]
+pub struct AppShared {
+    pub app_name: String,
+    pub user_id: Option<u64>,
+}
+"#,
+        ),
+    ]);
+    assert_eq!(
+        declaration(&ts, "export interface SharedProps {"),
+        "export interface SharedProps {\n  root: string;\n  app_name: string;\n  user_id: number | null;\n}\n",
+        "{ts}"
+    );
+}
+
+#[test]
+fn intt_shared_props_hold_root_alone_without_a_shared_struct() {
+    let ts = generated(&[("controllers/home.rs", HOME)]);
+    assert_eq!(
+        declaration(&ts, "export interface SharedProps {"),
+        "export interface SharedProps {\n  root: string;\n}\n",
+        "{ts}"
+    );
+}
+
+const TOAST: &str = r#"
+#[derive(suprnova::InertiaProps)]
+#[inertia_props(flash)]
+pub struct Toast {
+    pub message: String,
+}
+"#;
+
+#[test]
+fn intt_the_flash_marker_names_the_flash_data_type() {
+    let with = generated(&[("controllers/home.rs", HOME), ("flash.rs", TOAST)]);
+    assert!(
+        with.contains(
+            "    sharedPageProps: SharedProps;\n    errorValueType: string;\n    flashDataType: Toast;\n"
+        ),
+        "{with}"
+    );
+    assert!(with.contains("export interface Toast {"), "{with}");
+
+    let without = generated(&[("controllers/home.rs", HOME)]);
+    assert!(!without.contains("flashDataType"), "{without}");
+}
+
+#[test]
+fn intt_a_component_rendered_with_two_structs_is_an_error_naming_both() {
+    let error = project_types(&[
+        ("controllers/home.rs", HOME),
+        (
+            "controllers/landing.rs",
+            r#"
+#[derive(suprnova::InertiaProps)]
+pub struct LandingProps { pub hero: String }
+
+pub async fn landing(req: Request) -> Response {
+    inertia_response!(&req, "Home", LandingProps { hero: "x".into() })
+}
+"#,
+        ),
+    ])
+    .expect_err("one page has one props type");
+    for part in [
+        "`Home`",
+        "`HomeProps`",
+        "`LandingProps`",
+        "src/controllers/home.rs",
+        "src/controllers/landing.rs",
+    ] {
+        assert!(error.contains(part), "{part} in: {error}");
+    }
+}
+
+#[test]
+fn intt_two_shared_structs_are_an_error_naming_both() {
+    let error = project_types(&[(
+        "shared.rs",
+        r#"
+#[derive(suprnova::InertiaProps)]
+#[inertia_props(shared)]
+pub struct AppShared { pub app_name: String }
+
+#[derive(suprnova::Data)]
+pub struct OtherShared { pub theme: String }
+
+pub fn register() {
+    Inertia::share_data(OtherShared { theme: "dark".into() }).expect("shared");
+}
+"#,
+    )])
+    .expect_err("one struct types the shared props");
+    for part in ["`AppShared`", "`OtherShared`", "shared"] {
+        assert!(error.contains(part), "{part} in: {error}");
+    }
+}
+
+#[test]
+fn intt_two_flash_structs_are_an_error_naming_both() {
+    let error = project_types(&[
+        ("flash.rs", TOAST),
+        (
+            "notice.rs",
+            r#"
+#[derive(suprnova::InertiaProps)]
+#[inertia_props(flash)]
+pub struct Notice { pub text: String }
+"#,
+        ),
+    ])
+    .expect_err("one struct types the flash data");
+    for part in ["`Toast`", "`Notice`", "flash"] {
+        assert!(error.contains(part), "{part} in: {error}");
+    }
+}
+
+#[test]
+fn intt_a_conflict_leaves_the_written_file_alone() {
+    let dir = project(&[("controllers/home.rs", HOME)]);
+    let before = run_generate_types(&dir, &[]);
+    std::fs::write(
+        dir.path().join("src/controllers/landing.rs"),
+        "#[derive(suprnova::InertiaProps)]\npub struct LandingProps { pub hero: String }\n\
+         pub async fn landing(req: Request) -> Response {\n    \
+         inertia_response!(&req, \"Home\", LandingProps { hero: \"x\".into() })\n}\n",
+    )
+    .expect("add a conflicting render");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"))
+        .arg("generate-types")
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn suprnova binary");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a conflict fails the command: {printed}"
+    );
+    assert!(
+        printed.contains("`HomeProps`") && printed.contains("`LandingProps`"),
+        "the command prints both structs: {printed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("frontend/src/types/inertia-props.ts"))
+            .expect("read generated file"),
+        before,
+        "the last complete output stays"
+    );
+}
+
+#[test]
+fn intt_a_page_rendered_with_a_plain_struct_is_typed_by_it() {
+    let ts = generated(&[(
+        "controllers/report.rs",
+        r#"
+#[derive(serde::Serialize)]
+pub struct ReportProps {
+    pub total: u32,
+}
+
+pub async fn show(req: Request) -> Response {
+    inertia_response!(&req, "Report", ReportProps { total: 3 })
+}
+"#,
+    )]);
+    assert!(
+        ts.contains("export interface ReportProps {\n  total: number;\n}"),
+        "a struct that derives only Serialize is emitted once a page renders it:\n{ts}"
+    );
+    assert!(ts.contains("  \"Report\": ReportProps;\n"), "{ts}");
+}
+
+#[test]
+fn intt_a_generic_props_struct_gets_no_pages_entry() {
+    let ts = generated(&[(
+        "controllers/list.rs",
+        r#"
+#[derive(suprnova::InertiaProps)]
+pub struct Listing<T> {
+    pub items: Vec<T>,
+}
+
+pub async fn index(req: Request) -> Response {
+    inertia_response!(&req, "Listing", Listing::<String> { items: Vec::new() })
+}
+"#,
+    )]);
+    assert!(ts.contains("export interface Listing<T> {"), "{ts}");
+    assert_eq!(
+        declaration(&ts, "export interface Pages {"),
+        "export interface Pages {\n}\n",
+        "`Pages` cannot name `Listing` without its type arguments:\n{ts}"
+    );
 }

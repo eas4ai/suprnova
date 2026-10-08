@@ -6,14 +6,15 @@ import { t } from '../lib/lang'
 // at the host root, `/billing` behind a proxy that serves the app there.
 // Every URL this page posts to or links is built from it, so one build
 // runs at both.
-const { root } = usePage<{ root: string }>().props
+// `types/inertia-props.ts` types it, so `usePage()` takes no argument.
+const { root } = usePage().props
 
 // These props come from the framework, not from one of your handlers:
 // `InertiaConfig::error_page` in `src/bootstrap.rs` routes every
 // framework error response (403, 404, 429, 500, ...) to this page.
-// That is why they are declared here rather than imported from
-// `types/inertia-props.ts`, which `suprnova generate-types` rewrites
-// from your `#[derive(InertiaProps)]` structs.
+// That is why they are declared here: no handler of yours renders
+// `Error` with a struct, so `suprnova generate-types` writes no
+// `Pages` entry for it in `types/inertia-props.ts`.
 //
 // `message` is the server's, so it arrives already localized only if
 // your handlers translate it; the chrome below uses `t()` like every

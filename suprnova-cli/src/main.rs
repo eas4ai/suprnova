@@ -133,6 +133,13 @@ enum Commands {
         #[arg(long)]
         skip_types: bool,
 
+        /// Type i64, u64, i128, u128, isize and usize as `number | bigint`
+        /// on every type regeneration, as `generate-types --big-integers`
+        /// does, even when no `preserve_big_integers(..)` call under src/
+        /// turns big-integer preservation on
+        #[arg(long)]
+        big_integers: bool,
+
         /// Don't respawn a crashed dev process - tear the whole session
         /// down instead (the pre-restart behaviour).
         #[arg(long)]
@@ -210,6 +217,12 @@ enum Commands {
         /// Also generate route types (frontend/src/types/routes.ts)
         #[arg(long)]
         routes: bool,
+
+        /// Type i64, u64, i128, u128, isize and usize as `number | bigint`
+        /// even when no `preserve_big_integers(..)` call under src/ turns
+        /// big-integer preservation on
+        #[arg(long)]
+        big_integers: bool,
     },
     /// Generate a new middleware
     #[command(name = "make:middleware")]
@@ -581,6 +594,7 @@ fn main() {
             backend_only,
             frontend_only,
             skip_types,
+            big_integers,
             no_restart,
             restart_tries,
             timestamps,
@@ -599,6 +613,7 @@ fn main() {
                 backend_only,
                 frontend_only,
                 skip_types,
+                commands::generate_types::GenerateOptions { big_integers },
                 no_restart,
                 restart_tries,
                 timestamps,
@@ -621,8 +636,14 @@ fn main() {
             output,
             watch,
             routes,
+            big_integers,
         } => {
-            commands::generate_types::run(output, watch, routes);
+            commands::generate_types::run(
+                output,
+                watch,
+                routes,
+                commands::generate_types::GenerateOptions { big_integers },
+            );
         }
         Commands::MakeMiddleware { name } => {
             commands::make_middleware::run(name);

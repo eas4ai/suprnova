@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@fluent/bundle": "^0.19.1",
+    "@inertiajs/core": "^3.6.1",
     "@inertiajs/svelte": "^3.6.1",
     "svelte": "^5.56.8"
   },
