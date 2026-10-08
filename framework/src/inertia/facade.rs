@@ -24,6 +24,15 @@ use std::sync::Arc;
 /// (render, location, etc.) will land here.
 pub struct Inertia;
 
+/// Log that the bound SSR gateway lacks the capability `call` needs, so a
+/// setting that took no effect is visible rather than silently dropped.
+fn warn_lacking(capability: &str, call: &str) {
+    tracing::warn!(
+        call,
+        "the bound SSR gateway {capability}; Inertia::{call} has no effect"
+    );
+}
+
 impl Inertia {
     /// Build an Inertia response with a single scroll-prop wired from
     /// a paginator.
@@ -310,16 +319,20 @@ impl Inertia {
     /// configuration's switch until it is set again. Excluded paths and
     /// [`App::disable_ssr_for_request`](crate::App::disable_ssr_for_request)
     /// still keep a request out.
+    ///
+    /// The setting goes to the bound [`SsrGateway`](crate::SsrGateway); a
+    /// gateway without the capability logs a warning and ignores it.
     pub fn disable_ssr(disabled: bool) {
-        crate::App::inertia_registry()
-            .runtime()
-            .set_ssr_condition(SsrCondition::Always(disabled));
+        if !super::ssr_gateway::gateway().disable(SsrCondition::Always(disabled)) {
+            warn_lacking("cannot disable SSR", "disable_ssr");
+        }
     }
 
     /// Decide per request whether SSR is off - Laravel's
     /// `Inertia::disableSsr($closure)`. The condition runs for every first
     /// visit and its answer replaces the configuration's switch, so it can
-    /// turn SSR on as well as off.
+    /// turn SSR on as well as off. Like [`disable_ssr`](Self::disable_ssr)
+    /// it sets the bound gateway's condition.
     ///
     /// ```rust,no_run
     /// use suprnova::{Inertia, InertiaRequestExt};
@@ -333,9 +346,9 @@ impl Inertia {
     where
         F: Fn(&dyn super::InertiaRequestExt) -> bool + Send + Sync + 'static,
     {
-        crate::App::inertia_registry()
-            .runtime()
-            .set_ssr_condition(SsrCondition::When(Arc::new(condition)));
+        if !super::ssr_gateway::gateway().disable(SsrCondition::When(Arc::new(condition))) {
+            warn_lacking("cannot disable SSR", "disable_ssr_if");
+        }
     }
 
     /// Exclude paths from SSR - Laravel's `Inertia::withoutSsr($paths)`.
@@ -344,21 +357,24 @@ impl Inertia {
     /// Laravel's `ExcludesPaths` rules: slashes at either end are ignored,
     /// `*` matches any characters including `/`, and each pattern is tried
     /// against the path and the full URL. `admin/*` keeps `/admin/users`
-    /// and `/admin/users/edit` out, not `/adminx`.
+    /// and `/admin/users/edit` out, not `/adminx`. The patterns go to the
+    /// bound gateway; one without the capability logs a warning.
     pub fn without_ssr<I, S>(patterns: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        crate::App::inertia_registry()
-            .runtime()
-            .add_ssr_exclusions(patterns.into_iter().map(Into::into));
+        let patterns = patterns.into_iter().map(Into::into).collect();
+        if !super::ssr_gateway::gateway().except(patterns) {
+            warn_lacking("cannot exclude paths from SSR", "without_ssr");
+        }
     }
 
     /// Adjust the request sent to the SSR worker - Laravel's
     /// `Inertia::configureSsrRequestUsing($closure)`. A worker that needs a
     /// token, another header or a longer timeout is reached through it; a
-    /// later call replaces it.
+    /// later call replaces it. It applies to the health check too, and goes
+    /// to the bound gateway; one without the capability logs a warning.
     ///
     /// ```rust,no_run
     /// use suprnova::Inertia;
@@ -371,9 +387,39 @@ impl Inertia {
     where
         F: Fn(SsrRequest) -> SsrRequest + Send + Sync + 'static,
     {
-        crate::App::inertia_registry()
-            .runtime()
-            .set_ssr_request_configurator(Arc::new(configure));
+        if !super::ssr_gateway::gateway().configure_request_using(Arc::new(configure)) {
+            warn_lacking(
+                "cannot configure the SSR request",
+                "configure_ssr_request_using",
+            );
+        }
+    }
+
+    /// Whether the SSR worker is healthy, from the bound
+    /// [`SsrGateway`](crate::SsrGateway)'s health check, Laravel's
+    /// `HasHealthCheck::isHealthy` that `inertia:check-ssr` reads.
+    ///
+    /// The default gateway answers `GET {url}/health` with the installed
+    /// configuration's worker URL and timeout and the request configurator:
+    /// `Some(true)` for a 2xx, `Some(false)` for any other status or no
+    /// answer. `None` means the bound gateway has no health check.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Inertia;
+    ///
+    /// # async fn check() {
+    /// match Inertia::ssr_is_healthy().await {
+    ///     Some(true) => println!("the SSR worker is up"),
+    ///     Some(false) => println!("the SSR worker is down"),
+    ///     None => println!("the SSR gateway has no health check"),
+    /// }
+    /// # }
+    /// ```
+    pub async fn ssr_is_healthy() -> Option<bool> {
+        let config = crate::App::inertia_registry()
+            .installed_config()
+            .unwrap_or_default();
+        super::ssr_gateway::gateway().is_healthy(&config.ssr).await
     }
 
     /// Flash a value for the next page response - Laravel's

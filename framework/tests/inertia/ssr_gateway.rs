@@ -19,9 +19,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use suprnova::testing::TestContainer;
 use suprnova::{
-    EventFacade, FrameworkError, InertiaConfig, InertiaResponse, SsrConfig, SsrErrorType,
-    SsrRenderFailed,
+    App, EventFacade, FrameworkError, Inertia, InertiaConfig, InertiaRequestExt, InertiaResponse,
+    SsrCondition, SsrConfig, SsrErrorType, SsrGateway, SsrRenderFailed, SsrRequestConfigurator,
+    SsrResponse,
 };
 
 use crate::protocol_harness::MockReq;
@@ -34,6 +36,7 @@ const RENDERED: &str = "<div data-server-rendered=\"true\" id=\"app\">rendered</
 struct Seen {
     method: String,
     path: String,
+    headers: hyper::HeaderMap,
     body: Vec<u8>,
 }
 
@@ -82,6 +85,7 @@ impl Worker {
                             recorded.lock().unwrap().push(Seen {
                                 method: parts.method.to_string(),
                                 path: parts.uri.path().to_string(),
+                                headers: parts.headers,
                                 body: sent,
                             });
                             Ok::<_, Infallible>(
@@ -693,4 +697,197 @@ fn inssr_ssr_error_types_carry_laravels_names() {
         assert_eq!(kind.to_string(), name);
     }
     assert_eq!(SsrErrorType::from_name("timeout"), SsrErrorType::Unknown);
+}
+
+// ---- PAR-060: the gateway as a binding the facade acts on ----
+
+/// What a [`RecordingGateway`] was asked.
+#[derive(Default)]
+struct Calls {
+    dispatched: Vec<String>,
+    disabled: Option<bool>,
+    excepted: Vec<String>,
+    configured: bool,
+}
+
+/// An application's own gateway: it renders every page itself, implements
+/// every capability, and records the calls.
+#[derive(Default)]
+struct RecordingGateway {
+    calls: Mutex<Calls>,
+}
+
+#[suprnova::async_trait]
+impl SsrGateway for RecordingGateway {
+    async fn dispatch(
+        &self,
+        _config: &SsrConfig,
+        _request: &dyn InertiaRequestExt,
+        page: &Value,
+    ) -> Result<Option<SsrResponse>, FrameworkError> {
+        let mut calls = self.calls.lock().unwrap();
+        calls
+            .dispatched
+            .push(page["component"].as_str().unwrap_or_default().to_string());
+        if calls.disabled == Some(true) {
+            return Ok(None);
+        }
+        Ok(Some(SsrResponse {
+            head: vec!["<meta name=\"gateway\" content=\"own\">".to_string()],
+            body: "<div data-server-rendered=\"true\" id=\"app\">from the gateway</div>"
+                .to_string(),
+        }))
+    }
+
+    fn disable(&self, condition: SsrCondition) -> bool {
+        let disabled = match condition {
+            SsrCondition::Always(disabled) => disabled,
+            SsrCondition::When(_) => false,
+        };
+        self.calls.lock().unwrap().disabled = Some(disabled);
+        true
+    }
+
+    fn except(&self, paths: Vec<String>) -> bool {
+        self.calls.lock().unwrap().excepted.extend(paths);
+        true
+    }
+
+    fn configure_request_using(&self, _configure: SsrRequestConfigurator) -> bool {
+        self.calls.lock().unwrap().configured = true;
+        true
+    }
+}
+
+/// A gateway with no capabilities and no health check.
+struct BareGateway;
+
+#[suprnova::async_trait]
+impl SsrGateway for BareGateway {
+    async fn dispatch(
+        &self,
+        _config: &SsrConfig,
+        _request: &dyn InertiaRequestExt,
+        _page: &Value,
+    ) -> Result<Option<SsrResponse>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn inssr_a_bound_gateway_is_the_one_a_first_visit_dispatches_through() {
+    let _container = TestContainer::fake();
+    let gateway = Arc::new(RecordingGateway::default());
+    App::bind::<dyn SsrGateway>(gateway.clone());
+    // No bundle and a worker nobody runs: only the bound gateway renders.
+    let config = InertiaConfig::new().production();
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(
+        document.contains("<meta name=\"gateway\" content=\"own\">"),
+        "{document}"
+    );
+    assert!(document.contains("from the gateway"), "{document}");
+    assert_eq!(gateway.calls.lock().unwrap().dispatched, ["Dashboard"]);
+}
+
+#[tokio::test]
+async fn inssr_the_facade_acts_on_the_bound_gateway() {
+    let _container = TestContainer::fake();
+    let gateway = Arc::new(RecordingGateway::default());
+    App::bind::<dyn SsrGateway>(gateway.clone());
+    let config = InertiaConfig::new().production();
+
+    Inertia::disable_ssr(true);
+    Inertia::without_ssr(["admin/*"]);
+    Inertia::configure_ssr_request_using(|request| request.header("X-Token", "t"));
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(renders_on_the_client(&document), "{document}");
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.disabled, Some(true));
+    assert_eq!(calls.excepted, ["admin/*"]);
+    assert!(calls.configured);
+    assert_eq!(
+        calls.dispatched,
+        ["Dashboard"],
+        "dispatched through the gateway"
+    );
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn inssr_a_capability_the_bound_gateway_lacks_is_logged() {
+    let _container = TestContainer::fake();
+    App::bind::<dyn SsrGateway>(Arc::new(BareGateway));
+
+    Inertia::disable_ssr(true);
+    Inertia::disable_ssr_if(|_: &dyn InertiaRequestExt| true);
+    Inertia::without_ssr(["admin/*"]);
+    Inertia::configure_ssr_request_using(|request| request);
+
+    assert!(logs_contain("cannot disable SSR"));
+    assert!(logs_contain("cannot exclude paths from SSR"));
+    assert!(logs_contain("cannot configure the SSR request"));
+    assert_eq!(Inertia::ssr_is_healthy().await, None);
+}
+
+#[tokio::test]
+async fn inssr_with_nothing_bound_the_http_gateway_posts_to_the_worker() {
+    let _container = TestContainer::fake();
+    let worker = Worker::rendering().await;
+    let config = InertiaConfig::new()
+        .production()
+        .ssr(worker.url())
+        .ssr_ensure_bundle_exists(false);
+
+    let document = first_visit(&config).await.expect("the visit renders");
+
+    assert!(document.contains(RENDERED), "{document}");
+    assert_eq!(worker.seen().len(), 1);
+    assert_eq!(worker.seen()[0].path, "/render");
+}
+
+/// The installed configuration with the worker at `url`, under the test's
+/// own container.
+fn install_worker(url: String) {
+    Inertia::install(
+        &InertiaConfig::new()
+            .development(true)
+            .register_globally(false)
+            .ssr(url),
+    )
+    .expect("install");
+}
+
+#[tokio::test]
+async fn inssr_ssr_is_healthy_reads_the_workers_health_route() {
+    let _container = TestContainer::fake();
+    let healthy = Worker::answering(200, "{\"status\":\"OK\"}").await;
+    install_worker(healthy.url());
+    Inertia::configure_ssr_request_using(|request| request.header("X-Health-Token", "h"));
+
+    assert_eq!(Inertia::ssr_is_healthy().await, Some(true));
+    let seen = healthy.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].method.as_str(), seen[0].path.as_str()),
+        ("GET", "/health")
+    );
+    assert_eq!(
+        seen[0]
+            .headers
+            .get("x-health-token")
+            .and_then(|v| v.to_str().ok()),
+        Some("h"),
+        "the request configurator applies to the health check"
+    );
+
+    let failing = Worker::answering(500, "{}").await;
+    install_worker(failing.url());
+    assert_eq!(Inertia::ssr_is_healthy().await, Some(false));
+
+    install_worker(closed_url().await);
+    assert_eq!(Inertia::ssr_is_healthy().await, Some(false));
 }

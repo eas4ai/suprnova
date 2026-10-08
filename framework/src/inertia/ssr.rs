@@ -360,6 +360,28 @@ async fn report_failure(
     Ok(None)
 }
 
+/// Whether the worker answers `GET {url}/health` with a 2xx within the
+/// timeout, Laravel's `HttpGateway::isHealthy`. The request configurator
+/// applies, so a worker behind a token is checked with it; any failure to
+/// get an answer is unhealthy. The configured worker URL is checked, never
+/// the hot URL, as Laravel's `getProductionUrl` is.
+pub(crate) async fn is_healthy(config: &SsrConfig) -> bool {
+    let request = crate::App::inertia_registry()
+        .runtime()
+        .configure_ssr_request(SsrRequest {
+            url: endpoint(&config.url, "/health"),
+            headers: Vec::new(),
+            timeout: config.timeout,
+        });
+    match exchange(&request, None, config.max_response_bytes).await {
+        Ok(answer) => answer.status.is_success(),
+        Err(error) => {
+            tracing::debug!(url = %request.url, %error, "the SSR health check got no answer");
+            false
+        }
+    }
+}
+
 /// The client every SSR call shares, built once for the process: one
 /// connection pool, and rustls for a worker at an `https` URL (SS-14).
 ///
