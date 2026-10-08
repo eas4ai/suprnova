@@ -1555,7 +1555,9 @@ impl InertiaResponse {
                 Some(hooks) => hooks.root_view(req, config),
                 None => config,
             };
-            let ssr_result = super::ssr::render(&config.ssr, req, &page).await?;
+            let ssr_result = super::ssr_gateway::gateway()
+                .dispatch(&config.ssr, req, &page)
+                .await?;
             match config.root_template_for(req).application() {
                 Some(template) => build_template_response(
                     template,

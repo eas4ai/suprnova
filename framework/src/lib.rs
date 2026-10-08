@@ -330,6 +330,10 @@ pub use inertia::{
     ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest,
     SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
+// The SSR gateway of PAR-060, on its own line so the list above stays stable.
+pub use inertia::{
+    HttpGateway, SsrCondition, SsrDisabledWhen, SsrGateway, SsrRequestConfigurator, ssr_gateway,
+};
 // The PAR-051 and PAR-052 prop types (providers, merge paths, once and
 // scroll options), kept on their own line so the list above stays stable.
 pub use inertia::{

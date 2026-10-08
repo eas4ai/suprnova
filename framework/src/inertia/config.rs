@@ -497,6 +497,16 @@ pub struct SsrConfig {
     /// check at all, which is what every test double and mock SSR
     /// worker in this codebase (and yours) relies on.
     pub bundle_path: Option<PathBuf>,
+    /// The runtime `ssr:start` launches the worker under: `node` by default,
+    /// `bun`, `deno` or an absolute path. Laravel's `inertia.ssr.runtime`.
+    pub runtime: String,
+    /// Whether `ssr:start` refuses a runtime it cannot find on `PATH`.
+    /// Default `false`, as Laravel's `inertia.ssr.ensure_runtime_exists`.
+    pub ensure_runtime_exists: bool,
+    /// Where SSR is dispatched in development with the Vite dev server
+    /// running, at `/__inertia_ssr`; `None` uses the dev server's own URL.
+    /// Laravel's `inertia.ssr.hot_url` (PAR-058).
+    pub hot_url: Option<String>,
     /// When `true` (the default) and [`Self::bundle_path`] is `Some`,
     /// the SSR gateway checks the bundle exists on disk before every
     /// dispatch and falls back to CSR immediately - without paying
@@ -535,6 +545,9 @@ impl Default for SsrConfig {
             on_error: None,
             max_response_bytes: 8 * 1024 * 1024,
             bundle_path: None,
+            runtime: "node".to_string(),
+            ensure_runtime_exists: false,
+            hot_url: None,
             ensure_bundle_exists: true,
         }
     }
@@ -850,6 +863,27 @@ impl InertiaConfig {
     /// (see [`SsrConfig::excluded_paths`]).
     pub fn ssr_exclude(mut self, pattern: impl Into<String>) -> Self {
         self.ssr.excluded_paths.push(pattern.into());
+        self
+    }
+
+    /// Set the runtime `ssr:start` launches the worker under; see
+    /// [`SsrConfig::runtime`].
+    pub fn ssr_runtime(mut self, runtime: impl Into<String>) -> Self {
+        self.ssr.runtime = runtime.into();
+        self
+    }
+
+    /// Make `ssr:start` refuse a runtime it cannot find; see
+    /// [`SsrConfig::ensure_runtime_exists`].
+    pub fn ssr_ensure_runtime_exists(mut self, on: bool) -> Self {
+        self.ssr.ensure_runtime_exists = on;
+        self
+    }
+
+    /// Set where SSR is dispatched in development with the Vite dev server
+    /// running; see [`SsrConfig::hot_url`].
+    pub fn ssr_hot_url(mut self, url: impl Into<String>) -> Self {
+        self.ssr.hot_url = Some(url.into());
         self
     }
 

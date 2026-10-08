@@ -87,6 +87,36 @@ impl SsrRequest {
     }
 }
 
+/// The paths an SSR bundle is looked for at when `SsrConfig::bundle_path`
+/// is unset, under the working directory: Laravel's `BundleDetector` list,
+/// with `frontend/bootstrap/ssr/` where a Suprnova project's Vite build
+/// writes the bundle (PAR-057).
+pub const CONVENTIONAL_BUNDLE_PATHS: [&str; 6] = [
+    "frontend/bootstrap/ssr/ssr.js",
+    "frontend/bootstrap/ssr/app.js",
+    "frontend/bootstrap/ssr/ssr.mjs",
+    "frontend/bootstrap/ssr/app.mjs",
+    "public/js/ssr.js",
+    "public/js/app.js",
+];
+
+/// The SSR bundle on disk: the configured `bundle_path` when it exists,
+/// else the first of [`CONVENTIONAL_BUNDLE_PATHS`] that does, else `None`.
+/// Laravel's `BundleDetector::detect`, read by the dispatch's bundle check
+/// and by `ssr:start`.
+pub fn detect_bundle(config: &SsrConfig) -> Option<std::path::PathBuf> {
+    config
+        .bundle_path
+        .iter()
+        .cloned()
+        .chain(
+            CONVENTIONAL_BUNDLE_PATHS
+                .iter()
+                .map(std::path::PathBuf::from),
+        )
+        .find(|path| path.is_file())
+}
+
 // Per-request opt-out for SSR. Mirrors Laravel's
 // `Inertia::disable_ssr()`. The flag is an `Arc<AtomicBool>` so the
 // scope is set once (by the server when wrapping each request) and
