@@ -458,7 +458,10 @@ mod tests {
         fs::write(dir.path().join(LAST_PRUNE_FILE), (now - 10).to_string()).unwrap();
 
         repo.prune_if_due(now, 300, 24).unwrap();
-        assert!(repo.get(&old).is_some(), "the last prune is 10 s old: not due");
+        assert!(
+            repo.get(&old).is_some(),
+            "the last prune is 10 s old: not due"
+        );
 
         repo.prune_if_due(now + 300, 300, 24).unwrap();
         assert!(repo.get(&old).is_none(), "25 hours old: pruned");
@@ -479,7 +482,8 @@ mod tests {
             repo.save(id, &entry(id, Some("tab-a"), 1.0)).unwrap();
         }
         let other = new_id(7_000);
-        repo.save(&other, &entry(&other, Some("tab-b"), 1.0)).unwrap();
+        repo.save(&other, &entry(&other, Some("tab-b"), 1.0))
+            .unwrap();
 
         repo.enforce_tab_limit("tab-a", 3).unwrap();
         assert!(repo.get(&ids[0]).is_none(), "the oldest of the tab goes");
@@ -505,7 +509,10 @@ mod tests {
         );
         note_success(&path);
         assert!(!is_suppressed(&path, 0));
-        assert!(note_failure(&path, 50_000), "reported again after a success");
+        assert!(
+            note_failure(&path, 50_000),
+            "reported again after a success"
+        );
         note_success(&path);
     }
 }

@@ -171,7 +171,9 @@ impl Redactor {
                     }
                 }
             }
-            Value::Array(items) => items.iter_mut().for_each(|item| self.redact_header_bags(item)),
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|item| self.redact_header_bags(item)),
             _ => {}
         }
     }
@@ -191,7 +193,7 @@ fn normalize(list: &[String]) -> Vec<String> {
 /// Whether `name`, compared without case, is in the lower-cased `list`.
 fn is_listed(list: &[String], name: &str) -> bool {
     let lowered = name.to_lowercase();
-    list.iter().any(|listed| *listed == lowered)
+    list.contains(&lowered)
 }
 
 #[cfg(test)]
@@ -250,8 +252,14 @@ mod tests {
             "propValues": {"auth": {"token": "t", "name": "n"}},
         });
         redactor().redact_entry(&mut entry);
-        assert_eq!(entry["__meta"]["url"], "http://app.test/x?access_token=%5BREDACTED%5D");
-        assert_eq!(entry["__meta"]["redirectLocation"], "/y?secret=%5BREDACTED%5D");
+        assert_eq!(
+            entry["__meta"]["url"],
+            "http://app.test/x?access_token=%5BREDACTED%5D"
+        );
+        assert_eq!(
+            entry["__meta"]["redirectLocation"],
+            "/y?secret=%5BREDACTED%5D"
+        );
         assert_eq!(entry["http"]["requestHeaders"]["cookie"], REDACTED);
         assert_eq!(entry["http"]["requestHeaders"]["accept"], "text/html");
         assert_eq!(entry["http"]["responseHeaders"]["set-cookie"], REDACTED);

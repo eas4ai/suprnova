@@ -92,10 +92,8 @@ impl SourceLocation {
         let file = if self.line == 0 {
             self.file.to_string()
         } else {
-            resolve(self.file).map_or_else(
-                || self.file.to_string(),
-                |path| path.display().to_string(),
-            )
+            resolve(self.file)
+                .map_or_else(|| self.file.to_string(), |path| path.display().to_string())
         };
         json!({"file": file, "line": self.line})
     }

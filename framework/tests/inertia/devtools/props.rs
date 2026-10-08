@@ -18,7 +18,9 @@ fn router() -> Router {
             InertiaResponse::new("Feed")
                 .with("plain", "x")
                 .always("flags", json!({"beta": true}))
-                .optional("stats", || async { Ok::<_, FrameworkError>(json!({"count": 3})) })
+                .optional("stats", || async {
+                    Ok::<_, FrameworkError>(json!({"count": 3}))
+                })
                 .defer_with("comments", DeferOptions::new().group("sidebar"), || async {
                     Ok::<_, FrameworkError>(json!(["first"]))
                 })
@@ -27,9 +29,14 @@ fn router() -> Router {
                 })
                 .merge_prepend("posts", json!([1, 2]))
                 .deep_merge("settings", json!({"theme": {"dark": true}}))
-                .prop("tags", Prop::eager(json!([{"id": 1}])).merge().match_on("id"))
+                .prop(
+                    "tags",
+                    Prop::eager(json!([{"id": 1}])).merge().match_on("id"),
+                )
                 .scroll("feed", ScrollMetadata::new("page"), json!({"data": [1]}))
-                .once("plans", || async { Ok::<_, FrameworkError>(json!(["free"])) })
+                .once("plans", || async {
+                    Ok::<_, FrameworkError>(json!(["free"]))
+                })
                 .with("auth.user", json!({"name": "Ada"}))
                 .prop("auth.permissions", Prop::eager(json!(["edit"])).always())
                 .resolve(&req)
@@ -63,7 +70,10 @@ async fn indt_each_kind_of_prop_is_classified() {
     assert_eq!(props["settings"]["inertiaType"], "merge");
     assert_eq!(props["settings"]["mergeDirection"], "append");
     assert_eq!(props["settings"]["deepMerge"], true);
-    assert_eq!(props["tags"]["deepMerge"], true, "a match_on prop deep merges");
+    assert_eq!(
+        props["tags"]["deepMerge"], true,
+        "a match_on prop deep merges"
+    );
     assert_eq!(props["feed"]["inertiaType"], "scroll");
     assert_eq!(props["feed"]["mergeDirection"], "append");
     assert_eq!(props["plans"]["inertiaType"], "once");
@@ -73,7 +83,10 @@ async fn indt_each_kind_of_prop_is_classified() {
     assert_eq!(props["errors"]["inertiaType"], "always");
     assert_eq!(props["errors"]["shared"], true);
     for absent in ["stats", "comments", "report"] {
-        assert!(props.get(absent).is_none(), "{absent} was not delivered: {props}");
+        assert!(
+            props.get(absent).is_none(),
+            "{absent} was not delivered: {props}"
+        );
     }
 
     let (props, _) = feed(&[
@@ -112,7 +125,10 @@ async fn indt_a_rescued_deferred_prop_is_marked_rescued() {
     .await;
     assert_eq!(props["report"]["rescued"], true);
     assert_eq!(props["report"]["inertiaType"], "defer");
-    assert!(values.get("report").is_none(), "the client received no value");
+    assert!(
+        values.get("report").is_none(),
+        "the client received no value"
+    );
 }
 
 #[tokio::test]
@@ -132,7 +148,10 @@ async fn indt_a_reset_prop_is_marked_reset() {
 async fn indt_deep_paths_without_metadata_are_pruned_and_values_are_what_the_client_got() {
     let (props, values) = feed(&[]).await;
     assert!(props.get("auth").is_some(), "every top-level key is kept");
-    assert!(props.get("auth.user").is_none(), "a deep path without metadata is pruned");
+    assert!(
+        props.get("auth.user").is_none(),
+        "a deep path without metadata is pruned"
+    );
     assert_eq!(props["auth.permissions"]["inertiaType"], "always");
     assert_eq!(
         values["auth"],
@@ -140,8 +159,14 @@ async fn indt_deep_paths_without_metadata_are_pruned_and_values_are_what_the_cli
     );
     assert_eq!(values["auth.permissions"], json!(["edit"]));
     assert_eq!(values["posts"], json!([1, 2]));
-    assert!(values.get("stats").is_none(), "an optional prop that was not asked for");
-    assert!(values.get("comments").is_none(), "a deferred prop that was only announced");
+    assert!(
+        values.get("stats").is_none(),
+        "an optional prop that was not asked for"
+    );
+    assert!(
+        values.get("comments").is_none(),
+        "a deferred prop that was only announced"
+    );
 }
 
 /// Share `appName`, returning the line of the call.
@@ -177,7 +202,10 @@ async fn indt_a_shared_prop_names_its_share_call_and_a_render_prop_its_line() {
 
     assert_eq!(props["appName"]["shared"], true);
     let source = &props["appName"]["shareSource"];
-    assert!(source["file"].as_str().unwrap().ends_with("props.rs"), "{source}");
+    assert!(
+        source["file"].as_str().unwrap().ends_with("props.rs"),
+        "{source}"
+    );
     assert_eq!(source["line"], share_line);
 
     assert_eq!(props["locale"]["shared"], true);

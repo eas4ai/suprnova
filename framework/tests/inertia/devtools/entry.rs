@@ -24,7 +24,9 @@ async fn show_user(req: Request) -> Response {
     let pages = req.header("x-test-pages").map(PathBuf::from);
     let (_, response) = render("Users/Show");
     let response = match pages {
-        Some(pages) => response.with_config(InertiaConfig::new().development(true).pages_dir(pages)),
+        Some(pages) => {
+            response.with_config(InertiaConfig::new().development(true).pages_dir(pages))
+        }
         None => response,
     };
     response
@@ -58,14 +60,19 @@ fn router() -> Router {
             Ok(HttpResponse::html("<html><body><p>plain</p></body></html>"))
         })
         .get("/png", |_req: Request| async {
-            Ok(HttpResponse::bytes_body(vec![0x89, b'P', b'N', b'G'], "image/png"))
+            Ok(HttpResponse::bytes_body(
+                vec![0x89, b'P', b'N', b'G'],
+                "image/png",
+            ))
         })
         .get("/big", |_req: Request| async { text("x".repeat(256_001)) })
         .post("/save", |_req: Request| async {
             let response: Response = Redirect::to("/page").into();
             response
         })
-        .get("/away", |_req: Request| async { Ok(Inertia::location("https://billing.example/portal")) })
+        .get("/away", |_req: Request| async {
+            Ok(Inertia::location("https://billing.example/portal"))
+        })
         .post("/upload", |_req: Request| async { text("uploaded") })
         .into()
 }
@@ -88,9 +95,18 @@ async fn indt_every_recorded_request_gets_its_own_ulid() {
     assert!(is_ulid(&first_id), "{first_id}");
     assert!(is_ulid(&second_id), "{second_id}");
     assert_ne!(first_id, second_id);
-    assert!(first_id < second_id, "a later entry sorts after an earlier one");
-    assert_eq!(entry_ids(dir.path()), vec![first_id.clone(), second_id.clone()]);
-    assert_eq!(read_entry(dir.path(), &first_id)["__meta"]["id"], first_id.as_str());
+    assert!(
+        first_id < second_id,
+        "a later entry sorts after an earlier one"
+    );
+    assert_eq!(
+        entry_ids(dir.path()),
+        vec![first_id.clone(), second_id.clone()]
+    );
+    assert_eq!(
+        read_entry(dir.path(), &first_id)["__meta"]["id"],
+        first_id.as_str()
+    );
 }
 
 /// The request type an entry of `path` sent with `headers` records.
@@ -107,13 +123,25 @@ async fn request_type(dir: &Path, path: &str, headers: &[(&str, &str)]) -> Strin
         .to_string()
 }
 
+/// One request-type case: the path, the request's headers, and the type
+/// its entry records.
+type Case = (
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+    &'static str,
+);
+
 #[tokio::test]
 async fn indt_the_request_type_follows_laravels_precedence() {
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     let inertia = ("X-Inertia", "true");
-    let cases: Vec<(&str, Vec<(&str, &str)>, &str)> = vec![
-        ("/page", vec![("Precognition", "true"), inertia], "precognition"),
+    let cases: Vec<Case> = vec![
+        (
+            "/page",
+            vec![("Precognition", "true"), inertia],
+            "precognition",
+        ),
         ("/page", vec![], "initial"),
         ("/text", vec![], "http"),
         ("/page", vec![inertia], "navigate"),
@@ -127,7 +155,11 @@ async fn indt_the_request_type_follows_laravels_precedence() {
             ],
             "deferred",
         ),
-        ("/page", vec![inertia, ("X-Inertia-Devtools-Poll", "true")], "poll"),
+        (
+            "/page",
+            vec![inertia, ("X-Inertia-Devtools-Poll", "true")],
+            "poll",
+        ),
         (
             "/page",
             vec![
@@ -138,7 +170,11 @@ async fn indt_the_request_type_follows_laravels_precedence() {
             "partial",
         ),
         ("/page", vec![inertia, ("Purpose", "prefetch")], "prefetch"),
-        ("/page", vec![inertia, ("Sec-Purpose", "prefetch")], "prefetch"),
+        (
+            "/page",
+            vec![inertia, ("Sec-Purpose", "prefetch")],
+            "prefetch",
+        ),
     ];
     for (path, headers, expected) in cases {
         assert_eq!(
@@ -170,7 +206,10 @@ async fn indt_an_entry_carries_the_request_response_route_and_render_source() {
     let meta = &entry["__meta"];
     assert_eq!(meta["method"], "GET");
     assert!(
-        meta["url"].as_str().unwrap().ends_with("/users/7?tab=profile"),
+        meta["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/users/7?tab=profile"),
         "{}",
         meta["url"]
     );
@@ -185,37 +224,55 @@ async fn indt_an_entry_carries_the_request_response_route_and_render_source() {
     assert!(meta["utime"].as_f64().unwrap() > 1_600_000_000.0);
     let timestamp = meta["timestamp"].as_str().unwrap();
     assert_eq!(timestamp.len(), 24, "{timestamp}");
-    assert!(timestamp.ends_with('Z') && timestamp.as_bytes()[10] == b'T', "{timestamp}");
+    assert!(
+        timestamp.ends_with('Z') && timestamp.as_bytes()[10] == b'T',
+        "{timestamp}"
+    );
 
     let http = &entry["http"];
     assert_eq!(http["requestHeaders"]["x-inertia-devtools-tab"], "tab-1");
     assert_eq!(http["requestHeaders"]["x-inertia"], "true");
     assert_eq!(http["responseHeaders"]["x-inertia"], "true");
     assert!(http["responseHeaders"]["x-inertia-devtools-id"].is_string());
-    assert_eq!(http["requestBody"]["status"], "present", "a GET's query is its input");
+    assert_eq!(
+        http["requestBody"]["status"], "present",
+        "a GET's query is its input"
+    );
     assert_eq!(http["requestBody"]["value"], json!({"tab": "profile"}));
     assert_eq!(http["responseBody"]["status"], "present");
     assert_eq!(http["responseBody"]["value"]["component"], "Users/Show");
-    assert_eq!(http["responseBody"]["value"]["props"]["user"]["name"], "Ada");
+    assert_eq!(
+        http["responseBody"]["value"]["props"]["user"]["name"],
+        "Ada"
+    );
 
     assert_eq!(entry["route"]["name"], "users.show");
     assert_eq!(entry["route"]["uri"], "/users/{id}");
     assert_eq!(entry["route"]["method"], "GET");
     assert!(
-        entry["route"]["action"].as_str().unwrap().ends_with("show_user"),
+        entry["route"]["action"]
+            .as_str()
+            .unwrap()
+            .ends_with("show_user"),
         "{}",
         entry["route"]["action"]
     );
 
     let (line, _) = render("Users/Show");
     assert!(
-        entry["renderSource"]["file"].as_str().unwrap().ends_with("entry.rs"),
+        entry["renderSource"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("entry.rs"),
         "{}",
         entry["renderSource"]
     );
     assert_eq!(entry["renderSource"]["line"], line);
     let component_path = entry["componentPath"].as_str().unwrap();
-    assert!(component_path.ends_with("Users/Show.svelte"), "{component_path}");
+    assert!(
+        component_path.ends_with("Users/Show.svelte"),
+        "{component_path}"
+    );
     assert!(entry["props"].is_object());
     assert!(entry["propValues"].is_object());
 }
@@ -223,12 +280,33 @@ async fn indt_an_entry_carries_the_request_response_route_and_render_source() {
 #[tokio::test]
 async fn indt_a_route_defined_page_names_its_route_as_the_render_source() {
     let dir = tempfile::tempdir().unwrap();
-    let defined_at = line!() + 1;
-    let router: Router = Router::new().inertia("/about", "About", json!({"team": 4})).into();
-    let response = client(router, devtools(dir.path())).get("/about").inertia().send().await;
+    let router: Router = Router::new()
+        .inertia("/about", "About", json!({"team": 4}))
+        .into();
+    // The line of the `.inertia(` call, which `#[track_caller]` reports
+    // however the chain is laid out.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/inertia/devtools/entry.rs"),
+    )
+    .unwrap();
+    let defined_at = source
+        .lines()
+        .position(|line| line.contains(".inertia(\"/about\", \"About\""))
+        .unwrap()
+        + 1;
+    let response = client(router, devtools(dir.path()))
+        .get("/about")
+        .inertia()
+        .send()
+        .await;
     let entry = entry_of(dir.path(), &response);
     assert_eq!(entry["__meta"]["component"], "About");
-    assert!(entry["renderSource"]["file"].as_str().unwrap().ends_with("entry.rs"));
+    assert!(
+        entry["renderSource"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("entry.rs")
+    );
     assert_eq!(entry["renderSource"]["line"], defined_at);
 }
 
@@ -237,7 +315,11 @@ async fn indt_a_non_inertia_write_keeps_no_body_and_an_inertia_write_keeps_its_i
     let dir = tempfile::tempdir().unwrap();
     let client = client(router(), devtools(dir.path()));
 
-    let plain = client.post("/save").json(&json!({"title": "Hello"})).send().await;
+    let plain = client
+        .post("/save")
+        .json(&json!({"title": "Hello"}))
+        .send()
+        .await;
     assert_eq!(
         entry_of(dir.path(), &plain)["http"]["requestBody"],
         json!({"status": "omitted", "reason": "non-inertia-request"})
@@ -319,7 +401,10 @@ async fn indt_an_upload_is_summarized_and_a_text_body_kept_as_text() {
         addr,
         "POST",
         "/upload",
-        &[("X-Inertia", b"true"), ("Content-Type", b"application/octet-stream")],
+        &[
+            ("X-Inertia", b"true"),
+            ("Content-Type", b"application/octet-stream"),
+        ],
         vec![0xff, 0xfe, 0x00],
     )
     .await;
@@ -340,7 +425,11 @@ async fn indt_the_response_body_is_the_page_the_text_or_a_reason() {
     let page = client.get("/page").inertia().send().await;
     let page_body = body_of(&page);
     assert_eq!(page_body["status"], "present");
-    assert_eq!(page_body["value"], page.json(), "the page object the client got");
+    assert_eq!(
+        page_body["value"],
+        page.json(),
+        "the page object the client got"
+    );
 
     assert_eq!(
         body_of(&client.get("/json").send().await),
@@ -367,7 +456,10 @@ async fn indt_a_redirect_records_where_it_goes() {
 
     let redirect = client.post("/save").inertia().send().await;
     assert_eq!(redirect.status(), 302);
-    assert_eq!(entry_of(dir.path(), &redirect)["__meta"]["redirectLocation"], "/page");
+    assert_eq!(
+        entry_of(dir.path(), &redirect)["__meta"]["redirectLocation"],
+        "/page"
+    );
 
     let away = client.get("/away").inertia().send().await;
     assert_eq!(away.status(), 409);
@@ -390,7 +482,11 @@ async fn indt_every_recorded_response_carries_the_id_and_lineage_headers() {
         .await;
     let id = visit.header("x-inertia-devtools-id").unwrap();
     assert_eq!(visit.header("x-inertia-devtools-parent-out"), Some("p"));
-    assert_eq!(visit.header("x-inertia-devtools-base-path"), None, "at the host root");
+    assert_eq!(
+        visit.header("x-inertia-devtools-base-path"),
+        None,
+        "at the host root"
+    );
     assert_eq!(read_entry(dir.path(), id)["__meta"]["batchId"], "p");
 
     let first = client
@@ -404,7 +500,10 @@ async fn indt_every_recorded_response_carries_the_id_and_lineage_headers() {
         Some(first_id),
         "a request that is not an Inertia visit starts its own batch"
     );
-    assert_eq!(read_entry(dir.path(), first_id)["__meta"]["batchId"], Value::Null);
+    assert_eq!(
+        read_entry(dir.path(), first_id)["__meta"]["batchId"],
+        Value::Null
+    );
 
     let prefetch = client
         .get("/page")
@@ -432,12 +531,18 @@ async fn indt_a_first_visit_document_carries_the_id_tag_and_an_inertia_visit_doe
     let first = client.get("/page").send().await;
     first.assert_ok();
     let id = first.header("x-inertia-devtools-id").unwrap();
-    let tag = format!("<script data-inertia-devtools-id type=\"application/json\">\"{id}\"</script></body>");
+    let tag = format!(
+        "<script data-inertia-devtools-id type=\"application/json\">\"{id}\"</script></body>"
+    );
     assert!(first.body_text().contains(&tag), "{}", first.body_text());
 
     let visit = client.get("/page").inertia().send().await;
     assert!(!visit.body_text().contains("data-inertia-devtools-id"));
-    assert_eq!(visit.json()["component"], "Home", "the JSON page is untouched");
+    assert_eq!(
+        visit.json()["component"],
+        "Home",
+        "the JSON page is untouched"
+    );
 
     let plain = client.get("/html").send().await;
     assert!(plain.header("x-inertia-devtools-id").is_some());
@@ -457,7 +562,10 @@ async fn indt_under_a_public_root_the_base_path_rides_the_header_and_the_tag() {
 
     let first = client.get("/page").send().await;
     first.assert_ok();
-    assert_eq!(first.header("x-inertia-devtools-base-path"), Some("/billing"));
+    assert_eq!(
+        first.header("x-inertia-devtools-base-path"),
+        Some("/billing")
+    );
     assert!(
         first.body_text().contains(
             "<script data-inertia-devtools-id data-inertia-devtools-base-path=\"/billing\" type=\"application/json\">"

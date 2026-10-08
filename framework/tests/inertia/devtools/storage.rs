@@ -41,7 +41,10 @@ async fn indt_each_entry_is_a_json_file_the_index_lists_newest_first() {
     let second_id = second.header("x-inertia-devtools-id").unwrap();
 
     assert_eq!(entry_ids(dir.path()).len(), 2);
-    assert_eq!(read_entry(dir.path(), first_id)["__meta"]["requestType"], "http");
+    assert_eq!(
+        read_entry(dir.path(), first_id)["__meta"]["requestType"],
+        "http"
+    );
     let index = read_index(dir.path());
     let listed: Vec<&str> = index
         .as_array()
@@ -108,7 +111,12 @@ async fn indt_a_tab_keeps_its_newest_100_entries() {
             .header("X-Inertia-Devtools-Tab", "tab-1")
             .send()
             .await;
-        ids.push(response.header("x-inertia-devtools-id").unwrap().to_string());
+        ids.push(
+            response
+                .header("x-inertia-devtools-id")
+                .unwrap()
+                .to_string(),
+        );
     }
     let other = client
         .get("/text")
@@ -132,7 +140,9 @@ async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storag
         .inertia()
         .header("Cookie", "suprnova_session=cookie-value")
         .header("Authorization", "Bearer bearer-value")
-        .json(&json!({"email": "ada@example.com", "Password": "hunter2", "nested": {"secret": "s3"}}))
+        .json(
+            &json!({"email": "ada@example.com", "Password": "hunter2", "nested": {"secret": "s3"}}),
+        )
         .send()
         .await;
     let id = login.header("x-inertia-devtools-id").unwrap();
@@ -141,11 +151,23 @@ async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storag
         assert!(!raw.contains(secret), "{secret} reached the store: {raw}");
     }
     let entry: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(entry["http"]["requestBody"]["value"]["Password"], "[REDACTED]");
-    assert_eq!(entry["http"]["requestBody"]["value"]["email"], "ada@example.com");
-    assert_eq!(entry["http"]["requestBody"]["value"]["nested"]["secret"], "[REDACTED]");
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["Password"],
+        "[REDACTED]"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["email"],
+        "ada@example.com"
+    );
+    assert_eq!(
+        entry["http"]["requestBody"]["value"]["nested"]["secret"],
+        "[REDACTED]"
+    );
     assert_eq!(entry["http"]["requestHeaders"]["cookie"], "[REDACTED]");
-    assert_eq!(entry["http"]["requestHeaders"]["authorization"], "[REDACTED]");
+    assert_eq!(
+        entry["http"]["requestHeaders"]["authorization"],
+        "[REDACTED]"
+    );
     let url = entry["__meta"]["url"].as_str().unwrap();
     assert!(url.ends_with("/login?token=%5BREDACTED%5D&page=2"), "{url}");
     let index = std::fs::read_to_string(dir.path().join("_meta.json")).unwrap();
@@ -160,7 +182,11 @@ async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storag
         entry["http"]["responseBody"]["value"]["props"]["token"],
         "[REDACTED]"
     );
-    assert_eq!(page.json()["props"]["token"], "prop-token-value", "the client still gets it");
+    assert_eq!(
+        page.json()["props"]["token"],
+        "prop-token-value",
+        "the client still gets it"
+    );
 }
 
 #[tokio::test]
@@ -175,6 +201,9 @@ async fn indt_a_value_that_is_not_text_becomes_a_marker_and_the_entry_is_kept() 
     assert_eq!(reply.status, 200);
     assert_eq!(reply.body, "ok", "the response is the handler's");
     let entry = read_entry(dir.path(), &reply.headers["x-inertia-devtools-id"]);
-    assert_eq!(entry["http"]["requestHeaders"]["x-note"], "[UNSERIALIZABLE]");
+    assert_eq!(
+        entry["http"]["requestHeaders"]["x-note"],
+        "[UNSERIALIZABLE]"
+    );
     assert_eq!(entry["__meta"]["status"], 200);
 }

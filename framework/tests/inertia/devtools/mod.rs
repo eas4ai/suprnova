@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use suprnova::testing::TestClient;
-use suprnova::{DevToolsConfig, Inertia, InertiaConfig, MiddlewareRegistry, Router, SessionMiddleware};
+use suprnova::{
+    DevToolsConfig, Inertia, InertiaConfig, MiddlewareRegistry, Router, SessionMiddleware,
+};
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
 use crate::protocol_harness::MemoryStore;
@@ -63,7 +65,8 @@ pub fn session_client(
             store.clone(),
         ))
         .append(Inertia::middleware(&inertia(devtools)));
-    let client = TestClient::new(router, registry).with_session_store(store.clone(), "suprnova_session");
+    let client =
+        TestClient::new(router, registry).with_session_store(store.clone(), "suprnova_session");
     (client, store)
 }
 
@@ -85,15 +88,19 @@ pub fn entry_ids(dir: &Path) -> Vec<String> {
 /// The stored entry `id` in `dir`, parsed.
 pub fn read_entry(dir: &Path, id: &str) -> Value {
     let path: PathBuf = dir.join(format!("{id}.json"));
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("no entry file {}: {e}", path.display()));
+    let bytes =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("no entry file {}: {e}", path.display()));
     serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("entry {id} is not JSON: {e}"))
 }
 
 /// The stored entry named by a response's `X-Inertia-Devtools-Id`.
 pub fn entry_of(dir: &Path, response: &suprnova::testing::TestResponse) -> Value {
-    let id = response
-        .header("x-inertia-devtools-id")
-        .unwrap_or_else(|| panic!("no X-Inertia-Devtools-Id on a {} response", response.status()));
+    let id = response.header("x-inertia-devtools-id").unwrap_or_else(|| {
+        panic!(
+            "no X-Inertia-Devtools-Id on a {} response",
+            response.status()
+        )
+    });
     read_entry(dir, id)
 }
 
@@ -156,7 +163,10 @@ pub async fn raw_send(
         .header("Host", "localhost")
         .header("Content-Length", body.len().to_string());
     for (name, value) in headers {
-        builder = builder.header(*name, hyper::header::HeaderValue::from_bytes(value).unwrap());
+        builder = builder.header(
+            *name,
+            hyper::header::HeaderValue::from_bytes(value).unwrap(),
+        );
     }
     let response = sender
         .send_request(builder.body(Full::new(bytes::Bytes::from(body))).unwrap())

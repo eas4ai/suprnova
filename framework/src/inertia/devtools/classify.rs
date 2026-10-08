@@ -97,7 +97,8 @@ pub(crate) fn classify(path: &str, prop: &Prop, request: &ClassifyRequest) -> Pr
         reset: request.reset.iter().any(|key| key == path),
         once: prop.is_once(),
         merge_direction: merge_direction(prop, request),
-        deep_merge: prop.merge_mode() == Some(MergeMode::Deep) || !prop.match_on_fields().is_empty(),
+        deep_merge: prop.merge_mode() == Some(MergeMode::Deep)
+            || !prop.match_on_fields().is_empty(),
         rescued: false,
     }
 }
@@ -157,7 +158,8 @@ impl PropMeta {
         object.insert("shared".to_string(), Value::Bool(shared));
         object.insert(
             "inertiaType".to_string(),
-            self.inertia_type.map_or(Value::Null, |kind| Value::String(kind.to_string())),
+            self.inertia_type
+                .map_or(Value::Null, |kind| Value::String(kind.to_string())),
         );
         if let Some(group) = &self.defer_group {
             object.insert("deferGroup".to_string(), Value::String(group.clone()));
@@ -172,7 +174,10 @@ impl PropMeta {
             object.insert("once".to_string(), Value::Bool(true));
         }
         if let Some(direction) = self.merge_direction {
-            object.insert("mergeDirection".to_string(), Value::String(direction.to_string()));
+            object.insert(
+                "mergeDirection".to_string(),
+                Value::String(direction.to_string()),
+            );
         }
         if self.deep_merge {
             object.insert("deepMerge".to_string(), Value::Bool(true));
@@ -204,14 +209,32 @@ mod tests {
     #[test]
     fn indt_each_kind_of_prop_gets_its_pill() {
         let value = || Prop::eager(json!([1]));
-        assert_eq!(classify("a", &value().always(), &plain()).inertia_type, Some("always"));
-        assert_eq!(classify("a", &value().optional(), &plain()).inertia_type, Some("optional"));
-        assert_eq!(classify("a", &value().merge(), &plain()).inertia_type, Some("merge"));
-        assert_eq!(classify("a", &value().once(), &plain()).inertia_type, Some("once"));
+        assert_eq!(
+            classify("a", &value().always(), &plain()).inertia_type,
+            Some("always")
+        );
+        assert_eq!(
+            classify("a", &value().optional(), &plain()).inertia_type,
+            Some("optional")
+        );
+        assert_eq!(
+            classify("a", &value().merge(), &plain()).inertia_type,
+            Some("merge")
+        );
+        assert_eq!(
+            classify("a", &value().once(), &plain()).inertia_type,
+            Some("once")
+        );
         assert_eq!(classify("a", &value(), &plain()).inertia_type, None);
         // Composed flags: the first in Laravel's order wins.
-        assert_eq!(classify("a", &value().merge().once(), &plain()).inertia_type, Some("merge"));
-        assert_eq!(classify("a", &value().optional().once(), &plain()).inertia_type, Some("optional"));
+        assert_eq!(
+            classify("a", &value().merge().once(), &plain()).inertia_type,
+            Some("merge")
+        );
+        assert_eq!(
+            classify("a", &value().optional().once(), &plain()).inertia_type,
+            Some("optional")
+        );
     }
 
     #[test]
@@ -228,8 +251,14 @@ mod tests {
     #[test]
     fn indt_merge_direction_and_deep_merge_follow_the_flags() {
         let value = || Prop::eager(json!([1]));
-        assert_eq!(classify("a", &value().merge(), &plain()).merge_direction, Some("append"));
-        assert_eq!(classify("a", &value().prepend(), &plain()).merge_direction, Some("prepend"));
+        assert_eq!(
+            classify("a", &value().merge(), &plain()).merge_direction,
+            Some("append")
+        );
+        assert_eq!(
+            classify("a", &value().prepend(), &plain()).merge_direction,
+            Some("prepend")
+        );
         let deep = classify("a", &value().deep_merge(), &plain());
         assert_eq!(deep.merge_direction, Some("append"));
         assert!(deep.deep_merge);

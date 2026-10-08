@@ -317,7 +317,9 @@ async fn request_body(body: RequestBody) -> Value {
             }
         }
         Some(ct) if ct.starts_with("multipart/form-data") => {
-            if let Some(parts) = multipart_input(content_type.as_deref().unwrap_or(ct), bytes.clone()).await {
+            if let Some(parts) =
+                multipart_input(content_type.as_deref().unwrap_or(ct), bytes.clone()).await
+            {
                 input.extend(parts);
             }
         }
@@ -364,7 +366,8 @@ fn response_body(payload: Option<&RenderPayload>, response: &HttpResponse) -> Va
         return omitted("too-large");
     }
     if content_type.contains("json")
-        && let Ok(value @ (Value::Object(_) | Value::Array(_))) = serde_json::from_slice::<Value>(body)
+        && let Ok(value @ (Value::Object(_) | Value::Array(_))) =
+            serde_json::from_slice::<Value>(body)
     {
         return present(value);
     }
@@ -456,7 +459,10 @@ pub(crate) async fn build(
     let request_type = request_type(&facts, rendered);
     let response_body = response_body(payload.as_ref(), response);
     let mut route = Map::new();
-    route.insert("name".to_string(), facts.route_name.clone().map_or(Value::Null, Value::String));
+    route.insert(
+        "name".to_string(),
+        facts.route_name.clone().map_or(Value::Null, Value::String),
+    );
     route.insert(
         "uri".to_string(),
         Value::String(facts.route_uri.clone().unwrap_or_default()),
@@ -466,7 +472,10 @@ pub(crate) async fn build(
     }
     route.insert(
         "action".to_string(),
-        facts.route_action.clone().map_or(Value::Null, Value::String),
+        facts
+            .route_action
+            .clone()
+            .map_or(Value::Null, Value::String),
     );
     let batch_id = facts.batch_id().map(str::to_string);
     let RequestFacts {

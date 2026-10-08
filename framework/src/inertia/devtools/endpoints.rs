@@ -119,10 +119,13 @@ fn type_list(value: Option<&String>) -> Vec<String> {
 /// The `limit` query value as PHP's `is_numeric` and `(int)` read it.
 fn numeric(value: &str) -> Option<i64> {
     let value = value.trim();
-    value
-        .parse::<i64>()
-        .ok()
-        .or_else(|| value.parse::<f64>().ok().filter(|n| n.is_finite()).map(|n| n as i64))
+    value.parse::<i64>().ok().or_else(|| {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(|n| n as i64)
+    })
 }
 
 /// Every entry's metadata, newest first, filtered by `component`, `type`
@@ -154,9 +157,9 @@ async fn list(repository: &Arc<EntriesRepository>, request: &Request) -> HttpRes
     let entries: Vec<Value> = all
         .into_iter()
         .filter(|meta| {
-            component
-                .as_deref()
-                .is_none_or(|component| meta.get("component").and_then(Value::as_str) == Some(component))
+            component.as_deref().is_none_or(|component| {
+                meta.get("component").and_then(Value::as_str) == Some(component)
+            })
         })
         .filter(|meta| include.is_empty() || include.contains(&kind(meta)))
         .filter(|meta| !exclude.contains(&kind(meta)))

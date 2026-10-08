@@ -1405,14 +1405,14 @@ impl InertiaResponse {
                 &component,
                 Some(super::devtools::SourceLocation::of(render_source)),
             );
-            collector.component_path(
-                super::pages::find_page_file(&config, &component).map(|path| {
+            collector.component_path(super::pages::find_page_file(&config, &component).map(
+                |path| {
                     std::fs::canonicalize(&path)
                         .unwrap_or(path)
                         .display()
                         .to_string()
-                }),
-            );
+                },
+            ));
             collector
         });
 

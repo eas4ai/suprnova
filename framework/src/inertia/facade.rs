@@ -14,9 +14,8 @@ use super::response::{IntoInertiaData, reflash_session_values_after_eager_error}
 use super::runtime::SsrCondition;
 use super::ssr::SsrRequest;
 use super::{
-    DevToolsMiddleware, Inertia303Middleware, InertiaErrorPageMiddleware,
-    InertiaHeadersMiddleware, InertiaResponse, InertiaValidationRedirectMiddleware,
-    InertiaVersionMiddleware,
+    DevToolsMiddleware, Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware,
+    InertiaResponse, InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
 };
 use serde_json::Value;
 use std::sync::Arc;

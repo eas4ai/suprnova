@@ -35,9 +35,10 @@ fn router() -> Router {
             response
         })
         .get("/status", |_req: Request| async {
-            let status = suprnova::session::session_mut(|session| session.get_flash::<String>("status"))
-                .flatten()
-                .unwrap_or_else(|| "none".to_string());
+            let status =
+                suprnova::session::session_mut(|session| session.get_flash::<String>("status"))
+                    .flatten()
+                    .unwrap_or_else(|| "none".to_string());
             suprnova::http::text(status)
         })
         .into()
@@ -73,7 +74,13 @@ async fn indt_entries_lists_newest_first_and_filters_by_component_type_offset_an
     let mut sent = Vec::new();
     for (path, headers) in [
         ("/home", vec![]),
-        ("/home", vec![("X-Inertia-Partial-Component", "Home"), ("X-Inertia-Partial-Data", "x")]),
+        (
+            "/home",
+            vec![
+                ("X-Inertia-Partial-Component", "Home"),
+                ("X-Inertia-Partial-Data", "x"),
+            ],
+        ),
         ("/about", vec![]),
         ("/home", vec![("X-Inertia-Devtools-Poll", "true")]),
     ] {
@@ -82,7 +89,12 @@ async fn indt_entries_lists_newest_first_and_filters_by_component_type_offset_an
             request = request.header(name, value);
         }
         let response = request.send().await;
-        sent.push(response.header("x-inertia-devtools-id").unwrap().to_string());
+        sent.push(
+            response
+                .header("x-inertia-devtools-id")
+                .unwrap()
+                .to_string(),
+        );
     }
 
     let all = listed(&client, "").await;
@@ -105,7 +117,11 @@ async fn indt_entries_lists_newest_first_and_filters_by_component_type_offset_an
     let page = listed(&client, "?offset=1&limit=2").await;
     let page_ids: Vec<&String> = page.iter().map(|(id, _, _)| id).collect();
     assert_eq!(page_ids, vec![&sent[2], &sent[1]]);
-    assert_eq!(listed(&client, "?limit=0").await.len(), 1, "a limit is at least 1");
+    assert_eq!(
+        listed(&client, "?limit=0").await.len(),
+        1,
+        "a limit is at least 1"
+    );
 }
 
 #[tokio::test]
@@ -116,7 +132,10 @@ async fn indt_one_entry_by_id_and_not_found_for_anything_else() {
     let visit = client.get("/home").inertia().send().await;
     let id = visit.header("x-inertia-devtools-id").unwrap();
 
-    let found = client.get(format!("/_inertia/devtools/entries/{id}")).send().await;
+    let found = client
+        .get(format!("/_inertia/devtools/entries/{id}"))
+        .send()
+        .await;
     found.assert_ok();
     assert_eq!(found.json()["__meta"]["id"], id);
     assert_eq!(found.json()["__meta"]["component"], "Home");
@@ -127,7 +146,11 @@ async fn indt_one_entry_by_id_and_not_found_for_anything_else() {
             .send()
             .await;
         response.assert_status(404);
-        assert_eq!(response.json(), json!({"message": "Not found."}), "{missing}");
+        assert_eq!(
+            response.json(),
+            json!({"message": "Not found."}),
+            "{missing}"
+        );
     }
 }
 
@@ -177,19 +200,30 @@ async fn indt_outside_local_only_the_configured_gate_admits_a_request() {
 
     Gate::define::<(), ()>("indt-devtools-open", |_, _| true);
     let open = client(router(), devtools(dir.path()).gate("indt-devtools-open"));
-    open.get("/_inertia/devtools/entries").send().await.assert_ok();
+    open.get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
 
     Gate::define::<Admin, ()>("indt-devtools-admins", |_, _| true);
     let admins = devtools(dir.path()).gate("indt-devtools-admins");
     let guest = client(router(), admins.clone());
-    guest.get("/_inertia/devtools/entries").send().await.assert_status(403);
+    guest
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_status(403);
     let signed_in = TestClient::new(
         router(),
         MiddlewareRegistry::new()
             .append(ActingAsAdmin)
             .append(Inertia::middleware(&inertia(admins))),
     );
-    signed_in.get("/_inertia/devtools/entries").send().await.assert_ok();
+    signed_in
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
 }
 
 #[tokio::test]
@@ -198,7 +232,11 @@ async fn indt_in_local_a_request_is_admitted_without_a_gate() {
     let dir = tempfile::tempdir().unwrap();
     Gate::define::<(), ()>("indt-devtools-closed", |_, _| false);
     let client = client(router(), devtools(dir.path()).gate("indt-devtools-closed"));
-    client.get("/_inertia/devtools/entries").send().await.assert_ok();
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
 }
 
 #[tokio::test]
@@ -208,10 +246,17 @@ async fn indt_an_entry_request_keeps_the_flash_and_the_previous_url() {
     let (client, store) = session_client(router(), devtools(dir.path()));
 
     client.get("/home").send().await.assert_ok();
-    assert_eq!(store.only_session().previous_url().as_deref(), Some("/home"));
+    assert_eq!(
+        store.only_session().previous_url().as_deref(),
+        Some("/home")
+    );
     client.post("/save").send().await.assert_status(302);
     // The extension fetches the entry while the redirect is followed.
-    client.get("/_inertia/devtools/entries").send().await.assert_ok();
+    client
+        .get("/_inertia/devtools/entries")
+        .send()
+        .await
+        .assert_ok();
     assert_eq!(
         store.only_session().previous_url().as_deref(),
         Some("/home"),
@@ -234,9 +279,16 @@ async fn indt_an_entry_request_is_never_recorded() {
     let id = visit.header("x-inertia-devtools-id").unwrap().to_string();
 
     let list = client.get("/_inertia/devtools/entries").send().await;
-    let one = client.get(format!("/_inertia/devtools/entries/{id}")).send().await;
+    let one = client
+        .get(format!("/_inertia/devtools/entries/{id}"))
+        .send()
+        .await;
     assert_eq!(list.header("x-inertia-devtools-id"), None);
     assert_eq!(one.header("x-inertia-devtools-id"), None);
-    assert_eq!(entry_ids(dir.path()), vec![id], "only the page visit is stored");
+    assert_eq!(
+        entry_ids(dir.path()),
+        vec![id],
+        "only the page visit is stored"
+    );
     let _: Value = list.json();
 }

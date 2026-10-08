@@ -101,7 +101,8 @@ impl Collector {
     /// Where the shared key `key` was shared.
     pub(crate) fn share_source(&mut self, key: &str, source: SourceLocation) {
         let root = key.split('.').next().unwrap_or(key);
-        self.share_sources.insert(root.to_string(), source.refined_for(root));
+        self.share_sources
+            .insert(root.to_string(), source.refined_for(root));
     }
 
     /// The metadata of the prop at `path`.
@@ -158,7 +159,7 @@ impl Collector {
         let mut props = Map::new();
         let mut prop_values = Map::new();
         for (path, meta) in entries {
-            let shared = self.shared_keys.iter().any(|key| *key == path);
+            let shared = self.shared_keys.contains(&path);
             let share_source = self.share_sources.get(&path).copied();
             if path.contains('.') && !meta.has_metadata(shared, share_source.is_some()) {
                 continue;
@@ -235,7 +236,10 @@ mod tests {
         assert!(payload.props.contains_key("auth"));
         assert!(payload.props.contains_key("stats"));
         assert!(payload.props.contains_key("errors"));
-        assert!(payload.props.contains_key("auth.user.permissions"), "{keys:?}");
+        assert!(
+            payload.props.contains_key("auth.user.permissions"),
+            "{keys:?}"
+        );
         assert!(!payload.props.contains_key("auth.user.name"), "{keys:?}");
         assert!(!payload.props.contains_key("never"), "not delivered");
         assert_eq!(payload.props["auth"]["shared"], true);

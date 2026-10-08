@@ -73,12 +73,11 @@ async fn recording_client(dir: &Path) -> TestClient {
         suprnova::InMemoryCache::new(),
     ));
     SHARED.get_or_init(app::bootstrap::register_inertia_shared_data);
-    let config = app::bootstrap::inertia_config().devtools(
-        DevToolsConfig::new()
-            .enabled(true)
-            .storage_path(dir),
-    );
-    let router: Router = app::routes::register().get("/macro-page", macro_page).into();
+    let config = app::bootstrap::inertia_config()
+        .devtools(DevToolsConfig::new().enabled(true).storage_path(dir));
+    let router: Router = app::routes::register()
+        .get("/macro-page", macro_page)
+        .into();
     TestClient::new(
         router,
         MiddlewareRegistry::new().append(Inertia::middleware(&config)),
@@ -146,7 +145,10 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
     );
     assert_eq!(
         render["line"],
-        line_of("src/controllers/user.rs", "Inertia::paginate(\"Users/Index\"")
+        line_of(
+            "src/controllers/user.rs",
+            "Inertia::paginate(\"Users/Index\""
+        )
     );
     let page_file = recorded["componentPath"].as_str().unwrap();
     assert!(page_file.ends_with("Users/Index.svelte"), "{page_file}");
@@ -156,7 +158,10 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
     assert_eq!(props["appName"]["shared"], true);
     let shared_at = &props["appName"]["shareSource"];
     assert!(
-        shared_at["file"].as_str().unwrap().ends_with("src/bootstrap.rs"),
+        shared_at["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("src/bootstrap.rs"),
         "{shared_at}"
     );
     assert_eq!(
@@ -174,7 +179,10 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
         )),
         "the first visit's document carries the id tag"
     );
-    assert_eq!(entry(dir.path(), &first)["__meta"]["requestType"], "initial");
+    assert_eq!(
+        entry(dir.path(), &first)["__meta"]["requestType"],
+        "initial"
+    );
 
     let rendered = client.get("/macro-page").inertia().send().await;
     rendered.assert_ok();
@@ -192,5 +200,8 @@ async fn indt_the_users_directory_is_recorded_with_the_apps_own_sources() {
         "inertia_response!(&req, \"Users/Index\"",
     );
     assert_eq!(render["line"], macro_line, "the macro's call site");
-    assert_eq!(recorded["props"]["users"]["renderSource"]["line"], macro_line);
+    assert_eq!(
+        recorded["props"]["users"]["renderSource"]["line"],
+        macro_line
+    );
 }
