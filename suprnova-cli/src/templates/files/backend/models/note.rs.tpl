@@ -36,10 +36,6 @@ pub struct Note {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-// Re-export the SeaORM types the macro emits in the inner `note` module, as
-// the `User` model does.
-pub use note::{ActiveModel, Column, Entity};
-
 impl Note {
     /// The notes `user_id` wrote, and no others.
     ///

@@ -33,9 +33,7 @@ mod scaffold_remember_tokens;
 #[rustfmt::skip]
 #[path = "../../../suprnova-cli/src/templates/files/backend/migrations/create_sessions_table.rs.tpl"]
 mod scaffold_sessions;
-#[rustfmt::skip]
-#[path = "../../../suprnova-cli/src/templates/files/backend/models/user.rs.tpl"]
-mod scaffold_user;
+use crate::models::user as scaffold_user;
 #[rustfmt::skip]
 #[path = "../../../suprnova-cli/src/templates/files/backend/migrations/create_users_table.rs.tpl"]
 mod scaffold_users;
