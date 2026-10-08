@@ -984,7 +984,7 @@ async fn shared_props_field_lists_registry_keys() {
 }
 
 #[tokio::test]
-async fn shared_props_field_omitted_when_registry_empty() {
+async fn shared_props_field_lists_only_errors_when_registry_empty() {
     let _guard = suprnova::testing::TestContainer::fake();
 
     let req = MockReq::new("/").inertia();
@@ -995,9 +995,13 @@ async fn shared_props_field_omitted_when_registry_empty() {
         .unwrap();
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(
-        !page.as_object().unwrap().contains_key("sharedProps"),
-        "sharedProps must be omitted when no shared registry entries exist"
+    // Every response shares `errors` (PAR-051), so it is the one entry
+    // left when nothing else is shared; `expose_shared_props(false)` is
+    // what omits the field.
+    assert_eq!(
+        page["sharedProps"],
+        serde_json::json!(["errors"]),
+        "sharedProps lists only errors when no shared registry entries exist"
     );
 }
 

@@ -412,6 +412,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `{key}.{wrapper}` when the data arrives, where a wrapped one announced
   `{key}.{wrapper}` on both. The manual's two divergence entries for
   these are gone.
+- **`sharedProps` lists `errors`, and a setting turns the list off.**
+  Every response shares the validation errors, as Laravel's middleware
+  does, so `sharedProps` now starts with `errors`: a page with nothing
+  else shared carries `["errors"]` where it carried no `sharedProps`, and
+  after a failed form `errors` reaches the client's instant-visit carry
+  with the other shared keys. `InertiaConfig::expose_shared_props(false)`
+  leaves `sharedProps` out of the page object, Laravel's
+  `inertia.expose_shared_prop_keys`; it is on by default.
 
 ### Fixed
 

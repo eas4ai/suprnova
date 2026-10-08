@@ -927,3 +927,63 @@ async fn inp_a_property_value_converts_only_when_it_is_sent() {
     assert!(page["props"].get("price").is_none(), "{page}");
     assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+// ---- PAR-051: sharedProps ----
+
+#[tokio::test]
+async fn inp_shared_props_list_errors_after_a_validation_failure() {
+    // Laravel's middleware shares `errors` on every response, so the
+    // client carries it across an instant visit with the other shared
+    // keys; each shared key is listed by its top-level segment.
+    use suprnova::Redirect;
+    use suprnova::session::{new_session_slot_for_test, session_mut, session_scope_for_test};
+
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::App::inertia_share("auth.user", "Ada");
+    let slot = new_session_slot_for_test();
+    session_scope_for_test(slot, async {
+        let _: suprnova::Response = Redirect::to("/signup")
+            .with_errors([("email", "Taken")])
+            .into();
+        session_mut(|s| s.age_flash_data());
+
+        let page = page_of(
+            InertiaResponse::new("Signup"),
+            &MockReq::new("/signup").inertia(),
+        )
+        .await;
+
+        assert_eq!(page["props"]["errors"]["email"], "Taken");
+        assert_eq!(names(&page, "sharedProps"), ["errors", "auth"]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn inp_shared_props_list_errors_with_nothing_else_shared() {
+    let _guard = suprnova::testing::TestContainer::fake();
+    let page = page_of(InertiaResponse::new("Home"), &MockReq::new("/").inertia()).await;
+
+    assert_eq!(names(&page, "sharedProps"), ["errors"]);
+}
+
+#[tokio::test]
+async fn inp_shared_props_are_omitted_when_the_setting_is_off() {
+    // Laravel's `expose_shared_prop_keys` config: off, the page carries no
+    // `sharedProps` at all, though the shared values still ship.
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::App::inertia_share("appName", "Suprnova");
+    assert!(
+        suprnova::InertiaConfig::new().expose_shared_props,
+        "the setting is on by default"
+    );
+    let response = InertiaResponse::new("Home")
+        .with_config(suprnova::InertiaConfig::new().expose_shared_props(false));
+    let page = page_of(response, &MockReq::new("/").inertia()).await;
+
+    assert_eq!(page["props"]["appName"], "Suprnova");
+    assert!(
+        !page.as_object().unwrap().contains_key("sharedProps"),
+        "{page}"
+    );
+}

@@ -792,6 +792,25 @@ When the same key appears in more than one layer, later writes win:
 This lets a handler override a globally-shared default for one page
 without having to unregister anything.
 
+### The `sharedProps` list
+
+The page object lists the top-level key of every shared prop under
+`sharedProps`, as Laravel's does: the static shares, the shared
+providers' keys and the per-request provider's keys, each by its root
+segment (`"auth"` for a share under `"auth.user"`), with `errors` first,
+since every response shares the validation errors. The client reads the
+list during an instant visit, to carry the shared values into the page it
+renders before the server answers. A page that overrides a shared key
+keeps it on the list; the client reads the value from `props`.
+
+```json
+{ "component": "Signup", "props": { "errors": { "email": "Taken" }, "auth": { "user": "Ada" } }, "sharedProps": ["errors", "auth"] }
+```
+
+`InertiaConfig::expose_shared_props(false)` leaves the list out of every
+page object - Laravel's `inertia.expose_shared_prop_keys` setting. It is on
+by default; the shared values still ship as props when it is off.
+
 ### Per-request shared data
 
 The trait runs once per Inertia response with access to the request

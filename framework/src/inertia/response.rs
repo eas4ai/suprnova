@@ -1291,6 +1291,18 @@ impl InertiaResponse {
             // and uses `sharedProps` only as a key list.
             merged.insert(k, v);
         }
+        // Every response shares the validation errors, as Laravel's
+        // middleware does with `'errors' => Inertia::always(...)`, so
+        // `errors` heads the list; with `expose_shared_props` off there is
+        // no list at all (PAR-051).
+        let shared_keys = if config.expose_shared_props {
+            let mut keys = Vec::with_capacity(shared_keys.len() + 1);
+            keys.push(ERRORS_KEY.to_string());
+            keys.extend(shared_keys.into_iter().filter(|k| k != ERRORS_KEY));
+            keys
+        } else {
+            Vec::new()
+        };
 
         let (materialized, metadata) = resolve_props(
             merged,
