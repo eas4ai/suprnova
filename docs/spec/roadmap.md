@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: release-foundations-revised
+Current: inertia-protocol
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -458,6 +458,35 @@ Requirements: RTC-001, RTC-002, RTC-003, RTC-004, MEM-003, REG-025, REG-032, REG
    XMP chunk before the budget counts it, the BMP decoder copying an
    embedded profile, and the BMP encoder's borrowed-profile entry point
    left deprecated. Same delivery, mechanisms and done-when as 34.
+
+## inertia-protocol
+
+Requirements: PAR-046, PAR-047, PAR-048, PAR-049, PAR-050, PAR-051, PAR-052, PAR-053, PAR-054, PAR-055, PAR-056, RDOC-001, RDOC-002, RDOC-003, RDOC-004, RDOC-006
+
+36. inertia-protocol - the first of the parity rounds the developer ordered
+   on 2026-10-07 (17:35: "then the sixteen parity commitments in
+   docs/superpowers/notes/parity-rulings-2026-10-07.md in the order of
+   that log's table"): the Inertia server adapter's protocol, 61 of the 62
+   rows of the first group (inertia-laravel 3.5.1 response factory, props
+   resolution, prop types, headers, middleware, JSON encoding, response,
+   helpers and blade; Inertia.js 3.8.0 html shell, request body, response
+   header and server behaviour), the client nonce row H03 left to the
+   security-headers commitment with RDOC-005.
+   Delivery: PAR-046 to PAR-056 built in `framework/src/inertia/` and the
+   request's form and query decoding (`framework/src/http/`); the
+   application-owned root template of RDOC-001 to RDOC-004 and RDOC-006,
+   with the scaffold's root template, default title and Dockerfile copy
+   (`suprnova-cli/src/templates/`); the dogfood application exercising a
+   root template and the new facade surface; `manual/frontend-inertia-responses.md`
+   and `manual/frontend.md` updated, the narrowing divergence entry and the
+   always-409 `location` claim removed, a passage on working with a coding
+   assistant on Inertia pages (HM-05); `feature-map/laravel/parity.jsonl`
+   rows of the group linked to the shipped items; the changelog.
+   Mechanisms: `par-inertia-protocol` (the Inertia test binary, the `inp_`
+   tests of the http binary and the inertia unit tests), `inertia-root-template`
+   (the `rdoc_` tests of the inertia, memory and suprnova-cli binaries).
+   Done when both pass on a committed tree, the manual passages are in
+   place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

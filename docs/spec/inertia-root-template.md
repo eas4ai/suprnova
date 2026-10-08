@@ -1,6 +1,6 @@
 # Inertia root template
 
-Status: Draft
+Status: Agreed 2026-10-07 (RDOC-005 Draft)
 Prefix: RDOC
 
 Drafted 2026-10-05 from issue #143 (an application-owned root document for
@@ -9,9 +9,11 @@ recommendations made from the code that day ("I am going to accept your
 recommendations"). The plan was posted on the issue. The Observed section
 describes framework `2bd4bd53d` (v3.2.1), checked against the code by an
 independent reader the same day and again at `c34ee7b15`, where no cited
-file had changed. RDOC-005 takes the request's nonce from SEC-003, so this
-spec is built in the commitment that builds security headers (SEC) and the
-data cache. Laravel adapter references cite
+file had changed. RDOC-001 to RDOC-004 and RDOC-006 are built in the
+Inertia protocol commitment (the parity rows RF-01, RS-02, RS-05 and BL-04,
+ruled on 2026-10-07); RDOC-005 takes the request's nonce from SEC-003, so it
+is built in the commitment that builds security headers (SEC) and the data
+cache. Laravel adapter references cite
 `reference/inertia-laravel-2.0.25/src/`; Inertia client references cite
 `reference/inertia-3.7.1/packages/core/src/`.
 
@@ -86,15 +88,19 @@ response's title or `default_title`, empty when the SSR head carries
 one), `head` (the `csrf-token` meta tag, under a nonce policy the
 `csp-nonce` meta element of RDOC-005, the SSR head and the Vite tags),
 `body` (the page data element and mount element, or the SSR body), and
-`lang`, `csrf_token` and `nonce` (absent without a nonce policy) for
-templates that place them individually. A template that writes its own
-`<title>` omits the `title` part. A root template that fails to render
+`lang`, `csrf_token`, `nonce` (absent without a nonce policy) and `ssr`
+(whether the SSR server rendered this response, for a template that places
+fallback head content when it did not) for templates that place them
+individually. The mount element's id and the page data element's
+`data-page` attribute MUST come from `InertiaConfig::mount_id`, default
+`app`, so a client that mounts on another id finds its element. A template
+that writes its own `<title>` omits the `title` part. A root template that fails to render
 MUST make the response an error and MUST NOT panic or send part of a
 document.
-Falsifier: a root template cannot place a favicon, meta tags, a `<noscript>` or attributes on `<html>` and `<body>`; a part placed bare is missing or escaped as text; the `title` part is non-empty when the SSR head carries a `<title>`; a root template that names a field the framework does not supply compiles; or a root template that fails to render panics or sends part of a document.
+Falsifier: a root template cannot place a favicon, meta tags, a `<noscript>` or attributes on `<html>` and `<body>`; a part placed bare is missing or escaped as text; the `title` part is non-empty when the SSR head carries a `<title>`; `ssr` is true for a response the SSR server did not render; with `mount_id` set to `root` the page data element or the mount element still says `app`; a root template that names a field the framework does not supply compiles; or a root template that fails to render panics or sends part of a document.
 Mechanism: `inertia-root-template`.
 Rationale: Laravel's `app.blade.php` with `@inertiaHead`, `@inertia` and `@vite`; the application-owned template is the shape Live's documents already have.
-Status: Draft
+Status: Agreed 2026-10-07
 
 [RDOC-002] Without an application template, the first-visit document MUST
 be byte for byte the one the framework writes today wherever the public
@@ -102,7 +108,7 @@ root (PFX-002) is `/` and no nonce policy (SEC-003) applies.
 Falsifier: with no template, at public root `/` and with no nonce policy, the body or headers of a first visit differ by any byte from `c34ee7b15`'s output for the same page, title, locale, CSRF token and SSR output, in development with the React preamble, in production with a manifest, on the legacy fallback or under SSR.
 Mechanism: `inertia-root-template`.
 Rationale: The parts cannot rebuild today's bytes, which put the `csrf-token` meta tag before the title (`response.rs:2337-2345`), so the no-template path keeps its own writer, the one MEM-003 measures.
-Status: Draft
+Status: Agreed 2026-10-07
 
 [RDOC-003] The parts MUST be framework values that write themselves into
 the template's output while it renders (placed through Askama's safe
@@ -111,7 +117,7 @@ intermediate string and the root template adds no size cap.
 Falsifier: with a 1 MiB prop, a first visit through a root template allocates at least 1 MiB more (dhat total bytes) than the same visit through the default document; or a first visit with a 3 MiB prop through a root template does not return 200 with the whole page.
 Mechanism: `inertia-root-template`.
 Rationale: Keeps the single-buffer property `build_html_response` records (`response.rs:2327-2330`); `TrustedHtml` owns a string capped at 2 MiB, and the SSR response keeps its own cap, `InertiaConfig::ssr_max_response_bytes`.
-Status: Draft
+Status: Agreed 2026-10-07
 
 [RDOC-004] `InertiaConfig` MUST accept a function of the request (its
 path, query and headers, as `InertiaRequestExt`) that chooses the root
@@ -120,7 +126,7 @@ reaches the root template and never the page props.
 Falsifier: with a chooser that picks template B for paths under `/admin` and A otherwise, a first visit to `/admin/x` is not rendered through B or one to `/` not through A; or a value set as view data appears anywhere in the page object of the HTML or the JSON response, or does not reach the template.
 Mechanism: `inertia-root-template`.
 Rationale: Laravel's `rootView(Request)` and `withViewData` (`Middleware.php:80`, `Response.php:137,219`); taking `InertiaRequestExt` lets the error page, which holds only the captured request, call the chooser (RDOC-006).
-Status: Draft
+Status: Agreed 2026-10-07
 
 [RDOC-005] The request's CSP nonce (SEC-003) MUST be on every executable
 script and every script or style link the framework emits in the
@@ -144,8 +150,8 @@ failing handler's data is gone; the debug page, which is built outside the
 middleware chain, is exempt. The scaffold MUST ship a root template in
 place of the unserved `frontend/index.html`, set a default title, and copy
 `templates/` in its Dockerfile. The manual MUST document the template, its
-parts, the per-request choice, view data and the nonce.
-Falsifier: with a chooser that maps `/admin/*` to template B, a browser navigation to an unrouted `/admin/x` (404) or a denied `/admin/y` (403) is not rendered through B, B receives view data, or B's framework tags lack the request's nonce under a nonce policy; `suprnova new` writes `frontend/index.html`, titles its first visit `Suprnova`, or writes a Dockerfile that does not copy `templates/`; or `manual/frontend-inertia-responses.md` does not name the template, each part, the chooser, view data and the nonce.
+parts, the per-request choice and view data (the nonce with RDOC-005).
+Falsifier: with a chooser that maps `/admin/*` to template B, a browser navigation to an unrouted `/admin/x` (404) or a denied `/admin/y` (403) is not rendered through B, or B receives view data; `suprnova new` writes `frontend/index.html`, titles its first visit `Suprnova`, or writes a Dockerfile that does not copy `templates/`; or `manual/frontend-inertia-responses.md` does not name the template, each part, the chooser and view data.
 Mechanism: `inertia-root-template`.
 Rationale: Askama reads a template at compile time, and the scaffold's image build copies only `cmd/` and `src/` (`Dockerfile.tpl:55-56`), so without the copy a scaffolded root template breaks it.
-Status: Draft
+Status: Agreed 2026-10-07
