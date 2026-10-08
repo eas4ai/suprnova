@@ -486,9 +486,9 @@ impl InertiaResponse {
         r
     }
 
-    /// Attach an optional prop. Never included on standard visits;
-    /// included only when explicitly requested via `X-Inertia-Partial-Data`
-    /// on a matching partial reload. Maps to `Inertia::optional(...)`.
+    /// Attach an optional prop. Never included on standard visits; on a
+    /// matching partial reload, included whenever its key passes the
+    /// only/except lists. Maps to `Inertia::optional(...)`.
     pub fn optional<F, Fut, V>(mut self, key: impl Into<String>, resolver: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,

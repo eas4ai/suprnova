@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -12,8 +13,8 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 
 use suprnova::{
-    HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse, MiddlewareRegistry, Request,
-    Response, Router, handle_request,
+    HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse, MiddlewareRegistry, Prop,
+    Request, Response, Router, handle_request,
 };
 
 /// A request the test builds field by field.
@@ -65,6 +66,18 @@ pub(super) async fn page_of(resp: HttpResponse) -> Value {
         .expect("collect body")
         .to_bytes();
     serde_json::from_slice(&bytes).expect("an Inertia visit returns a JSON page object")
+}
+
+/// A counting resolver, so a test can prove a resolver did or did not run.
+pub(super) fn counted(counter: Arc<AtomicUsize>, value: Value) -> Prop {
+    Prop::lazy(move || {
+        let counter = counter.clone();
+        let value = value.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            value
+        }
+    })
 }
 
 /// A config whose manifest does not exist, so the default version source

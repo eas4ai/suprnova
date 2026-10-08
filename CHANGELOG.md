@@ -384,6 +384,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `{}`, a path walks into lists by index, and a scalar a deeper path
   reaches ships as it is instead of being dropped. The manual's divergence
   entry on narrowing is gone (PR-08, HD-04).
+- **Optional and deferred props resolve on an except-only partial
+  reload.** An `optional` or `defer` prop resolved on a partial reload only
+  when `X-Inertia-Partial-Data` named it, so `router.reload({ except:
+  ['stats'] })` returned none of them where Laravel returns every one it
+  does not exclude. They now resolve whenever their key passes the only
+  and except lists, a reload with `except` alone or neither list included;
+  a standard visit still leaves them out (PR-07, PT-01).
 
 ### Fixed
 

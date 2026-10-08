@@ -381,8 +381,8 @@ pub enum MergeMode {
 /// A prop's partial-reload visibility.
 ///
 /// One field rather than three booleans because the three are
-/// contradictory: a prop cannot both bypass partial filtering and
-/// require an explicit request. [`Prop::always`], [`Prop::optional`],
+/// contradictory: a prop cannot both bypass partial filtering and stay
+/// out of a standard visit. [`Prop::always`], [`Prop::optional`],
 /// and [`Prop::defer`] each set this, so the last one called wins and
 /// the earlier one is erased.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -395,8 +395,8 @@ pub enum Visibility {
     /// Included on every response, partial-reload filtering ignored.
     /// Maps to `Inertia::always(...)`.
     Always,
-    /// Never included on a standard visit; included only when the key
-    /// appears in `X-Inertia-Partial-Data`. Maps to
+    /// Never included on a standard visit; on a matching partial reload,
+    /// included whenever the only/except lists allow it. Maps to
     /// `Inertia::optional(...)`.
     Optional,
     /// Like [`Optional`](Self::Optional), and additionally announced
@@ -629,8 +629,9 @@ impl Prop {
         self
     }
 
-    /// Withhold this prop until the client asks for it by name in
-    /// `X-Inertia-Partial-Data`. Maps to `Inertia::optional(...)`.
+    /// Withhold this prop from a standard visit; a matching partial reload
+    /// resolves it whenever its key passes the only/except lists. Maps to
+    /// `Inertia::optional(...)`.
     ///
     /// Erases any earlier [`always`](Self::always) or
     /// [`defer`](Self::defer).
@@ -1083,7 +1084,8 @@ impl Prop {
 ///   takes precedence over the whitelist on conflicts.
 /// - Props flagged [`Visibility::Always`] bypass this filter.
 /// - Props flagged [`Visibility::Optional`] or [`Visibility::Deferred`]
-///   use the explicit-only predicate (must be in `only`).
+///   never ship on a standard visit, and follow the same only/except rule
+///   as every other prop on a matched partial reload.
 /// - The `errors` prop is always returned (handled by the caller).
 #[derive(Debug, Clone, Default)]
 pub struct PartialFilter {
@@ -1170,48 +1172,31 @@ impl PartialFilter {
         included
     }
 
-    /// Whether an Optional prop with `key` should be included.
+    /// Whether an Optional or Deferred prop with `key` should be included.
     ///
-    /// Per the v3 protocol, Optional props are **never** included on a
-    /// standard visit (or a partial reload targeting another component)
-    /// and **only** included on a matched partial reload when the key
-    /// appears in `X-Inertia-Partial-Data` and not in
-    /// `X-Inertia-Partial-Except`.
+    /// Never on a standard visit, or a partial reload targeting another
+    /// component. On a matched partial reload, whenever `key` passes the
+    /// `only` and `except` lists, the same rule
+    /// [`should_include_eager`](Self::should_include_eager) applies - a
+    /// reload with `X-Inertia-Partial-Except` alone, or with neither list,
+    /// included. That is Laravel's rule: `PropsResolver` skips its
+    /// first-load exclusion of `IgnoreFirstLoad` props on every partial
+    /// request and filters them by path like any other prop.
     ///
-    /// Dot-aware the same way
-    /// [`should_include_eager`](Self::should_include_eager) is:
-    /// `"permissions.read"` in `only` counts as an explicit request for
-    /// `"permissions"`, narrowed later by [`narrow`](Self::narrow) - this
-    /// is what lets a dotted request against a
-    /// `Defer`/`Optional` prop actually trigger its resolver. The
-    /// ancestor form works here too, so a lazily shared `auth.user`
-    /// still resolves under `only=auth`, and a bare `except` entry drops
-    /// every prop key beneath it.
+    /// Dot-aware the same way: `"permissions.read"` in `only` selects
+    /// `"permissions"`, and an ancestor entry selects a dotted prop key, so
+    /// a lazily shared `auth.user` still resolves under `only=auth`.
     pub fn should_include_optional(&self, key: &str) -> bool {
-        if !self.matched {
-            return false;
-        }
-        let in_only = match &self.only {
-            Some(list) => list.iter().any(|k| entry_selects_key(k, key)),
-            None => return false, // Optional requires explicit request
-        };
-        if !in_only {
-            return false;
-        }
-        if let Some(except) = &self.except
-            && except.iter().any(|k| k == key || dotted_ancestor(k, key))
-        {
-            return false;
-        }
-        true
+        self.matched && self.should_include_eager(key)
     }
 
     /// Dispatch the per-prop inclusion predicate.
     ///
     /// Reads the prop's [`Visibility`] and nothing else: `Always`
-    /// bypasses the filter, `Optional` and `Deferred` require the key to
-    /// appear in `X-Inertia-Partial-Data`, and `Standard` follows the
-    /// only/except rules. The absent sentinel is never included.
+    /// bypasses the filter, `Optional` and `Deferred` follow the
+    /// only/except rules on a matched partial reload and are withheld
+    /// otherwise, and `Standard` follows the only/except rules. The absent
+    /// sentinel is never included.
     ///
     /// This answers "does the value ship". It deliberately does **not**
     /// answer "does this prop's metadata ship" - merge, once, and
@@ -1458,15 +1443,22 @@ mod tests {
     }
 
     #[test]
-    fn optional_excluded_when_only_unset_on_partial() {
-        // Matched filter, no `only` list - optional must remain excluded
-        // because it requires explicit listing.
+    fn optional_included_on_a_partial_reload_without_lists() {
+        // Matched filter, no `only` list: the key passes, so Laravel
+        // resolves the prop.
         let filter = PartialFilter {
             matched: true,
             only: None,
             except: None,
         };
+        assert!(filter.should_include_optional("permissions"));
+        let filter = PartialFilter {
+            matched: true,
+            only: None,
+            except: Some(vec!["permissions".into()]),
+        };
         assert!(!filter.should_include_optional("permissions"));
+        assert!(filter.should_include_optional("other"));
     }
 
     #[test]
@@ -1511,7 +1503,7 @@ mod tests {
         assert!(!filter.should_include("nope", &eager));
         assert!(filter.should_include("wanted", &lazy));
         assert!(!filter.should_include("nope", &lazy));
-        // Optional and Deferred: explicit request only.
+        // Optional and Deferred: the only/except rules on a partial reload.
         assert!(filter.should_include("wanted", &optional));
         assert!(!filter.should_include("nope", &optional));
         assert!(filter.should_include("wanted", &deferred));

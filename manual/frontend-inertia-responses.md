@@ -508,8 +508,11 @@ visibility.
 
 - Default-visibility props follow whitelist / blacklist semantics.
 - `.always()` props are sent regardless.
-- `.optional()` and `.defer()` props never ship on a standard visit, and
-  only appear on a matching partial reload that explicitly lists the key.
+- `.optional()` and `.defer()` props never ship on a standard visit. On a
+  matching partial reload they resolve whenever their key passes the
+  whitelist and blacklist, as Laravel's do: a reload that sends only
+  `X-Inertia-Partial-Except` (`router.reload({ except: ['stats'] })`)
+  resolves every optional and deferred prop it does not exclude.
 
 The merge and scroll flags do not enter into it: they decide how the
 client folds a value it receives, not whether it receives one, so a
@@ -582,9 +585,9 @@ Rules:
   object keyed by their indexes (`{"1": …}`), as PHP encodes an array whose
   keys no longer start at 0. A scalar a deeper path runs into
   (`config.level` under `only: ['config.level.nested']`) ships as it is.
-- `Optional` and `Defer` props still need the explicit request to resolve
-  at all. A dotted entry (`permissions.read`) counts as that request for
-  the top-level key, and the resolved value ships whole.
+- `Optional` and `Defer` props resolve on a partial reload whenever their
+  key passes the lists. A dotted entry (`permissions.read`) selects the
+  top-level key, and the resolved value ships whole.
 - A dotted `except` doesn't delete the field on the client - it stops the
   field from refreshing on this response, and the client's merge restores
   it from whatever it already had cached. `deepMergeObjects` builds the

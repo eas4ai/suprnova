@@ -850,10 +850,10 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
 
     // Visit 2 - a matched partial carrying only `X-Inertia-Partial-Except`,
     // naming a different key. `passes_lists` is true (no `only` list to
-    // fail, and `except` names something else), so the metadata ships;
-    // `should_include_optional` still returns false without an explicit
-    // `only` entry, so the value does not. This is the third of the three
-    // gating divergences the scroll block was hoisted to fix.
+    // fail, and `except` names something else), so the metadata ships, and
+    // the value resolves too: an optional prop resolves on any partial
+    // reload whose lists it passes, as Laravel's `IgnoreFirstLoad` props
+    // do (PAR-047).
     let calls = Arc::new(AtomicUsize::new(0));
     let req = MockReq::new("/feed")
         .inertia()
@@ -873,10 +873,11 @@ async fn scroll_optional_ships_its_cursor_on_every_visit_that_passes_the_lists()
         .unwrap();
     let page = page_of(resp).await;
 
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(
-        !page["props"].as_object().unwrap().contains_key("items"),
-        "an except-only partial is not an explicit request for an optional prop; got {page}"
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        page["props"]["items"],
+        json!([{ "id": 1 }]),
+        "an except-only partial resolves an optional prop it does not except; got {page}"
     );
     assert_eq!(
         names(&page, "mergeProps"),

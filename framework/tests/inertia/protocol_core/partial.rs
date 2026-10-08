@@ -1,10 +1,13 @@
 //! PAR-047: partial reloads read `X-Inertia-Partial-Data` and
 //! `X-Inertia-Partial-Except` as Laravel's `PropsResolver` does.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use serde_json::json;
 use suprnova::{InertiaResponse, Prop};
 
-use super::support::{MockReq, page_of};
+use super::support::{MockReq, counted, page_of};
 
 #[tokio::test]
 async fn inp_partial_data_drops_empty_segments_and_does_not_trim() {
@@ -174,4 +177,51 @@ async fn inp_a_dotted_only_walks_into_lists_and_keeps_scalars_on_the_path() {
     // as an object.
     assert_eq!(page["props"]["tail"], json!({"1": "b"}), "got {page}");
     assert_eq!(page["props"]["config"], json!({"level": 3}), "got {page}");
+}
+
+// ---- optional and defer on a partial reload ----
+
+#[tokio::test]
+async fn inp_an_except_only_reload_resolves_optional_and_deferred_props() {
+    // Laravel resolves `IgnoreFirstLoad` props on any partial reload whose
+    // lists they pass; Suprnova required an `only` entry.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/p")
+        .partial("P")
+        .header("X-Inertia-Partial-Except", "x");
+    let resp = InertiaResponse::new("P")
+        .prop("o", counted(calls.clone(), json!("optional")).optional())
+        .prop("d", counted(calls.clone(), json!("deferred")).defer())
+        .prop("x", counted(calls.clone(), json!("excepted")).optional())
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+    assert_eq!(page["props"]["o"], "optional", "got {page}");
+    assert_eq!(page["props"]["d"], "deferred", "got {page}");
+    assert!(page["props"].get("x").is_none(), "got {page}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the excepted resolver must not run"
+    );
+    assert!(page.get("deferredProps").is_none());
+}
+
+#[tokio::test]
+async fn inp_an_only_list_still_withholds_optional_props_it_does_not_name() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let req = MockReq::new("/p")
+        .partial("P")
+        .header("X-Inertia-Partial-Data", "a");
+    let resp = InertiaResponse::new("P")
+        .with("a", 1)
+        .prop("o", counted(calls.clone(), json!("optional")).optional())
+        .prop("d", counted(calls.clone(), json!("deferred")).defer())
+        .resolve(&req)
+        .await
+        .unwrap();
+    let page = page_of(resp).await;
+    assert!(page["props"].get("o").is_none() && page["props"].get("d").is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
