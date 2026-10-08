@@ -511,8 +511,11 @@ component it depends on, a `Worker`,
 `object` or `embed` element or one by a name it cannot trace to a
 constant, HTML parsing into the document (`innerHTML`, `outerHTML`,
 `insertAdjacentHTML`, `setHTMLUnsafe`, `createContextualFragment` and
-`DOMParser`), `attachShadow` (UI-010), and a change to a built-in
-prototype. An attribute name `setAttribute`, `setAttributeNS` or
+`DOMParser`), `attachShadow` (UI-010), a change to a built-in prototype,
+a write to a member of a global object or of a built-in function
+(`Object.keys = f`, `JSON.parse = f`, `Math.random = f`), and a write to a
+member of a parameter or variable that holds a built-in member
+(`function f(p) { p.call = g } f(Array.prototype.slice)`). An attribute name `setAttribute`, `setAttributeNS` or
 `setNamedItem` receives MUST be a constant or trace within the script to
 constants only, and MUST NOT be an event handler attribute (`on` and a
 name), `srcdoc` or `style`. A URL passed to `fetch`, `XMLHttpRequest`,
@@ -521,10 +524,10 @@ name), `srcdoc` or `style`. A URL passed to `fetch`, `XMLHttpRequest`,
 constant that stays on the application's origin; no `javascript:` or
 `data:` URL stays on it. An element `customElements.define` defines MUST
 have a constant name the manifest declares.
-Falsifier: a component installs whose script calls `window["ev" + "al"]`, `Reflect.apply(Function, ...)` or `Function.prototype.constructor`, passes a string to `setTimeout`, imports `/acme-ui/x/x.js` or `https://cdn.example/x.js`, calls `setAttribute("onclick", ...)`, sets `img.src` to a computed cross-origin URL or `location` to a `javascript:` URL, creates a `script` element, assigns `innerHTML`, calls `createContextualFragment`, or defines an undeclared element; or a shipped script fails the scan.
+Falsifier: a component installs whose script calls `window["ev" + "al"]`, `Reflect.apply(Function, ...)` or `Function.prototype.constructor`, passes a string to `setTimeout`, imports `/acme-ui/x/x.js` or `https://cdn.example/x.js`, calls `setAttribute("onclick", ...)`, sets `img.src` to a computed cross-origin URL or `location` to a `javascript:` URL, creates a `script` element, assigns `innerHTML`, calls `createContextualFragment`, or defines an undeclared element; or a shipped script fails the scan; or a component installs whose script assigns `Object.keys`, `JSON.parse` or `Math.random`, or `p.call` on a parameter given `Array.prototype.slice`.
 Mechanism: `registries-scan`.
-Rationale: Revised 2026-10-07: relative imports only, so a component's scripts work under a path prefix (PFX-006), as the developer confirmed on 2026-10-05.
-Status: Agreed 2026-10-05
+Rationale: Revised 2026-10-07: relative imports only, so a component's scripts work under a path prefix (PFX-006), as the developer confirmed on 2026-10-05. Revised 2026-10-08: replacing a built-in function or a member a built-in handed over is a change to the built-ins like a prototype change (the next-feature item Lane E of release-foundations-revised recorded).
+Status: Agreed 2026-10-08
 
 [REG-033] A library MUST be able to change its signing key: `library.json`
 names the new key as `publicKey` and carries, as `previousKeys`, a
@@ -533,12 +536,13 @@ by that former key. When `live:add` finds a pinned key that differs from
 `publicKey`, it MUST accept the change only if `previousKeys` holds a
 valid statement from the pinned key for the new one, MUST show both
 fingerprints in the plan and MUST re-pin only once the developer confirms
-on a terminal; `--yes` MUST NOT re-pin. A changed key with no such
+on a terminal; `--yes` MUST NOT stand in for that confirmation, so it
+neither re-pins nor blocks the question. A changed key with no such
 statement MUST be refused as REG-024 says.
-Falsifier: a library whose new key is not vouched for by the pinned key installs; a vouched change re-pins under `--yes` or without a terminal; or a vouched change is refused.
+Falsifier: a library whose new key is not vouched for by the pinned key installs; a vouched change re-pins on `--yes` with no answer on a terminal, or without a terminal; or a vouched change is refused.
 Mechanism: `registries`.
-Rationale: The developer accepted this on 2026-10-05. The pinned key proves continuity of control (the manual's words in the documentation requirement), so only that key can hand control to the next.
-Status: Agreed 2026-10-05
+Rationale: The developer accepted this on 2026-10-05. The pinned key proves continuity of control (the manual's words in the documentation requirement), so only that key can hand control to the next. Clarified 2026-10-08: `--yes` is not a confirmation of a key change (decision 01M46H9B14G5CF8R9ZEG8DAXB5), the reading the code and the next-feature item of release-foundations-revised asked to settle.
+Status: Agreed 2026-10-08
 
 [REG-023] Every component's verification hash MUST be `sha256:` and the
 lowercase hex sha256 digest of its statement: the UTF-8 bytes of one JSON

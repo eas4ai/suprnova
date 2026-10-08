@@ -912,3 +912,107 @@ Falsifier: a request to `/s?b=2&a=1%20x` yields a page `url` other than `/s?a=1%
 Mechanism: `par-inertia-protocol`.
 Rationale: Row RS-07, settled from Symfony 7.3 `Request::normalizeQueryString`.
 Status: Agreed 2026-10-07
+
+## Inertia SSR, error pages and commands
+
+The second parity round the developer ordered on 2026-10-07 (17:35): the
+fifteen build rows of inertia-laravel 3.5.1's SSR gateway, exception
+handling and commands (SS-02, SS-03, SS-04, SS-05, SS-08, SS-10, SS-13,
+SS-14, EX-01, EX-02, EX-03, EX-06, EX-07, CM-01 and CM-02). SS-07 keeps the
+5 second timeout and CM-03 keeps `ssr:check` under its name, and CM-04,
+EX-04, EX-05, EX-08 and SS-15 are not applicable, as the log of the rulings
+says.
+
+[PAR-057] SSR MUST be on by default (`SsrConfig::enabled` true, the worker
+at `http://127.0.0.1:13714`) and gated by bundle detection: while
+`ensure_bundle_exists` (default on) is set, a first visit is dispatched to
+the worker only when an SSR bundle exists at the configured `bundle_path`
+or at one of the conventional paths `frontend/bootstrap/ssr/ssr.js`,
+`frontend/bootstrap/ssr/app.js`, `frontend/bootstrap/ssr/ssr.mjs`,
+`frontend/bootstrap/ssr/app.mjs`, `public/js/ssr.js` and `public/js/app.js`
+under the working directory; with none found the visit MUST render on the
+client, with no request to the worker and no error, and
+`ensure_bundle_exists(false)` MUST dispatch without the check.
+Falsifier: `SsrConfig::default().enabled` is false; with the default configuration and no bundle on disk a first visit sends a request to the worker or answers an error; with a bundle at `frontend/bootstrap/ssr/ssr.mjs` and no `bundle_path` the visit is not dispatched; or with `ensure_bundle_exists(false)` and no bundle the visit is not dispatched.
+Mechanism: `par-inertia-ssr`.
+Rationale: Rows SS-03 and SS-04; Laravel's `inertia.ssr.enabled` defaults to true behind `BundleDetector`, so an application opts out of SSR rather than in, and an application without a bundle sees no change.
+Status: Agreed 2026-10-08
+
+[PAR-058] In development with the Vite dev server running, the framework
+MUST dispatch SSR to the hot URL, `SsrConfig::hot_url` when set, else the
+Vite dev server's URL, at `/__inertia_ssr`, skipping the bundle check;
+otherwise it MUST post to the worker's `/render`.
+Falsifier: in development with the dev server the SSR request goes to `{url}/render`, or a missing bundle stops it; in production the request goes to the hot URL; or a configured `hot_url` is not the address used.
+Mechanism: `par-inertia-ssr`.
+Rationale: Row SS-05; Laravel's `HttpGateway::dispatch` posts to `{hot url}/__inertia_ssr` when Vite runs hot, which removes the separate SSR process during development.
+Status: Agreed 2026-10-08
+
+[PAR-059] A worker answer whose JSON is empty, `null`, `false` or not an
+object MUST render on the client. A non-2xx answer MUST be read as the
+worker's error JSON (`error`, `type`, `hint`, `browserApi`, `stack`,
+`sourceLocation`) and dispatched as an `SsrRenderFailed` event carrying the
+page's component and url and those fields, the type one of `browser-api`,
+`component-resolution`, `render`, `connection` and `unknown`; a transport
+failure MUST dispatch the same event with type `connection`. With
+`throw_on_error` the visit MUST fail with an error naming the component
+and, when given, the source location; without it the visit MUST render on
+the client and the `on_error` hook MUST still fire. The SSR client MUST
+speak TLS to a worker at an `https` URL.
+Falsifier: a worker answer of `{}` or `null` yields a document without the page data element or the mount element; a 500 from the worker dispatches no `SsrRenderFailed`, or one without the component; a refused connection dispatches none with type `connection`; with `throw_on_error` the error names no component; or an `https` worker URL receives plain HTTP on the wire.
+Mechanism: `par-inertia-ssr`.
+Rationale: Rows SS-02, SS-08 and SS-14; an empty SSR result gave a page the client could not start, the worker's error details and the event make SSR failures diagnosable, and the client spoke plain HTTP only.
+Status: Agreed 2026-10-08
+
+[PAR-060] The SSR call MUST be an `SsrGateway` trait bound in the container,
+with the HTTP gateway as the default binding, so an application binds its
+own: `dispatch(page, request)`, `is_healthy()` (`GET {url}/health`
+successful), and the capabilities `disable(condition)`, `except(paths)` and
+`configure_request_using(fn)`, each a no-op by default that an
+implementation overrides. `Inertia::disable_ssr`, `without_ssr` and
+`configure_ssr_request_using` MUST act on the bound gateway, and
+`Inertia::ssr_is_healthy()` MUST return its health.
+Falsifier: a gateway an application bound is not the one a first visit dispatches through; `disable_ssr(true)` still dispatches through a bound gateway that implements `disable`; `ssr_is_healthy()` is true when `/health` answers 500 or does not answer; or the HTTP gateway is not what dispatches when nothing is bound.
+Mechanism: `par-inertia-ssr`.
+Rationale: Rows SS-10 and SS-13; the trait-and-driver principle of `manual/introduction.md`, and the health check the commands read lives on the gateway as Laravel's `HasHealthCheck` does.
+Status: Agreed 2026-10-08
+
+[PAR-061] The application binary MUST have `ssr:start`, `ssr:stop` and
+`ssr:check` reading the installed Inertia configuration: `ssr:start`
+refuses when SSR is disabled, finds the bundle as PAR-057 does (failing
+when none exists, warning when the configured one is missing and a
+conventional one is used), refuses a runtime (`SsrConfig::runtime`, default
+`node`) that cannot be found when `ensure_runtime_exists` is set, stops a
+running worker first, and runs the worker in the foreground, forwarding
+`SIGINT` and `SIGTERM` to it and reporting its stderr as errors;
+`ssr:stop` MUST `GET {url}/shutdown`, succeeding when the worker closed the
+connection and, with `--graceful`, when none was running; `ssr:check` MUST
+fail when the gateway has no health check or the worker is unhealthy. The
+`suprnova` CLI's `ssr:start`, `ssr:stop` and `ssr:check` MUST share that
+implementation, with the configuration from flags and the `SUPRNOVA_SSR_*`
+environment, where the installed configuration is out of reach.
+Falsifier: `ssr:start` starts a worker with SSR disabled, with no bundle, or with a missing runtime under `ensure_runtime_exists`, or leaves a running worker's `/shutdown` uncalled; `ssr:stop` fails with `--graceful` when no worker runs, or succeeds when the worker is running and did not close; `ssr:check` succeeds against a worker whose `/health` fails; or the CLI's commands behave differently from the binary's for the same configuration.
+Mechanism: `par-inertia-ssr`.
+Rationale: Rows CM-01, CM-02 and CM-03; Laravel's `inertia:start-ssr`, `inertia:stop-ssr` and `inertia:check-ssr` run inside the application and read its configuration, which only the application binary can here.
+Status: Agreed 2026-10-08
+
+[PAR-062] `Inertia::handle_exceptions_using(callback)` MUST let the
+application decide every error response the framework renders, for every
+request type, a handler panic the boundary caught included: the callback
+receives an `InertiaErrorResponse` with the status, the error report, the
+request and the response the framework would send, and returns a
+replacement response or nothing, which keeps the original;
+`InertiaErrorResponse::render(component, props)` MUST render an Inertia
+page with the original status, including the shared props (the shared
+registry and the middleware `share` and `share_once` hooks) only when
+`with_shared_data()` was called. `InertiaConfig::error_page(component)`
+MUST install the default callback, which keeps today's rule: an Inertia
+visit or an HTML-wanting request answered with the framework's error body
+and a status from 400 to 599 gets the page with the sanitised message, the
+request id and `Cache-Control: no-cache, private`, shared data included,
+and every other response stays as it is. With debug on, the response the
+callback receives for a 5xx is the development error page (PAR-012), which
+the default callback keeps.
+Falsifier: a callback returning a 418 for a 404 still yields the error page or the original 404; a callback returning nothing changes the response; a page the callback rendered loses the original status; a rendered page carries shared props without `with_shared_data()`, or `error_page(component)` renders one without them; a handler panic reaches the client without the callback seeing it; a JSON API client's 404 is replaced when the callback returned nothing; or `error_page(component)` alone no longer renders the page for an Inertia visit's 403.
+Mechanism: `par-inertia-ssr`.
+Rationale: Rows EX-01, EX-02, EX-03, EX-06 and EX-07; Laravel decides each rendered error in `handleExceptionsUsing` with `ExceptionResponse`, shared data opt-in, and the one-line `error_page` setup stays as sugar over the default callback.
+Status: Agreed 2026-10-08

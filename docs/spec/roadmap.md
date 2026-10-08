@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: inertia-protocol
+Current: inertia-ssr-errors-commands
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -486,6 +486,36 @@ Requirements: PAR-046, PAR-047, PAR-048, PAR-049, PAR-050, PAR-051, PAR-052, PAR
    tests of the http binary and the inertia unit tests), `inertia-root-template`
    (the `rdoc_` tests of the inertia, memory and suprnova-cli binaries).
    Done when both pass on a committed tree, the manual passages are in
+   place, and the review is recorded.
+
+## inertia-ssr-errors-commands
+
+Requirements: PAR-057, PAR-058, PAR-059, PAR-060, PAR-061, PAR-062, RDOC-002, REG-032, REG-033
+
+37. inertia-ssr-errors-commands - the second of the parity rounds the
+   developer ordered on 2026-10-07 (17:35): inertia-laravel 3.5.1's SSR
+   gateway, exception handling and commands, the fifteen build rows of the
+   second group (SS-02, SS-03, SS-04, SS-05, SS-08, SS-10, SS-13, SS-14,
+   EX-01, EX-02, EX-03, EX-06, EX-07, CM-01, CM-02), with the three
+   next-feature items the first round left: RDOC-002's baseline reworded,
+   REG-033's `--yes` clarified and REG-032 extended to the replacement of a
+   built-in function.
+   Delivery: PAR-057 to PAR-060 in `framework/src/inertia/ssr.rs` and the
+   gateway binding; PAR-061 in the application CLI (`framework/src/app/`
+   and `framework/src/console/`) with the `suprnova` CLI's `ssr:*`
+   commands on the shared implementation (`suprnova-cli/src/commands/`);
+   PAR-062 in `framework/src/inertia/` with `InertiaConfig::error_page` as
+   sugar; the REG-032 refusal in the registry script scan
+   (`suprnova-cli/src/registry/scan/`) with fixtures; the dogfood
+   application on the defaults; the manual's SSR, error-page and console
+   passages and the registries chapter's words for `--yes` and built-in
+   replacement; the changelog.
+   Mechanisms: `par-inertia-ssr` (the `inssr_` tests of the inertia, error
+   and console binaries and the unit tests, and the `inssr_` tests of the
+   CLI's `ssr_e2e` binary), `inertia-root-template` rebound on RDOC-002's
+   revised text, `registries` rebound on REG-033's and `registries-scan`
+   on REG-032's.
+   Done when the four pass on a committed tree, the manual passages are in
    place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:

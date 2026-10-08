@@ -103,12 +103,14 @@ Rationale: Laravel's `app.blade.php` with `@inertiaHead`, `@inertia` and `@vite`
 Status: Agreed 2026-10-07
 
 [RDOC-002] Without an application template, the first-visit document MUST
-be byte for byte the one the framework writes today wherever the public
-root (PFX-002) is `/` and no nonce policy (SEC-003) applies.
-Falsifier: with no template, at public root `/` and with no nonce policy, the body or headers of a first visit differ by any byte from `c34ee7b15`'s output for the same page, title, locale, CSRF token and SSR output, in development with the React preamble, in production with a manifest, on the legacy fallback or under SSR.
+be the one the framework's own writer produces, and the root template
+feature (the parts, the per-request chooser and the mount id setting) MUST
+change no byte of it, wherever the public root (PFX-002) is `/` and no
+nonce policy (SEC-003) applies.
+Falsifier: with no template, at public root `/` and with no nonce policy, the body or headers of a first visit differ by any byte from the framework document pinned for the same tree (the constants of `framework/tests/inertia/root_template.rs`, re-recorded only when an agreed requirement changes the page, as PAR-051 and PAR-053 did) for the same page, title, locale, CSRF token and SSR output, in development with the React preamble, in production with a manifest, on the legacy fallback or under SSR.
 Mechanism: `inertia-root-template`.
-Rationale: The parts cannot rebuild today's bytes, which put the `csrf-token` meta tag before the title (`response.rs:2337-2345`), so the no-template path keeps its own writer, the one MEM-003 measures.
-Status: Agreed 2026-10-07
+Rationale: Revised 2026-10-08: the baseline named `c34ee7b15`, whose bytes PAR-051 and PAR-053 then changed for every first visit; the property is that the no-template path keeps its own writer, the one MEM-003 measures, which puts the `csrf-token` meta tag before the title as the parts cannot.
+Status: Agreed 2026-10-08
 
 [RDOC-003] The parts MUST be framework values that write themselves into
 the template's output while it renders (placed through Askama's safe
