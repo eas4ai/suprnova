@@ -329,6 +329,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   key completed before; about 4,800 do now. Acceptance, rejection and
   retry-after answers are unchanged, and no request fails with "rate
   limiter poisoned" any more, since the shard locks do not poison (#148).
+- **`X-Inertia` counts as an Inertia visit for any value PHP reads as
+  true.** A request was an Inertia visit only when `X-Inertia` was exactly
+  `true`, so a client sending `X-Inertia: 1` received the HTML document
+  where Laravel sends the JSON page object. `Request::is_inertia` and the
+  `InertiaRequestExt` default now read the header as PHP's boolean cast
+  does: every value but an empty one and `0` is an Inertia visit, and JSON
+  responses still carry `X-Inertia: true`. Every middleware that asks
+  `is_inertia` follows the same rule (HD-01).
 
 ### Fixed
 

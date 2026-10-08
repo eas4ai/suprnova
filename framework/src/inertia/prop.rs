@@ -35,11 +35,12 @@ pub trait InertiaRequestExt: Send + Sync {
     }
     /// Look up an HTTP header value by name (case-insensitive per HTTP spec).
     fn header(&self, name: &str) -> Option<&str>;
-    /// Whether this request originated from the Inertia client (`X-Inertia: true`).
+    /// Whether this request is an Inertia visit: `X-Inertia` holds any
+    /// value but an empty one or `0`, as PHP's boolean cast reads it and
+    /// Laravel's `Request::inertia()` does.
     fn is_inertia(&self) -> bool {
         self.header("X-Inertia")
-            .map(|v| v == "true")
-            .unwrap_or(false)
+            .is_some_and(|value| header_is_truthy(value.as_bytes()))
     }
     /// Whether this is a prefetch visit. The Inertia client sets
     /// `Purpose: prefetch` on hover/intent prefetches; handlers can
@@ -92,6 +93,16 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
     fn is_prefetch(&self) -> bool {
         (**self).is_prefetch()
     }
+}
+
+/// PHP's boolean cast of a header value: every value but an empty one and
+/// `0` is true.
+///
+/// Laravel reads `X-Inertia` this way (`(bool) $request->header(...)`), so
+/// the request types here share the one rule rather than each comparing
+/// against `"true"`.
+pub(crate) fn header_is_truthy(value: &[u8]) -> bool {
+    !value.is_empty() && value != b"0"
 }
 
 /// Future returned by a prop resolver.
