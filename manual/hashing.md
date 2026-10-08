@@ -31,7 +31,7 @@ The free-function facade reads the active driver from `HASH_DRIVER` (or falls ba
 | `HASH_TIME` | Argon time iterations | `4` | `>= 1` (argon only) |
 | `HASH_THREADS` | Argon parallelism / lanes | `1` | `>= 1` (argon only) |
 | `HASH_VERIFY` | When true, `verify()` rejects cross-algorithm hashes | `false` | `true` / `false` |
-| `HASH_MAX_CONCURRENCY` | Most password hashes running at once in the process, the async functions and Magnetar together | the host's available parallelism | whole number `>= 1` |
+| `HASH_MAX_CONCURRENCY` | Most password hashes running at once in the process, the async functions and Magnetar together | the host's available parallelism | whole number `>= 1`; blank is unset |
 
 Misconfiguration (bad value, out-of-range parameter) surfaces as a `FrameworkError::param` at the first call to `hash` / `verify` / `needs_rehash` - not as a silent default.
 

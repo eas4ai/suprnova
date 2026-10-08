@@ -74,7 +74,7 @@ pub struct HashConfig {
     pub verify_algorithm: bool,
     /// How many pieces of password hash work run at once in the process,
     /// the framework's and Magnetar's together. Selected by
-    /// `HASH_MAX_CONCURRENCY`; `None` (unset) means the host's available
+    /// `HASH_MAX_CONCURRENCY`; `None` (unset, or set blank) means the host's available
     /// parallelism. One Argon2 hash holds its whole memory cost (64 MiB
     /// under the defaults), so the limit bounds what a burst of sign-ins
     /// holds at once; the excess waits as tasks, not as threads.
