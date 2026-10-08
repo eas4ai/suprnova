@@ -1396,7 +1396,14 @@ impl<'a, 'c> Walker<'a, 'c> {
         // does not follow.
         let mut targets = Vec::new();
         collect_targets(target, &mut targets);
-        for simple in targets {
+        for target in targets {
+            let simple = match target {
+                Target::Simple(simple) => simple,
+                Target::Shorthand(identifier) => {
+                    self.identifier_target(identifier, None, true, false);
+                    continue;
+                }
+            };
             self.simple_target(simple, None, true, false);
             if let Some(member) = simple.as_member_expression()
                 && let Some(name) = self.member_name(member)
@@ -1494,37 +1501,7 @@ impl<'a, 'c> Walker<'a, 'c> {
     ) {
         match target {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                let name = identifier.name.as_str();
-                match self.lookup(name) {
-                    Some(id) => {
-                        if self.phase == Phase::Collect
-                            && let Some(binding) = self.facts.bindings.get_mut(id)
-                        {
-                            match (value, update) {
-                                (_, true) => binding.numeric_updates = true,
-                                (Some(value), false) if !opaque => binding.assignments.push(value),
-                                _ => binding.opaque = true,
-                            }
-                        }
-                    }
-                    None if name == "location" => match value {
-                        Some(value) if !opaque => {
-                            self.url_value(value, identifier.span, "`location`")
-                        }
-                        _ => self.refuse(
-                            "script-url",
-                            identifier.span,
-                            "`location` is assigned a value the scan cannot check".to_string(),
-                        ),
-                    },
-                    None => self.refuse(
-                        "script-global",
-                        identifier.span,
-                        format!(
-                            "assigning `{name}`, which the script does not declare, writes a global"
-                        ),
-                    ),
-                }
+                self.identifier_target(identifier, value, opaque, update);
             }
             other => {
                 if let Some(member) = other.as_member_expression() {
@@ -1561,6 +1538,46 @@ impl<'a, 'c> Walker<'a, 'c> {
                     );
                 }
             }
+        }
+    }
+
+    /// A write to a name: a binding the script declares records the value
+    /// it receives (or that it receives one the scan does not follow), and
+    /// a name it does not declare is a global, which only `location` may be
+    /// assigned, and then only a URL the scan admits.
+    fn identifier_target(
+        &mut self,
+        identifier: &'a IdentifierReference<'a>,
+        value: Option<&'a Expression<'a>>,
+        opaque: bool,
+        update: bool,
+    ) {
+        let name = identifier.name.as_str();
+        match self.lookup(name) {
+            Some(id) => {
+                if self.phase == Phase::Collect
+                    && let Some(binding) = self.facts.bindings.get_mut(id)
+                {
+                    match (value, update) {
+                        (_, true) => binding.numeric_updates = true,
+                        (Some(value), false) if !opaque => binding.assignments.push(value),
+                        _ => binding.opaque = true,
+                    }
+                }
+            }
+            None if name == "location" => match value {
+                Some(value) if !opaque => self.url_value(value, identifier.span, "`location`"),
+                _ => self.refuse(
+                    "script-url",
+                    identifier.span,
+                    "`location` is assigned a value the scan cannot check".to_string(),
+                ),
+            },
+            None => self.refuse(
+                "script-global",
+                identifier.span,
+                format!("assigning `{name}`, which the script does not declare, writes a global"),
+            ),
         }
     }
 
@@ -3035,12 +3052,19 @@ fn pattern_names<'a>(pattern: &'a BindingPattern<'a>, out: &mut Vec<&'a str>) {
     }
 }
 
-fn collect_targets<'a>(
-    target: &'a AssignmentTarget<'a>,
-    out: &mut Vec<&'a SimpleAssignmentTarget<'a>>,
-) {
+/// One target a destructuring assignment writes.
+enum Target<'a> {
+    /// A name, a member or TypeScript syntax.
+    Simple(&'a SimpleAssignmentTarget<'a>),
+    /// A shorthand property's name (`u` in `({ u } = o)`), which is both
+    /// the key read and the name written.
+    Shorthand(&'a IdentifierReference<'a>),
+}
+
+/// Every target a destructuring assignment writes, at any depth.
+fn collect_targets<'a>(target: &'a AssignmentTarget<'a>, out: &mut Vec<Target<'a>>) {
     if let Some(simple) = target.as_simple_assignment_target() {
-        out.push(simple);
+        out.push(Target::Simple(simple));
         return;
     }
     match target {
@@ -3055,8 +3079,8 @@ fn collect_targets<'a>(
         AssignmentTarget::ObjectAssignmentTarget(object) => {
             for property in &object.properties {
                 match property {
-                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => {
-                        let _ = identifier;
+                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                        out.push(Target::Shorthand(&shorthand.binding));
                     }
                     AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
                         collect_maybe_default(&property.binding, out);
@@ -3073,7 +3097,7 @@ fn collect_targets<'a>(
 
 fn collect_maybe_default<'a>(
     target: &'a AssignmentTargetMaybeDefault<'a>,
-    out: &mut Vec<&'a SimpleAssignmentTarget<'a>>,
+    out: &mut Vec<Target<'a>>,
 ) {
     match target {
         AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {

@@ -692,6 +692,63 @@ fn reg_032_every_key_and_default_of_a_destructuring_assignment_is_checked() {
     );
 }
 
+/// REG-032: a shorthand target in a destructuring assignment (`({ u } =
+/// o)`) receives a value the scan does not follow, like any other target:
+/// the binding it writes is no longer traced to its earlier constant, and
+/// a name the script does not declare is a global write, checked as one.
+#[test]
+fn reg_032_a_shorthand_destructuring_target_is_a_target_like_any_other() {
+    let cases: &[(&str, &str, u32)] = &[
+        (
+            "let u = \"/ok\";\n({ u } = { u: \"https://evil.example/x\" });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\n({ a: { u } } = { a: { u: \"https://evil.example/x\" } });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\n({ u = \"/fine\" } = { u: \"https://evil.example/x\" });\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            4,
+        ),
+        (
+            "let u = \"/ok\";\nfor ({ u } of [{ u: \"https://evil.example/x\" }]) {\n}\nconst img = new Image();\nimg.src = u;\n",
+            "script-url",
+            5,
+        ),
+        (
+            "let f = () => 1;\n({ f } = { f: \"alert(1)\" });\nsetTimeout(f, 1);\n",
+            "script-timer",
+            3,
+        ),
+        (
+            "({ location } = { location: \"javascript:alert(1)\" });\n",
+            "script-url",
+            1,
+        ),
+        (
+            "({ onerror } = { onerror: () => 1 });\n",
+            "script-global",
+            1,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .flat_map(|(script, check, line)| missing_refusals(script, check, &[*line]))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let declared = scan_widget_script("let a = 0;\n({ a } = { a: 1 });\nexport const b = a;\n");
+    assert!(declared.accepted(), "{:?}", declared.findings);
+}
+
 /// REG-032: reading a prototype's member is admitted, so the usual ways of
 /// borrowing a built-in method stay open. A member read from a prototype is
 /// a value, but not the prototype itself, so a script may keep one

@@ -398,16 +398,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `script-prototype-destructured`, `script-prototype-compound`,
   `script-prototype-destructuring-target`, `script-prototype-delete`,
   `script-prototype-receiver` and `script-prototype-destructured-key`.
-- **A destructuring assignment's defaults and nested keys are scanned.**
-  The `live:add` script scan never walked the default in
-  `[a = eval("alert(1)")] = []` or `({ a = ... } = {})`, nor the keys of a
-  nested target, so `eval`, a prototype or any other refused expression
-  passed there. It now walks every key and default of the target at any
-  depth, as it walks any value, and a nested or shorthand key gets the
-  property checks a top-level key gets (`({ constructor } = [])` is
-  refused as `script-eval`). Two bypass fixtures pin it:
-  `script-destructuring-default-eval` and
-  `script-prototype-assignment-default`.
+- **A destructuring assignment's defaults, nested keys and shorthand
+  targets are scanned.** The `live:add` script scan never walked the
+  default in `[a = eval("alert(1)")] = []` or `({ a = ... } = {})`, nor
+  the keys of a nested target, so `eval`, a prototype or any other refused
+  expression passed there. It now walks every key and default of the
+  target at any depth, as it walks any value, and a nested or shorthand
+  key gets the property checks a top-level key gets (`({ constructor } =
+  [])` is refused as `script-eval`). A shorthand target (`u` in
+  `({ u } = o)`) was not treated as a target at all: the scan still traced
+  `u` to its earlier constant, so `img.src = u` passed with any URL after
+  it, and `({ location } = { location: "javascript:alert(1)" })` wrote the
+  global `location` unchecked. It is now a target like any other: the name
+  holds a value the scan does not follow, and a name the script does not
+  declare is a global write (`script-url` for `location`, `script-global`
+  otherwise). Four bypass fixtures pin it:
+  `script-destructuring-default-eval`,
+  `script-prototype-assignment-default`,
+  `script-destructuring-shorthand-url` and
+  `script-destructuring-shorthand-global`.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked
