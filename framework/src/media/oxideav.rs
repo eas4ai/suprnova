@@ -588,9 +588,6 @@ impl OxideAvImageDriver {
             }
             _ => self.encode(canvas, target, quality, additions.len())?,
         };
-        if kept.icc.is_some() {
-            output = output.clone(); // VIOLATING EXAMPLE: one copy of the output with a profile
-        }
         match target {
             OutputFormat::Gif => {
                 // Held only when read whole, as an RGB or grey profile the
