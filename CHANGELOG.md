@@ -821,6 +821,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   input is refused (`script-url`), and the reverse, a constant shadowed by
   a remote URL where it is used, is no longer refused by mistake. The
   `script-trace-shadowed-initializer` fixture pins it.
+- **The script scan sees the global object through an expression.** The
+  `live:add` scan refused `window.localStorage`, a global it does not
+  admit, but admitted `(0, window).localStorage`, `(0, self)["localStorage"]`
+  and `(0, globalThis).fetch = f`, which replaces a browser API: its rules
+  about the global object's members recognised only the bare name.
+  They now see through a sequence's last expression, a conditional's
+  branches, a logical expression's sides and an assignment's value, so
+  each is refused as the bare form is (`script-global`), and
+  `(flag ? window : self).localStorage` and
+  `(w || globalThis).localStorage` name `localStorage` in their refusal.
+  A write through such an expression still does not make a global of the
+  script's own. The `script-global-sequence` fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked

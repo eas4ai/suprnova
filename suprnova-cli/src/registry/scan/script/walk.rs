@@ -1437,7 +1437,45 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    /// Whether an expression may evaluate to the global object: one of its
+    /// names the script does not declare, or a sequence, conditional,
+    /// logical or assignment expression that may yield one, as `(0,
+    /// window)` does. Every rule about a member of the global object reads
+    /// through these, so `(0, window).localStorage` is checked as
+    /// `window.localStorage` is (REG-032). Past [`MAX_TRACE_DEPTH`] the
+    /// answer is yes, which only adds checks.
     fn is_global_object(&self, expr: &Expression<'a>) -> bool {
+        self.global_object_within(expr, 0)
+    }
+
+    /// [`Self::is_global_object`] at a nesting depth.
+    fn global_object_within(&self, expr: &Expression<'a>, depth: usize) -> bool {
+        if depth > MAX_TRACE_DEPTH {
+            return true;
+        }
+        match unparen(expr) {
+            Expression::SequenceExpression(sequence) => sequence
+                .expressions
+                .last()
+                .is_some_and(|last| self.global_object_within(last, depth + 1)),
+            Expression::ConditionalExpression(conditional) => {
+                self.global_object_within(&conditional.consequent, depth + 1)
+                    || self.global_object_within(&conditional.alternate, depth + 1)
+            }
+            Expression::LogicalExpression(logical) => {
+                self.global_object_within(&logical.left, depth + 1)
+                    || self.global_object_within(&logical.right, depth + 1)
+            }
+            Expression::AssignmentExpression(assignment) => {
+                self.global_object_within(&assignment.right, depth + 1)
+            }
+            other => self.names_global_object(other),
+        }
+    }
+
+    /// Whether an expression is one of the global object's names the
+    /// script does not declare, as written.
+    fn names_global_object(&self, expr: &Expression<'a>) -> bool {
         match unparen(expr) {
             Expression::Identifier(reference) => {
                 GLOBAL_OBJECTS.contains(&reference.name.as_str()) && self.bound(reference).is_none()
@@ -1797,7 +1835,11 @@ impl<'a, 'c> Walker<'a, 'c> {
         name: &str,
         value: Option<&'a Expression<'a>>,
     ) {
-        if self.is_global_object(member.object()) {
+        // Only a write on the global object's name makes a global of the
+        // script's own, which later reads may name; a write through an
+        // expression that may yield it (`(c ? window : o).x = v`) may
+        // land on another object.
+        if self.names_global_object(member.object()) {
             self.facts.written_globals.insert(name.to_string());
         }
         self.facts.defined_names.insert(name.to_string());

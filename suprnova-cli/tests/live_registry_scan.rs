@@ -1180,6 +1180,56 @@ fn reg_032_a_built_in_is_refused_where_it_leaves_the_names_the_scan_follows() {
     );
 }
 
+/// REG-032: an expression that may yield the global object is the global
+/// object to every rule about its members: a sequence's last expression, a
+/// conditional's branch and a logical expression's side. Each read below
+/// is refused as `window.localStorage` is, naming the global it reads, not
+/// only the global object it passes through.
+#[test]
+fn reg_032_the_global_object_reached_through_an_expression_is_the_global_object() {
+    let cases: &[(&str, u32)] = &[
+        ("export const s = window.localStorage;\n", 1),
+        ("export const s = (0, window).localStorage;\n", 1),
+        (
+            "export function f(flag) {\n  return (flag ? window : self).localStorage;\n}\n",
+            2,
+        ),
+        (
+            "export function f(w) {\n  return (w || globalThis).localStorage;\n}\n",
+            2,
+        ),
+        ("export const s = (0, self)[\"local\" + \"Storage\"];\n", 1),
+        ("(0, globalThis).fetch = () => null;\n", 1),
+    ];
+    let mut failures = Vec::new();
+    for (script, line) in cases {
+        let report = scan_widget_script(script);
+        let named = report.findings.iter().any(|finding| {
+            finding.check == "script-global"
+                && finding.line == Some(*line)
+                && (finding.message.contains("`localStorage`")
+                    || finding.message.contains("`fetch`"))
+        });
+        if !named {
+            failures.push(format!(
+                "{script:?}: no `script-global` naming the global at widget.js:{line}; got [{}]",
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// The admitted fixtures' directory, under `accepted/`, that pins what the
 /// built-in rule leaves open (REG-032).
 fn own_members() -> PathBuf {
