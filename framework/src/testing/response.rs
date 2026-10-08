@@ -28,6 +28,10 @@ pub struct TestResponse {
     body: Bytes,
     session: Option<(Arc<dyn SessionStore>, String)>,
     report: Option<ErrorReport>,
+    /// The cookies the [`TestClient`](crate::testing::TestClient) that sent
+    /// the request holds after this response, as `(name, wire value)`
+    /// pairs. Empty for a response built any other way.
+    client_cookies: Vec<(String, String)>,
 }
 
 impl TestResponse {
@@ -54,7 +58,23 @@ impl TestResponse {
             body: body.into(),
             session: None,
             report: None,
+            client_cookies: Vec::new(),
         }
+    }
+
+    /// Keep the error report the client took out of the response's
+    /// extensions before hyper wrote it to the in-memory connection.
+    pub(crate) fn with_error_report(mut self, report: Option<ErrorReport>) -> Self {
+        self.report = report;
+        self
+    }
+
+    /// Keep the cookies the client holds after this response, so a session
+    /// lookup still finds the session when this response set no cookie: a
+    /// request that only reads the session leaves the cookie as it was.
+    pub(crate) fn with_client_cookies(mut self, cookies: Vec<(String, String)>) -> Self {
+        self.client_cookies = cookies;
+        self
     }
 
     /// Build a `TestResponse` from the response [`crate::handle_request`]
@@ -330,14 +350,19 @@ impl TestResponse {
     /// Assert the session named by this response's session cookie has
     /// `key` set to `expected`.
     ///
-    /// Requires [`Self::with_session_store`] first. There is no honest
-    /// way to read server-side session state from a wire-level response
-    /// alone - the session lives in the store, keyed by the id inside
-    /// the (encrypted) session cookie, not in the response body. This
-    /// decrypts the cookie with the same [`crate::CryptPurpose::Cookie`]
+    /// Requires [`Self::with_session_store`] first, or a response from a
+    /// [`TestClient`](crate::testing::TestClient) given a store. There is no
+    /// honest way to read server-side session state from a wire-level
+    /// response alone - the session lives in the store, keyed by the id
+    /// inside the (encrypted) session cookie, not in the response body.
+    /// This decrypts the cookie with the same [`crate::CryptPurpose::Cookie`]
     /// purpose [`crate::SessionMiddleware`] writes it under, extracts
     /// the session id, and reads that row from the attached store - the
     /// same lookup the middleware itself performs on the next request.
+    ///
+    /// The cookie is the one this response sets, else, for a client
+    /// response, the one the client carries into its next request: a
+    /// request that leaves the session unchanged sets no cookie.
     ///
     /// # Panics
     ///
@@ -349,22 +374,50 @@ impl TestResponse {
         key: &str,
         expected: impl Into<serde_json::Value>,
     ) -> &Self {
+        let call = format!("assert_session_has({key:?}, ...)");
+        let (session_id, session_data) = self.session_data(&call).await;
+        let expected = expected.into();
+        let actual = session_data.data.get(key);
+        if actual != Some(&expected) {
+            self.fail(format!(
+                "{call}\n  Expected: {expected}\n  Received: {}\n  session id: {session_id}",
+                actual
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<missing key>".to_string())
+            ));
+        }
+        self
+    }
+
+    /// The session cookie this response names: the one it sets, else the
+    /// one the client that sent the request still holds. Percent-decoded,
+    /// as [`Self::cookie`] is.
+    fn session_cookie(&self, cookie_name: &str) -> Option<String> {
+        self.cookie(cookie_name).or_else(|| {
+            self.client_cookies
+                .iter()
+                .find(|(name, _)| name == cookie_name)
+                .and_then(|(name, value)| {
+                    crate::http::parse_cookies(&format!("{name}={value}")).remove(cookie_name)
+                })
+        })
+    }
+
+    /// The session this response's session cookie names, read from the
+    /// attached store. `call` names the assertion in every failure.
+    async fn session_data(&self, call: &str) -> (String, crate::SessionData) {
         let Some((store, cookie_name)) = self.session.as_ref() else {
             self.fail(format!(
-                "assert_session_has({key:?}, ...) called without a session store - call \
+                "{call} called without a session store - call \
                  .with_session_store(store, cookie_name) first"
             ));
         };
-        let Some(raw) = self.cookie(cookie_name) else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): no {cookie_name:?} cookie in the response"
-            ));
+        let Some(raw) = self.session_cookie(cookie_name) else {
+            self.fail(format!("{call}: no {cookie_name:?} cookie in the response"));
         };
         let plaintext = Cookie::read_encrypted_for(CookiePrefix::strip(cookie_name), &raw)
             .unwrap_or_else(|e| {
-                self.fail(format!(
-                    "assert_session_has({key:?}, ...): session cookie failed to decrypt: {e}"
-                ))
+                self.fail(format!("{call}: session cookie failed to decrypt: {e}"))
             });
         let Some(session_id) = plaintext
             .split('.')
@@ -372,32 +425,17 @@ impl TestResponse {
             .filter(|id| is_valid_session_id(id))
         else {
             self.fail(format!(
-                "assert_session_has({key:?}, ...): decrypted cookie payload is not a valid \
-                 session id: {plaintext:?}"
+                "{call}: decrypted cookie payload is not a valid session id: {plaintext:?}"
             ));
         };
-        let stored = store.read(session_id).await.unwrap_or_else(|e| {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): store read failed: {e}"
-            ))
-        });
+        let stored = store
+            .read(session_id)
+            .await
+            .unwrap_or_else(|e| self.fail(format!("{call}: store read failed: {e}")));
         let Some(session_data) = stored else {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...): no session row for id {session_id}"
-            ));
+            self.fail(format!("{call}: no session row for id {session_id}"));
         };
-        let expected = expected.into();
-        let actual = session_data.data.get(key);
-        if actual != Some(&expected) {
-            self.fail(format!(
-                "assert_session_has({key:?}, ...)\n  Expected: {expected}\n  Received: {}\n  \
-                 session id: {session_id}",
-                actual
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "<missing key>".to_string())
-            ));
-        }
-        self
+        (session_id.to_string(), session_data)
     }
 
     /// Build an [`AssertableInertia`](crate::testing::AssertableInertia)

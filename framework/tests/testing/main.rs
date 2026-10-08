@@ -11,5 +11,6 @@ pub mod clock;
 pub mod clock_reads;
 pub mod registry_clears;
 pub mod request_diagnostics;
+pub mod test_client;
 pub mod test_database_helpers;
 pub mod test_response;
