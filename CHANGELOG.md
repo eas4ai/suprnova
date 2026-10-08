@@ -1323,6 +1323,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   uses, and keeps the 5 second whole-call timeout over headers and body,
   the 8 MiB response cap and the refusal of an oversized `Content-Length`
   (SS-14).
+- **A commented-out augmentation no longer hides the generated one.**
+  `generate-types` and `serve` looked for `declare module
+  '@inertiajs/core'` as plain text, so a `frontend/src/global.d.ts` holding
+  only `// declare module '@inertiajs/core' {}` counted as the project's
+  own augmentation: the generated file left out the augmentation and its
+  `import`, and the notice said a comment typed `usePage()`. The scan now
+  reads the file as TypeScript tokens, with `//` and `/* */` comments and
+  the text of `'...'`, `"..."` and template literals set aside, so only a
+  declaration in code counts, and a comment between `declare`, `module`
+  and the name no longer hides a real one (T02).
 
 ## 3.2.1 - 2026-10-05
 

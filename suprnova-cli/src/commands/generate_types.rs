@@ -2588,36 +2588,148 @@ fn find_own_augmentation(
     Ok(None)
 }
 
-/// Whether `text` declares `module '@inertiajs/core'`, in either quote and
-/// with any whitespace between the words: the form an augmentation takes.
-/// Importing the module, or declaring another one, is not that.
+/// Whether `text` declares `module '@inertiajs/core'`, in either quote,
+/// with any whitespace or comments between the words: the form an
+/// augmentation takes. Importing the module, declaring another one, or
+/// writing the declaration inside a comment or a string is not that.
 fn declares_inertia_core(text: &str) -> bool {
-    text.match_indices("declare").any(|(at, keyword)| {
-        if text[..at]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        {
-            return false;
-        }
-        let Some(rest) = past_whitespace(&text[at + keyword.len()..])
-            .and_then(|rest| rest.strip_prefix("module"))
-            .and_then(past_whitespace)
-        else {
-            return false;
-        };
-        ['\'', '"'].into_iter().any(|quote| {
-            rest.strip_prefix(quote)
-                .and_then(|rest| rest.strip_prefix(INERTIA_CORE))
-                .is_some_and(|rest| rest.starts_with(quote))
-        })
+    typescript_tokens(text).windows(3).any(|window| {
+        matches!(
+            window,
+            [TsToken::Word(declare), TsToken::Word(module), TsToken::Str(name)]
+                if declare == "declare" && module == "module" && name == INERTIA_CORE
+        )
     })
 }
 
-/// `text` past its leading whitespace, when it starts with some.
-fn past_whitespace(text: &str) -> Option<&str> {
-    let rest = text.trim_start();
-    (rest.len() < text.len()).then_some(rest)
+/// A token of TypeScript source, as far as finding a module declaration
+/// needs one.
+#[derive(Debug)]
+enum TsToken {
+    /// An identifier or keyword.
+    Word(String),
+    /// The text between the quotes of a `'...'` or `"..."` string, its
+    /// escapes as written.
+    Str(String),
+    /// Anything else: punctuation, a number, a template literal.
+    Other,
+}
+
+/// The tokens of `text`, with comments and whitespace dropped and each
+/// string and template literal read as one token, so a declaration written
+/// inside a comment or a string is never read as code.
+///
+/// `//` runs to the end of the line and `/* */` to its close; a string runs
+/// to its unescaped closing quote or the end of its line; a template
+/// literal runs to its unescaped closing backtick, and the code of each
+/// `${ }` in it is read as code, nested templates included. A regular
+/// expression literal is read as code, so a quote inside one can hide what
+/// follows it on that line.
+fn typescript_tokens(text: &str) -> Vec<TsToken> {
+    let mut tokens = Vec::new();
+    let mut chars = text.chars().peekable();
+    // The brace depth inside each `${ }` being read, innermost last: the
+    // `}` at depth 0 closes the expression and resumes its template.
+    let mut expressions: Vec<usize> = Vec::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut star = false;
+                for c in chars.by_ref() {
+                    if star && c == '/' {
+                        break;
+                    }
+                    star = c == '*';
+                }
+            }
+            '\'' | '"' => {
+                let quote = c;
+                let mut value = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            value.push(c);
+                            if let Some(escaped) = chars.next() {
+                                value.push(escaped);
+                            }
+                        }
+                        '\n' => break,
+                        _ if c == quote => break,
+                        _ => value.push(c),
+                    }
+                }
+                tokens.push(TsToken::Str(value));
+            }
+            '`' => {
+                tokens.push(TsToken::Other);
+                if template_rest(&mut chars) {
+                    expressions.push(0);
+                }
+            }
+            '{' => {
+                if let Some(depth) = expressions.last_mut() {
+                    *depth += 1;
+                }
+                tokens.push(TsToken::Other);
+            }
+            '}' => {
+                match expressions.last_mut() {
+                    Some(0) => {
+                        expressions.pop();
+                        if template_rest(&mut chars) {
+                            expressions.push(0);
+                        }
+                    }
+                    Some(depth) => *depth -= 1,
+                    None => {}
+                }
+                tokens.push(TsToken::Other);
+            }
+            c if c.is_alphabetic() || c == '_' || c == '$' => {
+                let mut word = String::from(c);
+                while let Some(&next) = chars.peek() {
+                    if next.is_alphanumeric() || next == '_' || next == '$' {
+                        word.push(next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(TsToken::Word(word));
+            }
+            c if c.is_whitespace() => {}
+            _ => tokens.push(TsToken::Other),
+        }
+    }
+    tokens
+}
+
+/// Read a template literal's text up to its unescaped closing backtick,
+/// or up to a `${` whose code follows: `true` then, so the caller reads
+/// that code and resumes the template at its closing `}`.
+fn template_rest(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '`' => return false,
+            '$' if chars.peek() == Some(&'{') => {
+                chars.next();
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The line that says a project's own augmentation types `usePage()`: the
