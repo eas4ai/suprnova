@@ -616,17 +616,6 @@ Requirements: PAR-076, PAR-077, PAR-078, PAR-079, PAR-080, PAR-071, PAR-074
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 
-Out of every commitment above, by the developer's 2026-09-12 ruling:
-complete blocks (auth flows, account settings, CTAs, pricing, dashboard
-layouts), tag input, nested menus, command palette, drag-reorder,
-auto-infinite-scroll, carousel, image cropper, rich text editor, rating
-input. They are a separate project and enter this roadmap only if the
-developer writes them in.
-
-Every commitment inherits the Live gate and the repository gate; a
-commitment is Done only when its mechanisms pass on a committed tree and
-its review is recorded (`sudus review`).
-
 41. precognition - the sixth of the parity rounds the developer ordered on
    2026-10-07 (17:35), ruled build by the parity default: the thirty-one
    build rows of the Precognition group (rows 002, 003, 006,
@@ -651,3 +640,14 @@ its review is recorded (`sudus review`).
    middleware where a kit page validates live; the changelog.
    Mechanisms: `par-precognition` (the `precognition` tests of the
    `http`, `session` and `testing` suites).
+
+Out of every commitment above, by the developer's 2026-09-12 ruling:
+complete blocks (auth flows, account settings, CTAs, pricing, dashboard
+layouts), tag input, nested menus, command palette, drag-reorder,
+auto-infinite-scroll, carousel, image cropper, rich text editor, rating
+input. They are a separate project and enter this roadmap only if the
+developer writes them in.
+
+Every commitment inherits the Live gate and the repository gate; a
+commitment is Done only when its mechanisms pass on a committed tree and
+its review is recorded (`sudus review`).
