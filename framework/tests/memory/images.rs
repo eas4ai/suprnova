@@ -1214,15 +1214,15 @@ fn jpeg_with_profile(jpeg: &[u8], profile: &[u8]) -> Vec<u8> {
 
 /// What reading and writing the small profile below takes, beyond what the
 /// same image keeping only its orientation allocates. Measured with the
-/// eas4ai forks of `oxideav-png`, `oxideav-bmp` and `oxideav-webp`: about
-/// 246,330 bytes for PNG output, which compresses the profile again from
-/// a PNG source whose `iCCP` chunk the decoder now inflates too (140,945
-/// with `oxideav-png` 0.1.8, whose decoder did not); about 178,945 for
-/// JPEG output from the same PNG sources (75,668 with 0.1.8); and 2,382
-/// for WebP output, lossless or lossy, from JPEG sources (the same with
-/// `oxideav-webp` 0.2.3). The allowance this replaces was half the output:
-/// 524,738 bytes for the PNG.
-const PROFILE_WORK: u64 = 320 * 1024;
+/// eas4ai forks of `oxideav-png`, `oxideav-bmp` and `oxideav-webp`, whose
+/// PNG decoder the driver asks to leave the source's `iCCP` chunk
+/// compressed: 142,886 bytes for PNG output, which compresses the profile
+/// again (140,945 with `oxideav-png` 0.1.8); 75,491 for JPEG output from
+/// the same PNG sources (75,668 with 0.1.8); and 2,382 for WebP output,
+/// lossless or lossy, from JPEG sources (the same with `oxideav-webp`
+/// 0.2.3). The allowance this replaces was half the output: 524,738 bytes
+/// for the PNG.
+const PROFILE_WORK: u64 = 192 * 1024;
 
 /// MEM-003: the metadata an image keeps is written into the one output
 /// buffer the encoder fills, not by copying the encoded file again. The
@@ -1248,10 +1248,9 @@ async fn mem_audit_an_image_with_a_profile_is_written_in_one_buffer() {
     app1.extend_from_slice(&tiff);
     // Noise, so the encoded outputs are as large as the pixels. The WebP
     // images come from an opaque JPEG, so the driver writes `WebP` lossy,
-    // and the JPEG's profile is read whole: a PNG's profile is inflated
-    // twice, once by the decoder, and that work would hide a copy of a
-    // smaller output. The lossy WebP is written at full quality, so its
-    // output is not small.
+    // and the JPEG's profile is read whole: a PNG's profile is inflated,
+    // and that work would hide a copy of a smaller output. The lossy WebP
+    // is written at full quality, so its output is not small.
     let default_quality = ImagePipeline::default().quality;
     let cases = [
         (OutputFormat::Png, 512, default_quality),
