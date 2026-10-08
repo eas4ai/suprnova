@@ -536,3 +536,151 @@ async fn intt_reload_only_with_and_the_other_callbacks_run() {
 
     assert_eq!(ran, ["only", "except", "full"]);
 }
+
+// ── PAR-067: page readers and the Inertia flash in the session ──────
+
+#[tokio::test]
+async fn intt_inertia_page_and_inertia_props_read_the_page() {
+    let client = TestClient::new(dashboard_routes(), MiddlewareRegistry::new());
+    let response = client.get("/dashboard").inertia().send().await;
+
+    let page = response.inertia_page();
+    assert_eq!(page["component"], "Dashboard");
+    assert_eq!(page["url"], "/dashboard");
+    assert_eq!(response.inertia_props(None), page["props"]);
+    assert!(response.inertia_props(None).is_object());
+    assert_eq!(response.inertia_props(Some("count")), json!(3));
+    assert_eq!(response.inertia_props(Some("absent")), Value::Null);
+}
+
+#[tokio::test]
+async fn intt_inertia_props_reads_a_nested_path() {
+    let router = Router::new().get("/user", |req: Request| async move {
+        InertiaResponse::new("User")
+            .with("user", json!({"name": "Ada"}))
+            .resolve(&req)
+            .await
+            .map_err(HttpResponse::from)
+    });
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+
+    let response = client.get("/user").send().await;
+
+    assert_eq!(response.inertia_props(Some("user.name")), json!("Ada"));
+}
+
+fn flash_routes() -> Router {
+    Router::new()
+        .post("/save", |_req: Request| async {
+            Inertia::flash("toast", "Saved").map_err(HttpResponse::from)?;
+            let response: Response = suprnova::Redirect::to("/page").into();
+            response
+        })
+        .get("/page", |req: Request| async move {
+            InertiaResponse::new("Page")
+                .resolve(&req)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .into()
+}
+
+/// The panic message of `future`, or a failure of the test when it passes.
+async fn async_failure_of(future: impl std::future::Future<Output = ()>) -> String {
+    use futures::FutureExt;
+    let payload = std::panic::AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .expect_err("the assertion was expected to fail");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn intt_assert_inertia_flash_reads_the_flash_a_redirect_left() {
+    let (client, _store) = session_client(flash_routes());
+
+    let saved = client.post("/save").send().await;
+
+    saved.assert_redirect(Some("/page"));
+    saved
+        .assert_inertia_flash("toast", Some("Saved"))
+        .await
+        .assert_inertia_flash("toast", None::<Value>)
+        .await
+        .assert_inertia_flash_missing("other")
+        .await;
+
+    let wrong = async_failure_of(async {
+        saved.assert_inertia_flash("toast", Some("Deleted")).await;
+    })
+    .await;
+    assert!(wrong.contains("toast"), "{wrong}");
+    let present = async_failure_of(async {
+        saved.assert_inertia_flash_missing("toast").await;
+    })
+    .await;
+    assert!(present.contains("toast"), "{present}");
+    let absent = async_failure_of(async {
+        saved.assert_inertia_flash("other", None::<Value>).await;
+    })
+    .await;
+    assert!(absent.contains("other"), "{absent}");
+}
+
+#[tokio::test]
+async fn intt_the_page_after_the_redirect_shows_and_pulls_the_flash() {
+    let (client, _store) = session_client(flash_routes());
+    client
+        .post("/save")
+        .send()
+        .await
+        .assert_redirect(Some("/page"));
+
+    let page = client.get("/page").inertia().send().await;
+
+    page.assert_inertia().has_flash("toast", Some("Saved"));
+    page.assert_inertia_flash_missing("toast").await;
+}
+
+#[tokio::test]
+async fn intt_assert_inertia_flash_needs_a_session_store() {
+    suprnova::testing::install_test_encryption_key();
+    let client = TestClient::new(flash_routes(), MiddlewareRegistry::new());
+    let response = client.get("/page").send().await;
+
+    let failure = async_failure_of(async {
+        response.assert_inertia_flash("toast", None::<Value>).await;
+    })
+    .await;
+    assert!(failure.contains("with_session_store"), "{failure}");
+}
+
+#[tokio::test]
+async fn intt_preserved_big_integers_reach_the_assertions_as_integers() {
+    let router = Router::new().get("/big", |req: Request| async move {
+        InertiaResponse::new("Big")
+            .with("id", 9007199254740993_i64)
+            .preserve_big_integers(true)
+            .resolve(&req)
+            .await
+            .map_err(HttpResponse::from)
+    });
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+
+    let response = client.get("/big").inertia().send().await;
+
+    assert!(
+        response.body_text().contains("$bigint"),
+        "the wire carries the marker: {}",
+        response.body_text()
+    );
+    response.assert_inertia().where_("id", 9007199254740993_i64);
+    assert_eq!(
+        response.inertia_props(Some("id")),
+        json!(9007199254740993_i64)
+    );
+}

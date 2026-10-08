@@ -76,6 +76,10 @@ pub struct AssertableInertia {
     props: Value,
     flash: Value,
     deferred_props: Map<String, Value>,
+    /// Whether the page set `encryptHistory: true`.
+    encrypt_history: bool,
+    /// Whether the page set `clearHistory: true`.
+    clear_history: bool,
     reload: Option<Reloader>,
     report: Option<ErrorReport>,
     /// The dotted path from the page's props to this scope's value;
@@ -183,16 +187,25 @@ impl AssertableInertia {
                 ))
             })
             .to_string();
-        let props = obj["props"].clone();
-        let flash = obj
+        let mut props = obj["props"].clone();
+        let mut flash = obj
             .get("flash")
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
+        // The page sends integers beyond JavaScript's safe range as
+        // `{"$bigint": "<digits>"}` markers; assertions compare against
+        // the integers the handler passed, as Laravel's `fromTestResponse`
+        // decodes them.
+        if obj.get("preserveBigIntegers") == Some(&Value::Bool(true)) {
+            decode_big_integers(&mut props);
+            decode_big_integers(&mut flash);
+        }
         let deferred_props = obj
             .get("deferredProps")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let flag = |key: &str| obj.get(key) == Some(&Value::Bool(true));
         Self {
             component,
             url,
@@ -200,6 +213,8 @@ impl AssertableInertia {
             props,
             flash,
             deferred_props,
+            encrypt_history: flag("encryptHistory"),
+            clear_history: flag("clearHistory"),
             reload: None,
             report,
             scope: None,
@@ -770,11 +785,62 @@ impl AssertableInertia {
             props: value,
             flash: self.flash.clone(),
             deferred_props: self.deferred_props.clone(),
+            encrypt_history: self.encrypt_history,
+            clear_history: self.clear_history,
             reload: self.reload.clone(),
             report: self.report.clone(),
             scope: Some(scope),
             interacted: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Assert the page's `flash` data has no `key`. `key` follows the same
+    /// dot-path rule as [`Self::prop`]. Laravel's `missingFlash`.
+    pub fn missing_flash(&self, key: &str) -> &Self {
+        if let Some(actual) = dot_path(&self.flash, key) {
+            self.fail(format!(
+                "AssertableInertia::missing_flash({key:?})\n  Inertia Flash Data has unexpected \
+                 key [{key}]: {actual}\n  flash: {}",
+                self.flash
+            ));
+        }
+        self
+    }
+
+    /// The whole page: `component`, `props`, `url`, `version`, `flash`,
+    /// and `encryptHistory` and `clearHistory` only when the page set
+    /// them, with big-integer markers decoded. Inside a scope, `props` is
+    /// the scope's value. Laravel's `toArray`, for a test that compares
+    /// the page as a value or writes it to a snapshot.
+    pub fn to_page(&self) -> Value {
+        let mut page = Map::new();
+        page.insert(
+            "component".to_string(),
+            Value::String(self.component.clone()),
+        );
+        page.insert("props".to_string(), self.props.clone());
+        page.insert("url".to_string(), Value::String(self.url.clone()));
+        page.insert("version".to_string(), Value::String(self.version.clone()));
+        page.insert("flash".to_string(), self.flash.clone());
+        if self.encrypt_history {
+            page.insert("encryptHistory".to_string(), Value::Bool(true));
+        }
+        if self.clear_history {
+            page.insert("clearHistory".to_string(), Value::Bool(true));
+        }
+        Value::Object(page)
+    }
+
+    /// Whether the page asks the client to encrypt its history state
+    /// (`encryptHistory: true`).
+    pub fn encrypt_history(&self) -> bool {
+        self.encrypt_history
+    }
+
+    /// Whether the page asks the client to clear its history
+    /// (`clearHistory: true`), as one rendered after a logout does.
+    pub fn clear_history(&self) -> bool {
+        self.clear_history
     }
 
     /// Assert the page's `flash` data has `key`, optionally equal to
@@ -1021,6 +1087,35 @@ fn dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         };
     }
     Some(current)
+}
+
+/// Replace every `{"$bigint": "<digits>"}` marker in `value`, at any depth,
+/// with the integer it carries: the reverse of the encoding a page with
+/// `preserveBigIntegers` applies (`framework/src/inertia/response.rs`).
+/// A marker whose digits fit no 64-bit integer is left as it is.
+fn decode_big_integers(value: &mut Value) {
+    let decoded = match value {
+        Value::Object(map) => map
+            .get("$bigint")
+            .and_then(Value::as_str)
+            .and_then(|digits| {
+                digits
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .or_else(|_| digits.parse::<u64>().map(Value::from))
+                    .ok()
+            }),
+        _ => None,
+    };
+    if let Some(number) = decoded {
+        *value = number;
+        return;
+    }
+    match value {
+        Value::Object(map) => map.values_mut().for_each(decode_big_integers),
+        Value::Array(items) => items.iter_mut().for_each(decode_big_integers),
+        _ => {}
+    }
 }
 
 /// The value for a failure message, `<missing>` for a path that resolved

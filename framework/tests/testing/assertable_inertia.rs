@@ -1047,3 +1047,85 @@ fn intt_a_full_reload_request_sends_no_partial_headers() {
     let names: Vec<String> = full.headers().into_iter().map(|(name, _)| name).collect();
     assert_eq!(names, ["X-Inertia", "X-Inertia-Version"]);
 }
+
+// ── PAR-067: page accessors, flash, big integers ─────────────────────
+
+fn page_with(extra: serde_json::Value) -> AssertableInertia {
+    let mut page = json!({
+        "component": "Home",
+        "props": {"count": 1},
+        "url": "/",
+        "version": "v",
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        page[key] = value.clone();
+    }
+    AssertableInertia::from_response(&HttpResponse::json(page).header("X-Inertia", "true"))
+}
+
+#[test]
+fn intt_missing_flash_fails_for_a_flashed_key() {
+    let page = AssertableInertia::from_response(&json_page_response());
+    page.missing_flash("other").missing_flash("toast.title");
+    let failure = failure_of(|| {
+        page.missing_flash("toast");
+    });
+    assert!(failure.contains("missing_flash(\"toast\")"), "{failure}");
+}
+
+#[test]
+fn intt_to_page_carries_the_history_flags_only_when_the_page_sets_them() {
+    let plain = page_with(json!({}));
+    assert_eq!(
+        plain.to_page(),
+        json!({
+            "component": "Home",
+            "props": {"count": 1},
+            "url": "/",
+            "version": "v",
+            "flash": {},
+        })
+    );
+    assert!(!plain.encrypt_history());
+    assert!(!plain.clear_history());
+
+    let cleared = page_with(json!({"clearHistory": true, "flash": {"toast": "hi"}}));
+    let page = cleared.to_page();
+    assert_eq!(page["clearHistory"], json!(true));
+    assert!(page.get("encryptHistory").is_none(), "{page}");
+    assert_eq!(page["flash"], json!({"toast": "hi"}));
+    assert!(cleared.clear_history());
+    assert!(!cleared.encrypt_history());
+
+    let encrypted = page_with(json!({"encryptHistory": true}));
+    assert_eq!(encrypted.to_page()["encryptHistory"], json!(true));
+    assert!(encrypted.to_page().get("clearHistory").is_none());
+    assert!(encrypted.encrypt_history());
+}
+
+#[test]
+fn intt_big_integer_markers_are_decoded_when_the_page_preserves_them() {
+    let page = page_with(json!({
+        "preserveBigIntegers": true,
+        "props": {
+            "id": {"$bigint": "9007199254740993"},
+            "rows": [{"n": {"$bigint": "-9007199254740993"}}],
+            "small": 3,
+        },
+        "flash": {"created": {"$bigint": "18446744073709551615"}},
+    }));
+
+    page.where_("id", 9007199254740993_i64)
+        .where_("rows.0.n", -9007199254740993_i64)
+        .where_type("id", "integer")
+        .where_("small", 3)
+        .has_flash("created", Some(json!(18446744073709551615_u64)));
+    assert_eq!(page.to_page()["props"]["id"], json!(9007199254740993_i64));
+}
+
+#[test]
+fn intt_big_integer_markers_stay_without_preserve_big_integers() {
+    let page = page_with(json!({"props": {"id": {"$bigint": "9007199254740993"}}}));
+
+    page.where_("id", json!({"$bigint": "9007199254740993"}));
+}

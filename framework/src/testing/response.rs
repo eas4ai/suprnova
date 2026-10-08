@@ -493,6 +493,109 @@ impl TestResponse {
             .with_reloader(self.reload.clone())
     }
 
+    /// This response's whole Inertia page as a value:
+    /// [`AssertableInertia::to_page`](crate::testing::AssertableInertia::to_page)
+    /// of [`Self::assert_inertia`]. Laravel's `inertiaPage()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does.
+    pub fn inertia_page(&self) -> serde_json::Value {
+        self.assert_inertia().to_page()
+    }
+
+    /// The props of this response's Inertia page: all of them for `None`,
+    /// the value at a dot-separated path for `Some` (`Null` when the path
+    /// resolves to nothing). Laravel's `inertiaProps($propName)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_inertia`] does.
+    pub fn inertia_props(&self, path: Option<&str>) -> serde_json::Value {
+        let page = self.assert_inertia();
+        match path {
+            Some(path) => page.prop(path),
+            None => page.to_page()["props"].take(),
+        }
+    }
+
+    /// Assert the Inertia flash data the session holds has `key`,
+    /// optionally equal to `expected` (`None::<serde_json::Value>` checks
+    /// presence only). Laravel's `assertInertiaFlash`.
+    ///
+    /// A handler that flashes and redirects (`Inertia::flash`) leaves the
+    /// data in the session for the page after the redirect; the redirect
+    /// response itself carries no page. This reads the session the
+    /// response's session cookie names from the attached store, as
+    /// [`Self::assert_session_has`] does, and the Inertia flash data in
+    /// it: what the previous request left, overlaid with what this one
+    /// wrote. `key` is a dot path.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_session_has`] does without a store or a
+    /// session, when `key` is absent, or when it holds another value.
+    pub async fn assert_inertia_flash<V: Into<serde_json::Value>>(
+        &self,
+        key: &str,
+        expected: Option<V>,
+    ) -> &Self {
+        let call = format!("assert_inertia_flash({key:?}, ...)");
+        let flash = self.inertia_flash(&call).await;
+        let Some(actual) = json_path(&flash, key) else {
+            self.fail(format!(
+                "{call}\n  Inertia Flash Data is missing key [{key}].\n  flash: {flash}"
+            ));
+        };
+        if let Some(expected) = expected {
+            let expected = expected.into();
+            if *actual != expected {
+                self.fail(format!(
+                    "{call}\n  Inertia Flash Data [{key}] does not match expected value.\n  \
+                     Expected: {expected}\n  Received: {actual}"
+                ));
+            }
+        }
+        self
+    }
+
+    /// Assert the Inertia flash data the session holds has no `key`, read
+    /// as [`Self::assert_inertia_flash`] reads it. Laravel's
+    /// `assertInertiaFlashMissing`.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_session_has`] does without a store or a
+    /// session, or when `key` is present.
+    pub async fn assert_inertia_flash_missing(&self, key: &str) -> &Self {
+        let call = format!("assert_inertia_flash_missing({key:?})");
+        let flash = self.inertia_flash(&call).await;
+        if let Some(actual) = json_path(&flash, key) {
+            self.fail(format!(
+                "{call}\n  Inertia Flash Data has unexpected key [{key}]: {actual}"
+            ));
+        }
+        self
+    }
+
+    /// The Inertia flash data of the session this response names: the
+    /// previous request's (`_flash.old.inertia.flash_data`) overlaid with
+    /// this one's (`_flash.new.inertia.flash_data`), as the page that
+    /// shows it merges them.
+    async fn inertia_flash(&self, call: &str) -> serde_json::Value {
+        let (_, session) = self.session_data(call).await;
+        let mut flash = serde_json::Map::new();
+        for key in [
+            crate::inertia::flash::flash_data_old_key(),
+            crate::inertia::flash::flash_data_new_key(),
+        ] {
+            if let Some(serde_json::Value::Object(map)) = session.data.get(&key) {
+                flash.extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        serde_json::Value::Object(flash)
+    }
+
     /// Run `callback` over this response's Inertia page and return the
     /// response, so response assertions chain after the page's. Laravel's
     /// `assertInertia(fn (Assert $page) => ...)`.
