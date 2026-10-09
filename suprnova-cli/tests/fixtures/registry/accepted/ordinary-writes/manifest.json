@@ -1,5 +1,0 @@
-{
-  "name": "acme.ordinary-writes",
-  "files": ["ordinary-writes.html", "ordinary-writes.js"],
-  "elements": ["acme-ordinary-writes"]
-}

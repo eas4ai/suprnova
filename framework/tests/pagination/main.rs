@@ -4,3 +4,4 @@
 pub mod laravel_shape;
 pub mod named_connection;
 pub mod pagination;
+pub mod laravel_gaps;
