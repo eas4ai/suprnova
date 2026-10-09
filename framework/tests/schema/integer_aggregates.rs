@@ -1,0 +1,634 @@
+//! `sum` and `avg` over integer columns on every database.
+//!
+//! The database chooses the type of an aggregate: `SUM` of an integer
+//! column is `numeric` on Postgres and `DECIMAL` on MySQL, `AVG` is
+//! `numeric` / `DECIMAL`, and SQLite answers an integer or a real. The
+//! terminals read whichever arrives, exactly: a sum that does not fit the
+//! type asked for, or has a fraction, is an error, never truncated.
+
+use std::str::FromStr;
+
+use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
+use sea_orm::{DatabaseConnection, DbBackend};
+use sea_orm_migration::prelude::*;
+use serial_test::serial;
+use suprnova::schema::Schema;
+use suprnova::testing::TestContainer;
+use suprnova::{DbConnection, Model, attrs, model};
+
+use super::cases::{drop_tables, run};
+use super::mysql::connect_mysql;
+use super::postgres::connect_postgres;
+use super::sqlite::connect_sqlite;
+
+/// The owner of ledger rows, for the relation aggregates.
+#[model(table = "ia_owners", fillable = ["name"], relations = {
+    entries: HasMany<IaEntry>,
+})]
+pub struct IaOwner {
+    pub id: i64,
+    pub name: String,
+}
+
+/// A ledger row with a signed, an unsigned and a 32-bit integer column, a
+/// double and a single-precision real.
+#[model(
+    table = "ia_entries",
+    fillable = ["ia_owner_id", "amount", "hits", "small", "ratio", "weight", "tag"],
+)]
+pub struct IaEntry {
+    pub id: i64,
+    pub ia_owner_id: Option<i64>,
+    pub amount: i64,
+    pub hits: u64,
+    pub small: i32,
+    pub ratio: f64,
+    pub weight: f32,
+    pub tag: String,
+}
+
+const TABLES: &[&str] = &["ia_entries", "ia_owners"];
+
+async fn create_entries(conn: &DatabaseConnection) {
+    let manager = SchemaManager::new(conn);
+    drop_tables(conn, TABLES).await;
+    Schema::create(&manager, "ia_owners", |t| {
+        t.id();
+        t.string("name");
+    })
+    .await
+    .expect("create ia_owners");
+    Schema::create(&manager, "ia_entries", |t| {
+        t.id();
+        t.big_integer("ia_owner_id").nullable();
+        t.big_integer("amount");
+        t.unsigned_big_integer("hits");
+        t.integer("small");
+        t.double("ratio");
+        t.float("weight").precision(24);
+        t.string("tag");
+        t.decimal("price", 30, 2).nullable();
+        t.small_integer("tiny").nullable();
+        t.date("due_on").nullable();
+        t.string("logged_at").nullable();
+    })
+    .await
+    .expect("create ia_entries");
+}
+
+/// Adds an entry whose single-precision `weight` equals its `ratio`.
+async fn add(amount: i64, hits: u64, small: i32, ratio: f64, tag: &str) {
+    let weight = ratio as f32;
+    IaEntry::create(attrs! {
+        amount: amount, hits: hits, small: small, ratio: ratio, weight: weight, tag: tag
+    })
+    .await
+    .expect("create an entry");
+}
+
+/// `sum::<i64>`, `sum::<u64>`, `sum::<i32>` and `sum::<f64>` over integer
+/// and real columns, single-precision included, and `avg`, give the same
+/// answer on SQLite, Postgres
+/// and MySQL, zero for no rows. A sum outside the type asked for, a
+/// negative sum asked for as a `u64`, and a fractional sum asked for as an
+/// integer are errors. It fails while Postgres's `numeric` and MySQL's
+/// `DECIMAL` do not decode as the integer or float asked for.
+pub async fn integer_aggregates_read_on_every_database(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    add(10, 3, 1, 0.5, "kept").await;
+    add(25, 4, 2, 0.25, "kept").await;
+    add(30, 5, 6, 1.0, "other").await;
+    let kept = || IaEntry::query().filter("tag", "kept");
+    let none = || IaEntry::query().filter("tag", "missing");
+
+    assert_eq!(IaEntry::sum::<i64>("amount").await.expect("sum::<i64>"), 65);
+    assert_eq!(IaEntry::sum::<u64>("hits").await.expect("sum::<u64>"), 12);
+    assert_eq!(IaEntry::sum::<i32>("small").await.expect("sum::<i32>"), 9);
+    assert_eq!(
+        IaEntry::sum::<i64>("small")
+            .await
+            .expect("sum::<i64> of an int"),
+        9
+    );
+    assert_eq!(
+        IaEntry::sum::<f64>("amount").await.expect("sum::<f64>"),
+        65.0
+    );
+    assert_eq!(
+        IaEntry::sum::<f64>("ratio").await.expect("sum of a real"),
+        1.75
+    );
+    assert_eq!(
+        IaEntry::sum::<f64>("weight")
+            .await
+            .expect("sum of a single-precision real"),
+        1.75
+    );
+    assert_eq!(
+        kept().sum::<i64>("amount").await.expect("a filtered sum"),
+        35
+    );
+
+    assert_eq!(
+        IaEntry::avg::<f64>("hits").await.expect("avg of a u64"),
+        4.0
+    );
+    assert_eq!(
+        IaEntry::avg::<f64>("small").await.expect("avg of an int"),
+        3.0
+    );
+    assert_eq!(
+        kept().avg::<f64>("amount").await.expect("avg of an i64"),
+        17.5
+    );
+    assert_eq!(
+        kept().avg::<f64>("ratio").await.expect("avg of a real"),
+        0.375
+    );
+
+    assert_eq!(none().sum::<i64>("amount").await.expect("an empty sum"), 0);
+    assert_eq!(
+        none().sum::<u64>("hits").await.expect("an empty u64 sum"),
+        0
+    );
+    assert_eq!(
+        none().avg::<f64>("amount").await.expect("an empty avg"),
+        0.0
+    );
+
+    let fraction = IaEntry::sum::<i64>("ratio")
+        .await
+        .expect_err("1.75 is not an i64");
+    assert!(
+        fraction.to_string().contains("1.75"),
+        "the error quotes the sum: {fraction}"
+    );
+
+    add(i64::from(i32::MAX), 1, 0, 0.0, "wide").await;
+    let wide = IaEntry::sum::<i32>("amount")
+        .await
+        .expect_err("a sum above i32::MAX is not an i32");
+    assert!(
+        wide.to_string().contains("2147483712"),
+        "the error quotes the sum: {wide}"
+    );
+    assert_eq!(
+        IaEntry::sum::<i64>("amount")
+            .await
+            .expect("the same sum as an i64"),
+        65 + i64::from(i32::MAX)
+    );
+
+    add(-100, 1, 0, 0.0, "negative").await;
+    let negative = IaEntry::query()
+        .filter("tag", "negative")
+        .sum::<u64>("amount")
+        .await
+        .expect_err("-100 is not a u64");
+    assert!(
+        negative.to_string().contains("-100"),
+        "the error quotes the sum: {negative}"
+    );
+
+    add(i64::MAX, 1, 0, 0.0, "huge").await;
+    add(i64::MAX, 1, 0, 0.0, "huge").await;
+    assert!(
+        IaEntry::query()
+            .filter("tag", "huge")
+            .sum::<i64>("amount")
+            .await
+            .is_err(),
+        "a sum above i64::MAX is not an i64"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+/// `with_sum` and `with_avg` over an integer column read the same values on
+/// SQLite, Postgres and MySQL. It fails while the relation aggregate reads
+/// Postgres's `numeric` and MySQL's `DECIMAL` as nothing and stores `0.0`.
+pub async fn relation_aggregates_read_on_every_database(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let owner = IaOwner::create(attrs! { name: "owner" })
+        .await
+        .expect("create an owner");
+    for amount in [10i64, 25] {
+        IaEntry::create(attrs! {
+            ia_owner_id: owner.id, amount: amount, hits: 1, small: 1, ratio: 0.5, weight: 0.5f32,
+            tag: "kept"
+        })
+        .await
+        .expect("create an entry");
+    }
+
+    let owners = IaOwner::query()
+        .with_sum(("entries", "amount"))
+        .with_avg(("entries", "amount"))
+        .get()
+        .await
+        .expect("relation aggregates");
+    let owner = owners.first().expect("the owner");
+    assert_eq!(owner.entries_sum_of("amount"), Some(35.0), "with_sum");
+    assert_eq!(owner.entries_avg_of("amount"), Some(17.5), "with_avg");
+
+    drop_tables(conn, TABLES).await;
+}
+
+/// `avg::<f64>` and `avg::<Decimal>` read every database's average. On a
+/// `DECIMAL(30, 2)` column whose average is `12345678901234567.90`, which no
+/// `f64` holds, Postgres and MySQL answer an exact decimal and
+/// `avg::<Decimal>` reads it exactly while `avg::<f64>` reads the nearest
+/// `f64`; SQLite stores the column as a real, so both read that real.
+/// `sum::<Decimal>` reads the exact sum. An average a `Decimal` cannot hold
+/// is an error. It fails to compile while `avg` takes no type parameter.
+pub async fn averages_read_as_f64_and_decimal(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    add(10, 3, 1, 0.5, "kept").await;
+    add(25, 4, 2, 0.25, "kept").await;
+    run(
+        conn,
+        "INSERT INTO ia_entries (amount, hits, small, ratio, weight, tag, price) VALUES \
+         (0, 0, 0, 0, 0, 'money', 12345678901234567.89), \
+         (0, 0, 0, 0, 0, 'money', 12345678901234567.91), \
+         (0, 0, 0, 1e300, 0, 'vast', NULL)",
+    )
+    .await
+    .expect("insert the decimal rows");
+    let kept = || IaEntry::query().filter("tag", "kept");
+    let money = || IaEntry::query().filter("tag", "money");
+    let decimal = |text: &str| Decimal::from_str(text).expect("a decimal");
+
+    assert_eq!(kept().avg::<f64>("amount").await.expect("avg::<f64>"), 17.5);
+    assert_eq!(
+        kept()
+            .avg::<Decimal>("amount")
+            .await
+            .expect("avg::<Decimal>"),
+        decimal("17.5")
+    );
+    assert_eq!(
+        kept()
+            .avg::<Decimal>("ratio")
+            .await
+            .expect("avg::<Decimal> of a real"),
+        decimal("0.375")
+    );
+    assert_eq!(
+        IaEntry::query()
+            .filter("tag", "missing")
+            .avg::<Decimal>("amount")
+            .await
+            .expect("an empty avg"),
+        Decimal::ZERO
+    );
+
+    let as_f64 = money()
+        .avg::<f64>("price")
+        .await
+        .expect("avg::<f64> of money");
+    let as_decimal = money()
+        .avg::<Decimal>("price")
+        .await
+        .expect("avg::<Decimal> of money");
+    let exact = decimal("12345678901234567.90");
+    assert_eq!(as_f64, 12345678901234567.90_f64, "the nearest f64");
+    if conn.get_database_backend() == DbBackend::Sqlite {
+        assert_eq!(
+            as_decimal,
+            decimal(&as_f64.to_string()),
+            "SQLite stores the column as a real, and the average is that real"
+        );
+    } else {
+        assert_eq!(as_decimal, exact, "the exact average");
+        assert_ne!(
+            decimal(&as_f64.to_string()),
+            exact,
+            "no f64 holds the average"
+        );
+        assert_eq!(
+            money()
+                .sum::<Decimal>("price")
+                .await
+                .expect("sum::<Decimal>"),
+            decimal("24691357802469135.80")
+        );
+    }
+
+    assert!(
+        IaEntry::query()
+            .filter("tag", "vast")
+            .avg::<Decimal>("ratio")
+            .await
+            .is_err(),
+        "no Decimal holds 1e300"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_averages_read_as_f64_and_decimal() {
+    averages_read_as_f64_and_decimal(&connect_mysql().await).await;
+}
+
+/// `with_min` and `with_max` read a 32-bit and a 16-bit integer column, which
+/// Postgres answers as `int4` and `int2`, and a date column, native or
+/// text, on every database. A date has no `f64`, so `_min_of` / `_max_of`
+/// answer `Some(None)` for it, as before, and `_min_as` / `_max_as` read it
+/// as a date. Reading it is never an error. It fails
+/// while the relation aggregate reads only `int8` on Postgres, and while a
+/// date fails the whole query.
+pub async fn relation_min_max_read_every_column(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let owner = IaOwner::create(attrs! { name: "owner" })
+        .await
+        .expect("create an owner");
+    for (small, tiny, due_on, logged_at) in [
+        (3i32, 9i16, "2026-03-04", "2026-01-02T03:04:05+00:00"),
+        (7, 2, "2026-01-02", "2026-05-06T07:08:09+00:00"),
+    ] {
+        run(
+            conn,
+            &format!(
+                "INSERT INTO ia_entries \
+                 (ia_owner_id, amount, hits, small, ratio, weight, tag, tiny, due_on, logged_at) \
+                 VALUES ({}, 0, 0, {small}, 0, 0, 'dated', {tiny}, '{due_on}', '{logged_at}')",
+                owner.id
+            ),
+        )
+        .await
+        .expect("insert an entry");
+    }
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "small"))
+        .with_max(("entries", "small"))
+        .with_min(("entries", "tiny"))
+        .with_max(("entries", "tiny"))
+        .with_min(("entries", "due_on"))
+        .with_max(("entries", "due_on"))
+        .with_max(("entries", "logged_at"))
+        .get()
+        .await
+        .expect("relation aggregates over int4, int2 and date columns");
+    let owner = owners.first().expect("the owner");
+    assert_eq!(
+        owner.entries_min_of("small"),
+        Some(Some(3.0)),
+        "with_min int4"
+    );
+    assert_eq!(
+        owner.entries_max_of("small"),
+        Some(Some(7.0)),
+        "with_max int4"
+    );
+    assert_eq!(
+        owner.entries_min_of("tiny"),
+        Some(Some(2.0)),
+        "with_min int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("tiny"),
+        Some(Some(9.0)),
+        "with_max int2"
+    );
+    assert_eq!(
+        owner.entries_max_of("due_on"),
+        Some(None),
+        "a date has no f64"
+    );
+    assert_eq!(
+        owner.entries_max_of("logged_at"),
+        Some(None),
+        "text has no f64"
+    );
+    let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date");
+    assert_eq!(
+        owner.entries_min_as::<NaiveDate>("due_on"),
+        Some(day("2026-01-02")),
+        "with_min of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("due_on"),
+        Some(day("2026-03-04")),
+        "with_max of a date column"
+    );
+    assert_eq!(
+        owner.entries_max_as::<DateTime<Utc>>("logged_at"),
+        Some(
+            DateTime::parse_from_rfc3339("2026-05-06T07:08:09+00:00")
+                .expect("a time")
+                .with_timezone(&Utc)
+        ),
+        "with_max of a date-time stored as text"
+    );
+    assert_eq!(
+        owner.entries_max_as::<i64>("small"),
+        Some(7),
+        "a number reads too"
+    );
+    assert_eq!(
+        owner.entries_max_as::<NaiveDate>("small"),
+        None,
+        "a value that does not read as the type"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_sqlite().await).await;
+}
+
+/// `<rel>_min_as::<Decimal>` and `<rel>_max_as::<Decimal>` read the exact
+/// minimum and maximum of a `DECIMAL(30, 2)` column on Postgres and MySQL,
+/// `12345678901234567.89` and `12345678901234567.91`, which no `f64` holds.
+/// They used to read the nearest `f64`, 12345678901234568, because the
+/// value was kept as a JSON float. `min_as::<f64>` and `_min_of` still read
+/// the nearest `f64`, `min_as::<String>` reads the decimal's text, as
+/// Laravel's `withMin` attribute holds it, and a whole minimum still reads
+/// as an integer. SQLite stores the column as a real, so there `Decimal`
+/// reads that real, and 7.00 is the real 7.0, not an integer.
+pub async fn relation_min_max_keep_exact_decimals(conn: &DatabaseConnection) {
+    create_entries(conn).await;
+    let _guard = TestContainer::fake();
+    TestContainer::singleton(DbConnection::from_raw(conn.clone()));
+    let money = IaOwner::create(attrs! { name: "money" })
+        .await
+        .expect("create the money owner");
+    let small = IaOwner::create(attrs! { name: "small" })
+        .await
+        .expect("create the small owner");
+    run(
+        conn,
+        &format!(
+            "INSERT INTO ia_entries (ia_owner_id, amount, hits, small, ratio, weight, tag, price) \
+             VALUES ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.89), \
+             ({m}, 0, 0, 0, 0, 0, 'money', 12345678901234567.91), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 7.00), \
+             ({s}, 0, 0, 0, 0, 0, 'small', 9.50)",
+            m = money.id,
+            s = small.id
+        ),
+    )
+    .await
+    .expect("insert the decimal rows");
+
+    let owners = IaOwner::query()
+        .with_min(("entries", "price"))
+        .with_max(("entries", "price"))
+        .order_by_asc("id")
+        .get()
+        .await
+        .expect("relation min and max over a decimal column");
+    let [money, small] = owners.as_slice() else {
+        panic!("two owners, got {}", owners.len());
+    };
+    let decimal = |text: &str| Decimal::from_str(text).expect("a decimal");
+    let nearest_min = 12345678901234567.89_f64;
+    let nearest_max = 12345678901234567.91_f64;
+
+    assert_eq!(money.entries_min_of("price"), Some(Some(nearest_min)));
+    assert_eq!(money.entries_max_of("price"), Some(Some(nearest_max)));
+    assert_eq!(
+        money.entries_min_as::<f64>("price"),
+        Some(nearest_min),
+        "min_as::<f64> reads the nearest f64"
+    );
+    if conn.get_database_backend() == DbBackend::Sqlite {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal(&nearest_min.to_string())),
+            "SQLite stores the column as a real, and the minimum is that real"
+        );
+    } else {
+        assert_eq!(
+            money.entries_min_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.89")),
+            "the exact minimum"
+        );
+        assert_eq!(
+            money.entries_max_as::<Decimal>("price"),
+            Some(decimal("12345678901234567.91")),
+            "the exact maximum"
+        );
+        assert_eq!(
+            money.entries_min_as::<String>("price").as_deref(),
+            Some("12345678901234567.89"),
+            "the decimal's text, as Laravel's attribute holds it"
+        );
+        assert_eq!(
+            small.entries_min_as::<i64>("price"),
+            Some(7),
+            "a whole minimum reads as an integer"
+        );
+    }
+
+    assert_eq!(
+        small.entries_max_as::<Decimal>("price"),
+        Some(decimal("9.5"))
+    );
+    assert_eq!(small.entries_max_as::<f64>("price"), Some(9.5));
+    assert_eq!(
+        small.entries_max_as::<i64>("price"),
+        None,
+        "a fraction does not read as an integer"
+    );
+
+    drop_tables(conn, TABLES).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_keep_exact_decimals() {
+    relation_min_max_keep_exact_decimals(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_min_max_read_every_column() {
+    relation_min_max_read_every_column(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_relation_aggregates_read_on_every_database() {
+    relation_aggregates_read_on_every_database(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_relation_aggregates_read_on_every_database() {
+    relation_aggregates_read_on_every_database(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_relation_aggregates_read_on_every_database() {
+    relation_aggregates_read_on_every_database(&connect_mysql().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_integer_aggregates_read_on_every_database() {
+    integer_aggregates_read_on_every_database(&connect_sqlite().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_integer_aggregates_read_on_every_database() {
+    integer_aggregates_read_on_every_database(&connect_postgres().await).await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+async fn mysql_integer_aggregates_read_on_every_database() {
+    integer_aggregates_read_on_every_database(&connect_mysql().await).await;
+}

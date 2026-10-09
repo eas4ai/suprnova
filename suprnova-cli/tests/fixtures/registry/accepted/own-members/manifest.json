@@ -1,5 +1,0 @@
-{
-  "name": "acme.own-members",
-  "files": ["own-members.html", "own-members.js"],
-  "elements": ["acme-own-members"]
-}
