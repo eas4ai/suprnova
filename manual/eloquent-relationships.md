@@ -845,6 +845,14 @@ parent writes. The `where_` closure receives `Builder<()>` and the
 canonical morph name per type. Wildcard absence also includes null type
 columns. See [MorphTo existence](eloquent.md#morphto-existence).
 
+`has`, `has_count` and `doesnt_have` on a `MorphTo` ask every target the
+relation declares, as Laravel's `has` does: `has("commentable")` renders
+what `has_morph("commentable", "*")` renders, and `doesnt_have` keeps every
+other row, including a null type and a type no target answers to.
+`where_has::<R, _>` and `where_doesnt_have::<R, _>` apply your closure to
+the owners of `R`'s type only, because the closure is written against one
+model; use `where_has_morph` to constrain several types.
+
 ### How it works
 
 The engine walks the relation inventory at query-build time. For each

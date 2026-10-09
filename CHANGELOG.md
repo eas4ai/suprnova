@@ -1647,6 +1647,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `image/svg+xml`, as Laravel's `image` rule leaves SVG out unless asked: an
   SVG passes only when the allowlist names `image/svg+xml`. `text/*` and
   `application/*` still admit every subtype.
+- **`has` and its kin read a polymorphic owner relation.** On a `MorphTo`,
+  `has`, `or_has`, `has_count`, `doesnt_have` and `or_doesnt_have` rendered
+  a probe that is always false, so `has` matched no row and `doesnt_have`
+  matched every row. They now ask every owner type the relation declares,
+  as Laravel's `has` routes a `MorphTo` to `hasMorph($relation, ['*'])`: a
+  row has its owner when its type names a declared owner whose table holds
+  its key under that owner's scopes, and `doesnt_have` keeps every other
+  row, a null type or a type no owner answers to included. `has_count`
+  compares the owner count, 0 or 1, with `=`, `<>`, `!=`, `<`, `<=`, `>` or
+  `>=` and refuses any other operator. `where_has::<R, _>`,
+  `where_doesnt_have` and their `or_` forms apply the closure to the owners
+  of `R`'s type, as `where_has_morph` with that one type does.
 
 ### Fixed
 
