@@ -30,7 +30,7 @@ pub use handler::{BroadcastingWsHandler, DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTIO
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
 pub use protocol::{ClientFrame, ServerFrame};
 pub use pusher::{
-    PusherAuth, PusherBroadcastHub, PusherConfig, PusherScheme, pusher_channel_auth,
+    PusherAuth, PusherBroadcastHub, PusherClient, PusherConfig, PusherScheme, pusher_channel_auth,
     pusher_user_auth,
 };
 pub use testing::RecordingBroadcastHub;

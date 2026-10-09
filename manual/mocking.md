@@ -214,6 +214,20 @@ async fn welcome_email_is_sent() {
 | `fake.assert_outgoing_count(n)`            | sent + queued totals `n`                            |
 | `fake.assert_nothing_outgoing()`           | nothing was sent and nothing was queued             |
 
+Three answers return a `bool` instead of panicking, as Laravel's
+`MailFake::hasSent` and `hasQueued` do:
+
+| Answer                                     | True when…                                          |
+|--------------------------------------------|-----------------------------------------------------|
+| `fake.has_sent("MailableName")`            | a mailable of this name was sent; queued ones don't count |
+| `fake.has_sent_mailable::<M>()`            | a mailable of type `M` was sent                     |
+| `fake.has_queued("MailableName")`          | a mailable of this name was queued                  |
+
+A sent message checks its attachments by content too:
+`m.has_equivalent_attachment(&attachment)` compares the name, bytes, and
+content type, and `m.has_attached_data(bytes, name, content_type)` checks
+raw data. `m.has_attachment(name)` matches the name only.
+
 `fake.captured()`, `fake.queued()`, `fake.sent(pred)`, `fake.sent_to(…)`,
 `fake.queued_named(…)`, and `fake.queued_to(…)` return the matching
 data so you can build custom assertions. See [Mail](mail.md) for the

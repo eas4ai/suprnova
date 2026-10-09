@@ -282,6 +282,8 @@ impl Mailable for OrderShipped {
 | `html_template_source(&self)` | optional | HTML body Tera template. Return `None` to skip HTML. |
 | `text_template_source(&self)` | optional | Plain-text body Tera template. Return `None` to skip text. |
 | `from(&self)` | optional | Override the global default `noreply@localhost`. |
+| `to(&self)` / `cc(&self)` / `bcc(&self)` / `reply_to(&self)` | optional | The mailable's own recipients, empty by default. See [A mailable's own recipients](#a-mailables-own-recipients). |
+| `delay(&self)` | optional | How long a queued send waits before a worker may take it. Default `None`. See [Queueing](#queueing). |
 | `queue(&self)` | optional | Default queue for `Mail::queue` / `Mail::later`. See [Queueing](#queueing). |
 | `after_commit(&self)` | optional | `true` makes `Mail::queue` / `Mail::later` inside `DB::transaction` wait for the commit. Default `false`. See [Queueing](#queueing). |
 | `attachments(&self)` | optional | Files to attach. Each is `name + bytes + mime`. |
@@ -309,6 +311,57 @@ Mail::to("alice@example.org")
 
 `Address` accepts `&str`, `String`, and `(name, email)` tuples; `Mail::to(...)` accepts anything `Into<Address>`.
 
+### A mailable's own recipients
+
+A mailable can carry its own recipients, as a Laravel mailable sets its own
+`$to`, `$cc`, and `$bcc`. Override `to`, `cc`, `bcc`, or `reply_to`; each
+returns a list of addresses and is empty by default:
+
+```rust
+#[async_trait]
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str { "OrderShipped" }
+    fn subject(&self) -> String { format!("Order #{} shipped", self.order_id) }
+    fn text_template_source(&self) -> Option<String> { Some("Tracking: {{ tracking }}".into()) }
+
+    fn to(&self) -> Vec<Address> { vec![Address::new(self.customer_email.clone())] }
+    // Every send of this mailable copies the audit inbox.
+    fn bcc(&self) -> Vec<Address> { vec!["audit@example.com".into()] }
+}
+
+// To the mailable's own recipients.
+Mail::send(order_shipped.clone()).await?;
+Mail::queue(order_shipped.clone()).await?;
+Mail::later(Duration::from_secs(60), order_shipped.clone()).await?;
+Mail::on_queue("emails", order_shipped.clone()).await?;
+
+// Or add to them through the builder.
+Mail::to("ops@example.com").send(order_shipped).await?;
+```
+
+Sending or queueing merges the mailable's lists with the builder's: the
+mailable's addresses come first, and an address whose email is already in
+the list, ignoring case, is skipped. The merge runs before
+[`Mail::always_to`](#global-defaults-always_from-always_reply_to-always_to-always_return_path)
+applies, so the always-to address still replaces every recipient. A queued
+mail carries the merged lists, and the worker adds nothing to them.
+
+`Mail::send`, `Mail::queue`, `Mail::later`, `Mail::on_queue`, and
+`Mail::queue_on` take the mailable alone, as Laravel's `Mail::onQueue` and
+`queueOn` do; `queue_on` is the same as `on_queue`. Each one refuses a
+mailable whose `to`, `cc`, and `bcc` are all empty with an error that names
+it, before anything is sent or pushed. A reply-to address is not a
+recipient, so it does not count.
+
+#### Why Suprnova diverges
+
+Laravel finds a mailable without recipients when the mailer hands the
+message to the transport, and a queued one fails on the worker. Suprnova
+refuses it when you call `Mail::send` or `Mail::queue`, so the caller gets
+the error and no job is queued that can never be sent. Laravel's
+`setAddress` keeps the last of two equal addresses; Suprnova keeps the
+first, so the mailable's own entry wins.
+
 Every transport writes an address the same way. The display name is quoted whenever it holds a comma, a quote, an `@`, angle brackets, `=?`, or any non-ASCII character, so a name such as `Doe, Jane`, or a name a user typed into their profile, stays one recipient on every provider. A line break in a display name becomes one space, and whitespace around an email is trimmed. The email itself must be exactly one plain address. A list (`a@example.com, b@example.com`), a `Name <email>` form, a quoted local part (`"a b"@example.com`), and a domain literal (`user@[127.0.0.1]`) are refused, and so is a display name with any other control character. See [What a message may contain](#what-a-message-may-contain).
 
 ## Attachments
@@ -323,7 +376,28 @@ let attachment = Attachment::new(
 );
 ```
 
-Attachments ride through the `Mailable::attachments` method. All five HTTP providers handle them - Postmark/SendGrid/Resend over JSON (base64-encoded), SES via Raw MIME (since `Content.Simple` does not support attachments), and Mailgun via `multipart/form-data` (the form-encoded path is used when there are no attachments).
+Attachments ride through the `Mailable::attachments` method, or the builder's `attach` and `attach_data`. All five HTTP providers handle them - Postmark/SendGrid/Resend over JSON (base64-encoded), SES via Raw MIME (since `Content.Simple` does not support attachments), and Mailgun via `multipart/form-data` (the form-encoded path is used when there are no attachments).
+
+```rust
+Mail::to("alice@example.org")
+    .attach(Attachment::new("invoice.pdf", invoice_bytes, "application/pdf"))
+    .attach_data(csv_bytes, "report.csv", "text/csv")
+    .send(OrderShipped { /* ... */ })
+    .await?;
+```
+
+A message carries one attachment for each distinct name and bytes, as
+Laravel's `attachData` keeps one per name and data. When the mailable's
+`attachments()` and the builder attach the same name and bytes, or the
+builder attaches them twice, the first is kept and the later one dropped,
+on the send path and on the queued path alike. Two attachments with one
+name and different bytes are both sent.
+
+`Attachment::is_equivalent(&other)` answers whether two attachments have
+the same name, bytes, and content type, as Laravel's
+`Attachment::isEquivalent` does, and
+`Attachment::is_equivalent_with(&other, name, content_type)` compares them
+with the given name and content type in place of the other's.
 
 ## Queueing
 
@@ -358,6 +432,22 @@ Mail::to("alice@example.org")
 
 The same empty-body guard runs on the queue path, so a misconfigured Mailable is rejected at push-time before any envelope is created.
 
+A mailable can declare its own delay, as Laravel's `#[Delay]` attribute
+does. `Mail::queue` and `MailBuilder::queue` apply it, and an explicit
+`later` delay wins over it:
+
+```rust
+impl Mailable for WeeklyDigest {
+    // ...
+    fn delay(&self) -> Option<Duration> { Some(Duration::from_secs(3600)) }
+}
+
+// Available to a worker an hour from now.
+Mail::to("alice@example.org").queue(WeeklyDigest::new()).await?;
+// Available in 10 seconds: the explicit delay wins.
+Mail::to("alice@example.org").later(Duration::from_secs(10), WeeklyDigest::new()).await?;
+```
+
 ### Queued mail inside a transaction
 
 A mail queued inside a `DB::transaction` races that transaction. A worker can pop the job before the commit and render mail about a row the transaction has not committed, or about a row that a rollback then removes. Return `true` from `Mailable::after_commit` for mail about rows the transaction writes:
@@ -384,7 +474,7 @@ DB::transaction(|_tx| {
 
 Inside a transaction, `Mail::queue` and `Mail::later` then push at the commit, and a rollback discards the push. Outside a transaction they push at once. `after_commit` takes `&self` for the reason `queue` does: every queued mailable rides one job type, `SendMailJob`, so the job's own `Job::after_commit` cannot answer for one mailable.
 
-A mailable that returns `false` defers to the process-wide `QUEUE_AFTER_COMMIT` setting, which makes every push wait for the commit. See [After-commit dispatch](queues.md#after-commit-dispatch).
+A mailable that returns `false` makes no choice: the queue connection's own after-commit setting decides, then the process-wide `QUEUE_AFTER_COMMIT`. See [Which setting decides](queues.md#which-setting-decides).
 
 ## Telemetry
 
@@ -684,11 +774,17 @@ fn audit_outgoing(m: &suprnova::mail::OutgoingMessage) {
     if m.has_metadata("order_id") { /* ... */ }
     if m.has_subject("Welcome") { /* ... */ }
     if m.has_attachment("invoice.pdf") { /* ... */ }
+    if m.has_attached_data(b"id,total", "report.csv", "text/csv") { /* ... */ }
     if m.has_header("X-Source", "promo-feed") { /* ... */ }
 }
 ```
 
 Recipient checks are case-insensitive on email; metadata, tag, subject, and attachment-filename checks are exact.
+
+`has_attachment(name)` matches the name only, so it passes for any bytes
+under that name. To check the file itself, use
+`has_equivalent_attachment(&attachment)`, which compares the name, bytes,
+and content type, or `has_attached_data(bytes, name, content_type)`.
 
 ## Test Fake: Expanded Surface
 
@@ -745,6 +841,9 @@ Additional helpers:
 | `fake.assert_queued_with(name, fn)` | At least one queued of name matching predicate |
 | `fake.assert_queued_to(email)` | At least one queued to recipient |
 | `fake.assert_not_queued(name)` | None queued of name |
+| `fake.has_sent(name)` | Whether a mailable of that name was sent; a queued one does not count |
+| `fake.has_sent_mailable::<M>()` | `has_sent` for the mailable type `M` |
+| `fake.has_queued(name)` | Whether a mailable of that name was queued |
 
 `QueuedSnapshot::decode::<M>()` deserializes the payload back into the concrete `M`, so type-checked predicates work without bespoke decode boilerplate.
 
@@ -794,7 +893,7 @@ The same fluent surface applies regardless of which entry point you start with.
 ## Reference
 
 - Trait: `suprnova::mail::Mailable`
-- Facade: `suprnova::mail::Mail`
+- Facade: `suprnova::mail::Mail` (`to`, `cc`, `bcc`, `send`, `queue`, `later`, `on_queue`, `queue_on`, `raw`, `html`, `fake`)
 - Bootstrap: `suprnova::mail::boot::bootstrap_from_env()`
 - Transports: `LogMailTransport`, `InMemoryMailTransport`, `FileMailTransport`, `SmtpMailTransport`, `PostmarkMailTransport`, `SesMailTransport`, `SendGridMailTransport`, `MailgunMailTransport`, `ResendMailTransport`
 - Queue job: `suprnova::mail::SendMailJob`

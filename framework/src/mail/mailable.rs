@@ -73,6 +73,38 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// The mailable's own `to` recipients. Default empty. Mirrors the
+    /// `$to` a Laravel mailable sets for itself.
+    ///
+    /// Sending or queueing adds these to the builder's `to` list, the
+    /// mailable's first and an address already present skipped, before the
+    /// `Mail::always_*` defaults apply. A mailable that names its own
+    /// recipients can be sent alone with [`Mail::send`](crate::mail::Mail::send)
+    /// or queued with [`Mail::queue`](crate::mail::Mail::queue).
+    fn to(&self) -> Vec<Address> {
+        Vec::new()
+    }
+
+    /// The mailable's own `cc` recipients, merged as [`Mailable::to`] is.
+    /// Default empty.
+    fn cc(&self) -> Vec<Address> {
+        Vec::new()
+    }
+
+    /// The mailable's own `bcc` recipients, merged as [`Mailable::to`] is,
+    /// for a copy every send of this mailable carries (an audit inbox, for
+    /// example). Default empty. Mirrors Laravel's `Mailable::bcc`.
+    fn bcc(&self) -> Vec<Address> {
+        Vec::new()
+    }
+
+    /// The mailable's own reply-to addresses, merged as [`Mailable::to`]
+    /// is. Default empty. A reply-to address is not a recipient: a mailable
+    /// with only these has no one to send to.
+    fn reply_to(&self) -> Vec<Address> {
+        Vec::new()
+    }
+
     /// Attachments to include with every dispatch. Default empty.
     fn attachments(&self) -> Vec<Attachment> {
         Vec::new()
@@ -143,6 +175,18 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// for one mailable.
     fn after_commit(&self) -> bool {
         false
+    }
+
+    /// How long a queued send of this mailable waits before a worker may
+    /// take it. Default `None`. Mirrors Laravel's `#[Delay]` attribute on
+    /// a mailable.
+    ///
+    /// [`MailBuilder::queue`](crate::mail::MailBuilder::queue) and
+    /// [`Mail::queue`](crate::mail::Mail::queue) apply it; an explicit
+    /// `later(delay, ...)` wins over it. A direct send ignores it. `&self`,
+    /// as [`Self::queue`] is, so the delay can follow the mailable's data.
+    fn delay(&self) -> Option<std::time::Duration> {
+        None
     }
 
     /// Render the subject. When `subject_template_source` returns `Some`,

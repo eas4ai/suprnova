@@ -582,6 +582,12 @@ handler already has to tolerate redelivery, so this needs no extra handling -
 but the log is there because a burst of them means the cache backing your
 dedupe lock is struggling.
 
+A `QueuedListener` whose job declares `unique_id` pushes through
+`push_unique` too, and `QueuedListener::delay` and `delay_until` delay the
+listener's job ahead of its own `Job::delay`. See
+[Unique queued listeners](events.md#unique-queued-listeners) and
+[Delaying a queued listener](events.md#delaying-a-queued-listener).
+
 ### Unique until processing
 
 A uniqueness lock normally lasts the whole `unique_for` window, even after the
@@ -930,9 +936,9 @@ including a refused `COMMIT`. The one bound on that guarantee is the TTL
 itself: a transaction that stays open longer than `unique_for` can have its
 lock expire and be re-taken by another dispatch mid-flight, so give
 `unique_for` room above your longest transaction if the dedupe matters. The
-`push_unique*` family takes no `EnvelopeOverrides`, so `Job::after_commit()` and
-`QUEUE_AFTER_COMMIT` are the only things that decide whether a unique push
-defers - there is no per-push override for it.
+`push_unique*` family takes no `EnvelopeOverrides`, so the
+[order below](#which-setting-decides) starts at the job's own choice -
+there is no per-push override for it.
 
 Batches and chains do not defer: `Queue::batch()` and `Queue::chain()` build
 and push their envelopes directly. Wrap the `.dispatch()` call so it runs
@@ -947,18 +953,53 @@ for one message. Instead `Mailable::after_commit(&self)` and
 returns `true`, `Mail::queue`, `Mail::later` and `Notify::queue` inside
 `DB::transaction` push at the commit, and a rollback discards the push.
 Outside a transaction they push at once. A message that returns `false`
-keeps the default, so the per-push and process-wide settings below still
-apply to it.
+makes no choice, so the connection's setting and `QUEUE_AFTER_COMMIT`
+below still apply to it.
 
-To defer every job push, queued mail and queued notification in the process,
-whatever the job or the message declares, set `QUEUE_AFTER_COMMIT=true` (`1`
-works too). Batches and chains still push at once. Suprnova reads the
-variable at each push. It is the `after_commit` option of a Laravel queue
-connection.
-`Job::after_commit()` answers `false` both for a job that never chose and
-for one that chose `false`, so a job cannot turn the process-wide setting
-off. One push can go ahead of the commit with `EnvelopeOverrides {
-after_commit: Some(false), .. }`.
+#### Which setting decides
+
+A push inside a transaction waits for the commit by the first of these
+that decides, in this order:
+
+1. The push's own `EnvelopeOverrides::after_commit`.
+2. The job's `Job::after_commit_choice()`: `Some(true)`, `Some(false)`, or
+   `None` for no choice. It defaults to `Some(true)` when
+   `Job::after_commit()` is `true` and `None` otherwise.
+3. The setting of the connection the push resolves to,
+   `Queue::connection_after_commit(connection)`.
+4. `QUEUE_AFTER_COMMIT`. When it is unset too, the push does not wait.
+
+A connection takes its setting from `QUEUE_<CONNECTION>_AFTER_COMMIT`,
+the connection name upper-cased with every character other than a letter
+or digit written as `_`, or in code from
+`Queue::set_connection_after_commit(connection, on)`, which wins over the
+variable. This is the `after_commit` option of a Laravel queue
+connection. `true` or `1` waits, `false` or `0` does not, and any other
+value is ignored with a warning. Suprnova reads the variables at each push.
+
+```rust
+use suprnova::{FrameworkError, Job, Queue, async_trait};
+
+// Every push to the `audit` connection inside a transaction waits for the
+// commit. QUEUE_AUDIT_AFTER_COMMIT=true does the same from the environment.
+Queue::set_connection_after_commit("audit", true);
+
+// A job that must reach a worker before the commit, whatever its
+// connection or QUEUE_AFTER_COMMIT say.
+#[async_trait]
+impl Job for ReleaseSeatHold {
+    fn job_name() -> &'static str { "ReleaseSeatHold" }
+    fn after_commit_choice() -> Option<bool> { Some(false) }
+    async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+}
+```
+
+To defer every job push, queued mail and queued notification in the
+process that nothing closer decides for, set `QUEUE_AFTER_COMMIT=true`
+(`1` works too). Batches and chains still push at once. A job that says
+`Some(false)` is pushed at once even then, and so is a push to a
+connection whose own setting is `false`. `push_unique` and `bulk` follow
+the same order, from step 2.
 
 Under `Queue::fake()` a push is recorded immediately, deferral and all, so a
 test can assert on it without committing anything. This matches Laravel's
@@ -981,12 +1022,12 @@ which defers to `tx.commit()` and is discarded by a rollback or by dropping
 the handle uncommitted. See
 [After-commit callbacks](database.md#after-commit-callbacks).
 
-Laravel also reads a connection-level `after_commit` config key as the last
-fallback in its precedence chain. Suprnova reads one process-wide switch,
-`QUEUE_AFTER_COMMIT`, in that place: the order is the per-push override, then
-the job's own `Job::after_commit()` or the switch. Queue connections here do
-not carry their own dispatch policy, so the switch applies to every
-connection.
+Laravel has no process-wide switch: each connection's `after_commit` is the
+last step of its order. Suprnova keeps `QUEUE_AFTER_COMMIT` as a step after
+the connection's own setting, for every connection that has none. A job
+says "no choice" with `after_commit_choice()` returning `None` where Laravel
+leaves `$afterCommit` unset, since `Job::after_commit()` returns a plain
+`bool`.
 
 ### Raw pushes
 

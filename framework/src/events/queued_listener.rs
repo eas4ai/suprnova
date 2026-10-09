@@ -49,14 +49,36 @@ use super::{Event as EventTrait, Listener};
 use crate::FrameworkError;
 use crate::queue::{Job, Queue};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
-/// A [`Listener`] that turns event `E` into durable job `J` and enqueues it via
-/// [`Queue::push`]. See the module docs for when to use this versus an
-/// in-process queued listener.
+/// Computes the moment a listener's job becomes available from the event.
+type DelayUntilFn<E> = Arc<dyn Fn(&E) -> DateTime<Utc> + Send + Sync>;
+
+/// The delay a [`QueuedListener`] registration gives its job.
+enum ListenerDelay<E> {
+    /// This long after the event is handled.
+    For(Duration),
+    /// At the moment the closure computes from the event.
+    Until(DelayUntilFn<E>),
+}
+
+/// A [`Listener`] that turns event `E` into durable job `J` and enqueues it.
+/// See the module docs for when to use this versus an in-process queued
+/// listener.
+///
+/// A job that declares [`Job::unique_id`] is pushed with
+/// [`Queue::push_unique`], so the unique lock is taken before the job is
+/// queued, as Laravel's dispatcher takes it for a unique listener: a second
+/// event while the lock is held pushes nothing and dispatches
+/// [`UniqueJobSkipped`](crate::queue::events::UniqueJobSkipped), and a job
+/// that asks [`Job::unique_until_processing`] releases the lock when a
+/// worker starts it. Any other job is pushed with [`Queue::push`].
 pub struct QueuedListener<E, J> {
     build: Arc<dyn Fn(&E) -> J + Send + Sync>,
+    delay: Option<ListenerDelay<E>>,
     _marker: PhantomData<fn() -> (E, J)>,
 }
 
@@ -69,7 +91,48 @@ where
     pub fn new(build: impl Fn(&E) -> J + Send + Sync + 'static) -> Self {
         Self {
             build: Arc::new(build),
+            delay: None,
             _marker: PhantomData,
+        }
+    }
+
+    /// Make each job available `delay` after the event is handled. Wins
+    /// over the job's own [`Job::delay`]. Mirrors the `delay` of Laravel's
+    /// queued closure and the `$delay` of a queued listener.
+    ///
+    /// Replaces an earlier [`QueuedListener::delay_until`].
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(ListenerDelay::For(delay));
+        self
+    }
+
+    /// Make each job available at the moment `until` computes from the
+    /// event. Wins over the job's own [`Job::delay`].
+    ///
+    /// A closure over the event, not a date, because a date fixed when the
+    /// listener is registered is in the past for every event a
+    /// long-running process handles later. Laravel's queued closure takes a
+    /// date for the same purpose. A moment already past makes the job
+    /// available at once.
+    ///
+    /// Replaces an earlier [`QueuedListener::delay`].
+    pub fn delay_until(
+        mut self,
+        until: impl Fn(&E) -> DateTime<Utc> + Send + Sync + 'static,
+    ) -> Self {
+        self.delay = Some(ListenerDelay::Until(Arc::new(until)));
+        self
+    }
+
+    /// The moment the job for `event` becomes available, when the
+    /// registration gives one.
+    fn available_at(&self, event: &E) -> Result<Option<DateTime<Utc>>, FrameworkError> {
+        match &self.delay {
+            None => Ok(None),
+            Some(ListenerDelay::For(delay)) => {
+                crate::queue::driver::available_after(*delay).map(Some)
+            }
+            Some(ListenerDelay::Until(until)) => Ok(Some(until(event))),
         }
     }
 }
@@ -80,9 +143,24 @@ where
     E: EventTrait,
     J: Job,
 {
+    /// Build the job and push it. A duplicate of a unique job answers
+    /// `Ok(())`: the event was handled, and the job already waiting does
+    /// the work.
     async fn handle(&self, event: &E) -> Result<(), FrameworkError> {
         let job = (self.build)(event);
-        Queue::push(job).await
+        let available_at = self.available_at(event)?;
+        if job.unique_id().is_some() {
+            // `Ok(false)` is a duplicate, reported by `UniqueJobSkipped`.
+            match available_at {
+                Some(at) => Queue::push_unique_later(job, at).await?,
+                None => Queue::push_unique(job).await?,
+            };
+            return Ok(());
+        }
+        match available_at {
+            Some(at) => Queue::push_later(job, at).await,
+            None => Queue::push(job).await,
+        }
     }
 }
 

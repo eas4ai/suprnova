@@ -229,6 +229,60 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 The `QueuedListener` only needs the event to be a regular synchronous
 event - the durability lives in the queue, not the dispatcher.
 
+### Unique queued listeners
+
+When the listener's job declares `Job::unique_id`, the listener pushes it
+with `Queue::push_unique`, so the unique lock is taken before the job is
+queued, as Laravel's dispatcher takes it for a unique listener. A second
+event while the lock is held pushes nothing, dispatches
+`UniqueJobSkipped`, and the listener still answers `Ok(())`. A job that
+also asks `Job::unique_until_processing` releases its lock when a worker
+starts it, so the next event queues the job again:
+
+```rust
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "RebuildSearchIndex" }
+    fn unique_id(&self) -> Option<String> { Some("search-index".into()) }
+    fn unique_until_processing() -> bool { true }
+    async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+}
+
+EventFacade::listen::<ProductUpdated, _>(Arc::new(
+    QueuedListener::<ProductUpdated, RebuildSearchIndex>::new(|_| RebuildSearchIndex),
+))
+.await;
+```
+
+The unique lock lives in the cache, so bootstrap the cache first. A job
+that declares both `unique_id` and `debounce_for` is still refused with an
+error, as every push refuses it.
+
+### Delaying a queued listener
+
+`delay(duration)` makes each job available that long after the event,
+and `delay_until(f)` at the moment `f` computes from the event. Either one
+wins over the job's own `Job::delay`, and the later call replaces the
+earlier one:
+
+```rust
+use std::time::Duration;
+
+// Thirty seconds after each event.
+QueuedListener::<OrderPlaced, SendReceipt>::new(|e| SendReceipt { order_id: e.order_id })
+    .delay(Duration::from_secs(30));
+
+// At the time the event names.
+QueuedListener::<ReminderScheduled, SendReminder>::new(|e| SendReminder { id: e.id })
+    .delay_until(|e| e.send_at);
+```
+
+`delay_until` takes a closure over the event rather than a date, because a
+date fixed when you register the listener is in the past for every event a
+long-running process handles later. Laravel's queued closure takes a date,
+an interval, or seconds; the closure covers each of those. A moment
+already past makes the job available at once.
+
 ### Debouncing a queued listener
 
 A `QueuedListener` funnels through `Queue::push`, so a listener is debounced
@@ -495,6 +549,8 @@ note.
 | `Event::wildcards` (`User.*` patterns) | not shipped - use typed listeners, or the `Observer<M>` trait for per-model lifecycle hooks |
 | `Event::subscribe` (string subscriber) | use the typed `Subscriber` trait |
 | `DB::listen(function ($q) {…})` | `DB::listen(Arc::new(|q| {…}))` - same shape, takes `&QueryExecuted` |
+| `ShouldBeUnique` / `ShouldBeUniqueUntilProcessing` on a queued listener | `QueuedListener` whose job declares `Job::unique_id` (and `Job::unique_until_processing`) |
+| `QueuedClosure::delay($delay)`, a listener's `$delay` | `QueuedListener::delay(duration)`, `QueuedListener::delay_until(\|e\| ...)` |
 
 ### Why Suprnova diverges
 
@@ -522,7 +578,7 @@ hidden global state to leak.
 | `Event` trait, `Listener<E>`, `Subscriber` | `framework/src/events/mod.rs` |
 | `EventDispatcher`, `EventFacade` (facade struct) | `framework/src/events/dispatcher.rs` |
 | `ErrorOccurred` | `framework/src/events/builtins.rs` |
-| `QueuedListener<E, J>` | `framework/src/events/queued_listener.rs` |
+| `QueuedListener<E, J>`, `DebouncedListener<E, J>` | `framework/src/events/queued_listener.rs` |
 | `assert_dispatched*`, `EventFakeGuard`, `muted` | `framework/src/events/testing.rs` |
 | Built-in event payloads | `framework/src/{database,auth,auth_flows,mail,notifications,queue,features}/events.rs` |
 | Per-model lifecycle events | macro-generated into each model's `events::` submodule |

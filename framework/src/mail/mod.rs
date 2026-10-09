@@ -198,6 +198,76 @@ impl Mail {
         MailBuilder::default().bcc(addr)
     }
 
+    /// Send `mailable` to its own recipients: its [`Mailable::to`],
+    /// [`Mailable::cc`] and [`Mailable::bcc`]. Mirrors Laravel's
+    /// `Mail::send($mailable)` for a mailable that sets its own `to`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, before anything is sent, a mailable whose `to`, `cc` and
+    /// `bcc` are all empty: there is no one to send it to. Otherwise the
+    /// errors of [`MailBuilder::send`].
+    pub async fn send<M: Mailable>(mailable: M) -> Result<(), FrameworkError> {
+        require_own_recipients(&mailable, "Mail::send")?;
+        MailBuilder::default().send(mailable).await
+    }
+
+    /// Queue `mailable` to its own recipients, as [`MailBuilder::queue`]
+    /// queues it. Mirrors Laravel's `Mail::queue($mailable)`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, before anything is pushed, a mailable with no recipients of
+    /// its own (see [`Mail::send`]). Otherwise the errors of
+    /// [`MailBuilder::queue`].
+    pub async fn queue<M: Mailable>(mailable: M) -> Result<(), FrameworkError> {
+        require_own_recipients(&mailable, "Mail::queue")?;
+        MailBuilder::default().queue(mailable).await
+    }
+
+    /// Queue `mailable` to its own recipients after `delay`, as
+    /// [`MailBuilder::later`] does. Mirrors Laravel's
+    /// `Mail::later($delay, $mailable)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Mail::queue`].
+    pub async fn later<M: Mailable>(
+        delay: std::time::Duration,
+        mailable: M,
+    ) -> Result<(), FrameworkError> {
+        require_own_recipients(&mailable, "Mail::later")?;
+        MailBuilder::default().later(delay, mailable).await
+    }
+
+    /// Queue `mailable` to its own recipients on `queue`. Mirrors Laravel's
+    /// `Mail::onQueue($queue, $mailable)`; the queue outranks
+    /// [`Mailable::queue`], as [`MailBuilder::on_queue`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Mail::queue`].
+    pub async fn on_queue<M: Mailable>(
+        queue: impl Into<String>,
+        mailable: M,
+    ) -> Result<(), FrameworkError> {
+        require_own_recipients(&mailable, "Mail::on_queue")?;
+        MailBuilder::default().on_queue(queue).queue(mailable).await
+    }
+
+    /// The same as [`Mail::on_queue`]. Laravel keeps `queueOn` beside
+    /// `onQueue` as an older spelling, and code ported from it uses both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Mail::queue`].
+    pub async fn queue_on<M: Mailable>(
+        queue: impl Into<String>,
+        mailable: M,
+    ) -> Result<(), FrameworkError> {
+        Self::on_queue(queue, mailable).await
+    }
+
     /// Send a one-off raw-text message without a `Mailable`. Mirrors
     /// Laravel's `Mail::raw($text, $callback)` where the callback
     /// configures the recipient list.
@@ -453,9 +523,29 @@ impl MailBuilder {
     }
     /// Attach a file directly on the builder (in addition to anything
     /// the Mailable contributes via `attachments()`).
+    ///
+    /// A message carries one attachment for each distinct name and bytes:
+    /// an attachment whose name and bytes equal an earlier one's, from
+    /// this builder or from the mailable's `attachments()`, is dropped and
+    /// the earlier one kept, as Laravel's `attachData` keeps one per name
+    /// and data. Two attachments with one name and different bytes are
+    /// both sent.
     pub fn attach(mut self, attachment: Attachment) -> Self {
-        self.attachments.push(attachment);
+        address::push_attachment(&mut self.attachments, attachment);
         self
+    }
+
+    /// Attach `bytes` as a file named `name` of type `content_type`.
+    /// Mirrors Laravel's `Mailable::attachData($data, $name, $options)`;
+    /// the same name and bytes attached twice are sent once, as with
+    /// [`MailBuilder::attach`].
+    pub fn attach_data(
+        self,
+        bytes: impl Into<Vec<u8>>,
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+    ) -> Self {
+        self.attach(Attachment::new(name, bytes.into(), content_type))
     }
 
     // --- Laravel-side aliases - re-spelled to match the PHP names ---
@@ -467,14 +557,37 @@ impl MailBuilder {
     }
 
     /// Render `mailable` and dispatch to the bound transport.
+    ///
+    /// The mailable's own recipients ([`Mailable::to`], `cc`, `bcc` and
+    /// `reply_to`) come first in each list, then the builder's, an address
+    /// already present skipped. `Mail::always_to` applies after that merge,
+    /// so it still replaces every recipient.
     pub async fn send<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
         let transport = Mail::current_transport()?;
         // Apply Mail::always_* defaults so the queue/notification/raw
         // paths all converge on identical precedence rules.
-        let msg = Mail::apply_always_defaults(self.into_outgoing(&mailable)?);
+        let msg = Mail::apply_always_defaults(
+            self.with_mailable_recipients(&mailable)
+                .into_outgoing(&mailable)?,
+        );
         deliver(transport.as_ref(), &msg).await?;
         record_sent_name(M::mailable_name());
         Ok(())
+    }
+
+    /// Merge the mailable's own recipients into this builder's lists: the
+    /// mailable's first, then the builder's, an address whose email is
+    /// already in the list (ignoring case) skipped.
+    ///
+    /// `send`, `queue` and `later` call this once, at their start. The
+    /// queued job then carries the merged lists and the worker adds nothing,
+    /// so the mailable's recipients are never doubled.
+    fn with_mailable_recipients<M: Mailable>(mut self, mailable: &M) -> Self {
+        self.to = merge_recipients(mailable.to(), std::mem::take(&mut self.to));
+        self.cc = merge_recipients(mailable.cc(), std::mem::take(&mut self.cc));
+        self.bcc = merge_recipients(mailable.bcc(), std::mem::take(&mut self.bcc));
+        self.reply_to = merge_recipients(mailable.reply_to(), std::mem::take(&mut self.reply_to));
+        self
     }
 
     /// Render `mailable` and merge the builder's hints into the message a
@@ -518,9 +631,9 @@ impl MailBuilder {
         let priority = self.priority.or_else(|| mailable.priority());
         let return_path = self.return_path.or_else(|| mailable.return_path());
 
-        // Attachments: mailable's first, then builder-side appended.
-        let mut attachments = mailable.attachments();
-        attachments.extend(self.attachments);
+        // Attachments: mailable's first, then builder-side appended, one per
+        // name and bytes.
+        let attachments = address::merge_attachments(mailable.attachments(), self.attachments);
 
         // Subject: builder override wins over mailable's render_subject.
         let subject = match self.subject_override {
@@ -557,10 +670,19 @@ impl MailBuilder {
     /// `MailBuilder::send`'s empty-body guard - or if the message breaks a
     /// [`wire::check_message`] rule, so the caller gets the error instead of
     /// a worker failing the job on every attempt.
+    ///
+    /// A mailable whose [`Mailable::delay`] is `Some` is queued as
+    /// [`MailBuilder::later`] queues it, with that delay. The mailable's own
+    /// recipients are merged as [`MailBuilder::send`] merges them, once,
+    /// into the queued job.
     pub async fn queue<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
-        self.check_queueable(&mailable)?;
-        let overrides = self.envelope_overrides(&mailable);
-        let job = self.build_send_job(mailable, None)?;
+        if let Some(delay) = mailable.delay() {
+            return self.later(delay, mailable).await;
+        }
+        let this = self.with_mailable_recipients(&mailable);
+        this.check_queueable(&mailable)?;
+        let overrides = this.envelope_overrides(&mailable);
+        let job = this.build_send_job(mailable, None)?;
         // Mirror to MailFake's queued buffer when a fake guard is active
         // so `assert_queued` works even when the caller hasn't installed
         // `Queue::fake` separately.
@@ -582,15 +704,17 @@ impl MailBuilder {
 
     /// Queue the mailable for a delayed dispatch. Same guard, registry
     /// requirements, and queue/connection resolution as
-    /// [`MailBuilder::queue`].
+    /// [`MailBuilder::queue`]. `delay` wins over the mailable's own
+    /// [`Mailable::delay`].
     pub async fn later<M: Mailable>(
         self,
         delay: std::time::Duration,
         mailable: M,
     ) -> Result<(), FrameworkError> {
-        self.check_queueable(&mailable)?;
-        let overrides = self.envelope_overrides(&mailable);
-        let job = self.build_send_job(mailable, Some(delay))?;
+        let this = self.with_mailable_recipients(&mailable);
+        this.check_queueable(&mailable)?;
+        let overrides = this.envelope_overrides(&mailable);
+        let job = this.build_send_job(mailable, Some(delay))?;
         if crate::mail::queue_fake_active() {
             capture_queued(QueuedMailable {
                 mailable_name: job.mailable_name.clone(),
@@ -714,6 +838,27 @@ impl MailFake {
     /// Number of messages captured. Convenience over `captured().len()`.
     pub fn count(&self) -> usize {
         self.transport.captured().len()
+    }
+
+    /// Whether a mailable named `mailable_name` was sent while this fake was
+    /// active. A queued one does not count until a worker sends it. Mirrors
+    /// Laravel's `MailFake::hasSent`, which answers where `assert_sent`
+    /// panics.
+    pub fn has_sent(&self, mailable_name: &str) -> bool {
+        sent_name_count(mailable_name) > 0
+    }
+
+    /// [`MailFake::has_sent`] for the mailable type `M`, named by its
+    /// [`Mailable::mailable_name`], so a rename cannot leave the test asking
+    /// about the old name.
+    pub fn has_sent_mailable<M: Mailable>(&self) -> bool {
+        self.has_sent(M::mailable_name())
+    }
+
+    /// Whether a mailable named `mailable_name` was queued while this fake
+    /// was active. Mirrors Laravel's `MailFake::hasQueued`.
+    pub fn has_queued(&self, mailable_name: &str) -> bool {
+        !self.queued_named(mailable_name).is_empty()
     }
 
     /// All mailables queued via `Mail::queue` / `Mail::later` while the
@@ -1085,6 +1230,35 @@ impl QueuedSnapshot {
     pub fn has_to(&self, email: &str) -> bool {
         self.to.iter().any(|a| a.email.eq_ignore_ascii_case(email))
     }
+}
+
+/// `first`, then each address of `then`, skipping an address whose email is
+/// already in the list, ignoring case as [`OutgoingMessage::has_to`] does.
+fn merge_recipients(first: Vec<Address>, then: Vec<Address>) -> Vec<Address> {
+    let mut merged: Vec<Address> = Vec::with_capacity(first.len() + then.len());
+    for address in first.into_iter().chain(then) {
+        if !merged
+            .iter()
+            .any(|kept| kept.email.eq_ignore_ascii_case(&address.email))
+        {
+            merged.push(address);
+        }
+    }
+    merged
+}
+
+/// Refuse a mailable with no recipients of its own for the `Mail` shortcuts
+/// that send a mailable alone. `reply_to` is not a recipient, so a mailable
+/// with only a reply-to address is refused too.
+fn require_own_recipients<M: Mailable>(mailable: &M, caller: &str) -> Result<(), FrameworkError> {
+    if mailable.to().is_empty() && mailable.cc().is_empty() && mailable.bcc().is_empty() {
+        return Err(FrameworkError::internal(format!(
+            "{caller}: {} has no recipients - return them from Mailable::to, cc or bcc, \
+             or start from Mail::to(...)",
+            M::mailable_name()
+        )));
+    }
+    Ok(())
 }
 
 /// Whether a `Mail::fake()` guard is currently active. Checked by

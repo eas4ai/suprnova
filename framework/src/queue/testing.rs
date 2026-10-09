@@ -340,11 +340,14 @@ pub fn install_fake() -> QueueFakeGuard {
 }
 
 /// Remove every connection registered with
-/// [`Queue::register_connection`](crate::queue::Queue::register_connection).
+/// [`Queue::register_connection`](crate::queue::Queue::register_connection),
+/// and every setting made with
+/// [`Queue::set_connection_after_commit`](crate::queue::Queue::set_connection_after_commit).
 ///
 /// The connections are process-wide. A test that registers one calls this
-/// when it is done, so a connection it registered does not change what a
-/// connection name means for the next test.
+/// when it is done, so a connection it registered, or a setting it gave a
+/// connection, does not change what a connection name means for the next
+/// test.
 pub fn forget_connections() {
     crate::queue::connections::clear();
 }

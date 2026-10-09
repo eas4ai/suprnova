@@ -12,6 +12,7 @@ mod env_snapshot;
 pub mod event_integration;
 pub mod fanout;
 pub mod hub;
+pub mod laravel_infra_gaps;
 pub mod middleware;
 #[cfg(feature = "broadcasting-fanout")]
 #[path = "../support/own_process.rs"]

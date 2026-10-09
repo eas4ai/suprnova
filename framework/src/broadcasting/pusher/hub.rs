@@ -1,16 +1,14 @@
 //! The Pusher-protocol broadcast hub.
 
 use super::auth::PusherAuth;
+use super::client::PusherClient;
 use super::config::PusherConfig;
-use super::{encryption, names, signing};
 use crate::FrameworkError;
 use crate::broadcasting::hub::reject_reserved_channel;
 use crate::broadcasting::{BroadcastEnvelope, BroadcastHub, ChannelRegistry, InMemoryBroadcastHub};
 use async_trait::async_trait;
-use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 /// A [`BroadcastHub`] that publishes through a Pusher-protocol service:
@@ -18,8 +16,8 @@ use tokio::sync::broadcast;
 ///
 /// Every publish goes to an in-process [`InMemoryBroadcastHub`] first,
 /// so a `ws!` endpoint served by this process keeps receiving events,
-/// then to the service's REST API. The [`ChannelRegistry`] decides each
-/// channel's wire name (see
+/// then to the service's REST API through the hub's [`PusherClient`]. The
+/// [`ChannelRegistry`] decides each channel's wire name (see
 /// [`Channel::visibility`](crate::broadcasting::Channel::visibility)),
 /// the same registry the authorization endpoints use.
 ///
@@ -35,9 +33,7 @@ use tokio::sync::broadcast;
 /// # Ok(()) }
 /// ```
 pub struct PusherBroadcastHub {
-    config: Arc<PusherConfig>,
-    registry: Arc<ChannelRegistry>,
-    client: reqwest::Client,
+    client: PusherClient,
     local: InMemoryBroadcastHub,
 }
 
@@ -54,20 +50,8 @@ impl PusherBroadcastHub {
         config: PusherConfig,
         registry: Arc<ChannelRegistry>,
     ) -> Result<Self, FrameworkError> {
-        config.validate()?;
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "building the Pusher HTTP client failed: {}",
-                    e.without_url()
-                ))
-            })?;
         Ok(Self {
-            config: Arc::new(config),
-            registry,
-            client,
+            client: PusherClient::new(config, registry)?,
             local: InMemoryBroadcastHub::new(),
         })
     }
@@ -77,150 +61,21 @@ impl PusherBroadcastHub {
     /// and [`pusher_user_auth`](crate::broadcasting::pusher_user_auth).
     /// Bind it with `App::singleton(hub.auth())`.
     pub fn auth(&self) -> PusherAuth {
-        PusherAuth::new(Arc::clone(&self.config), Arc::clone(&self.registry))
+        PusherAuth::new(
+            Arc::clone(self.client.config()),
+            Arc::clone(self.client.registry()),
+        )
     }
 
-    /// POST one envelope to `/apps/{app_id}/events`. An envelope carries
-    /// one channel, so one envelope is one request.
-    async fn publish_remote(&self, envelope: &BroadcastEnvelope) -> Result<(), FrameworkError> {
-        let channel = names::wire_name(&self.registry, &envelope.channel)?;
-        let data = self.event_data(&channel, &envelope.data)?;
-        let body = serde_json::to_vec(&EventRequest {
-            name: &envelope.event,
-            channels: [&channel],
-            data: &data,
-            socket_id: envelope.except.as_deref(),
-        })
-        .map_err(|e| FrameworkError::from_external_with("serializing a Pusher event failed", e))?;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                FrameworkError::internal(
-                    "the system clock reads before 1970, so a Pusher request cannot be timestamped",
-                )
-            })?
-            .as_secs();
-        let secret = self.config.secret();
-        let signed = signing::events_query(
-            &self.config.key,
-            secret,
-            &self.config.app_id,
-            timestamp,
-            &body,
-        )?;
-        let url = format!(
-            "{}/apps/{}/events?{}",
-            self.config.base_url(),
-            self.config.app_id,
-            signed.to_query()
-        );
-        let scrub = [secret, signed.signature.as_str()];
-
-        let response = self
-            .client
-            .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!(
-                    "Pusher publish to '{channel}' failed: {}",
-                    describe_transport_error(e, &scrub)
-                ))
-            })?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let answer = match response.bytes().await {
-            Ok(bytes) => excerpt(&String::from_utf8_lossy(&bytes), &scrub),
-            Err(_) => "(the response body could not be read)".to_string(),
-        };
-        Err(FrameworkError::internal(format!(
-            "Pusher publish to '{channel}' failed with HTTP {}: {answer}",
-            status.as_u16()
-        )))
-    }
-
-    /// The `data` field for `channel`: the event data as a JSON string,
-    /// or that string encrypted when the wire name is
-    /// `private-encrypted-`.
+    /// The client this hub publishes through, with the hub's config and
+    /// registry. Mirrors Laravel's `PusherBroadcaster::getPusher`.
     ///
-    /// The wire name decides, not the channel's visibility, because
-    /// Pusher clients decide by the name too: whatever arrives on a
-    /// `private-encrypted-` channel is decrypted, so it must never be
-    /// plaintext.
-    fn event_data(&self, channel: &str, data: &Value) -> Result<String, FrameworkError> {
-        let serialize_failed =
-            |e| FrameworkError::from_external_with("serializing Pusher event data failed", e);
-        if !channel.starts_with(ENCRYPTED_PREFIX) {
-            return serde_json::to_string(data).map_err(serialize_failed);
-        }
-        let master_key = self.config.encryption_master_key().ok_or_else(|| {
-            FrameworkError::internal(format!(
-                "Pusher publish to encrypted channel '{channel}' refused: no encryption \
-                 master key is configured (set PUSHER_ENCRYPTION_MASTER_KEY_BASE64 or call \
-                 PusherConfig::encryption_master_key_base64). The event is never sent as \
-                 plaintext."
-            ))
-        })?;
-        let plaintext = serde_json::to_vec(data).map_err(serialize_failed)?;
-        encryption::encrypt(channel, master_key, &plaintext)
+    /// Use it to ask the service what the in-process hub cannot know, such
+    /// as the users on a presence channel across every process; clone it
+    /// to keep it beyond the hub's borrow.
+    pub fn client(&self) -> &PusherClient {
+        &self.client
     }
-}
-
-/// The wire-name prefix of an end-to-end encrypted channel.
-const ENCRYPTED_PREFIX: &str = "private-encrypted-";
-
-/// The JSON body of one `POST /apps/{app_id}/events` call. A struct
-/// rather than `json!` so the body has one fixed shape, and `socket_id`
-/// is left out entirely when no connection is excluded.
-#[derive(Serialize)]
-struct EventRequest<'a> {
-    name: &'a str,
-    channels: [&'a str; 1],
-    data: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    socket_id: Option<&'a str>,
-}
-
-/// At most this many bytes of an error answer go into the error, so a
-/// large error page cannot flood the log.
-const ERROR_EXCERPT_BYTES: usize = 200;
-
-/// At most [`ERROR_EXCERPT_BYTES`] of `text`, with each of `secrets`
-/// replaced by `"[redacted]"` first.
-///
-/// Scrubbing comes before truncating so a cut can never leave a whole
-/// secret behind. A server that echoes the request back (some error
-/// pages quote the string they expected to be signed) would otherwise
-/// put the signature into a log line.
-fn excerpt(text: &str, secrets: &[&str]) -> String {
-    let mut text = text.to_string();
-    for secret in secrets.iter().filter(|s| !s.is_empty()) {
-        text = text.replace(secret, "[redacted]");
-    }
-    let mut end = text.len().min(ERROR_EXCERPT_BYTES);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    text
-}
-
-/// Describe a transport error without the request URL, whose query
-/// carries the signature: reqwest's own message quotes the URL.
-fn describe_transport_error(error: reqwest::Error, secrets: &[&str]) -> String {
-    let error = error.without_url();
-    let mut text = error.to_string();
-    let mut source = std::error::Error::source(&error);
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    excerpt(&text, secrets)
 }
 
 #[async_trait]
@@ -233,7 +88,7 @@ impl BroadcastHub for PusherBroadcastHub {
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
         reject_reserved_channel(&envelope.channel)?;
         self.local.publish(envelope.clone()).await?;
-        self.publish_remote(&envelope).await
+        self.client.trigger(&envelope).await
     }
 
     fn subscriber_count(&self, channel: &str) -> usize {
@@ -253,6 +108,9 @@ impl BroadcastHub for PusherBroadcastHub {
         self.local.untrack_member(channel, member_id).await
     }
 
+    /// The members this process tracks. The service's own list, which
+    /// sees every connection, is
+    /// [`PusherClient::presence_users`] through [`PusherBroadcastHub::client`].
     async fn list_members(&self, channel: &str) -> Vec<Value> {
         self.local.list_members(channel).await
     }
@@ -343,24 +201,5 @@ mod tests {
             .map(|e| e.to_string())
             .expect("a zero timeout fails at boot");
         assert!(err.contains("timeout"), "{err}");
-    }
-
-    #[test]
-    fn pusher_error_excerpt_is_capped_and_scrubbed() {
-        let signature = "927d37a56401cbf139d27b5fbfea241b0b3edd53d143efb127106ba258b697c5";
-        let body = format!("bad signature {signature} for secret app-secret");
-        let text = excerpt(&body, &["app-secret", signature]);
-        assert!(!text.contains(signature), "{text}");
-        assert!(!text.contains("app-secret"), "{text}");
-        assert!(text.contains("[redacted]"), "{text}");
-
-        // Capped at 200 bytes, on a character boundary.
-        let long = "é".repeat(150); // 300 bytes
-        let capped = excerpt(&long, &[]);
-        assert!(capped.len() <= 200, "{} bytes", capped.len());
-        assert_eq!(capped, "é".repeat(100));
-
-        // An empty secret never redacts every gap between characters.
-        assert_eq!(excerpt("plain", &[""]), "plain");
     }
 }

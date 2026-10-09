@@ -20,7 +20,7 @@
 
 use crate::error::FrameworkError;
 use crate::lock;
-use crate::mail::address::{Address, Attachment};
+use crate::mail::address::{Address, Attachment, merge_attachments};
 use crate::mail::mailable::Mailable;
 use crate::mail::transport::OutgoingMessage;
 use std::collections::{BTreeMap, HashMap};
@@ -161,7 +161,8 @@ pub struct RenderOutgoingParams {
     /// Builder-side subject. When set, the mailable's subject is not
     /// rendered at all, which matches the send path.
     pub subject_override: Option<String>,
-    /// Builder-side attachments, appended after the mailable's own.
+    /// Builder-side attachments, appended after the mailable's own. One
+    /// with the name and bytes of an earlier attachment is dropped.
     pub extra_attachments: Vec<Attachment>,
 }
 
@@ -233,10 +234,9 @@ pub fn render_outgoing(
         None => any.render_subject()?,
     };
 
-    // Attachments: mailable's first, then builder-side appended.
-    // Mirrors the send path's order.
-    let mut attachments = any.attachments();
-    attachments.extend(extra_attachments);
+    // Attachments: mailable's first, then builder-side appended, one per
+    // name and bytes. Mirrors the send path's order and de-duplication.
+    let attachments = merge_attachments(any.attachments(), extra_attachments);
 
     Ok(OutgoingMessage {
         from,

@@ -127,9 +127,28 @@ impl OutgoingMessage {
     }
 
     /// True when an attachment with the given filename is present.
-    /// Filename match is exact (case-sensitive).
+    /// Filename match is exact (case-sensitive). The bytes and the content
+    /// type are not compared; [`Self::has_equivalent_attachment`] compares
+    /// them.
     pub fn has_attachment(&self, filename: &str) -> bool {
         self.attachments.iter().any(|a| a.filename == filename)
+    }
+
+    /// True when an attachment with the same name, bytes and content type
+    /// as `attachment` is present (see [`Attachment::is_equivalent`]).
+    /// Mirrors Laravel's `Mailable::hasAttachment` given an `Attachment`,
+    /// which passes only for the same file, where a name alone passes for
+    /// any bytes.
+    pub fn has_equivalent_attachment(&self, attachment: &Attachment) -> bool {
+        self.attachments.iter().any(|a| a.is_equivalent(attachment))
+    }
+
+    /// True when an attachment named `name` of type `content_type` holds
+    /// exactly `bytes`. Mirrors Laravel's `Mailable::hasAttachedData`.
+    pub fn has_attached_data(&self, bytes: &[u8], name: &str, content_type: &str) -> bool {
+        self.attachments
+            .iter()
+            .any(|a| a.filename == name && a.content_type == content_type && a.content == bytes)
     }
 
     /// True when `tag` is in the tag list (case-sensitive).
