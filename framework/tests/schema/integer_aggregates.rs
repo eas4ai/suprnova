@@ -66,7 +66,7 @@ async fn create_entries(conn: &DatabaseConnection) {
         t.unsigned_big_integer("hits");
         t.integer("small");
         t.double("ratio");
-        t.float("weight");
+        t.float("weight").precision(24);
         t.string("tag");
         t.decimal("price", 30, 2).nullable();
         t.small_integer("tiny").nullable();
