@@ -541,6 +541,79 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Control a worker's lifetime and attempts without changing existing worker tuning.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct WorkerControls {
+    /// Set the idle polling delay in seconds, overriding the millisecond poll interval.
+    #[arg(long)]
+    pub sleep: Option<u64>,
+    /// Override the attempt budget for this worker; zero permits unlimited retries.
+    #[arg(long)]
+    pub tries: Option<u32>,
+    /// Override the attempt timeout in seconds; zero removes the timeout.
+    #[arg(long)]
+    pub timeout: Option<u64>,
+    /// Exit after one reservation settles, or after the first empty poll.
+    #[arg(long)]
+    pub once: bool,
+    /// Exit when no job is available instead of waiting for a later push.
+    #[arg(long)]
+    pub stop_when_empty: bool,
+    /// Exit with status 12 after a job exceeds this resident-memory limit in MiB.
+    /// Zero disables the limit. A configured limit requires readable procfs.
+    #[arg(long)]
+    pub memory: Option<u64>,
+}
+
+/// Run with explicit controls and return the supervisor's exit status after settlement.
+pub async fn run_worker_with_controls(
+    driver: Arc<dyn QueueDriver>,
+    cfg: WorkerConfig,
+    controls: WorkerControls,
+    shutdown: CancellationToken,
+) -> Result<i32, FrameworkError> {
+    run_labelled_worker(
+        driver,
+        crate::queue::Queue::connection_name(),
+        cfg,
+        controls,
+        shutdown,
+    )
+    .await
+}
+
+/// Drain a named connection with controls and preserve status 12 for its supervisor.
+pub async fn run_worker_on_with_controls(
+    connection: &str,
+    cfg: WorkerConfig,
+    controls: WorkerControls,
+    shutdown: CancellationToken,
+) -> Result<i32, FrameworkError> {
+    let target = crate::queue::connections::target(connection)?;
+    run_labelled_worker(target.driver, target.label, cfg, controls, shutdown).await
+}
+
+/// Read the resident set, rather than virtual address space, for the memory stop.
+async fn resident_memory_exceeded(limit: u64) -> Result<bool, FrameworkError> {
+    if limit == 0 {
+        return Ok(false);
+    }
+    let status = tokio::fs::read_to_string("/proc/self/status")
+        .await
+        .map_err(|error| {
+            FrameworkError::internal(format!(
+                "queue worker cannot read resident memory from procfs: {error}"
+            ))
+        })?;
+    let rss_kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| FrameworkError::internal("queue worker procfs status has no valid VmRSS"))?;
+    Ok(rss_kib > limit.saturating_mul(1024))
+}
+
 /// One job's terminal state for the worker's settlement match.
 ///
 /// Carries the dispatch result by type, not by string-matching the error
@@ -715,9 +788,11 @@ pub async fn run_worker(
         driver,
         crate::queue::Queue::connection_name(),
         cfg,
+        WorkerControls::default(),
         shutdown,
     )
     .await
+    .map(|_| ())
 }
 
 /// [`run_worker`] for the queue connection `connection`: a connection
@@ -741,15 +816,27 @@ pub async fn run_worker_on(
     shutdown: CancellationToken,
 ) -> Result<(), FrameworkError> {
     let target = crate::queue::connections::target(connection)?;
-    run_labelled_worker(target.driver, target.label, cfg, shutdown).await
+    run_labelled_worker(
+        target.driver,
+        target.label,
+        cfg,
+        WorkerControls::default(),
+        shutdown,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn run_labelled_worker(
     driver: Arc<dyn QueueDriver>,
     connection: String,
-    cfg: WorkerConfig,
+    mut cfg: WorkerConfig,
+    controls: WorkerControls,
     shutdown: CancellationToken,
-) -> Result<(), FrameworkError> {
+) -> Result<i32, FrameworkError> {
+    if let Some(seconds) = controls.sleep {
+        cfg.poll_interval = Duration::from_secs(seconds);
+    }
     // Before the first pop: a store that cannot write turns the first dead
     // letter into a redelivery loop (see `handle_dead_letter`).
     if let Some(store) = crate::queue::failed::current() {
@@ -766,6 +853,7 @@ async fn run_labelled_worker(
     .await;
 
     let mut processed: u64 = 0;
+    let mut memory_checked_at = 0;
     // Last iteration's paused set, and whether an unfiltered worker was idle
     // on the global switch. Two states because there are two kinds of
     // transition: a named queue's, which carries a name, and an unfiltered
@@ -782,6 +870,20 @@ async fn run_labelled_worker(
     };
 
     let result = loop {
+        // Check after every settled reservation, before any lifetime cap can hide status 12.
+        if processed != memory_checked_at {
+            memory_checked_at = processed;
+            if let Some(limit) = controls.memory {
+                match resident_memory_exceeded(limit).await {
+                    Ok(true) => break ExitReason::MemoryLimit,
+                    Ok(false) => {}
+                    Err(error) => break ExitReason::Failed(error),
+                }
+            }
+        }
+        if controls.once && processed > 0 {
+            break ExitReason::Once;
+        }
         // Stop accepting new work the moment shutdown fires; the current
         // in-flight job (if any) has already been popped above and will run
         // to completion below before the next iteration sees the cancel.
@@ -883,6 +985,9 @@ async fn run_labelled_worker(
         let popped = match popped {
             Ok(opt) => opt,
             Err(e) => {
+                if controls.once {
+                    break ExitReason::Failed(e);
+                }
                 tracing::error!(error = %e, driver = driver.name(), "queue pop failed");
                 tokio::select! {
                     _ = shutdown.cancelled() => {
@@ -895,6 +1000,9 @@ async fn run_labelled_worker(
             }
         };
         let Some(res) = popped else {
+            if controls.once || controls.stop_when_empty {
+                break ExitReason::Empty;
+            }
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     exit_with("cancelled", processed, &connection);
@@ -906,6 +1014,12 @@ async fn run_labelled_worker(
         };
 
         let mut env = res.envelope;
+        if let Some(tries) = controls.tries {
+            env.max_tries = if tries == 0 { u32::MAX } else { tries };
+        }
+        if let Some(seconds) = controls.timeout {
+            env.timeout_secs = (seconds > 0).then_some(seconds);
+        }
         env.attempts += 1;
 
         // One context for this attempt, restored from what the pusher had.
@@ -982,12 +1096,6 @@ async fn run_labelled_worker(
             })
             .await;
             processed += 1;
-            if let Some(max) = cfg.max_jobs
-                && processed >= max
-            {
-                exit_with("max_jobs reached", processed, &connection);
-                break ExitReason::MaxJobs;
-            }
             continue;
         }
 
@@ -1032,12 +1140,6 @@ async fn run_labelled_worker(
             )
             .await;
             processed += 1;
-            if let Some(max) = cfg.max_jobs
-                && processed >= max
-            {
-                exit_with("max_jobs reached", processed, &connection);
-                break ExitReason::MaxJobs;
-            }
             continue;
         }
 
@@ -1289,8 +1391,11 @@ async fn run_labelled_worker(
         processed,
     })
     .await;
-    let _ = result;
-    Ok(())
+    match result {
+        ExitReason::MemoryLimit => Ok(12),
+        ExitReason::Failed(error) => Err(error),
+        _ => Ok(0),
+    }
 }
 
 #[derive(Debug)]
@@ -1298,6 +1403,10 @@ enum ExitReason {
     Cancelled,
     MaxJobs,
     Restart,
+    Once,
+    Empty,
+    MemoryLimit,
+    Failed(FrameworkError),
 }
 
 /// The process-global registries the settlement path consults, resolved once

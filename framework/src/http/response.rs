@@ -107,6 +107,11 @@ impl HttpResponse {
         }
     }
 
+    /// Send Markdown as written, so clients receive its source and UTF-8 charset.
+    pub fn markdown(body: impl Into<String>) -> Self {
+        Self::bytes(Bytes::from(body.into()), "text/markdown; charset=utf-8")
+    }
+
     /// Create a JSON response from a serde_json::Value
     pub fn json(body: serde_json::Value) -> Self {
         Self {

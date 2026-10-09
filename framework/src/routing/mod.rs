@@ -42,6 +42,7 @@ pub use macros::{
     __patch_impl,
     __post_impl,
     __put_impl,
+    __query_impl,
     __ws_impl,
     AnyRouteDefBuilder,
     FallbackDefBuilder,

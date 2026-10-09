@@ -3,8 +3,10 @@
 //! Handlers register one-per-command-type and dispatch is in-process.
 //! For async background dispatch, use the `Queue` facade instead.
 
+pub(crate) mod after_response;
 pub mod command;
 pub mod testing;
+pub use after_response::{AfterResponseIo, after_response_connection};
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -159,9 +161,36 @@ impl Bus {
     /// `Err(_)`.
     pub async fn dispatch<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError> {
         if testing::is_active() {
-            testing::record::<C>(&cmd)?;
+            testing::record::<C>(&cmd, testing::DispatchMode::Regular)?;
             return Ok(Dispatched::Captured);
         }
+        Self::execute(cmd).await
+    }
+
+    /// Run a command inline and capture it separately from ordinary dispatch under the fake.
+    pub async fn dispatch_sync<C: Command>(
+        cmd: C,
+    ) -> Result<Dispatched<C::Output>, FrameworkError> {
+        if testing::is_active() {
+            testing::record::<C>(&cmd, testing::DispatchMode::Sync)?;
+            return Ok(Dispatched::Captured);
+        }
+        Self::execute(cmd).await
+    }
+
+    /// Run a command after the current response's final bytes are written and flushed.
+    /// The fake records it immediately without requiring an HTTP request or running its handler.
+    /// Returns an error outside a request or without a response writer. A deferred handler's
+    /// errors are logged because the response has already been sent.
+    pub fn dispatch_after_response<C: Command>(cmd: C) -> Result<(), FrameworkError> {
+        if testing::is_active() {
+            return testing::record::<C>(&cmd, testing::DispatchMode::AfterResponse);
+        }
+        let future = Box::pin(async move { Self::execute(cmd).await.map(|_| ()) });
+        after_response::defer(Box::pin(crate::App::in_current_scope(future)))
+    }
+
+    async fn execute<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError> {
         let dispatcher = {
             let g = lock::read(&REGISTRY, "bus handler registry")?;
             let map = g
