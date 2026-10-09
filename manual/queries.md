@@ -383,13 +383,25 @@ subquery. On a model query, `oldest()` and `latest()` use your model's
 declared creation timestamp, including a renamed `created_at` option.
 You override it with `oldest_by(column)` or `latest_by(column)`.
 
-You use `in_random_order(None)` without a seed, or
-`in_random_order(42)` with a seed, on either builder. On MySQL, you get
-`RAND(seed)`. On Postgres, you set the connection seed in the same
-statement before ordering by `random()`. Repeating the seed on the same
-rows and connection repeats the order on those engines. On SQLite, you
-can pass the seed, but `RANDOM()` has no seed support and your order
-remains random. You still receive each matching row once.
+You call `in_random_order()` on either builder to order rows randomly.
+MySQL orders by `RAND()`, and Postgres and SQLite order by `RANDOM()`.
+
+When you need the same order again, for example to page through one
+shuffled list, you call `in_random_order_seeded(seed)` instead. On
+MySQL, you get `RAND(seed)`. On Postgres, you set the connection seed in
+the same statement before ordering by `random()`. Repeating the seed on
+the same rows and connection repeats the order on those engines. On
+SQLite, you can pass the seed, but `RANDOM()` has no seed support and
+your order remains random. You still receive each matching row once.
+
+```rust
+let sample = DB::table("posts").in_random_order().limit(5).get().await?;
+let shuffled = DB::table("posts")
+    .in_random_order_seeded(42)
+    .limit(20)
+    .get()
+    .await?;
+```
 
 ### Terminals
 

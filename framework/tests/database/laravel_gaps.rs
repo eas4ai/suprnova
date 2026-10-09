@@ -409,7 +409,7 @@ async fn table_ranges_max_and_oldest_match_model_shapes() {
 #[tokio::test]
 async fn table_random_seed_uses_engine_specific_sql_and_sqlite_returns_each_row() {
     let _fx = fixture().await;
-    let query = || DB::table("gap_rows").in_random_order(42);
+    let query = || DB::table("gap_rows").in_random_order_seeded(42);
     for backend in [DbBackend::MySql, DbBackend::Postgres] {
         let first = query().to_sql_for(backend).unwrap();
         assert_eq!(first, query().to_sql_for(backend).unwrap());
@@ -423,9 +423,9 @@ async fn table_random_seed_uses_engine_specific_sql_and_sqlite_returns_each_row(
             assert!(!first.0.contains("CROSS JOIN"));
         }
     }
-    for seed in [None, Some(42), Some(u64::MAX)] {
+    for seed in [42, u64::MAX] {
         let mut rows: Vec<_> = DB::table("gap_rows")
-            .in_random_order(seed)
+            .in_random_order_seeded(seed)
             .get()
             .await
             .unwrap()
@@ -438,12 +438,37 @@ async fn table_random_seed_uses_engine_specific_sql_and_sqlite_returns_each_row(
     assert!(
         DB::table("gap_rows")
             .filter("id", 99)
-            .in_random_order(0)
+            .in_random_order_seeded(0)
             .get()
             .await
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn table_random_order_without_a_seed_uses_plain_engine_sql_and_returns_each_row() {
+    let _fx = fixture().await;
+    let query = || DB::table("gap_rows").in_random_order();
+    for (backend, expected) in [
+        (DbBackend::MySql, "ORDER BY RAND()"),
+        (DbBackend::Postgres, "ORDER BY RANDOM()"),
+        (DbBackend::Sqlite, "ORDER BY RANDOM()"),
+    ] {
+        let (sql, values) = query().to_sql_for(backend).unwrap();
+        assert!(sql.contains(expected), "{backend:?}: {sql}");
+        assert!(!sql.contains("setseed"), "{backend:?}: {sql}");
+        assert!(values.is_empty());
+    }
+    let mut rows: Vec<_> = query()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get_int("id").unwrap())
+        .collect();
+    rows.sort_unstable();
+    assert_eq!(rows, vec![1, 2, 3]);
 }
 
 #[tokio::test]
