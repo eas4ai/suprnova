@@ -18,3 +18,6 @@ pub mod path_traversal;
 pub mod public_url;
 pub mod read_through;
 pub mod read_through_options;
+
+/// Verifies the added Laravel behaviours through the shared delta mechanism.
+pub mod laravel_delta;

@@ -139,7 +139,7 @@ async fn registry_purge_clears_every_disk_but_keeps_the_registry_alive() {
     Storage::register_memory("three");
     assert_eq!(Storage::disks().len(), 4); // 3 + the pre-registered "default"
 
-    Storage::purge();
+    Storage::purge_all();
     assert!(Storage::disks().is_empty());
 
     // The registry itself is still usable after purge - re-registration works.
@@ -150,7 +150,7 @@ async fn registry_purge_clears_every_disk_but_keeps_the_registry_alive() {
 #[tokio::test]
 async fn disks_listing_is_sorted() {
     let _guard = Storage::fake();
-    Storage::purge();
+    Storage::purge_all();
     Storage::register_memory("c");
     Storage::register_memory("a");
     Storage::register_memory("b");

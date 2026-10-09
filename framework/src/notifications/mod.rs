@@ -537,23 +537,11 @@ impl Notify {
         N: Notification,
         R: Notifiable + ?Sized,
     {
-        let channels = notification.channels();
-
         if testing::is_active() {
-            let data = notification.data();
-            for c in &channels {
-                if let Some(route) = recipient.route_for(c) {
-                    testing::record(testing::FakeRecord {
-                        notification: N::notification_name().to_string(),
-                        channel: (*c).to_string(),
-                        route,
-                        data: data.clone(),
-                    });
-                }
-            }
-            return Ok(());
+            return testing::record_notification(recipient, &notification);
         }
 
+        let channels = notification.channels();
         let payload = serde_json::to_value(&notification)
             .map_err(|e| FrameworkError::internal(format!("Notify::queue encode: {e}")))?;
         let name = N::notification_name().to_string();
@@ -616,18 +604,7 @@ impl Notify {
         R: Notifiable + ?Sized,
     {
         if testing::is_active() {
-            let data = notification.data();
-            for c in notification.channels() {
-                if let Some(route) = recipient.route_for(c) {
-                    testing::record(testing::FakeRecord {
-                        notification: N::notification_name().to_string(),
-                        channel: c.to_string(),
-                        route,
-                        data: data.clone(),
-                    });
-                }
-            }
-            return Ok(());
+            return testing::record_notification(recipient, notification);
         }
         let dispatcher = dispatcher_for_queue()?;
         dispatcher.notify(recipient, notification).await

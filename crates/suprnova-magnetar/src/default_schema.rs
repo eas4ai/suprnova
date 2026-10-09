@@ -1211,6 +1211,19 @@ pub mod sql_stores {
             Ok(deleted.rows_affected)
         }
 
+        async fn revoke_other_remember(
+            &self,
+            user_id: &str,
+            current_selector: Option<&str>,
+        ) -> Result<u64> {
+            let mut delete = remembers::Entity::delete_many()
+                .filter(remembers::Column::UserId.eq(user_id.to_owned()));
+            if let Some(selector) = current_selector {
+                delete = delete.filter(remembers::Column::Selector.ne(selector.to_owned()));
+            }
+            Ok(delete.exec(&self.0).await.map_err(db_error)?.rows_affected)
+        }
+
         async fn prune_expired_remember(&self, now: DateTime<Utc>) -> Result<u64> {
             let deleted = remembers::Entity::delete_many()
                 .filter(remembers::Column::ExpiresAt.lte(now))

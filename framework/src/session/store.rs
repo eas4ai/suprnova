@@ -933,6 +933,23 @@ pub trait SessionStore: Send + Sync {
         ))
     }
 
+    /// Destroy another browser's sessions without ending the current sign-in.
+    ///
+    /// Return each removed ID so Live revocation leaves the current session's
+    /// memberships intact. Custom stores fail before mutation until they
+    /// implement this operation; deleting and restoring the current row is
+    /// not a safe substitute.
+    async fn destroy_other_guard_sessions(
+        &self,
+        _guard: &str,
+        _user_id: &str,
+        _current_id: &str,
+    ) -> Result<DestroyedSessions, FrameworkError> {
+        Err(FrameworkError::internal(
+            "this session store cannot preserve the current session; implement SessionStore::destroy_other_guard_sessions",
+        ))
+    }
+
     /// Garbage collect expired sessions
     ///
     /// Returns the number of sessions cleaned up.

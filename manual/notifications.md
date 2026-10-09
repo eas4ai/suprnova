@@ -621,6 +621,26 @@ process-wide serialization mutex, so parallel tests cannot interleave
 captures; let the `_fake` guard drop at end-of-test to clear the
 recorder.
 
+You use methods on the returned guard to inspect concrete notification types:
+
+```rust,ignore
+let fake = Notify::fake();
+Notify::send(&user, &OrderShipped { tracking: "1Z42".into() }).await?;
+let sent = fake.sent::<OrderShipped>("alice@example.org", |n| n.tracking == "1Z42")?;
+fake.assert_sent_to::<OrderShipped>("alice@example.org", |n| n.tracking == "1Z42");
+fake.assert_not_sent_to::<OrderShipped>("bob@example.org");
+```
+
+You pass the recipient's per-channel route string. You match the concrete Rust
+type, even when two types share a notification name. Your closure reads the
+full recorded notification, including fields omitted from `data()`. You get
+one notification per send or queue call when several channels use the same
+route. You receive a `Result<Vec<N>, FrameworkError>` from `sent`; serialization
+or decoding failures propagate instead of dropping a record. Your assertions
+panic when no matching notification exists or an unwanted type was sent.
+You keep using the existing untyped free functions, such as
+`assert_sent_to(route, "Name")`, for per-channel records.
+
 Use `recorded_notifications()` for full custody of the captured data:
 
 ```rust

@@ -720,6 +720,44 @@ impl SessionStore for DatabaseSessionDriver {
         Ok(destroyed)
     }
 
+    async fn destroy_other_guard_sessions(
+        &self,
+        guard: &str,
+        user_id: &str,
+        current_id: &str,
+    ) -> Result<DestroyedSessions, FrameworkError> {
+        let db = DB::connection()?;
+        let query = Query::select()
+            .columns([SessionColumn::Id, SessionColumn::Payload])
+            .from(self.table())
+            .and_where(Expr::col(SessionColumn::Id).ne(current_id))
+            .to_owned();
+        let rows = db.inner().query_all(&query).await.map_err(database_error)?;
+        let mut destroyed = DestroyedSessions::default();
+        for row in rows {
+            let id: String = row.try_get("", "id").map_err(database_error)?;
+            let payload: String = row.try_get("", "payload").map_err(database_error)?;
+            let Some(payload) = decode_payload(&payload) else {
+                continue;
+            };
+            let default_user = guard == crate::auth::Auth::default_guard_name()
+                && payload.user_id.as_deref() == Some(user_id);
+            if default_user || guard_identity_in(&payload.data, guard) == Some(user_id) {
+                let count = db
+                    .inner()
+                    .execute(&self.delete_by_id(&id))
+                    .await
+                    .map_err(database_error)?
+                    .rows_affected();
+                if count > 0 {
+                    destroyed.count += count;
+                    destroyed.ids.push(id);
+                }
+            }
+        }
+        Ok(destroyed)
+    }
+
     async fn gc(&self) -> Result<u64, FrameworkError> {
         let db = DB::connection()?;
 

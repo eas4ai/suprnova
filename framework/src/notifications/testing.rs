@@ -12,8 +12,11 @@
 //! mutex for the lifetime of the returned guard, mirroring
 //! `Queue::fake()` / `Bus::fake()`.
 
+use super::{Notifiable, Notification};
+use crate::FrameworkError;
 use once_cell::sync::Lazy;
 use serde_json::Value;
+use std::any::TypeId;
 use std::sync::{Mutex, MutexGuard};
 
 /// One captured dispatch.
@@ -32,6 +35,14 @@ pub struct FakeRecord {
 #[derive(Default)]
 struct FakeStore {
     records: Vec<FakeRecord>,
+    typed: Vec<TypedRecord>,
+}
+
+#[derive(Clone)]
+struct TypedRecord {
+    notification_type: TypeId,
+    payload: Value,
+    routes: Vec<String>,
 }
 
 static FAKE_SERIAL: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -45,11 +56,36 @@ pub(crate) fn is_active() -> bool {
     lock_fake().is_some()
 }
 
-pub(crate) fn record(rec: FakeRecord) {
-    let mut g = lock_fake();
-    if let Some(store) = g.as_mut() {
-        store.records.push(rec);
+/// Retain the concrete notification once and keep the existing per-channel records.
+pub(crate) fn record_notification<N: Notification, R: Notifiable + ?Sized>(
+    recipient: &R,
+    notification: &N,
+) -> Result<(), FrameworkError> {
+    let payload = serde_json::to_value(notification)
+        .map_err(|error| FrameworkError::internal(format!("encode fake notification: {error}")))?;
+    let data = notification.data();
+    let records: Vec<_> = notification
+        .channels()
+        .into_iter()
+        .filter_map(|channel| {
+            recipient.route_for(channel).map(|route| FakeRecord {
+                notification: N::notification_name().to_owned(),
+                channel: channel.to_owned(),
+                route,
+                data: data.clone(),
+            })
+        })
+        .collect();
+    let routes = records.iter().map(|record| record.route.clone()).collect();
+    if let Some(store) = lock_fake().as_mut() {
+        store.typed.push(TypedRecord {
+            notification_type: TypeId::of::<N>(),
+            payload,
+            routes,
+        });
+        store.records.extend(records);
     }
+    Ok(())
 }
 
 /// Install the notify fake for the current test.
@@ -65,6 +101,67 @@ pub fn install_fake() -> NotifyFakeGuard {
 /// RAII guard returned by [`install_fake`]. Clears the fake on drop.
 pub struct NotifyFakeGuard {
     _serial: MutexGuard<'static, ()>,
+}
+
+impl NotifyFakeGuard {
+    /// Inspect full notifications of one type sent to a route, so your tests
+    /// can filter fields that the channel payload does not expose.
+    /// Each send or queue call appears once even when several channels use the route.
+    /// Serialization errors are returned rather than silently losing a record.
+    pub fn sent<N: Notification>(
+        &self,
+        route: &str,
+        predicate: impl Fn(&N) -> bool,
+    ) -> Result<Vec<N>, FrameworkError> {
+        let records = lock_fake()
+            .as_ref()
+            .ok_or_else(|| FrameworkError::internal("Notify::fake() must be active"))?
+            .typed
+            .iter()
+            .filter(|record| {
+                record.notification_type == TypeId::of::<N>()
+                    && record.routes.iter().any(|candidate| candidate == route)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // Release the mutex before deserialization or application callbacks.
+        let mut matches = Vec::new();
+        for record in records {
+            let notification: N = serde_json::from_value(record.payload).map_err(|error| {
+                FrameworkError::internal(format!("decode fake notification: {error}"))
+            })?;
+            if predicate(&notification) {
+                matches.push(notification);
+            }
+        }
+        Ok(matches)
+    }
+
+    /// Assert that a notification of this type reaches the route and matches
+    /// your predicate, while the untyped free functions remain available.
+    pub fn assert_sent_to<N: Notification>(&self, route: &str, predicate: impl Fn(&N) -> bool) {
+        let matches = self
+            .sent::<N>(route, predicate)
+            .expect("decode recorded notifications");
+        assert!(
+            !matches.is_empty(),
+            "expected at least one {} notification sent to {route}",
+            N::notification_name()
+        );
+    }
+
+    /// Assert that this concrete notification type never reaches the route,
+    /// so another type with the same stored name cannot satisfy the check.
+    pub fn assert_not_sent_to<N: Notification>(&self, route: &str) {
+        let matches = self
+            .sent::<N>(route, |_| true)
+            .expect("decode recorded notifications");
+        assert!(
+            matches.is_empty(),
+            "expected no {} notifications sent to {route}",
+            N::notification_name()
+        );
+    }
 }
 
 impl Drop for NotifyFakeGuard {

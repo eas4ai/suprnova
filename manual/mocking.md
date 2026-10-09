@@ -16,7 +16,7 @@ its fake in depth.
 | Surface         | Entry point                                       | Assertion style                       | Parallel safety                                    | Chapter                              |
 |-----------------|---------------------------------------------------|---------------------------------------|----------------------------------------------------|--------------------------------------|
 | Mail            | `Mail::fake()` → `MailFake` guard                 | methods on the guard                  | needs `#[serial]` - global transport, no serializer | [mail.md](mail.md)                   |
-| Notifications   | `Notify::fake()` → `NotifyFakeGuard`              | free functions in `notifications::testing` | guard holds process-wide serializer            | [notifications.md](notifications.md) |
+| Notifications   | `Notify::fake()` → `NotifyFakeGuard`              | typed guard methods and free functions in `notifications::testing` | guard holds process-wide serializer            | [notifications.md](notifications.md) |
 | Queue           | `Queue::fake()` → `QueueFakeGuard`                | free functions in `queue::testing`    | guard holds process-wide serializer                | [queues.md](queues.md)               |
 | Bus             | `Bus::fake()` → `BusFakeGuard`                    | free functions in `bus::testing`      | guard holds process-wide serializer                | [bus.md](bus.md)                     |
 | Events          | `EventFacade::fake()` → `EventFakeGuard`          | free functions in `events`            | guard holds process-wide serializer                | [events.md](events.md)               |
@@ -61,9 +61,9 @@ fake.assert_sent(|m| m.has_to("alice@example.org"));
 
 ### Guard plus free functions (Notify, Queue, Bus, Events)
 
-The guard is a do-nothing token whose only job is to keep the fake
-installed; the assertions live in a `testing` submodule next to the
-fake's internals. Import what you need:
+You keep the fake installed with its guard and import assertions from the
+`testing` submodule. For notifications, you also use typed methods on the
+guard. Import what you need:
 
 ```rust,ignore
 use suprnova::Queue;
@@ -259,6 +259,22 @@ recipients are keyed on the per-channel `route_for` value, so
 `assert_sent_to` takes the route string (an email address for `"mail"`,
 the id-as-string for `"database"`, …) - see [Notifications](notifications.md)
 for the routing model.
+
+You inspect typed notifications through the guard without importing an
+assertion function:
+
+```rust,ignore
+let fake = Notify::fake();
+ship_order(order_id).await?;
+let sent = fake.sent::<OrderShipped>("alice@example.org", |n| n.order_id == order_id)?;
+fake.assert_sent_to::<OrderShipped>("alice@example.org", |n| n.order_id == order_id);
+fake.assert_not_sent_to::<OrderShipped>("bob@example.org");
+```
+
+You filter the full notification by concrete Rust type and route. You receive
+one match per dispatch, even when multiple channels use that route. You keep
+the untyped `testing::assert_sent_to(route, "Name")` and its siblings for
+existing tests.
 
 ## Queue - `Queue::fake()`
 

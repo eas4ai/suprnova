@@ -173,6 +173,7 @@ pub use database::{
     RouteColumn, RouteParam, SchemaDump, StoredDateTime, Transaction, TransactionBeginning,
     TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource, WhereIn,
 };
+pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
     Error as MagnetarError, Result as MagnetarResult,
@@ -196,6 +197,7 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
+pub use magnetar_integration::engine::MagnetarPasswordAuthEngine;
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
@@ -287,8 +289,8 @@ pub use filesystem::AzBlobConfig;
 pub use filesystem::GcsConfig;
 #[cfg(feature = "filesystem")]
 pub use filesystem::{
-    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, ENV_S3_DISK, ReadThroughConfig, S3Config,
-    Storage, TemporaryUploadUrl, copy_between_disks,
+    ATOMIC_STAGING_DIR, ChecksumAlgorithm, DiskExt, DiskNames, DiskReference, ENV_S3_DISK,
+    ReadThroughConfig, S3Config, Storage, TemporaryUploadUrl, copy_between_disks,
 };
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,

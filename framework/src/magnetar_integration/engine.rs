@@ -798,6 +798,7 @@ pub struct MagnetarHostEngine<
     /// [`FrameworkTotpGate`].
     sign_in_gate: Arc<dyn FactorGate>,
     remember: RememberSignInService<SeaOrmStorage<S>>,
+    remember_store: Arc<dyn RememberStore>,
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
     password: Arc<P>,
@@ -856,7 +857,7 @@ where
         });
         let remember = RememberSignInService::new(
             Arc::new(RememberService::new(
-                remember_store,
+                Arc::clone(&remember_store),
                 chrono::Duration::days(30),
             )?),
             Arc::new(SeaOrmStorage::<S>::new(binding.database().clone())),
@@ -882,6 +883,7 @@ where
             factors,
             sign_in_gate,
             remember,
+            remember_store,
             encryptor,
             magic_links,
             password,
@@ -1428,6 +1430,23 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
             message: "exact remember credential revocation is unavailable".to_owned(),
         })
     }
+    /// Revoke other devices' remember credentials without clearing this browser.
+    ///
+    /// An older engine fails before mutation when a current selector must
+    /// survive, so logout cannot silently end the current sign-in.
+    async fn revoke_other_remember(
+        &self,
+        user_id: &str,
+        current_selector: Option<&str>,
+    ) -> Result<u64> {
+        if current_selector.is_none() {
+            return self.revoke_remember(user_id).await;
+        }
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "current remember credential preservation is unavailable".to_owned(),
+        })
+    }
     /// Load a host-mapped users user by its opaque application id.
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>>;
     /// Revoke one opaque session by its stable row identifier.
@@ -1852,6 +1871,16 @@ where
 
     async fn revoke_remember_selector(&self, user_id: &str, selector: &str) -> Result<bool> {
         MagnetarHostEngine::revoke_remember_selector(self, user_id, selector).await
+    }
+
+    async fn revoke_other_remember(
+        &self,
+        user_id: &str,
+        current_selector: Option<&str>,
+    ) -> Result<u64> {
+        self.remember_store
+            .revoke_other_remember(user_id, current_selector)
+            .await
     }
 
     async fn user_by_id(&self, user_id: &str) -> Result<Option<User>> {
