@@ -460,6 +460,7 @@ impl ValidationErrors {
     ///
     /// Render field messages in the request's locale. The first message
     /// summarises the failure, followed by the number of remaining messages.
+    /// The catalog renders the count suffix, with an English fallback.
     /// An empty bag uses the catalog's invalid-data message.
     pub fn to_json(&self) -> serde_json::Value {
         let errors: serde_json::Map<String, serde_json::Value> = self
@@ -481,8 +482,20 @@ impl ValidationErrors {
         let message = match messages.next() {
             Some(first) => match messages.count() {
                 0 => first.to_string(),
-                1 => format!("{first} (and 1 more error)"),
-                count => format!("{first} (and {count} more errors)"),
+                count => {
+                    let fallback = if count == 1 {
+                        "(and 1 more error)".to_string()
+                    } else {
+                        format!("(and {count} more errors)")
+                    };
+                    let suffix = self.render(
+                        "",
+                        &ValidationMessage::keyed("validation-summary-more")
+                            .arg("count", count)
+                            .fallback(fallback),
+                    );
+                    format!("{first} {suffix}")
+                }
             },
             None => self.render(
                 "",

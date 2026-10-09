@@ -7,6 +7,15 @@
 ### The remaining parameters mirror the rule's constructor arguments.
 
 validation-invalid-data = The given data was invalid.
+
+### The summary suffix takes $count, the number of remaining errors.
+
+validation-summary-more =
+    { $count ->
+        [one] (and { $count } more error)
+       *[other] (and { $count } more errors)
+    }
+
 validation-required = The { $field } field is required.
 validation-email = The { $field } field must be a valid email address.
 validation-min = The { $field } field must be at least { $min } characters.
