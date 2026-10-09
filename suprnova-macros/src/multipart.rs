@@ -90,6 +90,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let mut validator_arms = Vec::new();
     let mut validator_decls = Vec::new();
     let mut required_checks = Vec::new();
+    let mut precognitive_defaults = Vec::new();
+    let mut selection_decls = Vec::new();
     // The parse of each text field that holds one value, run once every
     // part is read, on the last part of its name.
     let mut text_takes = Vec::new();
@@ -230,6 +232,30 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
             FieldShape::FileScalar { .. } | FieldShape::TextScalar { .. }
         );
 
+        let selected_ident = quote::format_ident!("__selected_{}", ident);
+        selection_decls.push(quote! {
+            let #selected_ident = !__precognitive || req.should_validate(#input_name);
+        });
+        match &shape {
+            FieldShape::FileScalar { .. } => {
+                precognitive_defaults.push(quote! {
+                    if __precognitive && !#selected_ident && #ident.is_none() {
+                        #ident = ::core::option::Option::Some(::suprnova::UploadedFile::from_memory(
+                            ::core::default::Default::default(), None, None, None,
+                        ));
+                    }
+                });
+            }
+            FieldShape::TextScalar { parse, .. } => {
+                precognitive_defaults.push(quote! {
+                    if __precognitive && !#selected_ident && #ident.is_none() {
+                        #ident = ["", "0", "false"].into_iter().find_map(#parse);
+                    }
+                });
+            }
+            _ => {}
+        }
+
         match shape {
             FieldShape::FileScalar { validator } | FieldShape::FileOption { validator } => {
                 let v_ident = quote::format_ident!("__v_{}", ident);
@@ -245,8 +271,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                         // parser keeps no part of the name after it, so a
                         // later part is neither validated nor kept.
                         if #ident.is_none() && !#invalid_ident {
-                            match ::suprnova::http::upload::take_file(
-                                &#v_ident, __value, #field_name_str, __index, &mut __errors,
+                            match __take_file(
+                                &#v_ident, __value, #field_name_str, __index, &mut __errors, __precognitive,
                             )? {
                                 ::suprnova::http::upload::Taken::Value(__file) => {
                                     #ident = ::core::option::Option::Some(__file);
@@ -282,8 +308,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     #field_name_str => {
                         #next_index
                         if let ::suprnova::http::upload::Taken::Value(__file) =
-                            ::suprnova::http::upload::take_file(
-                                &#v_ident, __value, #field_name_str, __index, &mut __errors,
+                            __take_file(
+                                &#v_ident, __value, #field_name_str, __index, &mut __errors, __precognitive,
                             )?
                         {
                             #ident.push(__file);
@@ -427,6 +453,34 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Unauthorized);
                 }
 
+                let __precognitive = req.is_precognitive();
+                let __only = if __precognitive { req.validate_only() } else { None };
+                #(#selection_decls)*
+
+                // A marked request checks files after reading, like a FormRequest.
+                // This lets an unselected file fail without stopping selected fields.
+                fn __take_file<V: ::suprnova::http::upload::validators::UploadValidator>(
+                    validator: &V,
+                    value: ::suprnova::http::upload::MultipartValue,
+                    name: &str,
+                    index: usize,
+                    errors: &mut ::suprnova::ValidationErrors,
+                    precognitive: bool,
+                ) -> ::core::result::Result<::suprnova::http::upload::Taken<::suprnova::UploadedFile<V>>, ::suprnova::FrameworkError> {
+                    if precognitive {
+                        if let ::suprnova::http::upload::MultipartValue::File { sniff, size, .. } = &value {
+                            match validator.validate_chunk(sniff, *size) {
+                                ::core::result::Result::Err(::suprnova::FrameworkError::InvalidUpload(message)) => {
+                                    errors.add(::suprnova::http::upload::field_error_key(name, Some(index)), *message);
+                                    return ::core::result::Result::Ok(::suprnova::http::upload::Taken::Invalid);
+                                }
+                                result => result?,
+                            }
+                        }
+                    }
+                    ::suprnova::http::upload::take_file(validator, value, name, index, errors)
+                }
+
                 // Construct one validator instance per file field, ONCE.
                 // The non-`move` closure below and the post-parse field
                 // loop both borrow these via `&#v_<ident>`, so stateful
@@ -474,13 +528,21 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
                 #(#text_takes)*
 
+                #(#precognitive_defaults)*
                 #(#required_checks)*
+                if let ::core::option::Option::Some(__only) = &__only {
+                    __errors = __errors.retain_fields(__only);
+                }
 
                 // A field failed: answer with every field's errors. The
                 // values built so far drop here, removing their temp files.
                 if !__errors.is_empty() {
                     return ::core::result::Result::Err(
-                        ::suprnova::FrameworkError::validation_errors(__errors),
+                        if __precognitive {
+                            ::suprnova::FrameworkError::PrecognitionFailure(__errors)
+                        } else {
+                            ::suprnova::FrameworkError::validation_errors(__errors)
+                        },
                     );
                 }
 
@@ -497,7 +559,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed) {
                     ::core::result::Result::Err(errs) if !errs.is_empty() => {
                         return ::core::result::Result::Err(
-                            ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name)),
+                            if __precognitive {
+                                  ::suprnova::FrameworkError::PrecognitionFailure(errs.rename_keys(__input_name))
+                              } else {
+                                  ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name))
+                              },
                         );
                     }
                     _ => {}
@@ -507,12 +573,19 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed).await {
                     ::core::result::Result::Err(errs) if !errs.is_empty() => {
                         return ::core::result::Result::Err(
-                            ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name)),
+                            if __precognitive {
+                                  ::suprnova::FrameworkError::PrecognitionFailure(errs.rename_keys(__input_name))
+                              } else {
+                                  ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name))
+                              },
                         );
                     }
                     _ => {}
                 }
 
+                if __precognitive {
+                    return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionSuccess);
+                }
                 ::core::result::Result::Ok(__constructed)
             }
         }
@@ -554,8 +627,8 @@ fn push_required(
             );
         }
     });
-    // Unreachable: a missing required field was reported above, and the
-    // error set was checked before construction. An error, not a panic.
+    // Selected errors are checked before construction. An unselected field
+    // without a placeholder reports an internal error here, never a field error.
     struct_init.push(quote! {
         #ident: #ident.ok_or_else(|| ::suprnova::FrameworkError::internal(
             format!("multipart field '{}' was neither extracted nor reported", #field_name_str)
@@ -576,7 +649,9 @@ fn validator_wiring(
     };
     let arm = quote! {
         #field_name_str => {
-            <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, __sniff, __size)?;
+            if !__precognitive {
+                <#validator as ::suprnova::http::upload::validators::UploadValidator>::validate_chunk(&#v_ident, __sniff, __size)?;
+            }
         }
     };
     (decl, arm)

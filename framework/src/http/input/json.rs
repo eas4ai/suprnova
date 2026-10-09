@@ -11,6 +11,7 @@
 
 use std::fmt;
 
+use serde::Deserialize;
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, EnumAccess, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
@@ -269,11 +270,24 @@ impl<'de, V: Visitor<'de>> Visitor<'de> for Pass<'_, '_, V> {
         deserializer: D,
     ) -> Result<Self::Value, D::Error> {
         let (path, collector) = (self.path, self.collector);
-        let read = self.visitor.visit_some(Tracked {
-            inner: deserializer,
-            path: path.to_string(),
-            collector,
-        });
+        let read = if collector.precognitive {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            self.visitor.visit_some(Tracked {
+                inner: RecoverValue {
+                    value,
+                    path,
+                    collector,
+                },
+                path: path.to_string(),
+                collector,
+            })
+        } else {
+            self.visitor.visit_some(Tracked {
+                inner: deserializer,
+                path: path.to_string(),
+                collector,
+            })
+        };
         Pass {
             visitor: (),
             path,
@@ -287,11 +301,24 @@ impl<'de, V: Visitor<'de>> Visitor<'de> for Pass<'_, '_, V> {
         deserializer: D,
     ) -> Result<Self::Value, D::Error> {
         let (path, collector) = (self.path, self.collector);
-        let read = self.visitor.visit_newtype_struct(Tracked {
-            inner: deserializer,
-            path: path.to_string(),
-            collector,
-        });
+        let read = if collector.precognitive {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            self.visitor.visit_newtype_struct(Tracked {
+                inner: RecoverValue {
+                    value,
+                    path,
+                    collector,
+                },
+                path: path.to_string(),
+                collector,
+            })
+        } else {
+            self.visitor.visit_newtype_struct(Tracked {
+                inner: deserializer,
+                path: path.to_string(),
+                collector,
+            })
+        };
         Pass {
             visitor: (),
             path,
@@ -439,6 +466,11 @@ impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for Within<'_, S> {
         deserializer: D,
     ) -> Result<Self::Value, D::Error> {
         let collector = self.collector;
+        if collector.precognitive {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            return read_value(self.seed, value, &self.path, collector)
+                .map_err(|error| collector.carry(error));
+        }
         self.seed
             .deserialize(Tracked {
                 inner: deserializer,
@@ -446,6 +478,116 @@ impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for Within<'_, S> {
                 collector,
             })
             .map_err(|error| collector.carry(error))
+    }
+}
+
+/// Read a buffered JSON field with the same path tracking as a JSON body.
+pub(super) fn read_value<'de, S: DeserializeSeed<'de>>(
+    seed: S,
+    value: serde_json::Value,
+    path: &str,
+    collector: &Collector,
+) -> Result<S::Value, FieldError> {
+    seed.deserialize(Tracked {
+        inner: RecoverValue {
+            value,
+            path,
+            collector,
+        },
+        path: path.to_owned(),
+        collector,
+    })
+}
+
+/// Recover shape mismatches before serde consumes a field visitor.
+/// Primitive mismatches use `Tracked`'s existing zero-value recovery.
+struct RecoverValue<'p, 'c> {
+    value: serde_json::Value,
+    path: &'p str,
+    collector: &'c Collector,
+}
+
+macro_rules! recover_shape {
+    ($($method:ident($($arg:ident: $ty:ty),*) => $fits:expr;)*) => {$(
+        fn $method<V: Visitor<'de>>(self, $($arg: $ty,)* visitor: V) -> Result<V::Value, Self::Error> {
+            if self.collector.precognitive && !($fits)(&self.value) {
+                self.collector.record(self.path, FieldFailure::Format);
+                return de::Deserializer::$method(super::placeholder::Placeholder, $($arg,)* visitor)
+                    .map_err(|error| self.collector.carry(error));
+            }
+            de::Deserializer::$method(self.value, $($arg,)* visitor)
+        }
+    )*};
+}
+
+impl<'de> de::Deserializer<'de> for RecoverValue<'_, '_> {
+    type Error = serde_json::Error;
+
+    recover_shape! {
+        deserialize_seq() => serde_json::Value::is_array;
+        deserialize_tuple(len: usize) => serde_json::Value::is_array;
+        deserialize_tuple_struct(name: &'static str, len: usize) => serde_json::Value::is_array;
+        deserialize_map() => serde_json::Value::is_object;
+        deserialize_struct(name: &'static str, fields: &'static [&'static str]) => serde_json::Value::is_object;
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if self.collector.precognitive {
+            let variant = self.value.as_str().or_else(|| {
+                self.value.as_object().and_then(|map| {
+                    (map.len() == 1)
+                        .then(|| map.keys().next())
+                        .flatten()
+                        .map(String::as_str)
+                })
+            });
+            if !variant.is_some_and(|variant| variants.contains(&variant)) {
+                self.collector.record(self.path, FieldFailure::Format);
+                return de::Deserializer::deserialize_enum(
+                    super::placeholder::Placeholder,
+                    name,
+                    variants,
+                    visitor,
+                )
+                .map_err(|error| self.collector.carry(error));
+            }
+        }
+        de::Deserializer::deserialize_enum(self.value, name, variants, visitor)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        de::Deserializer::deserialize_option(self.value, visitor)
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if self.collector.precognitive && name == super::multipart::UPLOADED_FILE {
+            self.collector.record(self.path, FieldFailure::File);
+            return de::Deserializer::deserialize_newtype_struct(
+                super::placeholder::Placeholder,
+                name,
+                visitor,
+            )
+            .map_err(|error| self.collector.carry(error));
+        }
+        de::Deserializer::deserialize_newtype_struct(self.value, name, visitor)
+    }
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        de::Deserializer::deserialize_any(self.value, visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf unit unit_struct identifier ignored_any
     }
 }
 

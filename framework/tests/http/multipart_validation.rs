@@ -2469,7 +2469,7 @@ async fn an_inertia_form_request_gets_its_field_errors_back_in_props_errors() {
 }
 
 #[tokio::test]
-async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
+async fn precognition_form_request_reports_only_selected_parse_failures() {
     let app = App::new(
         Router::new()
             .post("/profile", typed_form_handler)
@@ -2491,15 +2491,22 @@ async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
     );
     assert!(!errors(&reply).contains_key("title"), "{}", reply.text());
 
-    // Asked about `ratio`, which parses: the form still cannot be checked
-    // while other fields do not parse, so it is not reported valid, and
-    // the fields in the way are named.
-    let reply = send(&app, ask("ratio")).await;
-    assert_eq!(reply.status, 422, "{}", reply.text());
-    assert_eq!(
-        first_message(&reply, "title"),
-        "The title field is required."
-    );
+    // An unselected parse failure does not block the selected field's rules.
+    for only in ["ratio", ""] {
+        let reply = send(&app, ask(only)).await;
+        assert_eq!(reply.status, 204, "{}", reply.text());
+        assert_eq!(
+            reply.headers.get("precognition").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            reply
+                .headers
+                .get("precognition-success")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
 }
 
 // ── An empty value is a present key holding null, as Laravel keeps it ──

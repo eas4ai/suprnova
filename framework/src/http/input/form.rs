@@ -39,14 +39,40 @@ pub(super) fn read_nested<T: DeserializeOwned>(
     form: Nested<'_>,
     fields: Option<&'static [&'static str]>,
 ) -> Result<T, InputError> {
+    read_nested_selected(form, fields, None)
+}
+
+/// Keep typed placeholders inside validation when only unselected fields failed.
+pub(super) fn read_nested_selected<T: DeserializeOwned>(
+    form: Nested<'_>,
+    fields: Option<&'static [&'static str]>,
+    only: Option<&[String]>,
+) -> Result<T, InputError> {
     let present = fields.map(|fields| form.present(fields));
-    let collector = Collector::default();
+    let collector = Collector {
+        precognitive: only.is_some(),
+        ..Collector::default()
+    };
     let read = T::deserialize(FormInput {
         form,
         collector: &collector,
     });
     if let Some(error) = collector.take_failed() {
         return Err(InputError::Failed(error));
+    }
+    if let Some(only) = only {
+        if let (Some(fields), Some(present)) = (fields, present) {
+            record_missing_fields::<T>(&collector, fields, present);
+        }
+        let errors = collector.into_errors().retain_fields(only);
+        if !errors.is_empty() {
+            return Err(InputError::Fields(errors));
+        }
+        return read.map_err(|_| {
+            InputError::Failed(crate::FrameworkError::internal(
+                "Precognitive input cannot build a placeholder for an unselected field",
+            ))
+        });
     }
     let error = match read {
         Ok(value) if !collector.has_failures() => return Ok(value),
@@ -175,6 +201,7 @@ fn read_node<'de, S: DeserializeSeed<'de>>(
     collector: &Collector,
 ) -> Result<S::Value, FieldError> {
     match node {
+        Node::Json(value) => super::json::read_value(seed, value, path, collector),
         Node::Text(text) if text.is_empty() => seed.deserialize(FormNull { path, collector }),
         Node::Text(text) => seed.deserialize(FormValue {
             text: &text,

@@ -20,6 +20,585 @@ use suprnova::{
 };
 use validator::Validate;
 
+#[derive(Deserialize, Validate, suprnova::FormRequestDerive)]
+#[form_request(custom_hooks)]
+struct DatabaseForm {
+    #[validate(email)]
+    email: String,
+    #[validate(range(min = 1))]
+    count: u32,
+}
+
+#[async_trait]
+impl FormRequest for DatabaseForm {
+    async fn after_validation_async(&self) -> Result<(), suprnova::ValidationErrors> {
+        use suprnova::AsyncRule;
+        let mut errors = suprnova::ValidationErrors::new();
+        suprnova::Unique::new("precognition_users", "email")
+            .check_async(&self.email, &mut errors, "email")
+            .await;
+        errors.into_result()
+    }
+}
+
+#[derive(Deserialize, Validate)]
+struct HookForm {
+    #[validate(email)]
+    email: String,
+    asynchronous: bool,
+}
+
+#[async_trait]
+impl FormRequest for HookForm {
+    fn after_validation(&self) -> Result<(), suprnova::ValidationErrors> {
+        if self.asynchronous {
+            return Ok(());
+        }
+        let mut errors = suprnova::ValidationErrors::new();
+        errors.add("other", "synchronous hook refused");
+        errors.into_result()
+    }
+
+    async fn after_validation_async(&self) -> Result<(), suprnova::ValidationErrors> {
+        let mut errors = suprnova::ValidationErrors::new();
+        errors.add("other", "asynchronous hook refused");
+        errors.into_result()
+    }
+}
+
+#[derive(Deserialize)]
+struct IndexedForm {
+    tags: Vec<String>,
+}
+
+impl Validate for IndexedForm {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        let mut errors = validator::ValidationErrors::new();
+        if self.tags.get(3).is_some_and(|tag| tag.is_empty()) {
+            errors.add("tags.3", validator::ValidationError::new("required"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+impl FormRequest for IndexedForm {}
+
+#[derive(Deserialize, Validate)]
+struct QueryForm {
+    #[validate(email)]
+    email: String,
+    #[validate(length(min = 2))]
+    tags: Vec<String>,
+    #[validate(nested)]
+    profile: QueryProfile,
+}
+
+#[derive(Deserialize, Validate)]
+struct QueryProfile {
+    #[validate(length(min = 2))]
+    name: String,
+}
+impl FormRequest for QueryForm {}
+
+#[derive(Deserialize, Validate)]
+struct FileForm {
+    photo: suprnova::UploadedFile<suprnova::MaxSize<4>>,
+    #[validate(length(min = 2))]
+    caption: String,
+}
+impl FormRequest for FileForm {}
+
+#[derive(suprnova::MultipartRequest)]
+struct LiveUpload {
+    #[field("photo")]
+    photo: suprnova::UploadedFile<suprnova::MaxSize<4>>,
+    #[field("count")]
+    count: u32,
+}
+
+#[derive(suprnova::MultipartRequest)]
+struct NoPlaceholderUpload {
+    #[field("count")]
+    count: u32,
+    #[field("address")]
+    address: std::net::IpAddr,
+}
+
+#[derive(Deserialize, Validate)]
+struct NoPlaceholderForm {
+    email: String,
+    address: std::net::IpAddr,
+}
+impl FormRequest for NoPlaceholderForm {}
+
+mod data_routes {
+    use super::*;
+    use suprnova::{delete, get, handler, post, routes};
+
+    #[handler]
+    async fn database(input: DatabaseForm) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(input.count.to_string())
+    }
+    #[handler]
+    async fn hooks(input: HookForm) -> Response {
+        suprnova::text(input.email)
+    }
+    #[handler]
+    async fn indexed(input: IndexedForm) -> Response {
+        suprnova::text(input.tags.len().to_string())
+    }
+    #[handler]
+    async fn query(input: QueryForm) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.email, input.profile.name))
+    }
+    #[handler]
+    async fn file(input: FileForm) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.caption, input.photo.size))
+    }
+    #[handler]
+    async fn multipart(input: LiveUpload) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.count, input.photo.size))
+    }
+    #[handler]
+    async fn no_placeholder(input: NoPlaceholderForm) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.email, input.address))
+    }
+    #[handler]
+    async fn multipart_no_placeholder(input: NoPlaceholderUpload) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.count, input.address))
+    }
+    routes! {
+        post!("/database", database).middleware(Precognitive),
+        post!("/hooks", hooks).middleware(Precognitive),
+        post!("/indexed", indexed).middleware(Precognitive),
+        get!("/query", query).middleware(Precognitive),
+        delete!("/query", query).middleware(Precognitive),
+        post!("/file", file).middleware(Precognitive),
+        post!("/multipart", multipart).middleware(Precognitive),
+        post!("/no-placeholder", no_placeholder).middleware(Precognitive),
+        post!("/multipart-no-placeholder", multipart_no_placeholder).middleware(Precognitive),
+    }
+}
+
+fn error_keys(response: &hyper::Response<Bytes>) -> Vec<String> {
+    assert_eq!(response.status(), 422);
+    assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+    let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    body["errors"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn precognition_selected_database_rule_runs_after_unlisted_derived_or_parse_failure() {
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    let _guard = suprnova::testing::TestContainer::fake();
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    for sql in [
+        "CREATE TABLE precognition_users (email TEXT NOT NULL)",
+        "INSERT INTO precognition_users (email) VALUES ('used@example.com')",
+    ] {
+        database
+            .execute_raw(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap();
+    }
+    suprnova::testing::TestContainer::singleton(suprnova::DbConnection::from_raw(database));
+    for count in [serde_json::json!(0), serde_json::json!("bad")] {
+        let body = serde_json::json!({"email":"used@example.com", "count":count});
+        let response = send(
+            data_routes::register(),
+            "/database",
+            &[
+                ("Precognition", "true"),
+                ("Precognition-Validate-Only", "email"),
+                ("Content-Type", "application/json"),
+            ],
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(error_keys(&response), ["email"]);
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn precognition_unlisted_parse_failure_keeps_selected_validation_on_every_source() {
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    for (content_type, body) in [
+        ("application/json", r#"{"email":"ada@example.com","count":"bad"}"#.to_owned()),
+        ("application/json", r#"{"email":"ada@example.com"}"#.to_owned()),
+        ("application/x-www-form-urlencoded", "email=ada%40example.com&count=bad".to_owned()),
+        ("multipart/form-data; boundary=BOUNDARY", "--BOUNDARY\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nada@example.com\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"count\"\r\n\r\nbad\r\n--BOUNDARY--\r\n".to_owned()),
+    ] {
+        for (only, status) in [("email", 204), ("count", 422)] {
+            let response = send(protocol_routes::register(), "/bound/7", &[
+                ("Precognition", "true"), ("Precognition-Validate-Only", only),
+                ("Content-Type", content_type),
+            ], &body).await;
+            assert_eq!(response.status(), status, "{content_type}: {only}");
+            if status == 204 { assert_success(&response); } else { assert_eq!(error_keys(&response), ["count"]); }
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn precognition_unlisted_json_shapes_use_typed_placeholders() {
+    for body in [
+        r#"{"email":"ada@example.com","count":false,"tags":"bad"}"#,
+        r#"{"email":"ada@example.com","count":{},"tags":[{},false]}"#,
+    ] {
+        let response = send(
+            protocol_routes::register(),
+            "/bound/7",
+            &[
+                ("Precognition", "true"),
+                ("Precognition-Validate-Only", "email"),
+                ("Content-Type", "application/json"),
+            ],
+            body,
+        )
+        .await;
+        assert_success(&response);
+    }
+}
+
+#[tokio::test]
+async fn precognition_empty_selection_drops_every_derived_error() {
+    for only in ["", " , , "] {
+        assert_success(
+            &send(
+                protocol_routes::register(),
+                "/form",
+                &[
+                    ("Precognition", "true"),
+                    ("Precognition-Validate-Only", only),
+                    ("Content-Type", "application/json"),
+                ],
+                r#"{"email":"bad","password":"short"}"#,
+            )
+            .await,
+        );
+    }
+}
+
+#[tokio::test]
+async fn precognition_hooks_keep_unlisted_messages_after_selected_rules_pass() {
+    for asynchronous in [true, false] {
+        let body = serde_json::json!({"email":"ada@example.com","asynchronous":asynchronous});
+        for only in ["email", ""] {
+            let response = send(
+                data_routes::register(),
+                "/hooks",
+                &[
+                    ("Precognition", "true"),
+                    ("Precognition-Validate-Only", only),
+                    ("Content-Type", "application/json"),
+                ],
+                &body.to_string(),
+            )
+            .await;
+            assert_eq!(error_keys(&response), ["other"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn precognition_selection_and_should_validate_share_exact_wildcard_match() {
+    for (only, matches) in [
+        ("tags", false),
+        ("tags.*", true),
+        ("tags.3", true),
+        ("tags.3.*", false),
+    ] {
+        let request = Request::for_test_with_headers(
+            "POST",
+            "/indexed",
+            [("Precognition-Validate-Only", only)],
+        );
+        assert_eq!(request.should_validate("tags.3"), matches);
+        let response = send(
+            data_routes::register(),
+            "/indexed",
+            &[
+                ("Precognition", "true"),
+                ("Precognition-Validate-Only", only),
+                ("Content-Type", "application/json"),
+            ],
+            r#"{"tags":["a","b","c",""]}"#,
+        )
+        .await;
+        if matches {
+            assert_eq!(error_keys(&response), ["tags.3"]);
+        } else {
+            assert_success(&response);
+        }
+    }
+    let absent = Request::for_test("POST", "/indexed");
+    assert_eq!(absent.validate_only(), None);
+    assert!(absent.should_validate("tags.3"));
+    let request = Request::for_test_with_headers(
+        "POST",
+        "/indexed",
+        [("Precognition-Validate-Only", " tags.* , , email ")],
+    );
+    assert_eq!(
+        request.validate_only(),
+        Some(vec!["tags.*".into(), "email".into()])
+    );
+    for (field, expected) in [
+        ("tags", false),
+        ("tags.3", true),
+        ("tags.", false),
+        ("tags.3.name", false),
+        ("email", true),
+    ] {
+        assert_eq!(request.should_validate(field), expected, "{field}");
+    }
+    let empty =
+        Request::for_test_with_headers("POST", "/indexed", [("Precognition-Validate-Only", "")]);
+    assert_eq!(empty.validate_only(), Some(vec![]));
+    assert!(!empty.should_validate("email"));
+}
+
+#[tokio::test]
+async fn precognition_get_and_delete_validate_query_lists_and_encoded_objects() {
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    for method in ["GET", "DELETE"] {
+        for (email, status) in [("", 422), ("ada%40example.com", 204)] {
+            let path = format!(
+                "/query?email={email}&tags[]=a&tags[]=b&profile=%7B%22name%22%3A%22Ada%22%7D"
+            );
+            let response = send_method(
+                data_routes::register(),
+                method,
+                &path,
+                &[("Precognition", "true")],
+                "",
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            if status == 422 {
+                assert_eq!(error_keys(&response), ["email"]);
+            } else {
+                assert_success(&response);
+            }
+        }
+        for path in [
+            "/query?email=ada%40example.com&tags[]=a&profile=%7B%22name%22%3A%22Ada%22%7D",
+            "/query?email=ada%40example.com&tags[]=a&tags[]=b&profile=%7B%22name%22%3A%22A%22%7D",
+        ] {
+            let response = send_method(
+                data_routes::register(),
+                method,
+                path,
+                &[("Precognition", "true")],
+                "",
+            )
+            .await;
+            assert_eq!(response.status(), 422);
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn precognition_query_body_wins_and_selection_is_shared() {
+    let response = send_method(
+        data_routes::register(),
+        "GET",
+        "/query?email=bad&tags[]=a&profile=%7B%22name%22%3A%22A%22%7D",
+        &[
+            ("Precognition", "true"),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"email":"ada@example.com","tags":["a","b"],"profile":{"name":"Ada"}}"#,
+    )
+    .await;
+    assert_success(&response);
+    let response = send_method(
+        data_routes::register(),
+        "DELETE",
+        "/query?email=ada%40example.com&tags[]=a&profile=%7B%22name%22%3A%22A%22%7D",
+        &[
+            ("Precognition", "true"),
+            ("Precognition-Validate-Only", "email"),
+        ],
+        "",
+    )
+    .await;
+    assert_success(&response);
+}
+
+#[tokio::test]
+async fn precognition_multipart_file_rules_and_derive_never_reach_handler() {
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    for path in ["/file", "/multipart"] {
+        for (file, status) in [("hi", 204), ("hello", 422)] {
+            let body = format!(
+                "--BOUNDARY\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\n{file}\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nHi\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"count\"\r\n\r\n2\r\n--BOUNDARY--\r\n"
+            );
+            let response = send(
+                data_routes::register(),
+                path,
+                &[
+                    ("Precognition", "true"),
+                    ("Content-Type", "multipart/form-data; boundary=BOUNDARY"),
+                ],
+                &body,
+            )
+            .await;
+            assert_eq!(response.status(), status, "{path}: {file}");
+            if status == 204 {
+                assert_success(&response);
+            } else {
+                assert_eq!(error_keys(&response), ["photo"]);
+            }
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn precognition_multipart_derive_narrows_fields_and_recovers_unlisted_parse_failure() {
+    for (only, status) in [("photo", 204), ("count", 422), ("", 204)] {
+        let body = "--BOUNDARY\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.txt\"\r\n\r\nhi\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"count\"\r\n\r\nbad\r\n--BOUNDARY--\r\n";
+        let response = send(
+            data_routes::register(),
+            "/multipart",
+            &[
+                ("Precognition", "true"),
+                ("Precognition-Validate-Only", only),
+                ("Content-Type", "multipart/form-data; boundary=BOUNDARY"),
+            ],
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+    }
+}
+
+#[derive(Clone)]
+struct InlineValidation;
+#[async_trait]
+impl Middleware for InlineValidation {
+    async fn handle(&self, request: Request, _next: Next) -> Response {
+        let input = request.validate::<SignupRequest>().await?;
+        Ok(HttpResponse::text(input.email))
+    }
+}
+
+#[tokio::test]
+async fn precognition_inline_validation_answers_protocol_and_returns_real_value() {
+    for (marked, only, body, status) in [
+        (true, "email", r#"{"email":"bad","password":"short"}"#, 422),
+        (
+            true,
+            "email",
+            r#"{"email":"ada@example.com","password":"short"}"#,
+            204,
+        ),
+        (
+            false,
+            "email",
+            r#"{"email":"ada@example.com","password":"longenough"}"#,
+            200,
+        ),
+        (
+            false,
+            "email",
+            r#"{"email":"ada@example.com","password":"short"}"#,
+            422,
+        ),
+    ] {
+        let router = suprnova::post!("/inline", |_request: Request| async {
+            suprnova::text("unused")
+        })
+        .middleware(Precognitive)
+        .middleware(InlineValidation)
+        .register(Router::new());
+        let mut headers = vec![
+            ("Content-Type", "application/json"),
+            ("Precognition-Validate-Only", only),
+        ];
+        if marked {
+            headers.push(("Precognition", "true"));
+        }
+        let response = send(router, "/inline", &headers, body).await;
+        assert_eq!(response.status(), status);
+        if marked {
+            assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+            if status == 204 {
+                assert_success(&response);
+            } else {
+                assert_eq!(error_keys(&response), ["email"]);
+            }
+        } else if status == 200 {
+            assert_eq!(response.body(), "ada@example.com");
+        }
+    }
+}
+
+#[tokio::test]
+async fn precognition_unselected_type_without_placeholder_answers_server_error() {
+    let response = send(
+        data_routes::register(),
+        "/no-placeholder",
+        &[
+            ("Precognition", "true"),
+            ("Precognition-Validate-Only", "email"),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"email":"ada@example.com","address":false}"#,
+    )
+    .await;
+    assert_eq!(response.status(), 500);
+    assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+}
+
+#[tokio::test]
+async fn precognition_multipart_selected_parse_error_precedes_missing_placeholder() {
+    for (count, status) in [("bad", 422), ("7", 500)] {
+        let body = format!(
+            "--selection\r\nContent-Disposition: form-data; name=\"count\"\r\n\r\n{count}\r\n--selection\r\nContent-Disposition: form-data; name=\"address\"\r\n\r\nbad\r\n--selection--\r\n"
+        );
+        let response = send(
+            data_routes::register(),
+            "/multipart-no-placeholder",
+            &[
+                ("Precognition", "true"),
+                ("Precognition-Validate-Only", "count"),
+                ("Content-Type", "multipart/form-data; boundary=selection"),
+            ],
+            &body,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+        if status == 422 {
+            assert_eq!(error_keys(&response), ["count"]);
+        }
+    }
+}
+
 #[derive(Deserialize, Validate)]
 struct SignupRequest {
     #[validate(email)]
@@ -260,6 +839,16 @@ async fn send(
     headers: &[(&str, &str)],
     body: &str,
 ) -> hyper::Response<Bytes> {
+    send_method(router, "POST", path, headers, body).await
+}
+
+async fn send_method(
+    router: Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> hyper::Response<Bytes> {
     let router = Arc::new(router);
     let registry = Arc::new(MiddlewareRegistry::new());
     let (client, server) = tokio::io::duplex(256 * 1024);
@@ -281,7 +870,7 @@ async fn send(
         let _ = connection.await;
     });
     let mut request = hyper::Request::builder()
-        .method("POST")
+        .method(method)
         .uri(path)
         .header("host", "localhost")
         .header("content-length", body.len());
