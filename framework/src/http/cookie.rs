@@ -415,9 +415,12 @@ impl Cookie {
     /// from `session.path`, `session.domain` and `session.same_site`:
     ///
     /// - `Path` is `SESSION_PATH`, or without one the public root of the
-    ///   request (`/` at the host root), and `/` under a `__Host-` session
-    ///   cookie prefix.
-    /// - `Domain` is `SESSION_DOMAIN`, and none without one.
+    ///   request (`/` at the host root). A `__Host-` name takes `/`
+    ///   instead, because the browser requires it; the session prefix
+    ///   alone does not, so an ordinary cookie still deletes at its own
+    ///   path.
+    /// - `Domain` is `SESSION_DOMAIN`, and none without one. A `__Host-`
+    ///   name takes none, since the browser forbids a `Domain` on it.
     /// - `SameSite` is `SESSION_SAME_SITE`, read as the session cookie
     ///   reads it.
     ///
@@ -451,13 +454,24 @@ impl Cookie {
     /// An explicit `path` or `domain` wins. `None` for either takes the
     /// session configuration's value, as [`Self::forget`] does, so
     /// `forget_with(name, None, None)` is exactly [`Self::forget`].
+    ///
+    /// The defaults follow the cookie being deleted, not the session's
+    /// prefix: a `__Host-` name takes `Path=/` and no `Domain`, and any
+    /// other name takes the session path or the public root. The session
+    /// cookie itself keeps its own rule in the session middleware.
     pub fn forget_with(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) -> Self {
+        let name = name.into();
         let config = crate::session::middleware::current_session_config();
-        let path = path.map_or_else(|| config.response_cookie_path(), str::to_owned);
-        let mut cookie = Self::deletion(name)
-            .path(path)
-            .same_site(config.same_site_attribute());
-        if let Some(domain) = domain.map(str::to_owned).or(config.cookie_domain) {
+        let host_locked = name.starts_with("__Host-");
+        let path = path.map_or_else(|| config.deletion_cookie_path(&name), str::to_owned);
+        let same_site = config.same_site_attribute();
+        let domain = match domain {
+            Some(domain) => Some(domain.to_owned()),
+            None if host_locked => None,
+            None => config.cookie_domain,
+        };
+        let mut cookie = Self::deletion(name).path(path).same_site(same_site);
+        if let Some(domain) = domain {
             cookie = cookie.domain(domain);
         }
         cookie
