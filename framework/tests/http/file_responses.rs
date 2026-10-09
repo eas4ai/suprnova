@@ -31,6 +31,18 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = suprnova::Response> + Send + 'static,
 {
+    serve_with(path, &[], handler).await
+}
+
+async fn serve_with<F, Fut>(
+    path: &'static str,
+    headers: &[(&str, &str)],
+    handler: F,
+) -> (u16, HeaderMap, Bytes)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = suprnova::Response> + Send + 'static,
+{
     let handler = Arc::new(handler);
     let router: Router = Router::new()
         .get(path, move |_req| {
@@ -38,7 +50,7 @@ where
             async move { handler().await }
         })
         .into();
-    let req = incoming_get_request(path, &[]).await;
+    let req = incoming_get_request(path, headers).await;
     let resp = tokio::time::timeout(
         WAIT,
         handle_request(Arc::new(router), Arc::new(MiddlewareRegistry::new()), req),
@@ -615,4 +627,208 @@ async fn download_bytes_encodes_a_non_ascii_name() {
         "CertificatJoan Perez.pdf",
         Some(CATALAN_NAME),
     );
+}
+
+#[tokio::test]
+async fn ranges_and_file_metadata_reach_the_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), "range.txt", b"0123456789abcdefghij");
+    let modified = httpdate::fmt_http_date(std::fs::metadata(&path).unwrap().modified().unwrap());
+    for (range, status, expected, content_range) in [
+        ("bytes=0-9", 206, "0123456789", Some("bytes 0-9/20")),
+        ("bytes=15-", 206, "fghij", Some("bytes 15-19/20")),
+        ("bytes=-3", 206, "hij", Some("bytes 17-19/20")),
+        ("bytes=18-999", 206, "ij", Some("bytes 18-19/20")),
+        ("bytes=20-", 416, "", Some("bytes */20")),
+        ("bytes=-0", 416, "", Some("bytes */20")),
+        ("bytes=9-2", 200, "0123456789abcdefghij", None),
+        ("bytes=0-1,5-6", 200, "0123456789abcdefghij", None),
+        ("items=0-9", 200, "0123456789abcdefghij", None),
+    ] {
+        let path = path.clone();
+        let (actual, headers, body) = serve_with("/range", &[("Range", range)], move || {
+            let path = path.clone();
+            async move {
+                HttpResponse::file(path, None)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
+        })
+        .await;
+        assert_eq!(actual, status, "{range}");
+        assert_eq!(&body[..], expected.as_bytes(), "{range}");
+        assert_eq!(header(&headers, "last-modified"), modified);
+        assert_eq!(header(&headers, "accept-ranges"), "bytes");
+        assert_eq!(
+            headers
+                .get("content-range")
+                .map(|value| value.to_str().unwrap()),
+            content_range
+        );
+        assert_eq!(header(&headers, "content-length"), body.len().to_string());
+    }
+}
+
+#[tokio::test]
+async fn a_stale_if_range_gets_the_whole_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), "range.txt", b"0123456789");
+    let (status, headers, body) = serve_with(
+        "/conditional",
+        &[
+            ("Range", "bytes=0-2"),
+            ("If-Range", "Thu, 01 Jan 1970 00:00:00 GMT"),
+        ],
+        move || {
+            let path = path.clone();
+            async move {
+                HttpResponse::download(path, None)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(headers.get("content-range").is_none());
+    assert_eq!(&body[..], b"0123456789");
+}
+
+#[tokio::test]
+async fn extra_headers_and_disposition_override_file_and_download_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), "options.pdf", b"options");
+    for download in [false, true] {
+        let path = path.clone();
+        let (status, headers, body) = serve("/options", move || {
+            let path = path.clone();
+            async move {
+                let headers = [
+                    ("Cache-Control", "private, max-age=60"),
+                    ("X-Export", "ready"),
+                    ("Content-Type", "application/custom"),
+                    ("Content-Length", "999"),
+                ];
+                if download {
+                    HttpResponse::download_with(
+                        path,
+                        Some(CATALAN_NAME),
+                        headers,
+                        ContentDisposition::Inline,
+                    )
+                    .await
+                } else {
+                    HttpResponse::file_with(
+                        path,
+                        Some(CATALAN_NAME),
+                        headers,
+                        ContentDisposition::Attachment,
+                    )
+                    .await
+                }
+                .map_err(HttpResponse::from)
+            }
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(header(&headers, "cache-control"), "private, max-age=60");
+        assert_eq!(header(&headers, "x-export"), "ready");
+        assert_eq!(header(&headers, "content-type"), "application/custom");
+        assert_eq!(header(&headers, "content-length"), "7");
+        assert_disposition(
+            header(&headers, "content-disposition"),
+            if download { "inline" } else { "attachment" },
+            "CertificatJoan Perez.pdf",
+            Some(CATALAN_NAME),
+        );
+        assert_eq!(&body[..], b"options");
+    }
+}
+
+#[tokio::test]
+async fn a_generated_download_delivers_the_first_chunk_before_the_producer_finishes() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    sender.send(Ok(Bytes::from_static(b"first"))).await.unwrap();
+    let stream = futures::stream::poll_fn(move |cx| receiver.poll_recv(cx));
+    let response = HttpResponse::stream_download(stream, CATALAN_NAME, "text/csv")
+        .header("Cache-Control", "private");
+    assert!(response.is_streaming());
+    assert_eq!(response.header_value("Content-Length"), None);
+    assert_eq!(response.header_value("Cache-Control"), Some("private"));
+    assert_disposition(
+        response.header_value("Content-Disposition").unwrap(),
+        "attachment",
+        "CertificatJoan Perez.pdf",
+        Some(CATALAN_NAME),
+    );
+    let mut body = response.into_hyper().into_body();
+    let first = tokio::time::timeout(WAIT, body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert_eq!(first, b"first".as_slice());
+    sender
+        .send(Ok(Bytes::from_static(b"second")))
+        .await
+        .unwrap();
+    drop(sender);
+    let remainder = body.collect().await.unwrap().to_bytes();
+    assert_eq!(remainder, b"second".as_slice());
+}
+
+#[tokio::test]
+async fn an_empty_or_cancelled_download_producer_finishes_without_a_buffered_body() {
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<Result<Bytes, std::convert::Infallible>>(1);
+    drop(sender);
+    let response = HttpResponse::stream_download(
+        futures::stream::poll_fn(move |cx| receiver.poll_recv(cx)),
+        "bad\r\nname.txt",
+        "text/plain",
+    );
+    assert!(response.is_streaming());
+    assert!(
+        !response
+            .header_value("Content-Disposition")
+            .unwrap()
+            .contains(['\r', '\n'])
+    );
+    let body = response
+        .into_hyper()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn a_large_partial_download_seeks_and_streams_only_the_selected_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..3 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let path = write_file(dir.path(), "large.bin", &bytes);
+    let (status, headers, body) =
+        serve_with("/large-range", &[("Range", "bytes=1048576-")], move || {
+            let path = path.clone();
+            async move {
+                let response = HttpResponse::download(path, None)
+                    .await
+                    .map_err(HttpResponse::from)?;
+                assert!(response.is_streaming());
+                Ok(response)
+            }
+        })
+        .await;
+    assert_eq!(status, 206);
+    assert_eq!(
+        header(&headers, "content-range"),
+        "bytes 1048576-3145727/3145728"
+    );
+    assert_eq!(&body[..], &bytes[1024 * 1024..]);
 }

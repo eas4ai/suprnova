@@ -40,6 +40,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   request scopes.
 - **Temporary number locales.** `Lang::with_locale` restores the previous
   locale when its closure returns or panics.
+- **Generated downloads stream as you produce them.**
+  `HttpResponse::stream_download(stream, name, content_type)` sends each
+  chunk without buffering the export and writes a safe download filename.
+- **File response headers and dispositions.** `HttpResponse::file_with`
+  and `download_with`, and `Storage::response_with` and `download_with`,
+  accept caller headers and a disposition. Your content type and cache
+  policy reach the client.
 
 - **Precognition with per-route opt-in.** Add `Precognitive` to a route
   or group to validate a draft without running the handler body. A passing
@@ -787,6 +794,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `0.12345` at four fraction digits to `0.1235%`.
 - **Special number spellings.** Number formats use `∞` and `NaN` for values
   without a finite decimal representation.
+- **File and disk responses answer byte ranges.** A GET range receives
+  `206` with the selected bytes and `Content-Range`; an unsatisfiable range
+  receives `416`. Responses advertise `Accept-Ranges: bytes` and include
+  the file's modification time as `Last-Modified`.
+- **Production browser failures show a minimal HTML view.** With debug
+  off, a browser's 5xx page shows its status without error details.
+  Inertia visits keep the application error page and JSON clients keep
+  their JSON response.
+- **Debug frames show source and separate error traces.** Application
+  frames include nearby source lines when the file is readable. Each
+  recorded source error has its own trace.
+- **The implicit default disk is local.** Without a default named in code
+  or `FILESYSTEM_DISK`, `Storage::default_disk()` returns `local` or an
+  error naming `local` and `FILESYSTEM_DISK` when it is not registered.
+- **S3 accepts Laravel's AWS variables.** Bucket, region, credentials,
+  public URL, endpoint and path-style settings read the AWS names when
+  their S3 names are unset. Each explicit S3 value wins.
+- **Nullable-user policies authorize guests.** A policy accepting
+  `Option<&User>` receives `None` for a guest and decides whether the
+  handler runs. Policies requiring a user keep the `401` response.
+- **Handler authorization accepts enum abilities.** An enum variant
+  implementing `Into<String>` reaches the same async gate as a string
+  ability.
 
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request

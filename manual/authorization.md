@@ -154,6 +154,16 @@ gate signature; `view_any` / `create` simply ignore the resource (`_post`).
 Methods you don't write aren't registered, and an unregistered action
 default-denies.
 
+You accept a guest by declaring the user as `Option<&User>` in a policy
+method. The method receives `None` for a guest and `Some(user)` for an
+authenticated request. You return `true` to allow the guest or `false` to
+answer `403`. A rich denial keeps its status, including `404`.
+You can register the same shape directly with `Gate::define_optional` or
+`Gate::define_optional_with`. Authenticated checks keep the hook pipeline.
+If several nullable policies name the same ability and resource for
+different user types, your guest check denies because it cannot select a
+user type.
+
 ### Method-name → action mapping
 
 Method name is used directly as the action's verb segment, with the
@@ -337,6 +347,10 @@ The ability goes to the gate as written. A `#[policy(User, Post)]` method
 that policy names `"update-post"`. An ability registered with
 `Gate::define` or `Gate::define_async` is named the way it was registered.
 
+You can also write `#[authorize(Ability::Update, post)]`. Your enum
+implements `Into<String>` and returns the ability name, such as
+`"update-post"`. The converted name reaches the same async gate as a string.
+
 The check runs at a fixed point in the request:
 
 1. The route parameters are bound and the path values read. A model that
@@ -370,8 +384,8 @@ pub fn routes() -> Router {
 }
 ```
 
-When the route's guard has no user, the check answers `401`, even if
-another guard has one. A user of the default guard never stands in for the
+When the route's guard has no user, your nullable policy receives `None`.
+A policy that requires `&User` answers `401`, even if another guard has one. A user of the default guard never stands in for the
 user of the route's guard. This also holds under
 `AuthMiddleware::optional().for_guard("api")`, which lets a guest through.
 
@@ -379,7 +393,7 @@ When the check fails, it answers the request with one of these statuses:
 
 | Situation | Status |
 |---|---|
-| No user on the route's guard | `401 Unauthorized`, `{"message": "Unauthenticated."}` |
+| No user on the route's guard and the policy requires a user | `401 Unauthorized`, `{"message": "Unauthenticated."}` |
 | The gate denies | `403 Forbidden` |
 | A rich denial with a status, such as `Response::deny_as_not_found()` | That status, `404 Not Found` here |
 
@@ -393,10 +407,9 @@ is read, so naming one is a compile error too.
 
 ### Why Suprnova diverges
 
-A guest gets `401 Unauthorized`. Laravel's `can` middleware passes a guest
-to the gate, which answers `403 Forbidden` unless a policy method accepts a
-missing user. Suprnova answers the way `AuthMiddleware` does for a guest,
-so a client can tell "log in" from "not allowed".
+You receive `401 Unauthorized` when the policy requires a user. Laravel
+answers `403` in this case. Your nullable policies run for guests in both
+frameworks.
 
 In Laravel, `auth:api` makes `api` the default guard for the rest of the
 request, so `Auth::user()` and the `can` middleware both read the `api`

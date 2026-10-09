@@ -23,8 +23,9 @@ use crate::auth::Auth;
 /// guard, through [`Auth::user`], when it names none or no such middleware
 /// ran. Laravel's `can` middleware reads the user of the guard that
 /// `auth:<guard>` selected the same way. When the route's guard has no user,
-/// the answer is 401 even if another guard has one: that user is not the
-/// one the route authenticated.
+/// nullable policies receive `None`. Otherwise the answer is 401, even
+/// when another guard has a user, because that guard did not authenticate
+/// this route.
 ///
 /// The macro does not know the application's user type, so the gate is asked
 /// about the type-erased user and keys its lookup by the concrete type
@@ -36,21 +37,28 @@ use crate::auth::Auth;
 ///
 /// # Errors
 ///
-/// - 401 (`Unauthenticated.`) when the route's guard has no user.
+/// - 401 (`Unauthenticated.`) when the route's guard has no user and no nullable policy.
 /// - The denial as [`Gate::authorize_async`] maps it: 403 for a bare
 ///   denial, or the status a rich [`Response`](super::Response) carries,
 ///   404 for `Response::deny_as_not_found()`.
 /// - The error the guard returns when the user cannot be resolved.
 #[doc(hidden)]
-pub async fn __authorize_handler<R>(ability: &str, resource: &R) -> Result<(), FrameworkError>
+pub async fn __authorize_handler<R>(
+    ability: impl Into<String>,
+    resource: &R,
+) -> Result<(), FrameworkError>
 where
     R: Sync + 'static,
 {
+    let ability = ability.into();
     let Some(user) = Auth::route_user().await? else {
-        return Err(FrameworkError::domain("Unauthenticated.", 401));
+        return Gate::inspect_guest(&ability, resource)
+            .ok_or_else(|| FrameworkError::domain("Unauthenticated.", 401))?
+            .authorize()
+            .map(|_| ());
     };
     let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();
-    Gate::inspect_erased_async(ability, &*user, resource)
+    Gate::inspect_erased_async(&ability, &*user, resource)
         .await
         .authorize()
         .map(|_| ())
@@ -68,7 +76,7 @@ where
 ///
 /// As [`__authorize_handler`].
 #[doc(hidden)]
-pub async fn __authorize_handler_type<R>(ability: &str) -> Result<(), FrameworkError>
+pub async fn __authorize_handler_type<R>(ability: impl Into<String>) -> Result<(), FrameworkError>
 where
     R: Default + Send + Sync + 'static,
 {

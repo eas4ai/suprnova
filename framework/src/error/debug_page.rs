@@ -11,9 +11,9 @@
 //! In the server, around everything a request runs, because the panic
 //! boundary sits above every middleware: a middleware never sees the 500
 //! a panic becomes, so it could not build this page. The server reads
-//! `Config::is_debug()` once per request. With it off, none of this
-//! module runs: the request is not captured, no frame is recorded, and
-//! the response is the one the app sends in production. With it on, the
+//! `Config::is_debug()` once per request. With it off, browser requests
+//! receive a minimal HTML view for server errors, without capturing the
+//! request or recording frames. With it on, the
 //! server captures the request before the middleware chain consumes it
 //! ([`DebugRequest::capture`]), serves the request with frames recorded
 //! ([`DebugRequest::serve`]), and replaces the response when it is one
@@ -148,6 +148,66 @@ pub(crate) struct DebugRequest {
     /// The `Accept` header lists `text/html`.
     accepts_html: bool,
     notes: Notes,
+}
+
+/// Select a production browser request without recording request details or frames.
+pub(crate) fn production_browser<B>(request: &hyper::Request<B>) -> bool {
+    false && !request
+        .headers()
+        .get("x-inertia")
+        .is_some_and(|value| crate::inertia::header_is_truthy(value.as_bytes()))
+        && accept_lists_html(
+            request
+                .headers()
+                .get_all(header::ACCEPT)
+                .iter()
+                .filter_map(|value| value.to_str().ok()),
+        )
+}
+
+/// Replace a production browser's 5xx body with a minimal view that reveals only status.
+pub(crate) fn production_page(response: hyper::Response<Body>) -> hyper::Response<Body> {
+    if response.status().as_u16() < 500 {
+        return response;
+    }
+    let status = response.status();
+    let mut html = Html::default();
+    html.raw("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>")
+        .text(&status.as_u16().to_string())
+        .raw(" ")
+        .text(status.canonical_reason().unwrap_or("Server Error"))
+        .raw("</title></head><body><h1>")
+        .text(&status.as_u16().to_string())
+        .raw(" ")
+        .text(status.canonical_reason().unwrap_or("Server Error"))
+        .raw("</h1></body></html>");
+    let (mut parts, _) = response.into_parts();
+    let dropped: Vec<_> = parts
+        .headers
+        .keys()
+        .filter(|name| !header_survives_page(name.as_str()))
+        .cloned()
+        .collect();
+    for name in dropped {
+        parts.headers.remove(name);
+    }
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    parts.headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    hyper::Response::from_parts(
+        parts,
+        Full::new(Bytes::from(html.0))
+            .map_err(|never| match never {})
+            .boxed(),
+    )
 }
 
 impl DebugRequest {
@@ -322,6 +382,12 @@ impl DebugRequest {
 
         render_failure(&mut html, report);
         render_frames(&mut html, report);
+        for (message, recorded) in report.source_frames() {
+            html.raw("<h2>Stack frames</h2>\n<p>Source error: ")
+                .text(&redact_text(message))
+                .raw("</p>\n");
+            render_recorded_frames(&mut html, recorded, false);
+        }
         self.render_request(&mut html, request_id);
 
         html.raw("</main>\n</body>\n</html>\n");
@@ -426,13 +492,34 @@ fn render_frames(html: &mut Html, report: &ErrorReport) {
         html.raw("<p class=\"note\">No stack frames were recorded for this error. Suprnova records them on the request's own task, where a FrameworkError or AppError constructor or conversion creates the error, or where a panic is raised. This error was created somewhere else: on another task, before the request began, or as a struct literal.</p>\n");
         return;
     };
-    if report.is_panic() {
+    render_recorded_frames(html, recorded, report.is_panic());
+}
+
+fn render_recorded_frames(
+    html: &mut Html,
+    recorded: &super::frames::RecordedFrames,
+    is_panic: bool,
+) {
+    if is_panic {
         html.raw("<p>Recorded where the panic was raised, at <code>");
     } else {
         html.raw("<p>Recorded where the error was created, at <code>");
     }
     html.text(recorded.site()).raw("</code>.</p>\n");
     let resolved = recorded.resolve();
+    // The innermost application caller has a known creation site even when
+    // debug symbols omit locations. Do not use it for an application frame
+    // farther out when a dependency or framework function created the error.
+    let mut creation_source = resolved
+        .frames
+        .iter()
+        .find(|frame| {
+            !matches!(frame.origin, Origin::Std | Origin::Runtime)
+                && !frame.function.starts_with("suprnova::error::")
+                && !frame.function.starts_with("<suprnova::error::")
+        })
+        .filter(|frame| frame.origin == Origin::App && frame.location.is_none())
+        .map(|_| recorded.site());
     if resolved.frames.is_empty() {
         html.raw("<p class=\"note\">This platform could not capture the stack.</p>\n");
         return;
@@ -443,6 +530,9 @@ fn render_frames(html: &mut Html, report: &ErrorReport) {
         if first.origin == Origin::App {
             html.raw("<li class=\"app\">");
             render_frame(html, first);
+            if let Some(site) = creation_source.take() {
+                render_source(html, site);
+            }
             html.raw("</li>\n");
             rest = &rest[1..];
             continue;
@@ -484,7 +574,69 @@ fn render_frame(html: &mut Html, frame: &Frame) {
         html.raw("<span class=\"at\">")
             .text(location)
             .raw("</span>");
+        if frame.origin == Origin::App {
+            render_source(html, location);
+        }
     }
+}
+
+/// Keep only nearby source lines in memory and escape every line shown.
+fn render_source(html: &mut Html, location: &str) {
+    use std::io::{BufRead, BufReader};
+    use std::path::Path;
+
+    let Some((prefix, last)) = location.rsplit_once(':') else {
+        return;
+    };
+    let (path, line) = match prefix.rsplit_once(':') {
+        Some((path, line)) if line.parse::<usize>().is_ok() => (path, line),
+        _ => (prefix, last),
+    };
+    let Ok(line) = line.parse::<usize>() else {
+        return;
+    };
+    if line == 0 {
+        return;
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        Path::new(path).to_path_buf(),
+        manifest.join(path),
+        manifest.parent().unwrap_or(manifest).join(path),
+    ];
+    let Some(file) = candidates
+        .iter()
+        .find_map(|path| std::fs::File::open(path).ok())
+    else {
+        return;
+    };
+    let lines: Result<Vec<_>, _> = BufReader::new(file)
+        .lines()
+        .enumerate()
+        .skip(line.saturating_sub(4))
+        .take(7)
+        .map(|(index, text)| text.map(|text| (index, text)))
+        .collect();
+    let Ok(lines) = lines else {
+        return;
+    };
+    if !lines.iter().any(|(index, _)| index + 1 == line) {
+        return;
+    }
+    html.raw("<pre class=\"source\">");
+    for (index, text) in lines {
+        if index + 1 == line {
+            html.raw("<strong>");
+        }
+        html.text(&(index + 1).to_string())
+            .raw(" | ")
+            .text(&redact_text(&text));
+        if index + 1 == line {
+            html.raw("</strong>");
+        }
+        html.raw("\n");
+    }
+    html.raw("</pre>");
 }
 
 /// `"14 frames: framework 6, async runtime 3, standard library 5"`.

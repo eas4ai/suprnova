@@ -2,7 +2,7 @@
 //! Inertia visit or to a request whose `Accept` lists `text/html`, is
 //! replaced by the development error page, which also takes the place of
 //! the app's Inertia error page. Every other response, and every response
-//! with debug off, stays as it is today.
+//! with debug off except a browser 5xx, stays as it is today.
 
 use serde_json::Value;
 use serial_test::serial;
@@ -245,14 +245,54 @@ async fn with_debug_on_a_browser_request_to_a_5xx_without_an_error_report_is_lef
 
 #[tokio::test]
 #[serial]
-async fn with_debug_off_a_browser_request_to_a_failing_or_panicking_handler_gets_todays_json() {
+async fn with_debug_off_a_browser_request_gets_a_minimal_html_error_view() {
     let _debug = debug_mode(false, &[]).await;
 
     for path in ["/invoice", "/ledger-index"] {
         let reply = get(ledger_routes(), path, BROWSER).await;
 
-        assert_todays_json_error(&reply, 500);
+        assert_minimal_page(&reply, 500);
     }
+    let reply = get(routes(), "/maintenance", BROWSER).await;
+    assert_minimal_page(&reply, 503);
+    let reply = get(routes(), "/upstream", BROWSER).await;
+    assert_minimal_page(&reply, 504);
+}
+
+fn assert_minimal_page(reply: &Reply, status: u16) {
+    assert_eq!(reply.status, status);
+    assert!(
+        reply.content_type().starts_with("text/html"),
+        "{}",
+        reply.body
+    );
+    assert!(reply.body.starts_with("<!doctype html>"), "{}", reply.body);
+    assert!(reply.body.contains(&status.to_string()), "{}", reply.body);
+    for detail in [
+        INVOICE_ERROR,
+        LEDGER_ERROR,
+        DISK_ERROR,
+        PANIC_MESSAGE,
+        MAINTENANCE_ERROR,
+        UPSTREAM_BODY,
+        "Stack frames",
+        "data-page=",
+        "debug_error_page",
+        "<script",
+    ] {
+        assert!(
+            !reply.body.contains(detail),
+            "leaked {detail}: {}",
+            reply.body
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn with_debug_off_json_requests_keep_their_json_errors() {
+    let _debug = debug_mode(false, &[]).await;
+    assert_todays_json_error(&get(routes(), "/invoice", JSON_CLIENT).await, 500);
 }
 
 #[tokio::test]
@@ -275,17 +315,7 @@ async fn with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page()
 
     let navigation = inertia_request(BROWSER).await;
     assert_eq!(navigation.status, 500, "body: {}", navigation.body);
-    assert!(
-        navigation.content_type().starts_with("text/html"),
-        "a browser navigation must still get the Inertia shell; body: {}",
-        navigation.body
-    );
-    assert!(
-        navigation.body.contains("data-page=\"app\"")
-            && navigation.body.contains("\"component\":\"Error\""),
-        "a browser navigation must still get the app's Inertia error page; body: {}",
-        navigation.body
-    );
+    assert_minimal_page(&navigation, 500);
 }
 
 #[tokio::test]
@@ -311,4 +341,31 @@ async fn inp_with_debug_on_a_visit_sending_x_inertia_1_gets_the_page() {
         "X-Inertia: 0 must keep the JSON error; got content-type {:?}",
         reply.content_type()
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn production_html_keeps_head_semantics_and_ignores_false_inertia_flags() {
+    let _debug = debug_mode(false, &[]).await;
+    for flag in ["", "0"] {
+        let reply = get(
+            routes(),
+            "/invoice",
+            &[("Accept", "text/html"), ("X-Inertia", flag)],
+        )
+        .await;
+        assert_minimal_page(&reply, 500);
+    }
+    let reply = super::exchange(
+        routes(),
+        MiddlewareRegistry::new(),
+        request("HEAD", "/invoice", BROWSER, ""),
+    )
+    .await;
+    assert_eq!(reply.status, 500);
+    assert!(reply.content_type().starts_with("text/html"));
+    assert!(reply.body.is_empty());
+    let reply = get(routes(), "/missing-param", BROWSER).await;
+    assert_eq!(reply.status, 400);
+    assert!(reply.content_type().starts_with("application/json"));
 }

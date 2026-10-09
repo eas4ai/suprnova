@@ -52,6 +52,7 @@ pub struct ErrorReport {
     /// Where the error was created or the panic raised. `None` with debug
     /// off, and for an error created outside the request's own task.
     frames: Option<RecordedFrames>,
+    source_frames: Vec<(String, RecordedFrames)>,
 }
 
 impl PartialEq for ErrorReport {
@@ -86,9 +87,13 @@ impl ErrorReport {
     /// message, when there are any.
     pub(crate) fn from_error(error: &dyn std::error::Error) -> Self {
         let mut chain = vec![error.to_string()];
+        let mut source_frames = Vec::new();
         let mut current = error.source();
         while let Some(source) = current {
             let link = source.to_string();
+            if let Some(recorded) = frames::recorded_for(&link) {
+                source_frames.push((link.clone(), recorded));
+            }
             let repeats_previous = chain
                 .last()
                 .is_some_and(|previous| previous.ends_with(&link));
@@ -101,6 +106,7 @@ impl ErrorReport {
         Self {
             kind: Kind::Error { chain },
             frames,
+            source_frames,
         }
     }
 
@@ -117,6 +123,7 @@ impl ErrorReport {
                 chain: vec![message],
             },
             frames: None,
+            source_frames: Vec::new(),
         }
     }
 
@@ -130,6 +137,7 @@ impl ErrorReport {
         Self {
             kind: Kind::Panic { message, location },
             frames,
+            source_frames: Vec::new(),
         }
     }
 
@@ -137,6 +145,11 @@ impl ErrorReport {
     /// raised, for the development error page.
     pub(crate) fn frames(&self) -> Option<&RecordedFrames> {
         self.frames.as_ref()
+    }
+
+    /// Each source error's own trace, independent of the outer conversion's trace.
+    pub(crate) fn source_frames(&self) -> &[(String, RecordedFrames)] {
+        &self.source_frames
     }
 
     /// The error's own message, then the message of each `source()` in

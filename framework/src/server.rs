@@ -730,8 +730,13 @@ pub async fn handle_request_with_peer(
     // each wrapper would otherwise move a copy of it through the stack of
     // the task that polls it, which deep render paths cannot spare.
     let root = request_root(&req, peer_ip);
+    let file_request = crate::http::file_response::FileRequest::capture(&req);
     let request = Box::pin(serve_request(router, middleware_registry, req, peer_ip));
-    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, request)).await
+    crate::container::scope::run_in_new_scope(crate::routing::root::scope(
+        root,
+        file_request.serve(request),
+    ))
+    .await
 }
 
 /// The public root of `req` (PFX-001, PFX-002): a valid
@@ -763,9 +768,10 @@ pub(crate) fn request_root(
 /// container scope.
 ///
 /// Debug mode is read here, once per request. With it off, the request is
-/// routed as it is and nothing is captured or recorded for the
-/// development error page. With it on, the request is captured before the
-/// middleware chain takes it, served with stack frames recorded, and a
+/// routed without recording request details or stack frames. Browser
+/// failures receive a minimal production error view. With it on, the
+/// request is captured before the middleware chain takes it, served with
+/// stack frames recorded, and a
 /// failure answered with a 5xx may become the page; see
 /// `crate::error::debug_page`. This is the one place every request passes
 /// after the panic boundary, which no middleware can see past.
@@ -776,7 +782,19 @@ async fn serve_request(
     peer_ip: Option<std::net::IpAddr>,
 ) -> hyper::Response<ServerBody> {
     if !Config::is_debug() {
-        return route_request(router, middleware_registry, req, peer_ip).await;
+        let browser = crate::error::debug_page::production_browser(&req);
+        let is_head = req.method() == hyper::Method::HEAD;
+        let response = route_request(router, middleware_registry, req, peer_ip).await;
+        let response = if browser {
+            crate::error::debug_page::production_page(response)
+        } else {
+            response
+        };
+        return if is_head {
+            strip_body_for_head(response)
+        } else {
+            response
+        };
     }
     let debug_request = crate::error::debug_page::DebugRequest::capture(&req);
     let is_head = req.method() == hyper::Method::HEAD;

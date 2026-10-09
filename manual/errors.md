@@ -585,7 +585,10 @@ that shows the following:
 - The message `writing the ledger failed`, and the I/O error it wraps.
 - The line in `write_ledger` that called `from_external_with`, and the
   stack frames of your code that led there. The frames of the framework,
-  the async runtime, and the standard library are collapsed.
+  the async runtime, dependencies and the standard library are collapsed
+  behind a count. You see the source line and a few lines around each
+  application frame when its file is readable. You also see a separate
+  trace for each source error that recorded frames.
 - The request's method, path, query, headers, route pattern, and request
   id. Credentials and secret-named values are redacted, including the
   secret parameters of a URL in a header such as `Referer`.
@@ -594,7 +597,10 @@ An Inertia visit gets the same page, in place of your Inertia error
 page. `curl`, and every other client whose `Accept` header does not list
 `text/html`, still gets
 `{"message": "Internal Server Error", "request_id": "...", "debug_message": "..."}`.
-With debug off, nobody gets the page. The rules are in
+With debug off, you receive a minimal HTML error view for a 5xx when your
+request accepts `text/html` and is not an Inertia visit. You see the
+status with no error detail or frames. Your Inertia visits keep your app
+error page, and your JSON requests keep their JSON body. The rules are in
 [Error Model](error-model.md#the-development-error-page).
 
 ### Why Suprnova diverges
