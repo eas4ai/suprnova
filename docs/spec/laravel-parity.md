@@ -30,65 +30,94 @@ joins: `join`, `left_join`, `right_join` and `cross_join` against a table
 with an optional alias; a closure form whose conditions combine `on`,
 `or_on`, `where` and `or_where`; `join_sub` and `left_join_sub` against
 another builder under an alias; and `where_exists` and `where_not_exists`
-taking a builder, which may correlate with `where_column`. Every value in a
-join or exists clause MUST be bound as a parameter, never written into the
-SQL text, and every table, alias and column MUST be quoted for the active
-backend. A model query with a join MUST select the model's own table
-columns unless told otherwise, so a joined table's `id` never overwrites
-the model's.
-Falsifier: one of the three query shapes in issue #125 (chained left joins with a table alias and aliased columns, a left join against a grouped subquery, a correlated `where_exists`) returns rows that differ from the same query written as raw SQL; a value given to a join's `where` appears in the generated SQL text; or a model query joining another table hydrates the joined table's `id` into the model.
+taking a builder, which may correlate with `where_column`. An `or`
+condition MUST be flat, as Laravel compiles it: `where(a).or_where(b).where(c)`
+is `a OR b AND c`, never `(a OR b) AND c`, so a chain ported from Laravel
+compiles to the same SQL. `where_column` MUST accept an operator between
+the two columns, `cross_join` MUST accept the closure form for its `ON`
+conditions, and a builder with a join MUST offer `update` and `delete`
+over the joined rows. Every value in a join or exists clause MUST be bound
+as a parameter, never written into the SQL text, and every table, alias
+and column MUST be quoted for the active backend; an identifier or operator
+the builder does not know MUST be refused. A model query with a join MUST
+select the model's own table columns unless told otherwise, so a joined
+table's `id` never overwrites the model's.
+Falsifier: one of the three query shapes in issue #125 (chained left joins with a table alias and aliased columns, a left join against a grouped subquery, a correlated `where_exists`) returns rows that differ from the same query written as raw SQL; `where("a", 1).or_where("b", 2).where("c", 3)` compiles with parentheses around the `or`, or returns rows that `a = 1 OR b = 2 AND c = 3` does not; `where_column("a", ">", "b")` is refused or ignores the operator; `cross_join` with a closure drops its conditions; an `update` or `delete` on a joined builder is refused or touches rows the join does not match; a value given to a join's `where` appears in the generated SQL text; `where("a; drop", 1)` or an operator such as `=;` compiles; or a model query joining another table hydrates the joined table's `id` into the model.
 Mechanism: `par-joins`.
-Rationale: Issue #125. Laravel `Illuminate\Database\Query\Builder::join`, `leftJoin`, `rightJoin`, `crossJoin`, `joinSub`, `leftJoinSub`, `whereExists`, and `JoinClause`.
-Status: Agreed 2026-10-01
+Rationale: Issue #125 and row 001 of the parity log (the flat `or`, `whereColumn`'s operator, `crossJoin`'s `ON` and the joined `update` and `delete` of `Illuminate\Database\Query\Builder`); the identifier and operator refusals are SQL safety and stay.
+Status: Agreed 2026-10-08
 
 [PAR-002] The framework MUST offer file responses: a response streaming a
 file from a path with the content type its extension implies and
 `Content-Disposition: inline`; a download response with `attachment` and
 a filename the caller chooses; a download of in-memory bytes with a given
-content type; and the same two responses for a path on a named storage
-disk, resolved through the disk so its path guard applies. Every
-`Content-Disposition` header it writes MUST follow RFC 6266: an ASCII
-`filename` fallback, plus `filename*=UTF-8''` with percent-encoding when
-the name is not plain printable ASCII, and no character of the name may
-change the header's structure.
-Falsifier: a download named `Certificat·Joan Pérez.pdf` produces a header without a correct `filename*` or with a raw non-ASCII byte in `filename`; a name holding a quote, backslash, CR or LF changes the header's structure; a disk download of `../secret` reads outside the disk root; or a file response sends a content type or disposition other than the one specified.
+content type; a streaming download that writes a body as it is produced,
+under a filename; and the same responses for a path on a named storage
+disk, resolved through the disk so its path guard applies. A file and a
+download response MUST accept extra headers and a disposition argument,
+MUST send `Last-Modified` from the file's modification time and
+`Accept-Ranges: bytes`, MUST answer a `Range` request with `206`, the
+requested bytes and `Content-Range`, and `416` with `Content-Range: bytes
+*/<size>` for a range the file cannot satisfy, and MUST send the
+`Cache-Control` the caller sets. Every `Content-Disposition` header it
+writes MUST follow RFC 6266: an ASCII `filename` fallback, plus
+`filename*=UTF-8''` with percent-encoding when the name is not plain
+printable ASCII, and no character of the name may change the header's
+structure.
+Falsifier: a download named `Certificat·Joan Pérez.pdf` produces a header without a correct `filename*` or with a raw non-ASCII byte in `filename`; a name holding a quote, backslash, CR or LF changes the header's structure; a disk download of `../secret` reads outside the disk root; a file response sends a content type or disposition other than the one specified; `Range: bytes=0-9` on a file response answers anything but `206` with those ten bytes and `Content-Range: bytes 0-9/<size>`, or `Range: bytes=<size>-` anything but `416`; a file response lacks `Last-Modified` or `Accept-Ranges`; a header or `Cache-Control` the caller passes is missing; or a streaming download buffers its whole body before the first byte is sent.
 Mechanism: `par-file-responses`.
-Rationale: Issue #126. Laravel `ResponseFactory::file`, `download`, `streamDownload`, and `FilesystemAdapter::download` and `response`.
-Status: Agreed 2026-10-01
+Rationale: Issue #126 and row 002 of the parity log: Laravel's `ResponseFactory::file`, `download` and `streamDownload` take headers and a disposition, and `BinaryFileResponse` answers ranges with `Last-Modified`; the inline disposition, the extension-based type and the slash handling are the earlier spec's choices and stay.
+Status: Agreed 2026-10-08
 
 [PAR-003] `#[handler]` MUST accept `#[authorize(ability, Type)]`, which
 authorizes the ability against a model type, and `#[authorize(ability,
 param)]`, which authorizes it against the route-bound model the handler
-receives as `param`. The check MUST run after route model binding and
-before the handler body, through the async gate, so policies and the RBAC
-gate bridge both apply. It MUST answer 401 when no user is authenticated,
-403 when the gate denies, and 404 when the policy denies as not found. A
-`param` the handler does not take MUST be a compile error.
-Falsifier: a handler declaring `#[authorize("update", post)]` runs its body for a user the policy denies; answers 403 to a guest; answers 403 where the policy denies as not found; answers 403 instead of 404 for a route model that does not exist; or compiles when `post` is not one of its parameters.
+receives as `param`; the ability MAY be a string or a variant of an enum
+that converts into the ability name. The check MUST run after route model
+binding and before the handler body, through the async gate, so policies
+and the RBAC gate bridge both apply. A policy whose method takes an
+optional user MUST be consulted for a guest, as Laravel consults a
+nullable-user policy: the guest passes when it allows and gets 403 when
+it denies; a policy that requires a user MUST answer 401 to a guest. It
+MUST answer 403 when the gate denies, and 404 when the policy denies as
+not found. A `param` the handler does not take MUST be a compile error.
+Falsifier: a handler declaring `#[authorize("update", post)]` runs its body for a user the policy denies; answers 401 to a guest whose policy method accepts an optional user, or runs its body for a guest that method denies; answers 403 to a guest where the policy requires a user; answers 403 where the policy denies as not found; answers 403 instead of 404 for a route model that does not exist; `#[authorize(Ability::Update, post)]` with an enum that converts into the ability does not compile or checks another ability; or it compiles when `post` is not one of its parameters.
 Mechanism: `par-authorize`.
-Rationale: Issue #127. Laravel 13 `Illuminate\Routing\Attributes\Controllers\Authorize`, and the `can` middleware it applies.
-Status: Agreed 2026-10-01
+Rationale: Issue #127 and row 003 of the parity log: Laravel's `Authorize` middleware passes `null` to a policy method typed with a nullable user and accepts a `BackedEnum` ability; the compile-time parameter check and stacked attributes are the typed form and stay.
+Status: Agreed 2026-10-08
 
 [PAR-004] After a successful save, a model MUST report which attributes
-that save changed: `was_changed` for one attribute or several, and
-`get_changes` for all of them. While the save's `updated` and `saved`
-observers run, `get_original` and `get_raw_original` MUST return each
-attribute's value as it was loaded before the save; once the save returns,
-the original values are the saved ones. The rest follows Laravel: a save
-that changes nothing leaves the previous save's changes in place, and an
-insert reports no changes.
-Falsifier: in an `updated` observer for a save that flips `is_admin`, `was_changed("is_admin")` is false, `was_changed` reports an attribute the save did not change, `get_changes` omits or adds an attribute, or `get_raw_original("is_admin")` is not the value loaded before the save; or after the save returns, `get_original("is_admin")` still reports the value loaded before it.
+that save changed: `was_changed` for one attribute or several,
+`get_changes` for all of them, and `get_previous` for each changed
+attribute's value before the save. A save whose attributes are all equal
+to the values loaded MUST run no `UPDATE` and fire neither `updating` nor
+`updated`, while `saving` and `saved` still fire, as Laravel's `save`
+skips `performUpdate` for a clean model; dirtiness is judged against the
+values loaded or last saved in memory, not by reading the row again.
+While the save's `updated` and `saved` observers run, `get_original` and
+`get_raw_original` MUST return each attribute's value as it was loaded
+before the save; once the save returns, the original values are the saved
+ones. An insert reports no changes.
+Falsifier: in an `updated` observer for a save that flips `is_admin`, `was_changed("is_admin")` is false, `was_changed` reports an attribute the save did not change, `get_changes` omits or adds an attribute, `get_previous("is_admin")` is not the value before the save, or `get_raw_original("is_admin")` is not the value loaded before the save; after the save returns, `get_original("is_admin")` still reports the value loaded before it; or a save of a model whose attributes are unchanged issues an `UPDATE`, fires `updating` or `updated`, or skips `saving` or `saved`.
 Mechanism: `par-model-changes`.
-Rationale: Issue #128. Laravel `HasAttributes::wasChanged`, `getChanges`, `getOriginal`, `getRawOriginal`, `syncChanges` and `syncOriginal`, as `Model::save`, `performUpdate` and `finishSave` call them.
-Status: Agreed 2026-10-01
+Rationale: Issue #128 and row 004 of the parity log: Laravel's `Model::save` calls `performUpdate` only when `isDirty`, and `HasAttributes::getPrevious` returns the previous values `syncChanges` kept.
+Status: Agreed 2026-10-08
 
-[PAR-005] A belongs-to-many relation MUST offer `sync_without_detaching`,
-which attaches each given id the relation does not already hold and leaves
-every existing pivot row, its pivot columns included, untouched.
-Falsifier: after `sync_without_detaching` with id 3 on a relation that holds 1 and 2, the relation holds anything other than 1, 2 and 3, or a pivot column of the rows for 1 or 2 changed.
+[PAR-005] A belongs-to-many relation MUST offer `sync` and
+`sync_without_detaching`, which attach each given id the relation does not
+already hold and, for `sync`, detach the ids not given; both MUST accept
+pivot columns per id and update the pivot row of an id already held when
+its given columns differ; both MUST return the attached, detached and
+updated id lists, as Laravel's `sync` does; both MUST honour the
+relation's pivot filters (`where_pivot` and its kin), so a filtered
+relation syncs only the rows the filter sees; and both MUST touch the
+parent's `updated_at` when the relation touches its parent. Every other
+existing pivot row, its pivot columns included, MUST stay untouched; the
+operation runs in one transaction and an id of the wrong type is refused.
+Falsifier: after `sync_without_detaching` with id 3 on a relation that holds 1 and 2, the relation holds anything other than 1, 2 and 3, or a pivot column of the rows for 1 or 2 changed; `sync([2, 3])` on that relation does not report `attached: [3]`, `detached: [1]`, or reports an update for an unchanged row; `sync_without_detaching` with `{2: {role: "lead"}}` does not change row 2's `role` or does not report it under `updated`; a `where_pivot("role", "lead")` relation's `sync` detaches a row the filter does not see, or is refused; or a touching relation's `sync` leaves the parent's `updated_at` as it was.
 Mechanism: `par-sync-without-detaching`.
-Rationale: Issue #128. Laravel `InteractsWithPivotTable::syncWithoutDetaching`.
-Status: Agreed 2026-10-01
+Rationale: Issue #128 and row 005 of the parity log: Laravel's `InteractsWithPivotTable::sync`, `syncWithoutDetaching`, `formatRecordsList`, `attachNew` and `touchIfTouching`; the always-on transaction and the typed id matching are stricter and stay.
+Status: Agreed 2026-10-08
 
 [PAR-006] The `DB::table` builder and the model query builder MUST offer
 `where_any`, `or_where_any`, `where_all`, `or_where_all`, `where_none` and
@@ -96,11 +125,15 @@ Status: Agreed 2026-10-01
 parentheses), `or_where_in` and `or_where_not_in` with a list or a
 subquery, `where_in` and `where_not_in` with a subquery, `or_where_raw`
 with bound values, `or_where_null` and `or_where_not_null`, and `reorder`,
-which drops the orderings already set and may set a new one.
-Falsifier: one of these helpers returns rows that differ from the equivalent raw SQL; a grouped helper lets an `or` escape its parentheses, so `where("a", 1).where_any(["b", "c"], "=", 2)` returns a row whose `a` is not 1; or a subquery used by `where_in` loses its own bound values.
+which drops the orderings already set and may set a new one. Every `or_`
+helper MUST be flat as PAR-001 says; `where(column, value)` and
+`or_where(column, value)` MUST be the two-argument shortcut for `=`; and
+a `where` or `or_where` whose bound value is null MUST compile to `IS
+NULL`, as Laravel turns a null comparison into `whereNull`.
+Falsifier: one of these helpers returns rows that differ from the equivalent raw SQL; a grouped helper lets an `or` escape its parentheses, so `where("a", 1).where_any(["b", "c"], "=", 2)` returns a row whose `a` is not 1; a subquery used by `where_in` loses its own bound values; `or_where("b", 2)` after `where("a", 1)` compiles with parentheses; `where("a", 1)` is not `where("a", "=", 1)`; or `where("deleted_at", Value::Null)` compiles to `= NULL` and matches nothing.
 Mechanism: `par-query-helpers`.
-Rationale: Issue #128. Laravel `Builder::whereAny`, `whereAll`, `whereNone`, `orWhereIn`, `orWhereNotIn`, `orWhereRaw`, `orWhereNull`, `orWhereNotNull`, `reorder`.
-Status: Agreed 2026-10-01
+Rationale: Issue #128 and row 006 of the parity log: Laravel's `Builder::where` with two arguments, its `whereNull` rewrite for a null value, and the flat `orWhere*` helpers.
+Status: Agreed 2026-10-08
 
 [PAR-007] `DB::after_commit` MUST run a callback after the `DB::transaction`
 around it commits, at once when no `DB::transaction` is open, and never when
@@ -135,11 +168,13 @@ Status: Agreed 2026-10-01
 the named job types and sends those to the real queue; MUST record raw
 pushes and return them on request; and MUST offer
 `assert_pushed_without_chain`, which passes only for a job pushed with no
-chain.
-Falsifier: under `except`, a named job is recorded instead of dispatched or another job is dispatched instead of recorded; a raw push cannot be read back; or `assert_pushed_without_chain` passes for a job pushed with a chain.
+chain and, given a closure, only for such a job the closure accepts, as
+`assert_pushed_on` filters. A raw push whose payload is not a job
+envelope MUST be refused.
+Falsifier: under `except`, a named job is recorded instead of dispatched or another job is dispatched instead of recorded; a raw push cannot be read back; `assert_pushed_without_chain` passes for a job pushed with a chain; `assert_pushed_without_chain(|job| job.id == 7)` passes when only a job with another id was pushed without a chain, or fails when one with id 7 was; or a raw push of a string that is no envelope is recorded.
 Mechanism: `par-queue-fake`.
-Rationale: Laravel `QueueFake::except`, `pushRaw`, `rawPushes`, `assertPushedWithoutChain`.
-Status: Agreed 2026-10-01
+Rationale: Laravel `QueueFake::except`, `pushRaw`, `rawPushes` and `assertPushedWithoutChain` with its callback (row 009 of the parity log); refusing a raw payload that is not an envelope fails closed and stays.
+Status: Agreed 2026-10-08
 
 ## Test diagnostics
 
@@ -180,22 +215,31 @@ an error report (PAR-010), sent to an Inertia visit or to a request whose
 error page: an HTML document with the same status that shows the report's
 error chain, or the panic message and location, the stack frames (PAR-013)
 and the request context (PAR-014). For those responses the page MUST take
-the place of the app's Inertia error page. Every other response, and every
-response with debug off, MUST stay as it is today.
-Falsifier: with debug on, a browser request to a handler that returns an error gets JSON, or a page without the error's message or without the 500 status; an Inertia visit to it gets the app's Inertia error page; a request with `Accept: application/json` gets HTML; or, with debug off, a browser request gets anything but the response it got before the page existed.
+the place of the app's Inertia error page. With debug off, a response with
+status 500 or above sent to a request whose `Accept` header lists
+`text/html` and that is not an Inertia visit MUST be an HTML error view
+with the same status and no detail of the error, as Laravel renders its
+error view in production; an Inertia visit keeps the app's Inertia error
+page, and a request that accepts JSON keeps its JSON body. Every other
+response MUST stay as it is today.
+Falsifier: with debug on, a browser request to a handler that returns an error gets JSON, or a page without the error's message or without the 500 status; an Inertia visit to it gets the app's Inertia error page; a request with `Accept: application/json` gets HTML; with debug off, a browser request to it gets a JSON body, a page that shows the error's message or a frame, or a status other than the error's; with debug off an Inertia visit gets anything but the app's Inertia error page, or an `Accept: application/json` request anything but its JSON body.
 Mechanism: `par-debug-error-page`.
-Rationale: Laravel renders its exception page when `APP_DEBUG` is on and the request does not expect JSON, and the Inertia documentation keeps that page in local development, where the client shows it in its modal.
-Status: Agreed 2026-10-02
+Rationale: Laravel renders its exception page when `APP_DEBUG` is on and the request does not expect JSON, and its minimal error view when debug is off (row 012 of the parity log); the Inertia documentation keeps the debug page in local development, where the client shows it in its modal.
+Status: Agreed 2026-10-08
 
 [PAR-013] With debug on, the framework MUST record the stack frames at the
 place where an error first became a `FrameworkError` or an `AppError`, or
-where a panic happened, and the page MUST list them: the application's
-frames shown, and the frames of the standard library, the async runtime,
-other dependencies and the framework itself collapsed behind a count. With
-debug off, the framework MUST NOT record frames.
-Falsifier: a handler whose `?` turns a database error into a `FrameworkError` yields a page whose frames do not name that handler; a panicking handler's page does not name the function that panicked; a `std`, `tokio` or `hyper` frame is shown outside a collapsed group; or, with debug off, an error records frames.
+where a panic happened, and at the place each earlier error of the chain
+was raised when that error carries its own frames, and the page MUST list
+them: the application's frames shown, each with the source line and a few
+lines around it when the source file is readable, and the frames of the
+standard library, the async runtime, other dependencies and the framework
+itself collapsed behind a count; each error of the chain MUST show its own
+trace. With debug off, the framework MUST NOT record frames.
+Falsifier: a handler whose `?` turns a database error into a `FrameworkError` yields a page whose frames do not name that handler, or whose application frame shows no source lines although the file is readable; a page for a chained error shows one trace for the whole chain where an inner error recorded its own; a panicking handler's page does not name the function that panicked; a `std`, `tokio` or `hyper` frame is shown outside a collapsed group; or, with debug off, an error records frames.
 Mechanism: `par-debug-error-page`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's exception renderer shows a source snippet per frame and a trace per exception of the chain (row 013 of the parity log); argument types have no counterpart in a Rust backtrace.
+Status: Agreed 2026-10-08
 
 [PAR-014] The page MUST show the request's method, path and query, its
 headers, the matched route pattern when there is one, and the request id.
@@ -225,24 +269,33 @@ The developer ruled on 2026-10-01 to build a default filesystem disk,
 validated at startup, third in priority.
 
 [PAR-016] The application's default disk MUST be the disk named by
-`Storage::set_default_disk`, or else by `FILESYSTEM_DISK`, and
-`Storage::default_disk()` MUST return the disk registered under that
-name. With neither set, `Storage::default_disk()` MUST return an error
-that names `FILESYSTEM_DISK`. A call that names its disk MUST behave as
-it does today.
-Falsifier: with `FILESYSTEM_DISK=uploads` and a disk registered as `uploads`, bytes written through `Storage::default_disk()` cannot be read through `Storage::disk("uploads")`; `Storage::set_default_disk("archive")` does not win over `FILESYSTEM_DISK`; with neither set, `Storage::default_disk()` returns a disk, or an error that does not name `FILESYSTEM_DISK`; or `Storage::disk(name)` answers differently with a default set.
+`Storage::set_default_disk`, or else by `FILESYSTEM_DISK`, or else `local`,
+as Laravel's `filesystems.default` reads `FILESYSTEM_DISK` with `local` as
+its default, so a Laravel `.env` configures storage without edits; and
+`Storage::default_disk()` MUST return the disk registered under that name.
+With no `local` disk registered and neither setting present,
+`Storage::default_disk()` MUST return an error that names `local` and
+`FILESYSTEM_DISK`. A call that names its disk MUST behave as it does
+today.
+Falsifier: with `FILESYSTEM_DISK=uploads` and a disk registered as `uploads`, bytes written through `Storage::default_disk()` cannot be read through `Storage::disk("uploads")`; `Storage::set_default_disk("archive")` does not win over `FILESYSTEM_DISK`; with neither set and a `local` disk registered, `Storage::default_disk()` is not that disk; with neither set and no `local` disk, it returns a disk, or an error that names neither `local` nor `FILESYSTEM_DISK`; or `Storage::disk(name)` answers differently with a default set.
 Mechanism: `par-default-disk`.
-Rationale: Laravel's `Storage::disk()` with no name and `Storage::put` use `filesystems.default`, which reads `FILESYSTEM_DISK`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `Storage::disk()` with no name and `Storage::put` use `filesystems.default`, `env('FILESYSTEM_DISK', 'local')` (row 016 of the parity log).
+Status: Agreed 2026-10-08
 
 [PAR-017] When a default disk is named, startup MUST fail if no disk is
 registered under that name once the application's bootstrap and the
 environment's disks are in place: `filesystem::bootstrap_from_env`,
 which the server and the worker commands run at boot, MUST return an
-error that names the missing disk and `FILESYSTEM_DISK`.
-Falsifier: with `FILESYSTEM_DISK=uploads` and no `uploads` disk registered, `bootstrap_from_env` returns `Ok`; its error does not name `uploads` or `FILESYSTEM_DISK`; or with `FILESYSTEM_DISK=s3` and `S3_BUCKET` set, it fails although it registered the `s3` disk itself.
+error that names the missing disk and `FILESYSTEM_DISK`. The environment's
+`s3` disk MUST be configured by Laravel's names too: `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `AWS_BUCKET`, `AWS_URL`,
+`AWS_ENDPOINT` and `AWS_USE_PATH_STYLE_ENDPOINT`, read when the `S3_`
+names the framework reads today are absent, so a Laravel `.env`
+configures the disk without edits.
+Falsifier: with `FILESYSTEM_DISK=uploads` and no `uploads` disk registered, `bootstrap_from_env` returns `Ok`; its error does not name `uploads` or `FILESYSTEM_DISK`; with `FILESYSTEM_DISK=s3` and `S3_BUCKET` set, it fails although it registered the `s3` disk itself; or with `FILESYSTEM_DISK=s3`, `AWS_BUCKET`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` set and no `S3_` name, it fails to register the `s3` disk, or registers one that does not use those values.
 Mechanism: `par-default-disk`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `config/filesystems.php` `s3` disk reads the `AWS_*` names (row 017 of the parity log); the startup check is Suprnova's own design and stays.
+Status: Agreed 2026-10-08
 
 ## SQS queue driver
 
@@ -250,7 +303,7 @@ The developer ruled on 2026-10-01 to build an SQS queue driver, a managed
 queue outside the application database and Redis, after the default disk.
 
 [PAR-018] With `QUEUE_DRIVER=sqs`, the framework MUST queue jobs on Amazon
-SQS standard queues. A push MUST send the job to the queue its envelope
+SQS queues. A push MUST send the job to the queue its envelope
 names, or to `SQS_QUEUE` when it names none, and a delayed job MUST NOT be
 received before its time, a delay longer than the 15 minutes SQS allows on
 one message included. A pop MUST receive one message and hide it for the
@@ -259,13 +312,16 @@ MUST return it after the requeue delay with one more attempt, and a
 `release` MUST return it after the delay with the same number of attempts.
 A worker MUST receive from the queues its `--queue` list names, in order,
 and from `SQS_QUEUE` when the list is empty. `size`, `pending_size`,
-`delayed_size` and `reserved_size` MUST report the approximate counts SQS
-keeps for `SQS_QUEUE`, and `clear` MUST purge it and return the count it
-held.
-Falsifier: against an SQS endpoint, a pushed job is never received; a job pushed to the queue `emails` is received from `SQS_QUEUE`; a job delayed 20 minutes is received before 20 minutes have passed; an acknowledged job is received again; a nacked job comes back with attempts not one higher, or a released job with its attempts changed; a worker with `--queue=emails` receives a job from `SQS_QUEUE`; or `size` reports other than the counts SQS returns.
+`delayed_size`, `reserved_size` and `clear` MUST take the queue they
+report or purge, `SQS_QUEUE` when none is given, so an application with
+several queues counts and clears one; the sizes MUST report the
+approximate counts SQS keeps and `clear` MUST return the count the queue
+held. The same queue argument MUST exist on every queue driver's `size`
+and `clear`.
+Falsifier: against an SQS endpoint, a pushed job is never received; a job pushed to the queue `emails` is received from `SQS_QUEUE`; a job delayed 20 minutes is received before 20 minutes have passed; an acknowledged job is received again; a nacked job comes back with attempts not one higher, or a released job with its attempts changed; a worker with `--queue=emails` receives a job from `SQS_QUEUE`; `size` reports other than the counts SQS returns; `size("emails")` reports `SQS_QUEUE`'s count, or `clear("emails")` purges `SQS_QUEUE`; or another driver's `size` or `clear` refuses a queue name.
 Mechanism: `par-sqs-queue`.
-Rationale: Laravel's `SqsJob` counts every receive as an attempt, so its release counts one, and it passes SQS a delay over 900 seconds, which SQS refuses.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `SqsQueue::size($queue)` and `clear($queue)` take the queue (row 018 of the parity log); `SqsJob` counts every receive as an attempt, so its release counts one, and it passes SQS a delay over 900 seconds, which SQS refuses, so the attempt and delay rules stay.
+Status: Agreed 2026-10-08
 
 [PAR-019] The `sqs` driver MUST read its configuration from the
 environment. `SQS_PREFIX`, `SQS_QUEUE` (default `default`) and
@@ -275,30 +331,36 @@ that is already a URL MUST be used as it is. `AWS_DEFAULT_REGION`, or else
 service that is not AWS. Requests MUST be signed with AWS Signature
 Version 4 for `sqs` in that region, with `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` when they are set, or else
-with AWS's default credential chain. Boot MUST fail with an error that
-names the variable when no region is set, when the queue is not a URL and
-`SQS_PREFIX` is not set, or when the queue is a FIFO queue, whose name ends
-in `.fifo`. `QUEUE_CONNECTIONS` and `QUEUE_FAILOVER_CONNECTIONS` MUST
-accept `sqs`.
-Falsifier: with `SQS_PREFIX=https://sqs.us-east-1.amazonaws.com/123456789012`, `SQS_QUEUE=jobs` and `SQS_SUFFIX=-prod`, a push names a queue URL other than `https://sqs.us-east-1.amazonaws.com/123456789012/jobs-prod`; a request carries no Signature Version 4 `Authorization` header scoped to the region and `sqs`; boot succeeds with no region, with a plain queue name and no prefix, or with `SQS_QUEUE=jobs.fifo`; or `QUEUE_CONNECTIONS=sqs` is refused.
+with AWS's default credential chain. A queue whose name ends in `.fifo`
+MUST be sent FIFO messages, as Laravel's `getQueueableOptions` builds them:
+`MessageGroupId` from the job's message group, `default` when the job sets
+none, and `MessageDeduplicationId` from the job's deduplication id, a
+digest of the payload when the job sets none, with no per-message delay,
+which FIFO queues refuse. Boot MUST fail with an error that names the
+variable when no region is set or when the queue is not a URL and
+`SQS_PREFIX` is not set. `QUEUE_CONNECTIONS` and
+`QUEUE_FAILOVER_CONNECTIONS` MUST accept `sqs`.
+Falsifier: with `SQS_PREFIX=https://sqs.us-east-1.amazonaws.com/123456789012`, `SQS_QUEUE=jobs` and `SQS_SUFFIX=-prod`, a push names a queue URL other than `https://sqs.us-east-1.amazonaws.com/123456789012/jobs-prod`; a request carries no Signature Version 4 `Authorization` header scoped to the region and `sqs`; boot succeeds with no region, or with a plain queue name and no prefix; boot refuses `SQS_QUEUE=jobs.fifo`; a push to `jobs.fifo` carries no `MessageGroupId` or no `MessageDeduplicationId`, carries a group other than the job's, or carries a `DelaySeconds`; or `QUEUE_CONNECTIONS=sqs` is refused.
 Mechanism: `par-sqs-queue`.
-Rationale: a FIFO queue needs a message group and a deduplication ID on each job, and the parity map does not rule `onGroup` or `withDeduplicator` to build, so a FIFO queue is refused at boot rather than sent messages SQS rejects.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `SqsQueue::getQueueableOptions` sends `MessageGroupId` and `MessageDeduplicationId` for a `.fifo` queue (row 019 of the parity log); the region and prefix boot failures fail closed on missing configuration and stay.
+Status: Agreed 2026-10-08
 
 [PAR-020] With `SQS_OVERFLOW_ENABLED=true`, a job whose payload is 1 MiB
 or more, SQS's message limit, or every job when `SQS_OVERFLOW_ALWAYS=true`,
-MUST be stored on a filesystem disk, the one `SQS_OVERFLOW_DISK` names or
-else the default disk, and sent to SQS as a pointer to it. A pop MUST
-return the stored job. An acknowledgement MUST delete the stored payload
-unless `SQS_OVERFLOW_DELETE_AFTER_PROCESSING=false`, and `clear` MUST
-delete the stored payloads too when `SQS_OVERFLOW_FLUSH_ON_CLEAR=true`.
-Without overflow, a push over the limit MUST fail with an error that names
-the limit and `SQS_OVERFLOW_ENABLED`. Boot MUST fail when overflow is on
-and the disk is not registered.
-Falsifier: with overflow on, a 2 MiB job is sent to SQS whole, or a pop returns the pointer instead of the job; its stored payload survives an acknowledgement with delete-after-processing on, or survives `clear` with flush-on-clear on; with overflow off, a 2 MiB push succeeds or its error names neither the limit nor `SQS_OVERFLOW_ENABLED`; or boot succeeds with overflow on and no disk registered under the name.
+MUST be stored outside the message and sent to SQS as a pointer: in the
+cache store `SQS_OVERFLOW_STORE` names, as Laravel keeps them, or else on
+the filesystem disk `SQS_OVERFLOW_DISK` names, or else on the default
+disk. A pop MUST return the stored job. An acknowledgement MUST delete the
+stored payload unless `SQS_OVERFLOW_DELETE_AFTER_PROCESSING=false`, and
+`clear` MUST delete the stored payloads of the cleared queue, and only
+those, when `SQS_OVERFLOW_FLUSH_ON_CLEAR=true`. Without overflow, a push
+over the limit MUST fail with an error that names the limit and
+`SQS_OVERFLOW_ENABLED`. Boot MUST fail when overflow is on and the named
+store or disk is not registered.
+Falsifier: with overflow on, a 2 MiB job is sent to SQS whole, or a pop returns the pointer instead of the job; with `SQS_OVERFLOW_STORE=redis` the payload is not in that cache store, or is on a disk; its stored payload survives an acknowledgement with delete-after-processing on, or survives `clear` of its queue with flush-on-clear on, or `clear` of another queue deletes it; with overflow off, a 2 MiB push succeeds or its error names neither the limit nor `SQS_OVERFLOW_ENABLED`; or boot succeeds with overflow on and no store or disk registered under the name.
 Mechanism: `par-sqs-queue`.
-Rationale: Laravel keeps overflow payloads in a cache store, which can evict one before its job runs; a disk keeps it until the job is done.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `SqsQueue::overflow` stores the payload in the cache store `queue.connections.sqs.overflow.store` names (row 020 of the parity log); clearing only the cleared queue's payloads stays, since Laravel's flush of the whole store destroys other queues' payloads.
+Status: Agreed 2026-10-08
 
 ## Process facade
 
@@ -317,29 +379,36 @@ return a result with the exit code and the full standard output and
 standard error, and a nonzero exit MUST be a result that reports failure,
 not an error; `throw` MUST turn a failed result into an error that carries
 the exit code and both outputs. `path` MUST set the working directory,
-`env` MUST add a variable to the environment the process inherits, `input`
+`env` MUST add a variable to the environment the process inherits and
+MUST remove an inherited variable when given no value for it, `input`
 MUST be written to its standard input, and an output callback MUST receive
 each chunk of standard output and standard error as it arrives unless
-`quietly` is set, and `tty` MUST hand the process the terminal's standard
-input and output, capturing nothing. A program that cannot be started
-MUST be an error that names it.
-Falsifier: running `sh -c 'printf out; printf err >&2; exit 3'` does not give the output `out`, the error output `err`, exit code 3 and a failed result, or `run` returns an error for it; an argument to `Process::command` holding `; touch marker` is run by a shell, so `marker` exists; `Process::shell("printf 'b\na\n' | sort")` does not output `a\nb\n`; `path`, `env` or `input` does not reach the process; the callback misses a chunk, or is called under `quietly`; output is captured under `tty`; or a missing program gives a result, or an error that does not name it.
+`quietly` is set. `tty` MUST hand the process the terminal's standard
+input and output, capturing nothing, and MUST be an error that names the
+redirected stream when standard input or output is not a terminal. The
+command line a result or an error reports MUST quote each argument as a
+POSIX shell would read it. A program that cannot be started MUST be an
+error that names it.
+Falsifier: running `sh -c 'printf out; printf err >&2; exit 3'` does not give the output `out`, the error output `err`, exit code 3 and a failed result, or `run` returns an error for it; an argument to `Process::command` holding `; touch marker` is run by a shell, so `marker` exists; `Process::shell("printf 'b\na\n' | sort")` does not output `a\nb\n`; `path`, `env` or `input` does not reach the process; `env("HOME", None)` leaves `HOME` in the process's environment; the callback misses a chunk, or is called under `quietly`; output is captured under `tty`, or `tty` with standard input redirected from a file runs instead of erroring; the reported command line of `["printf", "a b"]` is not `printf 'a b'`; or a missing program gives a result, or an error that does not name it.
 Mechanism: `par-process`.
-Rationale: Laravel's `Process::run` takes a string, run through the shell, or an array, run as it is; `shell` and `command` are the two, kept apart so the shell is never reached by accident.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `PendingProcess::env` with a `false` value unsets a variable, Symfony's `Process::setTty` refuses a non-terminal, and `getCommandLine` escapes each argument (row 021 of the parity log); `shell` and `command` are kept apart so the shell is never reached by accident, and `quietly` dropping the callback stays.
+Status: Agreed 2026-10-08
 
 [PAR-022] A process MUST be killed, with every process it started, when
 it runs past its `timeout` (60 seconds unless set, none after `forever`),
 and `run` MUST then return a timeout error that names the command and the
 timeout. `start` MUST return a running process with its id, whether it is
 still running, the output so far and since the last read, a way to send it
-a signal, `stop` (a terminate signal, then a kill after a grace period)
-and `wait`, which returns its result. Dropping a running process, or the
-future of `run` before it completes, MUST kill it with every process it
-started.
-Falsifier: `sh -c 'sleep 30 & sleep 30'` with a one-second timeout does not return a timeout error naming the command within five seconds, or either `sleep` is still running afterwards; a started process reports no id, reports running after it exited, or `stop` leaves it running; or after the `run` future or a started process is dropped, the process or a child of it is still running.
+a signal, `stop` and `wait`, which returns its result. `stop(grace,
+signal)` MUST send the given signal, a terminate signal when none is
+given, wait up to `grace` (10 seconds unless set) for the process to exit,
+and then kill it, as Laravel's `InvokedProcess::stop` does through
+Symfony's `Process::stop`. Dropping a running process, or the future of
+`run` before it completes, MUST kill it with every process it started.
+Falsifier: `sh -c 'sleep 30 & sleep 30'` with a one-second timeout does not return a timeout error naming the command within five seconds, or either `sleep` is still running afterwards; a started process reports no id, reports running after it exited, or `stop` leaves it running; `stop` on a process that ignores the terminate signal returns before ten seconds without killing it, or `stop(Duration::from_secs(1), Signal::Interrupt)` sends anything but an interrupt first; or after the `run` future or a started process is dropped, the process or a child of it is still running.
 Mechanism: `par-process`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `InvokedProcess::stop($timeout = 10, $signal = null)` and Symfony's `Process::stop` (row 022 of the parity log); killing every descendant and the watchdog stay, since an orphaned process is the unsafe outcome.
+Status: Agreed 2026-10-08
 
 [PAR-023] `idle_timeout` MUST kill a process, with every process it
 started, when it writes no output for that long, and `run` MUST then
@@ -363,19 +432,23 @@ Status: Agreed 2026-10-02
 [PAR-025] `Process::fake()` MUST stop every process from running while its
 guard lives: a command matching a faked pattern (`*` matches any run of
 characters in the command line: the arguments joined by spaces, or the
-shell line as given) MUST get
-the faked result, its output, error output and exit code, and any other
-command an empty successful one, unless `prevent_stray_processes` makes it
-an error that names the command. A described fake MUST support a run that
-lasts a given number of `running` checks, and a sequence MUST answer its
-results in turn. Every faked run, start, pool and pipe MUST be recorded,
-and `assert_ran`, `assert_ran_times`, `assert_ran_in_order`,
-`assert_not_ran` and `assert_nothing_ran` MUST fail the test when the
-record does not match.
-Falsifier: with a fake installed, a command that creates a file creates it; a matching command gets another result; an unmatched command errors without `prevent_stray_processes` or runs with it; a sequence answers out of turn; a described process stops reporting running before its count; or an assertion passes on a record that does not match it.
+shell line as given) MUST get the faked result, its output, error output
+and exit code, and any other command an empty successful one, unless
+`prevent_stray_processes` makes it an error that names the command. A
+fake MAY be a closure that receives the pending process (its command,
+path, environment and input) and returns the result, as Laravel's closure
+handlers do. A described fake MUST support a run that lasts a given number
+of `running` checks and MUST replay its output and error output lines in
+the order they were described, each line ending in a newline as Laravel's
+`FakeProcessDescription` writes it; a sequence MUST answer its results in
+turn. Every faked run, start, pool and pipe MUST be recorded, and
+`assert_ran`, `assert_ran_times` (once when no count is given),
+`assert_ran_in_order`, `assert_not_ran` and `assert_nothing_ran` MUST fail
+the test when the record does not match.
+Falsifier: with a fake installed, a command that creates a file creates it; a matching command gets another result; an unmatched command errors without `prevent_stray_processes` or runs with it; a closure fake does not receive the command's arguments, path, environment or input, or its result is not the one returned; a sequence answers out of turn; a described process stops reporting running before its count, replays its error output before an output line described earlier, or writes a line without its trailing newline; `assert_ran_times("ls")` with no count passes when `ls` ran twice; or an assertion passes on a record that does not match it.
 Mechanism: `par-process`.
-Rationale: Laravel's `Process::fake` with pattern handlers, `describe`, `sequence`, `preventStrayProcesses` and the assertions.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `Process::fake` with closure and pattern handlers, `describe`, `sequence`, `preventStrayProcesses` and the assertions (rows 025 and 025.2 of the parity log); the fake answering every command stays.
+Status: Agreed 2026-10-08
 
 ## Log channels
 
@@ -386,27 +459,32 @@ the default. Slack and the other vendor sinks are deferred, not refused.
 [PAR-026] `LOG_CHANNEL` MUST name the channel the application's log
 events go to, and `stdout` when it is not set, writing what the framework
 writes today. The built-in channels are `stdout`, `stderr` (also named
-`errorlog`), `single`, `daily`, `monthly`, `syslog`, `null`, and `stack`,
+`errorlog`), `single`, `daily`, `monthly`, `syslog`, `null`, `stack`,
 which writes to every channel `LOG_STACK` lists (`single` when it is not
-set). `Log::define(name, channel)` in the bootstrap MUST add a channel
-under a name, and `Log::extend(driver, factory)` MUST add a driver a
-defined channel can use. A `LOG_CHANNEL` or `LOG_STACK` that names no
-channel MUST fail boot with an error that names it.
-Falsifier: with `LOG_CHANNEL` unset, an `info!` event is not written to stdout; with `LOG_CHANNEL=single` the event is not in the file, or is also on stdout; a defined channel, or one on an extended driver, does not receive the events of the default channel it is; or boot succeeds with `LOG_CHANNEL=nosuch`, or its error does not name `nosuch`.
+set), and `custom`, a channel whose `LOG_CHANNEL_DRIVER` names a driver
+`Log::extend` added, so every name Laravel's `config/logging.php` gives
+resolves from a Laravel `.env` without edits. `Log::define(name, channel)`
+in the bootstrap MUST add a channel under a name, and `Log::extend(driver,
+factory)` MUST add a driver a defined or the `custom` channel can use. A
+`LOG_CHANNEL` or `LOG_STACK` that names no channel MUST fail boot with an
+error that names it.
+Falsifier: with `LOG_CHANNEL` unset, an `info!` event is not written to stdout; with `LOG_CHANNEL=single` the event is not in the file, or is also on stdout; `LOG_CHANNEL=errorlog`, `LOG_CHANNEL=null` or `LOG_CHANNEL=stack` with `LOG_STACK=single,stderr` fails boot or writes elsewhere than Laravel's channel of that name would; `LOG_CHANNEL=custom` with `LOG_CHANNEL_DRIVER` naming an extended driver does not reach that driver; a defined channel, or one on an extended driver, does not receive the events of the default channel it is; or boot succeeds with `LOG_CHANNEL=nosuch`, or its error does not name `nosuch`.
 Mechanism: `par-log-channels`.
-Rationale: Laravel's `config/logging.php` channels and `LOG_CHANNEL`, with stdout as the default the developer kept.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `config/logging.php` channels, `LOG_CHANNEL` and the `custom` driver's `via` (row 026 of the parity log), with stdout as the default the developer kept and the boot failure on an unknown channel kept.
+Status: Agreed 2026-10-08
 
 [PAR-027] `single` MUST append each record to one file, `logs/suprnova.log`
 under the storage directory unless the channel sets a path, creating the
 directories. `daily` MUST write to a file named for the day
-(`suprnova-2026-10-02.log`) and keep the newest `LOG_DAILY_DAYS` (14)
-files, deleting older ones; `monthly` MUST write to a file named for the
-month (`suprnova-2026-10.log`) and keep the newest 3. The day and the month
+(`suprnova-2026-10-02.log`) and keep the newest `LOG_DAILY_DAYS` files,
+7 when it is not set as Laravel's `createDailyDriver` defaults, deleting
+older ones; `monthly` MUST write to a file named for the month
+(`suprnova-2026-10.log`) and keep the newest 3. The day and the month
 are those of the framework clock, in UTC.
-Falsifier: a record is not appended to the single file, or its directory is not created; a record written after midnight goes to the previous day's file; with 20 dated files and `LOG_DAILY_DAYS=14`, other than the 14 newest remain after a write; or a monthly channel keeps other than the 3 newest months.
+Falsifier: a record is not appended to the single file, or its directory is not created; a record written after midnight goes to the previous day's file; with 20 dated files and `LOG_DAILY_DAYS=14`, other than the 14 newest remain after a write; with 10 dated files and `LOG_DAILY_DAYS` unset, other than the 7 newest remain; or a monthly channel keeps other than the 3 newest months.
 Mechanism: `par-log-channels`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `LogManager::createDailyDriver` keeps `$config['days'] ?? 7` files (row 027 of the parity log); the `suprnova.log` name and the UTC clock are the earlier spec's choices and stay.
+Status: Agreed 2026-10-08
 
 [PAR-028] A `stack` MUST write each record to every channel it lists, and
 a channel that fails, such as a file it cannot open, MUST NOT stop the
@@ -435,11 +513,15 @@ Status: Agreed 2026-10-02
 [PAR-030] `syslog` MUST send each record as an RFC 3164 datagram to the
 local syslog socket (`LOG_SYSLOG_SOCKET`, `/dev/log` unless set, or
 `/var/run/syslog` on macOS), with the facility `LOG_SYSLOG_FACILITY`
-(`user` unless set) and the severity of the record's level. Off Unix it
-MUST fail boot with an error that says so.
-Falsifier: a record reaches the socket with another priority than facility times 8 plus severity, or does not reach it; or an unknown facility boots.
+(`user` unless set), the severity of the record's level, and the
+application's name from `APP_NAME` as the ident (`suprnova` when it is
+not set), as Laravel's syslog channel names the application. Off Unix it
+MUST fail boot with an error that says so, and an unknown facility MUST
+fail boot too.
+Falsifier: a record reaches the socket with another priority than facility times 8 plus severity, or does not reach it; with `APP_NAME=Shop` the datagram's tag is not `Shop`; or an unknown facility boots.
 Mechanism: `par-log-channels`.
-Status: Agreed 2026-10-02
+Rationale: Laravel's `createSyslogDriver` passes `config('app.name')` as the ident (row 030 of the parity log); the unknown-facility boot failure and the Unix-only refusal stay.
+Status: Agreed 2026-10-08
 
 ## Redis facade
 
@@ -450,38 +532,49 @@ blocking commands. Redis Cluster is deferred, not refused. The funnel and
 throttle limiters stay unbuilt by the developer's ruling of 2026-09-30.
 
 [PAR-031] `Redis::connection(name)` MUST return the connection with that
-name: `default`, which reaches `REDIS_URL` (`redis://127.0.0.1:6379` when
-it is unset), or one the bootstrap gives with `Redis::define(name, url)`,
-which replaces any connection of that name. A connection MUST open on its
-first command, not before, and MUST open again after it is lost.
-`Redis::purge(name)` MUST forget the connection, which closes once no
-handle holds it, and `Redis::connections()` MUST list the names of the
-connections resolved and not purged. A name with no connection, or a URL
-that is not a Redis URL, MUST be an error that names the connection.
-Falsifier: the default connection reaches another server or database than `REDIS_URL` names, or than `redis://127.0.0.1:6379` when it is unset; a defined connection reaches another database than its URL's; resolving a connection to an address where nothing listens fails before a command is sent; after the server drops the connection, a read, or the write after it, fails although the server is up; `connections()` misses a resolved name or lists a purged one; a purged connection that no handle holds stays open; or an unknown name, a URL such as `http://x`, or such a `REDIS_URL`, is not an error naming the connection.
+name: `default`, which reaches `REDIS_URL` when it is set, or else the
+server `REDIS_HOST` (`127.0.0.1`), `REDIS_PORT` (`6379`), `REDIS_PASSWORD`
+(none) and `REDIS_DB` (`0`) describe, as Laravel's `config/database.php`
+reads them; `cache`, the same server on `REDIS_CACHE_DB` (`1`); or one
+the bootstrap gives with `Redis::define(name, url)`, which replaces any
+connection of that name. Every key a typed method sends MUST carry the
+prefix `REDIS_PREFIX` names, `<app name as a slug>-database-` when it is
+not set, as Laravel's `redis.options.prefix`; `command(name, args)` sends
+its arguments as given. A connection MUST open on its first command, not
+before, and MUST open again after it is lost. `Redis::purge(name)` MUST
+forget the connection, which closes once no handle holds it, and
+`Redis::connections()` MUST list the names of the connections resolved and
+not purged. A name with no connection, or a URL that is not a Redis URL,
+MUST be an error that names the connection.
+Falsifier: the default connection reaches another server or database than `REDIS_URL` names, or, with `REDIS_URL` unset, than `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` and `REDIS_DB` describe; `Redis::connection("cache")` reaches another database than `REDIS_CACHE_DB`; with `REDIS_PREFIX=shop-` a `set("k", v)` writes a key other than `shop-k`, or with it unset and `APP_NAME=My Shop` a key other than `my-shop-database-k`; a defined connection reaches another database than its URL's; resolving a connection to an address where nothing listens fails before a command is sent; after the server drops the connection, a read, or the write after it, fails although the server is up; `connections()` misses a resolved name or lists a purged one; a purged connection that no handle holds stays open; or an unknown name, a URL such as `http://x`, or such a `REDIS_URL`, is not an error naming the connection.
 Mechanism: `par-redis`.
-Rationale: Laravel's `RedisManager` and the `redis` connections of `config/database.php`; Suprnova names connections in the bootstrap instead of a config file.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `RedisManager` and the `redis` connections and `options.prefix` of `config/database.php` (row 031 of the parity log); connecting on the first command and rejecting unknown URL schemes stay.
+Status: Agreed 2026-10-08
 
 [PAR-032] A connection MUST run the common commands as typed methods
 (`get`, `set`, `set_ex`, `del`, `exists`, `incr`, `decr`, `expire`, `ttl`,
 `mget`, `hset`, `hget`, `hgetall`, `hdel`, `lpush`, `rpush`, `lpop`,
 `rpop`, `lrange`, `sadd`, `srem`, `smembers`, `zadd`, `zrange`,
-`zrangebyscore`, `publish`, `eval` and `scan`), any other command with
-`command(name, args)`, which returns the reply, and give the underlying
-`redis` client with `client()`. A read, typed or one of Laravel's
-retryable commands given to `command`, MUST be sent again after a lost
-connection: once, and once more for each retry `REDIS_COMMAND_RETRIES`
-adds; another command MUST NOT be. While `Redis::enable_events()` is in
-force, each command a connection runs outside a pipeline or a transaction
-MUST be reported to the listeners `Redis::listen` adds, with the
-connection's name, the command, its arguments and its duration, and each
-command that fails to the listeners `Redis::listen_for_failures` adds,
-with its error. Events are off until enabled.
-Falsifier: a typed command, or `command("LRANGE", ...)`, returns other than the server's reply; `client()` is not a client of the same server and database; a read fails after the server dropped the connection once; a write is applied twice after a lost connection; with events enabled a command is not reported, or is reported with the wrong connection name, command or arguments, or a failed command is not reported to the failure listeners; or a command is reported while events are off.
+`zrangebyscore`, `publish`, `eval`, `evalsha` and `scan`), any other
+command with `command(name, args)`, which returns the reply, a raw command
+line with `execute_raw(args)`, as Laravel's `executeRaw`, and give the
+underlying `redis` client with `client()`. A read, typed or one of
+Laravel's retryable commands given to `command`, MUST be sent again after
+a lost connection: once, and once more for each retry
+`REDIS_COMMAND_RETRIES` adds; another command MUST NOT be, and `MULTI` and
+`SUBSCRIBE` on the shared connection MUST be refused. While
+`Redis::enable_events()` is in force, each command a connection runs
+outside a pipeline or a transaction MUST be dispatched as a
+`RedisCommandExecuted` event through the application's event dispatcher,
+with the connection's name, the command, its arguments and its duration,
+and each command that fails as a `RedisCommandFailed` event with its
+error, so `Event::listen` hears them; `Redis::listen` and
+`Redis::listen_for_failures` MUST keep receiving them too. Events are off
+until enabled.
+Falsifier: a typed command, `evalsha` with a loaded script, `execute_raw(["LRANGE", ...])` or `command("LRANGE", ...)` returns other than the server's reply; `client()` is not a client of the same server and database; a read fails after the server dropped the connection once; a write is applied twice after a lost connection; `MULTI` through `command` on the shared connection is sent; with events enabled a listener registered with `Event::listen` for `RedisCommandExecuted` does not hear a command, or hears the wrong connection name, command or arguments, a failed command reaches no `RedisCommandFailed` listener, or a `Redis::listen` listener stops hearing commands; or a command is reported while events are off.
 Mechanism: `par-redis`.
-Rationale: Laravel's `Connection::command`, `client`, `listen`, `listenForFailures`, `CommandExecuted`, `CommandFailed` and `PhpRedisConnection::RETRYABLE_COMMANDS`.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `Connection::command`, `executeRaw`, `client`, `listen`, `listenForFailures`, the `CommandExecuted` and `CommandFailed` events it dispatches through the application dispatcher, and `PhpRedisConnection::RETRYABLE_COMMANDS` (row 032 of the parity log); never resending writes and refusing `MULTI` or `SUBSCRIBE` on the shared connection stay, since a resent `INCR` double-applies.
+Status: Agreed 2026-10-08
 
 [PAR-033] `pipeline(|pipe| ...)` MUST send every command the closure
 queues before it reads a reply, and return the replies in order.
@@ -512,45 +605,63 @@ through `Lang`.
 
 [PAR-035] `Str::slug(title, separator)` MUST spell the title in ASCII,
 lower-case it, write `@` as `at`, and join its runs of letters and digits
-with the separator, as Laravel's `Str::slug` does. `Str::mask(value,
-character, index, length)` MUST replace the characters from `index`
-(counted from the end when negative) for `length` characters (to the end
-when `None`) with `character`. `Str::limit(value, limit, end)` MUST keep
-the first `limit` characters and append `end` when it cut, and
-`Str::limit_words(value, limit, end)` MUST cut at the last space within
-the limit. `Str::excerpt(text, phrase, radius, omission)` MUST return the
-first match of the phrase, case-insensitive, with up to `radius`
-characters on each side and `omission` where it cut, or `None` when the
-phrase is absent. Every count is in characters, not bytes.
-Falsifier: `Str::slug("Laravel 5 Framework", "-")` is not `laravel-5-framework`, `Str::slug("Œuvre d'art_2 @home", "-")` is not `oeuvre-dart-2-at-home`, or `Str::slug("foo bar", "_")` is not `foo_bar`; `Str::mask("taylor@example.com", '*', 3, None)` is not `tay***************`, or `Str::mask("taylor@example.com", '*', -15, Some(3))` is not `tay***@example.com`; `Str::limit("The quick brown fox jumps over the lazy dog", 20, "...")` is not `The quick brown fox...`, or `Str::limit_words("The quick brown fox", 12, "...")` is not `The quick...`; `Str::excerpt("This is my name", "my", 3, "...")` is not `Some("...is my na...")`; or a multibyte value is cut inside a character.
+with the separator, as Laravel's `Str::slug` does, and `Str::slug_in(title,
+separator, language)` MUST transliterate by the named language's rules as
+Laravel's third argument does. `Str::mask(value, character, index,
+length)` MUST replace the characters from `index` (counted from the end
+when negative) for `length` characters (to the end when `None`) with
+`character`. `Str::limit(value, limit, end)` MUST keep the first `limit`
+characters and append `end` when it cut. `Str::words(value, words, end)`
+MUST keep the first `words` words, a word being a run of non-space
+characters however it is spelled, and append `end` when it cut, as
+Laravel's `Str::words` does, and `Str::limit_words(value, limit, end)` MUST
+cut at the last space within the limit. `Str::excerpt(text, phrase, radius,
+omission)` MUST return the first match of the phrase, case-insensitive,
+with up to `radius` characters on each side and `omission` where it cut,
+trimming Laravel's invisible characters (the `INVISIBLE_CHARACTERS` set)
+from the ends it cut, or `None` when the phrase is absent. Every count is
+in characters, not bytes.
+Falsifier: `Str::slug("Laravel 5 Framework", "-")` is not `laravel-5-framework`, `Str::slug("Œuvre d'art_2 @home", "-")` is not `oeuvre-dart-2-at-home`, or `Str::slug("foo bar", "_")` is not `foo_bar`; `Str::slug_in("Ärger", "-", "de")` is not `aerger`; `Str::mask("taylor@example.com", '*', 3, None)` is not `tay***************`, or `Str::mask("taylor@example.com", '*', -15, Some(3))` is not `tay***@example.com`; `Str::limit("The quick brown fox jumps over the lazy dog", 20, "...")` is not `The quick brown fox...`; `Str::words("Perfectly balanced, as all things should be.", 3, " >>>")` is not `Perfectly balanced, as >>>`, or `Str::words("<b>bold</b> text here", 2, "...")` keeps other than the first two space-separated runs; `Str::limit_words("The quick brown fox", 12, "...")` is not `The quick...`; `Str::excerpt("This is my name", "my", 3, "...")` is not `Some("...is my na...")`, or an excerpt keeps a zero-width space at a cut end; or a multibyte value is cut inside a character.
 Mechanism: `par-strings`.
-Rationale: Laravel's `Str::slug`, `mask`, `limit` and `excerpt`.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `Str::slug` with its language argument, `Str::words`, `Str::mask`, `Str::limit` and `Str::excerpt` (row 035 of the parity log); counting characters in `limit` stays.
+Status: Agreed 2026-10-08
 
 [PAR-036] `Str::plural(word, count)` and `Str::singular(word)` MUST
 inflect the word by the rules of the language of the current `Lang`
-locale: English, French, Norwegian Bokmål, Portuguese, Spanish or
-Turkish, as Laravel's `Pluralizer` does with doctrine/inflector, and by
-the English rules for any other language. A count of 1 or -1 MUST leave
-the word as it is, and the result MUST keep the word's case: lower,
-upper, first letter capital, or each word capital.
-Falsifier: in English `car` is not `cars`, `child` is not `children`, `person` is not `people`, `sheep` is not `sheep`, `Car` is not `Cars`, `CAR` is not `CARS`, `cars` with a count of 1 is not `cars`, or `Str::singular("people")` is not `person`; in French `cheval` is not `chevaux`; in Spanish `ciudad` is not `ciudades`; in Portuguese `cão` is not `cães`; in Norwegian Bokmål `bil` is not `biler`; in Turkish `kitap` is not `kitaplar`; or under a locale with none of these languages `car` is not `cars`.
+locale: English, Esperanto, French, Italian, Norwegian Bokmål, Portuguese,
+Spanish or Turkish, as Laravel's `Pluralizer` does with doctrine/inflector,
+and by the English rules for any other language. A count of 1 or -1 MUST
+leave the word as it is, and the result MUST keep the word's case: lower,
+upper, first letter capital, or each word capital. `Str::plural_studly`
+and `Str::plural_pascal` MUST inflect the last word of a studly-cased
+value, and a count given with `prepend_count` MUST be written before the
+word, as Laravel's `Str::plural($value, $count, prependCount: true)`.
+Falsifier: in English `car` is not `cars`, `child` is not `children`, `person` is not `people`, `sheep` is not `sheep`, `Car` is not `Cars`, `CAR` is not `CARS`, `cars` with a count of 1 is not `cars`, or `Str::singular("people")` is not `person`; in French `cheval` is not `chevaux`; in Spanish `ciudad` is not `ciudades`; in Portuguese `cão` is not `cães`; in Norwegian Bokmål `bil` is not `biler`; in Turkish `kitap` is not `kitaplar`; in Italian `gatto` is not `gatti`; in Esperanto `hundo` is not `hundoj`; `Str::plural_studly("VerifiedHuman", 2)` is not `VerifiedHumans`; `Str::plural("car", 3)` with `prepend_count` is not `3 cars`; or under a locale with none of these languages `car` is not `cars`.
 Mechanism: `par-strings`.
-Rationale: Laravel's `Str::plural`, `Str::singular` and `Pluralizer::useLanguage`; Suprnova takes the language from the request's locale instead of a process-wide setting.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `Str::plural`, `Str::singular`, `Str::pluralStudly`, `Str::pluralPascal` and `Pluralizer::useLanguage` with the eight languages doctrine/inflector ships (row 036 of the parity log); Suprnova takes the language from the request's locale instead of a process-wide setting.
+Status: Agreed 2026-10-08
 
 [PAR-037] `Lang::percentage(value, precision)` MUST format `value` as a
-percentage, `10` as ten percent, with `precision` fraction digits, the
-way the current locale writes one. `Lang::abbreviate(value, precision)`
-MUST divide the value by the largest of a thousand, a million, a
-billion, a trillion and a quadrillion that it reaches, write it with
-`precision` fraction digits in the current locale's number format, and
-append `K`, `M`, `B`, `T` or `Q`, as Laravel's `Number::abbreviate` does;
-a value under a thousand is written as it is.
-Falsifier: in `en` `Lang::percentage(10.0, 0)` is not `10%`, or `Lang::percentage(12.345, 1)` is not `12.3%`; in `de` `Lang::percentage(10.0, 0)` is not `10 %` with the locale's space; in `en` `Lang::abbreviate(1000.0, 0)` is not `1K`, `Lang::abbreviate(489939.0, 0)` is not `490K`, `Lang::abbreviate(1230000.0, 2)` is not `1.23M`, `Lang::abbreviate(-2500.0, 1)` is not `-2.5K`, or `Lang::abbreviate(999.0, 0)` is not `999`; or in `de` `Lang::abbreviate(1230000.0, 2)` is not `1,23M`.
+percentage, `10` as ten percent, with `precision` fraction digits rounded
+half up on the decimal value as Laravel's `Number::percentage` rounds, the
+way the current locale writes one; `Lang::percentage_in(value, precision,
+locale)` MUST do the same in the named locale. `Lang::format(value,
+precision, max_precision)` and `Lang::percentage` with a `max_precision`
+MUST write at most that many fraction digits, dropping trailing zeros, as
+Laravel's `maxPrecision`. `Lang::use_locale(locale)` MUST set the locale
+these functions use when no request locale is in force, and
+`Lang::with_locale(locale, closure)` MUST run the closure under that
+locale and restore the previous one. An infinite value MUST be written as
+`∞` and a value that is not a number as `NaN`, as Laravel writes them.
+`Lang::abbreviate(value, precision)` MUST divide the value by the largest
+of a thousand, a million, a billion, a trillion and a quadrillion that it
+reaches, write it with `precision` fraction digits in the current locale's
+number format, and append `K`, `M`, `B`, `T` or `Q`, as Laravel's
+`Number::abbreviate` does; a value under a thousand is written as it is.
+Falsifier: in `en` `Lang::percentage(10.0, 0)` is not `10%`, `Lang::percentage(12.345, 1)` is not `12.3%`, or `Lang::percentage(0.12345, 4)` is not `0.1235%`; `Lang::percentage_in(10.0, 0, "de")` is not `10 %` with the locale's space; `Lang::format(1.2300, 2, Some(4))` writes more than two fraction digits or keeps a trailing zero past the first, or `Lang::percentage(12.5, 0)` under `max_precision` 2 is not `12.5%`; after `Lang::use_locale("de")` with no request locale `Lang::percentage(10.0, 0)` is not `10 %`, or `Lang::with_locale("fr", ..)` leaves `fr` in force after it returns; `Lang::format(f64::INFINITY, 0)` is not `∞` or `Lang::format(f64::NAN, 0)` is not `NaN`; in `en` `Lang::abbreviate(1000.0, 0)` is not `1K`, `Lang::abbreviate(489939.0, 0)` is not `490K`, `Lang::abbreviate(1230000.0, 2)` is not `1.23M`, `Lang::abbreviate(-2500.0, 1)` is not `-2.5K`, or `Lang::abbreviate(999.0, 0)` is not `999`; or in `de` `Lang::abbreviate(1230000.0, 2)` is not `1,23M`.
 Mechanism: `par-strings`.
-Rationale: Laravel's `Number::percentage` and `Number::abbreviate`; ICU4X writes the percentage, and its compact format is not in the ICU4X release the framework uses, so the suffixes are Laravel's.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `Number::percentage` with its locale argument and `maxPrecision`, `Number::useLocale`, `Number::withLocale`, its `∞` and `NaN` output and its own test expecting `0.1235%` for `percentage(0.12345, 4)` (rows 037 and 037.1 of the parity log); the Lang locale as the default stays, and the compact suffixes are Laravel's because ICU4X's compact format is not in the release the framework uses.
+Status: Agreed 2026-10-08
 
 ## Schema dump
 
@@ -562,23 +673,24 @@ supported database. Laravel's `SchemaDumped`, `SchemaLoaded` and
 before the bootstrap registers any listener, so none could hear them.
 
 [PAR-038] `schema:dump` on the app binary MUST write the schema of the
-`DATABASE_URL` database to `database/schema/<engine>-schema.sql`, where
-the engine is `sqlite`, `postgres`, `mysql` or `mariadb`, or to the file
-`--path` names: the statements that create every table, index, view and
-constraint the database holds, without any table's rows, followed by one
-`INSERT` for each row of the Migrator's ledger table (`seaql_migrations`
-unless the Migrator names another). Postgres MUST be dumped with
-`pg_dump`, MySQL with `mysqldump` and MariaDB with `mariadb-dump`, each
-given the password through its environment or a file only the current
-user can read, never as an argument; SQLite MUST be read through its own
-connection. When the tool is missing or fails, the command MUST exit with
-an error that names the tool, and an earlier dump file MUST stay as it
-was. The developer CLI's `suprnova schema:dump` MUST run the app
-binary's.
-Falsifier: on any of SQLite, Postgres, MySQL and MariaDB, after `migrate` the dump file is absent, holds a row of a table other than the ledger, lacks a table or index the migrations created, or lacks an applied migration's ledger row; the password appears in the dump tool's arguments; or with the tool missing the command exits zero or changes an earlier dump file.
+`DATABASE_URL` database, or of the connection `--database` names, to
+`database/schema/<engine>-schema.sql`, where the engine is `sqlite`,
+`postgres`, `mysql` or `mariadb`, or to the file `--path` names: the
+statements that create every table, index, view and constraint the
+database holds, without any table's rows, followed by one `INSERT` for
+each row of the Migrator's ledger table (`seaql_migrations` unless the
+Migrator names another), which `--without-migration-data` MUST leave out.
+Postgres MUST be dumped with `pg_dump`, MySQL with `mysqldump` and MariaDB
+with `mariadb-dump`, each given the password through its environment or a
+file only the current user can read, never as an argument; SQLite MUST be
+read through its own connection. When the tool is missing or fails, the
+command MUST exit with an error that names the tool, and an earlier dump
+file MUST stay as it was. The developer CLI's `suprnova schema:dump` MUST
+run the app binary's.
+Falsifier: on any of SQLite, Postgres, MySQL and MariaDB, after `migrate` the dump file is absent, holds a row of a table other than the ledger, lacks a table or index the migrations created, or lacks an applied migration's ledger row; with `--without-migration-data` the file holds a ledger row; with `--database reporting` the dump is of another connection than `reporting`, or an unknown name does not fail with an error naming it; the password appears in the dump tool's arguments; or with the tool missing the command exits zero or changes an earlier dump file.
 Mechanism: `par-schema-dump`.
-Rationale: Laravel's `schema:dump` and its `SchemaState` classes, which run the same tools; the ledger is written by Suprnova, the same `INSERT` statements on every engine.
-Status: Agreed 2026-10-03
+Rationale: Laravel's `DumpCommand` takes `--database` and `--without-migration-data`, which turns off `SchemaState::withMigrationTable` (row 038 of the parity log); the ledger is written by Suprnova, the same `INSERT` statements on every engine, and its agreed choices, events included, stay.
+Status: Agreed 2026-10-08
 
 [PAR-039] When the migration ledger records no migration and a dump file
 exists for the engine, or `--schema-path` names one, `migrate`,
@@ -638,19 +750,27 @@ Mechanism: `par-oauth-avatar`.
 Rationale: Socialite's `getAvatar()`; issue #140 asked for Google, and every provider that reports a picture fills it. The developer ruled on 2026-10-04 that it must not break existing providers, so it is a defaulted trait method, not a new identity field. The Facebook plugin's documentation names `/me?fields=id,name,email`, but it requests a bare `/me`, for which the Graph API returns only `id` and `name`, so Facebook sign-in never received an email.
 Status: Agreed 2026-10-04
 
-[PAR-042] `MultipartRequestHooks` MUST offer `after_validation_async`.
-A multipart request MUST run its stages in this order, each only after
-the one before it succeeded: `authorize`, before the body is read;
-extraction with its field validation (PAR-043); `after_validation`;
-`after_validation_async`; the handler. A hook's non-empty
-`ValidationErrors` MUST answer as a validation failure, a 422 whose body
-holds `errors`, which the Inertia validation middleware turns into a
-redirect back with the errors for an Inertia request; an empty set of
-errors counts as success. The default `after_validation_async` succeeds.
-Falsifier: a multipart request whose `after_validation_async` returns an error reaches its handler, answers anything but a 422 with that field's error in `errors`, or through Inertia does not redirect back with it in `props.errors`; a stage runs after an earlier one failed, the async hook before the sync one, or `authorize` after the body was read; or an empty error set fails the request.
+[PAR-042] A form request and a multipart request MUST run their stages in
+this order: `prepare_for_validation`, which MAY change the input before
+anything reads it; `authorize`, before the body is validated; extraction
+with its field validation (PAR-043 for multipart); `after_validation`;
+`after_validation_async`; the handler. On a real request the two hooks
+MUST run after the derived stage whether or not it reported errors, and
+their errors MUST be merged with the rule errors into one answer, as
+Laravel's `after` hooks run alongside the rules; on a marked request
+PAR-083 governs what runs. `MultipartRequestHooks` MUST offer
+`after_validation_async`, whose default succeeds. A non-empty
+`ValidationErrors` MUST answer as a validation failure: a 422 whose body
+holds `errors` for a request that accepts JSON or sends an Inertia visit,
+the latter turned into a redirect back with the errors by the Inertia
+validation middleware; and for a request whose `Accept` prefers
+`text/html` without `X-Inertia`, a plain HTML form, a redirect back with
+the errors and the input flashed to the session, as Laravel redirects a
+failed form post. An empty set of errors counts as success.
+Falsifier: a multipart request whose `after_validation_async` returns an error reaches its handler, answers anything but a 422 with that field's error in `errors`, or through Inertia does not redirect back with it in `props.errors`; a stage runs after an earlier one failed, the async hook before the sync one, `authorize` after the body was read, or `prepare_for_validation` after `authorize`; a `prepare_for_validation` that lower-cases `email` leaves the handler or the rules with the original case; on a real request whose `email` rule fails, an `after_validation` error on `name` is missing from the 422; a classic form post with `Accept: text/html` and no `X-Inertia` answers a 422 instead of a redirect back, or redirects without the errors and the old input in the session; or an empty error set fails the request.
 Mechanism: `par-multipart-validation`.
-Rationale: Issue #139: upload forms need database checks before the handler runs, which `FormRequest` already allows.
-Status: Agreed 2026-10-04
+Rationale: Issue #139 and row 042 of the parity log: Laravel's `FormRequest::prepareForValidation` runs before `passesAuthorization`, its `after` hooks run alongside the rules, and `failedValidation` redirects a non-JSON request back with the errors and input; the 303 for every Inertia method stays, since browsers follow it like Laravel's 302.
+Status: Agreed 2026-10-08
 
 [PAR-043] A multipart extraction failure that belongs to one field MUST
 answer as `ValidationErrors` under the field's form input name, the
@@ -665,20 +785,22 @@ file part where text belongs or a text part where a file belongs
 refuses as a validation failure: too large for `MaxSize`
 (`validation-max-file`, with the limit in kilobytes as Laravel words it),
 not an image (`validation-image`), or of a type `MimeType` does not allow
-(`validation-mimetypes`). Each message MUST come from the validation
-catalog by that key, so an application's `lang/<locale>/validation.ftl`
-overrides it. An `UploadValidator` MUST be able to return a validation
-failure with a catalog key, apart from an operational error, which keeps
-its own status. A field failure found while the body streams, as
-`MaxSize` is, MUST stop reading the body after the chunk that crossed
-the limit, skip both hooks and the handler, and remove every temporary
-file the extraction wrote. A limit on the whole request, the body's byte
-cap, `max_parts` and a field's `max_count`, MUST refuse with 413 without
-reading the body further, and wins when one chunk crosses both kinds.
-Falsifier: a multipart form missing a required file, or with a PDF as the second element of a `#[field("files[]")]` field of images, answers anything but a 422 whose `errors` holds `files.1`, or through Inertia does not redirect back with it in `props.errors`; a text part that does not parse answers 400; a message ignores an application catalog's entry for its key; an oversized file is read past the chunk that crossed `MaxSize`, or leaves a temporary file behind; a validator's operational error becomes a 422; or a body over its cap, too many parts or too many files for `max_count` is read further or answers other than 413.
+(`validation-mimetypes`), where an allowed type MAY be a `type/*`
+wildcard that admits every subtype, as Laravel's `mimetypes` rule does.
+Each message MUST come from the validation catalog by that key, so an
+application's `lang/<locale>/validation.ftl` overrides it. An
+`UploadValidator` MUST be able to return a validation failure with a
+catalog key, apart from an operational error, which keeps its own status.
+A field failure found while the body streams, as `MaxSize` is, MUST stop
+reading the body after the chunk that crossed the limit, skip both hooks
+and the handler, and remove every temporary file the extraction wrote. A
+limit on the whole request, the body's byte cap, `max_parts` and a
+field's `max_count`, MUST refuse with 413 without reading the body
+further, and wins when one chunk crosses both kinds.
+Falsifier: a multipart form missing a required file, or with a PDF as the second element of a `#[field("files[]")]` field of images, answers anything but a 422 whose `errors` holds `files.1`, or through Inertia does not redirect back with it in `props.errors`; a text part that does not parse answers 400; a message ignores an application catalog's entry for its key; `MimeType::allow(["image/*"])` refuses a PNG or admits a PDF; an oversized file is read past the chunk that crossed `MaxSize`, or leaves a temporary file behind; a validator's operational error becomes a 422; or a body over its cap, too many parts or too many files for `max_count` is read further or answers other than 413.
 Mechanism: `par-multipart-validation`.
-Rationale: Issue #139: today these failures answer 400, 413 or a 422 without `errors`, so an Inertia form shows no error under the field; `max_count` answered 422 and moves to 413 with the other request-wide limits, as the issue asks.
-Status: Agreed 2026-10-04
+Rationale: Issue #139 and row 043 of the parity log: Laravel's `mimetypes` rule matches `image/*` by `ValidatesAttributes::validateMimetypes`; the typed field errors, the 413 limits and the magic-byte check stay.
+Status: Agreed 2026-10-08
 
 [PAR-044] Without `key_type`, `#[model]` MUST take the key type from the
 primary-key field's declared type, the field `primary_key` names, and a
@@ -696,35 +818,36 @@ Mechanism: `par-laravel-defaults`.
 Rationale: Issue #137 and its follow-up comment: a Laravel table's keys are unsigned on MySQL, while SeaORM reads a `u64` only on MySQL and its Postgres and SQLite binders unwrap the conversion, so a model over one could not run on `TestDatabase`, which is SQLite.
 Status: Agreed 2026-10-04
 
-[PAR-045] An application MAY set `[package.metadata.suprnova.model]`
-`datetime_cast` and `[package.metadata.suprnova.schema]` `unsigned_ids`
-in a package's `Cargo.toml`; without them nothing changes. The model
-table is read from the package that declares the model, by `#[model]`;
-the schema table from the package of the binary, by `#[suprnova::main]`,
-which installs it before anything runs. `datetime_cast = "native"` makes
-every `DateTime<Utc>` and `Option<DateTime<Utc>>` field of a model with
-no cast of its own, the managed timestamps included, use
-`AsNativeDateTime` or `AsOptionalNativeDateTime`, a time-zone-aware
-column; `"naive"` uses `AsNaiveDateTime` or `AsOptionalNaiveDateTime`, for
-the time-zone-free columns Laravel creates on Postgres; a field's own
-cast wins. The setting chooses casts and converts no column: the manual
-and the scaffold's comment MUST say which column types each value needs
-and show the per-field override for a column that differs. SQLite MAY
-store a native date-time as its driver's text, so long as the value
-round-trips. `unsigned_ids = true` makes `id()` and `foreign_id()` create
-what `unsigned_id()` and `unsigned_foreign_id()` create, unsigned on
-MySQL and unchanged on Postgres and SQLite, in every migration the
-binary runs; a program that runs migrations without `#[suprnova::main]`
-MUST be able to install the same setting with one documented call. A
-key or value in either table that the framework does not know MUST fail
-the build of the macro that reads it, naming it. The scaffold's
-`Cargo.toml` MUST carry both settings commented out, saying they match
-Laravel's MySQL schema.
-Falsifier: with `datetime_cast = "native"` or `"naive"`, a model's managed timestamp uses another cast, or a field's explicit cast is replaced; a native value does not round-trip on any of SQLite, Postgres and MySQL; with `unsigned_ids = true`, `migrate` on the app binary against MySQL creates a signed `id` or foreign key, or changes a Postgres or SQLite column; a migrations library run by a binary with the setting misses it, or a program using the documented call does; without the tables any column or cast differs from today's; an unknown key or value builds; or a new scaffold lacks the commented settings.
+[PAR-045] Migrations and models MUST default to Laravel's MySQL shape:
+`id()` and `foreign_id()` MUST create unsigned columns on MySQL (unchanged
+on Postgres and SQLite), as Laravel's `Blueprint::id` and `foreignId` do,
+and `timestamps()` MUST create nullable `created_at` and `updated_at`, as
+Laravel's `Blueprint::timestamps` does. An application MAY set
+`[package.metadata.suprnova.schema]` `unsigned_ids = false` in the
+binary's `Cargo.toml` to keep signed ids, and `[package.metadata.suprnova.model]`
+`datetime_cast` to choose the model casts: the model table is read from
+the package that declares the model, by `#[model]`; the schema table from
+the package of the binary, by `#[suprnova::main]`, which installs it
+before anything runs. `datetime_cast = "native"` makes every
+`DateTime<Utc>` and `Option<DateTime<Utc>>` field of a model with no cast
+of its own, the managed timestamps included, use `AsNativeDateTime` or
+`AsOptionalNativeDateTime`, a time-zone-aware column; `"naive"` uses
+`AsNaiveDateTime` or `AsOptionalNaiveDateTime`, for the time-zone-free
+columns Laravel creates on Postgres; a field's own cast wins. The setting
+chooses casts and converts no column: the manual and the scaffold's
+comment MUST say which column types each value needs and show the
+per-field override for a column that differs. SQLite MAY store a native
+date-time as its driver's text, so long as the value round-trips. A
+program that runs migrations without `#[suprnova::main]` MUST be able to
+install the schema setting with one documented call. A key or value in
+either table that the framework does not know MUST fail the build of the
+macro that reads it, naming it. The scaffold's `Cargo.toml` MUST carry
+both settings commented out, saying the defaults match Laravel's MySQL
+schema and what each setting changes.
+Falsifier: without any setting, `migrate` on the app binary against MySQL creates a signed `id` or foreign key column, or `timestamps()` creates a `NOT NULL` `created_at` on any engine; with `unsigned_ids = false`, an `id` on MySQL is unsigned; with `datetime_cast = "native"` or `"naive"`, a model's managed timestamp uses another cast, or a field's explicit cast is replaced; a native value does not round-trip on any of SQLite, Postgres and MySQL; a migrations library run by a binary with the setting misses it, or a program using the documented call does; an unknown key or value builds; or a new scaffold lacks the commented settings.
 Mechanism: `par-laravel-defaults`.
-Rationale: Issue #137; the schema setting reaches the migrations through `#[suprnova::main]` because migrations build their schema at run time, where no macro reads `Cargo.toml`, and compiling it in keeps one schema for every environment.
-Status: Agreed 2026-10-04
-
+Rationale: Issue #137 and row 045 of the parity log: Laravel's `Blueprint::id` is `bigIncrements`, unsigned on MySQL, `foreignId` is `unsignedBigInteger`, and `timestamps()` adds `nullable()`; the settings stay for an application that wants the other shape, and the schema setting reaches the migrations through `#[suprnova::main]` because migrations build their schema at run time.
+Status: Agreed 2026-10-08
 
 ## Inertia protocol
 

@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: precognition
+Current: laravel-parity-round-4
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -643,6 +643,56 @@ Requirements: PAR-081, PAR-082, PAR-083, PAR-084, PAR-085, PAR-086, PAR-087, PAR
    Mechanisms: `par-precognition` (the `precognition` tests of the
    `http`, `session` and `testing` suites).
    Done when it passes on a committed tree, the manual chapter is in
+   place, and the review is recorded.
+
+## laravel-parity-round-4
+
+Requirements: PAR-001, PAR-002, PAR-003, PAR-004, PAR-005, PAR-006, PAR-009, PAR-012, PAR-013, PAR-016, PAR-017, PAR-018, PAR-019, PAR-020, PAR-021, PAR-022, PAR-025, PAR-026, PAR-027, PAR-030, PAR-031, PAR-032, PAR-035, PAR-036, PAR-037, PAR-038, PAR-042, PAR-043, PAR-045
+
+42. laravel-parity-round-4 - the seventh of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build by the parity default: the
+   PAR rows of the log where Suprnova differs from Laravel 13.35.0 (rows
+   001, 002, 003, 004, 005, 006, 009, 012, 013, 016, 017, 018, 019, 020,
+   021, 022, 025 with 025.2, 026, 027, 030, 031, 032, 035, 036, 037 with
+   037.1, 038, 042, 043 and 045), revised in place under the same
+   identifiers; row 024 and the keep rows stay as they are.
+   Delivery: the flat `or`, `where_column`'s operator, the cross-join
+   closure and the joined `update` and `delete` in
+   `framework/src/database/` and `framework/src/eloquent/`; ranges,
+   `Last-Modified`, headers, disposition and the streaming download in
+   `framework/src/http/response.rs` and the filesystem responses; guest
+   and enum abilities in the `#[authorize]` attribute; clean saves,
+   `get_previous`, `sync`'s lists, pivot columns, filters and parent touch
+   in `framework/src/eloquent/`; the fake's closure filter in
+   `framework/src/queue/`; the production HTML error view, source
+   snippets and per-error traces in `framework/src/error/`; the `local`
+   default and the `AWS_*` names in `framework/src/filesystem/`; the
+   per-queue sizes, FIFO messages and the overflow store in the SQS
+   driver; `env` removal, the `tty` check, quoted command lines, `stop`'s
+   grace and signal, the fake's closure handlers, line order and
+   defaults in `framework/src/process/`; the `custom` channel, the
+   seven-day retention and the `APP_NAME` ident in `framework/src/logging/`;
+   the `REDIS_*` names, the `cache` connection, the key prefix,
+   `evalsha`, `execute_raw` and the dispatcher events in
+   `framework/src/redis/`; `slug_in`, `words`, the invisible characters,
+   Esperanto and Italian, `plural_studly`, `plural_pascal`,
+   `prepend_count`, `percentage_in`, `max_precision`, `use_locale`,
+   `with_locale` and the infinite and NaN output in
+   `framework/src/support/`; `--without-migration-data` and `--database`
+   on `schema:dump`; `prepare_for_validation`, hooks alongside rule
+   errors and the redirect back for plain forms in
+   `framework/src/http/form_request.rs` and the multipart extractor; the
+   `type/*` wildcard; Laravel's column defaults with the opt-out setting
+   in the schema builder, the model macro and the scaffold; the manual
+   chapters each area owns and the changelog.
+   Mechanisms: the seventeen the blocks already name (`par-joins`,
+   `par-file-responses`, `par-authorize`, `par-model-changes`,
+   `par-sync-without-detaching`, `par-query-helpers`, `par-queue-fake`,
+   `par-debug-error-page`, `par-default-disk`, `par-sqs-queue`,
+   `par-process`, `par-log-channels`, `par-redis`, `par-strings`,
+   `par-schema-dump`, `par-multipart-validation`, `par-laravel-defaults`),
+   each rebound on a fail receipt for the revised text.
+   Done when they pass on a committed tree, the manual passages are in
    place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
