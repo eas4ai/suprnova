@@ -20,5 +20,6 @@ pub mod lazy_persistence;
 #[path = "../support/own_process.rs"]
 mod own_process;
 pub mod persistence_fail_closed;
+pub mod precognition;
 pub mod previous_url_open_redirect;
 pub mod store_container_binding;
