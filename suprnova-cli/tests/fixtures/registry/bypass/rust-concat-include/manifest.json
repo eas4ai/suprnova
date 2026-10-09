@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-concat-include",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
