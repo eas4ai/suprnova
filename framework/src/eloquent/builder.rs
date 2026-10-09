@@ -2703,8 +2703,11 @@ impl<M> Builder<M> {
     /// the order for stable pagination or reproducible samples. Laravel's
     /// `inRandomOrder($seed)`. MySQL uses `RAND(seed)`, and Postgres sets
     /// the connection seed in the same statement before `random()`.
-    /// SQLite accepts the seed, but its `RANDOM()` has no seed support,
-    /// so its order stays unseeded.
+    /// SQLite cannot seed `RANDOM()`, so it orders by a fixed function of
+    /// the seed and the model's primary key, then by the key itself: the
+    /// same seed on the same rows gives the same order, a union included.
+    /// A union is ordered by its selected columns, so there the key must
+    /// be one of them, as it is when you select every column.
     pub fn in_random_order_seeded(mut self, seed: u64) -> Self {
         self.orders.push(OrderTerm::Random(Some(seed)));
         self
@@ -3956,6 +3959,20 @@ impl<M> Builder<M> {
         }
     }
 
+    /// Name the model's primary key `key` for an ORDER BY inside this
+    /// query's own SELECT: qualified with the table its FROM writes, so a
+    /// joined table's column of the same name cannot stand in for it.
+    /// Outside that SELECT, over a union or a ranked union written as a
+    /// derived table, only the projected columns are in scope, and the
+    /// renderer names the key bare instead.
+    fn own_key(&self, backend: DbBackend, table: &str, key: &str) -> String {
+        format!(
+            "{}.{}",
+            self.own_table(backend, table),
+            quote_identifier(backend, key)
+        )
+    }
+
     /// The model's table as [`JoinedTable`] when this query joins another,
     /// `from` being what [`Self::own_table`] wrote for it.
     fn joined_table<'a>(&self, table: &'a str, from: &'a str) -> Option<JoinedTable<'a>> {
@@ -4188,14 +4205,18 @@ impl<M> Builder<M> {
     /// BY renders after WHERE and HAVING and before the UNION arms, so
     /// pushing here keeps Postgres `$N` numbering monotonic with the
     /// SQL text - see the union comment in `render_select_into`.
+    ///
+    /// `key` is the model's primary key written as this ORDER BY can
+    /// reach it, which a seeded SQLite order reads: see
+    /// [`Self::own_key`].
     fn render_orders(
         &self,
         backend: DbBackend,
-        table: &str,
+        key: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
-        self.render_order_terms(&self.orders, backend, table, values, n)
+        self.render_order_terms(&self.orders, backend, key, values, n)
     }
 
     /// Render `orders` as an ORDER BY list, the shared body of
@@ -4205,7 +4226,7 @@ impl<M> Builder<M> {
         &self,
         orders: &[OrderTerm],
         backend: DbBackend,
-        table: &str,
+        key: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4218,9 +4239,7 @@ impl<M> Builder<M> {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
-                OrderTerm::Random(seed) => {
-                    random_order(backend, *seed, &self.own_table(backend, table))
-                }
+                OrderTerm::Random(seed) => random_order(backend, *seed, key),
                 OrderTerm::BoundRaw(sql, bindings) => {
                     let sql = rewrite_raw_placeholders(backend, sql, bindings, *n)?;
                     *n += bindings.len();
@@ -4280,6 +4299,7 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
         column_expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         match backend {
@@ -4297,7 +4317,8 @@ impl<M> Builder<M> {
         this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql = this.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
+        let mut sql =
+            this.render_select_into(backend, table, key, column_expr, &mut values, &mut n)?;
         // Phase 10C T9 - row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
@@ -4323,6 +4344,7 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
         expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let aliased = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
@@ -4334,9 +4356,9 @@ impl<M> Builder<M> {
             if flat.group_by.is_empty() {
                 flat.orders.clear();
             }
-            return flat.render_select_for(backend, table, &aliased);
+            return flat.render_select_for(backend, table, key, &aliased);
         }
-        let (inner, values) = this.render_select_for(backend, table, "*")?;
+        let (inner, values) = this.render_select_for(backend, table, key, "*")?;
         Ok((
             format!("SELECT {aliased} FROM ({inner}) AS __suprnova_aggregate_subquery"),
             values,
@@ -4377,6 +4399,7 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         // Audit HIGH `eloquent` #1 - same identifier validation as
         // `render_select_for`. Count uses the same WHERE / GROUP BY /
@@ -4398,7 +4421,7 @@ impl<M> Builder<M> {
             whole.orders.clear();
             whole.limit = None;
             whole.offset = None;
-            let inner = whole.render_select_into(backend, table, "*", &mut values, &mut n)?;
+            let inner = whole.render_select_into(backend, table, key, "*", &mut values, &mut n)?;
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str(&inner);
             sql.push_str(") AS __suprnova_paginate_subquery");
@@ -4482,10 +4505,16 @@ impl<M> Builder<M> {
     /// the whole union are applied to it written as a derived table too,
     /// so an ordering may be any expression over its columns, which a bare
     /// compound refuses on Postgres and SQLite.
+    ///
+    /// `key` is the model's primary key column, which a seeded SQLite
+    /// order reads. Inside a SELECT it is qualified with the model's
+    /// table; over the whole union only the projected columns are in
+    /// scope, so it is named bare there.
     fn render_select_into(
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
         column_expr: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
@@ -4494,18 +4523,19 @@ impl<M> Builder<M> {
         let this = self.effective();
         let this = &*this;
         if this.eager_partition.is_some() && this.limit.is_some() {
-            return this.render_group_limit(backend, table, column_expr, values, n);
+            return this.render_group_limit(backend, table, key, column_expr, values, n);
         }
         let mut sql = this.render_select_core(backend, table, column_expr, values, n)?;
+        let own_key = this.own_key(backend, table, key);
         if this.unions.is_empty() {
-            sql.push_str(&this.render_orders(backend, table, values, n)?);
+            sql.push_str(&this.render_orders(backend, &own_key, values, n)?);
             sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
             return Ok(sql);
         }
 
         let head = &this.union_head;
         if head.is_bounded() {
-            sql.push_str(&this.render_order_terms(&head.orders, backend, table, values, n)?);
+            sql.push_str(&this.render_order_terms(&head.orders, backend, &own_key, values, n)?);
             sql.push_str(&render_limit_offset(backend, head.limit, head.offset));
             sql = format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}");
         }
@@ -4522,7 +4552,7 @@ impl<M> Builder<M> {
         for (other, all) in &this.unions {
             let connector = if *all { " UNION ALL " } else { " UNION " };
             sql.push_str(connector);
-            sql.push_str(&other.render_union_arm(backend, table, column_expr, values, n)?);
+            sql.push_str(&other.render_union_arm(backend, table, key, column_expr, values, n)?);
         }
 
         if this.orders.is_empty()
@@ -4542,7 +4572,7 @@ impl<M> Builder<M> {
             whole.push_str(" WHERE ");
             whole.push_str(&parts.join(" AND "));
         }
-        whole.push_str(&this.render_orders(backend, table, values, n)?);
+        whole.push_str(&this.render_orders(backend, &quote_identifier(backend, key), values, n)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
     }
@@ -4552,6 +4582,7 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
         column_expr: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
@@ -4568,7 +4599,15 @@ impl<M> Builder<M> {
             .checked_add(limit)
             .ok_or_else(|| FrameworkError::param("per-parent limit and offset overflow"))?;
         // Window order binds precede the FROM and WHERE binds in the statement.
-        let orders = self.render_orders(backend, table, values, n)?;
+        // Without a union the window sits in the model's own SELECT; over
+        // a union it reads the union's derived table, where only the
+        // projected columns, the key among them, are in scope.
+        let window_key = if self.unions.is_empty() {
+            self.own_key(backend, table, key)
+        } else {
+            quote_identifier(backend, key)
+        };
+        let orders = self.render_orders(backend, &window_key, values, n)?;
         let mut inner = self.clone();
         inner.eager_partition = None;
         inner.limit = None;
@@ -4605,10 +4644,10 @@ impl<M> Builder<M> {
         let sql = if inner.unions.is_empty() {
             inner.select_cols = None;
             inner.select_raw = Some(format!("{projection}, {row_number}"));
-            inner.render_select_into(backend, table, column_expr, values, n)?
+            inner.render_select_into(backend, table, key, column_expr, values, n)?
         } else {
             // Rank the combined rows, not each union operand's separate sequence.
-            let source = inner.render_select_into(backend, table, column_expr, values, n)?;
+            let source = inner.render_select_into(backend, table, key, column_expr, values, n)?;
             let alias = quote_identifier(backend, window_table);
             format!("SELECT {alias}.*, {row_number} FROM ({source}) AS {alias}")
         };
@@ -4625,12 +4664,13 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
+        key: &str,
         column_expr: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
         let arm = self.effective();
-        let sql = arm.render_select_into(backend, table, column_expr, values, n)?;
+        let sql = arm.render_select_into(backend, table, key, column_expr, values, n)?;
         let bare = arm.unions.is_empty()
             && arm.orders.is_empty()
             && arm.limit.is_none()
@@ -4805,7 +4845,8 @@ where
             };
             return Ok((source, Vec::new()));
         }
-        let (sql, values) = scoped.render_select_for(backend, M::TABLE, "*")?;
+        let (sql, values) =
+            scoped.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
         Ok((format!("({sql}) {alias}"), values))
     }
 
@@ -5447,7 +5488,7 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        self.render_select_for(backend, M::TABLE, "*")
+        self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
             .expect("to_sql_with_bindings: builder cannot render for the live connection's backend")
     }
 
@@ -5489,7 +5530,7 @@ where
         &self,
         backend: DbBackend,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
-        self.render_select_for(backend, M::TABLE, "*")
+        self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
     }
 
     /// Phase 10C T14 - log the rendered SQL via `tracing` and return
@@ -5518,7 +5559,7 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        match self.render_select_for(backend, M::TABLE, "*") {
+        match self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*") {
             Ok((sql, _values)) => {
                 tracing::info!(
                     target: "suprnova::eloquent::dump",
@@ -5563,7 +5604,7 @@ where
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
         let sql = self
-            .render_select_for(backend, M::TABLE, "*")
+            .render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
             .map(|(sql, _values)| sql)
             .unwrap_or_else(|e| format!("<invalid: {e}>"));
         tracing::error!(
@@ -5626,7 +5667,8 @@ where
             query.select_cols = None;
             query.select_raw = None;
             let column = quote_identifier(backend, &format!("{}.{identity}", M::TABLE));
-            let select = query.render_select_into(backend, M::TABLE, &column, values, n)?;
+            let select =
+                query.render_select_into(backend, M::TABLE, identity, &column, values, n)?;
             return Ok(format!(
                 " WHERE {} IN ({select})",
                 quote_identifier(backend, identity)
@@ -5787,7 +5829,7 @@ where
         // / LIMIT terms; afterwards we hand the plan to the eager
         // orchestrator.
         let eager_specs = std::mem::take(&mut this.eager_specs);
-        let (sql, vals) = this.render_select_for(backend, M::TABLE, "*")?;
+        let (sql, vals) = this.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
         // Fetch into the entity's `Model` - the SeaORM type that's
@@ -5971,7 +6013,8 @@ where
             probe.tx_override = self.tx_override.clone();
             probe.connection_override = self.connection_override.clone();
             probe.binder = self.binder;
-            let (sql, values) = probe.render_select_for(exec.backend(), M::TABLE, "*")?;
+            let (sql, values) =
+                probe.render_select_for(exec.backend(), M::TABLE, M::primary_key_name(), "*")?;
             let matching = exec
                 .statement_all::<<M::Entity as sea_orm::EntityTrait>::Model>(
                     Statement::from_sql_and_values(exec.backend(), sql, values),
@@ -6071,7 +6114,8 @@ where
         let backend = exec.backend();
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
+        let (sql, vals) =
+            self.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -6189,7 +6233,8 @@ where
         // executor as the page query.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE)?;
+        let (count_sql, count_vals) =
+            self.render_count_select_for(backend, M::TABLE, M::primary_key_name())?;
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
         let count_row = exec
             .query_one(count_stmt)
@@ -7066,7 +7111,8 @@ where
         query.select_raw = None;
         query.select_bindings.clear();
         query.orders.clear();
-        let (sql, values) = query.render_select_for(backend, M::TABLE, "*")?;
+        let (sql, values) =
+            query.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
         let row = exec
             .query_one(Statement::from_sql_and_values(backend, sql, values))
             .await?;
@@ -7093,7 +7139,8 @@ where
         s.limit = Some(1);
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
+        let (sql, vals) =
+            s.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -7120,7 +7167,8 @@ where
         let backend = exec.backend();
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
+        let (sql, vals) =
+            self.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7154,7 +7202,12 @@ where
         let vn = val_col.col_name();
         crate::database::validate_identifier(&kn)?;
         crate::database::validate_identifier(&vn)?;
-        let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
+        let (sql, vals) = self.render_select_for(
+            backend,
+            M::TABLE,
+            M::primary_key_name(),
+            &format!("{kn}, {vn}"),
+        )?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7209,7 +7262,12 @@ where
         };
         // Alias back to the bare column name so the result column is
         // named identically on SQLite, MySQL and Postgres.
-        let (sql, vals) = s.render_select_for(backend, M::TABLE, &format!("{key} AS {pk}"))?;
+        let (sql, vals) = s.render_select_for(
+            backend,
+            M::TABLE,
+            M::primary_key_name(),
+            &format!("{key} AS {pk}"),
+        )?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7240,7 +7298,8 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
+        let (sql, vals) =
+            self.render_aggregate_for(backend, M::TABLE, M::primary_key_name(), expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -7265,7 +7324,8 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
+        let (sql, vals) =
+            self.render_aggregate_for(backend, M::TABLE, M::primary_key_name(), expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)

@@ -692,3 +692,79 @@ async fn table_seeded_random_order_over_a_join_on_sqlite_repeats_each_row_once()
     sorted.sort_unstable();
     assert_eq!(sorted, (1..=12).collect::<Vec<i64>>());
 }
+
+#[tokio::test]
+async fn table_seeded_random_order_on_sqlite_is_the_same_whichever_plan_reads_the_rows() {
+    let fx = fixture().await;
+    // Rowids 1 and 4294967297 agree mod 2^32, and adding a seed to a rowid
+    // near i64::MAX overflows SQLite's integer range. The score index runs
+    // against the rowid order, so a filter on score reads the rows in
+    // another order than a full scan does.
+    fx.exec("CREATE INDEX gap_rows_score ON gap_rows (score)")
+        .await;
+    fx.exec(&format!(
+        "INSERT INTO gap_rows VALUES (4294967297, 5, 'c', '2026-10-04'), \
+         ({}, 4, 'c', '2026-10-04'), ({}, 3, 'c', '2026-10-04')",
+        i64::MAX - 1,
+        i64::MAX
+    ))
+    .await;
+    let every_row = vec![1, 2, 3, 4_294_967_297, i64::MAX - 1, i64::MAX];
+    let indexed = |seed| async move {
+        DB::table("gap_rows")
+            .filter_op("score", ">", 0)
+            .in_random_order_seeded(seed)
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get_int("id").unwrap())
+            .collect::<Vec<i64>>()
+    };
+    for seed in [1, 42, u64::MAX] {
+        let scanned = seeded_gap_ids(seed).await;
+        assert_eq!(scanned, seeded_gap_ids(seed).await, "seed {seed}");
+        assert_eq!(scanned, indexed(seed).await, "seed {seed}");
+        let mut sorted = scanned;
+        sorted.sort_unstable();
+        assert_eq!(sorted, every_row, "seed {seed}");
+    }
+    // Seed 42 gives rowids 1 and 4294967297 one expression value; the rowid
+    // orders the pair.
+    let order = indexed(42).await;
+    let at = |id| order.iter().position(|&x| x == id).unwrap();
+    assert!(at(1) < at(4_294_967_297), "{order:?}");
+    let (sql, values) = DB::table("gap_rows")
+        .in_random_order_seeded(42)
+        .to_sql_for(DbBackend::Sqlite)
+        .unwrap();
+    assert!(sql.ends_with("% 4294967296, \"gap_rows\".rowid"), "{sql}");
+    assert!(values.is_empty());
+}
+
+#[tokio::test]
+async fn table_seeded_random_order_on_sqlite_reports_a_table_without_a_rowid() {
+    let fx = fixture().await;
+    fx.exec("CREATE TABLE gap_keyed (code TEXT PRIMARY KEY) WITHOUT ROWID")
+        .await;
+    fx.exec("INSERT INTO gap_keyed VALUES ('a'), ('b')").await;
+    fx.exec("CREATE VIEW gap_view AS SELECT id, score FROM gap_rows")
+        .await;
+    for (table, rows) in [("gap_keyed", 2), ("gap_view", 3)] {
+        let error = DB::table(table)
+            .in_random_order_seeded(42)
+            .get()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("rowid"), "{table}: {error}");
+        assert_eq!(
+            DB::table(table)
+                .in_random_order()
+                .get()
+                .await
+                .unwrap()
+                .len(),
+            rows
+        );
+    }
+}
