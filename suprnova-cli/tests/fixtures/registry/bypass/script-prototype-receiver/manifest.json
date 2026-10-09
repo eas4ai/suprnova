@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-prototype-receiver",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

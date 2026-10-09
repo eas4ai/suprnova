@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "current-v2",
+      "protocol": 2,
+      "runtime": 2,
+      "snapshot": 1,
+      "expected": "compatible"
+    },
+    {
+      "id": "prior-v1",
+      "protocol": 1,
+      "runtime": 1,
+      "snapshot": 1,
+      "expected": "compatible"
+    },
+    {
+      "id": "mixed-new-protocol-old-runtime",
+      "protocol": 2,
+      "runtime": 1,
+      "snapshot": 1,
+      "expected": "refresh_document"
+    },
+    {
+      "id": "mixed-old-protocol-new-runtime",
+      "protocol": 1,
+      "runtime": 2,
+      "snapshot": 1,
+      "expected": "refresh_document"
+    },
+    {
+      "id": "unknown-snapshot",
+      "protocol": 2,
+      "runtime": 2,
+      "snapshot": 2,
+      "expected": "refresh_document"
+    }
+  ]
+}
