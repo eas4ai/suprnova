@@ -879,10 +879,22 @@ impl DbTableBuilder {
         self
     }
 
-    /// Randomize rows; SQLite accepts the seed but its RANDOM() has no seed support.
-    /// MySQL uses RAND(seed), and Postgres sets the connection seed before random().
-    pub fn in_random_order(mut self, seed: impl Into<Option<u64>>) -> Self {
-        self.order.push(TableOrder::Random(seed.into()));
+    /// Order the rows randomly, for sampling where any order will do.
+    /// MySQL orders by RAND() and Postgres and SQLite by RANDOM().
+    /// Use [`in_random_order_seeded`](Self::in_random_order_seeded) when
+    /// you need the same order again.
+    pub fn in_random_order(mut self) -> Self {
+        self.order.push(TableOrder::Random(None));
+        self
+    }
+
+    /// Order the rows randomly with a seed, so a repeated seed can repeat
+    /// the order for stable pagination or reproducible samples.
+    /// MySQL uses RAND(seed), and Postgres sets the connection seed in the
+    /// same statement before random(). SQLite accepts the seed, but its
+    /// RANDOM() has no seed support, so its order stays unseeded.
+    pub fn in_random_order_seeded(mut self, seed: u64) -> Self {
+        self.order.push(TableOrder::Random(Some(seed)));
         self
     }
 

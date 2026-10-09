@@ -50,7 +50,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   accept inclusive bounds, raw expressions and scalar subqueries.
 - **Table query maximums.** `max` reads typed values and returns none for an empty set.
 - **Table queries ordered by age.** `oldest` and `oldest_by` order rows ascending.
-- **Seeded random query ordering.** Both builders accept a seed, use RAND(seed)
+- **Seeded random query ordering.** `in_random_order()` orders rows randomly on
+  both builders, and `in_random_order_seeded(seed)` repeats an order with RAND(seed)
   on MySQL and setseed with random() on Postgres; SQLite accepts the seed without seeding.
 - **Inspect applied model scopes.** `apply_scopes` returns the builder with
   its registered global scopes and soft-delete filter applied once.

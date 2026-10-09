@@ -288,7 +288,7 @@ async fn order_by_asc_desc_random_raw() {
         .unwrap();
     assert_eq!(by_raw[0].name, "C");
     // in_random_order - verify it runs without panic:
-    let _ = T5User::query().in_random_order(None).get().await.unwrap();
+    let _ = T5User::query().in_random_order().get().await.unwrap();
 }
 
 #[tokio::test]

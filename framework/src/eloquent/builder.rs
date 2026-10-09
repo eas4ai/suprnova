@@ -2689,11 +2689,24 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Randomize rows with an optional seed for repeatable sampling.
-    /// MySQL uses RAND(seed), and Postgres sets its seed before random().
-    /// SQLite accepts your seed but RANDOM() does not support seeded ordering.
-    pub fn in_random_order(mut self, seed: impl Into<Option<u64>>) -> Self {
-        self.orders.push(OrderTerm::Random(seed.into()));
+    /// Order the rows randomly - useful for sampling where any order
+    /// will do. Postgres and SQLite order by `RANDOM()`, MySQL by
+    /// `RAND()`. Laravel's `inRandomOrder()` without a seed; use
+    /// [`in_random_order_seeded`](Self::in_random_order_seeded) when you
+    /// need the same order again.
+    pub fn in_random_order(mut self) -> Self {
+        self.orders.push(OrderTerm::Random(None));
+        self
+    }
+
+    /// Order the rows randomly with a seed, so a repeated seed can repeat
+    /// the order for stable pagination or reproducible samples. Laravel's
+    /// `inRandomOrder($seed)`. MySQL uses `RAND(seed)`, and Postgres sets
+    /// the connection seed in the same statement before `random()`.
+    /// SQLite accepts the seed, but its `RANDOM()` has no seed support,
+    /// so its order stays unseeded.
+    pub fn in_random_order_seeded(mut self, seed: u64) -> Self {
+        self.orders.push(OrderTerm::Random(Some(seed)));
         self
     }
 

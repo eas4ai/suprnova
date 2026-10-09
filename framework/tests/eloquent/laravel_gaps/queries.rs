@@ -208,12 +208,12 @@ async fn seeded_random_order_emits_engine_sql_and_sqlite_accepts_every_seed() {
     let _fx = fixture().await;
     for backend in [DbBackend::MySql, DbBackend::Postgres] {
         let first = QhItem::query()
-            .in_random_order(42)
+            .in_random_order_seeded(42)
             .to_sql_with_bindings_for(backend);
         assert_eq!(
             first,
             QhItem::query()
-                .in_random_order(42)
+                .in_random_order_seeded(42)
                 .to_sql_with_bindings_for(backend)
         );
         if backend == DbBackend::MySql {
@@ -225,9 +225,9 @@ async fn seeded_random_order_emits_engine_sql_and_sqlite_accepts_every_seed() {
             assert!(!first.0.contains("CROSS JOIN"));
         }
     }
-    for seed in [None, Some(0), Some(42), Some(u64::MAX)] {
+    for seed in [0, 42, u64::MAX] {
         let mut ids: Vec<_> = QhItem::query()
-            .in_random_order(seed)
+            .in_random_order_seeded(seed)
             .get()
             .await
             .unwrap()
@@ -240,10 +240,37 @@ async fn seeded_random_order_emits_engine_sql_and_sqlite_accepts_every_seed() {
     assert!(
         QhItem::query()
             .filter("id", 99)
-            .in_random_order(0)
+            .in_random_order_seeded(0)
             .get()
             .await
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn random_order_without_a_seed_emits_plain_engine_sql_and_returns_each_row() {
+    let _fx = fixture().await;
+    for (backend, expected) in [
+        (DbBackend::MySql, "ORDER BY RAND()"),
+        (DbBackend::Postgres, "ORDER BY RANDOM()"),
+        (DbBackend::Sqlite, "ORDER BY RANDOM()"),
+    ] {
+        let (sql, values) = QhItem::query()
+            .in_random_order()
+            .to_sql_with_bindings_for(backend);
+        assert!(sql.contains(expected), "{backend:?}: {sql}");
+        assert!(!sql.contains("setseed"), "{backend:?}: {sql}");
+        assert!(values.is_empty());
+    }
+    let mut ids: Vec<_> = QhItem::query()
+        .in_random_order()
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3]);
 }
