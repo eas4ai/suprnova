@@ -306,7 +306,9 @@ pub use http::body::{
     set_global_max_request_body_bytes,
 };
 pub use http::precognition::{Bail, Precognition, Precognitive};
-pub use http::upload::validators::{ImageFile, MaxSize, MimeAllowlist, MimeType};
+pub use http::upload::validators::{
+    DimensionLimits, Dimensions, ImageFile, MaxSize, MimeAllowlist, MimeType,
+};
 pub use http::upload::{
     DEFAULT_MAX_MULTIPART_BODY_BYTES, DEFAULT_MAX_MULTIPART_PARTS, DEFAULT_UPLOAD_SPILL_THRESHOLD,
     MultipartLimits, MultipartPayload, MultipartRequestHooks, MultipartValue, UploadedFile,
@@ -514,8 +516,9 @@ pub use validation::rule::{
         BeforeOrEqual, Between, Boolean, CompareWith, Confirmed, Contains, DateBound, DateFormat,
         Different, Digits, Distinct, DoesntContain, Email, ExcludeIf, ExcludeUnless, Gt, Gte,
         HibpVerifier, HttpUrl, In, InArray, Integer, Lt, Lte, Max, Min, Missing, NotIn, Numeric,
-        Password, Prohibited, Required, RequiredIf, RequiredUnless, RequiredWith, RequiredWithAll,
-        Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
+        Password, Prohibited, Required, RequiredCondition, RequiredIf, RequiredUnless,
+        RequiredWhen, RequiredWith, RequiredWithAll, Same, UncompromisedVerifier, Url,
+        UrlProtocols, Uuid,
     },
 };
 // The media subsystem's flat names. `Image` is the image-manipulation

@@ -6,6 +6,7 @@
 #[cfg(feature = "testing")]
 pub mod dates;
 pub mod exists;
+pub mod laravel_http_gaps;
 pub mod password;
 pub mod postgres;
 pub mod presence;

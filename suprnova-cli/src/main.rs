@@ -228,8 +228,11 @@ enum Commands {
     /// Generate a new middleware
     #[command(name = "make:middleware")]
     MakeMiddleware {
-        /// Name of the middleware (e.g., Auth, RateLimit)
+        /// Name of the middleware (e.g., Auth, RateLimit, Admin/EnsureRole)
         name: String,
+        /// Also write a test under tests/ that runs the middleware
+        #[arg(long)]
+        test: bool,
     },
     /// Generate a new controller
     #[command(name = "make:controller")]
@@ -347,11 +350,29 @@ enum Commands {
     /// Generate a new Inertia page or Data struct
     #[command(name = "make:inertia")]
     MakeInertia {
-        /// Name of the page or struct (e.g., About, UserProps)
+        /// Name of the page or struct (e.g., About, Admin/Users, UserProps)
         name: String,
         /// Scaffold a #[derive(Data, Validate)] struct in app/src/props/ instead of a frontend page
         #[arg(long)]
         data: bool,
+        /// Overwrite the page (or the Data struct) and its test if they exist
+        #[arg(long)]
+        force: bool,
+        /// Also write a test under tests/ that renders the page
+        #[arg(long, conflicts_with = "data")]
+        test: bool,
+    },
+    /// Generate a checked view: a template and its #[view] struct
+    #[command(name = "make:view")]
+    MakeView {
+        /// Name of the view (e.g., welcome, admin.dashboard, admin/dashboard)
+        name: String,
+        /// Overwrite the template, the view struct and its test if they exist
+        #[arg(long)]
+        force: bool,
+        /// Also write a test under tests/ that renders the view
+        #[arg(long)]
+        test: bool,
     },
     /// Generate a new database migration
     #[command(name = "make:migration")]
@@ -635,8 +656,8 @@ fn main() {
                 commands::generate_types::GenerateOptions { big_integers },
             );
         }
-        Commands::MakeMiddleware { name } => {
-            commands::make_middleware::run(name);
+        Commands::MakeMiddleware { name, test } => {
+            commands::make_middleware::run(name, test);
         }
         Commands::MakeController { name } => {
             commands::make_controller::run(name);
@@ -708,8 +729,16 @@ fn main() {
         Commands::MakeError { name } => {
             commands::make_error::run(name);
         }
-        Commands::MakeInertia { name, data } => {
-            commands::make_inertia::run(name, data);
+        Commands::MakeInertia {
+            name,
+            data,
+            force,
+            test,
+        } => {
+            commands::make_inertia::run(name, data, force, test);
+        }
+        Commands::MakeView { name, force, test } => {
+            commands::make_view::run(name, force, test);
         }
         Commands::MakeMigration { name } => {
             commands::make_migration::run(name);

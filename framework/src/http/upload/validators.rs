@@ -9,8 +9,8 @@
 //! full contents in memory, validators receive a bounded **sniff buffer**
 //! (the first ~16 KiB of the part, sufficient for magic-byte detection)
 //! plus the **total accumulated size** in bytes. Validators that care
-//! about content (e.g. [`ImageFile`], [`MimeType`]) consult `sniff`; validators
-//! that care about size (e.g. [`MaxSize`]) consult `size`.
+//! about content (e.g. [`ImageFile`], [`MimeType`], [`Dimensions`]) consult
+//! `sniff`; validators that care about size (e.g. [`MaxSize`]) consult `size`.
 //!
 //! # Refusing a file
 //!
@@ -118,7 +118,16 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
     }
 }
 
-/// `ImageFile` - rejects anything whose magic bytes don't claim image/*.
+/// `ImageFile` - accepts a file whose magic bytes are one of the image types
+/// Laravel's `image` rule accepts: JPEG, PNG, GIF, BMP, WebP, AVIF, HEIC and
+/// HEIF.
+///
+/// Any other type is refused with `validation-image`, other images included:
+/// TIFF, PSD, ICO, JPEG XL and JPEG 2000 are images a browser does not show,
+/// and Laravel's rule refuses them for that reason. SVG is markup that can
+/// carry script, so it is never an `ImageFile`; accept it on purpose with a
+/// [`MimeType`] allowlist that names `image/svg+xml`, as Laravel accepts it
+/// only through `image:allow_svg`.
 ///
 /// Named after Laravel's own `Illuminate\Validation\Rules\ImageFile`, which
 /// is exactly this rule class. The bare `Image` name belongs to the
@@ -137,16 +146,39 @@ impl UploadValidator for ImageFile {
         _size: u64,
         _ct: Option<&str>,
     ) -> Result<(), FrameworkError> {
-        // `infer::get` only needs the first ~32 bytes for every format it
-        // recognises; the bounded sniff buffer (≤ 16 KiB) is generous.
         // Unidentifiable bytes are not an image either.
-        match infer::get(sniff) {
-            Some(kind) if kind.mime_type().starts_with("image/") => Ok(()),
-            _ => Err(FrameworkError::invalid_upload(
+        match accepted_image_type(sniff) {
+            Some(_) => Ok(()),
+            None => Err(FrameworkError::invalid_upload(
                 ValidationMessage::keyed("validation-image").fallback("The file must be an image."),
             )),
         }
     }
+}
+
+/// The types [`ImageFile`] accepts, as `infer` names them: the extensions
+/// Laravel's `validateImage` lists (`jpg`, `jpeg`, `png`, `gif`, `bmp`,
+/// `webp`, `avif`, `heic`, `heif`) as media types. `infer` reports a HEIC
+/// file as `image/heif`; `image/heic` is listed so the set reads as
+/// Laravel's does.
+const IMAGE_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/bmp",
+    "image/webp",
+    "image/avif",
+    "image/heic",
+    "image/heif",
+];
+
+/// The media type of `sniff` when its magic bytes name one of
+/// [`IMAGE_TYPES`]. `infer::get` needs at most the first few dozen bytes for
+/// these formats, so the bounded sniff buffer always holds enough.
+fn accepted_image_type(sniff: &[u8]) -> Option<&'static str> {
+    infer::get(sniff)
+        .map(|kind| kind.mime_type())
+        .filter(|mime| IMAGE_TYPES.contains(mime))
 }
 
 /// `MimeType<L>` - accepts a fixed list provided by an allowlist type.
@@ -378,6 +410,180 @@ impl<L: MimeAllowlist + 'static> UploadValidator for MimeType<L> {
     ) -> Result<(), FrameworkError> {
         validate_against_allowlist(sniff, size, ct, L::allowed())
     }
+}
+
+/// The limits a [`Dimensions`] validator checks, Laravel's `dimensions`
+/// constraints: `min_width`, `max_width`, `min_height`, `max_height`,
+/// `width`, `height` and `ratio`.
+///
+/// Each method answers `None` (no limit) unless the type overrides it, so a
+/// type names only the limits it sets. The limits are functions of the
+/// type, as [`MimeAllowlist::allowed`] is, because an upload validator is
+/// built with `Default` inside the `MultipartRequest` derive and takes no
+/// arguments.
+///
+/// ```rust
+/// use suprnova::{DimensionLimits, Dimensions, ImageFile, MaxSize, UploadedFile};
+///
+/// #[derive(Default)]
+/// struct Avatar;
+///
+/// impl DimensionLimits for Avatar {
+///     fn max_width() -> Option<u32> {
+///         Some(1000)
+///     }
+///     fn ratio() -> Option<f64> {
+///         Some(1.0)
+///     }
+/// }
+///
+/// type AvatarUpload = UploadedFile<(ImageFile, Dimensions<Avatar>, MaxSize<1_048_576>)>;
+/// ```
+pub trait DimensionLimits: Send + Sync + Default {
+    /// The narrowest width allowed, in pixels.
+    fn min_width() -> Option<u32> {
+        None
+    }
+
+    /// The widest width allowed, in pixels.
+    fn max_width() -> Option<u32> {
+        None
+    }
+
+    /// The shortest height allowed, in pixels.
+    fn min_height() -> Option<u32> {
+        None
+    }
+
+    /// The tallest height allowed, in pixels.
+    fn max_height() -> Option<u32> {
+        None
+    }
+
+    /// The exact width required, in pixels.
+    fn width() -> Option<u32> {
+        None
+    }
+
+    /// The exact height required, in pixels.
+    fn height() -> Option<u32> {
+        None
+    }
+
+    /// The width divided by the height, written as a fraction
+    /// (`Some(3.0 / 2.0)`) as Laravel's `ratio=3/2` is. An image passes
+    /// when its own ratio is within Laravel's tolerance of one pixel:
+    /// `1 / (max((width + height) / 2, height) + 1)`.
+    fn ratio() -> Option<f64> {
+        None
+    }
+}
+
+/// `Dimensions<D>` - checks an image's width and height against the limits
+/// of `D`, Laravel's `dimensions` rule.
+///
+/// The width and height come from the image's header in the sniff buffer,
+/// without decoding a pixel, for the types [`ImageFile`] accepts. A file
+/// that breaks a limit is refused with `validation-dimensions`, and so is a
+/// file whose dimensions cannot be read: a type `ImageFile` refuses, an SVG,
+/// a corrupt header, or a header that does not end within the first 16 KiB
+/// (a JPEG whose metadata segments run past that point). Pair it with
+/// [`ImageFile`] so a file that is no image reads `validation-image` first.
+#[derive(Default)]
+pub struct Dimensions<D: DimensionLimits>(std::marker::PhantomData<D>);
+
+impl<D: DimensionLimits + 'static> UploadValidator for Dimensions<D> {
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        _size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        match image_dimensions(sniff) {
+            Some((width, height)) if dimensions_fit::<D>(width, height) => Ok(()),
+            _ => Err(FrameworkError::invalid_upload(
+                ValidationMessage::keyed("validation-dimensions")
+                    .fallback("The file has invalid image dimensions."),
+            )),
+        }
+    }
+}
+
+/// The width and height an image's header states, for the types
+/// [`ImageFile`] accepts. `None` for another type, for a header the sniff
+/// buffer does not hold in full, and for a zero side, which no limit can
+/// be checked against.
+fn image_dimensions(sniff: &[u8]) -> Option<(u32, u32)> {
+    let (width, height) = match accepted_image_type(sniff)? {
+        "image/bmp" => bmp_dimensions(sniff)?,
+        _ => {
+            let size = imagesize::blob_size(sniff).ok()?;
+            (
+                u32::try_from(size.width).ok()?,
+                u32::try_from(size.height).ok()?,
+            )
+        }
+    };
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// A BMP's width and height, read as PHP's `getimagesize` reads them: a
+/// 12-byte OS/2 header holds two 16-bit sides, and every later header two
+/// signed 32-bit sides, where a negative height marks a top-down bitmap
+/// and is taken as its absolute value. `imagesize` reads both forms as
+/// unsigned 32-bit numbers, which makes a top-down bitmap four billion
+/// pixels tall, so BMP is read here.
+fn bmp_dimensions(sniff: &[u8]) -> Option<(u32, u32)> {
+    let le_u32 = |at: usize| {
+        sniff
+            .get(at..at + 4)?
+            .try_into()
+            .ok()
+            .map(u32::from_le_bytes)
+    };
+    let le_i32 = |at: usize| {
+        sniff
+            .get(at..at + 4)?
+            .try_into()
+            .ok()
+            .map(i32::from_le_bytes)
+    };
+    let le_u16 = |at: usize| {
+        sniff
+            .get(at..at + 2)?
+            .try_into()
+            .ok()
+            .map(u16::from_le_bytes)
+    };
+    match le_u32(14)? {
+        12 => Some((u32::from(le_u16(18)?), u32::from(le_u16(20)?))),
+        13..=64 | 108 | 124 => Some((u32::try_from(le_i32(18)?).ok()?, le_i32(22)?.unsigned_abs())),
+        _ => None,
+    }
+}
+
+/// Whether a `width` by `height` image meets every limit `D` sets, as
+/// Laravel's `failsBasicDimensionChecks` and `failsRatioCheck` decide it.
+fn dimensions_fit<D: DimensionLimits>(width: u32, height: u32) -> bool {
+    let at_least = |limit: Option<u32>, value: u32| limit.is_none_or(|limit| value >= limit);
+    let at_most = |limit: Option<u32>, value: u32| limit.is_none_or(|limit| value <= limit);
+    let exactly = |limit: Option<u32>, value: u32| limit.is_none_or(|limit| value == limit);
+    at_least(D::min_width(), width)
+        && at_most(D::max_width(), width)
+        && exactly(D::width(), width)
+        && at_least(D::min_height(), height)
+        && at_most(D::max_height(), height)
+        && exactly(D::height(), height)
+        && D::ratio().is_none_or(|ratio| ratio_fits(ratio, width, height))
+}
+
+/// Laravel's `failsRatioCheck`, negated: the image's width over height is
+/// within `1 / (max((width + height) / 2, height) + 1)` of `ratio`, a
+/// tolerance of about one pixel, so a 1001 by 1000 image is not square.
+fn ratio_fits(ratio: f64, width: u32, height: u32) -> bool {
+    let (width, height) = (f64::from(width), f64::from(height));
+    let precision = 1.0 / (((width + height) / 2.0).max(height) + 1.0);
+    (ratio - width / height).abs() <= precision
 }
 
 /// Tuple composition. `Default` for tuples up to 12 is provided by std.
