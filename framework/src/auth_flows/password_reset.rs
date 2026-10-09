@@ -14,7 +14,11 @@
 //!
 //! [`PasswordReset::send_link`] returns `Ok(())` for an unknown email. No token,
 //! mail, or event is created, but the return shape does not reveal account
-//! existence.
+//! existence. Every answer, for a known address and an unknown one, a refusal
+//! and an error alike, is held until `PASSWORD_RESET_TIMEBOX_MS` (200 ms by
+//! default) has passed since the call began, as Laravel's broker answers
+//! inside its `Timebox`, so the time an answer takes does not reveal account
+//! existence either.
 //!
 //! # Completion ordering
 //!
@@ -103,6 +107,20 @@ impl PasswordReset {
     /// The reset URL has the shape `{base_url}?token={plaintext_token}`. Both
     /// engines use a 15-minute single-use token.
     ///
+    /// On the provider path the link goes out through
+    /// [`UserProvider::send_password_reset_notification`], which
+    /// `EloquentUserProvider` answers by loading the model and calling its
+    /// [`CanResetPassword::send_password_reset_notification`](crate::CanResetPassword::send_password_reset_notification),
+    /// as Laravel's broker calls `sendPasswordResetNotification` on the user.
+    /// The Magnetar path holds an address, not a model, and sends the
+    /// framework's [`PasswordResetMail`].
+    ///
+    /// Every answer is held until `PASSWORD_RESET_TIMEBOX_MS` milliseconds
+    /// (200 by default, Laravel's `auth.timebox_duration`) have passed since
+    /// the call began: a known and an unknown address, the abuse refusal and
+    /// every error. An unknown address therefore answers no sooner than a
+    /// known one. `0` turns the hold off.
+    ///
     /// On the on-file path, fires
     /// [`crate::auth_flows::events::PasswordResetLinkSent`]. The dispatch is
     /// best-effort: a listener panic or transient dispatcher error is discarded
@@ -112,7 +130,31 @@ impl PasswordReset {
     /// errors if unset) from the process environment. Defaulting `MAIL_FROM` to
     /// a placeholder breaks DMARC/SPF in production, so the facade fails closed
     /// instead of silently sending from a domain the operator doesn't control.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::param`] at once, before any lookup or mail,
+    /// when `PASSWORD_RESET_TIMEBOX_MS` is not a whole number of milliseconds
+    /// or is too large to add to the current time.
     pub async fn send_link(email: &str, base_url: &str) -> Result<(), FrameworkError> {
+        let started = tokio::time::Instant::now();
+        let timebox = crate::auth_flows::password_reset_timebox()?;
+        let deadline = started.checked_add(timebox).ok_or_else(|| {
+            FrameworkError::param(format!(
+                "{}={} ms runs past the time the clock can hold",
+                crate::auth_flows::PASSWORD_RESET_TIMEBOX_ENV,
+                timebox.as_millis()
+            ))
+        })?;
+        let answer = Self::send_link_now(email, base_url).await;
+        // Laravel's `Timebox::call` sleeps out the remainder whatever the
+        // callback returned or threw; this does the same for every branch.
+        tokio::time::sleep_until(deadline).await;
+        answer
+    }
+
+    /// The body of [`Self::send_link`], answered as soon as it is known.
+    async fn send_link_now(email: &str, base_url: &str) -> Result<(), FrameworkError> {
         crate::magnetar_integration::abuse_limiter::check_auth_abuse(
             crate::magnetar_integration::abuse_limiter::AuthAbuseRoute::PasswordResetSend,
             email,
@@ -120,7 +162,7 @@ impl PasswordReset {
         .await?;
         let from_address = crate::auth_flows::require_mail_from()?;
         let Some(engine) = crate::magnetar_integration::password_engine_if_installed()? else {
-            return Self::send_provider_link(email, base_url, from_address).await;
+            return Self::send_provider_link(email, base_url).await;
         };
         let Some(issued) = engine
             .issue_password_reset(email)
@@ -296,11 +338,11 @@ impl PasswordReset {
         Ok(provider)
     }
 
-    async fn send_provider_link(
-        email: &str,
-        base_url: &str,
-        from_address: String,
-    ) -> Result<(), FrameworkError> {
+    /// Mint a framework reset token for the verified user `email` names and
+    /// send the link through the provider's
+    /// [`UserProvider::send_password_reset_notification`], which holds the
+    /// model when the provider has one.
+    async fn send_provider_link(email: &str, base_url: &str) -> Result<(), FrameworkError> {
         let provider = Self::provider_for_password_reset()?;
         let Some(user) = provider
             .retrieve_verified_user_for_password_reset(email)
@@ -315,19 +357,13 @@ impl PasswordReset {
         )
         .await?;
         let reset_link = crate::auth_flows::append_token_query(base_url, &token);
-        let to_address = user.email;
-        let mail = PasswordResetMail {
-            to_address: to_address.clone(),
-            user_name: user.name,
-            reset_link,
-            app_name: crate::auth_flows::app_name(),
-            from_address,
-        };
-        Mail::to(to_address.as_str()).send(mail).await?;
+        provider
+            .send_password_reset_notification(&user.id, &reset_link)
+            .await?;
         let _ = crate::events::EventFacade::dispatch(
             crate::auth_flows::events::PasswordResetLinkSent {
                 user_id: user.id,
-                email: to_address,
+                email: user.email,
             },
         )
         .await;

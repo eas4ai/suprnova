@@ -307,35 +307,10 @@ impl UserProvider for DatabaseUserProvider {
     ) -> Result<bool, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
-            (Some(plaintext), Some(hash)) => {
-                let valid = hashing::verify_async(plaintext, hash).await?;
-                // While the application shares its database with Laravel,
-                // a valid sign-in rewrites a hash Laravel's hasher would
-                // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
-                // in the configured password column, as the model provider
-                // does. If the rewrite cannot be minted or stored, the
-                // sign-in fails with that error, as it does there: Laravel
-                // could not sign this user in (LDB-004). The stored hash is
-                // left as it was, and the next sign-in tries again.
-                if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
-                    let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
-                        Ok(rehashed) => {
-                            self.write_password(&user.get_auth_identifier(), &rehashed)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = rewritten {
-                        tracing::warn!(
-                            error = %error,
-                            "the password hash could not be rewritten for Laravel after a \
-                             valid password; the sign-in fails"
-                        );
-                        return Err(error);
-                    }
-                }
-                Ok(valid)
-            }
+            // Answers without writing, as Laravel's `validateCredentials`
+            // does; a sign-in rewrites the hash through
+            // `rehash_password_if_required`.
+            (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
             // A user row with no stored password (OAuth-only / passwordless). Run a
             // dummy verify so this path costs the same as a wrong-password attempt,
             // closing the account-type timing oracle. Mirrors EloquentUserProvider.
@@ -345,6 +320,43 @@ impl UserProvider for DatabaseUserProvider {
             }
             (None, _) => Ok(false),
         }
+    }
+
+    async fn rehash_password_if_required(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+    ) -> Result<(), FrameworkError> {
+        let password = credentials.get("password").and_then(|v| v.as_str());
+        let (Some(plaintext), Some(hash)) = (password, user.get_auth_password()) else {
+            return Ok(());
+        };
+        // While the application shares its database with Laravel, a sign-in
+        // rewrites a hash Laravel's hasher would refuse (`$2b$`, Argon2id) as
+        // the `$2y$` one it accepts, in the configured password column, as
+        // the model provider does. If the rewrite cannot be minted or stored,
+        // the sign-in fails with that error, as it does there: Laravel could
+        // not sign this user in (LDB-004). The stored hash is left as it was,
+        // and the next sign-in tries again.
+        if !(crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash)) {
+            return Ok(());
+        }
+        let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
+            Ok(rehashed) => {
+                self.write_password(&user.get_auth_identifier(), &rehashed)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = rewritten {
+            tracing::warn!(
+                error = %error,
+                "the password hash could not be rewritten for Laravel after a \
+                 valid password; the sign-in fails"
+            );
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

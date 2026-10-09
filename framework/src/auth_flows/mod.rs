@@ -66,7 +66,9 @@ pub use events::{
     AccountLocked, AccountUnlocked, EmailVerified, PasswordResetCompleted, PasswordResetLinkSent,
     TwoFactorChallengeFailed, TwoFactorChallenged, TwoFactorDisabled, TwoFactorEnrolled,
 };
-pub use mail::{EmailVerificationMail, PasswordChangedMail, PasswordResetMail};
+pub use mail::{
+    EmailVerificationMail, PasswordChangedMail, PasswordResetMail, VerifyEmailNotification,
+};
 pub use password_reset::PasswordReset;
 pub use token_store::{TokenPurpose, create_auth_flow_tokens_table};
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorLockout, TwoFactorUser};
@@ -95,6 +97,51 @@ pub(crate) fn require_mail_from() -> Result<String, crate::error::FrameworkError
 /// failure.
 pub(crate) fn app_name() -> String {
     std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into())
+}
+
+/// The environment key [`password_reset_timebox`] reads.
+pub(crate) const PASSWORD_RESET_TIMEBOX_ENV: &str = "PASSWORD_RESET_TIMEBOX_MS";
+
+/// Laravel's `auth.timebox_duration`, 200000 microseconds.
+const DEFAULT_PASSWORD_RESET_TIMEBOX_MS: u64 = 200;
+
+/// Read `PASSWORD_RESET_TIMEBOX_MS`: how long
+/// [`PasswordReset::send_link`] holds every answer, counted from the call.
+///
+/// Holding each answer for the same time keeps an unknown address from
+/// answering sooner than a known one, which would tell a caller which
+/// addresses have accounts. An unset or empty key gives 200 ms, as
+/// Laravel's broker does. `0` turns the hold off.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError::param`](crate::error::FrameworkError::param)
+/// naming the key and the value when the value is not a whole number of
+/// milliseconds.
+pub(crate) fn password_reset_timebox() -> Result<std::time::Duration, crate::error::FrameworkError>
+{
+    parse_password_reset_timebox(std::env::var(PASSWORD_RESET_TIMEBOX_ENV).ok())
+}
+
+/// [`password_reset_timebox`] over a value already read, so the parser is
+/// proven against fixed values rather than the process environment.
+fn parse_password_reset_timebox(
+    raw: Option<String>,
+) -> Result<std::time::Duration, crate::error::FrameworkError> {
+    let raw = raw.unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(std::time::Duration::from_millis(
+            DEFAULT_PASSWORD_RESET_TIMEBOX_MS,
+        ));
+    }
+    raw.parse::<u64>()
+        .map(std::time::Duration::from_millis)
+        .map_err(|_| {
+            crate::error::FrameworkError::param(format!(
+                "{PASSWORD_RESET_TIMEBOX_ENV}=`{raw}` is not a whole number of milliseconds"
+            ))
+        })
 }
 
 /// Append `token=<token>` to `base_url` as a query parameter, picking
@@ -171,6 +218,44 @@ mod tests {
             std::env::set_var("MAIL_FROM", "ops@example.com");
         }
         assert_eq!(require_mail_from().unwrap(), "ops@example.com");
+    }
+
+    #[test]
+    fn password_reset_timebox_defaults_to_laravels_200_ms() {
+        for raw in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                parse_password_reset_timebox(raw.map(str::to_owned)).unwrap(),
+                std::time::Duration::from_millis(200),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_reset_timebox_reads_whole_milliseconds() {
+        assert_eq!(
+            parse_password_reset_timebox(Some(" 300 ".to_owned())).unwrap(),
+            std::time::Duration::from_millis(300)
+        );
+        assert_eq!(
+            parse_password_reset_timebox(Some("0".to_owned())).unwrap(),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn password_reset_timebox_refuses_a_value_that_is_not_a_whole_number() {
+        for value in ["abc", "1.5", "-1"] {
+            let error = parse_password_reset_timebox(Some(value.to_owned())).unwrap_err();
+            assert!(
+                matches!(error, crate::error::FrameworkError::ParamError { .. }),
+                "{value}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(PASSWORD_RESET_TIMEBOX_ENV),
+                "{value}: the error names the key: {error}"
+            );
+        }
     }
 
     #[test]

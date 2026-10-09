@@ -274,6 +274,12 @@ impl StatefulGuard for SessionGuard {
                     Some(Ok(current)) => user.auth_epoch().or(current),
                     None => None,
                 };
+                // After the password validates and before the user is signed
+                // in, as Laravel's `attempt` rehashes before `login`. A
+                // rewrite that fails fails the sign-in.
+                self.provider
+                    .rehash_password_if_required(&*user, &creds)
+                    .await?;
                 // login_at_epoch() fires Login + Authenticated.
                 self.login_at_epoch(user.clone(), remember, recorded_epoch)
                     .await?;
@@ -342,6 +348,11 @@ impl StatefulGuard for SessionGuard {
             let admission = self.admit_host_sign_in(&user.get_auth_identifier()).await;
             if self.provider.validate_credentials(&*user, &creds).await? {
                 admission?;
+                // As `attempt` does: rewrite the hash before the user is
+                // signed in, and fail the sign-in when the rewrite fails.
+                self.provider
+                    .rehash_password_if_required(&*user, &creds)
+                    .await?;
                 let user_id = user.get_auth_identifier();
                 request_state::set_guard_user(&self.name, user);
                 request_state::set_guard_via_remember(&self.name, false);

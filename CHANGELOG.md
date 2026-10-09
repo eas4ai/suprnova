@@ -1051,6 +1051,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   after the first hash.
 - **`ARGON_TIME`.** The hashing configuration reads Laravel's `ARGON_TIME` as
   the Argon time when `HASH_TIME` is unset; `HASH_TIME` still wins.
+- **The verified gate redirects by route name.**
+  `EnsureEmailVerifiedMiddleware::redirect_to_route(name)` resolves the route
+  on each request; a name no route carries fails the request with a `500`
+  whose error names it.
+- **Your own verification message.**
+  `MustVerifyEmail::send_email_verification_notification` sends the
+  verification link, and a model overrides it to send its own message.
+  `EmailVerification::send_link` calls it, and `resend` calls it through the
+  new `UserProvider::send_email_verification_notification`. The default sends
+  the new `VerifyEmailNotification`, a mail notification through `Notify`
+  that reads as the mail did, and needs no notification setup.
+- **Your own reset message.** `CanResetPassword::send_password_reset_notification`
+  sends the reset link on the provider path, through the new
+  `UserProvider::send_password_reset_notification`; the default sends
+  `PasswordResetMail` to `email_for_reset()`.
+- **A timebox on reset links.** `PasswordReset::send_link` holds every
+  answer, a refusal and an error included, until `PASSWORD_RESET_TIMEBOX_MS`
+  milliseconds (200 by default) have passed, so an unknown address answers no
+  sooner than a known one.
+- **A rehash step in the sign-in.** `UserProvider::rehash_password_if_required`
+  runs after the password validates and before the user is signed in, in
+  `attempt`, `once` and `Auth::logout_other_devices`.
 
 ### Changed
 
@@ -1863,6 +1885,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`throttle:60,1` counts signed-in users by user.** The inline throttle keys
   a signed-in user by the user's identifier and a guest by address, each per
   path, so one user cannot buy a fresh budget from another address.
+
+- **The verified gate answers each request.**
+  `EnsureEmailVerifiedMiddleware::redirect_to` answers a request that expects
+  JSON with `403` `Your email address is not verified.`, and sends any other
+  request through `Redirect::guest`, so the intended URL is stored and
+  `Redirect::intended` returns the user after verification. `new()` still
+  answers `403` to every caller.
+- **Verification refusals tell the two cases apart.** `EmailVerification::verify`
+  answers `403` `This action is unauthorized.` for a live link of another
+  account or one mailed to an address the account no longer has, and keeps
+  `400` for an unknown, expired or used token.
+- **Verifying a verified account keeps its time.** `verify` consumes the token
+  and returns the user ID without a new stamp and without `EmailVerified`.
+- **Checking a password writes nothing.** `validate_credentials` on
+  `EloquentUserProvider` and `DatabaseUserProvider` no longer rewrites the hash
+  for a database shared with Laravel, so `Auth::validate` and a guard's
+  `validate` leave it as it is; the sign-in rewrites it, and a rewrite that
+  fails still fails the sign-in.
 
 ### Fixed
 
