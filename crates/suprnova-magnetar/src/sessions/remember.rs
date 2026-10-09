@@ -109,6 +109,23 @@ pub trait RememberStore: Send + Sync {
     }
     /// Revoke all rows for a user.
     async fn revoke_all_remember(&self, user_id: &str) -> Result<u64>;
+    /// End other devices' remember credentials while preserving this browser.
+    ///
+    /// Older stores fail before mutation when a selector must survive. Without
+    /// a current selector, ordinary all-user revocation suffices.
+    async fn revoke_other_remember(
+        &self,
+        user_id: &str,
+        current_selector: Option<&str>,
+    ) -> Result<u64> {
+        if current_selector.is_none() {
+            return self.revoke_all_remember(user_id).await;
+        }
+        Err(crate::Error::DependencyUnavailable {
+            dependency: "remember store".to_owned(),
+            message: "current remember credential preservation is unavailable".to_owned(),
+        })
+    }
     /// Prune expired rows and return the number removed.
     async fn prune_expired_remember(&self, now: DateTime<Utc>) -> Result<u64>;
 }

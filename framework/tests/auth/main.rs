@@ -29,3 +29,6 @@ pub mod remember_me;
 pub mod scaffold_tables;
 pub mod session_commit_boundary;
 pub mod session_guard;
+
+/// Verifies the added Laravel behaviours through the shared delta mechanism.
+pub mod laravel_delta;

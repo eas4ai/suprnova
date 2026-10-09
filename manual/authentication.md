@@ -436,6 +436,22 @@ deliberately failure-loud: previous versions silently no-op'd outside a
 session scope, and the audit fixed that - a "successful login" that
 never landed is the kind of bug nothing else catches.
 
+You call `Auth::logout_other_devices(password).await?` from a session-backed
+request to sign out your other devices. You verify the password against the
+current user through the default guard's provider. With the correct password,
+you revoke the user's other sessions and remember credentials while keeping
+the current session ID, CSRF token, session data, and remember selector. With
+an incorrect password, you receive `FrameworkError::Validation` on `password`
+and keep every credential unchanged.
+
+With Magnetar installed, you also revoke its other sessions and remember
+credentials while keeping the current web binding. You keep the current
+browser signed in without advancing the user's auth epoch. You propagate
+storage errors. With a custom session store, you implement
+`SessionStore::destroy_other_guard_sessions`; with a custom Magnetar remember
+store or engine, you implement `revoke_other_remember` to preserve the given
+selector.
+
 ## `Auth::user()` and `user_as<T>`
 
 `Auth::user()` returns the user behind the trait:

@@ -19,3 +19,6 @@ pub mod notify_fake;
 pub mod queue;
 pub mod telemetry;
 pub mod webpush;
+
+/// Verifies the added Laravel behaviours through the shared delta mechanism.
+pub mod laravel_delta;

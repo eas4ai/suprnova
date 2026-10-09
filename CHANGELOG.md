@@ -8,6 +8,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Sign out your other devices.** `Auth::logout_other_devices` verifies your
+  password and revokes other sessions and remember credentials while keeping
+  the current browser signed in.
+- **Typed notification assertions.** The notification fake filters recorded
+  notifications by concrete type, recipient route, and notification contents.
+  Existing name-based assertions keep working.
+- **Copy files across disks.** `Storage::copy_to_disk` streams between disk
+  names or ready-made disk handles and keeps the source.
+- **Move files across disks.** `Storage::move_to_disk` copies the file before
+  deleting the source and reports transfer or deletion failures.
+- **Forget several disks.** `Storage::forget` accepts one name or a list and
+  reports whether any registered disk was removed.
+- **Purge one disk or every disk.** `Storage::purge(name)` drops one named disk
+  and `purge_all` drops every disk. Existing `purge()` calls keep working.
+- **Store a ready-made disk.** `Storage::set` registers an operator under a
+  name and replaces the previous disk and its public URL.
+
 - **Language-specific slugs.** `Str::slug_in` applies the named language's
   ASCII spelling, including German `ä` as `ae`.
 - **Word limits keep markup.** `Str::words` limits space-separated runs
