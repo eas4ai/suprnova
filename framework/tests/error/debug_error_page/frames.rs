@@ -339,6 +339,49 @@ fn outer_recorded_error() -> FrameworkError {
     FrameworkError::from_external_with("outer recorded failure", inner_recorded_error())
 }
 
+fn inner_equal_message_error() -> FrameworkError {
+    FrameworkError::internal("same")
+}
+
+fn outer_equal_message_error() -> FrameworkError {
+    FrameworkError::from_external(inner_equal_message_error())
+}
+
+#[tokio::test]
+#[serial]
+async fn equal_messages_keep_each_errors_own_first_application_frame() {
+    let _debug = debug_mode(true, &[]).await;
+    let routes = Router::new()
+        .get("/equal-messages", |_req| async {
+            Err::<HttpResponse, _>(HttpResponse::from(outer_equal_message_error()))
+        })
+        .into();
+    let reply = get(routes, "/equal-messages", BROWSER).await;
+    assert_debug_page(&reply, 500);
+    let shown = outside_details(&reply.body);
+    let traces: Vec<&str> = shown.split("<h2>Stack frames").skip(1).collect();
+    assert_eq!(traces.len(), 2, "{}", reply.body);
+    let first_frames: Vec<&str> = traces
+        .iter()
+        .map(|trace| {
+            trace
+                .split("<li class=\"app\"><code class=\"fn\">")
+                .nth(1)
+                .and_then(|frame| frame.split("</code>").next())
+                .expect("each trace shows an application frame")
+        })
+        .collect();
+    assert!(
+        first_frames[0].contains("outer_equal_message_error"),
+        "{first_frames:?}"
+    );
+    assert!(
+        first_frames[1].contains("inner_equal_message_error"),
+        "{first_frames:?}"
+    );
+    assert_ne!(first_frames[0], first_frames[1]);
+}
+
 #[tokio::test]
 #[serial]
 async fn each_error_in_a_chain_displays_the_trace_it_recorded() {

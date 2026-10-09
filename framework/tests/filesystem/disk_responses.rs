@@ -336,6 +336,59 @@ async fn disk_ranges_use_the_disk_reader_and_file_mtime() {
 }
 
 #[tokio::test]
+async fn an_empty_disk_file_without_a_range_returns_200() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    Storage::register_fs("local", tmp.path()).expect("local disk");
+    Storage::register_memory("objects");
+    for disk in ["local", "objects"] {
+        Storage::disk(disk)
+            .expect("disk")
+            .write("empty.txt", Vec::<u8>::new())
+            .await
+            .expect("empty file");
+        let (status, headers, body) = serve("/empty", move || async move {
+            Storage::response(disk, "empty.txt", None)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .await;
+        assert_eq!(status, 200, "{disk}");
+        assert_eq!(header(&headers, "accept-ranges"), "bytes");
+        assert_eq!(header(&headers, "content-length"), "0");
+        assert!(headers.get("content-range").is_none());
+        assert!(body.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_empty_disk_file_with_a_range_returns_416() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    Storage::register_fs("local", tmp.path()).expect("local disk");
+    Storage::register_memory("objects");
+    for disk in ["local", "objects"] {
+        Storage::disk(disk)
+            .expect("disk")
+            .write("empty.txt", Vec::<u8>::new())
+            .await
+            .expect("empty file");
+        let (status, headers, body) =
+            serve_with("/empty", &[("Range", "bytes=0-")], move || async move {
+                Storage::download(disk, "empty.txt", None)
+                    .await
+                    .map_err(HttpResponse::from)
+            })
+            .await;
+        assert_eq!(status, 416, "{disk}");
+        assert_eq!(header(&headers, "content-range"), "bytes */0");
+        assert_eq!(header(&headers, "accept-ranges"), "bytes");
+        assert_eq!(header(&headers, "content-length"), "0");
+        assert!(body.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn disk_response_options_preserve_headers_and_select_the_disposition() {
     let _guard = Storage::fake();
     let _tmp = local_disk_with_outside_secret("local");
