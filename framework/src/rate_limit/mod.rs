@@ -884,7 +884,7 @@ where
                             Err(HttpResponse::text("503 Service Unavailable")
                                 .status(503)
                                 .header("retry-after", "1")
-                                .with_error_report_from(&e))
+                                .with_reported_error_from(&e))
                         }
                     };
                 }

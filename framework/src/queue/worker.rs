@@ -1347,7 +1347,20 @@ async fn run_labelled_worker(
                         job: identity_pre.clone(),
                         timeout: t,
                     };
-                    let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
+                    // The timeout as an error, Laravel's
+                    // `TimeoutExceededException`: the callbacks and the
+                    // don't-retry list see it as they see an error an
+                    // attempt returned (PAR-111).
+                    let error = FrameworkError::from_external(crate::queue::TimeoutExceeded {
+                        job_name: env.job_name.clone(),
+                        timeout: t,
+                    });
+                    // An error the application named with `dont_retry` or
+                    // `dont_retry_when` ends the retries of a timed-out
+                    // attempt too, as it does for a failed one.
+                    let exhausted = env.fail_on_timeout
+                        || env.attempts >= env.max_tries
+                        || crate::error::Exceptions::should_stop_retries(&error);
                     if exhausted {
                         // A stalled middleware times out the whole pipeline, so the
                         // core may never have run and the release at processing
@@ -1389,6 +1402,9 @@ async fn run_labelled_worker(
                             settlement_failure(&*driver, &env, "nack", "timeout_retry", &nack_err);
                         }
                     }
+                    // Reported once the attempt has settled, retried or
+                    // not, as the error of a failed attempt is (PAR-111).
+                    crate::error::Exceptions::report(&error);
                 }
             }
         })

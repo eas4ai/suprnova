@@ -1,7 +1,8 @@
 //! The tenth parity round's queue clauses of PAR-111: every failed job
-//! attempt is reported through `Exceptions`, and an error the application
-//! names with `dont_retry` or `dont_retry_when` fails the job at once.
-//! Each test is named after the falsifier clause it observes.
+//! attempt, a timed-out one included, is reported through `Exceptions`,
+//! and an error the application names with `dont_retry` or
+//! `dont_retry_when` fails the job at once. Each test is named after the
+//! falsifier clause it observes.
 //!
 //! # Isolation
 //!
@@ -21,7 +22,7 @@ use suprnova::queue::worker::{WorkerConfig, register_job};
 use suprnova::queue::{FailOnException, JobMiddleware};
 use suprnova::{
     BackoffSchedule, Exceptions, FrameworkError, Job, MemoryQueueDriver, Queue, QueueDriver,
-    WorkerControls, async_trait, run_worker_with_controls,
+    TimeoutExceeded, WorkerControls, async_trait, run_worker_with_controls,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -122,13 +123,48 @@ impl Job for RefundCard {
     }
 }
 
-/// A fresh memory driver holding `jobs`, with both job types registered.
+/// How many attempts of [`SlowCharge`] started.
+static SLOW_STARTS: AtomicU32 = AtomicU32::new(0);
+
+/// Sleeps past its one-second per-attempt timeout on every attempt; two
+/// tries, no backoff. The budget is whole seconds because the envelope
+/// stores `timeout_secs`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SlowCharge {
+    order: u32,
+}
+
+#[async_trait]
+impl Job for SlowCharge {
+    fn job_name() -> &'static str {
+        "laravel_http_gaps::SlowCharge"
+    }
+    fn max_tries() -> u32 {
+        2
+    }
+    fn backoff() -> BackoffSchedule {
+        BackoffSchedule::Fixed { secs: 0 }
+    }
+    fn timeout() -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        SLOW_STARTS.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(())
+    }
+}
+
+/// A fresh memory driver holding `jobs`, with every job type of this file
+/// registered.
 async fn queue_with<J: Job>(jobs: Vec<J>) -> Arc<MemoryQueueDriver> {
     CHARGES.store(0, Ordering::SeqCst);
+    SLOW_STARTS.store(0, Ordering::SeqCst);
     let driver = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
     register_job::<ChargeCard>();
     register_job::<RefundCard>();
+    register_job::<SlowCharge>();
     for job in jobs {
         Queue::push(job)
             .await
@@ -139,6 +175,12 @@ async fn queue_with<J: Job>(jobs: Vec<J>) -> Arc<MemoryQueueDriver> {
 
 /// Run a worker until the queue is empty.
 async fn drain(driver: Arc<MemoryQueueDriver>) {
+    drain_with_tries(driver, None).await;
+}
+
+/// Run a worker until the queue is empty, with `tries` overriding each
+/// job's own attempt budget as `queue:work --tries` does.
+async fn drain_with_tries(driver: Arc<MemoryQueueDriver>, tries: Option<u32>) {
     let exit = tokio::time::timeout(
         Duration::from_secs(10),
         run_worker_with_controls(
@@ -149,6 +191,7 @@ async fn drain(driver: Arc<MemoryQueueDriver>) {
             },
             WorkerControls {
                 stop_when_empty: true,
+                tries,
                 ..WorkerControls::default()
             },
             CancellationToken::new(),
@@ -176,6 +219,24 @@ fn record_declines() -> Arc<Mutex<Vec<String>>> {
 fn seen(list: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
     list.lock().expect("the list is not poisoned").clone()
 }
+
+/// Record each [`TimeoutExceeded`] of [`SlowCharge`] a callback receives,
+/// as `<job name> after <budget>`.
+fn record_timeouts() -> Arc<Mutex<Vec<String>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Exceptions::reportable(move |error: &TimeoutExceeded| {
+        if error.job_name == SlowCharge::job_name() {
+            record
+                .lock()
+                .expect("the list is not poisoned")
+                .push(format!("{} after {:?}", error.job_name, error.timeout));
+        }
+    });
+    seen
+}
+
+const SLOW_CHARGE_TIMED_OUT: &str = "laravel_http_gaps::SlowCharge after 1s";
 
 #[tokio::test]
 #[serial]
@@ -291,4 +352,75 @@ async fn an_error_no_dont_retry_entry_names_is_retried_until_its_tries_are_spent
         "a gateway timeout is not a declined card, so it runs all three tries"
     );
     assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_timed_out_attempt_with_tries_left_is_retried_and_reaches_the_callbacks() {
+    let _isolated = Isolated::new().await;
+    let timeouts = record_timeouts();
+    let _events = EventFacade::fake();
+    let driver = queue_with(vec![SlowCharge { order: 21 }]).await;
+
+    drain(driver.clone()).await;
+
+    assert_eq!(
+        SLOW_STARTS.load(Ordering::SeqCst),
+        2,
+        "the first timeout leaves a try, so the job runs again"
+    );
+    assert_eq!(
+        seen(&timeouts),
+        [SLOW_CHARGE_TIMED_OUT, SLOW_CHARGE_TIMED_OUT],
+        "each timed-out attempt, the retried one and the last, is reported"
+    );
+    assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1);
+    assert_eq!(driver.size(None).await.expect("size"), 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_timed_out_attempt_with_no_tries_left_is_dead_lettered_and_reaches_the_callbacks() {
+    let _isolated = Isolated::new().await;
+    let timeouts = record_timeouts();
+    let _events = EventFacade::fake();
+    let driver = queue_with(vec![SlowCharge { order: 22 }]).await;
+
+    drain_with_tries(driver.clone(), Some(1)).await;
+
+    assert_eq!(SLOW_STARTS.load(Ordering::SeqCst), 1);
+    let failed = dispatched::<JobFailed>(|_| true);
+    assert_eq!(failed.len(), 1, "the one timeout spends the only try");
+    assert_eq!(
+        seen(&timeouts),
+        [SLOW_CHARGE_TIMED_OUT],
+        "the timeout that dead-letters the job is reported"
+    );
+    assert_eq!(driver.size(None).await.expect("size"), 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_timed_out_attempt_dont_retry_when_accepts_fails_without_another_attempt() {
+    let _isolated = Isolated::new().await;
+    Exceptions::dont_retry_when(|error: &FrameworkError| {
+        error
+            .external_source()
+            .is_some_and(|source| source.is::<TimeoutExceeded>())
+    });
+    let timeouts = record_timeouts();
+    let _events = EventFacade::fake();
+    let driver = queue_with(vec![SlowCharge { order: 23 }]).await;
+
+    drain(driver.clone()).await;
+
+    assert_eq!(
+        SLOW_STARTS.load(Ordering::SeqCst),
+        1,
+        "the job fails on its first timeout, with a try left"
+    );
+    assert_eq!(dispatched::<JobFailed>(|_| true).len(), 1);
+    assert_eq!(seen(&timeouts), [SLOW_CHARGE_TIMED_OUT]);
+    assert_eq!(driver.size(None).await.expect("size"), 0);
+    assert_eq!(driver.delayed_size(None).await.expect("delayed size"), 0);
 }
