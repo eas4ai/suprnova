@@ -37,3 +37,5 @@ mod unsigned_pivots;
 mod unsigned_reads;
 mod unsigned_table_reads;
 mod unsigned_table_writes;
+
+pub mod laravel_gaps;

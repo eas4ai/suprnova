@@ -783,7 +783,7 @@ pub async fn laravel_misuse_is_refused(conn: &DatabaseConnection) {
             }),
         ),
         (
-            &["length", "string columns only"],
+            &["length", "string and ulid columns only"],
             Box::new(|t| {
                 t.enumeration("status", &["draft"]).length(20);
             }),

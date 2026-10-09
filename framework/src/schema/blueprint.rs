@@ -85,6 +85,22 @@ impl Blueprint {
         }
     }
 
+    /// Previews the same validated CREATE statements a migration executes.
+    /// You can check backend types without connecting to that database.
+    pub fn create_sql<F>(
+        table: &str,
+        backend: sea_orm::DbBackend,
+        define: F,
+    ) -> Result<Vec<String>, sea_orm::DbErr>
+    where
+        F: FnOnce(&mut Self),
+    {
+        let mut blueprint = Self::new(table);
+        define(&mut blueprint);
+        super::plan::plan_create(&blueprint, backend)
+            .map(|steps| steps.into_iter().map(|step| step.sql(backend)).collect())
+    }
+
     pub(crate) fn table(&self) -> &str {
         &self.table
     }
@@ -127,11 +143,11 @@ impl Blueprint {
         let Some(spec) = self.columns.get_mut(column) else {
             return;
         };
-        if spec.kind == ColumnKind::String {
+        if matches!(spec.kind, ColumnKind::String | ColumnKind::Ulid) {
             spec.length = Some(length);
         } else {
             let fault = format!(
-                "schema: cannot set a length on column `{}` of table `{}`: length applies to string columns only, use char(name, length) for a fixed-length column",
+                "schema: cannot set a length on column `{}` of table `{}`: length applies to string and ulid columns only, use char(name, length) for a fixed-length column",
                 spec.name, self.table
             );
             self.faults.push(fault);
@@ -187,6 +203,14 @@ impl Blueprint {
 
     pub(crate) fn set_precision(&mut self, column: usize, digits: u32) {
         match self.columns.get_mut(column) {
+            Some(spec) if spec.kind == ColumnKind::Float && (1..=53).contains(&digits) => {
+                spec.precision = Some(digits);
+            }
+            Some(spec) if spec.kind == ColumnKind::Float => self.fault_on(
+                column,
+                "precision()",
+                "float precision is the number of binary digits, from 1 to 53",
+            ),
             Some(spec) if spec.kind.is_temporal() && digits <= MAX_TIME_PRECISION => {
                 spec.precision = Some(digits);
             }
@@ -198,7 +222,7 @@ impl Blueprint {
             Some(_) => self.fault_on(
                 column,
                 "precision()",
-                "it applies to date_time, timestamp_tz and time columns only",
+                "it applies to float, date_time, timestamp_tz and time columns only",
             ),
             None => {}
         }
@@ -327,7 +351,7 @@ impl Blueprint {
         self.tiny_integer(name).unsigned()
     }
 
-    /// Adds a boolean column.
+    /// Adds Laravel's boolean storage: `tinyint(1)` on MySQL and SQLite, `boolean` on Postgres.
     pub fn boolean(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::Boolean)
     }
@@ -403,7 +427,8 @@ impl Blueprint {
         ColumnBuilder::new(self, index)
     }
 
-    /// Adds a 32-bit floating point column.
+    /// Adds a floating point column with 53 binary digits so values retain double precision.
+    /// Call `.precision(n)` to request fewer digits on MySQL or Postgres.
     pub fn float(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::Float)
     }
@@ -434,8 +459,9 @@ impl Blueprint {
         self.column(name, ColumnKind::DateTime)
     }
 
-    /// Adds a date and time column with a time zone: `timestamp with time
-    /// zone` on Postgres, `timestamp` on MySQL, text on SQLite.
+    /// Adds a whole-second zoned timestamp so Postgres matches Laravel's default.
+    /// Storage is `timestamp(0) with time zone` on Postgres, `timestamp(0)` on
+    /// MySQL, and `datetime` on SQLite. Call `.precision(n)` for fractional digits.
     pub fn timestamp_tz(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::TimestampTz)
     }
@@ -452,9 +478,15 @@ impl Blueprint {
         self.column(name, ColumnKind::Uuid)
     }
 
-    /// Adds a `CHAR(26)` column, the length of a ULID.
+    /// Adds a `CHAR(26)` column for a standard ULID. `.length(n)` changes the length.
     pub fn ulid(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnKind::Ulid)
+    }
+
+    /// Adds a ULID column of a chosen length when your schema uses a shorter code.
+    /// Rust has no optional arguments, so this is Laravel's `ulid(name, length)`.
+    pub fn ulid_with_length(&mut self, name: &str, length: u32) -> ColumnBuilder<'_> {
+        self.ulid(name).length(length)
     }
 
     /// Adds a column of raw bytes: `bytea` on Postgres, `BLOB` elsewhere.

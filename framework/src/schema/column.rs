@@ -108,7 +108,7 @@ impl ColumnSpec {
             default: None,
             length: None,
             unsigned: false,
-            precision: None,
+            precision: (kind == ColumnKind::TimestampTz).then_some(0),
             use_current: false,
             after: None,
             allowed: Vec::new(),
@@ -190,7 +190,11 @@ impl ColumnSpec {
                 }
             },
             ColumnKind::Boolean => {
-                def.boolean();
+                if backend == DbBackend::Postgres {
+                    def.boolean();
+                } else {
+                    def.custom(Alias::new("tinyint(1)"));
+                }
             }
             ColumnKind::String => {
                 def.string_len(self.length.unwrap_or(DEFAULT_STRING_LENGTH));
@@ -236,7 +240,21 @@ impl ColumnSpec {
                 }
             }
             ColumnKind::Float => {
-                def.float();
+                let precision = self.precision.unwrap_or(53);
+                match backend {
+                    DbBackend::MySql => {
+                        def.custom(Alias::new(format!("float({precision})")));
+                    }
+                    DbBackend::Postgres if precision == 53 => {
+                        def.double();
+                    }
+                    DbBackend::Postgres => {
+                        def.custom(Alias::new(format!("float({precision})")));
+                    }
+                    _ => {
+                        def.float();
+                    }
+                }
             }
             ColumnKind::Double => {
                 def.double();
@@ -246,6 +264,9 @@ impl ColumnSpec {
             }
             ColumnKind::Date => {
                 def.date();
+            }
+            ColumnKind::TimestampTz if backend == DbBackend::Sqlite => {
+                def.custom(Alias::new("datetime"));
             }
             ColumnKind::Time | ColumnKind::DateTime | ColumnKind::TimestampTz => {
                 match self
@@ -281,7 +302,7 @@ impl ColumnSpec {
                 }
             }
             ColumnKind::Ulid => {
-                def.char_len(26);
+                def.char_len(self.length.unwrap_or(26));
             }
             ColumnKind::Binary => {
                 def.blob();
@@ -358,7 +379,7 @@ impl<'a> ColumnBuilder<'a> {
         self
     }
 
-    /// Sets the length of a `string` column. Any other column type makes the
+    /// Sets the length of a `string` or `ulid` column. Any other column type makes the
     /// migration fail with an error that names the column, because a length
     /// on a `text` or an integer column would be silently ignored.
     pub fn length(self, length: u32) -> Self {
@@ -395,11 +416,11 @@ impl<'a> ColumnBuilder<'a> {
         self
     }
 
-    /// Sets the fractional-second digits of a `date_time`, `timestamp_tz` or
-    /// `time` column, from 0 to 6. MySQL keeps whole seconds without it;
-    /// Postgres keeps microseconds. SQLite stores these columns as text and
-    /// has no precision to set. On any other column type, or above 6, the
-    /// migration fails.
+    /// Selects precision when the default storage width or time resolution differs.
+    /// A `float` accepts 1 to 53 binary digits and defaults to 53.
+    /// A `date_time`, `timestamp_tz` or `time` accepts 0 to 6 fractional digits.
+    /// `timestamp_tz` defaults to zero. SQLite ignores precision.
+    /// Other column types and out-of-range values fail before SQL runs.
     pub fn precision(self, digits: u32) -> Self {
         self.blueprint.set_precision(self.column, digits);
         self

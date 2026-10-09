@@ -41,8 +41,8 @@
 //! Matches the Phase 5B registries (`register_mailable_factory`,
 //! `register_notification_factory`, `register_mail_renderer`):
 //!
-//! - Backing store is `RwLock<Option<IndexMap<String, SeederFn>>>` -
-//!   lazily initialized, kept in registration order, last-write-wins
+//! - The lazily initialized registry holds an `IndexMap<String, SeederFn>`
+//!   and an optional root name. Entries stay in registration order, last-write-wins
 //!   on the seeder name (re-registering the same name silently
 //!   replaces the function pointer so tests can swap stubs).
 //! - The trait method `Seeder::run()` is an associated function (no
@@ -73,26 +73,64 @@
 //! own HTTP request paths continue to fire events normally. Nested
 //! calls compose (the inner future inherits the outer flag).
 //!
-//! **Note:** this only matters for code that goes through the
-//! `Model` trait (`Model::create`, `Model::save`, etc.). Factories
-//! persist via `ActiveModelTrait::insert` and bypass the model-
-//! event dispatch path entirely - there's nothing to mute in that
-//! path. See [`without_events`]'s rustdoc for the full
-//! when-is-this-useful breakdown.
+//! This covers `Model` writes and factories backed by Eloquent models.
+//! A factory backed directly by a SeaORM model uses `ActiveModelTrait::insert`
+//! without the Eloquent event path. See [`without_events`] for the distinction.
 
 use crate::error::FrameworkError;
 use crate::lock;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::RwLock;
+use std::time::Instant;
 
 /// Function-pointer view of a registered seeder. Captures the type
 /// parameter through a closure produced in [`register`].
-type SeederFn = fn() -> BoxFuture<'static, Result<(), FrameworkError>>;
+type SeederFn = fn(SeederParams) -> BoxFuture<'static, Result<(), FrameworkError>>;
 
-static REGISTRY: RwLock<Option<IndexMap<String, SeederFn>>> = RwLock::new(None);
+/// Named values passed to a seeder so callers can reuse it with different inputs.
+pub type SeederParams = crate::Attrs;
+
+#[derive(Default)]
+struct Registry {
+    entries: IndexMap<String, SeederFn>,
+    root: Option<String>,
+}
+
+static REGISTRY: RwLock<Option<Registry>> = RwLock::new(None);
+
+#[derive(Default)]
+struct Invocation {
+    completed: HashSet<String>,
+    running: HashSet<String>,
+}
+
+tokio::task_local! {
+    static INVOCATION: RefCell<Invocation>;
+}
+
+/// Shares successful calls across nested seeders and resets them for each top-level run.
+pub(crate) async fn with_invocation<F: Future>(future: F) -> F::Output {
+    if INVOCATION.try_with(|_| ()).is_ok() {
+        future.await
+    } else {
+        INVOCATION
+            .scope(RefCell::new(Invocation::default()), future)
+            .await
+    }
+}
+
+struct RunningSeeder(String);
+
+impl Drop for RunningSeeder {
+    fn drop(&mut self) {
+        let _ = INVOCATION.try_with(|state| state.borrow_mut().running.remove(&self.0));
+    }
+}
 
 tokio::task_local! {
     /// When set to `true`, [`crate::eloquent::events::dispatch_after`]
@@ -120,6 +158,15 @@ pub trait Seeder: Send + Sync {
     async fn run() -> Result<(), FrameworkError>
     where
         Self: Sized;
+
+    /// Receives named inputs without changing existing `run()` implementations.
+    /// Override this when your seeder reads parameters; the default calls `run()`.
+    async fn run_with(_params: SeederParams) -> Result<(), FrameworkError>
+    where
+        Self: Sized,
+    {
+        Self::run().await
+    }
 }
 
 /// Register a seeder type. Inserts it into the global registry under
@@ -128,10 +175,11 @@ pub trait Seeder: Send + Sync {
 /// prior function pointer in-place (IndexMap preserves the original
 /// position, so test stubs slot in cleanly).
 pub fn register<S: Seeder + 'static>() {
-    let f: SeederFn = || Box::pin(S::run());
+    let f: SeederFn = |params| Box::pin(S::run_with(params));
     match lock::write(&REGISTRY, "seeder registry") {
         Ok(mut g) => {
-            g.get_or_insert_with(IndexMap::new)
+            g.get_or_insert_with(Registry::default)
+                .entries
                 .insert(S::name().to_string(), f);
         }
         Err(_) => {
@@ -143,52 +191,136 @@ pub fn register<S: Seeder + 'static>() {
     }
 }
 
-/// Run every registered seeder in registration order. Stops on the
-/// first error - seeders that already ran are NOT rolled back. The
-/// `db:seed` console command is the typical caller; tests can also
-/// drive this directly after registering seeders.
-pub async fn run_all() -> Result<(), FrameworkError> {
-    let entries: Vec<(String, SeederFn)> = {
-        let g = lock::read(&REGISTRY, "seeder registry")?;
-        g.as_ref()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
-            .unwrap_or_default()
-    };
-    for (name, f) in entries {
-        tracing::info!(seeder = %name, "running seeder");
-        f().await?;
-    }
+/// Registers the root so `db:seed` runs its ordering instead of every peer.
+/// Child seeders still need `register`. Replacing the root selects the new root.
+pub fn register_root<S: Seeder + 'static>() -> Result<(), FrameworkError> {
+    let mut registry = lock::write(&REGISTRY, "seeder registry")?;
+    let registry = registry.get_or_insert_with(Registry::default);
+    registry
+        .entries
+        .insert(S::name().to_owned(), |params| Box::pin(S::run_with(params)));
+    registry.root = Some(S::name().to_owned());
     Ok(())
 }
 
-/// Run a single registered seeder by its [`Seeder::name`].
-///
-/// This is the engine for `db:seed --class=<Name>`. Behavior:
-///
-/// - Looks up the seeder by exact name in the registry.
-/// - On hit: emits the same `tracing::info!` that [`run_all`] would
-///   and awaits the seeder's `run()`.
-/// - On miss: returns `Err(FrameworkError::not_found("no seeder
-///   registered for {name}"))`. The CLI surfaces this as a non-zero
-///   exit and a helpful error message rather than silently no-oping.
-///
-/// Calling `run_one` does NOT also call other seeders - unlike
-/// `run_all`, this is targeted execution. Laravel's
-/// `db:seed --class=UserSeeder` does the same.
-pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
-    let entry = {
-        let g = lock::read(&REGISTRY, "seeder registry")?;
-        g.as_ref().and_then(|m| m.get(name).copied())
+/// Runs every peer for applications that explicitly want registration order.
+/// Stops on error without rolling back earlier work. Nested calls share once tracking.
+pub async fn run_all() -> Result<(), FrameworkError> {
+    let names: Vec<String> = {
+        let registry = lock::read(&REGISTRY, "seeder registry")?;
+        registry
+            .as_ref()
+            .map(|registry| registry.entries.keys().cloned().collect())
+            .unwrap_or_default()
     };
-    match entry {
-        Some(f) => {
-            tracing::info!(seeder = %name, "running seeder");
-            f().await
-        }
-        None => Err(FrameworkError::not_found(format!(
-            "no seeder registered for `{name}`"
-        ))),
+    call_silent(names).await
+}
+
+/// Runs the registered root so it owns child order and selection.
+/// Applications without an explicit root retain the legacy `run_all` default.
+pub async fn run_root() -> Result<(), FrameworkError> {
+    let root = {
+        let registry = lock::read(&REGISTRY, "seeder registry")?;
+        registry.as_ref().and_then(|registry| registry.root.clone())
+    };
+    match root {
+        Some(name) => run_one(&name).await,
+        None => run_all().await,
     }
+}
+
+/// Runs one named seeder without progress so existing direct calls stay quiet.
+/// An unknown name fails before the seeder or its output runs.
+pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
+    with_invocation(execute(name, SeederParams::new(), true, false)).await
+}
+
+/// Calls named seeders in order and reports their progress through console output.
+/// A failed seeder stops the list and has no DONE line; earlier work remains.
+pub async fn call<I, S>(names: I) -> Result<(), FrameworkError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    call_list(names, false, false).await
+}
+
+/// Calls named seeders without progress when you need a quiet composition.
+pub async fn call_silent<I, S>(names: I) -> Result<(), FrameworkError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    call_list(names, true, false).await
+}
+
+/// Skips seeders already successful in this invocation, including ordinary calls.
+/// Failed runs can be retried. A new `db:seed` invocation starts with an empty set.
+pub async fn call_once<I, S>(names: I) -> Result<(), FrameworkError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    call_list(names, false, true).await
+}
+
+/// Passes named inputs to `Seeder::run_with` so one seeder serves several callers.
+pub async fn call_with(name: &str, params: SeederParams) -> Result<(), FrameworkError> {
+    with_invocation(execute(name, params, false, false)).await
+}
+
+async fn call_list<I, S>(names: I, silent: bool, once: bool) -> Result<(), FrameworkError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    with_invocation(async {
+        for name in names {
+            execute(name.as_ref(), SeederParams::new(), silent, once).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+async fn execute(
+    name: &str,
+    params: SeederParams,
+    silent: bool,
+    once: bool,
+) -> Result<(), FrameworkError> {
+    let skip = INVOCATION.with(|state| once && state.borrow().completed.contains(name));
+    if skip {
+        return Ok(());
+    }
+    let function = {
+        let registry = lock::read(&REGISTRY, "seeder registry")?;
+        registry
+            .as_ref()
+            .and_then(|registry| registry.entries.get(name).copied())
+    }
+    .ok_or_else(|| FrameworkError::not_found(format!("no seeder registered for `{name}`")))?;
+    let recursive = INVOCATION.with(|state| !state.borrow_mut().running.insert(name.to_owned()));
+    if recursive {
+        return Err(FrameworkError::bad_request(format!(
+            "recursive seeder call to `{name}`"
+        )));
+    }
+    let _running = RunningSeeder(name.to_owned());
+    tracing::info!(seeder = %name, "running seeder");
+    if !silent {
+        crate::console::line(format!("RUNNING {name}"));
+    }
+    let started = Instant::now();
+    function(params).await?;
+    INVOCATION.with(|state| state.borrow_mut().completed.insert(name.to_owned()));
+    if !silent {
+        crate::console::line(format!(
+            "DONE {name} ({} ms)",
+            started.elapsed().as_millis()
+        ));
+    }
+    Ok(())
 }
 
 /// Number of currently-registered seeders. Useful for tests asserting
@@ -209,7 +341,7 @@ pub fn count() -> usize {
 /// cannot read is not an empty one.
 pub(crate) fn try_count() -> Result<usize, FrameworkError> {
     let g = lock::read(&REGISTRY, "seeder registry")?;
-    Ok(g.as_ref().map(|m| m.len()).unwrap_or(0))
+    Ok(g.as_ref().map(|m| m.entries.len()).unwrap_or(0))
 }
 
 /// Whether a seeder with the given name is registered.
@@ -219,7 +351,7 @@ pub(crate) fn try_count() -> Result<usize, FrameworkError> {
 /// Returns `false` on registry-lock poison (matches `count()`).
 pub fn is_registered(name: &str) -> bool {
     match lock::read(&REGISTRY, "seeder registry") {
-        Ok(g) => g.as_ref().is_some_and(|m| m.contains_key(name)),
+        Ok(g) => g.as_ref().is_some_and(|m| m.entries.contains_key(name)),
         Err(_) => {
             tracing::error!("Seeder registry lock poisoned; reporting is_registered=false.");
             false
@@ -252,12 +384,10 @@ pub fn is_registered(name: &str) -> bool {
 /// that don't want to wake the broadcaster or trigger downstream
 /// jobs.
 ///
-/// **Factory-driven inserts do NOT fire model events.**
-/// `UserFactory::new().count(50).create_many()` writes through the
-/// `Persistable` impl (`ActiveModelTrait::insert`), which bypasses
-/// the `Model` trait's `create`/`save` methods that dispatch
-/// lifecycle hooks. There's nothing to mute in that path. Use this
-/// helper when you're driving the `Model` trait directly.
+/// Factories returning an Eloquent model dispatch the same events as
+/// `Model::create`, so this helper mutes those inserts too. Factories
+/// returning a raw SeaORM model use `ActiveModelTrait::insert` without
+/// Eloquent events and need no muting.
 ///
 /// # Example
 ///

@@ -1,7 +1,7 @@
 # Eloquent Factories
 
 Factories produce randomized model instances for tests and seeders. The
-shape is Laravel's: `UserFactory::new().count(10).create_many().await?`.
+You select a typed batch with `UserFactory::new().count(10).create().await?`.
 The contract is one trait plus a fluent builder, with a `#[derive(Factory)]`
 shortcut for the common case where the model already has a sensible
 randomized representation.
@@ -37,11 +37,10 @@ implementations:
 
 ```rust
 fn new() -> FactoryBuilder<Self::Model>;       // count = 1, no overrides
-fn times(n: usize) -> FactoryBuilder<Self::Model>;  // sugar for new().count(n)
+fn times(n: usize) -> FactoryBuilder<Self::Model, true>;  // sugar for new().count(n)
 ```
 
-Every other method you'll call (`with`, `count`, `make`, `create`,
-`create_many`, …) lives on `FactoryBuilder<M>`.
+You call the remaining methods on `FactoryBuilder<M, const MANY: bool = false>`.
 
 ## Defining a factory by hand
 
@@ -211,7 +210,8 @@ cases.
 
 ## The fluent builder
 
-`Factory::new()` / `Factory::times(n)` return a `FactoryBuilder<M>`.
+`Factory::new()` returns `FactoryBuilder<M>`. You get
+`FactoryBuilder<M, true>` from `count(n)`, `times(n)` or `Factory::times(n)`.
 Every operation is chainable; nothing happens until you call a
 terminal method (`make`, `make_one`, `make_many`, `create`,
 `create_one`, `create_many`).
@@ -220,13 +220,16 @@ terminal method (`make`, `make_one`, `make_many`, `create`,
 
 ```rust
 let user = UserFactory::new().make();             // 1 user
-let users = UserFactory::new().count(10).make_many();  // 10 users
-let same = UserFactory::times(10).make_many();   // identical
+let users: Vec<User> = UserFactory::new().count(10).make();
+let same: Vec<User> = UserFactory::times(10).make();
 ```
 
-`count(n)` is ignored by `make` / `create` (always one) and honored by
-`make_many` / `create_many`. `times(n)` is just sugar for
-`Self::new().count(n)` and matches Laravel's `Factory::times($n)`.
+You select the return type at compile time. Without a count, `make()` returns
+`M` and `create().await` returns `Result<M, FrameworkError>`. After `count(n)`
+or `times(n)`, they return `Vec<M>` and `Result<Vec<M>, FrameworkError>`.
+Even a count of one returns a vector. A count of zero returns an empty vector
+without an insert. You use `make_one()` or `create_one()` to discard the count.
+You can still call `make_many()` or `create_many()` on a counted builder.
 
 ### `with(|m| { … })` - per-call overrides
 
@@ -296,19 +299,20 @@ closure as long as you `.await` before returning the builder.
 
 | Method | Returns | Persisted? |
 |---|---|---|
-| `make()` | one `M` | no |
+| `make()` | `M`, or `Vec<M>` after a count | no |
 | `make_one()` | one `M` (forces count = 1) | no |
 | `make_many()` | `Vec<M>` of `count` items | no |
-| `create()` | `Result<M, FrameworkError>` | yes |
+| `create()` | `Result<M, FrameworkError>`, or a vector result after a count | yes |
 | `create_one()` | `Result<M, FrameworkError>` (forces count = 1) | yes |
-| `create_many()` | `Result<Vec<M>, FrameworkError>` | yes |
+| `create_many(records)` | `Result<Vec<M>, FrameworkError>` on the default builder | yes |
+| `create_many()` | `Result<Vec<M>, FrameworkError>` on a counted builder | yes |
 
 `make_one` and `create_one` are useful when a state method has set
 `count` internally to something else and the caller wants exactly one
 result:
 
 ```rust
-pub fn admins_in_org(org_id: i64) -> suprnova::FactoryBuilder<User> {
+pub fn admins_in_org(org_id: i64) -> suprnova::FactoryBuilder<User, true> {
     UserFactory::times(5)               // sensible default for fixtures
         .with(move |u| u.org_id = org_id)
         .with(|u| u.role = "admin".into())
@@ -317,6 +321,30 @@ pub fn admins_in_org(org_id: i64) -> suprnova::FactoryBuilder<User> {
 // Test only wants one - `create_one` discards the count(5).
 let admin = admins_in_org(42).create_one().await?;
 ```
+
+### Explicit records with `create_many`
+
+You pass a count or a list of `Attrs` to a default builder:
+
+```rust
+let users = UserFactory::new().create_many(2).await?;
+let users = UserFactory::new().create_many([
+    suprnova::attrs! { name: "Ada" },
+    suprnova::attrs! { name: "Grace", active: false },
+]).await?;
+```
+
+Each record starts from a fresh definition and your `with` overrides. Its
+attributes then win on overlap. You keep definition fields that you omit.
+Attribute lists require `M: serde::Serialize + serde::de::DeserializeOwned`.
+You name serialized fields; an unknown field or a value of the wrong type
+returns an error before any record is inserted. An empty list creates no rows.
+`FactoryRecords<M>` accepts `usize`, `Vec<Attrs>` and `[Attrs; N]`.
+You pass the same records to `create_many_quietly(records)` to mute events.
+
+Rust has no optional arguments. On a counted builder you keep the existing
+no-argument `create_many()` and `create_many_quietly()` forms. To supply a
+new explicit count or attribute list, start with `Factory::new()`.
 
 ## States: reusable preset combinations
 
@@ -665,7 +693,7 @@ Register the seeder in `bootstrap.rs` so the per-project `console`
 binary's `db:seed` command knows about it:
 
 ```rust
-suprnova::seed::register::<crate::seeders::BaseSeeder>();
+suprnova::seed::register_root::<crate::seeders::BaseSeeder>()?;
 ```
 
 Run through the project's `console` binary (every scaffolded app
@@ -675,7 +703,8 @@ ships one at `src/bin/console.rs`):
 cargo run --bin console -- db:seed
 ```
 
-Seeders run in registration order. Idempotency is the seeder's
+You register a root seeder to choose the order of its child calls.
+Without a root, you retain registration order. Idempotency is your seeder's
 responsibility - `run` does not snapshot or roll back, so a seeder
 that inserts unconditionally produces duplicates on re-run. Use
 `migrate:fresh` followed by `db:seed` for a clean slate.

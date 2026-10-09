@@ -105,7 +105,7 @@ async fn db_seed_appears_in_console_registry() {
     assert_eq!(entry.name, "db:seed");
     assert_eq!(
         entry.description,
-        "Run seeders (all by default, or one via --class=<Name>)"
+        "Run the root seeder, or one via --class=<Name>"
     );
 }
 

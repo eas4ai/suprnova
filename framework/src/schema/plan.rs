@@ -38,6 +38,21 @@ pub(crate) enum Step {
     Raw(String),
 }
 
+impl Step {
+    /// Renders the planned statement through the execution backend's grammar.
+    pub(crate) fn sql(self, backend: DbBackend) -> String {
+        match self {
+            Self::CreateTable(statement) => backend.build(&statement).sql,
+            Self::AlterTable(statement) => backend.build(&statement).sql,
+            Self::CreateIndex(statement) => backend.build(&statement).sql,
+            Self::DropIndex(statement) => backend.build(&statement).sql,
+            Self::CreateForeignKey(statement) => backend.build(&statement).sql,
+            Self::DropForeignKey(statement) => backend.build(&statement).sql,
+            Self::Raw(sql) => sql,
+        }
+    }
+}
+
 fn refuse(message: String) -> DbErr {
     DbErr::Migration(message)
 }
@@ -55,6 +70,13 @@ fn check_blueprint(blueprint: &Blueprint) -> Result<(), DbErr> {
         if column.name.is_empty() {
             return Err(refuse(format!(
                 "schema: cannot add a column with an empty name to table `{}`",
+                blueprint.table()
+            )));
+        }
+        if column.kind == ColumnKind::Ulid && column.length == Some(0) {
+            return Err(refuse(format!(
+                "schema: ULID column `{}` of table `{}` needs a positive length",
+                column.name,
                 blueprint.table()
             )));
         }

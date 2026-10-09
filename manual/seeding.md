@@ -8,9 +8,9 @@ posts your local dev iteration loop depends on. They are the runtime sibling of
 
 A seeder is a zero-sized type that implements the `Seeder` trait. The framework
 keeps an ordered process-global registry; the per-project `console db:seed`
-command runs every registered seeder in registration order, or one specific
-seeder via `--class=<Name>`. Most seeders end up being a few lines that call
-a [model factory](eloquent.md) and let the factory do the row-generation work.
+command runs the root you register, or one specific seeder via `--class=<Name>`.
+You retain registration order when you register no root. You usually write a
+few lines that call a [model factory](eloquent.md) to generate the rows.
 
 ```rust
 use suprnova::{async_trait, Factory, FrameworkError, Seeder};
@@ -40,7 +40,6 @@ Then:
 
 ```bash
 cargo run --bin console -- db:seed
-# running seeder UsersSeeder
 # (50 rows inserted)
 ```
 
@@ -143,32 +142,79 @@ bootstrap file, and `db:seed --class=BaseSeeder` is a single-target invocation
 that runs the whole bundle.
 
 If you want to chain seeders by name rather than by direct factory call, use
-`seed::run_one` from inside the composite seeder:
+`seed::call` from inside your root seeder:
 
 ```rust
 async fn run() -> Result<(), FrameworkError> {
-    suprnova::seed::run_one("UsersSeeder").await?;
-    suprnova::seed::run_one("PostsSeeder").await?;
-    suprnova::seed::run_one("CommentsSeeder").await?;
+    suprnova::seed::call(["UsersSeeder", "PostsSeeder", "CommentsSeeder"]).await?;
     Ok(())
 }
 ```
 
-The sub-seeders still need to be registered in `bootstrap.rs` for `run_one`
-to find them.
+You register each child with `seed::register` in `bootstrap.rs`. You select
+the composite with `seed::register_root::<BaseSeeder>()?`. A bare `db:seed`
+runs only that root, which chooses its children and order.
+
+`call` runs names in the order you give and writes `RUNNING <name>` followed
+by `DONE <name> (<ms> ms)` to the command's console output. You capture these
+lines with `console::test(["db:seed"]).run().await`. A failed child stops the
+list, returns its error, and has no DONE line. Earlier inserts remain.
+
+You use `call_silent(names)` to suppress progress. You use `call_once(names)`
+to skip each seeder that already completed in this invocation, including one
+run through `call` or `call_silent`. You can retry a failed seeder. The next
+`db:seed` invocation starts with an empty set. A recursive call to a running
+seeder returns an error.
+
+You pass named inputs with `call_with(name, params)`:
+
+```rust
+seed::call_with("UsersSeeder", suprnova::attrs! { count: 50 }).await?;
+```
+
+You read those inputs by overriding the default parameter path:
+
+```rust
+#[async_trait]
+impl Seeder for UsersSeeder {
+    fn name() -> &'static str { "UsersSeeder" }
+    async fn run() -> Result<(), FrameworkError> {
+        Self::run_with(suprnova::SeederParams::new()).await
+    }
+    async fn run_with(params: suprnova::SeederParams) -> Result<(), FrameworkError> {
+        let count = match params.get("count") {
+            None => 10,
+            Some(value) => value.as_u64()
+                .ok_or_else(|| FrameworkError::bad_request("count must be an integer"))?,
+        };
+        let count = usize::try_from(count)
+            .map_err(|_| FrameworkError::bad_request("count is too large"))?;
+        UserFactory::times(count).create().await?;
+        Ok(())
+    }
+}
+```
+
+`SeederParams` is an `Attrs` map. Existing seeders keep their `run()` signature:
+the default `run_with(params)` calls it. You resolve services with
+`App::make::<Service>()` inside either method, as you do elsewhere in your app.
 
 ## The seeder registry
 
-The framework keeps a process-global ordered map (`IndexMap<String, fn() -> _>`)
-of every registered seeder. Three knobs control it.
+You register peers in a process-global ordered map. Each stored function takes
+`SeederParams` and returns a boxed future. You register a root separately to
+choose which seeder a bare `db:seed` runs.
 
 ### `register::<S>()`
 
 Add a seeder to the registry under its `Seeder::name()`:
 
 ```rust
-suprnova::seed::register::<crate::seeders::BaseSeeder>();
+suprnova::seed::register::<crate::seeders::UsersSeeder>();
 ```
+
+You select a root with `seed::register_root::<BaseSeeder>()?`. This registers
+the root and replaces the previous root selection, if any.
 
 Two things to know about the registry:
 
@@ -181,8 +227,8 @@ Two things to know about the registry:
 
 ### `run_all()`
 
-Run every registered seeder in registration order. This is what the bare
-`console db:seed` invocation calls.
+You run every registered seeder in registration order explicitly. A bare
+`console db:seed` calls the registered root; without a root it calls `run_all`.
 
 ```rust
 suprnova::seed::run_all().await?;
@@ -228,18 +274,19 @@ the same `inventory` registry that picks up your own `#[command]`s. See
 [Console](console.md) for the binary's mechanics; this section covers the
 seeder-specific surface.
 
-### Run everything
+### Run the root
 
 ```bash
 cargo run --bin console -- db:seed
 ```
 
 The `suprnova` CLI runs the same command through your project's console
-binary. `suprnova db:seed` runs every seeder, `suprnova db:seed UsersSeeder`
+binary. `suprnova db:seed` runs your root, `suprnova db:seed UsersSeeder`
 and `suprnova db:seed --class=UsersSeeder` run one. The CLI checks no name;
 the console binary does.
 
-Runs every registered seeder in order. On an empty registry it prints a
+You run the root registered with `seed::register_root`. Without one you run
+every registered peer in order. On an empty registry you receive a
 warning to stderr (`db:seed: no seeders registered - nothing to run`) and
 exits zero - that's correct behavior for "someone ran the command before
 registering anything" and keeps test suites that haven't seeded anything
@@ -268,10 +315,9 @@ A targeted run reports its progress:
 
 ```
 
-The lines go to stdout. A bare `db:seed` stays silent - a full seed
-would otherwise bury its own output under one line per seeder. The
-`tracing` record each seeder emits is unchanged and remains the machine
-channel.
+You receive these outer progress lines on stdout for a named run. A bare
+`db:seed` leaves outer progress to your root's `call` methods. You keep the
+`tracing` record per seeder for machine logs.
 
 An unknown name fails fast:
 
@@ -284,6 +330,23 @@ cargo run --bin console -- db:seed --class=NotARealSeeder
 A malformed flag (`--class` with no following value, `--class=` with empty
 value, `--class --force`) fails fast too, with a diagnostic that names the
 expected shape.
+
+### Production and connection selection
+
+You pass `--force` in production. Without it the command returns an error
+before any seeder runs. You select another registered connection with
+`--database reporting` or `--database=reporting`:
+
+```bash
+./console db:seed --force
+./console db:seed --database reporting --class=UsersSeeder
+```
+
+You use the selected connection for the invocation's default queries and
+factories. Explicit model and query connections keep their precedence.
+The enclosing default returns after success or failure. An unknown connection
+fails before your seeder runs. `Config::is_production()` uses your loaded app
+configuration, or detects `APP_ENV=production` when none is loaded.
 
 ### From a built binary
 
@@ -540,7 +603,7 @@ The mistakes to avoid:
   production database and then never again - the moment a column changes, you
   have a forked source of truth between migration history and the seeder.
   Put the insert in a seeder; if production needs the row, run
-  `console db:seed --class=DefaultsSeeder` as part of deploy.
+  `console db:seed --force --class=DefaultsSeeder` as part of deploy.
 - **Don't write fixture data into your test by hand.** Reach for a factory.
   Five `User::create(attrs!{ … })` blocks in a test are five rewrites the
   moment you add a NOT NULL column. One `UserFactory::new().create()` survives.
@@ -551,30 +614,16 @@ The mistakes to avoid:
 
 ### Why Suprnova diverges
 
-Laravel ships a `DatabaseSeeder` class with a special-case `call($seeders)`
-helper that Eloquent's seeder loader recognises. Suprnova doesn't - the
-registry is a flat `IndexMap`, every seeder is a peer, and a composite
-seeder calls `seed::run_one(name)` (or just calls the sub-factories directly)
-to chain.
+You explicitly register your root with `seed::register_root::<S>()?`, because
+Rust has no class autoloader to discover `DatabaseSeeder`. You keep a flat
+registry of named peers and compose them with `call`, `call_silent`,
+`call_once` and `call_with`. A project that registers no root retains the
+previous registration-order default.
 
-The reason is the same trade-off you see elsewhere in Suprnova: a single
-generic registry with one ordering rule is easier to reason about than a
-class hierarchy with a magic root. The Laravel pattern works because PHP's
-class autoloading and the static `make()` reflection let `call([A::class,
-B::class])` find and instantiate those classes by name; in Rust we'd be
-asking the user to thread `dyn Seeder` trait objects around, which is
-clunkier than the function-pointer registry that's already there.
-
-The composite-seeder convention recovers the same ergonomics - `BaseSeeder`
-plays the role `DatabaseSeeder` plays in Laravel - without needing the
-framework to bless one name as special.
-
-Seeder progress lines are plain text at a fixed 80 columns. Laravel
-sizes its dot leader to the terminal and colors the status word;
-reading the real terminal width means a dependency the framework does
-not carry, and this output goes to a stdout that is routinely piped
-into a log, where escape codes are noise. Elapsed time prints as whole
-milliseconds with no thousands separator.
+You receive plain progress lines from nested calls. A named command keeps
+its outer dot leader at 80 columns. Laravel sizes that leader to the terminal
+and colors the status word. You receive whole milliseconds without a
+thousands separator, so you can capture progress without terminal escape codes.
 
 ## Bootstrap registration
 
@@ -584,14 +633,15 @@ The pattern is the same shape used elsewhere in the bootstrap file:
 
 ```rust
 // src/bootstrap.rs
-pub async fn register() {
+pub async fn register() -> Result<(), FrameworkError> {
     // …config + container bindings + auth wiring…
 
     // Seeders. Order matters - run_all visits in registration order.
-    suprnova::seed::register::<crate::seeders::BaseSeeder>();
+    suprnova::seed::register_root::<crate::seeders::BaseSeeder>()?;
     suprnova::seed::register::<crate::seeders::DemoContentSeeder>();
 
     // …observers, supervisors, queue jobs…
+    Ok(())
 }
 ```
 

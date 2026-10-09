@@ -259,23 +259,24 @@ affinity is what the database reports.
 | `small_integer(name)` | `integer` | `smallint` | `smallint` |
 | `tiny_integer(name)` | `integer` | `smallint` | `tinyint` |
 | `unsigned_big_integer(name)`, `unsigned_integer(name)`, `unsigned_small_integer(name)`, `unsigned_tiny_integer(name)` | the signed type | the signed type | the type, `unsigned` |
-| `boolean(name)` | `boolean` | `boolean` | `tinyint(1)` |
+| `boolean(name)` | `tinyint(1)` | `boolean` | `tinyint(1)` |
 | `string(name)` | `varchar(255)` | `varchar(255)` | `varchar(255)` |
 | `char(name, length)` | `char(length)` | `char(length)` | `char(length)` |
 | `text(name)` | `text` | `text` | `text` (64 KB) |
 | `medium_text(name)` | `text` | `text` | `mediumtext` (16 MB) |
 | `long_text(name)` | `text` | `text` | `longtext` (4 GB) |
 | `enumeration(name, &[values])` | `varchar` with `CHECK (name IN (..))` | `varchar(255)` with `CHECK (name IN (..))` | `enum(..)` |
-| `float(name)` | `float` | `real` | `float` |
+| `float(name)` | `float` | `double precision` | `float(53)` |
 | `double(name)` | `double` | `double precision` | `double` |
 | `decimal(name, precision, scale)` | `decimal(precision, scale)` | `numeric(precision, scale)` | `decimal(precision, scale)` |
 | `date(name)` | `date_text` | `date` | `date` |
 | `time(name)` | `time_text` | `time` | `time` |
 | `date_time(name)` | `datetime_text` | `timestamp` | `datetime` |
-| `timestamp_tz(name)` | `timestamp_with_timezone_text` | `timestamp with time zone` | `timestamp` |
+| `timestamp_tz(name)` | `datetime` | `timestamp(0) with time zone` | `timestamp(0)` |
 | `json(name)` | `json_text` | `jsonb` | `json` |
 | `uuid(name)` | `char(36)` | `uuid` | `char(36)` |
 | `ulid(name)` | `char(26)` | `char(26)` | `char(26)` |
+| `ulid_with_length(name, n)` | `char(n)` | `char(n)` | `char(n)` |
 | `binary(name)` | `blob` | `bytea` | `blob` |
 | `remember_token()` | nullable `varchar(100)` named `remember_token` | the same | the same |
 
@@ -296,6 +297,31 @@ A model field has to match the column's width on Postgres, whose driver reads
 each integer type into one Rust type only: `i16` for `tiny_integer` and
 `small_integer`, `i32` for `integer`, `i64` for `big_integer`, `id()` and
 `foreign_id`. MySQL and SQLite read any signed integer column into `i64`.
+
+You get Laravel's default float precision, 53 binary digits. Postgres uses
+`double precision`; MySQL's `float(53)` selects double storage. You request
+single precision with `t.float("ratio").precision(24)`. SQLite uses its native
+floating point storage and ignores this setting.
+
+You get whole-second zoned timestamps on Postgres unless you call
+`.precision(n)`. SQLite declares `datetime` and keeps your supplied text,
+including fractional seconds. You use a positive length with
+`ulid_with_length("code", 20)` or `ulid("code").length(20)`.
+
+You preview the validated CREATE SQL without connecting to the target engine:
+
+```rust
+let sql = suprnova::Blueprint::create_sql(
+    "events", suprnova::sea_orm::DbBackend::Postgres, |t| {
+        t.boolean("flag");
+        t.float("ratio");
+        t.timestamp_tz("at");
+    },
+)?;
+```
+
+You receive one string per statement, using the same plan as `Schema::create`.
+Invalid precision or length returns a migration error before you execute SQL.
 
 #### Laravel tables on MySQL
 
@@ -371,11 +397,11 @@ Each column method returns a builder. Chain the modifiers on it.
 | `.nullable()` | Allows `NULL`. |
 | `.default(value)` | Sets the value the database stores when an insert leaves the column out. It takes a plain Rust value (`7`, `"draft"`, `false`) or a SeaQuery `Expr` such as `Expr::current_timestamp()`. |
 | `.unique()` | Adds a unique index over this column alone, named `{table}_{column}_unique`. |
-| `.length(n)` | Sets the length of a `string` column. On any other column type the migration fails with an error that names the column. Use `char(name, length)` for a fixed length. |
+| `.length(n)` | Sets the length of a `string` or `ulid` column. On any other column type the migration fails with an error that names the column. Use `char(name, length)` for a fixed length. |
 | `.index()` | Adds an index over this column alone, named `{table}_{column}_index`. |
 | `.primary()` | Makes this column the primary key. For a key over several columns, `t.primary(&[..])`. |
 | `.unsigned()` | `UNSIGNED` on MySQL, for an integer column. Ignored on Postgres and SQLite. On any other column type the migration fails. |
-| `.precision(n)` | Fractional-second digits, 0 to 6, of a `date_time`, `timestamp_tz` or `time` column. MySQL keeps whole seconds without it, Postgres microseconds; SQLite stores text and ignores it. |
+| `.precision(n)` | Sets 1 to 53 binary digits for `float`, or 0 to 6 fractional-second digits for `date_time`, `timestamp_tz` or `time`. You get 53 digits for `float` and whole seconds for `timestamp_tz` by default. SQLite ignores precision. |
 | `.use_current()` | Defaults a `date_time` or `timestamp_tz` column to the current time, `CURRENT_TIMESTAMP`. Combined with `.default(..)` the migration fails. |
 | `.after(column)` | Places a column that `Schema::table` adds after `column`, on MySQL. Ignored on Postgres and SQLite; `Schema::create` refuses it, because MySQL does. |
 
@@ -584,9 +610,8 @@ that an index, a unique constraint or a foreign key covers: record the
   chains `->references($column)->on($table)`.
 - `.unsigned()` applies to integers only. Laravel also lets it mark a decimal
   or floating point column; MySQL deprecated that in 8.0.17.
-- Laravel's timestamp columns default to whole seconds (`timestamp(0)`) on
-  Postgres. The builder keeps each database's own default, microseconds on
-  Postgres and whole seconds on MySQL, unless `.precision(n)` sets one.
+- You use `ulid_with_length(name, length)` or `ulid(name).length(length)`
+  for Laravel's `ulid(name, length)`. Rust has no optional arguments.
 - `use_current()` together with `.default(..)` fails the migration. Laravel
   lets `useCurrent` win silently.
 
