@@ -687,7 +687,11 @@ impl SessionStore for DatabaseSessionDriver {
         // outranks index use here; the in-Rust comparison also keeps
         // backend JSON-dialect differences out of the query.
         let surviving = Query::select()
-            .columns([SessionColumn::Id, SessionColumn::Payload])
+            .columns([
+                SessionColumn::Id,
+                SessionColumn::UserId,
+                SessionColumn::Payload,
+            ])
             .from(self.table())
             .to_owned();
         let rows = db
@@ -697,13 +701,20 @@ impl SessionStore for DatabaseSessionDriver {
             .map_err(database_error)?;
         for row in rows {
             let id: String = row.try_get("", "id").map_err(database_error)?;
+            let column_user = read_user_id(&row).map_err(database_error)?;
             let payload: String = row.try_get("", "payload").map_err(database_error)?;
-            let Some(payload) = decode_payload(&payload) else {
-                continue;
-            };
+            let payload = decode_payload(&payload);
+            // Match `read`: the column takes precedence over the payload's
+            // default user, including rows without Suprnova auth metadata.
             let default_guard_user = guard == crate::auth::Auth::default_guard_name()
-                && payload.user_id.as_deref() == Some(user_id);
-            if default_guard_user || guard_identity_in(&payload.data, guard) == Some(user_id) {
+                && column_user.as_deref().or(payload
+                    .as_ref()
+                    .and_then(|payload| payload.user_id.as_deref()))
+                    == Some(user_id);
+            let guard_user = payload
+                .as_ref()
+                .and_then(|payload| guard_identity_in(&payload.data, guard));
+            if default_guard_user || guard_user == Some(user_id) {
                 let removed = db
                     .inner()
                     .execute(&self.delete_by_id(&id))
@@ -728,7 +739,11 @@ impl SessionStore for DatabaseSessionDriver {
     ) -> Result<DestroyedSessions, FrameworkError> {
         let db = DB::connection()?;
         let query = Query::select()
-            .columns([SessionColumn::Id, SessionColumn::Payload])
+            .columns([
+                SessionColumn::Id,
+                SessionColumn::UserId,
+                SessionColumn::Payload,
+            ])
             .from(self.table())
             .and_where(Expr::col(SessionColumn::Id).ne(current_id))
             .to_owned();
@@ -736,13 +751,18 @@ impl SessionStore for DatabaseSessionDriver {
         let mut destroyed = DestroyedSessions::default();
         for row in rows {
             let id: String = row.try_get("", "id").map_err(database_error)?;
+            let column_user = read_user_id(&row).map_err(database_error)?;
             let payload: String = row.try_get("", "payload").map_err(database_error)?;
-            let Some(payload) = decode_payload(&payload) else {
-                continue;
-            };
+            let payload = decode_payload(&payload);
             let default_user = guard == crate::auth::Auth::default_guard_name()
-                && payload.user_id.as_deref() == Some(user_id);
-            if default_user || guard_identity_in(&payload.data, guard) == Some(user_id) {
+                && column_user.as_deref().or(payload
+                    .as_ref()
+                    .and_then(|payload| payload.user_id.as_deref()))
+                    == Some(user_id);
+            let guard_user = payload
+                .as_ref()
+                .and_then(|payload| guard_identity_in(&payload.data, guard));
+            if default_user || guard_user == Some(user_id) {
                 let count = db
                     .inner()
                     .execute(&self.delete_by_id(&id))
