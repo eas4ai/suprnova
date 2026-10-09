@@ -496,13 +496,11 @@ impl ValidationErrors {
         })
     }
 
-    /// Return a new `ValidationErrors` containing only the entries for the
-    /// fields in `keep`: the same key, a key nested under one (`tag_ids`
-    /// keeps `tag_ids.3`), or a key a `*` segment matches (`tag_ids.*`
-    /// keeps `tag_ids.3`). Used by Precognition's
-    /// `Precognition-Validate-Only` header - the server runs full
-    /// validation but reports errors only for the fields the client
-    /// asked about.
+    /// Keep exact input keys and keys matched by a wildcard segment.
+    ///
+    /// Precognition uses this before choosing the next validation stage.
+    /// Each `*` matches one non-empty dotted segment, so `tags` does not
+    /// keep `tags.3`, while `tags.*` does.
     pub fn retain_fields(&self, keep: &[String]) -> Self {
         let kept = self
             .errors
@@ -514,22 +512,15 @@ impl ValidationErrors {
     }
 }
 
-/// Whether the field a Precognition client asked about, `wanted`, covers
-/// the error key `key`: the same key, a key nested under it (`tag_ids`
-/// covers `tag_ids.3` and `address.city` covers `address.city.0`), or a key
-/// its `*` segments match (`tag_ids.*` covers `tag_ids.3`, Laravel's rule
-/// key for the elements). An array rule reports each element under its
-/// own index, so without this, asking about the array would drop exactly
-/// the errors it has.
-fn field_covers(wanted: &str, key: &str) -> bool {
+/// Match a selected input key without including its parents or children.
+pub(crate) fn field_covers(wanted: &str, key: &str) -> bool {
     let mut wanted = wanted.split('.');
     let mut key = key.split('.');
     loop {
         match (wanted.next(), key.next()) {
-            (None, _) => return true,
-            (Some(_), None) => return false,
-            (Some(want), Some(have)) if want == "*" || want == have => {}
-            (Some(_), Some(_)) => return false,
+            (None, None) => return true,
+            (Some(want), Some(have)) if want == have || (want == "*" && !have.is_empty()) => {}
+            _ => return false,
         }
     }
 }
@@ -612,10 +603,10 @@ mod validation_tests {
     use super::*;
 
     #[test]
-    fn a_field_covers_itself_its_nested_keys_and_its_wildcards() {
+    fn a_field_covers_itself_and_its_wildcards() {
         assert!(field_covers("tag_ids", "tag_ids"));
-        assert!(field_covers("tag_ids", "tag_ids.3"));
-        assert!(field_covers("address.city", "address.city.0"));
+        assert!(!field_covers("tag_ids", "tag_ids.3"));
+        assert!(!field_covers("address.city", "address.city.0"));
         assert!(field_covers("tag_ids.*", "tag_ids.3"));
         assert!(field_covers("items.*.name", "items.2.name"));
         assert!(field_covers("*", "anything"));
