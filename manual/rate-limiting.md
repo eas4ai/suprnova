@@ -347,6 +347,11 @@ RateLimiter::define("api", |req| {
 
 `ThrottleRequestsMiddleware::by_name("api")` resolves the limiter through the same method and counts each limit under `api:<key>`, so the middleware and your own code read the same buckets: `RateLimiter::attempts("api:203.0.113.5:attempts:60:decay:60")` is the count the middleware keeps.
 
+Limits that end up with one key share one bucket, and the middleware counts a request in it once for each of those limits, as Laravel's `ThrottleRequests` hits a key once for each limit:
+
+- Two limits with the same key, maximum and window get the same fallback key. Two `Limit::per_minute(2).by("a")` limits count a request twice under `api:a:attempts:2:decay:60`, so they admit one request a minute.
+- Keys are compared as written, as Laravel compares them, so `café` and `cafe` keep their keys. They clean to one bucket (see [Sanitising keys](#sanitising-keys)), which counts a request once for each limit, and `RateLimiter::attempts("api:cafe")` reads it.
+
 ### Sanitising keys
 
 Every counter method cleans its key with `RateLimiter::clean_rate_limiter_key(key)` before it touches the cache, as Laravel's `cleanRateLimiterKey` does. The key is first encoded as PHP's `htmlentities` encodes it under its default flags: each character with a named HTML 4.01 entity becomes that entity, `&`, `<`, `>`, and `"` included, and `'` becomes `&#039;`. Then each `&name;` marker of two or more letters is reduced to its first letter. So `café` and `cafe` count in one bucket, and a key is stored as a Laravel application sharing the cache store stores it.
@@ -420,7 +425,7 @@ ThrottleRequestsMiddleware::with_limits(vec![
 ]);
 ```
 
-`.prefix(...)` sets a key prefix on any of them.
+`.prefix(...)` sets a key prefix on any of them. The limits of `with_limits` that share a key count under their fallback keys, as a named limiter's do, so the two limits above count under `user:1:attempts:5000:decay:3600` and `user:1:attempts:60:decay:60`.
 
 ### The default limit
 
@@ -520,7 +525,9 @@ This matches Laravel's `ThrottleRequests::getHeaders` shape exactly.
 
 ### Refused requests
 
-A request the middleware refuses leaves every bucket's count where it was. After `throttle:2,1` refuses a third request, the count is still `2`, so a client that keeps retrying a refused request doesn't keep its own window full. The decision stays atomic: the middleware counts the request and decides on the count it gets back, so a burst of concurrent requests admits at most the limit, then it takes back each count of a request it refused.
+The middleware checks every limit before it counts a request, as Laravel does, and a request it refuses there leaves every bucket's count where it was. After `throttle:2,1` refuses a third request, the count is still `2`, so a client that keeps retrying a refused request doesn't keep its own window full.
+
+The decision stays atomic: the middleware counts the request in each bucket with one increment and admits it only on the count it gets back, so a burst of concurrent requests admits at most the limit. It never takes a count back. A decrement cannot be tied to the window it would undo: if that window ended first, the decrement would land in the next window and let it admit one request too many. So a request that passes the check beside concurrent requests, and then finds the bucket full when it counts, is refused and keeps its count. That bucket already holds its limit, so the count changes no other answer in its window and ends with it. Another bucket the request was counted in keeps one count too, which can refuse a request early but never admits one.
 
 ### Missing named limiter
 
@@ -577,7 +584,7 @@ Laravel ships one shape: `Illuminate\Cache\RateLimiter` (Cache-backed fixed-wind
 
 A Cache-backed counter is the right answer to "I have named limiters, response callbacks, after-callbacks for failed-login-only counting, and I want to be source-compatible with Laravel migrations." It's the wrong answer to "I need exact one-slot-per-request sliding-window enforcement against a Redis ZSET with atomic Lua eval and no separate timer key." That second question is what most Rust services hitting Tokio's concurrency limits actually have, so `RateLimiterDriver` + `RateLimitMiddleware` exist alongside, not behind a feature flag.
 
-`ThrottleRequestsMiddleware::with`, the `throttle:60,1` shape, keeps the request path in its key, where Laravel keys the user or the address alone. Two routes behind the same inline limit therefore count apart; use a named limiter or `with_limits` for one budget across routes. Laravel checks every limit before it counts a request; Suprnova counts and checks in one atomic step, then takes back the counts of a refused request, so a concurrent burst cannot slip past the limit between the check and the count.
+`ThrottleRequestsMiddleware::with`, the `throttle:60,1` shape, keeps the request path in its key, where Laravel keys the user or the address alone. Two routes behind the same inline limit therefore count apart; use a named limiter or `with_limits` for one budget across routes. Laravel checks every limit and then counts the request; Suprnova checks the same way, then admits the request only on the count its atomic increment returns, so a concurrent burst cannot slip past the limit between the check and the count. A request that loses that race keeps its count, where Laravel would have admitted it.
 
 The backend-error policy is also a Suprnova addition. Laravel's middleware never surfaces a "the limiter is broken" decision because PHP's per-request lifecycle hides it - the next request gets a fresh process. A long-lived Tokio worker that loses Redis for ten seconds must decide what to do with the requests arriving during that window; `BackendErrorPolicy::FailOpen` (default) vs `FailClosed` is that decision exposed explicitly.
 
