@@ -15,7 +15,6 @@ use suprnova::http::text;
 use suprnova::{MiddlewareRegistry, Request, Response, Router, handle_request};
 use serial_test::serial;
 use std::sync::OnceLock;
-use suprnova::http::text;
 use suprnova::{any, routes};
 
 async fn anything(_req: Request) -> Response {
