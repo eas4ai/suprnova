@@ -51,7 +51,9 @@ fn err_response(status: u16, body: &str) -> Response {
 
 /// [`err_response`] for a failure on the server's side: the provider sees
 /// the same status and body, and the response carries `error` as its
-/// in-process report. A `5xx` reports `error` through `Exceptions`.
+/// in-process report. A `5xx` reports `error` through `Exceptions`. Every
+/// caller logs the failure first, with its own message, so the report skips
+/// its `framework error` line and each failure is logged once.
 fn failure_response(
     status: u16,
     body: &str,
@@ -59,7 +61,7 @@ fn failure_response(
 ) -> Response {
     Ok(HttpResponse::text(body)
         .status(status)
-        .with_reported_error_from(error))
+        .with_reported_logged_error_from(error))
 }
 
 /// Return whether SeaORM classified a database failure as a unique-constraint

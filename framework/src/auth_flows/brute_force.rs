@@ -443,7 +443,9 @@ impl Middleware for LoginThrottleMiddleware {
                     )
                     .status(503)
                     .header("retry-after", "1")
-                    .with_reported_error_from(&e)),
+                    // Logged above, with the email, so the report skips
+                    // its own line (PAR-111).
+                    .with_reported_logged_error_from(&e)),
                 };
             }
         };

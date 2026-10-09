@@ -31,9 +31,10 @@ use suprnova::live::{
     UploadProvider, UploadReplacement, UploadScan, UploadScanFailure, UploadScanner, UploadType,
     VerifyTransfer, live,
 };
+use suprnova::logging::current_request_id;
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
 use suprnova::{
-    App, Auth, Crypt, EncryptionKey, FrameworkError, Gate, HttpResponse, Middleware,
+    App, Auth, Crypt, EncryptionKey, Exceptions, FrameworkError, Gate, HttpResponse, Middleware,
     MiddlewareRegistry, Next, Request, Response, Router, StatusCode, async_trait, handle_request,
 };
 use suprnova_live_test_support::DirectProviderConformanceAdapter;
@@ -3221,5 +3222,182 @@ async fn reclaiming_a_finalized_direct_upload_retires_it_through_the_direct_prov
             .await
             .is_err(),
         "the provider's own retirement deleted the bytes"
+    );
+}
+
+// ---- PAR-111: the Live 5xx answers are reported ---------------------------
+//
+// The `Exceptions` registry is process-wide. Each test below runs
+// `#[serial]`, holds the binary's env lock, empties the registry at its
+// start and end ([`ReportsIsolated`]), and counts only the errors reported
+// while its own request, named by its `X-Request-Id`, is in flight.
+
+/// Empties the `Exceptions` registry when made and when dropped, and holds
+/// the env lock so no other test of this binary that registers callbacks
+/// overlaps.
+struct ReportsIsolated {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl ReportsIsolated {
+    async fn new() -> Self {
+        let lock = crate::env_lock::lock_env_async().await;
+        Exceptions::reset();
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for ReportsIsolated {
+    fn drop(&mut self) {
+        Exceptions::reset();
+    }
+}
+
+/// Record the text of each error reported while the request `request_id`
+/// is in flight.
+fn record_reports_for(request_id: &'static str) -> Arc<Mutex<Vec<String>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Exceptions::reportable(move |error: &FrameworkError| {
+        if current_request_id().is_some_and(|id| id.as_str() == request_id) {
+            record
+                .lock()
+                .expect("the list is not poisoned")
+                .push(error.to_string());
+        }
+    });
+    seen
+}
+
+fn reports(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    seen.lock().expect("the list is not poisoned").clone()
+}
+
+/// `request` named by the `X-Request-Id` `id`.
+fn with_request_id(
+    mut request: hyper::Request<Full<Bytes>>,
+    id: &'static str,
+) -> hyper::Request<Full<Bytes>> {
+    request
+        .headers_mut()
+        .insert("x-request-id", hyper::header::HeaderValue::from_static(id));
+    request
+}
+
+/// A finalize action whose finalizer never commits leaves the endpoint
+/// kernel without an outcome, and the action answers the closed 500 of
+/// `KernelUnavailable`. That failure is the error the 500 stands for, so
+/// the callbacks see it once.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_kernel_failure_behind_a_live_action_500_is_reported_once() {
+    let _isolated = ReportsIsolated::new().await;
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    let (router, _) = semantic_router_and_runtime_with_host(
+        LiveUploadHost::new().with_finalizer(Arc::new(TestUploadFinalizer::fail_every_commit())),
+    );
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let (handle, _, _) = create_ready_avatar(
+        Arc::clone(&router),
+        Arc::clone(&middleware),
+        "kernel-report-avatar",
+    )
+    .await;
+    let seed = upload_seed(Arc::clone(&router), Arc::clone(&middleware)).await;
+    let seen = record_reports_for("live-kernel-failure-report");
+
+    let request = with_request_id(
+        upload_action_request(
+            &seed,
+            &handle,
+            &request_identity(200),
+            &request_identity(216),
+            &request_identity(232),
+        ),
+        "live-kernel-failure-report",
+    );
+    let (status, _, body) = dispatch_shared(router, middleware, request).await;
+
+    assert_eq!(
+        status,
+        hyper::StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        reports(&seen),
+        ["Internal server error: live_endpoint_kernel_unavailable"],
+        "the kernel's failure reaches the callbacks once"
+    );
+}
+
+/// An upload refused with a 503 from an upload error kind, here the
+/// configured pending bytes running out, reports that error once: the kind
+/// is all the error there is, and the callbacks see it.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_upload_503_from_an_upload_error_kind_is_reported_once() {
+    let _isolated = ReportsIsolated::new().await;
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    // Four 64 MiB files fill 256 MiB of pending bytes, as in
+    // `aggregate_declared_bytes_are_reserved_per_scope_before_provider_work`.
+    TestContainer::singleton(
+        LiveConfig::builder()
+            .upload_max_file_bytes(64 * 1024 * 1024)
+            .upload_max_pending_bytes(256 * 1024 * 1024)
+            .build()
+            .expect("a 256 MiB pending upload limit"),
+    );
+    let router = semantic_router();
+    let middleware = Arc::new(MiddlewareRegistry::new().append(StrictUploadFacts));
+    let create = |index: u64, size: u64, key: String| {
+        json!({
+            "field": "aggregate_avatar",
+            "file": {
+                "lastModified": index,
+                "name": format!("reported-{index}.png"),
+                "size": size,
+                "type": "image/png"
+            },
+            "idempotency_key": key,
+            "island": {
+                "component": "tests.upload-route-component",
+                "documentKey": "avatar-document",
+                "slot": "avatar-slot"
+            },
+            "operation": "create",
+            "protocol_version": 1
+        })
+    };
+    for index in 0..4 {
+        let (status, _, created) = send_control(
+            Arc::clone(&router),
+            Arc::clone(&middleware),
+            create(index, 64 * 1024 * 1024, format!("reported-{index}")),
+            None,
+        )
+        .await;
+        assert_eq!(status, hyper::StatusCode::CREATED, "{created}");
+    }
+    let seen = record_reports_for("live-upload-exhausted-report");
+
+    let request = with_request_id(
+        control_request(create(5, 1, "reported-overflow".to_owned()), None),
+        "live-upload-exhausted-report",
+    );
+    let (status, _, body) = dispatch_shared(router, middleware, request).await;
+
+    assert_eq!(
+        status,
+        hyper::StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        reports(&seen),
+        ["Internal server error: upload_resource_exhausted"],
+        "the upload error reaches the callbacks once"
     );
 }

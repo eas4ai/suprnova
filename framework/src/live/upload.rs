@@ -269,7 +269,7 @@ pub(crate) async fn handle(request: Request) -> Response {
 
     Ok(match response {
         Ok(response) => response,
-        Err(error) => semantic_error(error.kind()),
+        Err(error) => upload_failure(&error),
     })
 }
 
@@ -277,7 +277,7 @@ async fn reacquire_upload(request: Request) -> Response {
     let response = reacquire_upload_inner(request).await;
     Ok(match response {
         Ok(response) => response,
-        Err(error) => semantic_error(error.kind()),
+        Err(error) => upload_failure(&error),
     })
 }
 
@@ -1349,6 +1349,22 @@ fn json_response(status: u16, body: serde_json::Value) -> HttpResponse {
 /// the browser reads, with a report naming the setting to raise.
 fn upload_limit_refusal(limit: super::LiveLimitExceeded) -> HttpResponse {
     semantic_error(UploadErrorKind::InputTooLarge).with_error_report_from(&limit)
+}
+
+/// The closed answer to an upload operation that failed with `error`. The
+/// `503` of an unavailable provider, ledger or authorization, or of
+/// exhausted resources, carries `error` as its in-process report and
+/// reports it through `Exceptions` (PAR-111): its kind is all the error
+/// there is, and the report names it. A refusal below 500 stays the bare
+/// answer it was: a report would make it an error response the Inertia
+/// error decision hands to the application.
+fn upload_failure(error: &UploadError) -> HttpResponse {
+    let response = semantic_error(error.kind());
+    if response.status_code() >= 500 {
+        response.with_reported_error_from(error)
+    } else {
+        response
+    }
 }
 
 fn semantic_error(kind: UploadErrorKind) -> HttpResponse {

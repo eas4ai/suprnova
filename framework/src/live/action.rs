@@ -47,7 +47,7 @@ use suprnova_live::upload::{
 use suprnova_live::validation::{BagPolicy, ValidationEngine, ValidationPort};
 
 use super::LiveLimitExceeded;
-use crate::{FrameworkError, Request, Response};
+use crate::{FrameworkError, HttpResponse, Request, Response};
 
 /// Builds a same-route URL reflection intent from bounded typed query state.
 pub fn url_intent(query: CanonicalValue) -> Result<UrlIntent, ResponseIntentError> {
@@ -259,12 +259,8 @@ pub(crate) async fn handle(request: Request) -> Response {
         super::session_state::scope(service.handle_reported(endpoint_request)).await;
     let completed = response.status.is_success();
     let projected = project_response(response);
-    if let Some(breach) = failure.and_then(|error| size_breach(&error)) {
-        tracing::warn!(limit = %breach, "Live response was refused");
-        return match projected {
-            Ok(response) => Ok(response.with_reported_error_from(&breach)),
-            Err(response) => Err(response.with_reported_error_from(&breach)),
-        };
+    if let Some(error) = failure {
+        return report_endpoint_failure(projected, &error);
     }
     if !completed || projected.is_err() {
         return projected;
@@ -319,6 +315,29 @@ fn endpoint_failure(error: &EndpointError) -> Response {
 
 fn error_response(kind: EndpointErrorKind) -> Response {
     project_response(LiveEndpointResponse::from_error_kind(kind))
+}
+
+/// `projected`, the engine's closed answer to a request that failed with
+/// `error`. A `5xx` carries the failure as its in-process report and
+/// reports it through `Exceptions` (PAR-111): a kernel that produced no
+/// outcome answers the 500 of `KernelUnavailable`, and that failure is what
+/// the 500 stands for. A size breach is logged here and carries the setting
+/// it went over, reported without the report's own line. Any other refusal
+/// below 500 stays the bare closed answer it was: a report would make it an
+/// error response the Inertia error decision hands to the application.
+fn report_endpoint_failure(projected: Response, error: &EndpointError) -> Response {
+    let attach = |response: HttpResponse| match size_breach(error) {
+        Some(breach) => {
+            tracing::warn!(limit = %breach, "Live response was refused");
+            response.with_reported_logged_error_from(&breach)
+        }
+        None if response.status_code() >= 500 => response.with_reported_error_from(error),
+        None => response,
+    };
+    match projected {
+        Ok(response) => Ok(attach(response)),
+        Err(response) => Err(attach(response)),
+    }
 }
 
 /// [`error_response`] for a failure with its error in hand: the client gets
