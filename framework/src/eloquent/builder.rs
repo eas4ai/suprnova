@@ -4376,15 +4376,10 @@ impl<M> Builder<M> {
     }
 
     /// Render this query's SELECT for `backend`, with the values it binds.
-    ///
-    /// `_key` is the model's primary key name, which every caller passes.
-    /// The renderer does not read it: a seeded SQLite order reads each
-    /// row's rowid instead (see [`Self::own_row`]).
     pub(crate) fn render_select_for(
         &self,
         backend: DbBackend,
         table: &str,
-        _key: &str,
         column_expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         match backend {
@@ -4436,7 +4431,6 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
         expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let aliased = format!("{expr} AS {AGGREGATE_RESULT_ALIAS}");
@@ -4448,9 +4442,9 @@ impl<M> Builder<M> {
             if flat.group_by.is_empty() {
                 flat.orders.clear();
             }
-            return flat.render_select_for(backend, table, key, &aliased);
+            return flat.render_select_for(backend, table, &aliased);
         }
-        let (inner, values) = this.render_select_for(backend, table, key, "*")?;
+        let (inner, values) = this.render_select_for(backend, table, "*")?;
         Ok((
             format!("SELECT {aliased} FROM ({inner}) AS __suprnova_aggregate_subquery"),
             values,
@@ -4960,8 +4954,7 @@ where
             };
             return Ok((source, Vec::new()));
         }
-        let (sql, values) =
-            scoped.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
+        let (sql, values) = scoped.render_select_for(backend, M::TABLE, "*")?;
         Ok((format!("({sql}) {alias}"), values))
     }
 
@@ -5842,7 +5835,7 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
+        self.render_select_for(backend, M::TABLE, "*")
             .expect("to_sql_with_bindings: builder cannot render for the live connection's backend")
     }
 
@@ -5884,7 +5877,7 @@ where
         &self,
         backend: DbBackend,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
-        self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
+        self.render_select_for(backend, M::TABLE, "*")
     }
 
     /// Phase 10C T14 - log the rendered SQL via `tracing` and return
@@ -5913,7 +5906,7 @@ where
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
-        match self.render_select_for(backend, M::TABLE, M::primary_key_name(), "*") {
+        match self.render_select_for(backend, M::TABLE, "*") {
             Ok((sql, _values)) => {
                 tracing::info!(
                     target: "suprnova::eloquent::dump",
@@ -5958,7 +5951,7 @@ where
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
         let sql = self
-            .render_select_for(backend, M::TABLE, M::primary_key_name(), "*")
+            .render_select_for(backend, M::TABLE, "*")
             .map(|(sql, _values)| sql)
             .unwrap_or_else(|e| format!("<invalid: {e}>"));
         tracing::error!(
@@ -6187,7 +6180,7 @@ where
         // / LIMIT terms; afterwards we hand the plan to the eager
         // orchestrator.
         let eager_specs = std::mem::take(&mut this.eager_specs);
-        let (sql, vals) = this.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
+        let (sql, vals) = this.render_select_for(backend, M::TABLE, "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
         // Fetch into the entity's `Model` - the SeaORM type that's
@@ -6343,8 +6336,7 @@ where
             probe.tx_override = self.tx_override.clone();
             probe.connection_override = self.connection_override.clone();
             probe.binder = self.binder;
-            let (sql, values) =
-                probe.render_select_for(exec.backend(), M::TABLE, M::primary_key_name(), "*")?;
+            let (sql, values) = probe.render_select_for(exec.backend(), M::TABLE, "*")?;
             let matching = exec
                 .statement_all::<<M::Entity as sea_orm::EntityTrait>::Model>(
                     Statement::from_sql_and_values(exec.backend(), sql, values),
@@ -6444,8 +6436,7 @@ where
         let backend = exec.backend();
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) =
-            self.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7440,8 +7431,7 @@ where
         query.select_raw = None;
         query.select_bindings.clear();
         query.orders.clear();
-        let (sql, values) =
-            query.render_select_for(backend, M::TABLE, M::primary_key_name(), "*")?;
+        let (sql, values) = query.render_select_for(backend, M::TABLE, "*")?;
         let row = exec
             .query_one(Statement::from_sql_and_values(backend, sql, values))
             .await?;
@@ -7468,8 +7458,7 @@ where
         s.limit = Some(1);
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) =
-            s.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
+        let (sql, vals) = s.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -7496,8 +7485,7 @@ where
         let backend = exec.backend();
         let col_name = col.col_name();
         crate::database::validate_identifier(&col_name)?;
-        let (sql, vals) =
-            self.render_select_for(backend, M::TABLE, M::primary_key_name(), &col_name)?;
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &col_name)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7531,12 +7519,7 @@ where
         let vn = val_col.col_name();
         crate::database::validate_identifier(&kn)?;
         crate::database::validate_identifier(&vn)?;
-        let (sql, vals) = self.render_select_for(
-            backend,
-            M::TABLE,
-            M::primary_key_name(),
-            &format!("{kn}, {vn}"),
-        )?;
+        let (sql, vals) = self.render_select_for(backend, M::TABLE, &format!("{kn}, {vn}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7591,12 +7574,7 @@ where
         };
         // Alias back to the bare column name so the result column is
         // named identically on SQLite, MySQL and Postgres.
-        let (sql, vals) = s.render_select_for(
-            backend,
-            M::TABLE,
-            M::primary_key_name(),
-            &format!("{key} AS {pk}"),
-        )?;
+        let (sql, vals) = s.render_select_for(backend, M::TABLE, &format!("{key} AS {pk}"))?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let rows = exec
             .query_all(stmt)
@@ -7627,8 +7605,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) =
-            self.render_aggregate_for(backend, M::TABLE, M::primary_key_name(), expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
@@ -7653,8 +7630,7 @@ where
         // + per-model default + `__read_replica__`.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (sql, vals) =
-            self.render_aggregate_for(backend, M::TABLE, M::primary_key_name(), expr)?;
+        let (sql, vals) = self.render_aggregate_for(backend, M::TABLE, expr)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
         let row = exec
             .query_one(stmt)
