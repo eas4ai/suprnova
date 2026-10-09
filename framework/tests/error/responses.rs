@@ -235,6 +235,151 @@ fn validation_4xx_keeps_per_field_errors() {
     );
 }
 
+#[cfg(feature = "localization")]
+#[path = "../localization/config_guard.rs"]
+mod localization_config_guard;
+
+#[cfg(feature = "localization")]
+mod localized_validation_summary {
+    use super::localization_config_guard::LocalizationConfigGuard;
+    use super::*;
+    use std::sync::Arc;
+    use suprnova::testing::TestContainer;
+    use suprnova::{
+        FluentTranslator, Locale, LocalizationConfig, Translator, ValidationErrors,
+        ValidationMessage, scope_locale,
+    };
+
+    fn bind_catalog(suffix: &str) -> (tempfile::TempDir, LocalizationConfigGuard) {
+        let dir = tempfile::tempdir().expect("catalog directory");
+        let french = dir.path().join("fr");
+        std::fs::create_dir(&french).expect("French catalog directory");
+        std::fs::write(
+            french.join("validation.ftl"),
+            format!(
+                "validation-invalid-data = Les données sont invalides.\n\
+                 validation-required = Le champ {{ $field }} est obligatoire.\n{suffix}"
+            ),
+        )
+        .expect("French validation catalog");
+        let config = LocalizationConfig {
+            default_locale: Locale::parse("en").expect("English locale"),
+            fallback_locale: Locale::parse("fr").expect("French locale"),
+            use_isolating: false,
+            detection: vec![],
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: Default::default(),
+        };
+        let translator = FluentTranslator::from_dir(dir.path(), &config).expect("valid catalog");
+        let guard = LocalizationConfigGuard::register(config);
+        TestContainer::bind::<dyn Translator>(Arc::new(translator));
+        (dir, guard)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn summary_422_uses_request_catalog_for_singular_and_plural() {
+        let _env = crate::env_lock::lock_env_async().await;
+        let _g = AppDebugGuard::falsy();
+        let _container = TestContainer::fake();
+        let _catalog = bind_catalog(
+            "validation-summary-more =
+    { $count ->
+        [one] (et { $count } autre erreur)
+       *[other] (et { $count } autres erreurs)
+    }
+",
+        );
+
+        for (locale, cases) in [
+            (
+                "fr",
+                [
+                    "Le champ email est obligatoire.",
+                    "Le champ email est obligatoire. (et 1 autre erreur)",
+                    "Le champ email est obligatoire. (et 2 autres erreurs)",
+                ],
+            ),
+            (
+                "en",
+                [
+                    "The email field is required.",
+                    "The email field is required. (and 1 more error)",
+                    "The email field is required. (and 2 more errors)",
+                ],
+            ),
+        ] {
+            scope_locale(Locale::parse(locale).expect("request locale"), async {
+                for (index, expected) in cases.into_iter().enumerate() {
+                    let mut errors = ValidationErrors::new();
+                    for _ in 0..=index {
+                        errors.add(
+                            "email",
+                            ValidationMessage::keyed("validation-required").fallback("required"),
+                        );
+                    }
+                    for error in [
+                        FrameworkError::Validation(errors.clone()),
+                        FrameworkError::PrecognitionFailure(errors.clone()),
+                    ] {
+                        let (status, body) = render(error);
+                        assert_eq!(status, 422);
+                        assert_eq!(body["message"], expected);
+                        assert_eq!(
+                            body["errors"]["email"].as_array().expect("errors").len(),
+                            index + 1
+                        );
+                        assert_eq!(body["errors"]["email"][0], cases[0]);
+                    }
+                }
+            })
+            .await;
+        }
+        scope_locale(Locale::parse("fr").expect("French locale"), async {
+            let (status, body) = render(FrameworkError::Validation(ValidationErrors::new()));
+            assert_eq!(status, 422);
+            assert_eq!(body["message"], "Les données sont invalides.");
+            assert_eq!(body["errors"], serde_json::json!({}));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn summary_422_missing_catalog_suffix_uses_english_fallback() {
+        let _env = crate::env_lock::lock_env_async().await;
+        let _g = AppDebugGuard::falsy();
+        let _container = TestContainer::fake();
+        let _catalog = bind_catalog("");
+
+        scope_locale(Locale::parse("fr").expect("French locale"), async {
+            assert!(!suprnova::Lang::has("validation-summary-more"));
+            for (count, expected) in [
+                (2, "Le champ email est obligatoire. (and 1 more error)"),
+                (3, "Le champ email est obligatoire. (and 2 more errors)"),
+            ] {
+                let mut errors = ValidationErrors::new();
+                for _ in 0..count {
+                    errors.add(
+                        "email",
+                        ValidationMessage::keyed("validation-required").fallback("required"),
+                    );
+                }
+                for error in [
+                    FrameworkError::Validation(errors.clone()),
+                    FrameworkError::PrecognitionFailure(errors.clone()),
+                ] {
+                    let (status, body) = render(error);
+                    assert_eq!(status, 422);
+                    assert_eq!(body["message"], expected);
+                }
+            }
+        })
+        .await;
+    }
+}
+
 #[test]
 fn unauthorized_403_keeps_static_message() {
     let _env = crate::env_lock::lock_env();
