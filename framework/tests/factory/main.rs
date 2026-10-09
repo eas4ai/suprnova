@@ -4,3 +4,5 @@
 pub mod derive;
 pub mod factory;
 pub mod persist;
+
+pub mod laravel_gaps;

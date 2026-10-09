@@ -1,31 +1,6 @@
-//! `db:seed` - runs every registered seeder via
-//! [`crate::seed::run_all`].
-//!
-//! A bare `db:seed` on an empty seeder registry emits a single
-//! `tracing::warn!` and returns `Ok(())` - that's the correct product
-//! behavior for "user ran the command before registering anything"
-//! and it makes the command safe to invoke from test suites that
-//! haven't seeded anything specific. A targeted run on an empty
-//! registry is not found, like any other unknown class.
-//!
-//! # Targeted runs (`--class=<Name>`)
-//!
-//! `db:seed --class=UserSeeder` (or the equivalent positional form
-//! `db:seed UserSeeder`) runs only the named seeder via
-//! [`crate::seed::run_one`]. Unknown names surface as
-//! `FrameworkError::not_found("no seeder registered for `X`")`
-//! through the normal dispatch path - non-zero exit + diagnostic on
-//! stderr. Matches Laravel's `php artisan db:seed --class=UserSeeder`.
-//!
-//! A targeted run reports progress on stdout - a `RUNNING` line before
-//! the seeder and a `<elapsed> ms DONE` line after it, both laid out by
-//! [`crate::console::two_column_detail`] and written with
-//! [`crate::console::line`], so a test can read them. A bare `db:seed` stays silent
-//! so a full seed does not bury its own output. The `tracing::info!` in
-//! `seed::run_one` remains the machine channel; this is the human one.
-//! The name is resolved before anything prints - an unknown class fails
-//! with the not-found error and no progress line at all, matching
-//! Laravel's own resolve-then-report order.
+//! Runs the root seeder or a named class on the requested database.
+//! Production needs `--force`. Nested calls share one invocation's once tracking.
+//! Targeted progress keeps the console's existing two-column layout.
 
 use std::time::Instant;
 
@@ -36,11 +11,23 @@ use suprnova_macros::command;
 
 #[command(
     name = "db:seed",
-    description = "Run seeders (all by default, or one via --class=<Name>)"
+    description = "Run the root seeder, or one via --class=<Name>"
 )]
 async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
-    let class = parse_class_arg(&args)?;
+    let options = parse_seed_args(&args)?;
+    if crate::Config::is_production() && !options.force {
+        return Err(FrameworkError::bad_request(
+            "db:seed refuses to run in production without --force",
+        ));
+    }
+    let run = seed::with_invocation(run_seed(options.class));
+    match options.database {
+        Some(name) => crate::DB::with_default_connection(name, run).await,
+        None => run.await,
+    }
+}
 
+async fn run_seed(class: Option<String>) -> Result<(), FrameworkError> {
     // Only a bare run has "nothing to run". A named class goes to
     // `run_one`, which owns the not-found error: an empty registry has no
     // seeder of that name either, and reporting success for work that was
@@ -68,12 +55,8 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
             if !seed::is_registered(&name) {
                 return seed::run_one(&name).await;
             }
-            // Laravel reports progress only for a targeted run - its
-            // `--class` option defaults to the root seeder's class name,
-            // so the effective rule there is "did the operator name a
-            // class". Suprnova has no root-seeder class (`run_all` walks
-            // the whole registry), so the rule is exactly that: a named
-            // class reports, a bare `db:seed` stays quiet.
+            // The root controls its own child progress. A named command
+            // keeps the existing console layout for its outer progress.
             crate::console::line(output::two_column_detail(&name, "RUNNING"));
             let started = Instant::now();
             let result = seed::run_one(&name).await;
@@ -90,49 +73,70 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
             }
             result
         }
-        None => seed::run_all().await,
+        None => seed::run_root().await,
     }
 }
 
-/// Extract the target class name from CLI args. Accepts:
-///
-/// - `--class=Name`
-/// - `--class Name`
-/// - `Name` (bare positional, Laravel-compatible)
-///
-/// Returns `Ok(None)` when no class is specified (run-all). Returns
-/// `Err(FrameworkError::bad_request(...))` for malformed flag usage
-/// such as `--class` with no following value.
-fn parse_class_arg(args: &[String]) -> Result<Option<String>, FrameworkError> {
+#[derive(Debug, Default)]
+struct SeedArgs {
+    class: Option<String>,
+    database: Option<String>,
+    force: bool,
+}
+
+fn parse_seed_args(args: &[String]) -> Result<SeedArgs, FrameworkError> {
+    let mut options = SeedArgs::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if let Some(rest) = arg.strip_prefix("--class=") {
-            if rest.is_empty() {
-                return Err(FrameworkError::bad_request(
-                    "db:seed --class= requires a seeder name (e.g. --class=UserSeeder)",
-                ));
-            }
-            return Ok(Some(rest.to_string()));
+        if arg == "--force" {
+            options.force = true;
+            continue;
         }
-        if arg == "--class" {
-            let Some(name) = iter.next() else {
-                return Err(FrameworkError::bad_request(
-                    "db:seed --class requires a seeder name (e.g. --class UserSeeder)",
-                ));
-            };
-            if name.starts_with("--") {
-                return Err(FrameworkError::bad_request(
-                    "db:seed --class requires a seeder name, found a flag",
-                ));
-            }
-            return Ok(Some(name.clone()));
+        let (flag, value) = if let Some(value) = arg.strip_prefix("--class=") {
+            ("--class", value)
+        } else if let Some(value) = arg.strip_prefix("--database=") {
+            ("--database", value)
+        } else if arg == "--class" || arg == "--database" {
+            let value = iter.next().ok_or_else(|| missing_value(arg))?;
+            (arg.as_str(), value.as_str())
+        } else if arg.starts_with('-') {
+            return Err(FrameworkError::bad_request(format!(
+                "db:seed: unknown option `{arg}`"
+            )));
+        } else {
+            ("--class", arg.as_str())
+        };
+        if value.is_empty() || value.starts_with('-') {
+            return Err(missing_value(flag));
         }
-        if !arg.starts_with("--") {
-            // Bare positional name - Laravel-compatible form.
-            return Ok(Some(arg.clone()));
+        let target = if flag == "--class" {
+            &mut options.class
+        } else {
+            &mut options.database
+        };
+        if target.replace(value.to_owned()).is_some() {
+            return Err(FrameworkError::bad_request(format!(
+                "db:seed: {flag} supplied twice"
+            )));
         }
     }
-    Ok(None)
+    Ok(options)
+}
+
+fn missing_value(flag: &str) -> FrameworkError {
+    let kind = if flag == "--class" {
+        "seeder"
+    } else {
+        "connection"
+    };
+    FrameworkError::bad_request(format!(
+        "db:seed {flag} requires a {kind} name, found a flag or missing value"
+    ))
+}
+
+#[cfg(test)]
+fn parse_class_arg(args: &[String]) -> Result<Option<String>, FrameworkError> {
+    parse_seed_args(args).map(|args| args.class)
 }
 
 #[cfg(test)]

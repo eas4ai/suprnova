@@ -4,3 +4,5 @@
 pub mod fake_crate;
 pub mod seeders;
 pub mod without_events_integration;
+
+pub mod laravel_gaps;

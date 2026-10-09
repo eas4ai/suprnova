@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Factory record batches.** `create_many` accepts a count or per-record
+  attribute maps, with each map overriding the factory definition.
+- **Custom ULID lengths.** `ulid_with_length` and the `length` modifier
+  create ULID columns with the length your schema needs.
+- **Schema SQL previews.** `Blueprint::create_sql` returns the validated
+  CREATE statements for your selected database engine.
+- **Seeder composition.** `call` runs children in order with console progress;
+  `call_silent` suppresses progress and `call_once` skips completed children.
+- **Seeder parameters.** `call_with` passes an attribute map to `run_with`
+  while existing `run` implementations keep working.
+- **Root seeders.** `register_root` selects the seeder a bare `db:seed` runs.
+- **Seeder connection selection.** `db:seed --database` scopes default
+  queries and factories to the named connection for the invocation.
+
 - **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
   elects one replica per tick for every task; `.on_every_server()` opts out.
 - **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
@@ -853,6 +867,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Typed factory counts.** `count` and `times` make `make` and `create`
+  return vectors while uncounted factories keep their single-model results.
+- **Laravel boolean storage.** MySQL and SQLite boolean columns use
+  `tinyint(1)` and retain false and true when you read their rows.
+- **Default float precision.** Float columns use 53 binary digits on MySQL
+  and Postgres, with explicit precision available through the column modifier.
+- **Whole-second zoned timestamps.** Postgres uses `timestamp(0) with time zone`
+  by default, and SQLite declares `datetime` for zoned timestamp columns.
+- **Production seeding requires force.** `db:seed` returns an error in
+  production unless you pass `--force`.
 
 - **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
   dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports

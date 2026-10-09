@@ -186,7 +186,8 @@ impl Expect {
 fn families(backend: DbBackend, logical: &str) -> &'static [&'static str] {
     match (backend, logical) {
         (DbBackend::Sqlite, "id" | "bigint" | "int" | "smallint") => &["integer"],
-        (DbBackend::Sqlite, "bool") => &["numeric"],
+        (DbBackend::Sqlite, "bool") => &["integer"],
+        (DbBackend::Sqlite, "tz") => &["numeric"],
         (DbBackend::Sqlite, "float" | "double" | "decimal") => &["real"],
         (DbBackend::Sqlite, "binary") => &["blob"],
         (DbBackend::Sqlite, _) => &["text"],
@@ -197,7 +198,7 @@ fn families(backend: DbBackend, logical: &str) -> &'static [&'static str] {
         (DbBackend::Postgres, "varchar") => &["character varying"],
         (DbBackend::Postgres, "char" | "ulid") => &["character"],
         (DbBackend::Postgres, "text") => &["text"],
-        (DbBackend::Postgres, "float") => &["real"],
+        (DbBackend::Postgres, "float") => &["double precision"],
         (DbBackend::Postgres, "double") => &["double precision"],
         (DbBackend::Postgres, "decimal") => &["numeric"],
         (DbBackend::Postgres, "date") => &["date"],
@@ -214,7 +215,7 @@ fn families(backend: DbBackend, logical: &str) -> &'static [&'static str] {
         (_, "varchar") => &["varchar"],
         (_, "char" | "uuid" | "ulid") => &["char"],
         (_, "text") => &["text"],
-        (_, "float") => &["float"],
+        (_, "float") => &["double"],
         (_, "double") => &["double"],
         (_, "decimal") => &["decimal"],
         (_, "date") => &["date"],
@@ -447,8 +448,8 @@ fn native_family(backend: DbBackend, zoned: bool) -> &'static str {
         (DbBackend::Postgres, false) => "timestamp without time zone",
         (DbBackend::MySql, true) => "timestamp",
         (DbBackend::MySql, false) => "datetime",
-        // SQLite has no date-time type; the declared name gives the column
-        // text affinity.
+        // SQLite's datetime declaration has numeric affinity but keeps text values.
+        (DbBackend::Sqlite, true) => "numeric",
         _ => "text",
     }
 }

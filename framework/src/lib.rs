@@ -282,7 +282,9 @@ pub use events::{
     DebouncedListener, ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard,
     Listener, QueuedListener, SsrErrorType, SsrRenderFailed, Subscriber,
 };
-pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
+pub use factory::{
+    Factory, FactoryBuilder, FactoryRecords, Persistable, Sequence, persist_via_seaorm,
+};
 #[cfg(feature = "filesystem-azure")]
 pub use filesystem::AzBlobConfig;
 #[cfg(feature = "filesystem-gcs")]
@@ -482,7 +484,10 @@ pub use ::chrono_tz;
 pub use ::chrono_tz::Tz;
 /// Exposes migration defaults and the schema builder without colliding with SeaORM's `Schema`.
 pub use schema::Schema as MigrationSchema;
-pub use seed::Seeder;
+pub use schema::{Blueprint, ColumnBuilder};
+pub use seed::{
+    Seeder, SeederParams, call, call_once, call_silent, call_with, register_root, run_root,
+};
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
     DatabaseSessionDriver, DestroyedSessions, SessionBlock, SessionConfig, SessionData,

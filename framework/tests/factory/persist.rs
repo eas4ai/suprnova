@@ -18,7 +18,7 @@ use suprnova::factory::{Factory, persist_via_seaorm};
 
 // Toy SeaORM entity used as the persist target. Mirrors the
 // `framework/tests/pagination.rs` pattern.
-mod toy_user {
+pub(super) mod toy_user {
     use sea_orm::entity::prelude::*;
     use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,7 @@ impl fake::Dummy<Faker> for toy_user::Model {
     }
 }
 
-struct UserFactory;
+pub(super) struct UserFactory;
 impl Factory for UserFactory {
     type Model = toy_user::Model;
     fn definition() -> toy_user::Model {
@@ -63,7 +63,7 @@ impl Factory for UserFactory {
 /// with the `toy_users` table created. Returns the
 /// `TestContainerGuard` keepalive - DO NOT drop it before the test
 /// completes, or `DB::connection()` will lose the binding mid-test.
-async fn fresh_db() -> (
+pub(super) async fn fresh_db() -> (
     suprnova::container::testing::TestContainerGuard,
     sea_orm::DatabaseConnection,
 ) {

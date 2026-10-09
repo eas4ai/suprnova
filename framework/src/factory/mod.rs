@@ -84,7 +84,7 @@ pub trait Factory {
     /// Sugar for `Self::new().count(n)`. Matches Laravel's
     /// `Factory::times(int)` API for the "I want N of these" pattern
     /// without the extra method call.
-    fn times(n: usize) -> FactoryBuilder<Self::Model>
+    fn times(n: usize) -> FactoryBuilder<Self::Model, true>
     where
         Self: Sized,
     {
@@ -98,25 +98,33 @@ pub trait Factory {
 pub(crate) type Override<M> = Box<dyn Fn(&mut M) + Send + Sync + 'static>;
 
 /// Fluent builder returned by [`Factory::new`]. Owns the per-instance
-/// count and the list of override closures.
+/// count and the list of override closures. `MANY` selects the terminal result:
+/// `false` returns `M`, and `true` returns `Vec<M>` after `count` or `times`.
 ///
 /// Boxed closures are `Send + Sync + 'static` so the builder itself is
 /// `Send` - important for the async `create` / `create_many` paths,
 /// which capture the builder across an `.await` point on the SeaORM
 /// insert.
-pub struct FactoryBuilder<M> {
+pub struct FactoryBuilder<M, const MANY: bool = false> {
     pub(crate) count: usize,
     pub(crate) overrides: Vec<Override<M>>,
     pub(crate) factory_fn: fn() -> M,
 }
 
-impl<M> FactoryBuilder<M> {
-    /// Set the number of instances `make_many` / `create_many` will
-    /// produce. Has no effect on `make` / `create`, which always
-    /// return one instance.
-    pub fn count(mut self, n: usize) -> Self {
-        self.count = n;
-        self
+impl<M, const MANY: bool> FactoryBuilder<M, MANY> {
+    /// Selects a vector result so `make` and `create` return exactly `n` models.
+    /// The result type changes even when `n` is zero or one.
+    pub fn count(self, n: usize) -> FactoryBuilder<M, true> {
+        FactoryBuilder {
+            count: n,
+            overrides: self.overrides,
+            factory_fn: self.factory_fn,
+        }
+    }
+
+    /// Selects a vector result when you already hold a factory builder.
+    pub fn times(self, n: usize) -> FactoryBuilder<M, true> {
+        self.count(n)
     }
 
     /// Add an override closure that runs against every produced
@@ -156,7 +164,7 @@ impl<M> FactoryBuilder<M> {
     /// UserFactory::times(10)
     ///     .with(|u| u.active = true)
     ///     .when(seed_admins, |b| b.with(|u| u.role = "admin".into()))
-    ///     .create_many().await?;
+    ///     .create().await?;
     /// ```
     pub fn when<F>(self, cond: bool, f: F) -> Self
     where
@@ -165,26 +173,17 @@ impl<M> FactoryBuilder<M> {
         if cond { f(self) } else { self }
     }
 
-    /// Build a single in-memory instance. Runs every registered
-    /// override against the produced value. Does NOT persist -
-    /// see `persist::FactoryBuilder::create` for the persisted
-    /// variant.
-    pub fn make(self) -> M {
-        let mut model = (self.factory_fn)();
-        for o in &self.overrides {
-            o(&mut model);
-        }
-        model
+    /// Builds exactly one model when you need to discard a counted result.
+    pub fn make_one(self) -> M {
+        self.build_record()
     }
 
-    /// Force-single in-memory build - discards any prior `count(n)`
-    /// and produces exactly one instance. Equivalent to
-    /// `self.count(1).make()`, but reads cleaner when a shared state
-    /// method has set `count` internally and the caller wants one.
-    ///
-    /// Mirrors Laravel's `Factory::makeOne($attrs)`.
-    pub fn make_one(self) -> M {
-        self.count(1).make()
+    fn build_record(&self) -> M {
+        let mut model = (self.factory_fn)();
+        for override_fn in &self.overrides {
+            override_fn(&mut model);
+        }
+        model
     }
 
     /// Build `count` instances in memory, applying overrides to each.
@@ -208,51 +207,138 @@ impl<M> FactoryBuilder<M> {
     }
 }
 
-/// Persistence-aware builder methods. Available whenever `M:
-/// Persistable` - which, thanks to the blanket impl in
-/// `persist`, every SeaORM `Model` satisfies for free.
-impl<M> FactoryBuilder<M>
-where
-    M: Persistable + 'static,
-{
-    /// Build one instance + persist it through the bound storage.
-    /// Returns the canonicalized post-insert model (assigned id,
-    /// defaulted columns resolved, etc.).
-    pub async fn create(self) -> Result<M, crate::error::FrameworkError> {
-        self.make().persist().await
+impl<M> FactoryBuilder<M> {
+    /// Builds one model so the default factory result stays a single value.
+    pub fn make(self) -> M {
+        self.make_one()
+    }
+}
+
+impl<M> FactoryBuilder<M, true> {
+    /// Builds the selected number of models with a vector checked by the compiler.
+    pub fn make(self) -> Vec<M> {
+        self.make_many()
+    }
+}
+
+impl<M: Persistable + 'static, const MANY: bool> FactoryBuilder<M, MANY> {
+    /// Persists exactly one model when you need to discard a counted result.
+    pub async fn create_one(self) -> Result<M, crate::FrameworkError> {
+        self.make_one().persist().await
     }
 
-    /// Force-single persisted build - discards any prior `count(n)`
-    /// and produces exactly one persisted instance. Equivalent to
-    /// `self.count(1).create().await`.
-    ///
-    /// Mirrors Laravel's `Factory::createOne($attrs)`.
-    pub async fn create_one(self) -> Result<M, crate::error::FrameworkError> {
-        self.count(1).create().await
-    }
-
-    /// Build `count` instances + persist each in turn. Returns every
-    /// post-insert model. Persists sequentially - if a later insert
-    /// fails, the prior inserts are NOT rolled back (the call site is
-    /// expected to wrap a transaction if it needs atomicity).
-    pub async fn create_many(self) -> Result<Vec<M>, crate::error::FrameworkError> {
-        let models = self.make_many();
+    async fn persist_many(models: Vec<M>) -> Result<Vec<M>, crate::FrameworkError> {
         let mut out = Vec::with_capacity(models.len());
-        for m in models {
-            out.push(m.persist().await?);
+        for model in models {
+            out.push(model.persist().await?);
         }
         Ok(out)
     }
+}
 
-    /// [`Self::create`] with the model's lifecycle events muted: no
-    /// `Creating`, `Saving`, `Created` or `Saved` listener runs, so no
-    /// observer sees the row. Mirrors Laravel's `createQuietly`.
-    pub async fn create_quietly(self) -> Result<M, crate::error::FrameworkError> {
+impl<M: Persistable + 'static> FactoryBuilder<M> {
+    /// Persists one model so the default factory result stays a single value.
+    pub async fn create(self) -> Result<M, crate::FrameworkError> {
+        self.create_one().await
+    }
+
+    /// Persists a count or per-record attribute maps over the factory definition.
+    /// Attributes require a model that implements serde serialization and deserialization.
+    /// Inserts run in order and stop on error. Use a transaction for atomicity.
+    pub async fn create_many<R: FactoryRecords<M>>(
+        self,
+        records: R,
+    ) -> Result<Vec<M>, crate::FrameworkError> {
+        Self::persist_many(records.into_models(self)?).await
+    }
+
+    /// Persists one model without waking its lifecycle event listeners.
+    pub async fn create_quietly(self) -> Result<M, crate::FrameworkError> {
         crate::seed::without_events(self.create()).await
     }
 
-    /// [`Self::create_many`] with the model's lifecycle events muted.
-    pub async fn create_many_quietly(self) -> Result<Vec<M>, crate::error::FrameworkError> {
-        crate::seed::without_events(self.create_many()).await
+    /// Persists explicit records without waking their lifecycle event listeners.
+    pub async fn create_many_quietly<R: FactoryRecords<M>>(
+        self,
+        records: R,
+    ) -> Result<Vec<M>, crate::FrameworkError> {
+        crate::seed::without_events(self.create_many(records)).await
+    }
+}
+
+impl<M: Persistable + 'static> FactoryBuilder<M, true> {
+    /// Persists the selected number of models and returns a typed vector.
+    /// Inserts stop on error. Use a transaction if all rows must roll back together.
+    pub async fn create(self) -> Result<Vec<M>, crate::FrameworkError> {
+        Self::persist_many(self.make()).await
+    }
+
+    /// Keeps counted builders compatible with the explicit many terminal.
+    pub async fn create_many(self) -> Result<Vec<M>, crate::FrameworkError> {
+        self.create().await
+    }
+
+    /// Persists the selected models without waking lifecycle event listeners.
+    pub async fn create_quietly(self) -> Result<Vec<M>, crate::FrameworkError> {
+        crate::seed::without_events(self.create()).await
+    }
+
+    /// Keeps counted quiet inserts compatible with the explicit many terminal.
+    pub async fn create_many_quietly(self) -> Result<Vec<M>, crate::FrameworkError> {
+        self.create_quietly().await
+    }
+}
+
+/// Supplies a count or attribute maps so one factory can create different records.
+/// A count works for every model. Attribute maps need serde to overlay typed fields.
+pub trait FactoryRecords<M> {
+    /// Builds all records before persistence so invalid attributes insert no rows.
+    fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError>;
+}
+
+impl<M> FactoryRecords<M> for usize {
+    fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
+        Ok(builder.count(self).make())
+    }
+}
+
+impl<M> FactoryRecords<M> for Vec<crate::Attrs>
+where
+    M: serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
+        self.into_iter()
+            .map(|attrs| {
+                let model = builder.build_record();
+                let mut value = serde_json::to_value(model).map_err(|error| {
+                    crate::FrameworkError::internal(format!(
+                        "factory definition serialization: {error}"
+                    ))
+                })?;
+                let fields = value.as_object_mut().ok_or_else(|| {
+                    crate::FrameworkError::bad_request("factory attributes require an object model")
+                })?;
+                for (name, value) in attrs.0 {
+                    if !fields.contains_key(&name) {
+                        return Err(crate::FrameworkError::bad_request(format!(
+                            "factory attribute `{name}` is not a serialized model field"
+                        )));
+                    }
+                    fields.insert(name, value);
+                }
+                serde_json::from_value(value).map_err(|error| {
+                    crate::FrameworkError::bad_request(format!("factory attributes: {error}"))
+                })
+            })
+            .collect()
+    }
+}
+
+impl<M, const N: usize> FactoryRecords<M> for [crate::Attrs; N]
+where
+    M: serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
+        Vec::from(self).into_models(builder)
     }
 }
