@@ -874,6 +874,206 @@ where
         Ok(())
     }
 
+    /// Map each attached record in bounded batches while preserving its pivot context.
+    /// Return mapped values in primary-key order and stop on database or callback errors.
+    pub async fn chunk_map<F, Fut, U>(
+        mut self,
+        size: u64,
+        mut closure: F,
+    ) -> Result<Collection<U>, FrameworkError>
+    where
+        F: FnMut(R) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<U, FrameworkError>> + Send,
+        U: Send,
+    {
+        if size == 0 {
+            return Err(FrameworkError::param("chunk_map: size must be positive"));
+        }
+        self.lazy_load.check()?;
+        let query = self
+            .related_query()?
+            .order_by(R::PRIMARY_KEY, crate::eloquent::builder::Direction::Asc);
+        let mut offset = 0;
+        let mut out = Vec::new();
+        loop {
+            let mut rows = query
+                .clone()
+                .limit(size)
+                .offset(offset)
+                .get()
+                .await?
+                .into_vec();
+            let count = rows.len() as u64;
+            self.hydrate_pivots(&mut rows).await?;
+            for row in rows {
+                out.push(closure(row).await?);
+            }
+            if count < size {
+                break;
+            }
+            offset = offset
+                .checked_add(size)
+                .ok_or_else(|| FrameworkError::param("chunk_map: offset overflow"))?;
+        }
+        Ok(Collection::from_vec(out))
+    }
+
+    /// Return or create a related record and attach it to this parent when needed.
+    /// Reuse a matching global record so another parent's attachment does not duplicate it.
+    pub async fn first_or_create(
+        self,
+        attributes: Attrs,
+        extra: Attrs,
+    ) -> Result<R, FrameworkError> {
+        let (row, _) = self.first_or_create_related(attributes, extra).await?;
+        Ok(row)
+    }
+
+    /// Create an attached counter with `default`, or add `step` and `extra` atomically.
+    /// Return its stored counter and pivot context so callers can use the relation immediately.
+    pub async fn increment_or_create(
+        mut self,
+        attributes: Attrs,
+        column: &str,
+        default: i64,
+        step: i64,
+        extra: Attrs,
+    ) -> Result<R, FrameworkError> {
+        crate::database::validate_identifier(column)?;
+        let mut values = extra.clone();
+        values.insert(column, default);
+        let (row, created) = self.find_or_attach(attributes, values).await?;
+        let row = if created {
+            row
+        } else {
+            super::operations::increment(row, column, step, extra).await?
+        };
+        let mut rows = vec![row];
+        self.hydrate_pivots(&mut rows).await?;
+        rows.pop()
+            .ok_or_else(|| FrameworkError::internal("increment_or_create: missing result"))
+    }
+
+    /// Apply target scopes and pivot predicates to one reusable, bounded target query.
+    fn related_query(&mut self) -> Result<Builder<R>, FrameworkError> {
+        self.validate_meta()?;
+        let mut values = Vec::new();
+        let mut position = 0;
+        // Portable markers are renumbered by the subquery builder on the actual backend.
+        let predicates =
+            self.pivot_filters
+                .render_and(DatabaseBackend::Sqlite, &mut values, &mut position)?;
+        let owner = L::bind_column(&self.parent_key, &self.parent_key_value)
+            .unwrap_or_else(|| json_value_to_sea_value(&self.parent_key_value));
+        let pivot = crate::DB::table(&self.pivot_table)
+            .select([self.pivot_related_key.as_str()])
+            .filter(self.pivot_foreign_key.as_str(), owner)
+            .where_raw(format!("1 = 1{predicates}"), values);
+        let mut query = R::query().filter_in(self.related_key.as_str(), pivot);
+        if let Some(rewrite) = self.scope_rewrite.take() {
+            query = rewrite(query);
+        }
+        Ok(query)
+    }
+
+    /// Load pivot context only for the records in this batch, on the parent's connection.
+    async fn hydrate_pivots(&self, rows: &mut [R]) -> Result<(), FrameworkError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let keys = rows
+            .iter()
+            .map(|row| {
+                row.field_value(&self.related_key)
+                    .ok_or_else(|| FrameworkError::param("related key is not a model column"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let pivots = load_pivot_rows::<P>(
+            &self.pivot_table,
+            L::default_connection_name(),
+            vec![
+                (
+                    self.pivot_foreign_key.clone(),
+                    PivotMatch::Eq(self.parent_key_value.clone()),
+                ),
+                (self.pivot_related_key.clone(), PivotMatch::In(keys)),
+            ],
+            &self.pivot_filters,
+        )
+        .await?;
+        let mut indexed = std::collections::HashMap::new();
+        for pivot in pivots {
+            let key = pivot
+                .field_value(&self.pivot_related_key)
+                .ok_or_else(|| FrameworkError::param("pivot related key is not a model column"))?;
+            indexed.insert(key.to_string(), pivot);
+        }
+        for row in rows {
+            if let Some(key) = row.field_value(&self.related_key)
+                && let Some(pivot) = indexed.get(&key.to_string())
+            {
+                row.set_pivot_arc(Some(Arc::new(pivot.clone())));
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the creation result and its loaded pivot together for the public entry point.
+    async fn first_or_create_related(
+        mut self,
+        attributes: Attrs,
+        extra: Attrs,
+    ) -> Result<(R, bool), FrameworkError> {
+        let (row, created) = self.find_or_attach(attributes, extra).await?;
+        let mut rows = vec![row];
+        self.hydrate_pivots(&mut rows).await?;
+        let row = rows
+            .pop()
+            .ok_or_else(|| FrameworkError::internal("first_or_create: missing result"))?;
+        Ok((row, created))
+    }
+
+    /// Reuse attached records, or find or create globally and attach with the configured keys.
+    async fn find_or_attach(
+        &mut self,
+        attributes: Attrs,
+        extra: Attrs,
+    ) -> Result<(R, bool), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
+        let query = self.related_query()?.filter_attrs(&attributes);
+        if let Some(row) = query.first().await? {
+            return Ok((row, false));
+        }
+        let write = || async {
+            let (row, created) =
+                super::operations::first_or_create(R::query(), attributes, extra, None).await?;
+            let id = row
+                .field_value(&self.related_key)
+                .ok_or_else(|| FrameworkError::param("related key is not a model column"))?;
+            let mut attachment = Self::__new(
+                self.parent_key_value.clone(),
+                self.pivot_table.clone(),
+                self.pivot_foreign_key.clone(),
+                self.pivot_related_key.clone(),
+            )
+            .local_key(self.parent_key.clone())
+            .related_pk(self.related_key.clone());
+            attachment.with_timestamps = self.with_timestamps;
+            attachment.attach(id).await?;
+            Ok((row, created))
+        };
+        // On the primary, creation and attachment share a transaction. Existing
+        // ambient transactions and per-model named connections retain their routing.
+        if crate::database::Transaction::current().is_none()
+            && L::default_connection_name().is_none_or(|name| name == "__primary__")
+            && R::default_connection_name().is_none_or(|name| name == "__primary__")
+        {
+            crate::DB::transaction_ambient(write).await
+        } else {
+            write().await
+        }
+    }
+
     /// Fetch every related row currently attached to this parent.
     /// Each row carries its pivot context via `__pivot`, accessible
     /// through the macro-emitted `.pivot::<P>()` accessor.

@@ -228,6 +228,36 @@ where
         Ok(())
     }
 
+    /// Map each reachable record in bounded batches to avoid loading the full relation.
+    /// Return mapped values in primary-key order and stop on the first error.
+    pub async fn chunk_map<F, Fut, U>(
+        self,
+        size: u64,
+        closure: F,
+    ) -> Result<Collection<U>, FrameworkError>
+    where
+        F: FnMut(C) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<U, FrameworkError>> + Send,
+        U: Send,
+    {
+        self.lazy_load.check()?;
+        let query = super::RouteChildRelation::__route_child_query(self)?;
+        super::operations::chunk_map(query, size, closure).await
+    }
+
+    /// Search only reachable targets so a missing key returns an unsaved instance.
+    pub async fn find_or_new(self, key: impl crate::eloquent::IntoVal) -> Result<C, FrameworkError>
+    where
+        C: crate::eloquent::FirstOrCreate,
+    {
+        self.lazy_load.check()?;
+        let query = super::RouteChildRelation::__route_child_query(self)?;
+        match query.where_key(key).first().await? {
+            Some(row) => Ok(row),
+            None => C::from_attrs_unsaved(crate::eloquent::Attrs::new()),
+        }
+    }
+
     /// Fetch every `C` row reachable from this parent through `B`.
     ///
     /// Issues a single `INNER JOIN` query:
@@ -485,6 +515,39 @@ where
     pub fn second_local_key(mut self, key: impl Into<String>) -> Self {
         self.inner = self.inner.second_local_key(key);
         self
+    }
+
+    /// Map each reachable target in bounded batches, keeping primary-key order.
+    /// The per-record callback lets callers transform targets without a full load.
+    pub async fn chunk_map<F, Fut, U>(
+        self,
+        size: u64,
+        closure: F,
+    ) -> Result<Collection<U>, FrameworkError>
+    where
+        F: FnMut(C) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<U, FrameworkError>> + Send,
+        U: Send,
+    {
+        self.inner.chunk_map(size, closure).await
+    }
+
+    /// Search reachable targets and return an unsaved instance when the key is absent.
+    pub async fn find_or_new(self, key: impl crate::eloquent::IntoVal) -> Result<C, FrameworkError>
+    where
+        C: crate::eloquent::FirstOrCreate,
+    {
+        self.inner.find_or_new(key).await
+    }
+
+    /// Ask the database once whether this relation reaches `model`, without hydrating a target.
+    pub async fn is(self, model: &C) -> Result<bool, FrameworkError> {
+        let query = super::RouteChildRelation::__route_child_query(self.inner)?;
+        Ok(query
+            .where_key(model.primary_key_value_json())
+            .count()
+            .await?
+            > 0)
     }
 
     /// Fetch the first matching `C` row reachable from this parent.

@@ -186,6 +186,38 @@ they only resolve against models that declare a `created_at` column,
 which the `#[suprnova::model]` macro auto-adds whenever timestamps are
 on (the default).
 
+### Finding or creating a related record
+
+You call `first_or_create(attributes, extra)` on `HasOne`, `HasMany` or
+`BelongsToMany` to return a matching record or create it. You supply lookup
+columns in `attributes` and creation values in `extra`. You keep an
+existing record's values. Your relation sets its foreign key after applying
+the related model's mass-assignment guard, including a custom local key.
+You also attach a pivot row through a many-to-many relation. You attach
+an existing record when it matches outside the relation.
+
+```rust
+let post = user.posts()
+    .first_or_create(attrs! { title: "Draft" }, attrs! { views: 0 })
+    .await?;
+let role = user.roles()
+    .first_or_create(attrs! { name: "editor" }, attrs! {})
+    .await?;
+```
+
+You call `increment_or_create(attributes, column, default, step, extra)`
+on the same relation kinds to create a counter or increment it. You use
+`default` for a new record. You add `step` to an existing record, including
+a zero or negative step. You supply integer amounts. You apply `extra`
+to an existing record in the same database update as the increment. You
+receive the record with its stored counter value.
+
+```rust
+let post = user.posts()
+    .increment_or_create(attrs! { title: "Draft" }, "views", 1, 3, attrs! {})
+    .await?;
+```
+
 ## Many-to-many: `BelongsToMany<R, P>` and the first-class pivot
 
 `BelongsToMany` is many-to-many through a join table. Suprnova's pivot
@@ -281,6 +313,22 @@ for r in &roles {
     let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
+```
+
+### Mapping related records in chunks
+
+You call `chunk_map(size, closure)` on `BelongsToMany`, `HasOneThrough` or
+`HasManyThrough` to map each related record while reading bounded batches.
+You receive a `Collection` of mapped values in primary-key order. Your
+closure receives one record and returns an asynchronous `Result`. A
+many-to-many record gives you its pivot context. You retain target scopes,
+soft-delete filters and pivot filters. You receive an error for a zero size.
+You stop at the first database or closure error and receive that error.
+
+```rust
+let names = user.roles()
+    .chunk_map(10, |role| async move { Ok(role.name) })
+    .await?;
 ```
 
 ### Filtering on pivot columns
@@ -413,11 +461,32 @@ let posts: Collection<Post> = country.posts().get().await?;
 `Option<C>` (matching the one-cardinality semantics) and `.first()` is
 its alias.
 
-Through wrappers expose only their terminals - `get` / `first` / `count`
-plus the key setters (`first_key` / `second_key` / `local_key` /
-`second_local_key`). They do not flow through a `Builder<C>`, so they
-can't chain `.filter(...)` or `.order_by(...)`. If you need to filter
-across the join, fall back to two explicit relation hops.
+You use the through terminals `get`, `first`, `chunk_map` and
+`find_or_new`, plus `count` on `HasManyThrough` and `is` on
+`HasOneThrough`. You configure keys with `first_key`, `second_key`,
+`local_key` and `second_local_key`. You cannot chain `.filter(...)` or
+`.order_by(...)` on these wrappers. You query two explicit relation hops
+when you need that chain.
+
+### Looking up a target by key
+
+You call `find_or_new(key)` on either through relation to search only
+records your relation reaches. You receive a new unsaved instance with
+default field values when the key does not match. You create no database
+row and copy no lookup key into the new instance.
+
+```rust
+let post = country.posts().find_or_new(post_id).await?;
+```
+
+You call `is(&model)` on `HasOneThrough` to check whether your relation
+reaches that model. You ask the database once with a count query and load
+no target instance. You receive `false` for a record outside the relation
+or one hidden by the relation's scopes or soft-delete filters.
+
+```rust
+let matches = user.profile().is(&profile).await?;
+```
 
 ### Through soft-deletes
 
