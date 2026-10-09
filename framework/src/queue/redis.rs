@@ -501,6 +501,74 @@ redis.call('DEL', KEYS[1], KEYS[2])
 return {stream_len, delayed_len}
 "#;
 
+// Scan bounded pages so named counts and clears do not monopolize Redis.
+// Stream entries are immutable; deleting their PEL entry also fences old workers.
+const NAMED_QUEUE_PAGE_SCRIPT: &str = r#"
+local function matches(payload)
+    if type(payload) ~= 'string' then return false end
+    local ok, env = pcall(cjson.decode, payload)
+    if not ok or type(env) ~= 'table' then return false end
+    local queue = env.queue
+    if queue == nil or queue == cjson.null then queue = 'default' end
+    return queue == ARGV[1]
+end
+local count = 0
+local reserved = 0
+local next_cursor = ARGV[3]
+local entries
+if ARGV[2] == 'stream' then
+    entries = redis.call('XRANGE', KEYS[1], ARGV[3], '+', 'COUNT', 128)
+    local groups = {}
+    if ARGV[5] == 'clear' and #entries > 0 then
+        for _, group in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do
+            for index = 1, #group, 2 do
+                if group[index] == 'name' then table.insert(groups, group[index + 1]) end
+            end
+        end
+    end
+    for _, entry in ipairs(entries) do
+        next_cursor = '(' .. entry[1]
+        local payload = false
+        for index = 1, #entry[2], 2 do
+            if entry[2][index] == 'msg' then payload = entry[2][index + 1] end
+        end
+        if matches(payload) then
+            count = count + 1
+            local pending = redis.pcall('XPENDING', KEYS[1], ARGV[4], entry[1], entry[1], 1)
+            if type(pending) == 'table' and pending.err then
+                if not string.find(pending.err, 'NOGROUP', 1, true) then
+                    return redis.error_reply(pending.err)
+                end
+            else
+                reserved = reserved + #pending
+            end
+            if ARGV[5] == 'clear' then
+                -- Fence reservations in every group before deleting the entry.
+                for _, group in ipairs(groups) do
+                    redis.call('XACK', KEYS[1], group, entry[1])
+                end
+                redis.call('XDEL', KEYS[1], entry[1])
+            end
+        end
+    end
+else
+    local offset = tonumber(ARGV[3])
+    entries = redis.call('ZRANGE', KEYS[2], offset, offset + 127)
+    for _, member in ipairs(entries) do
+        local separator = string.find(member, string.char(0), 1, true)
+        local payload = member
+        if separator then payload = string.sub(member, separator + 1) end
+        if matches(payload) then
+            count = count + 1
+            if ARGV[5] == 'clear' then redis.call('ZREM', KEYS[2], member) end
+        end
+    end
+    next_cursor = tostring(offset + #entries)
+    if ARGV[5] == 'clear' then next_cursor = tostring(offset + #entries - count) end
+end
+return {next_cursor, #entries, count, reserved}
+"#;
+
 fn encode_delayed_member(payload: &str) -> String {
     format!("{}\0{payload}", Uuid::new_v4())
 }
@@ -2158,10 +2226,14 @@ impl QueueDriver for RedisQueueDriver {
     /// XTRIM'd. Acknowledged entries remain in the stream until trimmed, so
     /// this is an upper bound on "live work" rather than a strict count of
     /// undelivered jobs - adequate for the same dashboarding role Laravel's
-    /// `Queue::size()` plays. For "ready to pop" backlog use
+    /// `Queue::size(None)` plays. For "ready to pop" backlog use
     /// `pending_size()` (subtracts the PEL); for explicit reserved counts
     /// use `reserved_size()`.
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        if let Some(queue) = queue {
+            let (stream, _, delayed) = self.named_counts(queue, false).await?;
+            return Ok(stream + delayed);
+        }
         let stream_len = self.xlen_stream().await?;
         let delayed = self.zcard_delayed().await?;
         Ok(stream_len.saturating_add(delayed))
@@ -2174,20 +2246,30 @@ impl QueueDriver for RedisQueueDriver {
     /// Redis Streams. It can read high when a previous run left acked
     /// entries on the stream awaiting `XTRIM`/`XDEL`; treat it as an upper
     /// bound on backlog rather than a strict ready-count.
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        if let Some(queue) = queue {
+            let (stream, reserved, _) = self.named_counts(queue, false).await?;
+            return Ok(stream.saturating_sub(reserved));
+        }
         let stream_len = self.xlen_stream().await?;
-        pending_size_from_counts(stream_len, self.reserved_size().await)
+        pending_size_from_counts(stream_len, self.reserved_size(None).await)
     }
 
     /// Envelopes parked on the `<stream>:delayed` ZSET because their
     /// `available_at` is still in the future.
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        if let Some(queue) = queue {
+            return Ok(self.named_counts(queue, false).await?.2);
+        }
         self.zcard_delayed().await
     }
 
     /// Envelopes currently held in the consumer group's Pending Entries
     /// List - i.e. delivered to some consumer but not yet `XACK`'d.
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        if let Some(queue) = queue {
+            return Ok(self.named_counts(queue, false).await?.1);
+        }
         self.xpending_count().await
     }
 
@@ -2382,8 +2464,22 @@ impl QueueDriver for RedisQueueDriver {
     /// delayed entries observed at the moment `XLEN`/`ZCARD` ran). The
     /// stream's consumer group is destroyed alongside the stream; it is
     /// re-created on the next `pop` before the driver asks for new work.
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let _operation_guard = self.operations.write().await;
+        if let Some(queue) = queue {
+            let (stream, _, delayed) = self.named_counts(queue, true).await?;
+            let filter = queue_filter(Some(queue));
+            let entries: Vec<_> = lock::lock(&self.pending, "redis queue pending map")?
+                .by_token
+                .iter()
+                .filter(|(_, entry)| queue_matches(entry.envelope.queue.as_deref(), &filter))
+                .map(|(token, entry)| (ReservationToken(*token), Arc::clone(entry)))
+                .collect();
+            for (token, entry) in entries {
+                forget_pending_entry(&self.pending, &token, &entry)?;
+            }
+            return Ok(stream + delayed);
+        }
         let mut conn = self.conn.clone();
         let next_epoch = Uuid::new_v4().to_string();
         let (stream_len, delayed): (u64, u64) = redis::Script::new(CLEAR_SCRIPT)
@@ -2413,6 +2509,45 @@ impl QueueDriver for RedisQueueDriver {
 }
 
 impl RedisQueueDriver {
+    async fn named_counts(
+        &self,
+        queue: &str,
+        clear: bool,
+    ) -> Result<(u64, u64, u64), FrameworkError> {
+        let mut conn = self.conn.clone();
+        let mut totals = [0u64; 3];
+        for kind in ["stream", "delayed"] {
+            let mut cursor = if kind == "stream" { "-" } else { "0" }.to_owned();
+            loop {
+                let (next, scanned, count, reserved): (String, u64, u64, u64) =
+                    redis::Script::new(NAMED_QUEUE_PAGE_SCRIPT)
+                        .key(&self.stream_key)
+                        .key(&self.delayed_key)
+                        .arg(queue)
+                        .arg(kind)
+                        .arg(&cursor)
+                        .arg(&self.group_name)
+                        .arg(if clear { "clear" } else { "count" })
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|error| {
+                            FrameworkError::internal(format!("redis named queue {kind}: {error}"))
+                        })?;
+                if kind == "stream" {
+                    totals[0] += count;
+                    totals[1] += reserved;
+                } else {
+                    totals[2] += count;
+                }
+                if scanned < PROMOTE_DUE_BATCH as u64 {
+                    break;
+                }
+                cursor = next;
+            }
+        }
+        Ok((totals[0], totals[1], totals[2]))
+    }
+
     /// Shared retryable body of [`QueueDriver::nack`] and
     /// [`QueueDriver::release`], which differ only in whether preparation
     /// consumes an attempt.
@@ -2693,6 +2828,8 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            message_group: None,
+            deduplication_id: None,
             unique_lock_owner: None,
             debounce_id: None,
             debounce_owner: None,
@@ -3820,9 +3957,9 @@ mod tests {
             .await
             .expect("receipt-backed replay");
         assert_eq!(replay, FenceOutcome::PreviouslyApplied);
-        assert_eq!(driver.delayed_size().await.expect("delayed size"), 1);
-        assert_eq!(driver.reserved_size().await.expect("reserved size"), 0);
-        driver.clear().await.expect("clear test queue");
+        assert_eq!(driver.delayed_size(None).await.expect("delayed size"), 1);
+        assert_eq!(driver.reserved_size(None).await.expect("reserved size"), 0);
+        driver.clear(None).await.expect("clear test queue");
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -3877,9 +4014,9 @@ mod tests {
             .await
             .expect_err("settlement must fail closed on an incomplete receipt");
         assert!(apply.to_string().contains("conflicts with live PEL entry"));
-        assert_eq!(driver.reserved_size().await.expect("reserved size"), 1);
+        assert_eq!(driver.reserved_size(None).await.expect("reserved size"), 1);
 
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -3927,7 +4064,7 @@ mod tests {
                 .expect("first settlement"),
             FenceOutcome::Applied
         );
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
 
         assert_eq!(
             driver
@@ -3943,8 +4080,8 @@ mod tests {
                 .expect("prior-epoch replay"),
             FenceOutcome::Stale
         );
-        assert_eq!(driver.delayed_size().await.expect("delayed size"), 0);
-        assert_eq!(driver.reserved_size().await.expect("reserved size"), 0);
+        assert_eq!(driver.delayed_size(None).await.expect("delayed size"), 0);
+        assert_eq!(driver.reserved_size(None).await.expect("reserved size"), 0);
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -3987,7 +4124,7 @@ mod tests {
             .expect("old delivery");
         assert_eq!(old_id, "1-0");
 
-        driver.clear().await.expect("rotate queue epoch");
+        driver.clear(None).await.expect("rotate queue epoch");
         let new_payload = lifecycle_envelope().to_json().expect("new JSON");
         let new_id: String = redis::cmd("XADD")
             .arg(&stream)
@@ -4026,7 +4163,7 @@ mod tests {
             .expect("recreated entry remains current");
         assert_ne!(rebound.fence.epoch, old_epoch);
         assert_eq!(rebound.payload, new_payload);
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -4092,15 +4229,15 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "forced XACK miss must fail the script");
-        assert_eq!(driver.delayed_size().await.expect("delayed size"), 0);
-        assert_eq!(driver.reserved_size().await.expect("reserved size"), 1);
+        assert_eq!(driver.delayed_size(None).await.expect("delayed size"), 0);
+        assert_eq!(driver.reserved_size(None).await.expect("reserved size"), 1);
         let receipt_exists: bool = conn.exists(&receipt_key).await.expect("receipt lookup");
         assert!(!receipt_exists, "failed settlement must remove its receipt");
         driver
             .ack(&reservation.token)
             .await
             .expect("ack original after rollback");
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -4158,7 +4295,7 @@ mod tests {
             .await
             .expect("lookup colliding delayed member");
         assert_eq!(preserved, Some(0));
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
     }
 
     #[ignore = "requires an explicitly configured isolated Redis"]
@@ -4206,12 +4343,12 @@ mod tests {
             .await
             .expect_err("backend boundary must reject an oversized mutation");
         assert!(error.to_string().contains("at most 128 follow-ups"));
-        assert_eq!(driver.delayed_size().await.expect("delayed size"), 0);
-        assert_eq!(driver.reserved_size().await.expect("reserved size"), 1);
+        assert_eq!(driver.delayed_size(None).await.expect("delayed size"), 0);
+        assert_eq!(driver.reserved_size(None).await.expect("reserved size"), 1);
         let mut conn = driver.conn.clone();
         let receipt_exists: bool = conn.exists(receipt_key).await.expect("receipt lookup");
         assert!(!receipt_exists);
-        driver.clear().await.expect("clear test queue");
+        driver.clear(None).await.expect("clear test queue");
     }
 
     fn pending_reply(entry_id: &str, owner: &str, idle_ms: i64, deliveries: i64) -> redis::Value {

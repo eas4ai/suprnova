@@ -287,7 +287,7 @@ async fn order_placed_enqueues_charge() {
 | `assert_nothing_batched()`                     | no batch was recorded                                          |
 | `assert_chained(&["JobA", "JobB"])`            | a recorded chain is made of exactly these `Job::job_name()`s, head first |
 | `assert_nothing_chained()`                     | no chain was recorded                                          |
-| `assert_pushed_without_chain::<J>()`           | at least one push of `J` carried no chain                      |
+| `assert_pushed_without_chain::<J>(\|j\| pred)`           | a typed push of `J` matches and carries no chain                      |
 
 The data side returns the typed jobs themselves:
 

@@ -294,7 +294,7 @@ async fn a_batch_under_except_dispatches_the_excepted_jobs_and_records_the_rest(
         .expect("the excepted batch job is on the real queue");
     assert_eq!(reserved.envelope.job_name, "Farewell");
     assert_eq!(reserved.envelope.batch_id.as_deref(), Some(id.as_str()));
-    assert_eq!(driver.size().await.unwrap(), 1, "only that one job");
+    assert_eq!(driver.size(None).await.unwrap(), 1, "only that one job");
 
     assert_batched(|batch| batch.id == id && batch.jobs.len() == 3);
     let greeted: Vec<String> = pushed::<Greet>().into_iter().map(|job| job.name).collect();
@@ -355,7 +355,7 @@ async fn a_chain_under_except_sends_each_link_where_except_sends_it() {
         "the later link except does not name is recorded"
     );
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "and it does not reach the real queue"
     );
@@ -370,7 +370,11 @@ async fn a_chain_under_except_sends_each_link_where_except_sends_it() {
         .await
         .unwrap();
     assert_chained(&["Greet", "Farewell"]);
-    assert_eq!(driver.size().await.unwrap(), 0, "nothing more reached it");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        0,
+        "nothing more reached it"
+    );
 }
 
 #[tokio::test]
@@ -420,7 +424,11 @@ async fn a_raw_push_is_recorded_and_read_back() {
     Queue::push_raw(&payload, Some("imports")).await.unwrap();
     Queue::push_raw(&payload, None).await.unwrap();
 
-    assert_eq!(driver.size().await.unwrap(), 0, "the fake writes no driver");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        0,
+        "the fake writes no driver"
+    );
     let raws = raw_pushes();
     assert_eq!(raws.len(), 2, "every raw push is recorded, in order");
     assert_eq!(raws[0].payload, payload, "the payload is kept verbatim");
@@ -489,7 +497,7 @@ async fn a_raw_push_is_recorded_even_for_a_job_except_names() {
         1,
         "a raw push is a payload, not a job type"
     );
-    assert_eq!(driver.size().await.unwrap(), 0);
+    assert_eq!(driver.size(None).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -591,7 +599,7 @@ async fn a_raw_push_that_is_not_an_envelope_is_refused() {
 async fn assert_pushed_without_chain_passes_for_a_job_pushed_alone() {
     let _guard = Queue::fake();
     Queue::push(Greet { name: "Ada".into() }).await.unwrap();
-    assert_pushed_without_chain::<Greet>();
+    assert_pushed_without_chain::<Greet>(|_| true);
 }
 
 #[tokio::test]
@@ -604,7 +612,7 @@ async fn assert_pushed_without_chain_passes_for_a_chain_of_one_job() {
         .dispatch()
         .await
         .unwrap();
-    assert_pushed_without_chain::<Greet>();
+    assert_pushed_without_chain::<Greet>(|_| true);
 }
 
 #[tokio::test]
@@ -622,7 +630,7 @@ async fn assert_pushed_without_chain_passes_when_one_push_has_no_chain() {
         .await
         .unwrap();
     Queue::push(Greet { name: "Lin".into() }).await.unwrap();
-    assert_pushed_without_chain::<Greet>();
+    assert_pushed_without_chain::<Greet>(|_| true);
 }
 
 #[tokio::test]
@@ -640,7 +648,7 @@ async fn assert_pushed_without_chain_fails_for_a_job_pushed_with_a_chain() {
         .dispatch()
         .await
         .unwrap();
-    assert_pushed_without_chain::<Greet>();
+    assert_pushed_without_chain::<Greet>(|_| true);
 }
 
 #[tokio::test]
@@ -653,5 +661,45 @@ async fn assert_pushed_without_chain_fails_when_the_job_was_not_pushed() {
     })
     .await
     .unwrap();
-    assert_pushed_without_chain::<Greet>();
+    assert_pushed_without_chain::<Greet>(|_| true);
+}
+
+#[tokio::test]
+#[serial]
+async fn without_chain_filters_only_jobs_pushed_without_a_chain() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let _guard = Queue::fake();
+    Queue::push(Greet { name: "Lin".into() }).await.unwrap();
+    Queue::chain()
+        .add(Greet { name: "Ada".into() })
+        .unwrap()
+        .add(Farewell {
+            name: "Grace".into(),
+        })
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    assert_pushed_without_chain::<Greet>(|job| job.name == "Lin");
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| assert_pushed_without_chain::<Greet>(
+            |job| job.name == "Ada"
+        )))
+        .is_err()
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| assert_pushed_without_chain::<Greet>(
+            |_| false
+        )))
+        .is_err()
+    );
+    Queue::push_raw(&raw_payload(Greet { name: "Raw".into() }), None)
+        .await
+        .unwrap();
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| assert_pushed_without_chain::<Greet>(
+            |job| job.name == "Raw"
+        )))
+        .is_err()
+    );
 }

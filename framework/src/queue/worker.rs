@@ -2404,6 +2404,8 @@ mod tests {
             fail_on_timeout: false,
             backoff: BackoffSchedule::default(),
             queue: None,
+            message_group: None,
+            deduplication_id: None,
             delay_secs: None,
         }
     }
@@ -2615,6 +2617,8 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            message_group: None,
+            deduplication_id: None,
             unique_lock_owner: None,
             debounce_id: None,
             debounce_owner: None,

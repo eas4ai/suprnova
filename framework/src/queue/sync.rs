@@ -105,11 +105,11 @@ impl QueueDriver for SyncQueueDriver {
         Ok(())
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
@@ -211,6 +211,8 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            message_group: None,
+            deduplication_id: None,
             unique_lock_owner: None,
             debounce_id: None,
             debounce_owner: None,

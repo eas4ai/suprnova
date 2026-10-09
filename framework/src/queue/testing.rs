@@ -697,36 +697,36 @@ pub fn assert_nothing_chained() {
     );
 }
 
-/// Assert at least one captured push of `J` carried no chain. Mirrors
+/// Assert an unchained push satisfies `pred`, so you can match its job data. Mirrors
 /// Laravel's `Queue::assertPushedWithoutChain`.
 ///
 /// A job pushed on its own has no chain, and so do a batch member, a retried
 /// job without a chain and a chain of one job. The head of a chain of two or
 /// more jobs carries the rest of the chain, so a push of `J` that is only
 /// ever such a head fails this. Panics when `J` was not pushed at all, and
-/// when every push of it carried a chain, naming the chains it carried.
+/// when no unchained typed push satisfies the filter. Raw payloads do not match.
 ///
 /// Use [`assert_chained`] to assert on the chain itself.
-pub fn assert_pushed_without_chain<J: Job>() {
-    let chains: Vec<Vec<String>> = {
+pub fn assert_pushed_without_chain<J: Job>(pred: impl Fn(&J) -> bool) {
+    let pushes = {
         let g = lock_fake();
         let store = g.as_ref().expect("Queue::fake() must be active");
-        store
-            .pushed
-            .get(J::job_name())
-            .map(|pushes| pushes.iter().map(|push| push.chained.clone()).collect())
-            .unwrap_or_default()
+        store.pushed.get(J::job_name()).cloned().unwrap_or_default()
     };
     assert!(
-        !chains.is_empty(),
+        !pushes.is_empty(),
         "expected at least one pushed {}",
         J::job_name()
     );
+    let matches = pushes
+        .iter()
+        .filter(|push| push.chained.is_empty())
+        .filter_map(|push| serde_json::from_value::<J>(push.payload.clone()).ok())
+        .any(|job| pred(&job));
     assert!(
-        chains.iter().any(Vec::is_empty),
-        "expected a pushed {} without a chain; every push of it carried one: {:?}",
-        J::job_name(),
-        chains
+        matches,
+        "expected a pushed {} without a chain matching the filter",
+        J::job_name()
     );
 }
 

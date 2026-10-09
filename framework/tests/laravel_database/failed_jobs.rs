@@ -76,6 +76,8 @@ pub fn envelope(job_name: &str, payload: serde_json::Value) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -564,7 +566,11 @@ async fn configured_names_are_quoted_alike(engine: Engine) {
             .push(envelope("Ldb.Quoted", serde_json::json!({ "n": 1 })))
             .await
             .unwrap_or_else(|e| panic!("{engine:?} {jobs}: push: {e}"));
-        assert_eq!(driver.size().await.expect("size"), 1, "{engine:?} {jobs}");
+        assert_eq!(
+            driver.size(None).await.expect("size"),
+            1,
+            "{engine:?} {jobs}"
+        );
         let popped = driver
             .pop(std::time::Duration::from_secs(30))
             .await
@@ -583,7 +589,11 @@ async fn configured_names_are_quoted_alike(engine: Engine) {
             .ack(&popped.token)
             .await
             .unwrap_or_else(|e| panic!("{engine:?} {jobs}: ack: {e}"));
-        assert_eq!(driver.size().await.expect("size"), 0, "{engine:?} {jobs}");
+        assert_eq!(
+            driver.size(None).await.expect("size"),
+            0,
+            "{engine:?} {jobs}"
+        );
 
         let store = DatabaseFailedJobStore::new(db.conn.clone(), failed.to_owned())
             .expect("a valid failed-jobs table name");

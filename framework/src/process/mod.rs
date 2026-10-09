@@ -56,12 +56,45 @@ pub use invoked::InvokedProcess;
 pub use pool::{InvokedPool, Pipe, Pool, PoolResults};
 
 use crate::error::FrameworkError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The timeout a process gets unless it sets another: 60 seconds, as in
 /// Laravel.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The grace before a stopped process is killed, so it can finish cleanup.
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// An environment change, so an inherited variable can be removed as well as set.
+#[derive(Debug, Clone)]
+pub enum ProcessEnvValue {
+    /// Set the variable so the child receives an explicit value.
+    Set(String),
+    /// Remove the variable so the child does not inherit its parent's value.
+    Remove,
+}
+
+impl From<String> for ProcessEnvValue {
+    fn from(value: String) -> Self {
+        Self::Set(value)
+    }
+}
+
+impl From<&str> for ProcessEnvValue {
+    fn from(value: &str) -> Self {
+        Self::Set(value.to_owned())
+    }
+}
+
+impl From<Option<String>> for ProcessEnvValue {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(value) => Self::Set(value),
+            None => Self::Remove,
+        }
+    }
+}
 
 /// The facade. Every method builds something to run; nothing runs until
 /// `run` or `start` is called on it.
@@ -166,6 +199,8 @@ pub enum Signal {
     Kill,
     /// `SIGINT`: an interrupt, as Ctrl-C sends.
     Int,
+    /// `SIGINT`: names the interrupt used when you stop a process cooperatively.
+    Interrupt,
     /// `SIGHUP`.
     Hup,
     /// `SIGQUIT`.
@@ -187,10 +222,33 @@ pub(crate) enum Command {
 
 impl Command {
     /// The command line: the arguments joined by spaces, or the shell line
-    /// as given. Fakes match it and results name it.
+    /// as given. Fakes match it.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn line(&self) -> String {
         match self {
             Command::Args(args) => args.join(" "),
+            Command::Shell(line) => line.clone(),
+        }
+    }
+
+    /// Quote arguments for diagnostics that can be read by a POSIX shell.
+    pub(crate) fn quoted_line(&self) -> String {
+        match self {
+            Command::Args(args) => args
+                .iter()
+                .map(|arg| {
+                    if !arg.is_empty()
+                        && arg.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte)
+                        })
+                    {
+                        arg.clone()
+                    } else {
+                        format!("'{}'", arg.replace('\'', "'\\''"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
             Command::Shell(line) => line.clone(),
         }
     }
@@ -242,7 +300,7 @@ const SHELL: &str = "/bin/sh";
 pub struct PendingProcess {
     pub(crate) command: Command,
     pub(crate) path: Option<PathBuf>,
-    pub(crate) env: Vec<(String, String)>,
+    pub(crate) env: Vec<(String, Option<String>)>,
     pub(crate) input: Option<Vec<u8>>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
@@ -270,10 +328,37 @@ impl PendingProcess {
         self
     }
 
-    /// Add a variable to the environment the process inherits.
-    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.push((key.into(), value.into()));
+    /// Set an inherited variable, or remove it with `None`.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<ProcessEnvValue>) -> Self {
+        let value = match value.into() {
+            ProcessEnvValue::Set(value) => Some(value),
+            ProcessEnvValue::Remove => None,
+        };
+        self.env.push((key.into(), value));
         self
+    }
+
+    /// The original arguments, so a fake can inspect values without parsing a shell line.
+    pub fn arguments(&self) -> Option<&[String]> {
+        match &self.command {
+            Command::Args(args) => Some(args),
+            Command::Shell(_) => None,
+        }
+    }
+
+    /// The chosen working directory, so a fake can test where a command runs.
+    pub fn working_directory(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The environment changes in setter order, including removals for a fake to inspect.
+    pub fn environment(&self) -> &[(String, Option<String>)] {
+        &self.env
+    }
+
+    /// The input bytes, so a fake can test what reaches standard input.
+    pub fn standard_input(&self) -> Option<&[u8]> {
+        self.input.as_deref()
     }
 
     /// Write these bytes to the process's standard input, then close it.
@@ -322,10 +407,9 @@ impl PendingProcess {
         self
     }
 
-    /// The command line: the arguments joined by spaces, or the shell line
-    /// as given.
+    /// The command line with POSIX argument quoting, or the shell line as given.
     pub fn command_line(&self) -> String {
-        self.command.line()
+        self.command.quoted_line()
     }
 
     /// Run the process and wait for it.
@@ -529,8 +613,10 @@ impl ProcessResult {
 pub enum ProcessError {
     /// The program could not be started: it is not on `PATH`, is not
     /// executable, or the working directory does not exist.
-    #[error("the program '{program}' could not be started: {source}")]
+    #[error("the command \"{command}\" could not be started: {source}")]
     NotStarted {
+        /// The quoted command line, so start failures identify the arguments too.
+        command: String,
         /// The program.
         program: String,
         /// Why.

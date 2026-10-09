@@ -130,17 +130,17 @@ impl QueueDriver for FlakyDriver {
     ) -> Result<(), FrameworkError> {
         self.inner.release(t, env, d).await
     }
-    async fn size(&self) -> Result<u64, FrameworkError> {
-        self.inner.size().await
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.size(queue).await
     }
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.pending_size().await
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.pending_size(queue).await
     }
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.delayed_size().await
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.delayed_size(queue).await
     }
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.reserved_size().await
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.reserved_size(queue).await
     }
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
         self.inner.pending_jobs(queue).await
@@ -154,8 +154,8 @@ impl QueueDriver for FlakyDriver {
     ) -> Result<Vec<InspectedJob>, FrameworkError> {
         self.inner.reserved_jobs(queue).await
     }
-    async fn clear(&self) -> Result<u64, FrameworkError> {
-        self.inner.clear().await
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.clear(queue).await
     }
     fn name(&self) -> &'static str {
         "flaky"
@@ -431,7 +431,7 @@ impl QueueDriver for ScriptedDriver {
         Ok(Settled::Atomically)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         self.clear_entered.notify_one();
         if self.block_clear {
             self.release_clear.notified().await;
@@ -505,6 +505,8 @@ fn env_at(available_at: chrono::DateTime<Utc>) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -643,7 +645,7 @@ async fn clear_waits_for_pop_alias_publication_then_invalidates_the_alias() {
     let started = clear_started.clone();
     let clear = tokio::spawn(async move {
         started.notify_one();
-        aggregate.clear().await
+        aggregate.clear(Some("default")).await
     });
     clear_started.notified().await;
     assert!(
@@ -694,7 +696,7 @@ async fn cleared_alias_cannot_ack_a_reused_inner_token_after_waiting_on_the_gate
         .expect("old reservation");
 
     let aggregate = failover.clone();
-    let clear = tokio::spawn(async move { aggregate.clear().await });
+    let clear = tokio::spawn(async move { aggregate.clear(None).await });
     issuer.clear_entered.notified().await;
 
     let ack_started = Arc::new(tokio::sync::Notify::new());
@@ -815,7 +817,7 @@ async fn clear_reports_all_failures_and_invalidates_only_successful_connections(
     }
 
     let message = failover
-        .clear()
+        .clear(None)
         .await
         .expect_err("two failed clears must be reported")
         .to_string();
@@ -865,7 +867,7 @@ async fn clear_count_overflow_is_labeled_and_does_not_skip_later_connections() {
     .expect("three drivers");
 
     let message = failover
-        .clear()
+        .clear(None)
         .await
         .expect_err("the aggregate count must not wrap")
         .to_string();
@@ -1032,7 +1034,7 @@ async fn failed_over_job_is_drained_and_settled_by_the_failover_driver() {
         .await
         .expect("push must succeed via fallback");
     assert_eq!(
-        fallback.pending_size().await.expect("fallback pending"),
+        fallback.pending_size(None).await.expect("fallback pending"),
         1,
         "the failed-over job must be pending on the fallback"
     );
@@ -1057,12 +1059,18 @@ async fn failed_over_job_is_drained_and_settled_by_the_failover_driver() {
         .await
         .expect("aggregate ack");
     assert_eq!(
-        fallback.pending_size().await.expect("pending after ack"),
+        fallback
+            .pending_size(None)
+            .await
+            .expect("pending after ack"),
         0,
         "ack must not put the fallback reservation back into pending"
     );
     assert_eq!(
-        fallback.reserved_size().await.expect("reserved after ack"),
+        fallback
+            .reserved_size(None)
+            .await
+            .expect("reserved after ack"),
         0,
         "ack must remove the fallback reservation"
     );
@@ -1093,7 +1101,7 @@ async fn filtered_pop_rejects_unsupported_connection_before_draining_capable_fal
         "the error must identify the incapable connection: {error}"
     );
     assert_eq!(
-        capable.pending_size().await.expect("capable pending"),
+        capable.pending_size(None).await.expect("capable pending"),
         1,
         "preflight failure must happen before a capable fallback is drained"
     );
@@ -1122,7 +1130,7 @@ async fn unknown_filter_error_stops_before_polling_a_later_supported_connection(
         .expect_err("an unknown driver's filter error must stop this poll");
     assert!(error.to_string().contains("unknown"));
     assert_eq!(
-        capable.pending_size().await.expect("capable pending"),
+        capable.pending_size(None).await.expect("capable pending"),
         1,
         "later connections must not be drained after an unknown filter implementation errors"
     );
@@ -1138,12 +1146,12 @@ async fn a_healthy_primary_keeps_every_push_and_fires_nothing() {
     Queue::push(FailoverJob).await.expect("push");
 
     assert_eq!(
-        primary.size().await.expect("primary size"),
+        primary.size(None).await.expect("primary size"),
         1,
         "a healthy primary must keep the push"
     );
     assert_eq!(
-        fallback.size().await.expect("fallback size"),
+        fallback.size(None).await.expect("fallback size"),
         0,
         "the fallback must never see a push the primary accepted"
     );
@@ -1266,25 +1274,31 @@ async fn aggregate_counters_listings_and_clear_span_every_driver_in_configured_o
         .await
         .expect("primary push");
 
-    assert_eq!(primary.pending_size().await.expect("primary pending"), 1);
-    assert_eq!(fallback.pending_size().await.expect("fallback pending"), 1);
     assert_eq!(
-        failover.size().await.expect("size"),
+        primary.pending_size(None).await.expect("primary pending"),
+        1
+    );
+    assert_eq!(
+        fallback.pending_size(None).await.expect("fallback pending"),
+        1
+    );
+    assert_eq!(
+        failover.size(None).await.expect("size"),
         2,
         "size must include both configured drivers"
     );
     assert_eq!(
-        failover.pending_size().await.expect("pending_size"),
+        failover.pending_size(None).await.expect("pending_size"),
         2,
         "pending_size must include both configured drivers"
     );
     assert_eq!(
-        failover.delayed_size().await.expect("delayed_size"),
+        failover.delayed_size(None).await.expect("delayed_size"),
         0,
         "neither driver contains a delayed job"
     );
     assert_eq!(
-        failover.reserved_size().await.expect("reserved_size"),
+        failover.reserved_size(None).await.expect("reserved_size"),
         0,
         "neither driver contains a reservation"
     );
@@ -1316,22 +1330,28 @@ async fn aggregate_counters_listings_and_clear_span_every_driver_in_configured_o
         "the aggregate reserved listing must be empty"
     );
     assert_eq!(
-        failover.clear().await.expect("clear"),
+        failover.clear(None).await.expect("clear"),
         2,
         "clear must report the sum removed from every driver"
     );
     assert_eq!(
-        primary.size().await.expect("primary size after clear"),
+        primary.size(None).await.expect("primary size after clear"),
         0,
         "clear must empty the primary"
     );
     assert_eq!(
-        fallback.size().await.expect("fallback size after clear"),
+        fallback
+            .size(None)
+            .await
+            .expect("fallback size after clear"),
         0,
         "clear must empty the fallback"
     );
     assert_eq!(
-        failover.size().await.expect("aggregate size after clear"),
+        failover
+            .size(None)
+            .await
+            .expect("aggregate size after clear"),
         0,
         "the aggregate must be empty after clear"
     );
@@ -1352,13 +1372,13 @@ async fn lifecycle_calls_reach_the_primary_that_issued_the_token() {
         .expect("pop")
         .expect("a reservation");
     assert_eq!(
-        primary.reserved_size().await.expect("reserved"),
+        primary.reserved_size(None).await.expect("reserved"),
         1,
         "the primary holds the reservation"
     );
     failover.ack(&res.token).await.expect("ack");
     assert_eq!(
-        primary.size().await.expect("size after ack"),
+        primary.size(None).await.expect("size after ack"),
         0,
         "ack must settle the primary's reservation"
     );
@@ -1384,8 +1404,8 @@ async fn fallback_nack_routes_to_the_driver_that_issued_the_token() {
         .nack(&reservation.token, Duration::ZERO)
         .await
         .expect("aggregate nack");
-    assert_eq!(fallback.pending_size().await.expect("pending"), 1);
-    assert_eq!(fallback.reserved_size().await.expect("reserved"), 0);
+    assert_eq!(fallback.pending_size(None).await.expect("pending"), 1);
+    assert_eq!(fallback.reserved_size(None).await.expect("reserved"), 0);
 
     let retried = failover
         .pop(Duration::from_secs(30))
@@ -1421,8 +1441,8 @@ async fn fallback_release_routes_to_the_driver_that_issued_the_token() {
         .release(&reservation.token, &reservation.envelope, Duration::ZERO)
         .await
         .expect("aggregate release");
-    assert_eq!(fallback.pending_size().await.expect("pending"), 1);
-    assert_eq!(fallback.reserved_size().await.expect("reserved"), 0);
+    assert_eq!(fallback.pending_size(None).await.expect("pending"), 1);
+    assert_eq!(fallback.reserved_size(None).await.expect("reserved"), 0);
 
     let released = failover
         .pop(Duration::from_secs(30))
@@ -1450,7 +1470,7 @@ async fn settle_reports_the_primary_answer() {
         .await
         .expect("aggregate pop")
         .expect("primary reservation");
-    assert_eq!(primary.reserved_size().await.expect("reserved"), 1);
+    assert_eq!(primary.reserved_size(None).await.expect("reserved"), 1);
 
     // `FlakyDriver::settle` answers `Stale`, which neither the trait default
     // nor the fallback memory driver ever produces. Asserting on it is what
@@ -1561,7 +1581,7 @@ async fn recovered_busy_primary_cannot_starve_the_fallback() {
         "two fair pops must visit the fallback while the primary remains busy; got {popped_tags:?}"
     );
     assert_eq!(
-        primary.pending_size().await.expect("primary pending"),
+        primary.pending_size(None).await.expect("primary pending"),
         1,
         "the primary must still be busy when the fallback is selected"
     );
@@ -1641,7 +1661,7 @@ async fn bulk_push_preserves_each_envelopes_own_delay() {
     //
     // The primary accepts one envelope and then refuses, so the batch fails
     // partway. A wholesale-forwarding decorator would re-push the accepted
-    // envelope onto the fallback too and land `fallback.pending_size() == 2`.
+    // envelope onto the fallback too and land `fallback.pending_size(None) == 2`.
     let primary = Arc::new(FlakyDriver::accepting_only(1));
     let fallback = Arc::new(MemoryQueueDriver::new());
     let failover = FailoverQueueDriver::new(vec![
@@ -1665,23 +1685,23 @@ async fn bulk_push_preserves_each_envelopes_own_delay() {
     failover.bulk_push(envs).await.expect("bulk push");
 
     assert_eq!(
-        primary.pending_size().await.expect("primary pending"),
+        primary.pending_size(None).await.expect("primary pending"),
         1,
         "the primary accepted exactly one envelope before its budget ran out"
     );
     assert_eq!(
-        fallback.pending_size().await.expect("fallback pending"),
+        fallback.pending_size(None).await.expect("fallback pending"),
         1,
         "only the refused immediate envelope falls through; re-pushing the \
          accepted one would make this 2"
     );
     assert_eq!(
-        fallback.delayed_size().await.expect("fallback delayed"),
+        fallback.delayed_size(None).await.expect("fallback delayed"),
         1,
         "the delayed envelope must keep its own available_at, not the batch's"
     );
     assert_eq!(
-        primary.size().await.expect("primary") + fallback.size().await.expect("fallback"),
+        primary.size(None).await.expect("primary") + fallback.size(None).await.expect("fallback"),
         3,
         "three envelopes in, three envelopes out - no duplicates"
     );
@@ -1716,18 +1736,18 @@ async fn bulk_push_does_not_re_push_what_the_primary_accepted() {
         .expect("the batch fails partway and finishes on the fallback");
 
     assert_eq!(
-        primary.size().await.expect("primary size"),
+        primary.size(None).await.expect("primary size"),
         1,
         "the primary keeps the one envelope it accepted"
     );
     assert_eq!(
-        fallback.size().await.expect("fallback size"),
+        fallback.size(None).await.expect("fallback size"),
         1,
         "only the refused envelope reaches the fallback; wholesale forwarding \
          would put both there"
     );
     assert_eq!(
-        primary.size().await.expect("primary") + fallback.size().await.expect("fallback"),
+        primary.size(None).await.expect("primary") + fallback.size(None).await.expect("fallback"),
         2,
         "two envelopes in, two envelopes out - wholesale forwarding yields 3"
     );

@@ -296,48 +296,94 @@ impl QueueDriver for MemoryQueueDriver {
         self.requeue(token, delay, false).await
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
-        let visible = {
-            let g = lock::lock(&self.inner, "memory queue state")?;
-            (g.visible.len() + g.reserved.len()) as u64
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        let ready_and_reserved = {
+            let state = lock::lock(&self.inner, "memory queue state")?;
+            state
+                .visible
+                .iter()
+                .chain(state.reserved.values())
+                .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+                .count() as u64
         };
-        let delayed = self.delayed.lock().await.len() as u64;
-        Ok(visible + delayed)
+        Ok(ready_and_reserved + self.delayed_size(queue).await?)
     }
 
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
         let g = lock::lock(&self.inner, "memory queue state")?;
-        Ok(g.visible.len() as u64)
+        Ok(g.visible
+            .iter()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
     }
 
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        Ok(self.delayed.lock().await.len() as u64)
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        Ok(self
+            .delayed
+            .lock()
+            .await
+            .by_id
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
     }
 
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
         let g = lock::lock(&self.inner, "memory queue state")?;
-        Ok(g.reserved.len() as u64)
+        Ok(g.reserved
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        // Hold both timers before changing state so promotion, reclaim and
+        // cancellation cannot leave a cleared job visible or newly reserved.
+        let mut store = self.delayed.lock().await;
+        let mut visibility = self.visibility.lock().await;
         let dropped_visible_reserved = {
             let mut g = lock::lock(&self.inner, "memory queue state")?;
-            let n = (g.visible.len() + g.reserved.len()) as u64;
-            g.visible.clear();
-            g.reserved.clear();
-            n
+            let before = g.visible.len() + g.reserved.len();
+            g.visible
+                .retain(|env| !queue_matches(env.queue.as_deref(), &filter));
+            g.reserved
+                .retain(|_, env| !queue_matches(env.queue.as_deref(), &filter));
+            (before - g.visible.len() - g.reserved.len()) as u64
         };
         let delayed_dropped = {
-            let mut store = self.delayed.lock().await;
-            let n = store.len() as u64;
-            store.clear();
-            n
+            let before = store.len();
+            if queue.is_none() {
+                store.clear();
+            } else {
+                store
+                    .by_id
+                    .retain(|_, env| !queue_matches(env.queue.as_deref(), &filter));
+                // Cancel removed ids' timers so a later dispatch of the same id
+                // cannot inherit their earlier deadline. Preserve surviving deadlines.
+                let mut remaining = Vec::new();
+                while let Some(key) = store.queue.peek() {
+                    let timer = store.queue.remove(&key);
+                    let deadline = timer.deadline();
+                    let id = timer.into_inner();
+                    if store.by_id.contains_key(&id) {
+                        remaining.push((id, deadline));
+                    }
+                }
+                for (id, deadline) in remaining {
+                    store.queue.insert_at(id, deadline);
+                }
+            }
+            (before - store.len()) as u64
         };
-        // Visibility DelayQueue is reservation accounting only - clearing
-        // the visible/reserved maps makes its expirations no-ops, but
-        // emptying it too prevents stale reservation tokens from firing
-        // future reclaim events.
-        self.visibility.lock().await.clear();
+        // Remaining reservations keep their original expiry timers.
+        if queue.is_none() {
+            visibility.clear();
+        }
         Ok(dropped_visible_reserved + delayed_dropped)
     }
 
@@ -543,6 +589,8 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            message_group: None,
+            deduplication_id: None,
             unique_lock_owner: None,
             debounce_id: None,
             debounce_owner: None,
@@ -550,6 +598,52 @@ mod tests {
             chain_remaining: Vec::new(),
             context: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_clear_cancelled_while_waiting_for_either_timer_keeps_the_job() {
+        let driver = MemoryQueueDriver::new();
+        let mut envelope = ready_envelope();
+        envelope.queue = Some("reports".into());
+        driver
+            .push(envelope)
+            .await
+            .expect("queue operation succeeds");
+        let held = driver.delayed.lock().await;
+        {
+            let clear = driver.clear(Some("reports"));
+            tokio::pin!(clear);
+            assert!(futures::poll!(clear.as_mut()).is_pending());
+        }
+        drop(held);
+        assert_eq!(
+            driver
+                .pending_size(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
+        let held = driver.visibility.lock().await;
+        {
+            let clear = driver.clear(Some("reports"));
+            tokio::pin!(clear);
+            assert!(futures::poll!(clear.as_mut()).is_pending());
+        }
+        drop(held);
+        assert_eq!(
+            driver
+                .pending_size(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
+        assert_eq!(
+            driver
+                .clear(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
     }
 
     /// DRIVERS-059: a delayed requeue took the envelope out of `reserved`,
@@ -574,7 +668,7 @@ mod tests {
         drop(held);
 
         assert_eq!(
-            driver.size().await.unwrap(),
+            driver.size(None).await.unwrap(),
             1,
             "the cancelled requeue dropped the job: it was neither reserved, \
              visible nor delayed"

@@ -43,11 +43,11 @@ impl QueueDriver for NullQueueDriver {
         Ok(())
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 

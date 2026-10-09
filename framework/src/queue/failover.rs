@@ -10,7 +10,7 @@ use crate::error::FrameworkError;
 use crate::queue::driver::{
     QueueDriver, QueueFilterCapability, Reservation, ReservationToken, Settled,
 };
-use crate::queue::envelope::Envelope;
+use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
 use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -33,6 +33,7 @@ struct ReservationOrigin {
     connection: Arc<Connection>,
     inner_token: ReservationToken,
     lease_deadline: Instant,
+    queue: Option<String>,
 }
 
 /// Wraps an ordered list of queue connections: a push that the first
@@ -206,6 +207,7 @@ impl FailoverQueueDriver {
                 connection,
                 inner_token: reservation.token,
                 lease_deadline,
+                queue: reservation.envelope.queue.clone(),
             },
         );
         Reservation {
@@ -245,11 +247,15 @@ impl FailoverQueueDriver {
             .remove(token);
     }
 
-    fn forget_connection_reservations(&self, connection: &Connection) {
+    fn forget_connection_reservations(&self, connection: &Connection, queue: Option<&str>) {
+        let filter = queue_filter(queue);
         self.reservations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|_, origin| !Arc::ptr_eq(&origin.connection.driver, &connection.driver));
+            .retain(|_, origin| {
+                !Arc::ptr_eq(&origin.connection.driver, &connection.driver)
+                    || !queue_matches(origin.queue.as_deref(), &filter)
+            });
     }
 
     fn prune_expired_reservations(&self) {
@@ -615,44 +621,44 @@ impl QueueDriver for FailoverQueueDriver {
         result
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let mut total = 0;
         for connection in self.distinct_backends() {
-            total = Self::add_count(total, connection.driver.size().await?, "size")?;
+            total = Self::add_count(total, connection.driver.size(queue).await?, "size")?;
         }
         Ok(total)
     }
 
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let mut total = 0;
         for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
-                connection.driver.pending_size().await?,
+                connection.driver.pending_size(queue).await?,
                 "pending_size",
             )?;
         }
         Ok(total)
     }
 
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let mut total = 0;
         for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
-                connection.driver.delayed_size().await?,
+                connection.driver.delayed_size(queue).await?,
                 "delayed_size",
             )?;
         }
         Ok(total)
     }
 
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let mut total = 0;
         for connection in self.distinct_backends() {
             total = Self::add_count(
                 total,
-                connection.driver.reserved_size().await?,
+                connection.driver.reserved_size(queue).await?,
                 "reserved_size",
             )?;
         }
@@ -686,14 +692,14 @@ impl QueueDriver for FailoverQueueDriver {
         Ok(jobs)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let mut total: u64 = 0;
         let mut failures = Vec::new();
         for connection in &self.connections {
             let _gate = connection.gate.write().await;
-            match connection.driver.clear().await {
+            match connection.driver.clear(queue).await {
                 Ok(cleared) => {
-                    self.forget_connection_reservations(connection);
+                    self.forget_connection_reservations(connection, queue);
                     if let Some(next_total) = total.checked_add(cleared) {
                         total = next_total;
                     } else {
@@ -801,6 +807,8 @@ mod tests {
                 timeout_secs: None,
                 fail_on_timeout: false,
                 idempotency_key: None,
+                message_group: None,
+                deduplication_id: None,
                 unique_lock_owner: None,
                 debounce_id: None,
                 debounce_owner: None,
@@ -811,10 +819,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(driver.size().await.unwrap(), 1);
-        assert_eq!(driver.pending_size().await.unwrap(), 1);
+        assert_eq!(driver.size(None).await.unwrap(), 1);
+        assert_eq!(driver.pending_size(None).await.unwrap(), 1);
         assert_eq!(driver.pending_jobs(None).await.unwrap().len(), 1);
-        assert_eq!(driver.delayed_size().await.unwrap(), 0);
-        assert_eq!(driver.reserved_size().await.unwrap(), 0);
+        assert_eq!(driver.delayed_size(None).await.unwrap(), 0);
+        assert_eq!(driver.reserved_size(None).await.unwrap(), 0);
     }
 }

@@ -106,7 +106,7 @@ async fn a_burst_of_dispatches_runs_once_and_keeps_the_last_one() {
         .expect("push");
     }
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         5,
         "every dispatch is enqueued; debouncing is settled at the worker, not by \
          suppressing the push"
@@ -409,7 +409,7 @@ async fn a_superseded_envelope_is_dropped_and_reports_it() {
          for the one envelope that was superseded"
     );
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         0,
         "the superseded envelope is acknowledged, not left to be redelivered"
     );
@@ -588,7 +588,7 @@ async fn declaring_both_debounce_and_uniqueness_is_refused() {
         "the error must name both declarations so the fix is obvious: {message}"
     );
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         0,
         "nothing may be enqueued when the declarations conflict"
     );
@@ -613,7 +613,7 @@ async fn push_unique_refuses_a_debounced_job_too() {
         "the error must name both declarations: {message}"
     );
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         0,
         "nothing may be enqueued when the declarations conflict"
     );
@@ -716,7 +716,7 @@ async fn a_cache_failure_fails_the_push_instead_of_enqueueing_an_unjudgeable_job
         "the caller sees the cache error rather than a silent success: {err}"
     );
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         0,
         "an envelope with no armed window would be judged against a key nothing \
          wrote; the push fails instead"
@@ -1563,7 +1563,7 @@ async fn bulk_refuses_a_job_declaring_debounce_and_uniqueness() {
         err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
         "{err}"
     );
-    assert_eq!(driver.size().await.expect("size"), 0);
+    assert_eq!(driver.size(None).await.expect("size"), 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -1116,24 +1116,24 @@ impl Queue {
     /// (pending + delayed + reserved).
     ///
     /// This and the counts and listings below read the default connection.
-    /// For another one, ask its driver: `Queue::connection(name)?.size()`.
-    pub async fn size() -> Result<u64, FrameworkError> {
-        current_driver()?.size().await
+    /// For another one, ask its driver: `Queue::connection(name)?.size(None)`.
+    pub async fn size(queue: Option<&str>) -> Result<u64, FrameworkError> {
+        current_driver()?.size(queue).await
     }
 
     /// Envelopes whose `available_at <= now` and which are not reserved.
-    pub async fn pending_size() -> Result<u64, FrameworkError> {
-        current_driver()?.pending_size().await
+    pub async fn pending_size(queue: Option<&str>) -> Result<u64, FrameworkError> {
+        current_driver()?.pending_size(queue).await
     }
 
     /// Envelopes whose `available_at > now`.
-    pub async fn delayed_size() -> Result<u64, FrameworkError> {
-        current_driver()?.delayed_size().await
+    pub async fn delayed_size(queue: Option<&str>) -> Result<u64, FrameworkError> {
+        current_driver()?.delayed_size(queue).await
     }
 
     /// Envelopes currently held by an unfinished reservation.
-    pub async fn reserved_size() -> Result<u64, FrameworkError> {
-        current_driver()?.reserved_size().await
+    pub async fn reserved_size(queue: Option<&str>) -> Result<u64, FrameworkError> {
+        current_driver()?.reserved_size(queue).await
     }
 
     /// Every envelope whose `available_at <= now` and which is not
@@ -1160,10 +1160,11 @@ impl Queue {
         current_driver()?.reserved_jobs(queue).await
     }
 
-    /// Drop every envelope on the default connection. Returns the number
+    /// Drop envelopes from `queue` on the default connection. `None` uses
+    /// the driver default described on [`QueueDriver::size`]. Returns the number
     /// of envelopes removed. Mirrors `Queue::clear($queue)`.
-    pub async fn clear() -> Result<u64, FrameworkError> {
-        current_driver()?.clear().await
+    pub async fn clear(queue: Option<&str>) -> Result<u64, FrameworkError> {
+        current_driver()?.clear(queue).await
     }
 
     /// Broadcast a restart signal to every worker, on every connection.
@@ -1501,7 +1502,7 @@ impl Queue {
     /// The driver of the connection `name`: a registered connection, or the
     /// default connection when `name` is [`Queue::connection_name`]. Use it
     /// to inspect one connection, for example
-    /// `Queue::connection("durable")?.size().await`.
+    /// `Queue::connection("durable")?.size(queue).await`.
     ///
     /// # Errors
     ///
@@ -2278,6 +2279,8 @@ pub(crate) fn build_envelope_on<J: Job>(
         timeout_secs,
         fail_on_timeout: J::fail_on_timeout(),
         idempotency_key: None,
+        message_group: job.message_group(),
+        deduplication_id: job.deduplication_id(),
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,

@@ -182,6 +182,8 @@ fn env(name: &str) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -696,7 +698,7 @@ async fn postgres_push_pop_ack_round_trips() {
         d.pop(Duration::from_millis(10)).await.unwrap().is_none(),
         "queue drained"
     );
-    assert_eq!(d.size().await.unwrap(), 0);
+    assert_eq!(d.size(None).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -737,21 +739,21 @@ async fn postgres_counters_report_pending_delayed_and_reserved() {
     d.push(env("now")).await.expect("push now");
     d.push(later).await.expect("push later");
 
-    assert_eq!(d.size().await.unwrap(), 2);
-    assert_eq!(d.pending_size().await.unwrap(), 1);
-    assert_eq!(d.delayed_size().await.unwrap(), 1);
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
+    assert_eq!(d.size(None).await.unwrap(), 2);
+    assert_eq!(d.pending_size(None).await.unwrap(), 1);
+    assert_eq!(d.delayed_size(None).await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
 
     let _r = d
         .pop(Duration::from_secs(600))
         .await
         .unwrap()
         .expect("visible job");
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
-    assert_eq!(d.pending_size().await.unwrap(), 0);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
+    assert_eq!(d.pending_size(None).await.unwrap(), 0);
 
-    assert_eq!(d.clear().await.unwrap(), 2);
-    assert_eq!(d.size().await.unwrap(), 0);
+    assert_eq!(d.clear(None).await.unwrap(), 2);
+    assert_eq!(d.size(None).await.unwrap(), 0);
 }
 
 /// The queue filter binds one placeholder per queue name *after* the two

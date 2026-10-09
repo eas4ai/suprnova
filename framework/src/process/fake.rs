@@ -125,13 +125,21 @@ impl ProcessFake {
         self
     }
 
-    /// Assert that a process with exactly this command line ran `times`
-    /// times.
+    /// Assert that this command ran once, so repeated execution fails the test.
+    ///
+    /// # Panics
+    ///
+    /// When it did not run exactly once.
+    pub fn assert_ran_times(&self, command: &str) -> &Self {
+        self.assert_ran_count(command, 1)
+    }
+
+    /// Assert exactly `times` runs, so tests detect missing or repeated execution.
     ///
     /// # Panics
     ///
     /// When it ran another number of times.
-    pub fn assert_ran_times(&self, command: &str, times: usize) -> &Self {
+    pub fn assert_ran_count(&self, command: &str, times: usize) -> &Self {
         let ran = self
             .recorded()
             .iter()
@@ -209,8 +217,8 @@ pub struct RecordedProcess {
     pub command: String,
     /// The working directory, when one was set.
     pub path: Option<PathBuf>,
-    /// The variables added to the environment.
-    pub env: Vec<(String, String)>,
+    /// The environment changes, with `None` for a removed inherited variable.
+    pub env: Vec<(String, Option<String>)>,
     /// The bytes written to standard input.
     pub input: Vec<u8>,
     /// The faked result; for a started process, the one it ends with.
@@ -227,6 +235,17 @@ pub enum FakeHandler {
     Describe(FakeDescription),
     /// Results answered in turn.
     Sequence(FakeSequence),
+    /// Inspect the pending command and settings to choose a result without running it.
+    Callback(Arc<dyn Fn(&PendingProcess) -> FakeResult + Send + Sync>),
+}
+
+impl<F> From<F> for FakeHandler
+where
+    F: Fn(&PendingProcess) -> FakeResult + Send + Sync + 'static,
+{
+    fn from(callback: F) -> Self {
+        Self::Callback(Arc::new(callback))
+    }
 }
 
 impl From<FakeResult> for FakeHandler {
@@ -284,8 +303,7 @@ impl FakeResult {
 #[derive(Debug, Clone, Default)]
 pub struct FakeDescription {
     id: Option<u32>,
-    output: Vec<String>,
-    error_output: Vec<String>,
+    chunks: Vec<(OutputKind, String)>,
     exit_code: i32,
     iterations: u32,
 }
@@ -299,25 +317,37 @@ impl FakeDescription {
 
     /// Replace the standard output with the lines of `output`.
     pub fn replace_output(mut self, output: &str) -> Self {
-        self.output = output.lines().map(str::to_owned).collect();
+        self.chunks.retain(|(kind, _)| *kind != OutputKind::Out);
+        if !output.is_empty() {
+            self = self.output(output);
+        }
         self
     }
 
     /// Replace the standard error with the lines of `output`.
     pub fn replace_error_output(mut self, output: &str) -> Self {
-        self.error_output = output.lines().map(str::to_owned).collect();
+        self.chunks.retain(|(kind, _)| *kind != OutputKind::Err);
+        if !output.is_empty() {
+            self = self.error_output(output);
+        }
         self
     }
 
     /// Add a line of standard output.
     pub fn output(mut self, line: impl Into<String>) -> Self {
-        self.output.push(line.into());
+        self.chunks.push((
+            OutputKind::Out,
+            format!("{}\n", line.into().trim_end_matches('\n')),
+        ));
         self
     }
 
     /// Add a line of standard error.
     pub fn error_output(mut self, line: impl Into<String>) -> Self {
-        self.error_output.push(line.into());
+        self.chunks.push((
+            OutputKind::Err,
+            format!("{}\n", line.into().trim_end_matches('\n')),
+        ));
         self
     }
 
@@ -390,7 +420,7 @@ pub(crate) struct Canned {
     id: Option<u32>,
     output: String,
     error_output: String,
-    output_lines: Vec<String>,
+    chunks: Vec<(OutputKind, String)>,
     exit_code: i32,
     iterations: u32,
 }
@@ -406,43 +436,54 @@ impl Canned {
     }
 }
 
-fn lines(lines: &[String]) -> String {
-    lines.iter().map(|line| format!("{line}\n")).collect()
-}
-
 impl FakeHandler {
     /// What this handler answers for one run.
-    fn answer(&self, command: &str) -> Result<Canned, ProcessError> {
+    fn answer(&self, pending: &PendingProcess) -> Result<Canned, ProcessError> {
         match self {
             FakeHandler::Result(result) => Ok(Canned {
                 id: None,
                 output: result.output.clone(),
                 error_output: result.error_output.clone(),
-                output_lines: vec![result.output.clone()],
+                chunks: [
+                    (OutputKind::Out, result.output.clone()),
+                    (OutputKind::Err, result.error_output.clone()),
+                ]
+                .into_iter()
+                .filter(|(_, text)| !text.is_empty())
+                .collect(),
                 exit_code: result.exit_code,
                 iterations: 0,
             }),
             FakeHandler::Describe(description) => Ok(Canned {
                 id: description.id,
-                output: lines(&description.output),
-                error_output: lines(&description.error_output),
-                output_lines: description
-                    .output
+                output: description
+                    .chunks
                     .iter()
-                    .map(|line| format!("{line}\n"))
+                    .filter(|(kind, _)| *kind == OutputKind::Out)
+                    .map(|(_, text)| text.as_str())
                     .collect(),
+                error_output: description
+                    .chunks
+                    .iter()
+                    .filter(|(kind, _)| *kind == OutputKind::Err)
+                    .map(|(_, text)| text.as_str())
+                    .collect(),
+                chunks: description.chunks.clone(),
                 exit_code: description.exit_code,
                 iterations: description.iterations,
             }),
+            FakeHandler::Callback(callback) => {
+                FakeHandler::Result(callback(pending)).answer(pending)
+            }
             FakeHandler::Sequence(sequence) => {
                 let next = lock(&sequence.items).pop_front();
                 match next {
-                    Some(handler) => handler.answer(command),
+                    Some(handler) => handler.answer(pending),
                     None if sequence.fail_when_empty => Err(ProcessError::FakeExhausted {
-                        command: command.to_owned(),
+                        command: pending.command_line(),
                     }),
                     None => match &sequence.when_empty {
-                        Some(handler) => handler.answer(command),
+                        Some(handler) => handler.answer(pending),
                         None => Ok(Canned::default()),
                     },
                 }
@@ -488,9 +529,11 @@ pub(crate) fn resolve(pending: &PendingProcess) -> Result<Option<Canned>, Proces
         .find(|(pattern, _)| pattern == "*" || matches(pattern, &command))
         .map(|(_, handler)| handler.clone());
     let canned = match handler {
-        Some(handler) => handler.answer(&command)?,
+        Some(handler) => handler.answer(pending)?,
         None if *lock(&state.prevent_stray) => {
-            return Err(ProcessError::Stray { command });
+            return Err(ProcessError::Stray {
+                command: pending.command_line(),
+            });
         }
         None => Canned::default(),
     };
@@ -499,7 +542,7 @@ pub(crate) fn resolve(pending: &PendingProcess) -> Result<Option<Canned>, Proces
         path: pending.path.clone(),
         env: pending.env.clone(),
         input: pending.input.clone().unwrap_or_default(),
-        result: canned.result(&command),
+        result: canned.result(&pending.command_line()),
     });
     Ok(Some(canned))
 }
@@ -548,23 +591,18 @@ impl FakeInvoked {
 
     /// Show the next line of output, if any is left.
     fn show_next(&mut self) -> bool {
-        let Some(line) = self.canned.output_lines.get(self.shown).cloned() else {
+        let Some((kind, line)) = self.canned.chunks.get(self.shown).cloned() else {
             return false;
         };
         self.shown += 1;
         if let Some(callback) = lock(&self.callback).as_mut() {
-            callback(OutputKind::Out, &line);
+            callback(kind, &line);
         }
         true
     }
 
     fn show_all(&mut self) {
         while self.show_next() {}
-        if let Some(callback) = lock(&self.callback).as_mut()
-            && !self.canned.error_output.is_empty()
-        {
-            callback(OutputKind::Err, &self.canned.error_output);
-        }
     }
 
     pub(crate) fn running(&mut self) -> bool {
@@ -604,10 +642,10 @@ impl FakeInvoked {
     }
 
     pub(crate) fn wait_until(&mut self, until: &mut dyn FnMut(OutputKind, &str) -> bool) -> bool {
-        let lines = self.canned.output_lines.clone();
-        lines.iter().any(|line| until(OutputKind::Out, line))
-            || (!self.canned.error_output.is_empty()
-                && until(OutputKind::Err, &self.canned.error_output))
+        self.canned
+            .chunks
+            .iter()
+            .any(|(kind, text)| !text.is_empty() && until(*kind, text))
     }
 
     pub(crate) fn result(&mut self, command: &str) -> ProcessResult {

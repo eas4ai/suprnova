@@ -419,12 +419,16 @@ async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
         .await
         .unwrap();
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "nothing is pushed before the commit"
     );
     tx.commit().await.unwrap();
-    assert_eq!(driver.size().await.unwrap(), 1, "the commit pushes the job");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        1,
+        "the commit pushes the job"
+    );
 
     let tx = DB::begin_transaction().await.unwrap();
     Queue::push_after_commit_with_tx(&tx, NoteWritten)
@@ -432,7 +436,7 @@ async fn push_after_commit_with_tx_pushes_only_after_the_handle_commits() {
         .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         1,
         "a rollback discards the push"
     );
@@ -632,7 +636,7 @@ async fn postgres_a_cancelled_manual_commit_still_runs_its_after_commit_work() {
         "the after-commit callback of a committed transaction was dropped"
     );
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         1,
         "the job pushed after the commit was dropped"
     );

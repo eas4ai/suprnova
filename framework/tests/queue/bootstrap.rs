@@ -61,6 +61,8 @@ fn bootstrap_env() -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -354,7 +356,7 @@ async fn queue_connections_registers_one_connection_per_entry() {
         .push(bootstrap_env())
         .await
         .unwrap();
-    assert_eq!(Queue::size().await.unwrap(), 1);
+    assert_eq!(Queue::size(None).await.unwrap(), 1);
     suprnova::queue::testing::forget_connections();
 }
 
