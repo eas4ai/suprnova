@@ -39,7 +39,8 @@
 //! brute-force window. The atomic alternative is
 //! [`hit_and_check`](RateLimiter::hit_and_check) - it increments first and
 //! decides on the returned count, so the decision and the write are a single
-//! step with no gap. The HTTP middleware uses it; prefer it over the
+//! step with no gap. The HTTP middleware decides the same way, on the count
+//! [`increment`](RateLimiter::increment) returns; prefer it over the
 //! read-gate-then-`hit` pair anywhere correctness under concurrency matters.
 //!
 //! ## Multi-process correctness needs Redis
@@ -236,6 +237,11 @@ impl RateLimiter {
     /// [`ThrottleRequestsMiddleware`](super::ThrottleRequestsMiddleware)
     /// resolves named limiters through this method, so it counts the same
     /// buckets a direct caller sees, each under `<name>:<key>`.
+    ///
+    /// Two limits with the same key, maximum and window get the same
+    /// fallback key, so they still count in one bucket, and the middleware
+    /// counts a request there once for each of them, as Laravel's
+    /// `ThrottleRequests` hits the key once for each limit.
     pub fn limiter(name: &str) -> Option<Arc<NamedLimiterFn>> {
         let registered = registry().get(name)?;
         Some(Arc::new(move |request: &Request| {
@@ -298,12 +304,22 @@ impl RateLimiter {
         if n < max_attempts {
             return Ok(false);
         }
-        let timer_key = format!("{}{TIMER_SUFFIX}", Self::clean_rate_limiter_key(key));
-        if Cache::has(&timer_key).await? {
+        if Self::window_is_open(key).await? {
             return Ok(true);
         }
         Self::reset_attempts(key).await?;
         Ok(false)
+    }
+
+    /// Whether the bucket's window is open: its `:timer` deadline is still
+    /// stored. A count only refuses a request while its window is open, as
+    /// in [`too_many_attempts`](Self::too_many_attempts). The throttle
+    /// middleware checks a bucket with this before it counts a request, and
+    /// does not reset a count whose window has ended, because that reset
+    /// could erase counts a new window has already taken.
+    pub(crate) async fn window_is_open(key: &str) -> Result<bool, FrameworkError> {
+        let timer_key = format!("{}{TIMER_SUFFIX}", Self::clean_rate_limiter_key(key));
+        Cache::has(&timer_key).await
     }
 
     /// Increment the counter by 1 and seed the `:timer` deadline if
@@ -581,24 +597,36 @@ async fn forget_windowless_counter(
 
 /// Give each limit of a [`LimitResult::Many`] whose key another limit of
 /// the same result shares its [`fallback_key`](super::Limit::fallback_key),
-/// as the callback Laravel's `RateLimiter::limiter` returns does. Every
-/// limit of a shared key is renamed, the first one too, so two limits on
-/// `a` count under `a:attempts:2:decay:60` and `a:attempts:10:decay:3600`.
-/// A single limit and a response pass through unchanged.
+/// as the callback Laravel's `RateLimiter::limiter` returns does. A single
+/// limit and a response pass through unchanged.
 fn with_distinct_keys(result: LimitResult) -> LimitResult {
     let LimitResult::Many(mut limits) = result else {
         return result;
     };
+    give_shared_keys_fallback_keys(&mut limits);
+    LimitResult::Many(limits)
+}
+
+/// Rename every limit whose key another limit of `limits` shares to its
+/// [`fallback_key`](super::Limit::fallback_key), the first one too, so two
+/// limits on `a` count under `a:attempts:2:decay:60` and
+/// `a:attempts:10:decay:3600`. Keys are compared as written, as Laravel's
+/// `duplicates('key')` compares them: two keys that only clean alike
+/// (`café` and `cafe`) keep their keys and count in one bucket.
+///
+/// [`ThrottleRequestsMiddleware::with_limits`](super::ThrottleRequestsMiddleware::with_limits)
+/// renames its limits the same way, so a list of limits counts in the
+/// buckets it would count in behind a named limiter.
+pub(crate) fn give_shared_keys_fallback_keys(limits: &mut [super::Limit]) {
     let mut uses: HashMap<String, usize> = HashMap::new();
-    for limit in &limits {
+    for limit in limits.iter() {
         *uses.entry(limit.key.clone()).or_default() += 1;
     }
-    for limit in &mut limits {
+    for limit in limits.iter_mut() {
         if uses.get(&limit.key).is_some_and(|count| *count > 1) {
             limit.key = limit.fallback_key();
         }
     }
-    LimitResult::Many(limits)
 }
 
 /// The strip step of Laravel's `cleanRateLimiterKey`:
