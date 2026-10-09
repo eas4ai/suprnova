@@ -675,6 +675,95 @@ impl Auth {
         Ok(())
     }
 
+    /// Sign out other devices after verifying the current user's password.
+    ///
+    /// Keep this session ID, its remember selector, and its Magnetar binding
+    /// so this browser stays signed in. A wrong password returns validation
+    /// errors on `password` without revoking credentials. Storage failures
+    /// propagate; custom session stores must support current-session retention.
+    pub async fn logout_other_devices(password: &str) -> Result<(), FrameworkError> {
+        use crate::session::SessionStore;
+
+        Self::refuse_custom_default_guard("logout_other_devices", "logout")?;
+        let guard = Self::default_guard_name();
+        let current = session().ok_or_else(|| {
+            FrameworkError::internal("Auth::logout_other_devices requires SessionMiddleware")
+        })?;
+        let user = Self::user_or_fail().await?;
+        let user_id = user.get_auth_identifier();
+        if crate::session::middleware::persisted_guard_auth_user_id(&guard).as_deref()
+            != Some(user_id.as_str())
+        {
+            return Err(FrameworkError::Unauthorized);
+        }
+        if !super::active_user_provider()?
+            .validate_credentials(user.as_ref(), &serde_json::json!({"password": password}))
+            .await?
+        {
+            let mut errors = crate::ValidationErrors::new();
+            errors.add("password", "The password is incorrect.");
+            return Err(FrameworkError::Validation(errors));
+        }
+        let selector = current.auth_guard_remember_selector(&guard);
+        let engine = crate::magnetar_integration::optional_password_engine();
+        let binding = current
+            .auth_guard_magnetar_binding(&guard)
+            .or_else(|| current.magnetar_web_binding());
+        if let Some(engine) = engine.as_ref() {
+            let binding = binding.as_ref().ok_or_else(|| {
+                FrameworkError::internal(
+                    "Auth::logout_other_devices requires the current Magnetar session binding",
+                )
+            })?;
+            let verified = engine.resolve_web_binding(binding).await.map_err(|error| {
+                FrameworkError::internal(format!("verify current Magnetar session: {error}"))
+            })?;
+            if verified.user_id() != user_id {
+                return Err(FrameworkError::Unauthorized);
+            }
+            engine
+                .revoke_other_remember(&user_id, selector.as_deref())
+                .await
+                .map_err(|error| {
+                    FrameworkError::internal(format!(
+                        "revoke other Magnetar remember credentials: {error}"
+                    ))
+                })?;
+            for other in engine.list_sessions(&user_id).await.map_err(|error| {
+                FrameworkError::internal(format!("list Magnetar sessions: {error}"))
+            })? {
+                if other.session_id != binding.session_id {
+                    engine
+                        .revoke_session(&other.session_id)
+                        .await
+                        .map_err(|error| {
+                            FrameworkError::internal(format!(
+                                "revoke other Magnetar session: {error}"
+                            ))
+                        })?;
+                }
+            }
+        }
+        let store: Arc<dyn SessionStore> = App::make::<dyn SessionStore>().unwrap_or_else(|| {
+            Arc::new(
+                crate::session::DatabaseSessionDriver::with_configured_table(
+                    std::time::Duration::ZERO,
+                    crate::session::SessionConfig::from_env().table_name,
+                ),
+            )
+        });
+        let destroyed = store
+            .destroy_other_guard_sessions(&guard, &user_id, &current.id)
+            .await?;
+        for id in destroyed.ids {
+            crate::live::revocation::session_destroyed(id.as_bytes()).await;
+        }
+        if engine.is_none() {
+            super::remember::revoke_other_for_user(&user_id, selector.as_deref()).await?;
+        }
+        Ok(())
+    }
+
     /// Log out and invalidate the entire session.
     ///
     /// Use this for complete session destruction (e.g. "log out everywhere").

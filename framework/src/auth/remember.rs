@@ -338,6 +338,22 @@ pub async fn revoke_all_for_user(user_id: &str) -> Result<u64, FrameworkError> {
     Ok(result.rows_affected)
 }
 
+pub(crate) async fn revoke_other_for_user(
+    user_id: &str,
+    current_selector: Option<&str>,
+) -> Result<u64, FrameworkError> {
+    let conn = DB::connection()?;
+    let mut delete = entity::Entity::delete_many().filter(entity::Column::UserId.eq(user_id));
+    if let Some(selector) = current_selector {
+        delete = delete.filter(entity::Column::Selector.ne(selector));
+    }
+    let result = delete
+        .exec(conn.inner())
+        .await
+        .map_err(|e| FrameworkError::database(format!("revoke other remember tokens: {e}")))?;
+    Ok(result.rows_affected)
+}
+
 /// Revoke exactly one remember token by owner and non-secret selector.
 pub(crate) async fn revoke_by_selector(
     user_id: &str,

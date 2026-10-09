@@ -26,7 +26,7 @@
 //! # }
 //! ```
 
-use super::Storage;
+use super::DiskReference;
 use crate::FrameworkError;
 use futures::TryStreamExt;
 use opendal::{Operator, Writer};
@@ -55,13 +55,20 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 /// diverts that cleanup to a detached task. Backends that overwrite in place
 /// cannot restore old bytes; abort cleans up only what the backend owns.
 pub async fn copy_between_disks(
-    src: &str,
+    src: impl Into<DiskReference>,
     src_path: &str,
-    dest: &str,
+    dest: impl Into<DiskReference>,
     dest_path: &str,
 ) -> Result<u64, FrameworkError> {
-    let src_op = Storage::disk(src)?;
-    let dest_op = Storage::disk(dest)?;
+    let src_op = src.into().resolve()?;
+    let dest_op = dest.into().resolve()?;
+    if std::sync::Arc::ptr_eq(src_op.service(), dest_op.service())
+        && opendal::raw::normalize_path(src_path) == opendal::raw::normalize_path(dest_path)
+    {
+        return Err(FrameworkError::bad_request(
+            "source and destination paths must differ on the same disk",
+        ));
+    }
 
     // `reader_with(..).chunk(N).await` builds a reader that fetches at most N
     // bytes per stream item - this is what makes the "streams in 64 KiB
@@ -81,7 +88,7 @@ pub async fn copy_between_disks(
     // Only the backend knows which staged state belongs to this writer.
     // Even an earlier absence check cannot make a public key ours to delete.
     let mut guard =
-        WriterGuard::new(dest_op.clone(), dest, dest_path, writer).preserve_destination();
+        WriterGuard::new(dest_op.clone(), "destination", dest_path, writer).preserve_destination();
     let result = stream_to_writer(reader, guard.writer()).await;
     guard.settle(result).await
 }

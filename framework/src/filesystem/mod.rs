@@ -340,6 +340,92 @@ pub(crate) fn local_fs_operator(root: &str) -> Result<Operator, FrameworkError> 
 /// a cosmetic one. Don't promote them back to links.
 pub struct Storage;
 
+/// A disk name or ready-made handle, so cross-disk operations accept either.
+#[derive(Clone)]
+pub enum DiskReference {
+    /// Resolve a registered disk when the operation starts.
+    Name(String),
+    /// Use an existing operator without a registry lookup.
+    Handle(Operator),
+}
+
+impl From<&str> for DiskReference {
+    fn from(name: &str) -> Self {
+        Self::Name(name.to_owned())
+    }
+}
+impl From<String> for DiskReference {
+    fn from(name: String) -> Self {
+        Self::Name(name)
+    }
+}
+impl From<&String> for DiskReference {
+    fn from(name: &String) -> Self {
+        Self::Name(name.clone())
+    }
+}
+impl From<Operator> for DiskReference {
+    fn from(operator: Operator) -> Self {
+        Self::Handle(operator)
+    }
+}
+impl From<&Operator> for DiskReference {
+    fn from(operator: &Operator) -> Self {
+        Self::Handle(operator.clone())
+    }
+}
+impl DiskReference {
+    fn resolve(self) -> Result<Operator, FrameworkError> {
+        match self {
+            Self::Name(name) => Storage::disk(&name),
+            Self::Handle(operator) => Ok(operator),
+        }
+    }
+}
+
+/// One disk name or several names, so forgetting a list preserves single-name callers.
+pub struct DiskNames(Vec<String>);
+impl From<&str> for DiskNames {
+    fn from(name: &str) -> Self {
+        Self(vec![name.to_owned()])
+    }
+}
+impl From<String> for DiskNames {
+    fn from(name: String) -> Self {
+        Self(vec![name])
+    }
+}
+impl From<&String> for DiskNames {
+    fn from(name: &String) -> Self {
+        Self(vec![name.clone()])
+    }
+}
+impl<T: AsRef<str>, const N: usize> From<[T; N]> for DiskNames {
+    fn from(names: [T; N]) -> Self {
+        Self(names.iter().map(|name| name.as_ref().to_owned()).collect())
+    }
+}
+impl<T: AsRef<str>> From<Vec<T>> for DiskNames {
+    fn from(names: Vec<T>) -> Self {
+        Self(names.iter().map(|name| name.as_ref().to_owned()).collect())
+    }
+}
+impl<T: AsRef<str>, const N: usize> From<&[T; N]> for DiskNames {
+    fn from(names: &[T; N]) -> Self {
+        Self::from(names.as_slice())
+    }
+}
+impl<T: AsRef<str>> From<&Vec<T>> for DiskNames {
+    fn from(names: &Vec<T>) -> Self {
+        Self::from(names.as_slice())
+    }
+}
+impl<T: AsRef<str>> From<&[T]> for DiskNames {
+    fn from(names: &[T]) -> Self {
+        Self(names.iter().map(|name| name.as_ref().to_owned()).collect())
+    }
+}
+
 /// Configuration for the S3 driver.
 ///
 /// Mirrors `opendal::services::S3` - credentials and region are optional so
@@ -1210,22 +1296,61 @@ impl Storage {
         Ok(())
     }
 
-    /// Drop a registered disk by name, returning whether it was present.
-    ///
-    /// Mirrors Laravel's `FilesystemManager::forgetDisk`. Useful for
-    /// configuration reloads or tests that need to swap a disk implementation
-    /// at runtime without spinning up `Storage::fake`.
-    pub fn forget(name: &str) -> bool {
+    /// Copy a file across disks without buffering the full object, accepting
+    /// registered names or operator handles for either disk. Returns bytes copied.
+    pub async fn copy_to_disk(
+        source: impl Into<DiskReference>,
+        source_path: &str,
+        destination: impl Into<DiskReference>,
+        destination_path: &str,
+    ) -> Result<u64, FrameworkError> {
+        copy_between_disks(source, source_path, destination, destination_path).await
+    }
+
+    /// Move a file by closing the destination copy before deleting the source.
+    /// A failed copy leaves the source; a failed delete returns an error with
+    /// both copies retained. Returns bytes moved on success.
+    pub async fn move_to_disk(
+        source: impl Into<DiskReference>,
+        source_path: &str,
+        destination: impl Into<DiskReference>,
+        destination_path: &str,
+    ) -> Result<u64, FrameworkError> {
+        let source = source.into().resolve()?;
+        let destination = destination.into().resolve()?;
+        let copied =
+            Self::copy_to_disk(&source, source_path, destination, destination_path).await?;
+        source
+            .delete(source_path)
+            .await
+            .map_err(|error| FrameworkError::internal(format!("delete moved source: {error}")))?;
+        Ok(copied)
+    }
+
+    /// Store a ready-made disk so application drivers can replace a named disk.
+    /// Existing handles keep their backend; the replacement starts without a public URL.
+    pub fn set(name: impl Into<String>, disk: Operator) {
+        registry::register(name, disk);
+    }
+
+    /// Drop one or several disk names for configuration reloads.
+    /// Returns whether any name was registered. Every name is processed.
+    pub fn forget(names: impl Into<DiskNames>) -> bool {
+        let mut removed = false;
+        for name in names.into().0 {
+            removed |= registry::forget(&name);
+        }
+        removed
+    }
+
+    /// Drop only the named disk so other registered disks remain available.
+    /// This is the named form of Laravel's purge; Rust cannot overload `purge()`.
+    pub fn purge(name: &str) -> bool {
         registry::forget(name)
     }
 
-    /// Drop every registered disk.
-    ///
-    /// Mirrors Laravel's `FilesystemManager::purge()` (which clears every
-    /// disk when called without arguments). Production code rarely needs
-    /// this; tests should prefer `Storage::fake`, which combines a purge
-    /// with a process-wide mutex.
-    pub fn purge() {
+    /// Drop every disk so you can rebuild the registry after configuration changes.
+    pub fn purge_all() {
         registry::purge()
     }
 

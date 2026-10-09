@@ -426,9 +426,25 @@ Storage::register_memory("scratch");
 let bytes = copy_between_disks("local", "uploads/big.bin", "scratch", "big.bin").await?;
 ```
 
-If any step fails mid-copy, the partial destination object is aborted and
-deleted before the original error propagates - a failed copy is never
-observable as a truncated destination.
+You also call `Storage::copy_to_disk(source, source_path, destination,
+destination_path).await?` or `Storage::move_to_disk` with those same arguments.
+You pass a string name or an owned or borrowed `Operator` for either disk,
+through `DiskReference`. You receive the transferred byte count as `u64`.
+You keep the source after a copy. You delete it only after a move finishes
+copying and closing the destination writer. You receive an error for a missing
+disk, a failed read or write, or a failed source deletion. You keep both copies
+when deletion fails. You cannot copy or move a file onto itself on the same
+operator.
+
+```rust,ignore
+let archive = Storage::disk("archive")?;
+Storage::copy_to_disk("local", "report.pdf", &archive, "copy.pdf").await?;
+Storage::move_to_disk("local", "report.pdf", archive, "report.pdf").await?;
+```
+
+You abort the destination writer before a copy error propagates. The backend
+cleans up its staged writes. On a backend that writes in place, you can still
+see partial bytes; abort cannot restore the previous contents.
 
 ## Read-through disks
 
@@ -743,10 +759,23 @@ stale copy over the destination the first attempt already wrote correctly.
 ## Registry hygiene
 
 ```rust,ignore
-let removed = Storage::forget("local");  // bool: was it present?
-Storage::purge();                        // drop every disk
+let removed = Storage::forget("local");  // bool: was any named disk present?
+Storage::forget(["cache", "archive"]);
+Storage::purge("uploads");               // drop one named disk
+Storage::purge_all();                    // drop every disk
+Storage::purge_all();                    // drop every disk
+Storage::set("archive", ready_disk);     // store a ready-made Operator
 let names = Storage::disks();            // Vec<String>, sorted
 ```
+
+You pass one name, an array, a vector, or a slice to `forget` through
+`DiskNames`. You receive `true` when at least one disk was removed, and `false`
+for missing names or an empty list. You use `purge(name)` for Laravel's
+named purge and `purge_all()` for every disk; Rust does not overload
+functions by argument count, so the two forms carry two names. You store a
+ready-made operator with `set`; you
+replace the previous disk of that name and clear its old public URL. You keep
+any operator handle you already obtained usable after removal or replacement.
 
 These mirror Laravel's `FilesystemManager::forgetDisk` / `purge` and are
 useful for configuration reloads and admin dashboards. They are not
@@ -822,7 +851,7 @@ so production code cannot reach for them.
 | `Storage::fake()`                     | `Storage::fake()`                                        |
 | `Storage::disk()->assertExists()`     | `disk.assert_exists(path).await`                         |
 | `FilesystemManager::forgetDisk($n)`   | `Storage::forget(name)`                                  |
-| `FilesystemManager::purge()`          | `Storage::purge()`                                       |
+| `FilesystemManager::purge()`          | `Storage::purge(name)` and `Storage::purge_all()`                                       |
 
 ## Configuration
 
