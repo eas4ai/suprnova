@@ -1,7 +1,17 @@
+//! `suprnova make:inertia <name> [--data] [--force] [--test]` - scaffold an
+//! Inertia page, or with `--data` a Data struct.
+//!
+//! A nested page name (`Admin/Users`) writes under the same directory of
+//! `frontend/src/pages`, and the component is named with it
+//! (`Admin/UsersPage`). An existing page or test is kept unless `--force`
+//! is given; the page and its test are written together or not at all.
+
 use console::style;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::commands::generator::{self, WriteSet};
+use crate::commands::live_make::Naming;
 use crate::templates::{self, Frontend};
 use crate::ui;
 
@@ -25,15 +35,16 @@ pub struct {name} {{
 }}
 "#;
 
-pub fn run(name: String, data: bool) {
+pub fn run(name: String, data: bool, force: bool, test: bool) {
     if data {
-        run_data_struct(name);
-    } else {
-        run_inertia_page(name);
+        run_data_struct(name, force);
+    } else if let Err(e) = run_inertia_page(&name, force, test) {
+        ui::error(&e);
+        std::process::exit(1);
     }
 }
 
-fn run_data_struct(name: String) {
+fn run_data_struct(name: String, force: bool) {
     let struct_name = to_pascal_case(&name);
 
     if !is_valid_rust_identifier(&struct_name) {
@@ -58,9 +69,9 @@ fn run_data_struct(name: String) {
         ui::warning("Make sure to add `pub mod props;` to your src/lib.rs");
     }
 
-    if props_file.exists() {
+    if props_file.exists() && !force {
         ui::warning(&format!(
-            "Props struct '{}' already exists at {}",
+            "Props struct '{}' already exists at {} (pass --force to overwrite)",
             struct_name,
             props_file.display()
         ));
@@ -90,57 +101,120 @@ fn run_data_struct(name: String) {
     ui::br();
 }
 
-fn run_inertia_page(name: String) {
+fn run_inertia_page(name: &str, force: bool, test: bool) -> Result<(), String> {
     let _ = dotenvy::from_path(".env");
 
     let frontend = Frontend::detect_from_env();
     let ext = frontend.page_ext();
-    let page_name = to_page_name(&name);
-
+    let mut segments = generator::segments(name, false)?;
+    let last = segments.pop().unwrap_or_default();
+    let page_name = to_page_name(&last);
     if !is_valid_component_name(&page_name) {
-        ui::error(&format!("'{}' is not a valid page name", name));
-        std::process::exit(1);
+        return Err(format!("'{}' is not a valid page name", name));
     }
+    if let Some(bad) = segments.iter().find(|segment| !is_valid_directory(segment)) {
+        return Err(format!(
+            "'{bad}' is not a valid page directory (in '{name}'): use letters, digits, `_` \
+             and `-`, starting with a letter"
+        ));
+    }
+    let component = segments
+        .iter()
+        .map(String::as_str)
+        .chain([page_name.as_str()])
+        .collect::<Vec<_>>()
+        .join("/");
 
     let pages_dir = Path::new("frontend/src/pages");
-    let page_file = pages_dir.join(format!("{}.{}", page_name, ext));
-
     if !pages_dir.exists() {
-        ui::error("Pages directory not found at frontend/src/pages");
         ui::hint("Make sure you're in a Suprnova project root directory.");
-        std::process::exit(1);
+        return Err("Pages directory not found at frontend/src/pages".to_string());
+    }
+    let page_file = pages_dir.join(format!("{component}.{ext}"));
+    let stem = component
+        .split('/')
+        .map(snake_segment)
+        .collect::<Vec<_>>()
+        .join("_");
+    let test_file = PathBuf::from(format!("tests/{stem}.rs"));
+    if test && !Path::new("Cargo.toml").is_file() {
+        // Checked before anything is written: the test belongs to the
+        // package in the current directory.
+        return Err(
+            "--test needs a Cargo.toml in the current directory (run it from the project root)"
+                .to_string(),
+        );
     }
 
-    if page_file.exists() {
+    let mut owned = vec![&page_file];
+    if test {
+        owned.push(&test_file);
+    }
+    let existing: Vec<String> = owned
+        .iter()
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    if !existing.is_empty() && !force {
+        // Laravel's generators report an existing file and exit 0, as
+        // `live:make` and this command always have.
         ui::warning(&format!(
-            "Page '{}' already exists at {}",
-            page_name,
-            page_file.display()
+            "{} already exists; nothing was written (pass --force to overwrite)",
+            existing.join(" and ")
         ));
-        std::process::exit(0);
+        return Ok(());
     }
 
-    let page_content = templates::inertia_page_template(&page_name, frontend);
-
-    if let Err(e) = crate::secure_fs::write_generated(&page_file, page_content) {
-        ui::error(&format!("Failed to write page file: {}", e));
-        std::process::exit(1);
+    let mut files = WriteSet::default();
+    files.put(
+        page_file,
+        templates::inertia_page_template(&component, frontend),
+    )?;
+    if test {
+        files.put(
+            test_file,
+            templates::inertia_page_test_template(&component, &format!("{stem}_renders")),
+        )?;
     }
-    ui::success(&format!("Created {}", page_file.display()));
+    generator::report(&files.apply()?);
 
     ui::br();
     ui::info(&format!(
         "Page {} ({}) created",
-        style(&page_name).cyan().bold(),
+        style(&component).cyan().bold(),
         style(frontend.as_str()).dim(),
     ));
     ui::br();
     ui::hint("Use the page in a controller:");
     ui::command(&format!(
         "inertia_response!(&req, \"{}\", props)",
-        page_name
+        component
     ));
     ui::br();
+    Ok(())
+}
+
+/// A page directory segment: ASCII letters, digits, `_` and `-`, starting
+/// with a letter, so it is a path segment on every platform and in an
+/// Inertia component name.
+fn is_valid_directory(segment: &str) -> bool {
+    segment
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// A component path segment as part of a test file stem: `UsersPage`
+/// reads `users_page`, `user-admin` reads `user_admin`.
+fn snake_segment(segment: &str) -> String {
+    match Naming::parse(segment) {
+        Some(naming) => naming.snake,
+        // A Rust keyword is still a file stem.
+        None => to_snake_case(&segment.replace('-', "_")),
+    }
 }
 
 fn is_valid_component_name(name: &str) -> bool {

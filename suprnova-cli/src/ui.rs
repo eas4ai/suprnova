@@ -197,6 +197,10 @@ pub(crate) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("make:middleware <name>", "Scaffold a new middleware"),
             ("make:migration <name>", "Scaffold a new migration"),
             ("make:inertia <name>", "Scaffold an Inertia page"),
+            (
+                "make:view <name>",
+                "Scaffold a checked view and its template",
+            ),
             ("make:error <name>", "Scaffold a domain error"),
             ("make:task <name>", "Scaffold a scheduled task"),
             ("make:command <name>", "Scaffold a console command"),
