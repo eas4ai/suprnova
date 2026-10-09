@@ -573,6 +573,73 @@ async fn equality_shortcuts_and_bound_nulls_match_sql() {
     );
 }
 
+/// The falsifier: `db_where("a", 1)`, `filter("a", 1)` and `r#where("a", 1)`
+/// each compile to `a = ?` with the value bound, never written into the
+/// SQL, and a null value compiles to `IS NULL` with nothing bound.
+#[tokio::test]
+async fn db_where_filter_and_raw_where_compile_to_one_bound_equality() {
+    let _fx = seeded_sqlite().await;
+    for (name, query) in [
+        ("db_where", items().db_where("a", 1i64)),
+        ("filter", items().filter("a", 1i64)),
+        ("r#where", items().r#where("a", 1i64)),
+    ] {
+        let (sql, bindings) = query
+            .to_sql_for(DatabaseBackend::Sqlite)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sql, "SELECT * FROM \"pq_items\" WHERE \"a\" = ?", "{name}");
+        assert_eq!(bindings, vec![SeaValue::BigInt(Some(1))], "{name}");
+        let (sql, _) = query
+            .to_sql_for(DatabaseBackend::Postgres)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sql, "SELECT * FROM \"pq_items\" WHERE \"a\" = $1", "{name}");
+        assert_eq!(ids_matching(query, "a = 1").await, vec![1, 2, 3], "{name}");
+    }
+
+    // A text value is bound too, so a quote in it is data.
+    let (sql, bindings) = items()
+        .db_where("code", "ab-1' OR '1' = '1")
+        .to_sql_for(DatabaseBackend::Sqlite)
+        .expect("renders");
+    assert_eq!(sql, "SELECT * FROM \"pq_items\" WHERE \"code\" = ?");
+    assert!(
+        matches!(&bindings[..], [SeaValue::String(Some(code))] if code.as_str() == "ab-1' OR '1' = '1"),
+        "{bindings:?}"
+    );
+
+    for (name, query) in [
+        (
+            "db_where",
+            items().db_where("label", SeaValue::String(None)),
+        ),
+        ("filter", items().filter("label", SeaValue::String(None))),
+    ] {
+        let (sql, bindings) = query
+            .to_sql_for(DatabaseBackend::Sqlite)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            sql, "SELECT * FROM \"pq_items\" WHERE \"label\" IS NULL",
+            "{name}"
+        );
+        assert!(bindings.is_empty(), "{name}: {bindings:?}");
+        assert_eq!(
+            ids_matching(query, "label IS NULL").await,
+            vec![2, 4],
+            "{name}"
+        );
+    }
+
+    // A column name that is not an identifier fails before any SQL runs.
+    assert!(
+        items()
+            .db_where("a; DROP TABLE pq_items", 1i64)
+            .to_sql_for(DatabaseBackend::Sqlite)
+            .is_err()
+    );
+    assert!(items().filter("a = 1 OR 1", 1i64).get().await.is_err());
+    assert_eq!(items().count().await.expect("count"), 5, "nothing ran");
+}
+
 #[tokio::test]
 async fn every_or_helper_keeps_a_following_and_flat() {
     let _fx = seeded_sqlite().await;

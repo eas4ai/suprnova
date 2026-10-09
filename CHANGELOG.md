@@ -1641,6 +1641,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
   `<script data-page="app" type="application/json">`, failed with "no
   Inertia page object" (TS-01).
+- **An image wildcard leaves SVG out.** A `MimeType` allowlist entry such as
+  `image/*` admitted an SVG document, which is markup that can run script. A
+  `type/*` wildcard now admits every subtype of its type except
+  `image/svg+xml`, as Laravel's `image` rule leaves SVG out unless asked: an
+  SVG passes only when the allowlist names `image/svg+xml`. `text/*` and
+  `application/*` still admit every subtype.
 
 ### Fixed
 

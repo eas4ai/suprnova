@@ -2695,6 +2695,225 @@ async fn a_mime_type_wildcard_accepts_images_and_refuses_other_types() {
     }
 }
 
+// ── PAR-043: a wildcard admits every subtype but SVG ──
+
+/// SVG documents as editors and browsers write them, one carrying the
+/// script that makes an SVG upload dangerous to serve.
+const SVG_DOCUMENTS: [&[u8]; 4] = [
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>",
+    b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    b"\xEF\xBB\xBF\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \
+      \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg/>",
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+];
+
+#[derive(Default)]
+struct OnlySvg;
+impl suprnova::MimeAllowlist for OnlySvg {
+    fn allowed() -> &'static [&'static str] {
+        &["image/svg+xml"]
+    }
+}
+
+#[derive(Default)]
+struct AnyImageOrSvg;
+impl suprnova::MimeAllowlist for AnyImageOrSvg {
+    fn allowed() -> &'static [&'static str] {
+        &["image/*", "image/svg+xml"]
+    }
+}
+
+#[derive(Default)]
+struct AnyText;
+impl suprnova::MimeAllowlist for AnyText {
+    fn allowed() -> &'static [&'static str] {
+        &["text/*"]
+    }
+}
+
+#[derive(Default)]
+struct AnyApplication;
+impl suprnova::MimeAllowlist for AnyApplication {
+    fn allowed() -> &'static [&'static str] {
+        &["application/*"]
+    }
+}
+
+/// One optional file under each allowlist, so a test sends only the part
+/// it checks.
+#[derive(MultipartRequest)]
+struct MimeFamilies {
+    #[field("any_image")]
+    any_image: Option<UploadedFile<suprnova::MimeType<AnyImage>>>,
+    #[field("svg_only")]
+    svg_only: Option<UploadedFile<suprnova::MimeType<OnlySvg>>>,
+    #[field("image_or_svg")]
+    image_or_svg: Option<UploadedFile<suprnova::MimeType<AnyImageOrSvg>>>,
+    #[field("any_text")]
+    any_text: Option<UploadedFile<suprnova::MimeType<AnyText>>>,
+    #[field("any_application")]
+    any_application: Option<UploadedFile<suprnova::MimeType<AnyApplication>>>,
+}
+
+impl MimeFamilies {
+    /// Whether `field` holds the file it was sent.
+    fn holds(&self, field: &str) -> bool {
+        match field {
+            "any_image" => self.any_image.is_some(),
+            "svg_only" => self.svg_only.is_some(),
+            "image_or_svg" => self.image_or_svg.is_some(),
+            "any_text" => self.any_text.is_some(),
+            "any_application" => self.any_application.is_some(),
+            other => panic!("no field `{other}`"),
+        }
+    }
+}
+
+/// Send `content`, declared as `declared`, as the only part of `field`, and
+/// return the catalog key it was refused with, or `None` when the field took
+/// it.
+async fn mime_refusal(field: &str, declared: &str, content: &[u8]) -> Option<String> {
+    let req = crate::common::request_from_multipart(
+        BOUNDARY,
+        form(&[file_part(field, "upload.bin", declared, content)]).into(),
+    )
+    .await;
+    match MimeFamilies::from_request(req).await {
+        Ok(form) => {
+            assert!(form.holds(field), "`{field}` was left empty");
+            None
+        }
+        Err(FrameworkError::Validation(errors)) => {
+            assert_eq!(errors.errors.len(), 1, "{errors}");
+            Some(key(&errors, field))
+        }
+        Err(other) => panic!("`{field}`: expected a validation outcome, got {other:?}"),
+    }
+}
+
+async fn wildcard_image(req: Request) -> Response {
+    let form = WildcardImage::from_request(req).await?;
+    Ok(HttpResponse::json(json!({ "size": form.image.size })))
+}
+
+#[tokio::test]
+async fn an_image_wildcard_refuses_an_svg_document() {
+    let refused = Some("validation-mimetypes".to_string());
+    for svg in SVG_DOCUMENTS {
+        // Whatever the client declares, the content is an SVG document.
+        for declared in ["image/svg+xml", "image/png", "application/octet-stream"] {
+            assert_eq!(
+                mime_refusal("any_image", declared, svg).await,
+                refused,
+                "`image/*` admitted an SVG declared {declared}: {}",
+                String::from_utf8_lossy(svg)
+            );
+        }
+    }
+
+    // Through the whole request path: a 422 under the field's name, while
+    // the same wildcard still takes a PNG.
+    let app = App::new(Router::new().post("/wildcard", wildcard_image));
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/wildcard",
+            form(&[file_part(
+                "image",
+                "logo.svg",
+                "image/svg+xml",
+                SVG_DOCUMENTS[0],
+            )]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert!(errors(&reply).contains_key("image"), "{}", reply.text());
+
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/wildcard",
+            form(&[file_part("image", "logo.png", "image/png", &png())]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+}
+
+#[tokio::test]
+async fn an_svg_document_passes_only_where_image_svg_xml_is_named() {
+    for svg in SVG_DOCUMENTS {
+        for declared in ["image/svg+xml", "application/octet-stream"] {
+            assert_eq!(
+                mime_refusal("svg_only", declared, svg).await,
+                None,
+                "a named SVG type refused an SVG declared {declared}: {}",
+                String::from_utf8_lossy(svg)
+            );
+            assert_eq!(
+                mime_refusal("image_or_svg", declared, svg).await,
+                None,
+                "SVG named beside `image/*` refused an SVG declared {declared}: {}",
+                String::from_utf8_lossy(svg)
+            );
+        }
+    }
+    // Naming SVG beside the wildcard keeps the wildcard.
+    assert_eq!(
+        mime_refusal("image_or_svg", "image/png", &png()).await,
+        None
+    );
+
+    // Naming SVG admits SVG documents and nothing else.
+    let refused = Some("validation-mimetypes".to_string());
+    assert_eq!(mime_refusal("svg_only", "image/png", &png()).await, refused);
+    assert_eq!(
+        mime_refusal(
+            "svg_only",
+            "image/svg+xml",
+            b"fetch('/api/me').then(r => r.text())"
+        )
+        .await,
+        refused,
+        "script text that only declares SVG"
+    );
+    assert_eq!(
+        mime_refusal("image_or_svg", "application/pdf", &pdf()).await,
+        refused
+    );
+}
+
+#[tokio::test]
+async fn text_and_application_wildcards_still_admit_every_subtype() {
+    let csv = b"name,email\nann,ann@example.com\n";
+    assert_eq!(mime_refusal("any_text", "text/csv", csv).await, None);
+    assert_eq!(
+        mime_refusal("any_text", "text/plain", b"plain words, no markup").await,
+        None
+    );
+    assert_eq!(
+        mime_refusal("any_application", "application/pdf", &pdf()).await,
+        None
+    );
+    assert_eq!(
+        mime_refusal("any_application", "application/json", br#"{"a": 1}"#).await,
+        None
+    );
+
+    let refused = Some("validation-mimetypes".to_string());
+    assert_eq!(
+        mime_refusal("any_application", "application/octet-stream", &png()).await,
+        refused,
+        "a PNG is not in the application family"
+    );
+    assert_eq!(
+        mime_refusal("any_text", "text/plain", &pdf()).await,
+        refused,
+        "a PDF is not in the text family"
+    );
+}
+
 #[derive(serde::Deserialize, validator::Validate)]
 struct HookSignup {
     #[validate(email)]
