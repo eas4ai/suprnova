@@ -4191,10 +4191,11 @@ impl<M> Builder<M> {
     fn render_orders(
         &self,
         backend: DbBackend,
+        table: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
-        self.render_order_terms(&self.orders, backend, values, n)
+        self.render_order_terms(&self.orders, backend, table, values, n)
     }
 
     /// Render `orders` as an ORDER BY list, the shared body of
@@ -4204,6 +4205,7 @@ impl<M> Builder<M> {
         &self,
         orders: &[OrderTerm],
         backend: DbBackend,
+        table: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4216,7 +4218,9 @@ impl<M> Builder<M> {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
-                OrderTerm::Random(seed) => random_order(backend, *seed),
+                OrderTerm::Random(seed) => {
+                    random_order(backend, *seed, &self.own_table(backend, table))
+                }
                 OrderTerm::BoundRaw(sql, bindings) => {
                     let sql = rewrite_raw_placeholders(backend, sql, bindings, *n)?;
                     *n += bindings.len();
@@ -4494,14 +4498,14 @@ impl<M> Builder<M> {
         }
         let mut sql = this.render_select_core(backend, table, column_expr, values, n)?;
         if this.unions.is_empty() {
-            sql.push_str(&this.render_orders(backend, values, n)?);
+            sql.push_str(&this.render_orders(backend, table, values, n)?);
             sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
             return Ok(sql);
         }
 
         let head = &this.union_head;
         if head.is_bounded() {
-            sql.push_str(&this.render_order_terms(&head.orders, backend, values, n)?);
+            sql.push_str(&this.render_order_terms(&head.orders, backend, table, values, n)?);
             sql.push_str(&render_limit_offset(backend, head.limit, head.offset));
             sql = format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}");
         }
@@ -4538,7 +4542,7 @@ impl<M> Builder<M> {
             whole.push_str(" WHERE ");
             whole.push_str(&parts.join(" AND "));
         }
-        whole.push_str(&this.render_orders(backend, values, n)?);
+        whole.push_str(&this.render_orders(backend, table, values, n)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
     }
@@ -4564,7 +4568,7 @@ impl<M> Builder<M> {
             .checked_add(limit)
             .ok_or_else(|| FrameworkError::param("per-parent limit and offset overflow"))?;
         // Window order binds precede the FROM and WHERE binds in the statement.
-        let orders = self.render_orders(backend, values, n)?;
+        let orders = self.render_orders(backend, table, values, n)?;
         let mut inner = self.clone();
         inner.eager_partition = None;
         inner.limit = None;

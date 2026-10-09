@@ -391,8 +391,9 @@ shuffled list, you call `in_random_order_seeded(seed)` instead. On
 MySQL, you get `RAND(seed)`. On Postgres, you set the connection seed in
 the same statement before ordering by `random()`. Repeating the seed on
 the same rows and connection repeats the order on those engines. On
-SQLite, you can pass the seed, but `RANDOM()` has no seed support and
-your order remains random. You still receive each matching row once.
+SQLite, `RANDOM()` cannot be seeded, so the engine orders by an expression
+derived from the seed and each row's `rowid`. The same seed repeats the
+order on the same rows. You still receive each matching row once.
 
 ```rust
 let sample = DB::table("posts").in_random_order().limit(5).get().await?;
