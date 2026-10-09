@@ -1045,6 +1045,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Guest and user throttle limits.** `throttle:10|60,1` allows a guest 10
   requests a minute and a signed-in user 60, as Laravel's `throttle` reads
   its first argument.
+- **Throttle counts that stop at the limit.** The throttle middleware checks
+  every limit before it counts a request, then counts each bucket with one
+  conditional increment that leaves a full bucket's count where it was, so a
+  request refused at either step is not counted in the bucket that refused
+  it, and a concurrent burst admits at most the limit. Limits whose keys
+  collide count under the keys the limiter returns, so two limits on one key
+  share one bucket, the bucket `RateLimiter::attempts` reads.
+- **Conditional increments.** `CacheStore::increment_if_below` and
+  `Cache::increment_if_below` add to a counter only while it is below a
+  ceiling and answer `ConditionalIncrement::Incremented` with the new value
+  or `ConditionalIncrement::Unchanged` with the value as it stands. The
+  in-memory and Redis stores compare and write in one atomic step; a custom
+  store gets a default that reads and then increments.
+  `RateLimiter::increment_if_below` does the same for a rate-limiter bucket
+  and opens its window as `increment` does.
 - **Named hasher drivers.** `hashing::extend` registers a driver under a name
   and `HASH_DRIVER` selects it, as Laravel's `Hash::extend` does; it refuses a
   built-in algorithm's name, a name registered before, and a registration

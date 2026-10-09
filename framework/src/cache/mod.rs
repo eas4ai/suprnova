@@ -45,7 +45,7 @@ pub mod store;
 pub use config::{CacheConfig, CacheConfigBuilder, CacheDriver};
 pub use memory::InMemoryCache;
 pub use redis::RedisCache;
-pub use store::CacheStore;
+pub use store::{CacheStore, ConditionalIncrement};
 
 use crate::config::Config;
 use crate::container::App;
@@ -447,6 +447,40 @@ impl Cache {
     pub async fn increment(key: &str, amount: i64) -> Result<i64, FrameworkError> {
         let store = Self::store()?;
         store.increment(key, amount).await
+    }
+
+    /// Add `amount` to a numeric value only while it is below `ceiling`.
+    ///
+    /// A missing or expired key reads as 0. Answers
+    /// [`ConditionalIncrement::Incremented`] with the new value when the
+    /// value was below `ceiling`, and [`ConditionalIncrement::Unchanged`]
+    /// with the value as it stands otherwise. It is the step a counter needs
+    /// to refuse a caller without counting the caller: both built-in stores
+    /// compare and write in one atomic step, so concurrent callers never
+    /// take the value past `ceiling` with steps of 1. A custom
+    /// [`CacheStore`] that does not override
+    /// [`CacheStore::increment_if_below`] reads and then increments, which
+    /// is not atomic.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::cache::ConditionalIncrement;
+    /// # use suprnova::Cache;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// match Cache::increment_if_below("seats:taken", 1, 100).await? {
+    ///     ConditionalIncrement::Incremented(taken) => println!("seat {taken} is yours"),
+    ///     ConditionalIncrement::Unchanged(_) => println!("sold out"),
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn increment_if_below(
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        let store = Self::store()?;
+        store.increment_if_below(key, amount, ceiling).await
     }
 
     /// Decrement a numeric value

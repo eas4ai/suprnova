@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use suprnova::cache::{CacheStore, InMemoryCache};
+use suprnova::cache::{CacheStore, ConditionalIncrement, InMemoryCache};
 use suprnova::container::testing::TestContainer;
 use suprnova::http::{HttpResponse, text};
 use suprnova::rate_limit::{Limit, LimitResult};
@@ -603,6 +603,19 @@ impl WindowsEndOnCue {
     fn race_next_count(&self, key: &str) {
         *self.racing.lock().expect("racing key") = Some(key.to_owned());
     }
+
+    /// Take the place [`Self::race_next_count`] promised another request,
+    /// if it was promised in `key`'s bucket.
+    async fn run_race(&self, key: &str) -> Result<(), FrameworkError> {
+        let raced = {
+            let mut racing = self.racing.lock().expect("racing key");
+            racing.take_if(|racing| racing.as_str() == key).is_some()
+        };
+        if raced {
+            self.inner.increment(key, 1).await?;
+        }
+        Ok(())
+    }
 }
 
 #[suprnova::async_trait]
@@ -636,14 +649,17 @@ impl CacheStore for WindowsEndOnCue {
         self.inner.flush().await
     }
     async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-        let raced = {
-            let mut racing = self.racing.lock().expect("racing key");
-            racing.take_if(|racing| racing.as_str() == key).is_some()
-        };
-        if raced {
-            self.inner.increment(key, 1).await?;
-        }
+        self.run_race(key).await?;
         self.inner.increment(key, amount).await
+    }
+    async fn increment_if_below(
+        &self,
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        self.run_race(key).await?;
+        self.inner.increment_if_below(key, amount, ceiling).await
     }
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
         self.held_decrements
@@ -764,6 +780,12 @@ async fn a_request_that_loses_the_last_place_leaves_the_next_window_admitting_th
         "another request takes the last place before this one counts, and the \
          bucket stays full for the rest of the window"
     );
+    assert_eq!(
+        RateLimiter::attempts("cue:race").await.expect("attempts"),
+        2,
+        "the request that lost the last place is not counted, so the bucket \
+         holds the limit and no more"
+    );
     store.end_window("cue:race").await;
     store.run_held_decrements().await;
 
@@ -771,6 +793,48 @@ async fn a_request_that_loses_the_last_place_leaves_the_next_window_admitting_th
         statuses(&router, 3).await,
         [200, 200, 429],
         "the next window admits exactly the limit of 2"
+    );
+}
+
+#[tokio::test]
+async fn a_later_bucket_that_fills_before_its_count_refuses_and_the_earlier_keeps_its_count() {
+    let _guard = TestContainer::fake();
+    let store = Arc::new(WindowsEndOnCue::default());
+    TestContainer::bind::<dyn CacheStore>(store.clone());
+    let router: Arc<Router> = Arc::new(
+        Router::new()
+            .get("/cue", |_request| async { text("ok") })
+            .middleware(ThrottleRequestsMiddleware::with_limits(vec![
+                Limit::per_minute(2).by("cue:first"),
+                Limit::per_minute(3).by("cue:second"),
+            ]))
+            .into(),
+    );
+
+    assert_eq!(statuses(&router, 1).await, [200]);
+    RateLimiter::hit("cue:second", 60).await.expect("hit");
+    // Each bucket has one place left at the check, so the first is counted
+    // first, and another request takes the second's last place before the
+    // second is counted.
+    store.race_next_count("cue:second");
+    let refused = send(&router, "/cue", None, None).await;
+
+    assert_eq!(refused.status, 429);
+    assert_eq!(
+        refused.limits,
+        ["3"],
+        "the second limit refuses the request"
+    );
+    assert_eq!(
+        RateLimiter::attempts("cue:second").await.expect("attempts"),
+        3,
+        "the bucket that refused the request holds the limit and no count of it"
+    );
+    assert_eq!(
+        RateLimiter::attempts("cue:first").await.expect("attempts"),
+        2,
+        "the bucket counted first keeps the request's count, as Laravel counts \
+         every limit of a request that passes its check"
     );
 }
 

@@ -35,16 +35,18 @@
 //!
 //! The middleware checks every limit before it counts a request, as
 //! Laravel does, so a request refused there leaves every count where it
-//! was. The admission itself stays on the atomic post-increment count (see
-//! [`RateLimiter::hit_and_check`]), and the middleware never takes a count
-//! back, so no window admits more requests than its limit (see
-//! `count_request` for why there is no give-back).
+//! was. It then counts each bucket with one conditional increment (see
+//! [`RateLimiter::increment_if_below`]), which refuses without counting when
+//! the bucket is full, so no window admits more requests than its limit and
+//! a refused request is never counted in the bucket that refused it (see
+//! `count_request`).
 
 use async_trait::async_trait;
 
 use crate::Middleware;
 use crate::Next;
 use crate::Request;
+use crate::cache::ConditionalIncrement;
 use crate::http::{HttpResponse, Response};
 
 use super::laravel::{NamedLimiterFn, RateLimiter, give_shared_keys_fallback_keys};
@@ -480,35 +482,34 @@ async fn holds_limit(
 /// Count the request in each of its buckets, and answer the limit that
 /// refuses it and that limit's key, if one does.
 ///
-/// Each bucket takes one atomic increment, by the number of limits counted
-/// in it, as Laravel hits a key once for each limit. The request is
-/// admitted only when the first of the counts it got in a bucket is within
-/// every limit counted there, which is Laravel's check-before-hit decided
-/// on the atomic post-increment count.
+/// Each bucket takes one conditional increment, by the number of limits
+/// counted in it, as Laravel hits a key once for each limit. The ceiling is
+/// the smallest limit counted there, so the step counts the request only
+/// while the bucket holds fewer counts than every one of those limits,
+/// which is Laravel's check decided in the same atomic step as the count.
+/// When the bucket is full, the step changes nothing and the first counted
+/// limit at that ceiling refuses the request.
 ///
-/// # Why a count is never taken back
+/// # Why the count step refuses without counting
 ///
-/// A decrement that gives a refused request's count back carries no mark of
-/// the window it came from, and the cache store has no step that decrements
-/// a count only while a given window lasts. If the window ended between the
-/// count and the give-back, the decrement would land in the next window, as
-/// `-1` on a new counter or as one count off requests that window already
-/// admitted, and that window would admit one request more than its limit.
-/// So the middleware takes nothing back, and that is why it cannot
-/// over-admit: an increment hands each request in a window its own counts,
-/// counts in a window only grow, and a request is admitted only on a count
-/// within the limit, so no more requests than the limit get one, however
-/// late any step of a refused request runs.
+/// A request can pass the check beside concurrent requests and find the
+/// bucket full when it counts. Counting it and then giving the count back
+/// does not work: a decrement carries no mark of the window it came from,
+/// so if the window ended between the count and the give-back, the
+/// decrement would land in the next window and let it admit one request
+/// more than its limit. A plain increment kept without a give-back never
+/// over-admits, but leaves the bucket one count higher than the requests it
+/// admitted. The conditional increment does neither: the refusing bucket's
+/// count stays where it was, and a request is counted in a bucket only
+/// while that bucket has room, so no bucket admits more requests than its
+/// limit.
 ///
-/// A request refused at the check was never counted. The one refused
-/// request that keeps a count is one that passed the check beside
-/// concurrent requests and found the bucket full when it counted. The
-/// bucket that refused it already holds its limit, so that count admits or
-/// refuses nothing else in the window, and it ends with the window. A
-/// bucket of that request counted before the one that refused it keeps a
-/// count too, which can refuse a request early but never admits one; the
-/// buckets are counted fewest places left first, so the bucket that runs
-/// out is usually counted first.
+/// The buckets are counted fewest places left first, so the bucket that
+/// runs out is usually the one counted first. A bucket counted earlier in
+/// the same request keeps its count when a later bucket refuses: the
+/// request passed the check, and Laravel's `ThrottleRequests` counts every
+/// limit of a request that passes its check. That count can refuse a
+/// request early but never admits one.
 async fn count_request<'b>(
     limits: &'b [Limit],
     buckets: &Buckets<'b>,
@@ -520,24 +521,25 @@ async fn count_request<'b>(
         .collect();
     order.sort_by_key(|bucket| places_left(bucket, limits));
     for bucket in order {
-        let Some(decay_seconds) = bucket
-            .counted
-            .first()
-            .and_then(|index| limits.get(*index))
-            .map(Limit::decay_seconds)
-        else {
+        let counted = || bucket.counted.iter().filter_map(|index| limits.get(*index));
+        // The first counted limit sets the window, and the first one with
+        // the fewest attempts sets the ceiling and refuses at it.
+        let (Some(first), Some(tightest)) = (
+            counted().next(),
+            counted().min_by_key(|limit| limit.max_attempts),
+        ) else {
             continue;
         };
         let hits = i64::try_from(bucket.counted.len()).unwrap_or(i64::MAX);
-        let total = RateLimiter::increment(bucket.key, decay_seconds, hits).await?;
-        let first = total.saturating_sub(hits).saturating_add(1);
-        let refusing = bucket
-            .counted
-            .iter()
-            .filter_map(|index| limits.get(*index))
-            .find(|limit| first > limit.max_attempts);
-        if let Some(limit) = refusing {
-            return Ok(Some((limit, bucket.key)));
+        let step = RateLimiter::increment_if_below(
+            bucket.key,
+            first.decay_seconds(),
+            hits,
+            tightest.max_attempts,
+        )
+        .await?;
+        if let ConditionalIncrement::Unchanged(_) = step {
+            return Ok(Some((tightest, bucket.key)));
         }
     }
     Ok(None)

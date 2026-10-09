@@ -151,7 +151,9 @@ pub use authorization::{Authorizable, Gate, GateEvaluated};
 // authorization decision type is exported here under an unambiguous alias.
 // Its Laravel-spelled home is `suprnova::authorization::Response`.
 pub use authorization::Response as GateResponse;
-pub use cache::{Cache, CacheConfig, CacheStore, InMemoryCache, LockGuard, RedisCache};
+pub use cache::{
+    Cache, CacheConfig, CacheStore, ConditionalIncrement, InMemoryCache, LockGuard, RedisCache,
+};
 pub use config::{
     AppConfig, AppConfigBuilder, Config, Environment, ServerConfig, ServerConfigBuilder, env,
     env_optional, env_required, try_env_required,

@@ -17,7 +17,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use suprnova::cache::store::CacheStore;
-use suprnova::cache::{CacheConfig, RedisCache};
+use suprnova::cache::{CacheConfig, ConditionalIncrement, RedisCache};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 fn redis_url() -> String {
@@ -837,4 +837,128 @@ async fn redis_tag_index_drops_members_that_can_no_longer_be_reached() {
 
     s.flush_tags(&["b"]).await.unwrap();
     assert!(!s.has("live").await.unwrap());
+}
+
+/// `increment_if_below` is one `EVAL`, so a concurrent burst against one
+/// key adds exactly up to the ceiling and no further.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_increment_if_below_admits_a_concurrent_burst_exactly_up_to_the_ceiling() {
+    let s = fresh_store("increment-if-below-burst").await;
+    let start = Arc::new(tokio::sync::Barrier::new(256));
+    let tasks: Vec<_> = (0..256)
+        .map(|_| {
+            let s = Arc::clone(&s);
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                s.increment_if_below("burst", 1, 50).await
+            })
+        })
+        .collect();
+
+    let mut incremented = Vec::new();
+    let mut unchanged = Vec::new();
+    for task in tasks {
+        match task.await.expect("the task ran").expect("the step ran") {
+            ConditionalIncrement::Incremented(value) => incremented.push(value),
+            ConditionalIncrement::Unchanged(value) => unchanged.push(value),
+        }
+    }
+    let stored = s.get_raw("burst").await.unwrap();
+    s.forget("burst").await.unwrap();
+
+    incremented.sort_unstable();
+    assert_eq!(
+        incremented,
+        (1..=50).collect::<Vec<i64>>(),
+        "each of the 50 places went to one caller"
+    );
+    assert_eq!(unchanged.len(), 206);
+    assert!(
+        unchanged.iter().all(|value| *value == 50),
+        "every refused caller read the full count: {unchanged:?}"
+    );
+    assert_eq!(stored.as_deref(), Some("50"));
+}
+
+/// The script compares the stored count with the ceiling as integers, keeps
+/// the key's TTL, and refuses a value `INCRBY` would refuse without changing
+/// it.
+#[tokio::test]
+#[ignore = "requires Redis at CACHE_REDIS_TEST_URL or default localhost"]
+async fn redis_increment_if_below_compares_exactly_and_leaves_a_refused_value_alone() {
+    let prefix = format!("increment-if-below{}:", uuid::Uuid::new_v4().simple());
+    let s = store_at(&redis_url(), prefix.clone()).await;
+    let mut raw = raw_connection().await;
+    let keys = ["fresh", "edge", "negative", "text", "padded"];
+
+    assert_eq!(
+        s.increment_if_below("fresh", 1, 1).await.unwrap(),
+        ConditionalIncrement::Incremented(1),
+        "a missing key reads as 0"
+    );
+    assert_eq!(
+        s.increment_if_below("fresh", 1, 1).await.unwrap(),
+        ConditionalIncrement::Unchanged(1)
+    );
+
+    // At the edge of i64, where a Lua number rounds both sides to 2^63.
+    s.put_raw(
+        "edge",
+        &(i64::MAX - 1).to_string(),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .unwrap();
+    let overflow = s.increment_if_below("edge", 2, i64::MAX).await;
+    assert!(
+        overflow
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("increment")),
+        "an unrepresentable step must fail: {overflow:?}"
+    );
+    assert_eq!(
+        s.increment_if_below("edge", 1, i64::MAX).await.unwrap(),
+        ConditionalIncrement::Incremented(i64::MAX)
+    );
+    assert_eq!(
+        s.increment_if_below("edge", 1, i64::MAX).await.unwrap(),
+        ConditionalIncrement::Unchanged(i64::MAX)
+    );
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{prefix}edge"))
+        .query_async(&mut raw)
+        .await
+        .unwrap();
+    assert!(ttl > 0, "the counter keeps its TTL, got {ttl}");
+
+    // Negative counts compare by value, not by spelling.
+    s.put_raw("negative", "-10", None).await.unwrap();
+    assert_eq!(
+        s.increment_if_below("negative", 3, -5).await.unwrap(),
+        ConditionalIncrement::Incremented(-7)
+    );
+    assert_eq!(
+        s.increment_if_below("negative", 3, -9).await.unwrap(),
+        ConditionalIncrement::Unchanged(-7)
+    );
+
+    for (key, value) in [("text", "not-an-integer"), ("padded", "01")] {
+        s.put_raw(key, value, None).await.unwrap();
+        for ceiling in [i64::MIN, i64::MAX] {
+            let refused = s.increment_if_below(key, 1, ceiling).await;
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("increment")),
+                "{value:?} is no counter: {refused:?}"
+            );
+            assert_eq!(s.get_raw(key).await.unwrap().as_deref(), Some(value));
+        }
+    }
+
+    for key in keys {
+        s.forget(key).await.unwrap();
+    }
 }

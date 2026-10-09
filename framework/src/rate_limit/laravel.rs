@@ -39,9 +39,11 @@
 //! brute-force window. The atomic alternative is
 //! [`hit_and_check`](RateLimiter::hit_and_check) - it increments first and
 //! decides on the returned count, so the decision and the write are a single
-//! step with no gap. The HTTP middleware decides the same way, on the count
-//! [`increment`](RateLimiter::increment) returns; prefer it over the
-//! read-gate-then-`hit` pair anywhere correctness under concurrency matters.
+//! step with no gap; prefer it over the read-gate-then-`hit` pair anywhere
+//! correctness under concurrency matters. The HTTP middleware decides in one
+//! step too, with [`increment_if_below`](RateLimiter::increment_if_below),
+//! which counts a request only while the bucket has room, so a request it
+//! refuses is never counted.
 //!
 //! ## Multi-process correctness needs Redis
 //!
@@ -57,7 +59,7 @@
 //! both surfaces.)
 
 use crate::Request;
-use crate::cache::Cache;
+use crate::cache::{Cache, ConditionalIncrement};
 use crate::container::App;
 use crate::error::FrameworkError;
 use std::collections::HashMap;
@@ -416,20 +418,52 @@ impl RateLimiter {
             forget_windowless_counter(&key, new_value, Some(amount)).await?;
             return Ok(new_value);
         }
-        let timer_key = format!("{key}{TIMER_SUFFIX}");
-        let decay = Duration::from_secs(decay_seconds);
-        let available_at = unix_now_secs() + decay_seconds as i64;
-        // Anchor the window deadline. `Cache::add` is no-op when the
-        // key already exists, so a mid-window hit cannot shift the
-        // window forward.
-        Cache::add(&timer_key, &available_at, Some(decay)).await?;
-        // Seed the counter at zero on first hit so `increment` has
-        // something to bump. Mirrors Laravel's `add($key, 0, $decay)`
-        // before the increment call.
-        let seeded = Cache::add(&key, &0_i64, Some(decay)).await?;
+        let (seeded, decay) = open_window(&key, decay_seconds).await?;
         let new_value = Cache::increment(&key, amount).await?;
         restore_counter_ttl(&key, seeded, new_value, Some(amount), decay).await?;
         Ok(new_value)
+    }
+
+    /// Increment the counter by `amount` only while it holds fewer than
+    /// `ceiling` counts, as one atomic step, and seed the `:timer` if
+    /// missing. Answers [`ConditionalIncrement::Incremented`] with the new
+    /// count, or [`ConditionalIncrement::Unchanged`] with the count as it
+    /// stands when the bucket was already full.
+    ///
+    /// It exists so the throttle middleware can refuse a request without
+    /// counting it. Counting with [`increment`](Self::increment) and then
+    /// refusing leaves the refused request in the count, and a
+    /// [`decrement`](Self::decrement) that gives it back can land in the
+    /// next window and let that window admit more than its limit. Here the
+    /// cache store compares and counts in one step, atomically on both
+    /// built-in stores (see [`Cache::increment_if_below`]), so a full
+    /// bucket's count stays where it was, and concurrent callers stepping by
+    /// 1 never take the count past `ceiling`.
+    ///
+    /// The window opens as it does for [`increment`](Self::increment): the
+    /// `:timer` deadline and the zero counter are seeded with `Cache::add`,
+    /// a `decay_seconds` of zero opens no window, and a counter that expired
+    /// between the seed and the step gets its time to live back.
+    pub async fn increment_if_below(
+        key: &str,
+        decay_seconds: u64,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        let key = Self::clean_rate_limiter_key(key);
+        if decay_seconds == 0 {
+            let step = Cache::increment_if_below(&key, amount, ceiling).await?;
+            if let ConditionalIncrement::Incremented(new_value) = step {
+                forget_windowless_counter(&key, new_value, Some(amount)).await?;
+            }
+            return Ok(step);
+        }
+        let (seeded, decay) = open_window(&key, decay_seconds).await?;
+        let step = Cache::increment_if_below(&key, amount, ceiling).await?;
+        if let ConditionalIncrement::Incremented(new_value) = step {
+            restore_counter_ttl(&key, seeded, new_value, Some(amount), decay).await?;
+        }
+        Ok(step)
     }
 
     /// Decrement the counter by `amount`. Mirrors
@@ -448,11 +482,7 @@ impl RateLimiter {
             forget_windowless_counter(&key, new_value, amount.checked_neg()).await?;
             return Ok(new_value);
         }
-        let timer_key = format!("{key}{TIMER_SUFFIX}");
-        let decay = Duration::from_secs(decay_seconds);
-        let available_at = unix_now_secs() + decay_seconds as i64;
-        Cache::add(&timer_key, &available_at, Some(decay)).await?;
-        let seeded = Cache::add(&key, &0_i64, Some(decay)).await?;
+        let (seeded, decay) = open_window(&key, decay_seconds).await?;
         let new_value = Cache::decrement(&key, amount).await?;
         restore_counter_ttl(&key, seeded, new_value, amount.checked_neg(), decay).await?;
         Ok(new_value)
@@ -544,6 +574,23 @@ impl RateLimiter {
         let _ = App::resolve_make::<dyn crate::cache::CacheStore>();
         Cache::is_initialized()
     }
+}
+
+/// Open the window of the cleaned `key` for a step with a decay of
+/// `decay_seconds`, which is not zero, and answer whether this call seeded
+/// the counter, with the window's length.
+///
+/// The `:timer` deadline is anchored with `Cache::add`, a no-op when the key
+/// already exists, so a mid-window hit cannot shift the window forward. The
+/// counter is seeded at zero the same way, so the step has something to
+/// bump; it mirrors Laravel's `add($key, 0, $decay)` before its increment.
+async fn open_window(key: &str, decay_seconds: u64) -> Result<(bool, Duration), FrameworkError> {
+    let timer_key = format!("{key}{TIMER_SUFFIX}");
+    let decay = Duration::from_secs(decay_seconds);
+    let available_at = unix_now_secs() + decay_seconds as i64;
+    Cache::add(&timer_key, &available_at, Some(decay)).await?;
+    let seeded = Cache::add(key, &0_i64, Some(decay)).await?;
+    Ok((seeded, decay))
 }
 
 /// Give a counter its window TTL back when it expired between the `add`
