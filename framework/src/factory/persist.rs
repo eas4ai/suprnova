@@ -36,6 +36,7 @@
 //! integration tests that want to verify against a specific
 //! `sqlite::memory:` handle, for instance.
 
+use crate::eloquent::Attrs;
 use crate::error::FrameworkError;
 use async_trait::async_trait;
 use sea_orm::{
@@ -43,6 +44,7 @@ use sea_orm::{
     PrimaryKeyToColumn,
 };
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 /// A model that can persist itself. The async method consumes `self`
@@ -68,6 +70,11 @@ pub trait Persistable: Sized + Send {
     /// overrides it with the unfiltered attributes, because that model's
     /// `Serialize` honours its hidden and visible lists.
     ///
+    /// The default [`Persistable::with_definition_attributes`] merges over
+    /// this map. A `#[suprnova::model]` overrides that method and assigns
+    /// fields directly, because a field it skips on output is missing
+    /// from this map too.
+    ///
     /// The `Self: Serialize` bound sits on the method, not the trait, so
     /// a custom `Persistable` that is not serializable still compiles; it
     /// only cannot take attribute sets in `create_many`.
@@ -84,6 +91,40 @@ pub trait Persistable: Sized + Send {
                 "factory attributes require an object model",
             )),
         }
+    }
+
+    /// Applies one of `create_many`'s per-record attribute sets to a model
+    /// the factory definition and its `with` overrides built. Each name is
+    /// a serialized field name. A field the set does not name keeps its
+    /// built value. A name that matches no field, or a value that does not
+    /// fit its field, is an error, so `create_many` inserts no row.
+    ///
+    /// The default serializes the model through
+    /// [`Persistable::definition_fields`], merges the set over that map and
+    /// deserializes the result, which round-trips every column of a plain
+    /// SeaORM model. That round trip drops a field the model skips on
+    /// output, so the `#[suprnova::model]` macro overrides this method: it
+    /// deserializes each value into its own field and assigns it, and
+    /// leaves every other field untouched. A custom `Persistable` with the
+    /// same kind of field should override it the same way.
+    ///
+    /// The `Self: Serialize + DeserializeOwned` bound sits on the method for
+    /// the same reason as on [`Persistable::definition_fields`].
+    fn with_definition_attributes(self, attributes: Attrs) -> Result<Self, FrameworkError>
+    where
+        Self: Serialize + DeserializeOwned,
+    {
+        let mut fields = self.definition_fields()?;
+        for (name, value) in attributes.0 {
+            if !fields.contains_key(&name) {
+                return Err(FrameworkError::bad_request(format!(
+                    "factory attribute `{name}` is not a serialized model field"
+                )));
+            }
+            fields.insert(name, value);
+        }
+        serde_json::from_value(Value::Object(fields))
+            .map_err(|error| FrameworkError::bad_request(format!("factory attributes: {error}")))
     }
 }
 
