@@ -100,16 +100,3 @@ async fn send_request(
     let collected = body.collect().await.expect("collect body bytes").to_bytes();
     (parts.status, parts.headers, collected)
 }
-
-/// HEAD against a GET-only route succeeds (RFC 9110 §9.3.2 fallback)
-/// and returns the GET status with the body stripped to zero bytes.
-///
-/// Also pins the wire-level Content-Length behavior. Per RFC 9110
-/// §9.3.2 a HEAD response SHOULD carry the Content-Length the GET
-/// would have set; our `strip_body_for_head` helper preserves
-/// `parts.headers` but swaps the body for `Full::new(Bytes::new())`
-/// whose `size_hint().exact()` is `Some(0)`. Whether hyper writes
-/// the preserved header or recomputes from the empty body's
-/// size_hint is its wire-encoding decision. This assertion pins
-/// whichever value hyper actually emits so a future hyper bump
-/// that changes the behavior surfaces here.
