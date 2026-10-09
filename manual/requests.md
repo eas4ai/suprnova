@@ -1,0 +1,1389 @@
+# Requests
+
+Suprnova handlers receive a `Request` - the wire-level HTTP request - or
+a typed form-request struct that parses, validates, and authorizes the
+body before your code runs. Both paths live on the same `#[handler]`
+macro; you pick the shape per route. This chapter covers both, plus the
+multipart upload extractor and the raw accessors you reach for in
+middleware.
+
+## Typed form requests
+
+The `#[request]` attribute marks a struct as a `FormRequest`. The macro
+adds `serde::Deserialize` and `validator::Validate` derives and emits an
+`impl FormRequest` so the `#[handler]` macro knows to extract and
+validate it on the way in:
+
+```rust
+use suprnova::request;
+
+#[request]
+pub struct CreateUserRequest {
+    #[validate(email(message = "Please provide a valid email address"))]
+    pub email: String,
+
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
+    pub password: String,
+
+    #[validate(length(min = 1, max = 100, message = "Name is required"))]
+    pub name: String,
+}
+```
+
+A handler that names this type as its parameter is handed an
+already-validated value:
+
+```rust
+use suprnova::{handler, json_response, Response};
+use crate::requests::CreateUserRequest;
+
+#[handler]
+pub async fn store(form: CreateUserRequest) -> Response {
+    // `form` is validated - this code only runs if every rule passed.
+    json_response!({ "email": form.email, "name": form.name })
+}
+```
+
+A handler that names `Request` instead gets the raw request through
+unchanged:
+
+```rust
+use suprnova::{handler, json_response, Request, Response};
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    json_response!({ "path": req.path() })
+}
+```
+
+Both are extractors - the `#[handler]` macro looks up
+`FromRequest::from_request` for every parameter type, and any struct
+that implements `FormRequest` gets a blanket `FromRequest` impl for
+free.
+
+## Validation rules
+
+Validation runs through the `validator` crate. Common rules:
+
+### String validations
+
+```rust
+#[request]
+pub struct ExampleRequest {
+    // Required (non-empty)
+    #[validate(length(min = 1, message = "This field is required"))]
+    pub name: String,
+
+    // Email format
+    #[validate(email(message = "Invalid email address"))]
+    pub email: String,
+
+    // URL format
+    #[validate(url(message = "Invalid URL"))]
+    pub website: String,
+
+    // Length constraints
+    #[validate(length(min = 8, max = 100))]
+    pub password: String,
+
+    // Regex pattern - PHONE_REGEX must be a `static` or `const`
+    // visible from the validator's expansion point. Declare it once,
+    // typically in the same module:
+    #[validate(regex(path = "PHONE_REGEX", message = "Invalid phone number"))]
+    pub phone: String,
+}
+
+use std::sync::LazyLock;
+use regex::Regex;
+
+// validator 0.20 implements `AsRegex` for `std::sync::LazyLock<Regex>`
+// but not for `once_cell::sync::Lazy<Regex>` - use the std type so the
+// derive's `#[validate(regex(path = "..."))]` expansion typechecks.
+static PHONE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\+?[0-9\s\-()]{7,20}$").unwrap());
+```
+
+### Numeric validations
+
+```rust
+#[request]
+pub struct ProductRequest {
+    // Range validation - literals must match the field type. `f64`
+    // takes `0.0` / `10000.0`, not the integer-literal `0` / `10000`.
+    #[validate(range(min = 0.0, max = 10000.0, message = "Price must be between 0 and 10000"))]
+    pub price: f64,
+
+    // Minimum value
+    #[validate(range(min = 1))]
+    pub quantity: i32,
+
+    // Maximum value
+    #[validate(range(max = 100))]
+    pub discount_percent: i32,
+}
+```
+
+### Nested and collection validations
+
+```rust
+use serde::Deserialize;
+
+#[derive(Deserialize, Validate)]
+pub struct Address {
+    #[validate(length(min = 1))]
+    pub street: String,
+
+    #[validate(length(min = 1))]
+    pub city: String,
+}
+
+#[request]
+pub struct OrderRequest {
+    // Nested struct validation
+    #[validate(nested)]
+    pub shipping_address: Address,
+
+    // Collection length
+    #[validate(length(min = 1, message = "At least one item required"))]
+    pub items: Vec<String>,
+}
+```
+
+### Common validation attributes
+
+| Attribute | Description | Example |
+|-----------|-------------|---------|
+| `email` | Valid email format | `#[validate(email)]` |
+| `url` | Valid URL format | `#[validate(url)]` |
+| `length` | String/collection length | `#[validate(length(min = 1, max = 100))]` |
+| `range` | Numeric range | `#[validate(range(min = 0, max = 100))]` |
+| `regex` | Regex pattern match | `#[validate(regex(path = "PATTERN"))]` |
+| `contains` | String contains substring | `#[validate(contains(pattern = "@"))]` |
+| `does_not_contain` | String doesn't contain | `#[validate(does_not_contain(pattern = "admin"))]` |
+| `nested` | Validate nested struct | `#[validate(nested)]` |
+
+## Validation error responses
+
+When validation fails, Suprnova returns a 422 response with the
+Laravel / Inertia-compatible error bag:
+
+```json
+HTTP 422 Unprocessable Entity
+
+{
+    "message": "Please provide a valid email address (and 1 more error)",
+    "errors": {
+        "email": ["Please provide a valid email address"],
+        "password": ["Password must be at least 8 characters"]
+    }
+}
+```
+
+The `errors` shape matches what `@inertiajs/*` clients read from
+`usePage().props.errors` directly.
+The `message` summarises the first error and the count of the rest.
+See [Precognition](precognition.md) for the same body during live validation.
+
+### Nested fields
+
+A `#[validate(nested)]` failure is reported under a dotted key naming the
+full path, the same notation Laravel uses. A nested struct contributes
+`parent.field`; an element of a validated `Vec<T>` contributes
+`parent.<index>.field`:
+
+```json
+{
+    "message": "Validation failed for field 'shipping_address.street' (and 1 more error)",
+    "errors": {
+        "shipping_address.street": ["Validation failed for field 'shipping_address.street'"],
+        "items.1.name": ["Validation failed for field 'items.1.name'"]
+    }
+}
+```
+
+Index `1` is the second element - the first element passed and is absent
+from the bag. Bind the key straight through on the client:
+`form.errors['items.1.name']`. A form body or a multipart body sends the
+same fields under bracketed names, `shipping_address[street]` and
+`items[1][name]`, which read into the same structs and fail under the same
+dotted keys; see [nested names and lists](#nested-names-and-lists).
+
+### Renamed fields
+
+The error keys are the names the client sent. When serde renames a field
+(`#[serde(rename_all = "camelCase")]` on the struct, or `rename` on a
+field), a failure on `unit_price` is reported as `unitPrice`. The same names
+drive `Precognition-Validate-Only`, where a Rust name matches nothing, and a
+localized message reads the name snake-cased, "unit price", as Laravel's
+does. A hook names fields by their Rust names, as `validate!` does, and its
+errors are keyed by the input names too.
+
+A nested object is renamed at its own level when its type registers its
+names. A form request does. A plain struct nested in one derives
+`suprnova::InputNames` for it:
+
+```rust
+#[derive(Deserialize, Validate, suprnova::InputNames)]
+#[serde(rename_all = "camelCase")]
+pub struct LineItem {
+    #[validate(range(min = 1))]
+    pub unit_price: i64,
+}
+```
+
+An error on the second item's price is then keyed `lineItems.1.unitPrice`.
+Without the derive the nested part keeps the Rust name,
+`lineItems.1.unit_price`. A generic nested type, and a field serde
+`flatten`s, keep Rust names too, as do the serde attributes the derives do
+not read (`from`, `try_from`, `transparent`).
+
+## Complete example
+
+A user registration endpoint, end to end.
+
+**Define the request:**
+
+```rust
+// src/requests/create_user.rs
+use suprnova::request;
+
+#[request]
+pub struct CreateUserRequest {
+    #[validate(email(message = "Please provide a valid email address"))]
+    pub email: String,
+
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
+    pub password: String,
+
+    #[validate(length(min = 2, max = 50, message = "Name must be between 2 and 50 characters"))]
+    pub name: String,
+}
+```
+
+**Create the controller:**
+
+```rust
+// src/controllers/user.rs
+use suprnova::{handler, json_response, Request, Response, ResponseExt};
+use crate::requests::CreateUserRequest;
+
+#[handler]
+pub async fn index(_req: Request) -> Response {
+    json_response!({ "users": [] })
+}
+
+#[handler]
+pub async fn store(form: CreateUserRequest) -> Response {
+    // Validation passed - create the user
+    // In a real app, you'd save to database here
+
+    json_response!({
+        "user": {
+            "email": form.email,
+            "name": form.name
+        },
+        "message": "User created successfully"
+    })
+    .status(201)
+}
+```
+
+**Register the routes:**
+
+```rust
+// src/routes.rs
+use suprnova::{get, post, routes};
+use crate::controllers;
+
+routes! {
+    get!("/users", controllers::user::index).name("users.index"),
+    post!("/users", controllers::user::store).name("users.store"),
+}
+```
+
+## Authorization and cross-field hooks
+
+You use four lifecycle hooks on `FormRequest`: `prepare_for_validation`,
+`authorize`, `after_validation`, and `after_validation_async`. Both the `#[request]`
+attribute and the `#[derive(FormRequestDerive)]` form emit a default
+`impl FormRequest` for you. To override any hook, add the
+`#[form_request(custom_hooks)]` opt-out to suppress the default impl,
+then write your own. (This mirrors the `#[multipart(custom_hooks)]`
+pattern.)
+
+```rust
+use suprnova::{FormRequest, FormRequestDerive, Request};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate, FormRequestDerive)]
+#[form_request(custom_hooks)]
+pub struct DeleteUserRequest {
+    pub user_id: i64,
+}
+
+impl FormRequest for DeleteUserRequest {
+    fn authorize(req: &Request) -> bool {
+        // Return false to short-circuit with 403 Forbidden before the
+        // body is read.
+        req.header("X-Admin-Token").is_some()
+    }
+}
+```
+
+The opt-out also works under the `#[request]` attribute form - useful
+when you want the attribute's auto-derives but need to override hooks:
+
+```rust
+use suprnova::{FormRequest, Request, request};
+
+#[request]
+#[form_request(custom_hooks)]
+pub struct DeleteUserRequestAttr {
+    pub user_id: i64,
+}
+
+impl FormRequest for DeleteUserRequestAttr {
+    fn authorize(req: &Request) -> bool {
+        req.header("X-Admin-Token").is_some()
+    }
+}
+```
+
+When `authorize` returns `false`, extraction returns
+`FrameworkError::Unauthorized` and renders:
+
+```json
+HTTP 403 Forbidden
+
+{ "message": "This action is unauthorized." }
+```
+
+`after_validation` is the synchronous cross-field hook - use it for
+rules like "password and confirmation must match". `after_validation_async`
+is the asynchronous counterpart and is where database-backed rules
+(e.g. the built-in `Unique`) participate in automatic validation. Both
+run after the derived rules on a real request, even when those rules report
+errors. You get one merged error bag from the rules and both hooks. An
+empty error bag counts as success. For marked Precognition requests, you
+keep the stage rules described in [Precognition](precognition.md).
+
+You prepare input before authorization with `prepare_for_validation`:
+
+```rust,ignore
+fn prepare_for_validation(req: &mut Request) -> Result<(), suprnova::FrameworkError> {
+    req.transform_input("email", |text| text.to_ascii_lowercase());
+    Ok(())
+}
+```
+
+You register a transformation without reading the body. The parser applies
+it after authorization, before validation. Your JSON names use dotted
+paths; your form and multipart names use the submitted field name. You
+return an error to stop preparation before authorization or a body read.
+
+For a classic form whose `Accept` prefers `text/html` without `X-Inertia`,
+you get a `302` redirect back with `errors.default` and old input flashed
+to the session. You read old text with `session.get_old_input(key)` on the
+next request. You keep `422` errors for JSON and the Inertia middleware's
+`303` redirect for Inertia visits.
+
+```rust
+use suprnova::{FormRequest, FormRequestDerive, ValidationErrors};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate, FormRequestDerive)]
+#[form_request(custom_hooks)]
+pub struct UpdatePasswordRequest {
+    #[validate(length(min = 8))]
+    pub new_password: String,
+    pub confirmation: String,
+}
+
+impl FormRequest for UpdatePasswordRequest {
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        if self.new_password != self.confirmation {
+            let mut errs = ValidationErrors::new();
+            errs.add("confirmation", "passwords do not match");
+            return Err(errs);
+        }
+        Ok(())
+    }
+}
+```
+
+### Body size caps
+
+The per-struct `#[form_request(max_body_bytes = N)]` attribute
+overrides the process-global 8 MiB cap on a single FormRequest:
+
+```rust
+use suprnova::FormRequestDerive;
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate, FormRequestDerive)]
+#[form_request(max_body_bytes = 64 * 1024 * 1024)] // 64 MiB
+pub struct ImportPayload {
+    pub rows: Vec<Row>,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct Row { /* ... */ }
+```
+
+`Content-Length` is parsed up front and the request is rejected with
+HTTP 413 *before* a body byte is read when the declared size exceeds
+the cap; clients that lie about `Content-Length` still trip the
+streaming byte counter during read.
+
+## Content type detection
+
+`FormRequest::extract` looks only at the `Content-Type` header:
+
+- `application/x-www-form-urlencoded` → parsed as a form, as described in
+  [empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
+- `multipart/form-data` → the parts parsed as a form by the same rules, each
+  file part filling an `UploadedFile` field, as described in
+  [files in a form request](#files-in-a-form-request)
+- `application/json` or any `application/*+json` suffix → parsed via `serde_json`
+- Anything else (including a missing header) → rejected with HTTP 415
+  Unsupported Media Type, before the body is read
+
+For an upload that checks each file while the body streams in, see
+[file uploads](#file-uploads-multipartrequest) below.
+
+## Empty values, repeated names, and fields that don't parse
+
+A form can't send `null`. An HTML form sends an empty input as `name=`, and
+Inertia sends a `null` value as an empty field when it posts `FormData`.
+Laravel's default `ConvertEmptyStringsToNull` middleware reads the empty
+value as `null`. A form-urlencoded `FormRequest` and a `MultipartRequest`
+read it the same way:
+
+- An `Option` field is `None`, an `Option<String>` included.
+- A required field is missing, a `String` included, so the request fails
+  with a `422`.
+- A list keeps the `null` in its place. An element of a `Vec<Option<T>>` is
+  `None`. An element of a `Vec<T>`, which has no place for `null`, is
+  missing, and is reported under its index, such as `ids.1`.
+
+The name itself stays, holding `null`, so a cleared field is told apart from
+one never sent. Read into a `serde_json::Value` or a map, `name=Ada&bio=`
+gives `{"name": "Ada", "bio": null}`, and a `#[serde(flatten)]` map sees
+`bio` too. A `#[serde(default)]` field that arrives empty is `null`, not its
+default: the default is for a field the form left out.
+
+A `bool` field reads what forms send, in a url-encoded body, a query
+string and a multipart body alike: `1` and `0`, as Inertia sends them,
+`true` and `false`, and `on` and `off`, as an HTML checkbox sends them, the
+words in any case.
+
+A name sent more than once keeps its last value, as PHP does. The body
+`title=&title=Holiday` gives `Holiday`, and `title=Holiday&title=` gives
+`null`. A name with brackets is nested data, as the next section describes:
+`tags[]=rust&tags[]=web` fills a `tags: Vec<String>` field. `req.form()`,
+the form-urlencoded branch of `req.input()`, and `req.query_into()` read by
+the same rules.
+
+A field that is missing, or whose value doesn't parse as its type, answers
+the way a failing rule does: a `422` whose `errors` names every such field
+under its input name, with the catalog message for its type. An Inertia
+form gets the usual redirect back with those errors in `props.errors`. A
+JSON body reads the same way, nested fields included, and a JSON `null`
+where a value is required counts as missing.
+
+| Failure | Catalog key |
+|---|---|
+| A required field missing, empty, or JSON `null` | `validation-required` |
+| A value that isn't an integer, a number, or a `bool` for such a field | `validation-integer`, `validation-numeric`, `validation-boolean` |
+| A JSON value that isn't a string for a `String` field, or a list where one value belongs | `validation-string` |
+| Any other value that doesn't fit, such as an unknown enum variant | `validation-format` |
+
+`title=&count=abc` posted to a struct with `title: String` and `count: u32`
+answers with both:
+
+```json
+{
+    "message": "The title field is required. (and 1 more error)",
+    "errors": {
+        "title": ["The title field is required."],
+        "count": ["The count field must be an integer."]
+    }
+}
+```
+
+A body that isn't JSON at all, or a field a struct denies with
+`#[serde(deny_unknown_fields)]`, is no field's failure: it answers `422`
+with a message that words it.
+
+```rust
+use suprnova::{handler, json_response, request, Response};
+
+#[request]
+pub struct UpdateProfile {
+    pub name: String,
+    pub bio: Option<String>,
+}
+
+#[handler]
+pub async fn update(form: UpdateProfile) -> Response {
+    // `name=Ada&bio=` arrives with `bio` as `None`, and `name=&bio=Hi`
+    // fails with a `422` before this code runs.
+    json_response!({ "name": form.name, "has_bio": form.bio.is_some() })
+}
+```
+
+### Why Suprnova diverges
+
+- A JSON body keeps `""` as an empty string. JSON has its own `null`, and
+  Inertia sends a `null` value as one, so an empty string in JSON is text
+  the client chose. To require text there, validate `length(min = 1)`.
+  Laravel converts a JSON `""` to `null` too.
+- Text isn't trimmed. Laravel's `TrimStrings` middleware runs before
+  `ConvertEmptyStringsToNull`, so a value of spaces is `null` in Laravel and
+  text in Suprnova.
+- A JSON body reads a `bool` as JSON `true` or `false` only. Laravel's
+  `boolean` rule also takes `1`, `0`, `"1"` and `"0"` there. A JSON client
+  sends a JSON boolean, which a `bool` field reads as it is.
+- A `MultipartRequest` field that holds one file takes the first file part
+  of its name, where PHP keeps the last. The extractor checks a file while
+  the body streams, before it knows whether a later part of the same name
+  follows, so it decides on the first one.
+- On a real request, the `#[validate(...)]` rules run only once every
+  field parses, so a request with a field that doesn't parse hears about
+  the parse failures alone. Laravel checks every rule at once. A struct can't be built while a
+  field has no value of its type, and the rules run on the struct.
+- A JSON object nested in the body, or a nested object in a form
+  (`shipping_address[street]`), reports its first missing field, and a
+  field after that object is checked once the object reads. Missing fields
+  at the top of the body are all reported at once.
+- [Precognition](precognition.md) parses and validates only the listed
+  fields, through every validation stage. An unlisted field that does not
+  parse does not block the listed fields' answer. The typed struct is
+  built only for the real request.
+
+## Nested names and lists
+
+A form sends nested data under names with brackets, and Laravel reads them
+as nested arrays. The Inertia client writes such names when it puts a `GET`
+visit's data in the query string and when it sends a form that holds a file
+as `multipart/form-data`, and an HTML form can name its inputs the same way.
+A form request, `req.input()`, `req.form()` and `req.query_into()` read them
+as PHP's `parse_str` does, in a url-encoded body, a multipart body and a
+query string alike:
+
+- `user[name]=Ada` is the member `name` of `user`. It fills a nested struct
+  field, and a `serde_json::Value` reads it as `{"user": {"name": "Ada"}}`.
+- `tags[]=a&tags[]=b` is a list, in the order sent.
+- `photos[1]=b&photos[0]=a` is a list in index order, `["a", "b"]`. A gap
+  leaves no hole: `ids[5]=x&ids[1]=y` gives `["y", "x"]`.
+- A key that isn't an integer makes an object, so `filters[status]=x` and
+  `filters[sort]=name` fill a `filters` struct.
+- Names nest to any depth up to 64 levels: `items[0][name]` is the `name` of
+  the first item. A name nested deeper is dropped, with what was read under
+  its first part, as PHP drops it.
+- An empty value is `null` at every depth, as at the top.
+
+The `OrderRequest` above reads this body, and a filter page reads its query
+the same way:
+
+```text
+shipping_address[street]=1+Main+St&shipping_address[city]=Springfield&items[]=a&items[]=b
+```
+
+```rust
+use serde::Deserialize;
+use suprnova::{handler, json_response, Request, Response};
+
+#[derive(Deserialize)]
+struct Filters {
+    status: Option<String>,
+    sort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Listing {
+    filters: Option<Filters>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    // GET /items?filters[status]=open&tags[]=rust&tags[]=web
+    let listing: Listing = req.query_into()?;
+    let status = listing.filters.and_then(|filters| filters.status);
+    json_response!({ "status": status, "tags": listing.tags })
+}
+```
+
+A field that fails is named by its path with dots, as Laravel names it:
+`items[3]=x` read into `items: Vec<u32>` fails as `items.3`, and a missing
+`shipping_address[city]` as `shipping_address.city`. The client binds these
+keys as they are: `form.errors['items.3']`.
+
+`req.query_params()` and `req.query_param(...)` read the query's pairs as
+sent, so a bracketed name is one key there: `req.query_param("filters[status]")`.
+
+## Reading the body directly
+
+For one-off endpoints or middleware that doesn't want a full
+`FormRequest`, the `Request` type itself reads the body in three flavors -
+each consumes `self` because the body can be read at most once:
+
+```rust
+use serde::Deserialize;
+use suprnova::{handler, json_response, Request, Response};
+
+#[derive(Deserialize)]
+struct LoginForm { username: String, password: String }
+
+#[handler]
+pub async fn login(req: Request) -> Response {
+    // Pick the parser explicitly.
+    let form: LoginForm = req.form().await?;
+    json_response!({ "user": form.username })
+}
+
+#[handler]
+pub async fn webhook(req: Request) -> Response {
+    // Same shape, JSON wire.
+    let payload: serde_json::Value = req.json().await?;
+    json_response!({ "received": payload })
+}
+
+#[handler]
+pub async fn ingest(req: Request) -> Response {
+    // Auto-pick based on Content-Type - JSON unless
+    // `application/x-www-form-urlencoded` is explicit.
+    let value: serde_json::Value = req.input().await?;
+    json_response!({ "value": value })
+}
+```
+
+For raw access, `req.body_bytes().await` returns the buffered `Bytes`
+plus the `RequestParts` metadata (route params and content type). Use
+`body_bytes_with_cap(n)` to override the global 8 MiB cap on a
+case-by-case basis.
+
+## Resolving services alongside the form
+
+Validated form requests compose with the [service container](container.md).
+Use `App::resolve::<T>()` (or `App::get::<T>()`) inside the handler:
+
+```rust
+use suprnova::{handler, json_response, Response, App};
+use crate::requests::CreateUserRequest;
+use crate::services::UserService;
+
+#[handler]
+pub async fn store(form: CreateUserRequest) -> Response {
+    let user_service = App::resolve::<UserService>()?;
+    let user = user_service.create_user(&form.email, &form.name).await?;
+    json_response!({ "user": user })
+}
+```
+
+## Files in a form request
+
+The Inertia client sends a form that holds a file as `multipart/form-data`:
+a list of files under `photos[0]`, `photos[1]` (or `photos[]` when the
+application asks for brackets), and nested fields under names such as
+`user[name]`. A form request reads that body. Text parts read as a
+url-encoded body reads, and a part with a file name fills an
+`UploadedFile<V>` field, where `V` is a validator, or a tuple of them, from
+`suprnova::http::upload::validators`:
+
+```rust
+use suprnova::http::upload::UploadedFile;
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
+use suprnova::{handler, json_response, request, Response};
+
+#[request]
+pub struct StoreAlbum {
+    #[validate(length(min = 1))]
+    pub title: String,
+    pub photos: Vec<UploadedFile<(ImageFile, MaxSize<5_242_880>)>>,
+    pub cover: Option<UploadedFile<ImageFile>>,
+}
+
+#[handler]
+pub async fn store(form: StoreAlbum) -> Response {
+    // Each photo is in memory or in a temp file depending on its size.
+    json_response!({ "title": form.title, "photos": form.photos.len() })
+}
+```
+
+- An empty part, which is how Inertia sends a `null` file, and an empty
+  file input both leave an `Option<UploadedFile>` `None` and a required
+  `UploadedFile` missing.
+- A file its validators refuse fails under its input name, `photos.1` for
+  the second photo, with the validator's message. Text where a file belongs
+  fails with `validation-file`, and a file where text belongs with
+  `validation-string`.
+- `req.input()` reads a multipart body the same way. A `serde_json::Value`
+  holds `null` where a file was sent, as Laravel's `input()` reads a file
+  field.
+- An `UploadedFile` reads only from a multipart body. In a JSON body the
+  field fails with a `422`.
+
+The body is capped at the form request's `max_body_bytes`, as every body it
+reads is, and the parts take the part ceiling and the in-memory limit of
+the multipart settings below: a file part above the limit goes to a temp
+file, and a text part above it answers `413`. The validators run once the
+whole body is read. `#[derive(MultipartRequest)]`, below, checks each file
+while it streams in, and stops reading at the byte that breaks a `MaxSize`.
+
+## File uploads (`MultipartRequest`)
+
+`multipart/form-data` is its own extractor - `#[derive(MultipartRequest)]`
+streams the body part by part, spilling large file parts to a temp file
+above the configured threshold so a 200 MiB upload never sits fully in
+RAM. Each field carries a `#[field("name")]` annotation that names the
+wire field; file fields use `UploadedFile<V>` where `V` is a validator
+(or a tuple of validators) from `suprnova::http::upload::validators`.
+
+```rust
+use suprnova::{handler, json_response, MultipartRequest, Response};
+use suprnova::http::upload::UploadedFile;
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
+
+#[derive(MultipartRequest)]
+pub struct AvatarUpload {
+    #[field("avatar")]
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // 5 MiB cap
+    #[field("caption")]
+    pub caption: Option<String>,
+}
+
+#[handler]
+pub async fn upload_avatar(form: AvatarUpload) -> Response {
+    // `avatar` is in memory or in a temp file depending on size.
+    // `.bytes()` reads either; `.store_as(...)` streams to a disk.
+    let bytes = form.avatar.bytes().await?;
+    json_response!({ "size": bytes.len(), "caption": form.caption })
+}
+```
+
+Field shapes:
+
+| Declaration | Wire shape |
+|---|---|
+| `UploadedFile<V>` | required file |
+| `Option<UploadedFile<V>>` | optional file |
+| `Vec<UploadedFile<V>>` | array uploads (`photos[]`) |
+| `String` / `u32` / any `FromStr` | text field (required) |
+| `Option<String>` / `Option<T: FromStr>` | optional text field |
+| `Vec<String>` / `Vec<T: FromStr>` | repeated text fields |
+| `Vec<Option<String>>` / `Vec<Option<T: FromStr>>` | repeated text fields, an empty one as `None` |
+
+A text field is read through its type's `FromStr`, except a `bool`, which
+takes what forms send: `1` and `0`, as Inertia sends them, `true` and
+`false`, and `on` and `off`, as an HTML checkbox sends them, the words in any
+case. An unchecked checkbox sends nothing, so declare it `Option<bool>` and
+read a missing value as `false` with `unwrap_or(false)`.
+
+An empty text part is `null`, as
+[empty values, repeated names, and fields that don't parse](#empty-values-repeated-names-and-fields-that-dont-parse)
+describes: an `Option` field is `None`, a required field reports
+`validation-required`, and an empty element is `None` in a
+`Vec<Option<T>>` and reports `validation-required` under its index in a
+`Vec<T>`. A `String` field is no exception. A `Vec<UploadedFile<V>>` field
+still leaves out an empty file input or a `null` file, which is how a
+client leaves a file out.
+
+A text field that holds one value, rather than a `Vec`, takes the last part
+of its name. Only that part is parsed, so an earlier part that doesn't parse
+reports nothing, and a last part that doesn't parse reports one error.
+
+Built-in validators in `suprnova::http::upload::validators`:
+
+- `MaxSize<N>` - stops reading the body at the chunk that takes the file
+  past `N` bytes.
+- `ImageFile` - rejects parts whose magic bytes don't claim `image/*`.
+  (Named after Laravel's own rule; the plain `Image` name belongs to the
+  image-manipulation pipeline - see [Images](images.md).)
+- `MimeType<L>` - accepts a fixed allowlist provided by your own
+  `MimeAllowlist` type. You can allow `image/*` to admit any image subtype.
+  The type is detected from the file's magic bytes.
+  The client's `Content-Type` counts only for bytes that carry no magic
+  (`text/csv`, `application/json`), never for a type that has some: bytes
+  that aren't a PNG don't pass as `image/png` whatever the header claims.
+  Markup and script text is refused before the header is read. SVG is the
+  exception, being markup: an allowlist that names `image/svg+xml` accepts
+  a file whose root element is `<svg>` (after an optional XML declaration,
+  comments and doctype), and refuses any other text declared as SVG. An
+  SVG can carry script, so serve uploaded ones as attachments or from
+  another origin.
+- `()` - no-op; `UploadedFile<()>` accepts any bytes.
+
+Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
+short-circuiting on the first failure.
+
+### Validation errors
+
+A failure that belongs to one field answers `422` with Laravel's
+`{ "message", "errors" }` body, the message under the field's form input
+name. The name is the one in `#[field(...)]`, with a trailing `[]`
+replaced by the part's zero-based index, so a PDF sent as the second file
+of `#[field("photos[]")]` reports under `photos.1`. For an Inertia form,
+`InertiaValidationRedirectMiddleware` turns that `422` into a redirect back
+with the errors, and the form shows each one under its field.
+
+Every failing field is reported at once. Each message comes from the
+validation catalog by its key:
+
+| Failure | Catalog key |
+|---|---|
+| A required field is missing | `validation-required` |
+| Text that doesn't parse as an integer, a float or a `bool` field | `validation-integer`, `validation-numeric`, `validation-boolean` |
+| Text that doesn't parse as any other type | `validation-format` |
+| Bytes that aren't UTF-8 for a `String` field | `validation-string` |
+| A text part where a file belongs | `validation-file` |
+| A file part where text belongs | `validation-string` |
+| A file over `MaxSize<N>`, the limit in kilobytes as Laravel words it | `validation-max-file` |
+| A file `ImageFile` refuses | `validation-image` |
+| A file `MimeType<L>` refuses, with the allowed types | `validation-mimetypes` |
+
+A text part whose bytes aren't UTF-8, as a page served in a legacy
+encoding can send, doesn't parse as any type: a `String` field reports
+`validation-string`, and any other field the key its type reports for text
+that doesn't parse.
+
+To change a message, define its key in your own catalog:
+
+```ftl
+# lang/en/validation.ftl
+validation-image = Choose a picture for { $field }.
+```
+
+A file input left empty arrives as a file part with no file name and no
+bytes, and Inertia sends a `null` file as an empty text part. Both count as
+a missing file: an optional field is `None`, and a required one reports
+`validation-required`. A field that holds one file takes the first part of
+its name that isn't one of these, and ignores every later part of that name
+without checking it. Text where a file belongs is never checked as a file:
+it reports `validation-file`, however long it is.
+
+A file that fails while the body streams, as one over `MaxSize<N>` does,
+stops the read after the chunk that crossed the limit. The hooks and the
+handler don't run, and every temp file the request wrote is removed.
+
+#### Custom validators
+
+Implement `UploadValidator` to check a file yourself. Return
+`FrameworkError::invalid_upload` with a keyed message for a file that is
+invalid input, so it reports under the field's name like the built-ins.
+Return any other error for a failure to check the file; that error keeps
+its own status.
+
+```rust
+use suprnova::http::upload::validators::UploadValidator;
+use suprnova::{FrameworkError, ValidationMessage};
+
+#[derive(Default)]
+pub struct PdfOnly;
+
+impl UploadValidator for PdfOnly {
+    fn validate_final(
+        &self,
+        sniff: &[u8],
+        _size: u64,
+        _content_type: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        if !sniff.starts_with(b"%PDF-") {
+            return Err(FrameworkError::invalid_upload(
+                ValidationMessage::keyed("validation-pdf").fallback("The file must be a PDF."),
+            ));
+        }
+        Ok(())
+    }
+}
+```
+
+### Per-field caps and array bounds
+
+The byte cap on the total body is global (25 MiB by default for
+multipart, configurable via
+`suprnova::http::upload::set_global_max_multipart_body_bytes`). Per-field
+caps prevent abuse where a body of many small parts grows
+`Vec<UploadedFile<_>>` unbounded within the byte budget:
+
+```rust
+#[derive(MultipartRequest)]
+pub struct Gallery {
+    #[field("photos", max_count = 8)]
+    pub photos: Vec<UploadedFile<MaxSize<1_048_576>>>,
+}
+```
+
+The (`max_count` + 1)-th part with that name returns HTTP `413` before
+allocating, so the extra part never reaches `Vec` growth. The four limits
+on the whole request - the body's byte cap, the part ceiling, a field's
+`max_count`, and the in-memory limit on a text part - all answer `413`
+without reading the body further. Form text must fit in memory, so a text
+part longer than the spill threshold (2 MiB by default, set with
+`suprnova::http::upload::set_global_upload_spill_threshold`) bounds the
+request the way the byte cap does, as PHP's `post_max_size` does for
+Laravel. When one chunk crosses the byte cap and a file's `MaxSize`
+together, the `413` wins.
+
+### Why Suprnova diverges
+
+Laravel checks an array's size with `array|max:N`, a validation rule that
+runs after PHP has buffered the whole request, so too many files is a `422`.
+`max_count` bounds the request while it streams, before the extra part is
+read, so it refuses the request the way the byte cap does.
+
+### Authorize and after-validation hooks
+
+`MultipartRequest` mirrors `FormRequest`'s hooks via the
+`MultipartRequestHooks` trait. By default the derive emits an empty
+impl; opt in to your own with `#[multipart(custom_hooks)]`:
+
+```rust
+use suprnova::{AsyncRule, MultipartRequest, Request, Unique, ValidationErrors, async_trait};
+use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
+
+#[derive(MultipartRequest)]
+#[multipart(custom_hooks)]
+pub struct NewAlbum {
+    #[field("slug")]
+    pub slug: String,
+    #[field("photos[]")]
+    pub photos: Vec<UploadedFile>,
+}
+
+#[async_trait]
+impl MultipartRequestHooks for NewAlbum {
+    fn authorize(req: &Request) -> bool {
+        req.header("X-Admin-Token").is_some()
+    }
+
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        if self.photos.is_empty() {
+            errs.add("photos", "Add at least one photo.");
+        }
+        errs.into_result()
+    }
+
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Unique::new("albums", "slug")
+            .check_async(&self.slug, &mut errs, "slug")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+You run these stages in order:
+
+1. `prepare_for_validation`, where you register `Request::transform_input`
+   changes before authorization.
+2. `authorize`, before any byte of the body is read. `false` answers `403`.
+3. Extraction and field validation.
+4. `after_validation`.
+5. `after_validation_async`, where you use database checks such as `Unique`.
+6. The handler, only when the merged error bag is empty.
+
+You run both hooks for a real request with a constructed value, even when
+field validation reports errors. You stop before hooks on a streaming
+failure or when missing or malformed scalar input prevents construction.
+A marked request keeps the [Precognition](precognition.md) stage rules.
+You get a redirect with flashed errors and old text input for a classic
+HTML form, as with a form request.
+
+A hook's non-empty `ValidationErrors` answers `422` like a field failure;
+an empty set counts as success. Hook errors use the same input names: an
+error under a Rust field name, such as `photos.1` on the `photos` field,
+reports under that field's `#[field(...)]` name. The impl needs
+`#[async_trait]` only when it overrides `after_validation_async`.
+
+### Streaming to storage
+
+`UploadedFile::store_as` writes the part to a registered storage disk.
+For disk-backed parts the path is fully streaming (64 KiB chunks via
+`opendal::Operator::writer`); in-memory parts use a single write call.
+Use the content-derived extension when the storage path is
+content-addressed - the filename header is untrusted:
+
+```rust
+use suprnova::Storage;
+
+let disk = Storage::disk("avatars")?;
+let path = format!("{}.{}", user.id, form.avatar.extension_from_magic());
+form.avatar.store_as(&disk, &path).await?;
+```
+
+See [Filesystem](filesystem.md) for the storage disk registry.
+
+## File organization
+
+The standard structure for requests:
+
+```
+src/
+├── requests/
+│   ├── mod.rs                 # Re-exports all requests
+│   ├── create_user.rs         # CreateUserRequest
+│   ├── update_user.rs         # UpdateUserRequest
+│   └── create_post.rs         # CreatePostRequest
+├── controllers/
+│   └── user.rs                # Uses CreateUserRequest
+└── routes.rs
+```
+
+**src/requests/mod.rs:**
+```rust
+pub mod create_user;
+pub mod update_user;
+
+pub use create_user::CreateUserRequest;
+pub use update_user::UpdateUserRequest;
+```
+
+## End-to-end type safety with Inertia
+
+Requests can also derive `InertiaProps` to generate TypeScript types, enabling end-to-end type safety from your Rust backend to your React frontend.
+
+### Generating TypeScript types for requests
+
+Add `InertiaProps` derive alongside `#[request]`:
+
+```rust
+use suprnova::{request, InertiaProps};
+
+#[request]
+#[derive(InertiaProps)]
+pub struct CreateTodoRequest {
+    #[validate(length(min = 1, message = "Title is required"))]
+    pub title: String,
+
+    #[validate(length(max = 500))]
+    pub description: Option<String>,
+}
+```
+
+Run type generation:
+
+```bash
+suprnova generate-types
+```
+
+This generates TypeScript types in `frontend/src/types/inertia-props.ts`:
+
+```typescript
+export interface CreateTodoRequest {
+  title: string
+  description: string | null
+}
+```
+
+### Type-safe forms with Inertia
+
+Use Inertia's `<Form>` component for the cleanest form handling:
+
+```tsx
+import { Form, usePage } from '@inertiajs/react'
+
+export default function CreateTodo() {
+  const { errors } = usePage().props
+
+  return (
+    <Form action="/todos" method="post">
+      <input
+        type="text"
+        name="title"
+        placeholder="Todo title"
+      />
+      {errors?.title && <span className="error">{errors.title}</span>}
+
+      <textarea
+        name="description"
+        placeholder="Description (optional)"
+      />
+
+      <button type="submit">Create Todo</button>
+    </Form>
+  )
+}
+```
+
+For more control, combine `<Form>` with the `useForm` hook and your generated types:
+
+```tsx
+import { Form, useForm } from '@inertiajs/react'
+import type { CreateTodoRequest } from '../types/inertia-props'
+
+export default function CreateTodo() {
+  const { data, setData, errors, processing } = useForm<CreateTodoRequest>({
+    title: '',
+    description: null,
+  })
+
+  return (
+    <Form action="/todos" method="post">
+      {({ processing }) => (
+        <>
+          <input
+            type="text"
+            name="title"
+            value={data.title}
+            onChange={(e) => setData('title', e.target.value)}
+            placeholder="Todo title"
+          />
+          {errors.title && <span className="error">{errors.title}</span>}
+
+          <textarea
+            name="description"
+            value={data.description || ''}
+            onChange={(e) => setData('description', e.target.value || null)}
+            placeholder="Description (optional)"
+          />
+
+          <button type="submit" disabled={processing}>
+            Create Todo
+          </button>
+        </>
+      )}
+    </Form>
+  )
+}
+```
+
+### What the derive buys you
+
+- TypeScript catches field-name typos and type mismatches at compile
+  time.
+- IDE autocomplete reads the generated `.ts` directly.
+- Rename a field in Rust, rerun `suprnova generate-types`, and the
+  TypeScript surface follows.
+
+See [TypeScript types](frontend-typescript-types.md) for the full
+generation pipeline.
+
+## Request accessors
+
+Beyond the validated-form pattern above, the `Request` type carries Laravel-style accessors for inspecting the wire-level request - URL, headers, query string, content negotiation, route metadata, and client IP. These are useful in middleware, in handlers that want raw access alongside a `FormRequest`, and in any place where validated parsing isn't the right tool.
+
+### URL and path
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `req.path()` | `&str` | Raw URI path. |
+| `req.decoded_path()` | `String` | Path with percent-escapes resolved. |
+| `req.segments()` | `Vec<String>` | Path split on `/`, empty segments dropped. |
+| `req.segment(index, default)` | `Option<String>` | 1-based segment access. |
+| `req.url()` | `String` | Scheme + host + path (no query string). |
+| `req.full_url()` | `String` | URL + query string. |
+| `req.full_url_with_query(&[("k","v")])` | `String` | Append or override query keys. |
+| `req.full_url_without_query(&["k"])` | `String` | Strip query keys. |
+
+```rust
+use suprnova::{handler, json_response, Request, Response};
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    if req.is(&["admin/*"]) {
+        // path matches the admin/* wildcard
+    }
+    json_response!({ "url": req.full_url() })
+}
+```
+
+### Host, scheme, IP
+
+| Method | Returns | Source order |
+|--------|---------|--------------|
+| `req.host()` | `Option<String>` | `X-Forwarded-Host` → `Host` → URI authority. |
+| `req.http_host()` | `Option<String>` | Host plus port when non-default. |
+| `req.scheme_and_http_host()` | `Option<String>` | `scheme://host:port`. |
+| `req.scheme()` | `&'static str` | `"https"` when [`secure`] is true, else `"http"`. |
+| `req.secure()` | `bool` | URI scheme → `X-Forwarded-Proto` → `X-Forwarded-Ssl: on`. |
+| `req.ip()` | `Option<String>` | From a trusted proxy: `X-Forwarded-For`, read from the right, then `X-Real-IP` when there is no `X-Forwarded-For`. Otherwise the peer address. |
+| `req.ips()` | `Vec<String>` | Every address the request names: `X-Forwarded-For` left to right, `X-Real-IP`, then the peer address. For logs only. |
+| `req.user_agent()` | `Option<&str>` | `User-Agent` header. |
+| `req.port()` | `Option<u16>` | Host header port → `X-Forwarded-Port` → URI port. |
+
+`req.ip()` is the address to key a limit on or to check against an
+allowlist. It reads the proxy headers only when the TCP peer is a trusted
+proxy, and it returns the peer address in every other case:
+
+1. When the peer is not in the trusted proxies, `req.ip()` is the peer
+   address. The headers are ignored, because any client can send them.
+2. When the peer is a trusted proxy and the request has an
+   `X-Forwarded-For` header, `req.ip()` reads the list **from the right**.
+   It skips every entry that is a trusted proxy and returns the first
+   entry that is not. A proxy adds the address it saw to the right end of
+   the header, so the left end is what the client wrote and the client
+   chooses it. The header may arrive as several lines. They count as one
+   list, in order.
+3. When the peer is a trusted proxy and the request has no
+   `X-Forwarded-For`, `req.ip()` reads `X-Real-IP`. With both headers
+   present, `X-Real-IP` is not read.
+4. An entry that is not an address ends the walk, and `req.ip()` returns
+   the proxy that wrote that entry. An entry with a port, such as
+   `203.0.113.5:54321`, is read as its address.
+
+Three rules keep this safe:
+
+- **List every proxy of the chain.** A proxy that is not in the trusted
+  proxies is taken for the client, and all of its clients share its
+  address.
+- **List proxies and nothing else.** `APP_TRUSTED_PROXIES` takes
+  addresses and CIDR ranges, such as
+  `10.0.0.5,173.245.48.0/20,2400:cb00::/32`. A client that connects from a
+  listed range is believed like a proxy and chooses its own address. A
+  range of `/0`, which is every address, is refused, and boot fails.
+- **Let the proxy write the header.** A trusted proxy has to add to
+  `X-Forwarded-For` or replace it. A proxy that passes the client's header
+  on unchanged lets the client write all of it. A proxy that sets
+  `X-Real-IP` has to remove any `X-Forwarded-For` from the request.
+
+The `Forwarded` header of RFC 7239 is not read. See
+[Rate Limiting](rate-limiting.md#the-client-address-behind-a-proxy) for
+what this means for per-address limits and
+[Environment Variables](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies)
+for the variable.
+
+### Headers and method
+
+`req.is_precognitive()` is true after the `Precognitive` middleware marks
+the request. `req.is_attempting_precognition()` reads the header alone,
+so it can be true on a route without the middleware. Use the marked state
+to skip side effects or change live-validation rules. See
+[Precognition](precognition.md) for route opt-in and narrowed validation.
+
+| Method | Returns |
+|--------|---------|
+| `req.has_header("X-Foo")` | `bool` |
+| `req.bearer_token()` | `Option<String>` (last `Bearer ` substring, comma-trimmed) |
+| `req.is_method("POST")` | `bool` (case-insensitive) |
+| `req.ajax()` | `X-Requested-With: XMLHttpRequest` |
+| `req.pjax()` | Truthy `X-PJAX` header |
+| `req.prefetch()` | `X-Moz`, `Purpose`, or `Sec-Purpose` = `prefetch` |
+
+### Content negotiation
+
+```rust
+if req.is_json() { /* Content-Type carries /json or +json */ }
+if req.expects_json() { /* AJAX without Accept narrowing, or Accept prefers JSON */ }
+if req.wants_json() { /* Accept header tops with JSON */ }
+if req.accepts_html() { /* Accept allows text/html */ }
+
+let preferred = req.prefers(&["application/json", "text/html"]);
+let acceptable = req.acceptable_content_types();
+```
+
+`accepts(&[ty])` matches both bare types and `application/<vendor>+json`-style suffixes. `accepts_any_content_type()` returns true when there is no Accept header or the top preference is `*/*`.
+
+A type the header weights `q=0` is refused, as RFC 9110 defines it: `acceptable_content_types()` leaves it out, and `accepts`, `prefers`, `wants_json` and `expects_json` treat it as unwanted. The most specific matching range decides, so `Accept: */*, application/json;q=0` accepts HTML and refuses JSON. Laravel lists a `q=0` type as acceptable; Suprnova follows the RFC instead.
+
+### Query string
+
+```rust
+let id: Option<String> = req.query_param("id");
+let present: bool = req.has_query("id");
+let map = req.query_params(); // HashMap<String, String>
+
+// Typed query parse via serde
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+    page: Option<u32>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+let q: SearchQuery = req.query_into()?;
+```
+
+`query_into` reads the query as a form body reads: `?page=` leaves `page`
+`None`, `?q=a&q=b` gives `b`, `?tags[]=a&tags[]=b` fills `tags`, and
+`?filters[status]=x` fills a nested `filters` struct, as
+[nested names and lists](#nested-names-and-lists) describes. A field
+that is missing or doesn't parse answers as a form request's does: a `422`
+whose `errors` names each such field with its catalog message, so an
+Inertia visit is redirected back with them. A query that fails for another
+reason answers `422` with a message.
+
+### Route metadata
+
+After the router dispatches a request, the matched pattern is recorded on the request:
+
+```rust
+if req.route_is(&["users.show", "users.*"]) {
+    // we're inside the users.show or users.* route
+}
+
+let pattern = req.route_pattern(); // Some("/users/{id}")
+let name = req.route_name();       // Some("users.show")
+```
+
+`route_is(&[...])` accepts `*` wildcards (Laravel's `Str::is` semantics).
+
+## Aborting early
+
+For early-exit error handling without the full `Response` envelope, the `abort_with` / `abort_if` / `abort_unless` helpers return a `FrameworkError` that renders through the standard `From<FrameworkError> for HttpResponse` pipeline. They compose with `?` directly:
+
+```rust
+use suprnova::{abort_if, abort_unless, abort_with, handler, json_response, Request, Response};
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    let id = req.param("id")?;
+
+    // 404 when the resource is missing.
+    abort_if(id == "0", 404, "User not found")?;
+
+    // 403 when the caller is unauthenticated.
+    abort_unless(req.has_header("Authorization"), 403, "Login required")?;
+
+    // Or raise a status unconditionally:
+    if some_condition() {
+        return Err(abort_with(418, "I'm a teapot").unwrap_err().into());
+    }
+
+    json_response!({ "id": id })
+}
+```
+
+`abort_if` / `abort_unless` return `Ok(())` when the condition is false, so the `?` continues normally.
+
+## Why Suprnova diverges
+
+Laravel exposes a synchronous, merged input bag - `$req->input('field')`,
+`$req->all()`, `$req->only(['a','b'])`, `$req->boolean('flag')` - pulled
+from the query string and the parsed body together. Suprnova does not
+ship that surface. The reason:
+
+- Suprnova's body is consume-once and async. A synchronous `all()`
+  would require buffering every body up front to satisfy a method that
+  most handlers never call - the memory and DoS surface differs from
+  PHP's per-request-process lifecycle.
+- The typed alternative (`#[request]` + `FormRequest`) gives
+  compile-time field names, validation, and content-type-aware parsing -
+  exactly the safety net the untyped bag lacks.
+
+For query / header / route inspection, reach for `query_param`,
+`query_into`, `has_query`, `bearer_token`, and the header readers
+above. For body-side access, define a `#[request]` struct or a
+`#[derive(MultipartRequest)]` extractor.
+
+## Next
+
+- [Validation](validation.md) - the rule library behind `#[validate(...)]`
+  and the shape of the 422 error bag
+- [Responses](responses.md) - building `HttpResponse` values back from
+  your handler, including streaming and redirects
+- [Errors](errors.md) - handler patterns built on top of `Response`
+  being `Result<HttpResponse, HttpResponse>`
+- [Routing](routing.md) - registering routes and the `{id}` parameters
+  `req.param("id")` reads
+- [Authentication](authentication.md) - `Auth::user_as`, `Auth::attempt`,
+  and the guards that resolve the current user from the request
+- [Filesystem](filesystem.md) - registering the storage disks that
+  `UploadedFile::store_as` writes to
