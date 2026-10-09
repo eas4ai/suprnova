@@ -56,8 +56,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Inspect applied model scopes.** `apply_scopes` returns the builder with
   its registered global scopes and soft-delete filter applied once.
 - **Polymorphic existence queries.** `has_morph`, `doesnt_have_morph` and
-  their constrained forms query registered types and aliases; wildcard
-  absence includes rows with a null type.
+  their constrained forms query the relation's targets and registered types
+  and aliases; the wildcard covers the targets the relation declares, and
+  wildcard absence includes rows with a null type.
 - **Delete loaded pivots by their keys.** Pivots without an `id` delete
   their original key pair; morph pivots also keep the type in the predicate.
 - **Eager limits apply per parent.** Has-one, has-many, morph-one and

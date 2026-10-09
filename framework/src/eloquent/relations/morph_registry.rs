@@ -6,6 +6,10 @@
 //! per-family morph enum (T6) and the morph m2m loader (T7), and walked
 //! by Phase 8 (Admin) to render the polymorphic relation graph.
 //!
+//! A `MorphTo` relation also carries its own owner list, one
+//! [`MorphToTarget`] per declared target, because the registry holds only
+//! the models that opt in and holds every family at once.
+//!
 //! Structurally identical to the [`ModelEntry`](crate::eloquent::ModelEntry)
 //! registry - opt-in: only structs that actually declare a
 //! `morph_type = "..."` attribute appear here. Plain `#[suprnova::model]`
@@ -54,6 +58,81 @@ pub struct MorphTypeEntry {
 }
 
 inventory::collect!(MorphTypeEntry);
+
+/// One owner type a `MorphTo` relation declares in `targets = [...]`.
+///
+/// The model macro emits the list into the relation's
+/// [`RelationEntry::morph_targets`](super::RelationEntry::morph_targets), in
+/// declaration order. The registry cannot stand in for it: it holds every
+/// model that declares `morph_type`, from every family, and no model that
+/// does not. A `MorphTo` existence query (`has_morph(relation, "*")`, and
+/// `with_exists` on a `MorphTo`) reads this list instead, so it reads only
+/// the tables of the relation's own owners, whose keys share one type, and
+/// finds an owner without `morph_type` by the type string its parent writes.
+///
+/// All non-fn fields are `&'static` so the list is a constant initialiser
+/// inside `inventory::submit!`, as for [`MorphTypeEntry`].
+#[derive(Debug, Clone, Copy)]
+pub struct MorphToTarget {
+    /// The Rust type name (`"Post"`), which `has_morph` also accepts.
+    pub type_name: &'static str,
+    /// The type string the `*_type` column holds for an owner that
+    /// declares no `morph_type`: its snake-cased type name, the default a
+    /// parent writes and the fetch helper matches. A registered owner is
+    /// matched by its registry entry instead.
+    pub fallback_morph_type: &'static str,
+    /// The owner's SQL table.
+    pub table: &'static str,
+    /// The owner's primary-key column, which the row's `*_id` column holds.
+    pub primary_key: &'static str,
+    /// `TypeId::of::<T>` thunk, to find the owner's registry entry.
+    pub type_id: fn() -> TypeId,
+    /// Build the owner's scoped predicates so morph existence matches its
+    /// normal reads.
+    pub query_constraints: fn() -> crate::eloquent::Builder<()>,
+}
+
+impl MorphToTarget {
+    /// The registered model `entry` describes, as an owner: a type list may
+    /// name a registered model the relation does not declare.
+    pub(crate) fn from_entry(entry: &MorphTypeEntry) -> Self {
+        Self {
+            type_name: entry.type_name,
+            fallback_morph_type: entry.morph_type,
+            table: entry.table,
+            primary_key: entry.primary_key,
+            type_id: entry.type_id,
+            query_constraints: entry.query_constraints,
+        }
+    }
+
+    /// The type string a parent writes for this owner: its `morph_type`
+    /// when the model registers one, else the snake-cased type name.
+    pub(crate) fn morph_type(&self) -> &'static str {
+        find_morph_type_by_id((self.type_id)())
+            .map_or(self.fallback_morph_type, |entry| entry.morph_type)
+    }
+
+    /// Every string the `*_type` column may hold for this owner: the
+    /// registered `morph_type` and its aliases, or the snake-cased type
+    /// name alone when the model registers none.
+    pub(crate) fn morph_type_names(&self) -> Vec<String> {
+        match find_morph_type_by_id((self.type_id)()) {
+            Some(entry) => std::iter::once(entry.morph_type)
+                .chain(entry.aliases.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+            None => vec![self.fallback_morph_type.to_owned()],
+        }
+    }
+
+    /// Whether `name` names this owner: one of its type strings, or its
+    /// Rust type name.
+    pub(crate) fn is_named(&self, name: &str) -> bool {
+        self.type_name == name
+            || names_morph_target((self.type_id)(), self.fallback_morph_type, name)
+    }
+}
 
 /// Iterator over every registered morph type in the binary. Order is
 /// link-time; do not depend on it.
