@@ -26,7 +26,7 @@ use super::unsigned_reads::BEYOND;
 /// `INTEGER`.
 #[model(table = "sc_entries", fillable = ["score", "tier", "label"])]
 pub struct ScEntry {
-    pub id: i64,
+    pub id: u64,
     pub score: Option<i64>,
     pub tier: i32,
     pub label: String,
