@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-http
+Current: laravel-gaps-auth
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -793,6 +793,44 @@ Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 
+## laravel-gaps-auth
+
+Requirements: PAR-123, PAR-124, PAR-125, PAR-126, PAR-127, PAR-128, PAR-129, PAR-130, PAR-131, PAR-132
+
+46. laravel-gaps-auth - the eleventh of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build by the parity default: the
+   build rows of the log's authorization, verification, password reset,
+   rate-limiting, encryption, hashing and request-guard areas where
+   Suprnova lacks or differs from Laravel 13.35.0, grouped into PAR-123 to
+   PAR-130 and PAR-132, with PAR-131, the relation existence probe on a
+   self-referential relation, surfaced on 2026-10-09; the Laravel-format
+   encrypted payload (two rows) and the request guard's `validate`
+   through its callback (one clause) stay with the developer, and the two
+   rows that Suprnova already answers the way they ask stay as they are.
+   Delivery: the gate methods, the `GateEvaluated` event, the `Response`
+   code and the after-callback arguments in `framework/src/authorization/`
+   and `framework/src/error.rs`; the verified-email middleware, the
+   verification and reset notifications, the verification answers and
+   the reset timebox in `framework/src/auth_flows/` and
+   `framework/src/auth/`; the rehash moved from `validate_credentials` to
+   the sign-in step in `framework/src/auth/`; the rate-limiter key
+   cleaning, the wrapped `limiter`, `hit_for_minute`, `hit_until`, the
+   throttle headers, the refused-request count, the inline user key and
+   the `guest|user` limit in `framework/src/rate_limit/`; the encrypter
+   and the key generator in `framework/src/crypto/`; the Argon time
+   setting and named hasher drivers in `framework/src/hashing/`; the
+   request guard resolver in `framework/src/auth/`; a `laravel_auth_gaps`
+   test module in each of the auth, auth_flows, authorization, crypto,
+   hashing and rate_limit suites; the aliased existence probe in
+   `framework/src/eloquent/builder.rs`, with its tests in the eloquent
+   suite's `laravel_gaps` module; the manual chapters each area owns and
+   the changelog.
+   Mechanisms: `par-laravel-gaps-auth` (the `laravel_auth_gaps` modules of
+   the six suites, for PAR-123 to PAR-130 and PAR-132) and
+   `par-laravel-gaps-data` (the `laravel_gaps` modules of the data suites,
+   for PAR-131).
+   Done when it passes on a committed tree, the manual passages are in
+   place, and the review is recorded.
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,

@@ -2108,3 +2108,221 @@ Falsifier: a model with a text primary key and eight rows whose keys start with 
 Mechanism: `par-laravel-gaps-data`.
 Rationale: The seeded order over the primary key reads a text key as its leading digits, so a UUID or ULID model collapses toward key order for every seed (noted 2026-10-09 by a side review of the ninth round's fixes); the rowid every SQLite table has is the row number to shuffle, carried through a union's projection so the outer query can reach it; `DB::table` keeps its rowid form.
 Status: Agreed 2026-10-09
+
+## Laravel API gaps: auth
+
+The members of Laravel 13.35.0's authorization, verification, password
+reset, rate-limiting, encryption, hashing and request-guard surface that
+the parity review found missing or differing in Suprnova and ruled build:
+the build rows of the log's auth areas, grouped by area. Two rows and one
+clause stay for the developer, because each would check less or encrypt
+more weakly than Suprnova does today: the Laravel-format encrypted payload
+(`Encrypter::encryptString` and `Crypt::encryptString`) and the request
+guard's `validate` through its callback. Two rows of the same areas stay
+as they are, because Suprnova already answers them the way the row asks,
+and the per-call hashing options of `ArgonHasher::$time` are already
+there as `hashing::hash_with`. PAR-131 was surfaced on 2026-10-09,
+outside the log.
+
+[PAR-123] `Gate::inspect_current(action, resource)` and
+`Gate::none_current(actions, resource)` MUST answer for the user of the
+route's guard, the user `#[authorize]` checks, as Laravel's `Gate::inspect`
+and `Gate::none` resolve the user themselves; with no user signed in, a
+gate defined with `define_optional` MUST receive `None` and every other
+gate MUST deny with the default denial, as Laravel's gate denies a guest a
+callback that does not accept one. `Gate::after_with_arguments` MUST
+register an after-callback that receives the resource as well as the user,
+the action and the decision, filling only an undecided result, as
+Laravel's after-callbacks receive `$arguments`; `Gate::after` keeps its
+signature. Every evaluation the gate makes (`inspect`, `inspect_async`,
+`raw`, `raw_async` and every check built on them) MUST dispatch a
+`GateEvaluated` event carrying the user's type name, the user's identifier
+when the check resolved the user itself, the action, the resource's type
+name and the decision (`None` when nothing decided), as Laravel's `raw`
+dispatches `GateEvaluated` on each check. `Response::authorize` MUST keep
+the response's code in the error it returns, through a
+`FrameworkError::Denial { message, status_code, code }` variant that
+`FrameworkError::code()` reads, so a denial built with `with_code` keeps
+its code.
+Falsifier: with user 7 signed in, `Gate::inspect_current("edit", &post)` answers differently from `Gate::inspect_async("edit", &user7, &post)`; with nobody signed in it allows through a gate that is not `define_optional`, or a `define_optional` gate does not receive `None`; an `after_with_arguments` callback receives no `&post` or overrides a decided result; one `Gate::inspect("update", &user7, &post)` or one `Gate::allows_async` dispatches no `GateEvaluated` event, or one whose decision differs from the answer; or `Response::deny_with("quota").with_code("over-limit").authorize()` returns an error whose `code()` is `None`.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `Gate::inspect`, `Gate::none`, `Gate::after`, `Events\GateEvaluated` and `Response`; Laravel's `Gate` resolves the user (`Gate.php:894`), passes `$arguments` to after-callbacks (`:580`) and dispatches `GateEvaluated` from `raw` (`:451`, `:604`), and its `Response` keeps a code; the event names the user's type because a generic gate user has no identifier, and the after-callback's `Response` return is not drafted because Laravel declares those callbacks `bool|null`.
+Status: Agreed 2026-10-09
+
+[PAR-124] `EnsureEmailVerifiedMiddleware` MUST decide per request what an
+unverified caller receives, as Laravel's `EnsureEmailIsVerified` does: a
+request that expects JSON MUST get `403` with the message
+`Your email address is not verified.` even when the middleware names a
+redirect, and any other request MUST get the redirect the middleware
+names, sent through `Redirect::guest`, so the intended URL is stored by
+the rule `Redirect::guest` follows (a `GET` that does not expect JSON
+stores its own path and query). `redirect_to_route(name)` MUST name the
+redirect by route, resolved through `routing::route` on each request, a
+name no route carries failing the request with a `500` that names the
+route, as Laravel's `URL::route` throws; `redirect_to(path)` keeps its
+literal path. `EnsureEmailVerifiedMiddleware::new()`, which names no
+redirect, keeps answering `403` to every caller, and the Inertia answer
+(`409` with `X-Inertia-Location`) stays.
+Falsifier: `EnsureEmailVerifiedMiddleware::redirect_to("/email/verify")` answers an unverified request with `Accept: application/json` with anything but `403` `Your email address is not verified.`, or an unverified browser `GET /billing?tab=2` with anything but a redirect to `/email/verify`; that redirect leaves an intended URL other than `/billing?tab=2`, or an unverified `POST /billing` stores `/billing`; `redirect_to_route("verification.notice")` with that route registered at `/email/verify` redirects anywhere else, or with no route of that name answers anything but `500`; or `EnsureEmailVerifiedMiddleware::new()` answers an unverified browser `GET` with anything but `403`.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `EnsureEmailIsVerified::handle` and `EnsureEmailIsVerified::redirectTo`; Laravel answers each request by `expectsJson()` and redirects with `Redirect::guest(URL::route(...))`, resolving the route name per request, where Suprnova fixes the answer when the middleware is built and stores no intended URL.
+Status: Agreed 2026-10-09
+
+[PAR-125] `MustVerifyEmail` MUST provide
+`send_email_verification_notification(&self, verification_link)`, whose
+default sends the framework's verification mail to `email()` as a mail
+notification through `Notify`, and which a model overrides to send its
+own, as Laravel's `sendEmailVerificationNotification` notifies
+`VerifyEmail`. `EmailVerification::send_link` MUST send through the
+user's method, and `EmailVerification::resend`, which holds no model,
+through `UserProvider::send_email_verification_notification(id,
+verification_link)`, whose default sends the framework's notification to
+the provider's verification address and which `EloquentUserProvider`
+answers by loading the model and calling its method. The single-use
+stored token behind the link stays. `EmailVerification::verify` MUST
+answer `403` with the message `This action is unauthorized.` for a live
+token that belongs to another account than the route's user, or that was
+mailed to an address the account no longer has, as Laravel's
+`EmailVerificationRequest::authorize` fails on the id and on the email
+hash, and MUST keep `400` `invalid or expired verification token` for an
+unknown, expired or consumed token. For an account the provider's
+existing `is_email_verified(id)` reports verified, `verify` MUST consume
+the token and return the user id without calling
+`mark_email_verified_for` and without dispatching `EmailVerified`, as
+Laravel's `fulfill` skips both.
+Falsifier: with `Notify::fake()`, `EmailVerification::send_link(&user, base)` for a model that keeps the default records no verification notification to its address, or a model that overrides `send_email_verification_notification` has the framework's notification sent as well, or its override receives a link that `verify` refuses; `EmailVerification::resend` for an `EloquentUserProvider` model that overrides the method sends the framework's notification; `verify` of a live token owned by user 2 while user 1 is signed in answers anything but `403` `This action is unauthorized.`; `verify` of an unknown token answers anything but `400` `invalid or expired verification token`; or `verify` of a fresh token for an account verified at `2026-10-01T10:00:00Z` moves that timestamp or dispatches `EmailVerified`.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `MustVerifyEmail::sendEmailVerificationNotification`, `EmailVerificationRequest::authorize` and `EmailVerificationRequest::fulfill`; Laravel notifies through `VerifyEmail`, refuses an id or hash mismatch with `403` and returns early from `fulfill` for a verified account; the stored single-use token stays, as it is stricter than Laravel's signed link.
+Status: Agreed 2026-10-09
+
+[PAR-126] `CanResetPassword` MUST provide
+`send_password_reset_notification(&self, reset_link)`, whose default sends
+the framework's reset mail to `email_for_reset()` and which a model
+overrides to send its own, as Laravel's `sendPasswordResetNotification`
+does; `email_for_reset` stays the reset address a model chooses, as
+Laravel's `getEmailForPasswordReset` is. `PasswordReset::send_link` MUST
+send the provider path's mail through
+`UserProvider::send_password_reset_notification(id, reset_link)`, whose
+default sends the framework's mail to the address the provider returned
+and which `EloquentUserProvider` answers by loading the model and calling
+its method; the Magnetar engine path, which holds no model, keeps the
+framework's mail. `PasswordReset::send_link` MUST hold every answer, for a
+known address and an unknown one, a refusal and an error alike, until
+`PASSWORD_RESET_TIMEBOX_MS` milliseconds have passed since the call
+began, `200` by default as Laravel's `auth.timebox_duration` is, a value
+that is not a whole number failing the configuration with
+`FrameworkError::param`, so an unknown address answers no sooner than a
+known one. The uniform `Ok(())` for an unknown address stays.
+Falsifier: an `EloquentUserProvider` model that overrides `send_password_reset_notification` has the framework's reset mail sent as well, or its override receives a link that `PasswordReset::complete` refuses; a model that keeps the default receives the mail anywhere but `email_for_reset()`; with `PASSWORD_RESET_TIMEBOX_MS=300`, `PasswordReset::send_link("nobody@example.com", base)` returns in under 300 milliseconds of paused test time, or a known address does; or with `PASSWORD_RESET_TIMEBOX_MS=abc`, `send_link` sends a mail.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `CanResetPassword` and `PasswordBroker`; Laravel's model hook sends the reset notification and its broker answers inside a 200 ms timebox (`PasswordBrokerManager.php:75`); `email_for_reset` already is `getEmailForPasswordReset`, with no default because the trait has no email to fall back to, and the uniform `Ok(())` stays over the invalid-user status.
+Status: Agreed 2026-10-09
+
+[PAR-127] `RateLimiter::limiter(name)` MUST return a callback that gives
+each limit whose key another limit of the same result shares its
+`fallback_key()`, as Laravel's `limiter` wraps the registered callback, and
+the throttle middleware MUST count a named limiter's limits under the keys
+that callback returns, prefixed with the limiter's name, so a direct
+caller and the middleware count the same buckets.
+`RateLimiter::clean_rate_limiter_key` MUST apply PHP's `htmlentities`,
+with its default flags and UTF-8, before it strips the entity markers, so
+a cleaned key is the one Laravel's `cleanRateLimiterKey` writes (`café`
+and `cafe` both clean to `cafe`). `RateLimiter::hit_for_minute(key)` MUST
+count a hit with a decay of 60 seconds and `RateLimiter::hit_until(key,
+expires_at)` one that decays at the given `DateTime<Utc>`, as Laravel's
+`hit` defaults to 60 seconds and takes a date. The throttle middleware
+MUST send one `X-RateLimit-Limit` and `X-RateLimit-Remaining` pair, the
+one of the limit with the lowest remaining count, and none when the
+handler's response already carries an equal or lower
+`X-RateLimit-Remaining`; a request it refuses MUST leave the bucket's
+count where it was, the admission staying on the atomic post-increment
+count. `ThrottleRequestsMiddleware::with`, the `throttle:60,1` alias, MUST
+count a signed-in user under the user's identifier and a guest under the
+client address, the path staying in its key, and `from_alias_args` MUST
+read a first argument `<guest>|<user>` as the guest's limit and the
+signed-in user's, as Laravel's `resolveMaxAttempts` does. The default
+`throttle` limit keeps its key.
+Falsifier: `RateLimiter::hit("café", 60)` followed by `RateLimiter::hit("cafe", 60)` returns `1` for the second call; a limiter `api` returning `Limit::per_minute(2).by("a")` and `Limit::per_hour(10).by("a")` hands a caller of `RateLimiter::limiter("api")` two limits keyed `a`, or one request through `throttle:api` leaves `RateLimiter::attempts("api:a:attempts:2:decay:60")` at anything but `1`; `RateLimiter::hit_for_minute("k")` leaves `RateLimiter::available_in("k")` outside 59 to 60, or `hit_until("k", t)` with `t` ten seconds ahead leaves it outside 9 to 10; a route behind both limits answers two `X-RateLimit-Remaining` headers; after `throttle:2,1` refuses a third request the bucket's count is `3`; one signed-in user calling `throttle:1,1` from two addresses is admitted twice; or `throttle:1|3,1` refuses a signed-in user's second request, admits a guest's second request, or is refused at registration.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `RateLimiter::limiter`, `ThrottleRequests` and `RateLimiter::hit`; Laravel wraps `limiter` to rename duplicate keys (`Cache/RateLimiter.php:64`), cleans keys with `htmlentities` (`:287`), defaults `hit` to 60 seconds (`:148`), keys an inline throttle by `resolveRequestSignature` (`Routing/Middleware/ThrottleRequests.php:224`), reads `guest|user` in `resolveMaxAttempts` (`:194`), checks before it hits (`:156`) and keeps the lowest remaining header (`:297`); the path in the inline key is Suprnova's documented choice and stays.
+Status: Agreed 2026-10-09
+
+[PAR-128] `Encrypter::new(key)` MUST build an encrypter that holds its own
+`EncryptionKey` and no process-wide state, with `encrypt_string_for`,
+`decrypt_string_for`, `encrypt` and `decrypt` over the purpose-bound
+payload the `Crypt` facade writes, as Laravel's `Encrypter::__construct`
+takes its own key; it MUST offer no cipher choice: the AES GCM cipher with
+a 256-bit key stays the only one, and `EncryptionKey`'s constructors keep refusing a key that
+is not 32 bytes. `EncryptionKey::try_generate()` MUST return
+`Result<EncryptionKey, FrameworkError>`, drawing the bytes from the
+operating system random source and returning an error when that source
+refuses, where `EncryptionKey::generate` panics, and
+`Crypt::try_generate_key()` MUST delegate to it.
+Falsifier: a payload `Encrypter::new(key_a).encrypt_string_for(purpose, context, text)` wrote does not open with `Encrypter::new(key_a).decrypt_string_for(purpose, context, &payload)`, or opens with `Encrypter::new(key_b)` or under another purpose or context; a payload `Crypt::encrypt_string_for` wrote under `APP_KEY` does not open with `Encrypter::new` of that key; building an `Encrypter` changes what `Crypt` decrypts; `EncryptionKey::from_base64` of a 16-byte key answers `Ok`; or `EncryptionKey::try_generate()` or `Crypt::try_generate_key()` returns `Err` on a working random source, or the same 32 bytes twice.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `Encrypter::__construct` and `Crypt::generateKey`; Laravel's encrypter takes its own key (`Encrypter.php:54`) and `random_bytes` throws on a failed source, a path no integration test can reach, so the `Result` type holds it; CBC and 128-bit keys are not drafted, because they would weaken the one cipher Suprnova uses.
+Status: Agreed 2026-10-09
+
+[PAR-129] `HashConfig::from_env` MUST read `ARGON_TIME` as Laravel's Argon
+time setting when `HASH_TIME` is unset, under the same minimum of `1`, and
+`HASH_TIME` MUST win when both are set. `hashing::extend(name, factory)`
+MUST register a named hasher driver, a closure returning a
+`Box<dyn Hasher>`, and `HASH_DRIVER=<name>` MUST select it, as Laravel's
+`Hash::extend` registers a named driver that configuration selects; a
+`HASH_DRIVER` naming neither a built-in algorithm nor a registered driver
+MUST fail the configuration with `FrameworkError::param`, as it does
+today; and `hashing::extend` MUST refuse a built-in algorithm name, a
+name registered before, and any call after the default driver is
+initialised, as `set_default_driver` refuses after first use. The default
+driver stays what it is today.
+Falsifier: with `HASH_TIME` unset and `ARGON_TIME=3` the configured Argon time is anything but `3`, or with `HASH_TIME=2` and `ARGON_TIME=5` anything but `2`; `ARGON_TIME=0` passes the configuration; after `hashing::extend("pepper", factory)` with `HASH_DRIVER=pepper`, `hashing::hash("secret")` does not return the factory hasher's output; `HASH_DRIVER=missing` builds a driver; or `hashing::extend` answers `Ok` for `argon2id`, for a name registered before, or after the default driver is initialised.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Rows `ArgonHasher::$time` and `Hash::extend`; Laravel reads `ARGON_TIME` in its hashing configuration and registers drivers through `Manager::extend` (`Support/Manager.php:131`); the row's per-call form is already `hashing::hash_with` over an `Argon2idHasher` built from `Argon2Options`, under the minimums `HASH_TIME` has.
+Status: Agreed 2026-10-09
+
+[PAR-130] `Auth::via_request_with_provider(name, resolver)` MUST register a
+request guard whose resolver receives the request and the guard's user
+provider, as Laravel's `viaRequest` callback receives `$request` and
+`$provider`, and `Auth::via_request(name, resolver)` MUST keep its
+signature and behaviour for every existing caller; the provider the
+resolver receives MUST be the provider the guard's configuration names.
+Falsifier: a resolver registered with `Auth::via_request_with_provider("partner", |request, provider| ...)` is called without a provider argument, or its provider is not the one the `partners` configuration names; or a resolver registered with `Auth::via_request` stops receiving the request alone.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Row `RequestGuard`; Laravel's request guard hands its provider to the callback (`RequestGuard.php:47`), which a ported `viaRequest` guard reads; the validate clause of the same row stays with the developer, because Laravel's `validate` answers through the callback without checking the password Suprnova checks.
+Status: Agreed 2026-10-09
+
+[PAR-131] The relation existence probe MUST alias its inner tables when
+the related table, the pivot or a through relation's intermediate table is
+the parent's own table or the table of the query around it, as Laravel
+aliases a self relation, so `has`, `or_has`, `doesnt_have`,
+`or_doesnt_have`, `has_count`, `where_has`, `where_doesnt_have`,
+`or_where_has`, `where_relation`, `with_exists`, `with_count` and
+`with_sum` answer for a self-referential relation: a category's `children`
+and `parent` through `parent_id`, a through relation over its own table, a
+self-referential many-to-many through a pivot, and a morph owner of its
+own type. Each nested probe MUST take an alias of its own, a qualified
+column in a `where_has` predicate MUST still name the outer row, a joined
+outer query MUST correlate to its own table, and a probe whose tables
+differ from the parent's MUST render the SQL it renders today.
+Falsifier: over the tree `root -> (a -> x, b)` and `solo` in one table, `has("children")` returns anything but `a` and `root`, `doesnt_have("parent")` anything but `root` and `solo`, `has_count("children", ">=", 2)` anything but `root`, `where_has("children", |q| q.has("children"))` anything but `root`, `has("grandchildren")` anything but `root`, or `with_count(["children"])` gives `root` anything but `2`; a self-referential many-to-many `has("friends")` returns a person who names no friend; a note's `has("subject")` returns a note whose owner note does not exist; or `has("posts")` on a model whose posts live in another table renders other SQL than before.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Surfaced 2026-10-09 outside the log: the probe named tables, not aliases, so a self-referential relation compared each inner row with itself and answered wrongly without an error; Laravel aliases a self relation as `laravel_reserved_N` (`Eloquent/Relations/HasOneOrMany.php:550`, `BelongsTo.php:256`, `BelongsToMany.php:1590`, `HasOneOrManyThrough.php:762`).
+Status: Agreed 2026-10-09
+
+[PAR-132] `validate_credentials` on `EloquentUserProvider` and
+`DatabaseUserProvider` MUST answer whether the password matches without
+writing, as Laravel's `validateCredentials` does, and the rewrite a
+database shared with Laravel needs (LDB-004) MUST run in the sign-in step
+instead: after the password validates and before the user is signed in,
+in the session guard's `attempt` and `once`, through a provided
+`UserProvider::rehash_password_if_required(user, credentials)` that does
+nothing by default, as Laravel's `SessionGuard` calls
+`rehashPasswordIfRequired`. A rewrite that cannot be minted or stored MUST
+still fail the sign-in and leave the stored hash as it was, as Laravel's
+thrown `save()` fails `attempt`; `Auth::validate` and a guard's `validate`
+MUST leave the stored hash as it is, and `logout_other_devices` keeps the
+rewrite it makes today.
+Falsifier: with the shared-Laravel-database setting on and a user holding a `$2b$` hash, `Auth::validate` with the right password changes the stored hash; `Auth::attempt` with it signs in and leaves the `$2b$` hash, or signs in when the rewrite's write fails; or with the setting off any of them writes a hash.
+Mechanism: `par-laravel-gaps-auth`.
+Rationale: Row `EloquentUserProvider::validateCredentials`; Laravel's `validateCredentials` never writes and `SessionGuard::attempt` rehashes before `login` (`SessionGuard.php:443`), so a failed `save()` fails the sign-in there too and the row's premise does not hold, which leaves the write inside `validate` as the one difference.
+Status: Agreed 2026-10-09
