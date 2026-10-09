@@ -11,13 +11,21 @@ async fn answer(request: Request) -> Response {
     ))
 }
 
-async fn server(router: Router) -> std::net::SocketAddr {
+pub(crate) async fn server(router: Router) -> std::net::SocketAddr {
+    server_with(router, MiddlewareRegistry::new()).await
+}
+
+/// [`server`] with `middleware` as the global middleware.
+pub(crate) async fn server_with(
+    router: Router,
+    middleware: MiddlewareRegistry,
+) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener");
     let addr = listener.local_addr().expect("address");
     let router = Arc::new(router);
-    let middleware = Arc::new(MiddlewareRegistry::new());
+    let middleware = Arc::new(middleware);
     tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let router = router.clone();
@@ -48,8 +56,11 @@ async fn query_macro_dispatches_an_extension_method() {
     let (status, _, body) = super::http_wire::request(addr, "QUERY", "/delta-query/7", &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body, "QUERY:7");
-    let (status, _, _) = super::http_wire::request(addr, "GET", "/delta-query/7", &[]).await;
-    assert_eq!(status, 404);
+    // The path is a QUERY route's, so another method gets the 405 that
+    // names QUERY, not a 404.
+    let (status, headers, _) = super::http_wire::request(addr, "GET", "/delta-query/7", &[]).await;
+    assert_eq!(status, 405);
+    assert_eq!(headers.get("allow").map(String::as_str), Some("QUERY"));
 }
 
 #[tokio::test]

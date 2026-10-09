@@ -57,10 +57,14 @@ pub use macros::{
     validate_route_path,
 };
 pub use params::{ParamConstraint, WholeValuePattern};
-pub use resource::{ResourceAction, ResourceController, ResourceDef, ResourceRoutes};
+#[doc(hidden)]
+pub use resource::__resource_support;
+pub use resource::{
+    ControllerMiddleware, ResourceAction, ResourceController, ResourceDef, ResourceRoutes,
+};
 pub use router::{
     BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, RouteUrlError, Router, WsMatch,
-    clear_route_names_for_test, register_route_name, route, route_name_for_pattern,
+    clear_route_names_for_test, register_route_name, route, route_has, route_name_for_pattern,
     route_with_params, try_register_route_name, try_route, try_route_with_params,
 };
 pub(crate) use router::{

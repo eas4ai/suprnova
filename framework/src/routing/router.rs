@@ -35,7 +35,7 @@
 
 use crate::FrameworkError;
 use crate::http::{Request, Response};
-use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::middleware::{BoxedMiddleware, Middleware, MiddlewareExclusion, boxed_as};
 use crate::routing::params::ParamConstraint;
 use crate::ws::BoxedWebSocketHandler;
 use hyper::Method;
@@ -653,6 +653,31 @@ pub fn try_route_with_params(
         })
 }
 
+/// Whether every name in `names` is a registered route name: Laravel's
+/// `Route::has`.
+///
+/// One unregistered name makes the answer false, so a page that links to
+/// several routes can check them all in one call. An empty list is true,
+/// as Laravel's check over no names is.
+///
+/// ```rust,no_run
+/// use suprnova::route_has;
+///
+/// if route_has(&["login", "register"]) {
+///     // show both links
+/// }
+/// ```
+pub fn route_has(names: &[&str]) -> bool {
+    let Some(lock) = ROUTE_REGISTRY.get() else {
+        return names.is_empty();
+    };
+    let map = match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    names.iter().all(|name| map.contains_key(*name))
+}
+
 /// Reverse-lookup a route name from a matched route pattern.
 ///
 /// `pattern` is the matchit route template (e.g. `/users/{id}`) that
@@ -736,6 +761,11 @@ pub struct Router {
     /// security-shaped invariant - the codex review tracked it as
     /// "route_middleware keyed by path leaks across methods".
     route_middleware: HashMap<(Method, String), Vec<BoxedMiddleware>>,
+    /// The middleware each route leaves out, Laravel's `withoutMiddleware`,
+    /// keyed like `route_middleware`. [`Router::add_middleware`] reads it,
+    /// so a group middleware added after the route's exclusion is left out
+    /// as well as one added before it.
+    route_exclusions: HashMap<(Method, String), Vec<MiddlewareExclusion>>,
     /// Framework-owned metadata for routes that enter a Live trust boundary.
     live_routes: HashMap<(Method, String), crate::live::context::LiveRouteMetadata>,
     /// Startup declarations consumed into the immutable Live mount catalog.
@@ -817,6 +847,7 @@ impl Router {
             ws_routes: MatchitRouter::new(),
             route_names: HashMap::new(),
             route_middleware: HashMap::new(),
+            route_exclusions: HashMap::new(),
             live_routes: HashMap::new(),
             live_mounts: Mutex::new(Some(Vec::new())),
             live_nested_segments: HashMap::new(),
@@ -1027,16 +1058,24 @@ impl Router {
     /// twice counted every request twice. A middleware is identified by
     /// the alias and arguments it was resolved from; one added by type or
     /// by hand has no alias and is always kept.
+    ///
+    /// A middleware the route leaves out ([`Router::exclude_middleware`]) is
+    /// not added.
     pub(crate) fn add_middleware(
         &mut self,
         method: Method,
         path: &str,
         middleware: BoxedMiddleware,
     ) {
-        let chain = self
-            .route_middleware
-            .entry((method, path.to_string()))
-            .or_default();
+        let key = (method, path.to_string());
+        if self
+            .route_exclusions
+            .get(&key)
+            .is_some_and(|excluded| excluded.iter().any(|e| e.matches(&middleware)))
+        {
+            return;
+        }
+        let chain = self.route_middleware.entry(key).or_default();
         if let Some(alias) = crate::middleware::alias_of(&middleware)
             && chain
                 .iter()
@@ -1045,6 +1084,30 @@ impl Router {
             return;
         }
         chain.push(middleware);
+    }
+
+    /// Leave `exclusion` out of the middleware of the route `(method, path)`:
+    /// Laravel's `withoutMiddleware`.
+    ///
+    /// The route drops a matching middleware it already has, and
+    /// [`Router::add_middleware`] refuses one added later, so a group's
+    /// middleware is left out whichever is registered first. Only the
+    /// route's middleware is touched; the global middleware is not kept
+    /// here and always runs.
+    pub(crate) fn exclude_middleware(
+        &mut self,
+        method: Method,
+        path: &str,
+        exclusion: MiddlewareExclusion,
+    ) {
+        let key = (method, path.to_string());
+        if let Some(chain) = self.route_middleware.get_mut(&key) {
+            chain.retain(|middleware| !exclusion.matches(middleware));
+        }
+        self.route_exclusions
+            .entry(key)
+            .or_default()
+            .push(exclusion);
     }
 
     /// Hold the parameter `param` of the route `(method, pattern)` to
@@ -2304,6 +2367,24 @@ impl Router {
             .then(|| (pattern.clone(), handler.clone(), params))
     }
 
+    /// The methods other than `method` whose routes match `path`, in the
+    /// order of Laravel's `Router::$verbs`: what a `405` lists in `Allow`.
+    ///
+    /// Each method is matched as [`Router::match_route`] matches it, so a
+    /// route whose constraints refuse the path is not counted, and `HEAD`
+    /// is listed beside `GET` because a `GET` route answers it. An empty
+    /// list means no route of any method matches, and the request gets the
+    /// `404` or the fallback. The server asks only after the request's own
+    /// method found no route, so a matched request pays nothing for it.
+    pub(crate) fn methods_allowing(&self, method: &Method, path: &str) -> Vec<Method> {
+        ALLOW_ORDER
+            .iter()
+            .filter(|verb| *verb != method)
+            .filter(|verb| self.match_route(verb, path).is_some())
+            .cloned()
+            .collect()
+    }
+
     /// Whether `path` has a HEAD handler registered explicitly (as
     /// opposed to falling back to GET in [`Router::match_route`]).
     ///
@@ -2647,6 +2728,64 @@ impl RouteBuilder {
         Ok(self)
     }
 
+    /// Leave every middleware of type `M` out of this route: Laravel's
+    /// `withoutMiddleware(M::class)`.
+    ///
+    /// The type matches a middleware added by type and one an alias
+    /// resolved to, whether it was added before or after this call. The
+    /// global middleware is not route middleware, so it still runs.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{async_trait, Router, Middleware, Next, Request, Response, HttpResponse};
+    /// # async fn health(_req: Request) -> Response { Ok(HttpResponse::text("ok")) }
+    /// # struct EnsureJson;
+    /// # #[async_trait]
+    /// # impl Middleware for EnsureJson {
+    /// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+    /// # }
+    /// Router::new()
+    ///     .get("/health", health)
+    ///     .middleware(EnsureJson)
+    ///     .without_middleware::<EnsureJson>();
+    /// ```
+    pub fn without_middleware<M: Middleware + 'static>(self) -> Self {
+        self.with_exclusions(vec![MiddlewareExclusion::of_type::<M>()])
+    }
+
+    /// Leave the middleware a name stands for out of this route: the alias
+    /// with its arguments, as in `"throttle:60,1"`, or every middleware of a
+    /// group. Laravel's `withoutMiddleware('auth')`.
+    ///
+    /// An alias matches the middleware resolved from the same alias and
+    /// arguments only: leaving out `"throttle:60,1"` keeps
+    /// `"throttle:30,1"`. Use [`Self::without_middleware`] to leave out a
+    /// type however it was named.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered, as [`Self::middleware_named`]
+    /// panics. That is at boot. Use [`Self::try_without_middleware_named`]
+    /// to get the error instead.
+    pub fn without_middleware_named(self, name: &str) -> Self {
+        self.try_without_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::without_middleware_named`].
+    pub fn try_without_middleware_named(self, name: &str) -> Result<Self, FrameworkError> {
+        Ok(self.with_exclusions(MiddlewareExclusion::named(name)?))
+    }
+
+    /// Leave `exclusions` out of this route's middleware. The route macros
+    /// collect their exclusions first and hand them over here.
+    pub(crate) fn with_exclusions(mut self, exclusions: Vec<MiddlewareExclusion>) -> Self {
+        for exclusion in exclusions {
+            self.router
+                .exclude_middleware(self.last_method.clone(), &self.last_path, exclusion);
+        }
+        self
+    }
+
     /// Serialize the requests that carry one session on the most recently
     /// registered route: the session middleware holds the session's cache
     /// lock from load to write for `block`'s hold bound and waits up to
@@ -2948,6 +3087,21 @@ pub(crate) static ANY_METHODS: LazyLock<[Method; 8]> = LazyLock::new(|| {
     ]
 });
 
+/// The methods a `405` can list in `Allow`, in the order Laravel's
+/// `Router::$verbs` lists them, `HEAD` beside `GET`.
+static ALLOW_ORDER: LazyLock<[Method; 8]> = LazyLock::new(|| {
+    [
+        Method::GET,
+        Method::HEAD,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+        query_method(),
+    ]
+});
+
 /// Hyper represents QUERY as an extension method in the pinned HTTP version.
 pub(crate) fn query_method() -> Method {
     Method::from_bytes(b"QUERY").expect("QUERY is a valid HTTP method")
@@ -3098,6 +3252,41 @@ impl MultiMethodRouteBuilder {
             }
         }
         Ok(self)
+    }
+
+    /// [`RouteBuilder::without_middleware`] for every method of the route.
+    pub fn without_middleware<M: Middleware + 'static>(self) -> Self {
+        self.with_exclusions(vec![MiddlewareExclusion::of_type::<M>()])
+    }
+
+    /// [`RouteBuilder::without_middleware_named`] for every method of the
+    /// route.
+    ///
+    /// # Panics
+    ///
+    /// When the name is not registered. That is at boot. Use
+    /// [`Self::try_without_middleware_named`] to get the error instead.
+    pub fn without_middleware_named(self, name: &str) -> Self {
+        self.try_without_middleware_named(name)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Self::without_middleware_named`].
+    pub fn try_without_middleware_named(self, name: &str) -> Result<Self, FrameworkError> {
+        Ok(self.with_exclusions(MiddlewareExclusion::named(name)?))
+    }
+
+    /// Leave `exclusions` out of the middleware of every method of the
+    /// route. The `any!` macro collects its exclusions first and hands them
+    /// over here.
+    pub(crate) fn with_exclusions(mut self, exclusions: Vec<MiddlewareExclusion>) -> Self {
+        for exclusion in exclusions {
+            for method in &self.methods {
+                self.router
+                    .exclude_middleware(method.clone(), &self.path, exclusion.clone());
+            }
+        }
+        self
     }
 
     /// Serialize the requests that carry one session on every method this

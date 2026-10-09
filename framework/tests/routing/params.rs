@@ -448,14 +448,17 @@ async fn a_constraint_holds_for_the_method_it_was_set_on() {
         .post("/items/{id}", echo);
     let addr = serve(router, 4).await;
 
-    assert_eq!(send(addr, "GET", "/items/abc").await.0, 404);
+    // The GET route refuses the value and its handler does not run. The
+    // POST route on the same path takes it, so the answer is the 405 that
+    // names POST, as Laravel's alternate-verb check gives it.
+    assert_eq!(send(addr, "GET", "/items/abc").await.0, 405);
     assert_eq!(
         send(addr, "POST", "/items/abc").await,
         ok("id=abc"),
         "the POST route set no constraint"
     );
     // A HEAD request with no HEAD route runs the GET route, constraint included.
-    assert_eq!(send(addr, "HEAD", "/items/abc").await.0, 404);
+    assert_eq!(send(addr, "HEAD", "/items/abc").await.0, 405);
     assert_eq!(send(addr, "HEAD", "/items/42").await.0, 200);
 }
 

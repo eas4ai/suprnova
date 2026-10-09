@@ -926,6 +926,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `errors` and `processing` from its slot, and keep the sign-in page's
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
+- **Controller middleware.** A `ResourceController` lists `ControllerMiddleware`
+  values in its `middleware` method, and a module named by `resource!` in a
+  `pub fn middleware()`. Each runs on the actions `only` and `except` scope it
+  to, after the group's middleware, and a name no alias or group carries fails
+  the registration.
+- **Resource middleware at registration.** `ResourceRoutes::middleware` and
+  `ResourceDef::middleware` scope a `ControllerMiddleware` to some actions,
+  running before the controller's own list.
+- **Resources inside groups.** `resource!` is an item of `group!` and takes the
+  group's prefix, name prefix, middleware, session block and binding settings.
+- **Routes leave group middleware out.** `without_middleware::<M>()` and
+  `without_middleware_named(name)` remove a middleware a route's group or its
+  own registration gives it, by type or by alias; the global middleware still runs.
+- **`route_has`.** Returns true only when every route name in a list is
+  registered, as Laravel's `Route::has` does.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -938,6 +954,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   by default, and SQLite declares `datetime` for zoned timestamp columns.
 - **Production seeding requires force.** `db:seed` returns an error in
   production unless you pass `--force`.
+- **A wrong method answers 405.** A request whose path a route of another
+  method matches answers `405` with `Allow` and Laravel's message in place of
+  the 404, and an `OPTIONS` request answers `200` with `Allow`. Both run
+  through the global middleware; a path no route matches keeps the 404 or the
+  fallback.
 
 - **Collection metadata belongs to the collection.** JSON:API collections
   keep their document metadata at the root without merging the first item's metadata.
