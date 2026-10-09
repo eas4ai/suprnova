@@ -644,6 +644,43 @@ that no resolver runs. A middleware earlier in the chain validates the
 credential and records what it proved in request-scoped state, and your
 guard reads that state, as the token guard reads the bearer id.
 
+### `Auth::via_request_with_provider`
+
+A resolver that looks the user up through the guard's own provider takes
+that provider as a second argument. `Auth::via_request_with_provider(name,
+resolver)` hands it the `Arc<dyn UserProvider>` that the guard's
+configuration names, as Laravel's `viaRequest` callback receives `$request`
+and `$provider`:
+
+```rust
+use suprnova::Auth;
+
+// `partner` is declared with `GuardConfig::custom(driver, "partners")`,
+// so `provider` is the provider registered under `partners`.
+Auth::via_request_with_provider("partner", |request, provider| {
+    let key = request.header("x-api-key").map(str::to_owned);
+    Box::pin(async move {
+        let Some(key) = key else { return Ok(None) };
+        let credentials = serde_json::json!({ "api_key": key });
+        provider.retrieve_by_credentials(&credentials).await
+    })
+})?;
+```
+
+The resolver doesn't capture a provider of its own, so a callback you port
+from Laravel keeps its shape. The manager looks the provider up each time
+the resolver runs. A provider you register after the resolver, or register
+again under the same name, is the one the resolver receives, and the same
+one the guard's `validate` uses. If no provider is registered under the
+name the configuration gives, the request fails with `500` before the
+resolver runs.
+
+`Auth::via_request` is built on this function: its resolver takes the
+request alone, and the rules above hold for both. Registering a guard name
+twice keeps the last resolver, whichever function registered it.
+`AuthManager::via_request_with_provider` is the method of the manager
+behind it.
+
 ### A guard of your application as the default guard
 
 A guard of your application is read-only through the manager. When you
@@ -702,6 +739,10 @@ resolves its user, and it gets the current request. A Rust guard cannot
 reach the request from `user()`. So the middleware for the guard runs
 the resolver with the request, and the guard reads the answer. That is
 why the guard reports no user outside that middleware.
+
+Laravel's request guard also answers `validate` through its closure, which
+checks no password. A Suprnova request guard validates credentials through
+its provider, as the token guard does.
 
 ## User providers
 

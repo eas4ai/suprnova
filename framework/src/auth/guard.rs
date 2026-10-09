@@ -1316,7 +1316,9 @@ impl Auth {
     /// driver [`AuthManager::via_request_driver`] derives from its name. The
     /// middleware runs the resolver at most once per guard name in one
     /// request; a resolver error fails the request, never lets it through as
-    /// a guest. See [`AuthManager::via_request`] for the rules.
+    /// a guest. See [`AuthManager::via_request`] for the rules. A resolver
+    /// that needs the guard's user provider is registered with
+    /// [`via_request_with_provider`](Self::via_request_with_provider).
     ///
     /// # Errors
     ///
@@ -1379,6 +1381,57 @@ impl Auth {
         F: for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Send + Sync + 'static,
     {
         Self::manager()?.via_request(name, resolver)
+    }
+
+    /// Register `resolver` as the way the guard `name` authenticates a
+    /// request, handing it the request and the guard's user provider.
+    /// Mirrors Laravel's `Auth::viaRequest`, whose callback receives
+    /// `$request` and `$provider`.
+    ///
+    /// The provider is the one the guard's configuration names, so a
+    /// resolver ported from Laravel looks the user up the way its callback
+    /// did, without capturing a provider of its own. Everything else is as
+    /// [`via_request`](Self::via_request) states, which takes a resolver of
+    /// the request alone and is built on this function. See
+    /// [`AuthManager::via_request_with_provider`] for the rules.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a guard name that is empty or contains `:`, and registers
+    /// nothing: the principal a guard of the application attests is
+    /// `<guard>:<id>`. Fails without a registered [`AuthManager`].
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::{App, Auth, AuthConfig, AuthManager, GuardConfig, UserProvider};
+    /// # fn ex(partners: Arc<dyn UserProvider>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let driver = AuthManager::via_request_driver("partner");
+    /// let config = AuthConfig::from_env().guard("partner", GuardConfig::custom(driver, "partners"));
+    /// App::singleton(AuthManager::new(config));
+    /// Auth::register_provider("partners", partners)?;
+    ///
+    /// // `provider` is the `partners` provider the guard's configuration names.
+    /// Auth::via_request_with_provider("partner", |request, provider| {
+    ///     let key = request.header("x-api-key").map(str::to_owned);
+    ///     Box::pin(async move {
+    ///         let Some(key) = key else { return Ok(None) };
+    ///         let credentials = serde_json::json!({ "api_key": key });
+    ///         provider.retrieve_by_credentials(&credentials).await
+    ///     })
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn via_request_with_provider<F>(
+        name: impl Into<String>,
+        resolver: F,
+    ) -> Result<(), FrameworkError>
+    where
+        F: for<'r> Fn(&'r Request, Arc<dyn UserProvider>) -> RequestUserFuture<'r>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::manager()?.via_request_with_provider(name, resolver)
     }
 
     /// Resolve a named guard as the read-only [`Guard`] contract.

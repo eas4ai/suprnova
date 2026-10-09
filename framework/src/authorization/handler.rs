@@ -6,9 +6,6 @@
 //! They are public only because macro output in the application's crate
 //! calls them; nothing else should.
 
-use std::any::Any;
-use std::sync::Arc;
-
 use super::Gate;
 use crate::FrameworkError;
 use crate::auth::Auth;
@@ -34,6 +31,9 @@ use crate::auth::Auth;
 /// [`Gate::authorize_async`]. Async gates and async before-hooks answer
 /// too, among them the hook
 /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) installs.
+/// The check is the one [`Gate::inspect_current`] makes, so its
+/// [`GateEvaluated`](super::GateEvaluated) event carries the user's
+/// identifier.
 ///
 /// # Errors
 ///
@@ -53,12 +53,12 @@ where
     let ability = ability.into();
     let Some(user) = Auth::route_user().await? else {
         return Gate::inspect_guest(&ability, resource)
+            .await
             .ok_or_else(|| FrameworkError::domain("Unauthenticated.", 401))?
             .authorize()
             .map(|_| ());
     };
-    let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();
-    Gate::inspect_erased_async(&ability, &*user, resource)
+    Gate::inspect_authenticatable(&ability, user, resource)
         .await
         .authorize()
         .map(|_| ())

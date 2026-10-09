@@ -30,5 +30,7 @@ pub mod scaffold_tables;
 pub mod session_commit_boundary;
 pub mod session_guard;
 
+/// The Laravel request-guard gap, observed by the `par-laravel-gaps-auth` mechanism.
+pub mod laravel_auth_gaps;
 /// Verifies the added Laravel behaviours through the shared delta mechanism.
 pub mod laravel_delta;

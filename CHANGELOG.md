@@ -1024,6 +1024,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Key generation that returns its error.** `EncryptionKey::try_generate`
   and `Crypt::try_generate_key` return the refusal of the operating system
   random source as an error, where `EncryptionKey::generate` panics.
+- **Gate checks for the signed-in user.** `Gate::inspect_current` and
+  `Gate::none_current` check the user of the route's guard, the user
+  `#[authorize]` checks. A guest reaches only the gates defined with
+  `define_optional`, which receive `None`, and every other ability answers
+  the default denial.
+- **After hooks that see the resource.** `Gate::after_with_arguments`
+  registers an after hook that receives the resource with the user, the
+  action and the running decision, and fills only an undecided result.
+- **`GateEvaluated` events.** Every gate check dispatches `GateEvaluated`
+  with the user's type, the user's identifier when the check found the user
+  itself, the action, the resource's type and the decision.
+- **Request guards that receive their provider.**
+  `Auth::via_request_with_provider` hands the resolver the request and the
+  user provider that the guard's configuration names.
 
 ### Changed
 
@@ -1812,6 +1826,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SameSite` from `SESSION_PATH`, `SESSION_DOMAIN` and `SESSION_SAME_SITE`,
   so the deletion cookie matches the cookie it deletes; an explicit path or
   domain given to `Cookie::forget_with` still wins.
+- **Denial codes survive `authorize`.** `GateResponse::authorize` returns
+  `FrameworkError::Denial` for a denial built with `with_code`, and
+  `FrameworkError::code()` reads the code after `?`; a denial without a code
+  maps as before.
 
 ### Fixed
 

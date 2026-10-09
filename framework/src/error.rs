@@ -1001,6 +1001,27 @@ pub enum FrameworkError {
     #[error("This action is unauthorized.")]
     Unauthorized,
 
+    /// An authorization denial that carries a machine-readable reason code.
+    ///
+    /// [`GateResponse::authorize`](crate::authorization::Response::authorize)
+    /// returns it for a denial built with
+    /// [`with_code`](crate::authorization::Response::with_code), so the code
+    /// reaches the caller through `?` as Laravel's `AuthorizationException`
+    /// keeps the code of the response it came from. [`Self::code`] reads it.
+    /// A denial without a code stays [`Self::Unauthorized`] or
+    /// [`Self::Domain`]. The response body carries the message only, as
+    /// Laravel renders a denial.
+    #[error("{message}")]
+    Denial {
+        /// The denial message, or `This action is unauthorized.` when the
+        /// denial carried none.
+        message: String,
+        /// HTTP status code: the denial's status, or 403.
+        status_code: u16,
+        /// The reason code the denial carried.
+        code: String,
+    },
+
     /// Model not found (404 Not Found)
     ///
     /// Used when route model binding fails to find the requested resource.
@@ -1228,6 +1249,38 @@ impl FrameworkError {
         .recorded()
     }
 
+    /// Create a [`Self::Denial`]. Through the recorder like every other
+    /// constructor, so a denial with a 5xx status records its frames for
+    /// the development error page.
+    #[track_caller]
+    pub(crate) fn denial(
+        message: impl Into<String>,
+        status_code: u16,
+        code: impl Into<String>,
+    ) -> Self {
+        Self::Denial {
+            message: message.into(),
+            status_code,
+            code: code.into(),
+        }
+        .recorded()
+    }
+
+    /// The machine-readable reason code of a [`Self::Denial`]: the code the
+    /// policy attached with
+    /// [`GateResponse::with_code`](crate::authorization::Response::with_code).
+    /// `None` for every other error.
+    ///
+    /// A caller that answers one denial differently from another, such as
+    /// an API that maps `over-limit` to an upgrade prompt, reads the code
+    /// here after `?` instead of inspecting the gate's response first.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Denial { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
     /// Bridge from any [`HttpError`]-implementing domain error into
     /// `FrameworkError`. Use this at the call site to propagate a
     /// custom error through `?` without writing a one-off
@@ -1355,6 +1408,7 @@ impl FrameworkError {
             Self::Validation(_) => 422,
             Self::ValidationRedirect { .. } => 302,
             Self::Unauthorized => 403,
+            Self::Denial { status_code, .. } => *status_code,
             Self::ModelNotFound { .. } => 404,
             Self::ParamParse { .. } => 400,
             Self::UnsupportedMediaType => 415,
@@ -1550,6 +1604,7 @@ impl FrameworkError {
             Self::Domain { message, .. } => message,
             Self::Validation(_) | Self::ValidationRedirect { .. } => "Validation failed",
             Self::Unauthorized => "This action is unauthorized.",
+            Self::Denial { message, .. } => message,
             Self::ModelNotFound { model_name } => model_name,
             Self::ParamParse { param, .. } => param,
             Self::UnsupportedMediaType => "Unsupported Media Type",
@@ -1592,9 +1647,9 @@ impl FrameworkError {
     ///
     /// Variant preservation: structured response variants
     /// (`Validation`, `ValidationError`, `PrecognitionFailure`,
-    /// `InvalidUpload`, `PrecognitionSuccess`, `Unauthorized`, `ModelNotFound`,
-    /// `ParamParse`, `UnsupportedMediaType`, `AlreadyReported`,
-    /// `RateLimited`) keep their variant so their response renderer
+    /// `InvalidUpload`, `PrecognitionSuccess`, `Unauthorized`, `Denial`,
+    /// `ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
+    /// `AlreadyReported`, `RateLimited`) keep their variant so their response renderer
     /// still emits the per-variant body (Laravel `errors` map,
     /// Precognition headers, JSON:API `source.pointer`, the
     /// `Retry-After` header, etc.). The context prefix is folded into
@@ -1672,6 +1727,17 @@ impl FrameworkError {
                 elapsed,
                 message: format!("{}: {}", prefix, message),
             },
+            // A contexted denial keeps its code and status: flattening it to
+            // `Domain` would drop the code `code()` exists to read.
+            Self::Denial {
+                message,
+                status_code,
+                code,
+            } => Self::Denial {
+                message: format!("{}: {}", prefix, message),
+                status_code,
+                code,
+            },
             // Variants whose body is fully fixed by the variant itself
             // (no caller-visible message field). Preserve the variant
             // so the response renderer still chooses the right shape;
@@ -1725,6 +1791,7 @@ impl FrameworkError {
             Self::Validation(_) => "FrameworkError::Validation",
             Self::ValidationRedirect { .. } => "FrameworkError::ValidationRedirect",
             Self::Unauthorized => "FrameworkError::Unauthorized",
+            Self::Denial { .. } => "FrameworkError::Denial",
             Self::ModelNotFound { .. } => "FrameworkError::ModelNotFound",
             Self::ParamParse { .. } => "FrameworkError::ParamParse",
             Self::UnsupportedMediaType => "FrameworkError::UnsupportedMediaType",

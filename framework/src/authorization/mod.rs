@@ -50,11 +50,13 @@
 //! # fn main() {}
 //! ```
 
+mod events;
 mod gate;
 mod handler;
 mod registry;
 mod response;
 
+pub use events::GateEvaluated;
 pub use gate::Gate;
 #[doc(hidden)]
 pub use handler::{__authorize_handler, __authorize_handler_type};
