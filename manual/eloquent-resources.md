@@ -67,15 +67,8 @@ async fn list_users() -> Result<HttpResponse, FrameworkError> {
 async fn paginate_users() -> Result<HttpResponse, FrameworkError> {
     // `paginate(per_page)` reads `?page=` from the current request automatically.
     let page = User::query().paginate(10).await?;
-    // Convert the model paginator into a resource paginator field-by-field -
-    // `data` is `pub`, the rest of the counts/links carry over.
-    let page = LengthAwarePaginator::new(
-        page.data.into_iter().map(UserResource::from).collect(),
-        page.total,
-        page.per_page,
-        page.current_page,
-    )
-    .with_base_url("/api/users");
+    // Transform each item while keeping the page metadata.
+    let page = page.through(UserResource::from).with_path("/api/users");
     Resource::paginated(page).render().await
 }
 ```
@@ -123,6 +116,18 @@ Resource::single(user)
 Canonical members (`data`, `included`, `links`, `meta`, `jsonapi`,
 `errors`) are never overwritten by `.additional(...)`.
 
+Set application-wide implementation information once in your bootstrap:
+
+```rust
+use suprnova::{JsonApiInfo, jsonapi_default};
+
+jsonapi_default(Some(JsonApiInfo::new().with_version("1.1")))?;
+```
+
+You apply the default to single resources, collections, and paginated
+collections, including empty collections. Override it for one response with
+`.with_jsonapi(info)`. Pass `None` to `jsonapi_default` to clear it.
+
 ## Per-resource `links` and `meta`
 
 Override the `IntoJsonResource::resource_links` and
@@ -152,8 +157,11 @@ impl IntoJsonResource for MyHandRolledPost {
 
 Both default to an empty `Map` for macro-derived resources, so the
 JSON:API renderer omits the keys when not used. Override
-`resource_top_level_meta` to lift per-resource metadata into the
-envelope's top-level `meta` member.
+`resource_top_level_meta` to supply top-level `meta` for a single resource.
+For a collection, attach document metadata with `.with_meta(...)` or
+`.with_meta_map(...)`. You keep that metadata at the root without copying
+any first item's top-level metadata. Each item's `resource_meta` remains
+inside its own resource object.
 
 ## Conditional attributes - `Maybe<T>` / `MissingValue<T>`
 
@@ -196,14 +204,61 @@ entire attributes object, so `Maybe::Missing` values nested inside
 arbitrary serde-derived structures are dropped recursively - useful
 when a deeply-nested transformer wants to omit subfields.
 
+Use `merge_when(condition, fields)` to include several attributes together.
+You store the group in a `MergeValue<T>` field, with fields that serialize
+to an object. The group's field name disappears from the output. Its
+members join the surrounding attributes when the condition is true:
+
+```rust
+use suprnova::{Data, MergeValue, Validate, merge_when};
+use serde_json::{Value, json};
+
+#[derive(Debug, Clone, Data, Validate)]
+#[json_resource("users")]
+pub struct UserResource {
+    pub id: i64,
+    pub name: String,
+    pub details: MergeValue<Value>,
+}
+
+let resource = UserResource {
+    id: user.id,
+    name: user.name.clone(),
+    details: merge_when(can_view_email, json!({ "email": user.email })),
+};
+```
+
+You omit the whole group when the condition is false. A present group must
+serialize to an object; scalar fields produce a serialization error.
+Merged members follow sparse fieldsets under their own names, and a
+`Maybe::Missing` member is omitted while an explicit null remains.
+
+Use `with_exists(relation)` when you need a flag without related rows:
+
+```rust
+use suprnova::when_exists_loaded;
+
+let users = User::query().with_exists("posts").get().await?;
+let user = &users[0];
+let posts_exists = when_exists_loaded(user, "posts", |exists| exists);
+```
+
+You read the `<relation>_exists` flag with
+`user.__eager.get_exists("posts")`. You get `Some(false)` when the loaded
+relation has no rows, and `None` when you did not request the flag. Place
+`posts_exists` in a `Maybe<bool>` resource field to emit true or false when
+loaded and omit it otherwise. The closure runs only for a loaded flag.
+Existence flags coexist with counts and loaded rows; requesting a flag
+alone leaves the relation unloaded. An unknown relation returns an error,
+even when your query has no matches.
+
 ## Sparse fieldsets
 
 The framework's `IncludeMiddleware` parses
 `?fields[type]=email,name`-style query parameters and binds them to a
-task-local. The macro-emitted `resource_attributes` consults the
-fieldset and only emits requested attributes. No handler-side work is
-needed - install the middleware and the resource layer honours it
-automatically.
+task-local. You get only the requested
+attributes after conditional groups merge. Install the middleware to bind
+the fieldset without extra handler work.
 
 ```rust
 // Request: GET /api/users/7?fields[users]=email
@@ -351,6 +406,9 @@ let response = FrameworkError::validation("email", "email is invalid")
 | `IncludeTree` | parsed `?include=` from `JsonApiRequest` |
 | `RequestFieldsetSet` | parsed `?fields[type]=` from `JsonApiRequest` |
 | `Maybe<T>` / `MissingValue<T>` | `MissingValue` + `whenLoaded` / `when` / `unless` |
+| `merge_when` / `MergeValue<T>` | `mergeWhen` |
+| `when_exists_loaded` | `whenExistsLoaded` |
+| `jsonapi_default` | application-wide `JsonApiResource::configure` |
 | `JsonApiInfo` | `JsonApiResource::$jsonApiInformation` |
 | `JsonApiResponse::status(code)` / `.created()` | `ResourceResponse::calculateStatus` |
 | `JsonApiResponse::additional(map)` / `.with_additional(k, v)` | `JsonResource::additional($data)` |
@@ -364,7 +422,8 @@ Top-level re-exports under `suprnova::`: `Resource`, `JsonApi`,
 `JsonApiResponse`, `JsonApiBuilder`, `JsonApiInfo`, `IncludedSink`,
 `IntoJsonResource`, `RelationshipValue`, `ResourceIdentifier`,
 `IncludeTree`, `RequestFieldsetSet`, `Maybe`, `MissingValue`,
-`insert_maybe`, `strip_missing_values`, `AsRelationshipValue`,
+`insert_maybe`, `merge_when`, `MergeValue`, `when_exists_loaded`,
+`jsonapi_default`, `strip_missing_values`, `AsRelationshipValue`,
 `PushIncluded`, `IncludeResolutionError`, `current_fieldset`,
 `scope_fieldset`.
 

@@ -4,3 +4,5 @@
 pub mod json_api_include_depth;
 pub mod json_api_resources;
 pub mod resource_authorization;
+
+pub mod laravel_gaps;

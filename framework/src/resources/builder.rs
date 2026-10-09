@@ -108,7 +108,7 @@ impl JsonApiBuilder {
             links: Map::new(),
             meta: Map::new(),
             additional: Map::new(),
-            jsonapi: None,
+            jsonapi: super::jsonapi_info::current_jsonapi_default(),
             seen_included: Default::default(),
             include_requested: false,
         }
@@ -121,7 +121,7 @@ impl JsonApiBuilder {
             links: Map::new(),
             meta: Map::new(),
             additional: Map::new(),
-            jsonapi: None,
+            jsonapi: super::jsonapi_info::current_jsonapi_default(),
             seen_included: Default::default(),
             include_requested: false,
         }
@@ -266,10 +266,14 @@ pub fn render_resource_object<T: IntoJsonResource>(
     let id = resource.resource_id();
     let attrs_filter = fieldset.fields_for(rtype);
     let attrs_filter_ref: Option<&[&str]> = attrs_filter.as_deref();
-    let mut attrs = resource.resource_attributes(attrs_filter_ref);
+    let mut attrs = resource.resource_attributes(None);
     // Drop any Maybe::Missing sentinel objects emitted by conditional
     // attributes (see resources::maybe).
     strip_missing_values(&mut attrs);
+    // Merged fields take part in the sparse fieldset under their own names.
+    if let (Some(allowed), Some(map)) = (attrs_filter_ref, attrs.as_object_mut()) {
+        map.retain(|name, _| allowed.contains(&name.as_str()));
+    }
 
     let mut data = Map::new();
     data.insert("type".into(), Value::String(rtype.to_string()));

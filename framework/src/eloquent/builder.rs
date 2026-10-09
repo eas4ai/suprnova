@@ -213,6 +213,33 @@ pub(crate) enum WhereTerm {
     ExistsQuery(Box<DbTableBuilder>, bool),
 }
 
+// Adapt the shared typed boundary to the model builder's WHERE grammar.
+fn cursor_where(
+    cursor: &crate::pagination::Cursor,
+    orders: &[(String, bool)],
+    forward: bool,
+) -> Result<WhereTerm, FrameworkError> {
+    let terms = cursor
+        .comparisons(orders, forward)?
+        .into_iter()
+        .map(|group| {
+            WhereTerm::Group(
+                group
+                    .into_iter()
+                    .map(|comparison| {
+                        WhereTerm::Op(
+                            comparison.column,
+                            comparison.operator.into(),
+                            crate::eloquent::model::sea_value_to_json_loose(&comparison.value),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    Ok(WhereTerm::Or(terms))
+}
+
 /// Spec passed to [`WhereTerm::Exists`]. Built by
 /// [`Builder::has`] / [`Builder::where_has`] / [`Builder::doesnt_have`]
 /// / [`Builder::where_doesnt_have`] and the belongs-to / morph
@@ -581,6 +608,7 @@ pub struct Builder<M> {
     /// `"posts.comments"` paths recurse through
     /// `__recurse_eager_load`.
     pub(crate) eager_specs: Vec<EagerSpec>,
+    exists_relations: Vec<String>,
     /// Phase 10C T9 - row-locking hint applied at SQL emission time.
     /// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`].
     /// The clause is appended at the very end of the compound
@@ -658,6 +686,7 @@ impl<M> Clone for Builder<M> {
             // `Arc<dyn Fn>`, so this shares the closure rather than
             // duplicating it - every variant clones cheaply.
             eager_specs: self.eager_specs.clone(),
+            exists_relations: self.exists_relations.clone(),
             lock_mode: self.lock_mode,
             // T11: transaction override is a cheap `Arc` clone - every
             // clone of the builder targets the same underlying tx.
@@ -1173,6 +1202,7 @@ impl<M> Builder<M> {
             skip_all_scopes: false,
             scope_resolver: None,
             eager_specs: Vec::new(),
+            exists_relations: Vec::new(),
             lock_mode: LockMode::None,
             tx_override: None,
             connection_override: None,
@@ -1309,6 +1339,16 @@ impl<M> Builder<M> {
     {
         for r in relations {
             self.eager_specs.push(EagerSpec::WithCount(r.into()));
+        }
+        self
+    }
+
+    /// Load a boolean `<relation>_exists` flag without hydrating related rows.
+    /// Read it through the model's eager cache or `when_exists_loaded` in a resource.
+    pub fn with_exists(mut self, relation: impl Into<String>) -> Self {
+        let relation = relation.into();
+        if !self.exists_relations.contains(&relation) {
+            self.exists_relations.push(relation);
         }
         self
     }
@@ -5424,6 +5464,8 @@ where
                 .await?;
         }
 
+        this.load_existence_flags(&out, &exec).await?;
+
         // Phase 10C T1 - Retrieved fires ONCE per hydrated row, AFTER
         // eager loads land. Listeners observe the fully-populated
         // model (relations cache + all hydrated columns), not the
@@ -5433,6 +5475,69 @@ where
         }
 
         Ok(Collection::from_vec(out))
+    }
+
+    // The probe reads parents through EXISTS so it never hydrates child models.
+    async fn load_existence_flags(
+        &self,
+        out: &[M],
+        exec: &crate::database::transaction::ExecutorChoice,
+    ) -> Result<(), FrameworkError> {
+        for relation in &self.exists_relations {
+            if crate::eloquent::relations::find_relation::<M>(relation).is_none() {
+                return Err(FrameworkError::bad_request(format!(
+                    "Unknown relation `{relation}`"
+                )));
+            }
+            if out.is_empty() {
+                continue;
+            }
+            // Fetch parent keys through EXISTS, never child models or relation rows.
+            let keys: Vec<Value> = out
+                .iter()
+                .map(|row| {
+                    row.get_raw_original(M::primary_key_name())
+                        .unwrap_or_else(|| {
+                            crate::eloquent::model::sea_value_to_json_loose(
+                                &row.primary_key_value().into(),
+                            )
+                        })
+                })
+                .collect();
+            let mut probe = Self::new()
+                .filter_in(M::primary_key_name(), keys)
+                .has(relation);
+            probe.tx_override = self.tx_override.clone();
+            probe.connection_override = self.connection_override.clone();
+            probe.binder = self.binder;
+            let (sql, values) = probe.render_select_for(exec.backend(), M::TABLE, "*")?;
+            let matching = exec
+                .statement_all::<<M::Entity as sea_orm::EntityTrait>::Model>(
+                    Statement::from_sql_and_values(exec.backend(), sql, values),
+                )
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            let matching: std::collections::HashSet<Value> = matching
+                .into_iter()
+                .map(|row| serde_json::to_value(row).map(|row| row[M::primary_key_name()].clone()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| FrameworkError::internal(e.to_string()))?;
+            for row in out {
+                let key = row
+                    .get_raw_original(M::primary_key_name())
+                    .unwrap_or_else(|| {
+                        crate::eloquent::model::sea_value_to_json_loose(
+                            &row.primary_key_value().into(),
+                        )
+                    });
+                let cache = row
+                    .__eager_cache()
+                    .ok_or_else(|| FrameworkError::internal("Model has no eager cache"))?;
+                cache.set_exists(relation, matching.contains(&key));
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute the SELECT and return at most one row.
@@ -5693,8 +5798,10 @@ where
     /// a client can page in either direction. Cursors are encrypted+MACd
     /// via `CursorPaginator::encode_value` so they can't be forged.
     ///
-    /// Any existing `ORDER BY` on the builder is replaced - cursor
-    /// pagination requires a stable total order over the PK. An `OFFSET`
+    /// Multiple ordered columns keep their directions and each contributes
+    /// a named cursor boundary. The primary key breaks ties when absent.
+    /// Zero or one explicit order retains the ascending primary-key walk.
+    /// Select non-null ordered columns so the keyset can advance. An `OFFSET`
     /// positions the first page only, the one requested without a
     /// cursor; every later page starts at its cursor, so the offset
     /// never skips rows between two pages.
@@ -5715,69 +5822,115 @@ where
             return Err(FrameworkError::param("per_page"));
         }
 
-        let pk = M::primary_key_name();
-        let decoded = match current_cursor_from_request() {
-            Some(c) => Some(crate::pagination::CursorPaginator::<M>::decode_value(&c)?),
-            None => None,
-        };
-        let from_cursor = decoded.is_some();
-        let plan = crate::pagination::cursor::plan_scan(decoded);
-
-        // Replace any existing ORDER BY with a stable PK sort in the
-        // plan's direction - cursor pagination requires a total order
-        // over the keyset column. A page reached by a cursor starts at
-        // the cursor alone: an offset kept there would skip rows again
-        // on every page.
-        let mut q = self;
+        use crate::pagination::{Cursor, CursorDirection, CursorPaginator};
+        let mut q = self.into_effective();
+        let orders = q.cursor_orders()?;
+        let current_cursor = current_cursor_from_request();
+        let decoded = current_cursor.as_deref().map(Cursor::decode).transpose()?;
+        let plan =
+            crate::pagination::cursor::plan_direction(decoded.as_ref().map(Cursor::direction));
         q.orders.clear();
-        if from_cursor {
+        if decoded.is_some() {
             q.offset = None;
         }
-        let mut q = if plan.order_asc {
-            q.order_by_asc(pk)
-        } else {
-            q.order_by_desc(pk)
-        };
-        if let Some((op, boundary)) = &plan.filter {
-            // Convert the typed boundary back to JSON; the builder's
-            // `filter_op` pipeline rebinds it via `json_value_to_sea_value`
-            // in the renderer. Every PK variant we care about (Int /
-            // BigInt / Uuid / String) round-trips losslessly.
-            let boundary_json = crate::eloquent::model::sea_value_to_json_loose(boundary);
-            q = q.keyset_bound(pk, op, boundary_json);
+        for (name, ascending) in &orders {
+            q.orders.push(OrderTerm::Col(
+                name.clone(),
+                if *ascending == plan.order_asc {
+                    Direction::Asc
+                } else {
+                    Direction::Desc
+                },
+            ));
         }
-
-        let mut rows: Vec<M> = q.limit(per_page + 1).get().await?.into_vec();
-        // Normalize a backward (DESC) scan back to ASC so finalize_page
-        // sees the overflow row at the start.
+        if let Some(cursor) = &decoded {
+            let bound = cursor_where(cursor, &orders, plan.order_asc)?;
+            if q.unions.is_empty() {
+                let terms = std::mem::take(&mut q.where_terms);
+                q.where_terms.push(WhereTerm::Group(terms));
+                q.where_terms.push(bound);
+            } else {
+                q.union_filters.push(bound);
+            }
+        }
+        let mut rows = q.limit(per_page.saturating_add(1)).get().await?.into_vec();
         if !plan.order_asc {
             rows.reverse();
         }
         let (rows, flags) = crate::pagination::cursor::finalize_page(rows, per_page, &plan);
+        let next_cursor = rows
+            .last()
+            .filter(|_| flags.has_next)
+            .map(|row| Self::cursor_for_row(row, &orders, CursorDirection::Next))
+            .transpose()?;
+        let prev_cursor = rows
+            .first()
+            .filter(|_| flags.has_prev)
+            .map(|row| Self::cursor_for_row(row, &orders, CursorDirection::Prev))
+            .transpose()?;
+        let paginator = CursorPaginator::new(rows, per_page, next_cursor, prev_cursor)
+            .with_cursor_name("cursor");
+        Ok(match current_cursor {
+            Some(cursor) => paginator.with_current_cursor(cursor),
+            None => paginator,
+        })
+    }
 
-        let next_cursor = if flags.has_next && !rows.is_empty() {
-            let pk_val: sea_orm::Value = rows.last().unwrap().primary_key_value().into();
-            Some(crate::pagination::CursorPaginator::<M>::encode_value(
-                &pk_val,
-                crate::pagination::CursorDirection::Next,
-            )?)
+    fn cursor_orders(&self) -> Result<Vec<(String, bool)>, FrameworkError> {
+        let mut orders: Vec<(String, bool)> = if self.orders.len() > 1 {
+            self.orders
+                .iter()
+                .map(|order| match order {
+                    OrderTerm::Col(name, direction) => {
+                        crate::database::validate_identifier(name)?;
+                        Ok((name.clone(), matches!(direction, Direction::Asc)))
+                    }
+                    _ => Err(FrameworkError::bad_request(
+                        "Cursor pagination needs ordered columns",
+                    )),
+                })
+                .collect::<Result<_, _>>()?
         } else {
-            None
+            vec![(M::primary_key_name().to_string(), true)]
         };
-        let prev_cursor = if flags.has_prev && !rows.is_empty() {
-            let pk_val: sea_orm::Value = rows.first().unwrap().primary_key_value().into();
-            Some(crate::pagination::CursorPaginator::<M>::encode_value(
-                &pk_val,
-                crate::pagination::CursorDirection::Prev,
-            )?)
-        } else {
-            None
-        };
+        if !orders
+            .iter()
+            .any(|(name, _)| name.rsplit('.').next() == Some(M::primary_key_name()))
+        {
+            orders.push((M::primary_key_name().to_string(), true));
+        }
+        Ok(orders)
+    }
 
-        Ok(
-            crate::pagination::CursorPaginator::new(rows, per_page, next_cursor, prev_cursor)
-                .with_cursor_name("cursor"),
-        )
+    fn cursor_for_row(
+        row: &M,
+        orders: &[(String, bool)],
+        direction: crate::pagination::CursorDirection,
+    ) -> Result<String, FrameworkError> {
+        let pk = M::primary_key_name();
+
+        let parameters = orders
+            .iter()
+            .map(|(name, _)| {
+                let column = name.rsplit('.').next().unwrap_or(name);
+                let value = if column == pk {
+                    row.primary_key_value().into()
+                } else {
+                    let original = row
+                        .get_raw_original(column)
+                        .or_else(|| row.field_value(column))
+                        .ok_or_else(|| {
+                            FrameworkError::internal(format!(
+                                "Cursor column `{name}` was not selected"
+                            ))
+                        })?;
+                    M::bind_column(column, &original)
+                        .unwrap_or_else(|| json_value_to_sea_value(&original))
+                };
+                Ok((name.clone(), value))
+            })
+            .collect::<Result<_, FrameworkError>>()?;
+        crate::pagination::Cursor::new(parameters, direction).encode()
     }
 
     // ---- Chunking + lazy iteration (Phase 10C T8) -----------------------

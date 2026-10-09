@@ -114,7 +114,7 @@ async fn length_aware_paginate_empty_table_yields_no_window() {
     let _db = fixture(0).await;
     let page: LengthAwarePaginator<T7Article> = T7Article::query().paginate(10).await.unwrap();
     assert_eq!(page.total, 0);
-    assert_eq!(page.last_page, 0);
+    assert_eq!(page.last_page, 1);
     assert_eq!(page.data.len(), 0);
     assert_eq!(page.from, None);
     assert_eq!(page.to, None);

@@ -9,15 +9,14 @@ use crate::crypto::Crypt;
 /// Direction a cursor advances in. The first page always uses
 /// [`CursorDirection::Next`] implicitly (the caller passes `None`).
 /// Page-to-page cursors carry their direction in the wire payload so
-/// `Pagination::cursor` knows whether to filter `gt`/asc (next) or
-/// `lt`/desc (prev).
+/// `Pagination::cursor` can follow or reverse the query's ordered columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorDirection {
-    /// Cursor identifies the upper boundary already shown; the next
-    /// page is the strictly greater rows.
+    /// Cursor identifies the last boundary already shown; the next
+    /// page follows it in the query's order.
     Next,
-    /// Cursor identifies the lower boundary already shown; the previous
-    /// page is the strictly lesser rows.
+    /// Cursor identifies the first boundary already shown; the previous
+    /// page precedes it in the query's order.
     Prev,
 }
 
@@ -40,16 +39,182 @@ impl CursorDirection {
     }
 }
 
+/// Named, typed boundaries let you paginate without losing ties across ordered columns.
+#[derive(Debug, Clone)]
+pub struct Cursor {
+    parameters: std::collections::BTreeMap<String, sea_orm::Value>,
+    direction: CursorDirection,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ParametersPayload {
+    parameters: std::collections::BTreeMap<String, (String, serde_json::Value)>,
+    d: String,
+}
+
+impl Cursor {
+    /// Build named boundaries so each ordered column contributes to the next page.
+    pub fn new(
+        parameters: std::collections::BTreeMap<String, sea_orm::Value>,
+        direction: CursorDirection,
+    ) -> Self {
+        Self {
+            parameters,
+            direction,
+        }
+    }
+
+    /// Look up an ordered column so you can inspect its typed cursor boundary.
+    pub fn parameter(&self, name: &str) -> Option<&sea_orm::Value> {
+        self.parameters.get(name)
+    }
+
+    /// Read the scan direction so callers can build forward or backward boundaries.
+    pub fn direction(&self) -> CursorDirection {
+        self.direction
+    }
+
+    /// Encrypt named boundaries so clients cannot alter pagination positions.
+    /// Null boundaries are rejected because SQL comparisons cannot advance through them.
+    pub fn encode(&self) -> Result<String, FrameworkError> {
+        if self.parameters.is_empty() {
+            return Err(FrameworkError::bad_request(
+                "Cursor needs an ordered column",
+            ));
+        }
+        let parameters = self
+            .parameters
+            .iter()
+            .map(|(name, value)| {
+                let tagged = value_to_tagged_json(value)?;
+                if tagged.1.is_null() {
+                    return Err(FrameworkError::bad_request(
+                        "Cursor ordered columns must not be null",
+                    ));
+                }
+                Ok((name.clone(), tagged))
+            })
+            .collect::<Result<_, FrameworkError>>()?;
+        let payload = ParametersPayload {
+            parameters,
+            d: self.direction.as_str().into(),
+        };
+        let json =
+            serde_json::to_string(&payload).map_err(|e| FrameworkError::internal(e.to_string()))?;
+        Crypt::encrypt_string(crate::crypto::CryptPurpose::Cursor, &json)
+    }
+
+    /// Authenticate and decode boundaries so cursor input cannot become unsigned SQL binds.
+    /// Previously issued single-value cursors remain readable.
+    pub fn decode(wire: &str) -> Result<Self, FrameworkError> {
+        let json =
+            Crypt::decrypt_string(crate::crypto::CryptPurpose::Cursor, wire).map_err(|e| {
+                if Crypt::is_initialized() {
+                    FrameworkError::bad_request("Invalid pagination cursor")
+                } else {
+                    e
+                }
+            })?;
+        let document: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
+        if document.get("parameters").is_some() {
+            let payload: ParametersPayload = serde_json::from_value(document)
+                .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
+            let parameters = payload
+                .parameters
+                .into_iter()
+                .map(|(name, (tag, value))| Ok((name, tagged_json_to_value(&tag, value)?)))
+                .collect::<Result<_, FrameworkError>>()?;
+            Ok(Self::new(
+                parameters,
+                CursorDirection::from_str(&payload.d)?,
+            ))
+        } else {
+            let payload: CursorPayload = serde_json::from_value(document)
+                .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
+            Ok(Self::new(
+                std::collections::BTreeMap::from([(
+                    "".into(),
+                    tagged_json_to_value(&payload.t, payload.v)?,
+                )]),
+                CursorDirection::from_str(&payload.d)?,
+            ))
+        }
+    }
+
+    /// Share lexicographic comparisons so both query builders use the same boundaries.
+    pub(crate) fn comparisons(
+        &self,
+        orders: &[(String, bool)],
+        forward: bool,
+    ) -> Result<Vec<Vec<CursorComparison>>, FrameworkError> {
+        let values = orders
+            .iter()
+            .map(|(name, _)| self.boundary(name, orders.len() == 1).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(orders
+            .iter()
+            .enumerate()
+            .map(|(index, (name, ascending))| {
+                let prefix =
+                    orders[..index]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (name, _))| CursorComparison {
+                            column: name.clone(),
+                            operator: "=",
+                            value: values[i].clone(),
+                        });
+                let boundary = CursorComparison {
+                    column: name.clone(),
+                    operator: if *ascending == forward { ">" } else { "<" },
+                    value: values[index].clone(),
+                };
+                prefix.chain(std::iter::once(boundary)).collect()
+            })
+            .collect())
+    }
+
+    /// Validate an ordered boundary so missing or null values cannot skip rows.
+    pub(crate) fn boundary(
+        &self,
+        name: &str,
+        single: bool,
+    ) -> Result<&sea_orm::Value, FrameworkError> {
+        let value = self
+            .parameter(name)
+            .or_else(|| single.then(|| self.parameter("")).flatten())
+            .ok_or_else(|| {
+                FrameworkError::bad_request("Cursor does not match the ordered columns")
+            })?;
+        if value_to_tagged_json(value)?.1.is_null() {
+            return Err(FrameworkError::bad_request(
+                "Cursor ordered columns must not be null",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+/// One typed comparison lets the two query builders share a lexicographic boundary.
+pub(crate) struct CursorComparison {
+    /// Name the column so each adapter can apply its own quoting rules.
+    pub column: String,
+    /// Compare equality on the prefix and strictly beyond its final column.
+    pub operator: &'static str,
+    /// Keep the SQL type while constructing the boundary.
+    pub value: sea_orm::Value,
+}
+
 /// Paginator that emits opaque cursor strings instead of page numbers.
 ///
 /// Equivalent to Laravel's `CursorPaginator`. Returned by
 /// [`Pagination::cursor`](crate::pagination::Pagination::cursor) and by
 /// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate).
 ///
-/// The boundary value carried in `next_cursor` / `prev_cursor` is the
-/// last (or first) row's primary-sort column, encoded as a typed
-/// SeaORM [`sea_orm::Value`] so dialects (Postgres, MySQL, SQLite)
-/// receive the correctly-typed bind without any string coercion.
+/// The boundary carried in `next_cursor` / `prev_cursor` contains each
+/// ordered column from the last or first row. Typed SeaORM
+/// [`sea_orm::Value`] values retain the SQL types when the cursor is decoded.
 ///
 /// ## JSON shape
 ///
@@ -133,6 +298,28 @@ impl<T: Serialize> Serialize for CursorPaginator<T> {
 }
 
 impl<T> CursorPaginator<T> {
+    /// Transform items into another type so you can keep all pagination metadata.
+    pub fn through<U>(self, transform: impl FnMut(T) -> U) -> CursorPaginator<U> {
+        let Self {
+            data,
+            per_page,
+            next_cursor,
+            prev_cursor,
+            path,
+            cursor_name,
+            current_cursor,
+        } = self;
+        CursorPaginator {
+            data: data.into_iter().map(transform).collect(),
+            per_page,
+            next_cursor,
+            prev_cursor,
+            path,
+            cursor_name,
+            current_cursor,
+        }
+    }
+
     /// The URL of the page behind this one, and `None` at the last page.
     /// Laravel's `nextPageUrl`.
     pub fn next_page_url(&self) -> Option<String> {
@@ -337,19 +524,18 @@ impl<T> CursorPaginator<T> {
     /// genuine uninitialized-`Crypt` (would itself be a boot bug) still
     /// propagates as 500.
     pub fn decode_value(wire: &str) -> Result<(sea_orm::Value, CursorDirection), FrameworkError> {
-        let json =
-            Crypt::decrypt_string(crate::crypto::CryptPurpose::Cursor, wire).map_err(|e| {
-                if Crypt::is_initialized() {
-                    FrameworkError::bad_request("Invalid pagination cursor")
-                } else {
-                    e
-                }
-            })?;
-        let payload: CursorPayload = serde_json::from_str(&json)
-            .map_err(|e| crate::crypto::json_decode_error("Cursor payload", &e))?;
-        let value = tagged_json_to_value(&payload.t, payload.v)?;
-        let direction = CursorDirection::from_str(&payload.d)?;
-        Ok((value, direction))
+        let cursor = Cursor::decode(wire)?;
+        if cursor.parameters.len() != 1 {
+            return Err(FrameworkError::bad_request(
+                "Cursor has several ordered columns",
+            ));
+        }
+        let value = cursor
+            .parameters
+            .into_values()
+            .next()
+            .ok_or_else(|| FrameworkError::bad_request("Cursor has no boundary"))?;
+        Ok((value, cursor.direction))
     }
 
     /// Encode a cursor boundary as a plain string. **Legacy helper**
@@ -427,12 +613,9 @@ impl<T> CursorPaginator<T> {
 /// consume the same plan, so the bidirectional next/prev semantics
 /// live in one place rather than being reimplemented per surface.
 pub(crate) struct ScanPlan {
-    /// `true` → fetch ASC (first page / forward step); `false` → fetch
-    /// DESC (backward step, which the caller reverses back to ASC).
+    /// Keep the query order on a forward scan; reverse it on a backward
+    /// scan, which the caller then restores before trimming the page.
     pub order_asc: bool,
-    /// `Some((op, boundary))` keyset filter - `op` is `">"` (forward)
-    /// or `"<"` (backward). `None` on the first page.
-    pub filter: Option<(&'static str, sea_orm::Value)>,
     /// Direction this scan represents; drives the cursor computation in
     /// [`finalize_page`]. Fully correlated with `order_asc` (kept
     /// separate for readability at the call sites).
@@ -452,36 +635,21 @@ pub(crate) struct PageFlags {
 
 /// Resolve a decoded cursor (`None` = first page) into the scan to run.
 /// Pure - no query mechanics, no IO.
-pub(crate) fn plan_scan(decoded: Option<(sea_orm::Value, CursorDirection)>) -> ScanPlan {
-    match decoded {
-        None => ScanPlan {
-            order_asc: true,
-            filter: None,
-            scan_direction: CursorDirection::Next,
-            entered_via_next: false,
-            entered_via_prev: false,
-        },
-        Some((boundary, CursorDirection::Next)) => ScanPlan {
-            order_asc: true,
-            filter: Some((">", boundary)),
-            scan_direction: CursorDirection::Next,
-            entered_via_next: true,
-            entered_via_prev: false,
-        },
-        Some((boundary, CursorDirection::Prev)) => ScanPlan {
-            order_asc: false,
-            filter: Some(("<", boundary)),
-            scan_direction: CursorDirection::Prev,
-            entered_via_next: false,
-            entered_via_prev: true,
-        },
+pub(crate) fn plan_direction(direction: Option<CursorDirection>) -> ScanPlan {
+    let entered_via_next = direction == Some(CursorDirection::Next);
+    let entered_via_prev = direction == Some(CursorDirection::Prev);
+    ScanPlan {
+        order_asc: !entered_via_prev,
+        scan_direction: direction.unwrap_or(CursorDirection::Next),
+        entered_via_next,
+        entered_via_prev,
     }
 }
 
 /// Trim the overflow probe row and compute the page flags.
 ///
-/// `rows` MUST be ASC-normalized: the caller fetches `per_page + 1`
-/// rows and, for a backward (DESC) scan, reverses them back to ASC
+/// `rows` follow the query's original order: the caller fetches `per_page + 1`
+/// rows and reverses a backward scan back to that order
 /// before calling this. With that contract the overflow row is at the
 /// END for a forward scan and at the START for a backward scan, so it
 /// is dropped from the correct side. Returns the trimmed page plus
@@ -796,33 +964,29 @@ mod tests {
     }
 
     fn plan_for(dir: Option<CursorDirection>) -> ScanPlan {
-        let decoded = dir.map(|d| (sea_orm::Value::BigInt(Some(10)), d));
-        plan_scan(decoded)
+        plan_direction(dir)
     }
 
     #[test]
-    fn plan_scan_first_page_is_ascending_unfiltered() {
+    fn plan_direction_first_page_is_forward() {
         let p = plan_for(None);
         assert!(p.order_asc);
-        assert!(p.filter.is_none());
         assert_eq!(p.scan_direction, CursorDirection::Next);
         assert!(!p.entered_via_next && !p.entered_via_prev);
     }
 
     #[test]
-    fn plan_scan_next_filters_greater_than_ascending() {
+    fn plan_direction_next_scans_forward() {
         let p = plan_for(Some(CursorDirection::Next));
         assert!(p.order_asc);
-        assert_eq!(p.filter.as_ref().map(|(op, _)| *op), Some(">"));
         assert_eq!(p.scan_direction, CursorDirection::Next);
         assert!(p.entered_via_next);
     }
 
     #[test]
-    fn plan_scan_prev_filters_less_than_descending() {
+    fn plan_direction_prev_scans_backward() {
         let p = plan_for(Some(CursorDirection::Prev));
         assert!(!p.order_asc);
-        assert_eq!(p.filter.as_ref().map(|(op, _)| *op), Some("<"));
         assert_eq!(p.scan_direction, CursorDirection::Prev);
         assert!(p.entered_via_prev);
     }

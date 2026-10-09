@@ -65,6 +65,7 @@ pub struct EagerLoadCache {
     rows: HashMap<String, RelationCell>,
     /// `with_count` results, by relation name.
     counts: HashMap<String, u64>,
+    exists: std::sync::Mutex<HashMap<String, bool>>,
     /// Whether the model came out of a query that returned more than
     /// one row. Set once, by the read path that hydrated the model.
     from_multi_row_query: bool,
@@ -94,6 +95,7 @@ impl EagerLoadCache {
         Self {
             rows: HashMap::new(),
             counts: HashMap::new(),
+            exists: std::sync::Mutex::default(),
             from_multi_row_query: false,
             row: RowState::default(),
         }
@@ -112,6 +114,7 @@ impl EagerLoadCache {
         Self {
             rows: HashMap::new(),
             counts: HashMap::new(),
+            exists: std::sync::Mutex::default(),
             from_multi_row_query: false,
             row: RowState::loaded(row),
         }
@@ -169,6 +172,12 @@ impl EagerLoadCache {
         Self {
             rows: self.clone_rows(),
             counts: self.counts.clone(),
+            exists: std::sync::Mutex::new(
+                self.exists
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
             from_multi_row_query: false,
             row: RowState::default(),
         }
@@ -320,6 +329,23 @@ impl EagerLoadCache {
         self.counts.get(name).copied()
     }
 
+    /// Read a relation's existence flag so loaded false stays distinct from unloaded.
+    pub fn get_exists(&self, name: &str) -> Option<bool> {
+        self.exists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&format!("{name}_exists"))
+            .copied()
+    }
+
+    /// Store a probe result without marking the relation's rows as loaded.
+    pub(crate) fn set_exists(&self, name: &str, exists: bool) {
+        self.exists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(format!("{name}_exists"), exists);
+    }
+
     /// Store a `with_sum` / `with_avg` / `with_min` / `with_max` value.
     ///
     /// The cache key is the wide `<rel>_<kind>_<col>` form built by
@@ -352,6 +378,12 @@ impl Clone for EagerLoadCache {
         Self {
             rows: self.clone_rows(),
             counts: self.counts.clone(),
+            exists: std::sync::Mutex::new(
+                self.exists
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
             from_multi_row_query: self.from_multi_row_query,
             row: self.row.clone(),
         }
