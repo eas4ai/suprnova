@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::blocking::SessionBlock;
-use crate::http::CookiePrefix;
+use crate::http::{CookiePrefix, SameSite};
 
 /// Maximum session/remember lifetime in seconds: 9999-12-31T23:59:59Z as
 /// a Unix timestamp.
@@ -136,6 +136,18 @@ impl SessionConfig {
             "/".to_owned()
         } else {
             crate::routing::root::cookie_path()
+        }
+    }
+
+    /// The `SameSite` attribute [`Self::cookie_same_site`] names, read
+    /// without regard to case as the session middleware reads it:
+    /// `strict` is `Strict`, `none` is `None`, and anything else is `Lax`,
+    /// so a cookie built from this value agrees with the session cookie.
+    pub(crate) fn same_site_attribute(&self) -> SameSite {
+        match self.cookie_same_site.to_ascii_lowercase().as_str() {
+            "strict" => SameSite::Strict,
+            "none" => SameSite::None,
+            _ => SameSite::Lax,
         }
     }
 

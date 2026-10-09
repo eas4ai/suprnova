@@ -1,7 +1,7 @@
 //! CSRF protection middleware
 
 use crate::Request;
-use crate::http::{Cookie, HttpResponse, Response, SameSite};
+use crate::http::{BodyRead, Cookie, HttpResponse, Response, SameSite};
 use crate::middleware::{Middleware, Next};
 use crate::session::get_csrf_token;
 use async_trait::async_trait;
@@ -144,15 +144,19 @@ fn normalize_pattern(pattern: &str) -> &str {
 
 /// CSRF protection middleware
 ///
-/// Validates CSRF tokens on state-changing requests (POST, PUT, PATCH, DELETE).
+/// Validates the CSRF token on every request whose method is not `GET`,
+/// `HEAD` or `OPTIONS`, as Laravel's `isReading` decides. `QUERY` and
+/// extension methods such as `PROPFIND` are checked too: a method the
+/// middleware does not know is not known to be safe.
 ///
 /// # Token Sources
 ///
-/// The middleware looks for the CSRF token in the following order:
-/// 1. `X-CSRF-TOKEN` header (used by Inertia.js)
-/// 2. `X-XSRF-TOKEN` header (Laravel convention; reads the
+/// The middleware takes the token from the first of these that has a
+/// value, in Laravel's `getTokenFromRequest` order:
+/// 1. `_token` in a form body or at the top level of a JSON body
+/// 2. `X-CSRF-TOKEN` header (a hand-written request that read the meta tag)
+/// 3. `X-XSRF-TOKEN` header (Laravel convention; reads the
 ///    `XSRF-TOKEN` cookie value the framework issued on the response)
-/// 3. `_token` form field (traditional forms)
 ///
 /// # Origin verification (Laravel 13's `PreventRequestForgery`)
 ///
@@ -184,8 +188,6 @@ fn normalize_pattern(pattern: &str) -> &str {
 /// # }
 /// ```
 pub struct CsrfMiddleware {
-    /// HTTP methods that require CSRF validation
-    protected_methods: Vec<&'static str>,
     /// Paths to exclude from CSRF validation (e.g., webhooks).
     ///
     /// Each entry is a Laravel-style glob pattern (see [`Self::is_excluded`]):
@@ -223,14 +225,13 @@ pub struct CsrfMiddleware {
 impl CsrfMiddleware {
     /// Create a new CSRF middleware with default settings
     ///
-    /// Protects: POST, PUT, PATCH, DELETE.
+    /// Checks every method but `GET`, `HEAD` and `OPTIONS`.
     ///
     /// Origin verification is **off** by default (token validation
     /// only); use [`allow_same_site`](Self::allow_same_site) or
     /// [`origin_only`](Self::origin_only) to enable it.
     pub fn new() -> Self {
         Self {
-            protected_methods: vec!["POST", "PUT", "PATCH", "DELETE"],
             except: Vec::new(),
             origin_policy: OriginPolicy::Disabled,
             add_xsrf_cookie: true,
@@ -585,13 +586,12 @@ impl Default for CsrfMiddleware {
 #[async_trait]
 impl Middleware for CsrfMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
-        let method = request.method().as_str();
-
         // Reading verbs (GET/HEAD/OPTIONS) are never token-checked.
         // We still run through the bottom of the function so the
         // XSRF-TOKEN cookie gets attached to read responses - that's
         // how SPA clients ever acquire the cookie in the first place.
-        let is_reading = !self.protected_methods.contains(&method);
+        let is_reading = is_reading(request.method());
+        let method = request.method().as_str();
 
         // Excluded paths bypass both origin and token checks, but
         // still get the XSRF cookie so a webhook handler that later
@@ -678,37 +678,45 @@ impl Middleware for CsrfMiddleware {
 
         // Laravel's `getTokenFromRequest`: `$request->input('_token') ?:
         // $request->header('X-CSRF-TOKEN')`, and `X-XSRF-TOKEN` only while
-        // the token is still empty. A form's own `_token` therefore decides
-        // whenever it has a value, whatever header came with it, and a
-        // value counts as empty as PHP's `?:` reads one: no value, `""`, or
-        // `"0"`. The body's `_token` is its last value, as PHP keeps a
-        // repeated name's last value and `req.form()` reads it.
+        // the token is still empty. A body's own `_token`, from a form or
+        // a JSON object, therefore decides whenever it has a value,
+        // whatever header came with it, and a value counts as empty as
+        // PHP's `?:` reads one: no value, `""`, or `"0"`. A form's
+        // `_token` is its last value, as PHP keeps a repeated name's last
+        // value and `req.form()` reads it.
         let mut request = request;
-        let body_token = if request
-            .content_type()
-            .is_some_and(crate::http::body::is_form_urlencoded)
-        {
-            // Buffered up to the server's request body limit, the size the
-            // handler reads the same body to; the handler still sees the
-            // whole form, `_token` included. A body over that limit is
-            // refused here with the `413` the handler would give it, as
-            // Laravel's `ValidatePostSize` refuses one before the token
-            // check.
-            request = match request
-                .buffer_body(crate::http::body::global_max_request_body_bytes())
-                .await
-            {
-                Ok(request) => request,
-                Err(error) => return Err(HttpResponse::from(error)),
-            };
-            request.cached_body().and_then(|body| {
-                url::form_urlencoded::parse(body)
-                    .filter(|(name, _)| name == "_token")
-                    .last()
-                    .map(|(_, value)| value.into_owned())
-            })
-        } else {
-            None
+        let body_token = match TokenBody::of(&request) {
+            Some(TokenBody::Form) => {
+                // Buffered up to the server's request body limit, the size
+                // the handler reads the same body to; the handler still
+                // sees the whole form, `_token` included. A form over that
+                // limit is refused here with the `413` the handler would
+                // give it, as Laravel's `ValidatePostSize` refuses one
+                // before the token check.
+                request = match request
+                    .buffer_body(crate::http::body::global_max_request_body_bytes())
+                    .await
+                {
+                    Ok(request) => request,
+                    Err(error) => return Err(HttpResponse::from(error)),
+                };
+                request.cached_body().and_then(|body| form_body_token(body))
+            }
+            Some(TokenBody::Json) => {
+                // Read up to the same limit and kept on the request, so the
+                // handler sees the whole body. A JSON body over the limit is
+                // left for the handler, whose own cap can be larger, and
+                // holds no token here: the headers decide. A body that
+                // fails to arrive keeps its failure for the handler's read.
+                match request
+                    .read_body_up_to(crate::http::body::global_max_request_body_bytes())
+                    .await
+                {
+                    BodyRead::Whole(body) => json_body_token(&body),
+                    BodyRead::TooLarge | BodyRead::Failed => None,
+                }
+            }
+            None => None,
         };
         let token = body_token
             .filter(|token| has_value(token))
@@ -727,6 +735,102 @@ impl Middleware for CsrfMiddleware {
             _ => reject_with_419(),
         }
     }
+}
+
+/// Whether `method` only reads, as Laravel's `isReading` decides: `GET`,
+/// `HEAD` and `OPTIONS`. Every other method is checked, `QUERY` and
+/// extension methods such as `PROPFIND` included: a list of the methods
+/// that change state misses every method nobody put on it.
+fn is_reading(method: &hyper::Method) -> bool {
+    matches!(
+        *method,
+        hyper::Method::GET | hyper::Method::HEAD | hyper::Method::OPTIONS
+    )
+}
+
+/// A body the `_token` field is read from, as Laravel's
+/// `$request->input('_token')` reads it: a form body, or a JSON body.
+enum TokenBody {
+    /// `application/x-www-form-urlencoded`.
+    Form,
+    /// A `Content-Type` that names JSON (`/json` or `+json`), the test
+    /// Laravel's `isJson` makes before `input` reads the body as JSON.
+    Json,
+}
+
+impl TokenBody {
+    /// The kind of body `request` carries, when `_token` can be read from
+    /// it. A multipart body is not read: its files stream to the handler
+    /// as they arrive.
+    fn of(request: &Request) -> Option<Self> {
+        let content_type = request.content_type()?;
+        if crate::http::body::is_form_urlencoded(content_type) {
+            Some(Self::Form)
+        } else if request.is_json() {
+            Some(Self::Json)
+        } else {
+            None
+        }
+    }
+}
+
+/// The last `_token` of a form body, the value PHP keeps for a name sent
+/// more than once and the value `req.form()` reads.
+fn form_body_token(body: &[u8]) -> Option<String> {
+    url::form_urlencoded::parse(body)
+        .filter(|(name, _)| name == "_token")
+        .last()
+        .map(|(_, value)| value.into_owned())
+}
+
+/// The top-level `_token` of a JSON body, when it is a string.
+///
+/// Laravel's `$request->input('_token')` reads a JSON body's top-level
+/// `_token`. Only a string can match a session token, so another value, a
+/// body that is not a JSON object, or a body that does not parse holds no
+/// token, and the headers decide. A key sent twice counts by its last
+/// value, as PHP's `json_decode` keeps it. Every other member is skipped
+/// without being kept, so a large body is not copied to find one field.
+fn json_body_token(body: &[u8]) -> Option<String> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    /// The `_token` member of a JSON object, read and nothing else.
+    struct TokenMember(Option<String>);
+
+    impl<'de> serde::Deserialize<'de> for TokenMember {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_map(TokenMemberVisitor)
+        }
+    }
+
+    struct TokenMemberVisitor;
+
+    impl<'de> Visitor<'de> for TokenMemberVisitor {
+        type Value = TokenMember;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut token = None;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "_token" {
+                    token = match map.next_value::<serde_json::Value>()? {
+                        serde_json::Value::String(value) => Some(value),
+                        _ => None,
+                    };
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(TokenMember(token))
+        }
+    }
+
+    serde_json::from_slice::<TokenMember>(body)
+        .ok()
+        .and_then(|member| member.0)
 }
 
 /// Whether a token source has a value, as PHP's `?:` reads one: `""` and
@@ -1542,6 +1646,44 @@ mod tests {
     #[allow(dead_code)]
     fn _unused_imports_keep() {
         let _ = Empty::<Bytes>::new();
+    }
+
+    /// A JSON body's `_token` is its top-level string member, the last one
+    /// when the key repeats, as PHP's `json_decode` keeps it. Anything
+    /// else holds no token.
+    #[test]
+    fn json_body_token_reads_the_top_level_string_member() {
+        assert_eq!(
+            json_body_token(br#"{"a": {"_token": "inner"}, "_token": "outer"}"#).as_deref(),
+            Some("outer")
+        );
+        assert_eq!(
+            json_body_token(br#"{"_token": "first", "_token": "last"}"#).as_deref(),
+            Some("last")
+        );
+        assert_eq!(
+            json_body_token(br#"{"_token": "first", "_token": 7}"#),
+            None
+        );
+        assert_eq!(json_body_token(br#"{"_token": ["t"]}"#), None);
+        assert_eq!(json_body_token(br#"[{"_token": "t"}]"#), None);
+        assert_eq!(json_body_token(br#"{"_token": "t""#), None);
+        assert_eq!(json_body_token(br#"{"_token": "t"} trailing"#), None);
+        assert_eq!(json_body_token(b""), None);
+    }
+
+    #[test]
+    fn only_get_head_and_options_are_reading_methods() {
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            let method = hyper::Method::from_bytes(method.as_bytes()).unwrap();
+            assert!(is_reading(&method), "{method}");
+        }
+        for method in [
+            "POST", "PUT", "PATCH", "DELETE", "QUERY", "PROPFIND", "TRACE",
+        ] {
+            let method = hyper::Method::from_bytes(method.as_bytes()).unwrap();
+            assert!(!is_reading(&method), "{method}");
+        }
     }
 
     /// MEM-003: normalizing a path for an exemption rule borrows it.

@@ -1260,7 +1260,7 @@ pub async fn show(req: Request) -> Response {
 
 | Method | Returns | Source order |
 |--------|---------|--------------|
-| `req.host()` | `Option<String>` | `X-Forwarded-Host` → `Host` → URI authority. |
+| `req.host()` | `Option<String>` | `X-Forwarded-Host` → `Host` → URI authority. Lowercased, numeric port stripped, `None` when invalid. |
 | `req.http_host()` | `Option<String>` | Host plus port when non-default. |
 | `req.scheme_and_http_host()` | `Option<String>` | `scheme://host:port`. |
 | `req.scheme()` | `&'static str` | `"https"` when [`secure`] is true, else `"http"`. |
@@ -1269,6 +1269,16 @@ pub async fn show(req: Request) -> Response {
 | `req.ips()` | `Vec<String>` | Every address the request names: `X-Forwarded-For` left to right, `X-Real-IP`, then the peer address. For logs only. |
 | `req.user_agent()` | `Option<&str>` | `User-Agent` header. |
 | `req.port()` | `Option<u16>` | Host header port → `X-Forwarded-Port` → URI port. |
+
+`req.host()` reads the host as Symfony's `getHost` does. It lowercases the
+host and strips a port only when the port is all digits:
+`Host: Example.COM:8080` gives `example.com`, and `Host: example.com:abc`
+gives `example.com:abc`. A host that holds anything but letters, digits,
+`-`, `_`, `.`, `:` and the brackets of an IPv6 literal gives `None`, so
+`Host: bad<host>` never reaches `http_host()`, `scheme_and_http_host()`,
+`url()`, a redirect, or a cache key. Laravel throws a
+`SuspiciousOperationException` for such a host; `req.host()` returns
+`None`, and [`TrustHosts`](#trusted-hosts) answers the request `400`.
 
 `req.ip()` is the address to key a limit on or to check against an
 allowlist. It reads the proxy headers only when the TCP peer is a trusted
@@ -1311,6 +1321,63 @@ what this means for per-address limits and
 [Environment Variables](env-vars.md#behind-a-reverse-proxy-set-app_trusted_proxies)
 for the variable.
 
+### Trusted hosts
+
+The `Host` header is written by the client. When your application builds
+an absolute URL from it, such as a password reset link, a forged host
+sends that link to the attacker's site. `TrustHosts` is a middleware that
+answers `400` with the message `Bad request.` to any request whose host
+you do not serve. It mirrors Laravel's `TrustHosts`.
+
+`TrustHosts::new()` trusts the host of `APP_URL` and its subdomains. With
+`APP_URL=https://example.com`, a request for `example.com` or
+`api.example.com` passes, and a request for `evil.test` gets `400`:
+
+```rust
+use suprnova::{global_middleware, TrustHosts};
+
+pub async fn register() {
+    global_middleware!(TrustHosts::new());
+}
+```
+
+`TrustHosts::at(patterns, subdomains)` trusts the hosts that the regular
+expressions in `patterns` match. When `subdomains` is `true`, it also
+trusts the `APP_URL` host and its subdomains:
+
+```rust
+use suprnova::{global_middleware, FrameworkError, TrustHosts};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    global_middleware!(TrustHosts::at([r"^example\.com$", r"^(.+\.)?example\.org$"], false)?);
+    Ok(())
+}
+```
+
+The middleware follows these rules:
+
+- A pattern matches without regard to case, anywhere in the host. Anchor
+  it with `^` and `$` to match the whole host.
+- A request whose `req.host()` is `None` gets `400`.
+- With no pattern at all, every valid host passes, as in Laravel. That
+  happens with `TrustHosts::at` given an empty list and `false`, or with an
+  `APP_URL` that has no host.
+- In the local environment (`APP_ENV=local`, the default when `APP_ENV` is
+  unset), every host passes, as Laravel's `shouldSpecifyTrustedHosts`
+  allows. Set `APP_ENV` on every other deployment.
+- Behind a trusted proxy the host comes from `X-Forwarded-Host`, so name
+  the public host the browser asked for.
+
+The middleware reads `APP_URL` and `APP_ENV` on each request, from the
+registered `AppConfig` or from the environment.
+
+#### Why Suprnova diverges
+
+Laravel's `TrustHosts::at` stores the patterns and compiles them on each
+request. `TrustHosts::at` compiles them once and returns a `Result`, so a
+pattern that is not a valid regular expression fails at boot instead of
+refusing every request.
+
 ### Headers and method
 
 `req.is_precognitive()` is true after the `Precognitive` middleware marks
@@ -1324,7 +1391,7 @@ to skip side effects or change live-validation rules. See
 | `req.has_header("X-Foo")` | `bool` |
 | `req.bearer_token()` | `Option<String>` (last `Bearer ` substring, comma-trimmed) |
 | `req.is_method("POST")` | `bool` (case-insensitive) |
-| `req.ajax()` | `X-Requested-With: XMLHttpRequest` |
+| `req.ajax()` | `X-Requested-With: XMLHttpRequest`, compared exactly as Symfony's `isXmlHttpRequest` compares it |
 | `req.pjax()` | Truthy `X-PJAX` header |
 | `req.prefetch()` | `X-Moz`, `Purpose`, or `Sec-Purpose` = `prefetch` |
 

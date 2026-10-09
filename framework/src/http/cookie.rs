@@ -408,6 +408,24 @@ impl Cookie {
 
     /// Create a cookie that deletes itself (for logout)
     ///
+    /// A browser drops a cookie only when the deletion cookie's `Path` and
+    /// `Domain` match the ones the cookie was set with. The deletion
+    /// cookie therefore takes its `Path`, `Domain` and `SameSite` from the
+    /// session configuration, as Laravel's cookie jar takes its defaults
+    /// from `session.path`, `session.domain` and `session.same_site`:
+    ///
+    /// - `Path` is `SESSION_PATH`, or without one the public root of the
+    ///   request (`/` at the host root), and `/` under a `__Host-` session
+    ///   cookie prefix.
+    /// - `Domain` is `SESSION_DOMAIN`, and none without one.
+    /// - `SameSite` is `SESSION_SAME_SITE`, read as the session cookie
+    ///   reads it.
+    ///
+    /// Inside a request [`SessionMiddleware`](crate::session::SessionMiddleware)
+    /// serves, its configuration is the one read; elsewhere the
+    /// environment is. `Secure` and `HttpOnly` stay set. Use
+    /// [`Self::forget_with`] for a cookie set with another path or domain.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -425,28 +443,38 @@ impl Cookie {
     /// Create a deletion cookie scoped to an explicit path and/or domain.
     ///
     /// A browser only drops a cookie when the deletion cookie's `Path`
-    /// and `Domain` match the ones the cookie was set with. That makes
-    /// [`Self::forget`] - path `/`, no domain - silently useless against
-    /// a cookie set with `Path=/admin` or `Domain=.example.com`: the
-    /// response looks correct, the header is on the wire, and the cookie
-    /// survives. Mirrors Laravel's
+    /// and `Domain` match the ones the cookie was set with, so a cookie
+    /// set with `Path=/admin` or `Domain=.example.com` needs a deletion
+    /// cookie with the same. Mirrors Laravel's
     /// `Response::withoutCookie($name, $path, $domain)`.
     ///
-    /// `None` for either argument keeps the framework default (path `/`,
-    /// no `Domain` attribute), so `forget_with(name, None, None)` is
-    /// exactly [`Self::forget`].
+    /// An explicit `path` or `domain` wins. `None` for either takes the
+    /// session configuration's value, as [`Self::forget`] does, so
+    /// `forget_with(name, None, None)` is exactly [`Self::forget`].
     pub fn forget_with(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) -> Self {
-        let mut cookie = Self::new(name, "")
-            .max_age(Duration::from_secs(0))
-            .http_only(true)
-            .secure(true);
-        if let Some(p) = path {
-            cookie = cookie.path(p);
-        }
-        if let Some(d) = domain {
-            cookie = cookie.domain(d);
+        let config = crate::session::middleware::current_session_config();
+        let path = path.map_or_else(|| config.response_cookie_path(), str::to_owned);
+        let mut cookie = Self::deletion(name)
+            .path(path)
+            .same_site(config.same_site_attribute());
+        if let Some(domain) = domain.map(str::to_owned).or(config.cookie_domain) {
+            cookie = cookie.domain(domain);
         }
         cookie
+    }
+
+    /// The bare deletion cookie: an empty value, `Max-Age=0`, `HttpOnly`,
+    /// `Secure`, `SameSite=Lax`, `Path=/` and no `Domain`.
+    ///
+    /// The session middleware builds its own deletion cookies on this and
+    /// sets each attribute from the configuration it holds. It builds them
+    /// after its configuration scope has ended, where [`Self::forget`]
+    /// would read the environment's configuration instead.
+    pub(crate) fn deletion(name: impl Into<String>) -> Self {
+        Self::new(name, "")
+            .max_age(Duration::from_secs(0))
+            .http_only(true)
+            .secure(true)
     }
 
     /// Create a permanent cookie (5 years)
@@ -548,8 +576,8 @@ impl Cookie {
     /// Queue a deletion cookie for `name` - Laravel's
     /// `Cookie::expire()`. Builds the deletion cookie with
     /// [`Self::forget_with`], so `path`/`domain` scope it exactly like
-    /// a direct `forget_with` call would; `None` for either keeps the
-    /// framework default (path `/`, no `Domain` attribute).
+    /// a direct `forget_with` call would; `None` for either takes the
+    /// session configuration's value.
     pub fn expire(name: impl Into<String>, path: Option<&str>, domain: Option<&str>) {
         Self::queue(Self::forget_with(name, path, domain));
     }

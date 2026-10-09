@@ -15,6 +15,7 @@ mod env_snapshot;
 pub mod facade;
 pub mod gc_loop;
 pub mod id_shape_validation;
+pub mod laravel_http_gaps;
 #[cfg(feature = "testing")]
 pub mod lazy_persistence;
 #[path = "../support/own_process.rs"]
