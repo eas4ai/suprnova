@@ -1722,3 +1722,151 @@ Falsifier: `move_to_disk("local", "a.txt", "archive", "a.txt")` leaves the sourc
 Mechanism: `par-laravel-delta`.
 Rationale: Rows `Storage::copyToDisk`, `Storage::moveToDisk`, `Storage::forgetDisk`, `Storage::purge` and `Storage::set` of the delta; Laravel 13.35.0's `FilesystemManager` takes a disk name or an enum for each.
 Status: Agreed 2026-10-09
+
+## Laravel API gaps: data
+
+The members of Laravel 13.35.0's database, Eloquent, migration, pagination,
+factory and seeding surface that the parity review found missing or
+differing in Suprnova and ruled build: the forty-five rows of the log's
+data areas, grouped by area.
+
+[PAR-099] `first_or_fail` on both builders MUST accept an optional
+message and, without one, MUST name the model (or table) in its default
+message, the status staying `404`. `DB::transaction` MUST nest: an inner
+call inside an open transaction MUST run in a savepoint that its failure
+rolls back alone, `DB::transaction_level()` MUST report the depth, and
+`DB::after_rollback(closure)` MUST run the closure when the enclosing
+transaction rolls back. `DB::before_starting_transaction(listener)` MUST
+run each listener before `BEGIN`, and a listener's error MUST stop the
+transaction from starting and be the caller's error. `DB::raw(expression)`
+MUST be accepted as a value in `update`, as a `group_by` term and in
+`having`, written into the SQL unbound and never as a bound parameter;
+`select_raw`, `where_raw` and `order_by_raw` keep their bound parameters.
+Falsifier: `first_or_fail` with a message answers another text, or its default message lacks the model's name; an inner `DB::transaction` that fails rolls the outer one back, or `transaction_level()` is not 2 inside it; `after_rollback` runs on a commit or not on a rollback; a `before_starting_transaction` listener runs after `BEGIN`, or its error lets the transaction start; or `update` with `DB::raw("views + 1")` binds the expression as a string or refuses it.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `BuildsQueries::firstOrFail`, `ManagesTransactions`, `Connection::beforeStartingTransaction` and `DB::raw` of the parity log's data areas; Laravel nests transactions through savepoints, and SeaORM's savepoint support carries it.
+Status: Agreed 2026-10-09
+
+[PAR-100] The model query builder MUST offer `apply_scopes()`, returning
+the query with every global scope and the soft-delete filter applied, as
+the query runs them; `has_morph`, `doesnt_have_morph`, `where_has_morph`
+and `where_doesnt_have_morph` over a polymorphic relation, taking the
+related model types or `*` for every type including rows with no type,
+with an optional constraint closure per type; and `force_destroy` on a
+soft-deleting model MUST remove rows that are already soft-deleted.
+Falsifier: `apply_scopes()` compiles without a registered scope's clause or without the soft-delete filter; `where_has_morph("commentable", ["Post"], ..)` returns a row whose commentable is another type, or `*` leaves out a row with a null type; or `force_destroy` leaves a soft-deleted row in the table.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Builder::applyScopes`, `QueriesRelationships::doesntHaveMorph` and `SoftDeletes::forceDestroy`.
+Status: Agreed 2026-10-09
+
+[PAR-101] A loaded model collection MUST offer `find(key)`, `find(model)`
+and `find(keys)` by primary key, with `find_or(key, default)`;
+`load_with(relation, closure)`, eager loading a relation onto the loaded
+models under the closure's constraints; `unique()` deduplicating by primary
+key and keeping the last copy, as Laravel's `Collection::unique` does; and
+`diff(other)` comparing by primary key.
+Falsifier: `find(3)` on a collection holding key 3 returns `None`, or `find([1, 3])` misses one; `load_with("posts", |q| q.where("published", true))` loads an unpublished post; `unique()` on two loads of the same row keeps the first copy or both; or `diff` keeps a model whose key the other collection holds.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Collection::find`, `Collection::load`, `Collection::unique` and `Collection::diff`; Laravel compares models by key, not by value.
+Status: Agreed 2026-10-09
+
+[PAR-102] `AsEnumCollection<E>` MUST store a list of enums as the strings
+`AsEnum` stores for each, so a column Laravel wrote with
+`AsEnumCollection::of` reads back the same; appended attributes MUST honour
+the model's hidden and visible lists, and `append(name)` MUST add an
+appended attribute at run time; `get_raw_original()` MUST return every
+attribute as loaded and `get_raw_original_or(attribute, default)` the
+default when the attribute was not loaded.
+Falsifier: a JSON column holding `["draft","live"]` written by Laravel does not read into `AsEnumCollection<Status>`, or a write stores anything but those strings; a hidden appended attribute appears in the model's array, or `append("full_name")` does not add it; or `get_raw_original()` misses a loaded attribute, or `get_raw_original_or("missing", 7)` is not 7.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `AsEnumCollection::of`, `HasAttributes::$appends` and `HasAttributes::getRawOriginal`.
+Status: Agreed 2026-10-09
+
+[PAR-103] The hidden and visible lists MUST apply to every array and JSON
+output of a model, appended attributes included and the model's `Serialize`
+output as well, and a model MUST offer `make_hidden`, `make_hidden_if`,
+`make_visible` and `make_visible_if`, changing the lists for that instance
+so every later conversion honours them; declaring both lists on one model
+stays refused.
+Falsifier: a model with `hidden = ["secret"]` serializes `secret` through `Serialize`, or an appended attribute named in `hidden` appears; after `make_hidden("email")` the next `to_array` still carries `email`, or after `make_visible("secret")` it is still absent; `make_hidden_if(false, ..)` hides; or a model declaring both lists compiles.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `HidesAttributes`, `HidesAttributes::$hidden`, `$visible`, `makeHidden` and `makeHiddenIf`; today `to_array_except` filters one output and serde ignores the lists.
+Status: Agreed 2026-10-09
+
+[PAR-104] A factory's `count(n)` and `times(n)` MUST make `create` and
+`make` produce `n` models as a typed many-result, and `create_many` MUST
+take a count or a list of per-record attribute sets, each merged over the
+definition, as Laravel's `Factory::count`, `times` and `createMany` do.
+Falsifier: `factory.count(3).create()` saves one row, or returns a single model; `times(3).make()` yields other than three; `create_many(2)` saves other than two, or `create_many([attrs_a, attrs_b])` saves records without those attributes.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Factory::count`, `Factory::createMany` and `Factory::times`.
+Status: Agreed 2026-10-09
+
+[PAR-105] A pivot model whose table has no `id` MUST be deletable by its
+key pair (`detach` by both keys), and a morph pivot by the pair plus the
+type; `limit` and `take` on a has-one or has-many relation MUST cap each
+parent's related rows during eager loading, not the rows of every parent
+together; and a morph-one or morph-many relation MUST offer `create`,
+`save` and `upsert` that fill the owner's id and type.
+Falsifier: a pivot row on a table without `id` cannot be deleted by its two keys, or a morph pivot by its keys and type; `with("comments", |q| q.limit(2))` over three parents returns two comments in total instead of two per parent; or `post.comments().create(attrs)` on a morph-many saves a row without the owner's id or type.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `AsPivot::delete`, `MorphPivot::delete`, `HasOneOrMany::limit`, `HasOneOrMany::take` and `MorphOneOrMany`; Laravel caps eager loads per parent with a window function.
+Status: Agreed 2026-10-09
+
+[PAR-106] A resource MUST offer `merge_when(condition, fields)`, merging a
+group of fields when the condition holds; the model builder MUST offer
+`with_exists(relation)`, loading a boolean existence flag per row without
+loading the relation, and a resource `when_exists_loaded(relation, value)`
+reading it; and a JSON:API resource collection's `with` meta MUST stay at
+the top level without merging the first item's meta, with an
+application-wide setting for the `jsonapi` member.
+Falsifier: `merge_when(false, ..)` merges, or `merge_when(true, ..)` leaves a field out; `with_exists("comments")` loads the comments or yields no flag, or `when_exists_loaded` reads a flag that was not loaded as present; a collection's top-level meta carries the first item's meta; or the `jsonapi` member cannot be set once for the application.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `ConditionallyLoadsAttributes::filter`, `ConditionallyLoadsAttributes::whenExistsLoaded` and `AnonymousResourceCollection::with`.
+Status: Agreed 2026-10-09
+
+[PAR-107] The schema builder MUST create what Laravel creates: `boolean`
+as `tinyint(1)` on MySQL and SQLite, round-tripping 0 and 1; `float` as
+double precision (Laravel's precision 53) unless a precision is given;
+`timestamp_tz` as `timestamp(0) with time zone` on Postgres and `datetime`
+on SQLite unless a precision is given; and `ulid(name, length)` beside
+`ulid(name)`.
+Falsifier: `boolean("flag")` declares `boolean` on SQLite, or a stored 1 reads back as anything but true; `float("ratio")` creates a single-precision column on Postgres; `timestamp_tz("at")` keeps fractional seconds on Postgres or declares `text` on SQLite; or `ulid("code", 20)` is refused.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Blueprint::boolean`, `Blueprint::float`, `Blueprint::timestampTz` and `Blueprint::ulid`.
+Status: Agreed 2026-10-09
+
+[PAR-108] A cursor paginator MUST key on several columns when the query
+orders by several, reading each column's value from the row, with
+`Cursor::parameter(name)` for a named lookup; a page MUST offer
+`through(transform)`, returning a page of another item type with the same
+metadata; and a length-aware page MUST report `last_page` 1 for an empty
+result and MUST treat a page number below 1, or not a number, as page 1,
+as Laravel's paginator does.
+Falsifier: `cursor_paginate` over `order_by("created_at").order_by("id")` builds a cursor without `id`, or `cursor.parameter("id")` is `None`; `page.through(|u| u.name)` loses `total` or `per_page`; `paginate` over no rows reports `last_page: 0`; or `?page=0` or `?page=abc` answers anything but page 1.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `AbstractCursorPaginator::getParametersForItem`, `AbstractCursorPaginator::setCollection`, `Cursor::parameter` and `LengthAwarePaginator::__construct`.
+Status: Agreed 2026-10-09
+
+[PAR-109] The `DB::table` builder MUST offer `in_random_order(seed)`,
+`max`, `oldest`, `where_not_between`, `or_where_between` and
+`or_where_not_between` as the model builder does, with a subquery or a
+`DB::raw` expression accepted as the column where the model builder
+accepts one; `in_random_order` on both builders MUST accept a seed; and
+`oldest` and `latest` on the model builder MUST order by the model's
+declared creation column.
+Falsifier: `DB::table("posts").max("views")` is missing or returns the wrong value; `in_random_order(42)` twice returns different orders on the same rows; `where_not_between("views", 1, 5)` on `DB::table` is missing, or its `or_` form groups wrongly; or `oldest()` on a model whose creation column is `added_at` orders by `created_at`.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Builder::inRandomOrder`, `Builder::max`, `Builder::oldest` and `Builder::whereNotBetween`; identifier validation stays, with raw expressions through the raw-specific forms.
+Status: Agreed 2026-10-09
+
+[PAR-110] A seeder's `run` MUST be able to call other seeders with
+parameters, silently or once (`call`, `call_silent`, `call_once`, `call_with`),
+printing a `RUNNING` and a `DONE` line with the duration for each unless
+silent, and MUST be able to resolve container services; `db:seed` MUST
+refuse to run in production without `--force`, MUST accept `--database`,
+and MUST run the root seeder that sets the order when no seeder is named.
+Falsifier: `call(["UserSeeder", "PostSeeder"])` runs them out of order or prints no lines, `call_silent` prints, `call_once` runs a seeder twice, or `call_with(seeder, params)` hands no parameters; a seeder cannot resolve a bound service; `db:seed` runs under `APP_ENV=production` without `--force`, or refuses with it; `--database reporting` seeds another connection; or `db:seed` with no name does not run the root seeder.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Rows `Seeder`, `Seeder::call` and `artisan db:seed`; Laravel's `db:seed` confirms in production and `Seeder::call` reports each seeder.
+Status: Agreed 2026-10-09

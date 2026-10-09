@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-delta
+Current: laravel-gaps-data
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -723,6 +723,33 @@ Requirements: PAR-089, PAR-090, PAR-091, PAR-092, PAR-093, PAR-094, PAR-095, PAR
    and the changelog.
    Mechanisms: `par-laravel-delta` (the `laravel_delta` modules of the ten
    suites).
+   Done when it passes on a committed tree, the manual passages are in
+   place, and the review is recorded.
+
+## laravel-gaps-data
+
+Requirements: PAR-099, PAR-100, PAR-101, PAR-102, PAR-103, PAR-104, PAR-105, PAR-106, PAR-107, PAR-108, PAR-109, PAR-110
+
+44. laravel-gaps-data - the ninth of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build by the parity default: the
+   forty-five rows of the log's database, Eloquent, migration, pagination,
+   factory and seeding areas where Suprnova lacks or differs from Laravel
+   13.35.0, grouped into PAR-099 to PAR-110; the four rows that have an
+   equivalent under another name stay as they are.
+   Delivery: transactions, raw expressions and `first_or_fail` in
+   `framework/src/database/`; scopes, morph existence, force destroy,
+   collections, casts, appends, hidden lists and serialization in
+   `framework/src/eloquent/` and the `#[model]` macro; factories in
+   `framework/src/factory/`; pivot deletion, per-parent limits and morph
+   writes in `framework/src/eloquent/relations/`; resources in
+   `framework/src/resources/`; the column types in `framework/src/schema/`;
+   cursors and pages in `framework/src/pagination/`; seeders and `db:seed`
+   in `framework/src/seed/` and the console; a `laravel_gaps` test module
+   in each of the database, eloquent, factory, pagination, resources,
+   schema and seed suites; the manual chapters each area owns and the
+   changelog.
+   Mechanisms: `par-laravel-gaps-data` (the `laravel_gaps` modules of the
+   seven suites).
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 
