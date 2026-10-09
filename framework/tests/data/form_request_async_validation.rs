@@ -18,7 +18,8 @@ use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use suprnova::{FormRequest, Request, ValidationErrors};
+use std::sync::Arc;
+use suprnova::{FormRequest, Middleware, Next, Precognitive, Request, ValidationErrors};
 use validator::Validate;
 
 /// `email` is validated synchronously (format) by the derive. `username`
@@ -56,11 +57,20 @@ async fn spawn() -> SocketAddr {
             let svc = service_fn(
                 |hyper_req: hyper::Request<hyper::body::Incoming>| async move {
                     let req = Request::new(hyper_req);
-                    let resp = match UniqueishForm::extract(req).await {
-                        Ok(_form) => suprnova::HttpResponse::json(serde_json::json!({"ok": true}))
-                            .status(200),
-                        Err(e) => e.into(),
-                    };
+                    let next: Next = Arc::new(|req| {
+                        Box::pin(async move {
+                            match UniqueishForm::extract(req).await {
+                                Ok(_form) => {
+                                    suprnova::HttpResponse::json(serde_json::json!({"ok": true}))
+                                        .status(200)
+                                        .ok()
+                                }
+                                Err(e) => Err(e.into()),
+                            }
+                        })
+                    });
+                    let response = Precognitive.handle(req, next).await;
+                    let resp = response.unwrap_or_else(|response| response);
                     Ok::<_, Infallible>(resp.into_hyper())
                 },
             );

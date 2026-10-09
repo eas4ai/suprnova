@@ -44,6 +44,7 @@ fn router() -> Router {
                 .await
                 .map_err(HttpResponse::from)
         })
+        .middleware(suprnova::Precognitive)
         .get("/plain", |_req: Request| async { text("plain") })
         .post("/back", |_req: Request| async {
             let response: Response = Inertia::back(302, Some("/fallback")).into();

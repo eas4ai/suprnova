@@ -1758,7 +1758,7 @@ impl HttpResponse {
                 // shape as `Validation(errors)` so consumers can parse
                 // both paths uniformly.
                 serde_json::json!({
-                    "message": "The given data was invalid.",
+                    "message": msg,
                     "errors": { field: [msg] },
                 })
             }

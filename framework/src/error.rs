@@ -174,7 +174,7 @@ impl From<AppError> for FrameworkError {
 ///
 /// ```json
 /// {
-///     "message": "The given data was invalid.",
+///     "message": "The email field must be a valid email address. (and 1 more error)",
 ///     "errors": {
 ///         "email": ["The email field must be a valid email address."],
 ///         "password": ["The password field must be at least 8 characters."]
@@ -458,9 +458,9 @@ impl ValidationErrors {
 
     /// Convert to JSON Value for response.
     ///
-    /// Both the banner and every per-field message are rendered against
-    /// the locale in effect for the current request - this is where
-    /// keyed messages become text.
+    /// Render field messages in the request's locale. The first message
+    /// summarises the failure, followed by the number of remaining messages.
+    /// An empty bag uses the catalog's invalid-data message.
     pub fn to_json(&self) -> serde_json::Value {
         let errors: serde_json::Map<String, serde_json::Value> = self
             .errors
@@ -473,10 +473,25 @@ impl ValidationErrors {
                 (field.clone(), serde_json::Value::Array(rendered))
             })
             .collect();
-        let banner = ValidationMessage::keyed("validation-invalid-data")
-            .fallback("The given data was invalid.");
+        let mut messages = errors
+            .values()
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(serde_json::Value::as_str);
+        let message = match messages.next() {
+            Some(first) => match messages.count() {
+                0 => first.to_string(),
+                1 => format!("{first} (and 1 more error)"),
+                count => format!("{first} (and {count} more errors)"),
+            },
+            None => self.render(
+                "",
+                &ValidationMessage::keyed("validation-invalid-data")
+                    .fallback("The given data was invalid."),
+            ),
+        };
         serde_json::json!({
-            "message": self.render("", &banner),
+            "message": message,
             "errors": errors,
         })
     }
@@ -995,7 +1010,7 @@ pub enum FrameworkError {
     /// Precognition validation passed (204 No Content)
     ///
     /// Returned by `FormRequest::extract` when the request carries a
-    /// `Precognition: true` header and the (possibly field-filtered)
+    /// middleware's mark and the (possibly field-filtered)
     /// validation passed. The controller body is skipped. The response
     /// converter emits 204 with `Precognition: true`,
     /// `Precognition-Success: true`, `Vary: Precognition`.

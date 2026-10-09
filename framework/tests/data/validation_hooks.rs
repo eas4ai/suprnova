@@ -2,9 +2,8 @@
 //! = "fn")]`: the derive owns a Data Object's `FormRequest` impl, so these
 //! are how its `validate!` rules and its database rules (`Exists`,
 //! `Unique`) take part in request validation. Every test sends a real
-//! HTTP request and extracts the Data Object from it, on both of the
-//! derive's `FormRequest` paths: the default one, and the inlined one a
-//! route-parameter field selects.
+//! HTTP request and extracts the Data Object through the shared
+//! `FormRequest` pipeline, with and without route-parameter inputs.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -22,8 +21,8 @@ use suprnova::rules::{
 };
 use suprnova::testing::TestContainer;
 use suprnova::{
-    DbConnection, Exists, FormContext, FormRequest, HttpResponse, Request, ValidationErrors,
-    validate,
+    DbConnection, Exists, FormContext, FormRequest, HttpResponse, Middleware, Next, Precognitive,
+    Request, ValidationErrors, validate,
 };
 
 // ---- Data Objects under test ----
@@ -77,8 +76,7 @@ async fn assignment_rules(dto: &AssignTagsDto) -> Result<(), ValidationErrors> {
     errs.into_result()
 }
 
-/// Both hooks, on the inlined path a route-parameter field selects. That
-/// path used to run the sync hook only.
+/// Both hooks with route-parameter inputs. The old separate path ran only the sync hook.
 #[derive(Debug, suprnova::Data, validator::Validate)]
 #[data(
     after_validation = "rename_rules",
@@ -159,11 +157,20 @@ where
             let sent = sent.clone();
             let params = params.clone();
             async move {
-                let result = T::extract(Request::new(hyper_req).with_params(params)).await;
-                if let Some(sent) = sent.lock().unwrap().take() {
-                    let _ = sent.send(result);
-                }
-                Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                let next: Next = Arc::new(move |request| {
+                    let sent = sent.clone();
+                    Box::pin(async move {
+                        let result = T::extract(request).await;
+                        if let Some(sent) = sent.lock().unwrap().take() {
+                            let _ = sent.send(result);
+                        }
+                        Ok(HttpResponse::text("ok"))
+                    })
+                });
+                let response = Precognitive
+                    .handle(Request::new(hyper_req).with_params(params), next)
+                    .await;
+                Ok::<_, Infallible>(response.unwrap_or_else(|response| response).into_hyper())
             }
         });
         let _ = http1::Builder::new()

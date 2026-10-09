@@ -930,7 +930,7 @@ mod tests {
             decide_page(&facts(
                 422,
                 "application/json",
-                br#"{"message":"The given data was invalid.","errors":{"email":["r"]}}"#
+                br#"{"message":"r","errors":{"email":["r"]}}"#
             )),
             ErrorPageDecision::PassThrough
         );

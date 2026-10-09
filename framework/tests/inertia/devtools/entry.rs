@@ -52,6 +52,7 @@ fn router() -> Router {
                 .await
                 .map_err(HttpResponse::from)
         })
+        .middleware(suprnova::Precognitive)
         .post("/page", |req: Request| async move {
             InertiaResponse::new("Home")
                 .resolve(&req)
@@ -223,6 +224,19 @@ async fn indt_the_request_type_follows_laravels_precedence() {
             vec![("Precognition", "true"), inertia],
             "precognition",
         ),
+        (
+            "/page",
+            vec![("Precognition", "TRUE"), inertia],
+            "precognition",
+        ),
+        ("/text", vec![("Precognition", "true")], "http"),
+        ("/text", vec![("Precognition", "true"), inertia], "navigate"),
+        (
+            "/page",
+            vec![("Precognition", "false"), inertia],
+            "navigate",
+        ),
+        ("/page", vec![("Precognition", "1"), inertia], "navigate"),
         ("/page", vec![], "initial"),
         ("/text", vec![], "http"),
         ("/page", vec![inertia], "navigate"),

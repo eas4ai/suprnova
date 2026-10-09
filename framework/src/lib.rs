@@ -298,6 +298,7 @@ pub use http::body::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
     set_global_max_request_body_bytes,
 };
+pub use http::precognition::{Bail, Precognition, Precognitive};
 pub use http::upload::validators::{ImageFile, MaxSize, MimeAllowlist, MimeType};
 pub use http::upload::{
     DEFAULT_MAX_MULTIPART_BODY_BYTES, DEFAULT_MAX_MULTIPART_PARTS, DEFAULT_UPLOAD_SPILL_THRESHOLD,

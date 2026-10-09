@@ -41,6 +41,50 @@ pub(crate) use multipart::parse_multipart_input;
 
 use placeholder::Skeleton;
 
+/// Read form fields with trusted path values, preserving typed and nested input.
+pub(crate) fn parse_form_with_route_inputs<T: DeserializeOwned>(
+    bytes: &[u8],
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, InputError> {
+    let fields = struct_field_names::<T>();
+    read_with_route_inputs(
+        nested::Nested::from_urlencoded(bytes, fields),
+        fields,
+        route_inputs,
+    )
+}
+
+/// Read uploads and fields with trusted path values through the ordinary form reader.
+pub(crate) fn parse_multipart_with_route_inputs<T: DeserializeOwned>(
+    payload: crate::http::upload::MultipartPayload,
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, InputError> {
+    let fields = struct_field_names::<T>();
+    read_with_route_inputs(
+        nested::Nested::from_multipart(payload, fields),
+        fields,
+        route_inputs,
+    )
+}
+
+fn read_with_route_inputs<T: DeserializeOwned>(
+    mut input: nested::Nested<'_>,
+    fields: Option<&'static [&'static str]>,
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, InputError> {
+    for (name, value) in route_inputs {
+        let text = match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        };
+        input.names.insert(
+            std::borrow::Cow::Owned(name),
+            nested::Node::Text(std::borrow::Cow::Owned(text)),
+        );
+    }
+    form::read_nested(input, fields)
+}
+
 /// Why a read of typed input failed.
 #[derive(Debug)]
 pub(crate) enum InputError {

@@ -92,14 +92,14 @@ impl MiddlewareChain {
     pub async fn execute(self, request: Request, handler: Arc<BoxedHandler>) -> Response {
         if self.middleware.is_empty() {
             // No middleware - call handler directly
-            return handler(request).await;
+            return dispatch(request, &handler).await;
         }
         let middleware = super::identity::sort_by_priority(self.middleware);
 
         // Build the chain from inside-out
         // Start with the actual handler as the innermost "next"
         let handler_clone = handler.clone();
-        let mut next: Next = Arc::new(move |req| handler_clone(req));
+        let mut next: Next = Arc::new(move |req| dispatch(req, &handler_clone));
 
         // Wrap each middleware around the next, from last to first
         // This creates the correct execution order: first middleware runs first
@@ -115,6 +115,20 @@ impl MiddlewareChain {
 
         // Execute the outermost middleware (which was the first added)
         next(request).await
+    }
+}
+
+fn dispatch(request: Request, handler: &BoxedHandler) -> MiddlewareFuture {
+    // Closures and plain functions have only a Request argument. Typed
+    // handlers stop after extraction in the handler macro instead.
+    if request.is_precognitive()
+        && request
+            .route_settings()
+            .is_some_and(|route| route.skips_precognitive_body())
+    {
+        Box::pin(async { Err(crate::FrameworkError::PrecognitionSuccess.into()) })
+    } else {
+        handler(request)
     }
 }
 

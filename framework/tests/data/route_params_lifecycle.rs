@@ -12,15 +12,14 @@
 //!   - `body_bytes_with_cap` (used the uncapped `body_bytes` instead)
 //!   - `after_validation()` cross-field hook
 //!
-//! The fix inlines the full default `FormRequest::extract` lifecycle in
-//! the macro's custom path, with one extra step: route params are
-//! injected into the parsed body map before deserialization (path wins).
+//! The derive supplies route inputs to the default `FormRequest::extract`
+//! lifecycle. Path values win over body input before deserialization.
 //!
 //! These tests demonstrate the lifecycle is now wired:
 //!   - Form-urlencoded body extracts cleanly.
 //!   - Non-object JSON body is rejected with a clear 422, as the default
 //!     extractor rejects a body that does not fit.
-//!   - A `Precognition: true` header short-circuits to 204
+//!   - With middleware, a `Precognition: true` header short-circuits to 204
 //!     (PrecognitionSuccess) rather than completing normally.
 //!
 //! The macro emits the `FormRequest` impl unconditionally for DTOs with
@@ -44,7 +43,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use suprnova::error::FrameworkError;
-use suprnova::{FormRequest, HttpResponse, Request};
+use suprnova::{FormRequest, HttpResponse, Middleware, Next, Precognitive, Request};
 
 // DTO with one route-param field and a form-shaped body field. Both
 // content-type branches must work.
@@ -78,9 +77,16 @@ where
                 let params_inner = params.clone();
                 async move {
                     let req = Request::new(hyper_req).with_params(params_inner);
-                    let result = T::extract(req).await;
-                    *captured_inner.lock().unwrap() = Some(result);
-                    Ok::<_, Infallible>(HttpResponse::text("ok").into_hyper())
+                    let next: Next = Arc::new(move |req| {
+                        let captured_inner = captured_inner.clone();
+                        Box::pin(async move {
+                            let result = T::extract(req).await;
+                            *captured_inner.lock().unwrap() = Some(result);
+                            Ok(HttpResponse::text("ok"))
+                        })
+                    });
+                    let response = Precognitive.handle(req, next).await;
+                    Ok::<_, Infallible>(response.unwrap_or_else(|response| response).into_hyper())
                 }
             });
             let _ = http1::Builder::new().serve_connection(io, svc).await;

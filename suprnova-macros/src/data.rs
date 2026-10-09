@@ -167,9 +167,7 @@ struct StructOptions {
     allow_unknown_fields: bool,
     /// `Some(N)` when `#[data(max_body_bytes = N)]` is present - overrides
     /// the `FormRequest::max_body_bytes` trait default for this DTO.
-    /// Honored by both the simple (no route-param) and the inlined-lifecycle
-    /// (with route-param) `FormRequest` impl arms - the override is part
-    /// of the trait surface, not a route-param-only feature.
+    /// Honored by the shared `FormRequest` pipeline, with or without route inputs.
     max_body_bytes: Option<u64>,
     /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
     json_resource: Option<JsonResourceOptions>,
@@ -548,16 +546,7 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
         })
         .collect();
 
-    // `#[data(max_body_bytes = N)]` - emit an override that shadows the
-    // trait default. Both the simple (no-op extract) and the inlined-
-    // lifecycle (with route-param) arms emit it; the inlined arm calls
-    // `Self::max_body_bytes()` directly, so the override propagates
-    // automatically once present on the impl.
-    // `#[data(after_validation = "fn")]` / `#[data(after_validation_async =
-    // "fn")]` - both arms below emit these, and both run them through the
-    // trait: the default `extract` calls the trait methods, and the
-    // inlined arm calls them fully qualified so an inherent method of the
-    // same name on the struct can never stand in for the hook.
+    // Overrides participate in the trait's shared extraction pipeline.
     let after_validation_override: TokenStream2 = match &struct_opts.after_validation_fn {
         Some(path) => quote! {
             fn after_validation(&self) -> ::core::result::Result<(), ::suprnova::ValidationErrors> {
@@ -588,35 +577,21 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
         None => quote! {},
     };
 
-    // If no fields use from_route_param, emit the simple no-op FormRequest impl
-    // (delegates to the trait's default `extract` which reads the body normally).
-    if route_param_injections.is_empty() {
-        return quote! {
-            #[::suprnova::__async_trait::async_trait]
-            impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
-                fn authorize(req: &::suprnova::Request) -> bool {
-                    #authorize_body
-                }
-
-                #max_body_bytes_override
-                #after_validation_override
-                #after_validation_async_override
+    let route_inputs_override = if route_param_injections.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn route_inputs(req: &::suprnova::Request) -> ::core::result::Result<
+                ::suprnova::serde_json::Map<String, ::suprnova::serde_json::Value>,
+                ::suprnova::FrameworkError,
+            > {
+                let route_snapshot = req.all_route_params();
+                let mut map = ::suprnova::serde_json::Map::new();
+                #(#route_param_injections)*
+                ::core::result::Result::Ok(map)
             }
-        };
-    }
-
-    // At least one field is injected from a route param: generate a custom
-    // `extract` that runs the FULL FormRequest lifecycle (Precognition
-    // detection, content-type-aware body parsing honoring max_body_bytes,
-    // after_validation cross-field hook) with one extra step - route-param
-    // injection into the parsed body map before deserialization, with path
-    // params winning (IDOR protection).
-    //
-    // Historically the route-param branch read `body_bytes()` without
-    // honoring `max_body_bytes`, never parsed form-urlencoded bodies,
-    // didn't handle Precognition, and skipped the `after_validation`
-    // cross-field hook. Adding a single route-param field silently
-    // changed the request semantics for the whole DTO.
+        }
+    };
     quote! {
         #[::suprnova::__async_trait::async_trait]
         impl #impl_generics ::suprnova::http::FormRequest for #struct_name #ty_generics #where_clause {
@@ -627,169 +602,7 @@ fn build_form_request(ctx: &DataCodegen<'_>, struct_opts: &StructOptions) -> Tok
             #max_body_bytes_override
             #after_validation_override
             #after_validation_async_override
-
-            async fn extract(req: ::suprnova::Request) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
-                if !Self::authorize(&req) {
-                    return Err(::suprnova::FrameworkError::Unauthorized);
-                }
-
-                // Snapshot route params BEFORE consuming the request body.
-                let route_snapshot: ::std::collections::HashMap<String, String> =
-                    req.all_route_params();
-
-                // --- Precognition detection (mirrors default FormRequest::extract) ---
-                let is_precognition = req
-                    .header("Precognition")
-                    .map(|v| v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                let validate_only: Vec<String> = req
-                    .header("Precognition-Validate-Only")
-                    .map(|raw| {
-                        raw.split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // --- Content-type-aware body parsing with per-struct cap ---
-                let content_type = req.content_type().map(|s| s.to_string());
-                let (_, body_bytes) = req
-                    .body_bytes_with_cap(Self::max_body_bytes())
-                    .await?;
-
-                let mut map: ::suprnova::serde_json::Map<String, ::suprnova::serde_json::Value> =
-                    if body_bytes.is_empty() {
-                        ::suprnova::serde_json::Map::new()
-                    } else {
-                        match content_type.as_deref() {
-                            ::core::option::Option::Some(ct)
-                                if ct.starts_with("application/x-www-form-urlencoded") =>
-                            {
-                                // Form-urlencoded: flatten pairs into a JSON object
-                                // (last value wins on duplicate keys, matching Laravel).
-                                let mut obj = ::suprnova::serde_json::Map::new();
-                                for (k, v) in ::suprnova::__form_urlencoded::parse(&body_bytes) {
-                                    obj.insert(
-                                        k.into_owned(),
-                                        ::suprnova::serde_json::Value::String(v.into_owned()),
-                                    );
-                                }
-                                obj
-                            }
-                            _ => {
-                                // JSON: must be an object. Reject non-object payloads
-                                // explicitly rather than silently treating them as `{}`.
-                                // A body that is not a JSON object answers 422,
-                                // as the default extractor's parse does.
-                                let parsed: ::suprnova::serde_json::Value =
-                                    ::suprnova::serde_json::from_slice(&body_bytes)
-                                        .map_err(|e| ::suprnova::FrameworkError::domain(
-                                            ::std::format!("Failed to parse JSON body: {e}"),
-                                            422,
-                                        ))?;
-                                match parsed {
-                                    ::suprnova::serde_json::Value::Object(m) => m,
-                                    _ => {
-                                        return ::core::result::Result::Err(
-                                            ::suprnova::FrameworkError::domain(
-                                                "Failed to parse JSON body: the body must be a JSON \
-                                                 object (DTOs with route-param fields cannot \
-                                                 accept arrays / strings / null at the top level)",
-                                                422,
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                // Inject route params into the map (path params WIN - IDOR protection).
-                #(#route_param_injections)*
-
-                // Deserialize the merged map into Self.
-                // A body that does not fit the struct answers 422, as the
-                // default extractor's parse does.
-                let dto: Self = ::suprnova::serde_json::from_value(
-                    ::suprnova::serde_json::Value::Object(map),
-                ).map_err(|e| ::suprnova::FrameworkError::domain(
-                    ::std::format!("Failed to parse request body: {e}"),
-                    422,
-                ))?;
-
-                // --- Validate + Precognition + both cross-field hooks (mirrors default) ---
-                //
-                // The stages run in the default `extract`'s order and bail at
-                // the first failure: the derived `validate()`, the sync hook,
-                // then the async hook, so a malformed value never reaches a
-                // database rule.
-                use ::validator::Validate;
-                let validation_result = dto.validate();
-
-                if is_precognition {
-                    let bag = match validation_result {
-                        ::core::result::Result::Err(errors) => {
-                            ::suprnova::ValidationErrors::from_validator_keyed(
-                                errors,
-                                ::suprnova::data::input_names::input_key::<Self>,
-                            )
-                        }
-                        ::core::result::Result::Ok(()) => {
-                            match <Self as ::suprnova::http::FormRequest>::after_validation(&dto) {
-                                ::core::result::Result::Err(errs) => errs.rename_keys(
-                                    ::suprnova::data::input_names::input_key::<Self>,
-                                ),
-                                ::core::result::Result::Ok(()) => {
-                                    match <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await {
-                                        ::core::result::Result::Err(errs) => errs.rename_keys(
-                                            ::suprnova::data::input_names::input_key::<Self>,
-                                        ),
-                                        ::core::result::Result::Ok(()) => ::suprnova::ValidationErrors::new(),
-                                    }
-                                }
-                            }
-                        }
-                    };
-                    let filtered = if validate_only.is_empty() {
-                        bag
-                    } else {
-                        bag.retain_fields(&validate_only)
-                    };
-                    return ::core::result::Result::Err(if filtered.is_empty() {
-                        ::suprnova::FrameworkError::PrecognitionSuccess
-                    } else {
-                        ::suprnova::FrameworkError::PrecognitionFailure(filtered)
-                    });
-                }
-
-                if let ::core::result::Result::Err(errors) = validation_result {
-                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
-                        ::suprnova::ValidationErrors::from_validator_keyed(
-                            errors,
-                            ::suprnova::data::input_names::input_key::<Self>,
-                        ),
-                    ));
-                }
-
-                if let ::core::result::Result::Err(errs) =
-                    <Self as ::suprnova::http::FormRequest>::after_validation(&dto)
-                {
-                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
-                        errs.rename_keys(::suprnova::data::input_names::input_key::<Self>),
-                    ));
-                }
-
-                if let ::core::result::Result::Err(errs) =
-                    <Self as ::suprnova::http::FormRequest>::after_validation_async(&dto).await
-                {
-                    return ::core::result::Result::Err(::suprnova::FrameworkError::Validation(
-                        errs.rename_keys(::suprnova::data::input_names::input_key::<Self>),
-                    ));
-                }
-
-                ::core::result::Result::Ok(dto)
-            }
+            #route_inputs_override
         }
     }
 }
@@ -1627,7 +1440,7 @@ fn build_deserialize(
                     }
                 }
 
-                __d.deserialize_map(#visitor_construction)
+                __d.deserialize_struct(#struct_name_str, &[#(#all_known_names),*], #visitor_construction)
             }
         }
     }
