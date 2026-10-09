@@ -33,16 +33,21 @@ use crate::mail::{Address, Attachment, Mail};
 use crate::notifications::{Channel, DynNotification, Notification};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 /// What a per-notification renderer must produce - enough to assemble
-/// an outgoing message. `subject` is required; at least one of `html` /
-/// `text` must be `Some` or delivery will fail. `from` is optional and
-/// falls back to `noreply@localhost` to match `MailBuilder::send`.
+/// an outgoing message. At least one of `html` / `text` must be `Some` or
+/// delivery will fail. `from` is optional and falls back to
+/// `noreply@localhost` to match `MailBuilder::send`. An empty `subject`
+/// falls back to the notification's name in title case (`InvoicePaid`
+/// gives `Invoice Paid`), as Laravel's mail channel falls back to the
+/// class name.
 ///
-/// `cc`, `bcc`, `reply_to`, and `attachments` are optional and default
-/// to empty. Use `..Default::default()` in the struct literal to skip
-/// any field you don't need:
+/// `cc`, `bcc`, `reply_to`, `attachments` and `attachment_paths` are
+/// optional and default to empty. Use `..Default::default()` in the struct
+/// literal to skip any field you don't need, and the `attach*` methods to
+/// add files:
 ///
 /// ```rust,no_run
 /// # use suprnova::notifications::channels::mail::MailRendering;
@@ -80,6 +85,81 @@ pub struct MailRendering {
     pub reply_to: Vec<Address>,
     /// File attachments included with the message.
     pub attachments: Vec<Attachment>,
+    /// Files attached by path, read when the mail is delivered and sent
+    /// after `attachments`. Fill it with [`MailRendering::attach_path`] and
+    /// [`MailRendering::attach_many`].
+    pub attachment_paths: Vec<PathAttachment>,
+}
+
+/// The name and content type of a file attached by path. Mirrors the
+/// `as` and `mime` options of Laravel's `MailMessage::attach`.
+///
+/// A `None` name is the file's own name; a `None` content type follows the
+/// file's extension, `application/octet-stream` when the extension is
+/// unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachOptions {
+    /// The file name the recipient sees.
+    pub name: Option<String>,
+    /// The MIME content type, such as `application/pdf`.
+    pub content_type: Option<String>,
+}
+
+/// One file attached by path to a [`MailRendering`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathAttachment {
+    /// The file to read when the mail is delivered.
+    pub path: PathBuf,
+    /// Its name and content type.
+    pub options: AttachOptions,
+}
+
+impl MailRendering {
+    /// Attach `attachment`. Mirrors Laravel's `MailMessage::attach` given
+    /// an `Attachment`.
+    pub fn attach(mut self, attachment: Attachment) -> Self {
+        self.attachments.push(attachment);
+        self
+    }
+
+    /// Attach `bytes` as a file named `name` of type `content_type`.
+    /// Mirrors Laravel's `MailMessage::attachData`.
+    pub fn attach_data(
+        self,
+        bytes: impl Into<Vec<u8>>,
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+    ) -> Self {
+        self.attach(Attachment::new(name, bytes.into(), content_type))
+    }
+
+    /// Attach the file at `path`, read when the mail is delivered, not now.
+    /// Mirrors Laravel's `MailMessage::attach($path, $options)`.
+    ///
+    /// Reading at delivery keeps a queued notification small, since the
+    /// rendering runs on the worker, and a file that cannot be read then
+    /// fails the delivery with an error naming the path.
+    pub fn attach_path(mut self, path: impl Into<PathBuf>, options: AttachOptions) -> Self {
+        self.attachment_paths.push(PathAttachment {
+            path: path.into(),
+            options,
+        });
+        self
+    }
+
+    /// Attach each `(path, options)` of `files`, as
+    /// [`MailRendering::attach_path`] does. Mirrors Laravel's
+    /// `MailMessage::attachMany`.
+    pub fn attach_many<I, P>(mut self, files: I) -> Self
+    where
+        I: IntoIterator<Item = (P, AttachOptions)>,
+        P: Into<PathBuf>,
+    {
+        for (path, options) in files {
+            self = self.attach_path(path, options);
+        }
+        self
+    }
 }
 
 /// Opt-in trait for Notifications that want to be deliverable via the
@@ -163,7 +243,10 @@ fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
 ///
 /// `cc`, `bcc`, `reply_to`, and `attachments` ride through
 /// [`MailRendering`] - populate any of them in `to_mail` and the
-/// channel threads them into the outgoing message verbatim.
+/// channel threads them into the outgoing message verbatim. Files in
+/// `attachment_paths` are read at delivery and attached after
+/// `attachments`; an empty subject becomes the notification's name in
+/// title case.
 pub struct MailChannel;
 
 impl MailChannel {
@@ -204,6 +287,13 @@ impl Channel for MailChannel {
             )));
         }
 
+        // Read every file attached by path before anything is sent, so a
+        // file that cannot be read fails the delivery as a whole.
+        let mut attachments = rendering.attachments;
+        for file in &rendering.attachment_paths {
+            attachments.push(read_attachment(file).await?);
+        }
+
         let from = rendering
             .from
             .unwrap_or_else(|| Address::new("noreply@localhost"));
@@ -212,10 +302,14 @@ impl Channel for MailChannel {
         msg.cc = rendering.cc;
         msg.bcc = rendering.bcc;
         msg.reply_to = rendering.reply_to;
-        msg.subject = rendering.subject;
+        msg.subject = if rendering.subject.is_empty() {
+            subject_from_name(notification.name())
+        } else {
+            rendering.subject
+        };
         msg.html = rendering.html;
         msg.text = rendering.text;
-        msg.attachments = rendering.attachments;
+        msg.attachments = attachments;
         let msg = Mail::apply_always_defaults(msg);
 
         let transport = Mail::current_transport()?;
@@ -223,5 +317,103 @@ impl Channel for MailChannel {
         // `MessageSending` and `MessageSent` like any other (Laravel's mail
         // channel sends through the mailer, which fires them too).
         crate::mail::deliver(transport.as_ref(), &msg).await
+    }
+}
+
+/// Read one file attached by path into an [`Attachment`]: its name is the
+/// option's or the file's own, its content type the option's or the one
+/// its extension names, `application/octet-stream` when the extension is
+/// unknown. The content type carries no charset, as a mail part's own
+/// header names none.
+async fn read_attachment(file: &PathAttachment) -> Result<Attachment, FrameworkError> {
+    let content = tokio::fs::read(&file.path).await.map_err(|e| {
+        FrameworkError::internal(format!(
+            "MailChannel: cannot read the attachment {}: {e}",
+            file.path.display()
+        ))
+    })?;
+    let name = file.options.name.clone().unwrap_or_else(|| {
+        file.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.path.display().to_string())
+    });
+    let content_type = file.options.content_type.clone().unwrap_or_else(|| {
+        crate::http::file_response::mime_from_extension(&file.path)
+            .unwrap_or("application/octet-stream")
+            .to_owned()
+    });
+    Ok(Attachment::new(name, content, content_type))
+}
+
+/// The subject a notification mail without one is sent with: the part of
+/// `name` after its last `::`, split into words at case changes and at
+/// `_`, `-`, `.` and whitespace, each word in title case. `InvoicePaid`
+/// gives `Invoice Paid`; an acronym stays one word (`HTTPError` gives
+/// `Http Error`). Mirrors Laravel's
+/// `Str::title(Str::snake(class_basename($notification), ' '))`.
+fn subject_from_name(name: &str) -> String {
+    let base = name.rsplit("::").next().unwrap_or(name);
+    let chars: Vec<char> = base.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if matches!(c, '_' | '-' | '.') || c.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        if c.is_uppercase() && !word.is_empty() {
+            let previous = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if previous.is_lowercase()
+                || previous.is_numeric()
+                || (previous.is_uppercase() && next_is_lower)
+            {
+                words.push(std::mem::take(&mut word));
+            }
+        }
+        word.push(c);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+        .iter()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first
+                    .to_uppercase()
+                    .chain(chars.flat_map(char::to_lowercase))
+                    .collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subject_from_name;
+
+    #[test]
+    fn a_name_becomes_a_title_case_subject() {
+        assert_eq!(subject_from_name("InvoicePaid"), "Invoice Paid");
+        assert_eq!(
+            subject_from_name("App::Billing::InvoicePaid"),
+            "Invoice Paid"
+        );
+        assert_eq!(subject_from_name("invoice_paid"), "Invoice Paid");
+        assert_eq!(
+            subject_from_name("order-shipped.reminder"),
+            "Order Shipped Reminder"
+        );
+        assert_eq!(subject_from_name("HTTPError"), "Http Error");
+        assert_eq!(subject_from_name("Order2Shipped"), "Order2 Shipped");
+        assert_eq!(subject_from_name("welcome"), "Welcome");
+        assert_eq!(subject_from_name(""), "");
     }
 }

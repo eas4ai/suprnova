@@ -1088,6 +1088,54 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **A rehash step in the sign-in.** `UserProvider::rehash_password_if_required`
   runs after the password validates and before the user is signed in, in
   `attempt`, `once` and `Auth::logout_other_devices`.
+- **Attachments compared by content.** `Attachment::is_equivalent` and
+  `is_equivalent_with` compare the name, bytes and content type, and
+  `OutgoingMessage::has_equivalent_attachment` and `has_attached_data` check
+  a sent message with them; `has_attachment` still matches the name only.
+- **Raw data attachments on the builder.** `MailBuilder::attach_data(bytes,
+  name, content_type)` attaches in-memory data, as Laravel's `attachData` does.
+- **A mailable's own recipients.** `Mailable::to`, `cc`, `bcc` and `reply_to`
+  give a mailable its own lists; a send or a queue merges them ahead of the
+  builder's, skips an address already present, and `Mail::always_to` still
+  replaces every recipient.
+- **Mailables sent alone.** `Mail::send`, `Mail::queue`, `Mail::later`,
+  `Mail::on_queue` and `Mail::queue_on` send or queue a mailable to its own
+  recipients and refuse one with none before anything is sent or pushed.
+- **Boolean mail fake checks.** `MailFake::has_sent`, `has_sent_mailable::<M>()`
+  and `has_queued` answer whether a mailable was sent or queued; a queued
+  mailable does not count as sent.
+- **Mailable delays.** `Mailable::delay` delays `Mail::queue` and
+  `MailBuilder::queue`; an explicit `later` delay wins.
+- **Notification delays per channel.** `Notification::delay(channel)` delays
+  that channel's job when `Notify::queue` pushes it.
+- **`BroadcastNotificationCreated`.** The broadcast notification channel
+  dispatches it with the notification's name, the route, the data and the
+  message's queue and connection, after the publish or the push.
+- **Queued broadcast notifications.** A notification that implements
+  `NotificationBroadcast::to_broadcast` and is registered with
+  `register_broadcast_renderer` supplies a `BroadcastMessage`; one that names
+  a queue or a connection with `on_queue` or `on_connection` is published by
+  a queued `BroadcastNotificationJob`, which the worker knows without
+  registration.
+- **Notification mail attachments by path.** `MailRendering::attach`,
+  `attach_data`, `attach_path` and `attach_many` attach files, the last two
+  with `AttachOptions` for the name and content type; files are read at
+  delivery, the content type follows the extension, and a file that cannot
+  be read fails the delivery naming the path.
+- **Delayed queued listeners.** `QueuedListener::delay(duration)` and
+  `delay_until(|event| ...)` delay the listener's job, winning over the job's
+  own `Job::delay`.
+- **Per-connection after-commit.** `QUEUE_<CONNECTION>_AFTER_COMMIT` and
+  `Queue::set_connection_after_commit` give a queue connection its own
+  after-commit setting, which `Queue::connection_after_commit` reads.
+- **A job's own after-commit choice.** `Job::after_commit_choice()` answers
+  `Some(true)`, `Some(false)` or `None`, so a job can push ahead of the
+  commit even when its connection or `QUEUE_AFTER_COMMIT` waits.
+- **A Pusher HTTP API client.** `PusherClient::new(config, registry)` and
+  `PusherBroadcastHub::client()` query channels and presence users, publish
+  a batch in one request, end a user's connections and send any other
+  signed `GET`, with channel names through the registry's wire mapping and
+  errors that never quote the secret or a signature.
 
 ### Changed
 
@@ -1918,6 +1966,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   for a database shared with Laravel, so `Auth::validate` and a guard's
   `validate` leave it as it is; the sign-in rewrites it, and a rewrite that
   fails still fails the sign-in.
+- **One attachment per name and bytes.** A message drops an attachment
+  whose name and bytes equal an earlier one's, from the mailable's
+  `attachments()` or the builder, on the send and the queued path; two
+  attachments with one name and different bytes are both sent.
+- **Notification mail without a subject.** An empty `MailRendering` subject
+  is sent as the notification's name in title case (`InvoicePaid` gives
+  `Invoice Paid`) instead of empty.
+- **Unique queued listeners take the lock.** A `QueuedListener` whose job
+  declares `unique_id` pushes through `Queue::push_unique`, so a second event
+  while the lock is held pushes nothing and dispatches `UniqueJobSkipped`.
+- **The after-commit decision follows an order.** A push waits for the
+  commit by the first of its own override, the job's
+  `after_commit_choice`, the connection's setting and `QUEUE_AFTER_COMMIT`,
+  for `push`, `push_unique` and `bulk` alike, instead of the job's
+  `after_commit` or `QUEUE_AFTER_COMMIT`.
 
 ### Fixed
 

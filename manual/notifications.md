@@ -103,6 +103,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     fn max_tries(&self) -> u32 { 3 }
     fn backoff(&self) -> BackoffSchedule { BackoffSchedule::default() }
     fn after_commit(&self) -> bool { false }
+    fn delay(&self, _channel: &str) -> Option<std::time::Duration> { None }
 }
 ```
 
@@ -119,6 +120,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `max_tries(&self)` | Max attempts for this notification's queued jobs. Default: `3`. |
 | `backoff(&self)` | Backoff schedule for this notification's queued jobs. Default: the framework default. |
 | `after_commit(&self)` | `true` makes `Notify::queue` inside `DB::transaction` wait for the commit before it pushes the jobs. Default: `false`. See [Queued notifications inside a transaction](#queued-notifications-inside-a-transaction). |
+| `delay(&self, channel)` | How long `Notify::queue` holds the job for `channel` before a worker may take it. Default: `None` for every channel. See [Queue tuning](#queue-tuning). |
 
 `should_send` and `after_sending` are honored on **both** paths. `Notify::send`
 consults them in the dispatcher; `Notify::queue` checks `should_send` before
@@ -142,15 +144,64 @@ pub trait NotificationMailable: Notification {
 }
 ```
 
-`MailRendering` is the rendering envelope - `subject` (required), `html`
-and/or `text` (at least one required), optional `from`, `cc`, `bcc`,
-`reply_to`, and `attachments`. The mail channel assembles an outgoing
-message from this rendering plus the recipient's `route_for("mail")`,
-applies the configured sender defaults (`Mail::always_from(...)`,
-`always_to(...)`, etc.), and dispatches through the configured mail transport.
+`MailRendering` is the rendering envelope - `subject`, `html` and/or
+`text` (at least one required), optional `from`, `cc`, `bcc`,
+`reply_to`, `attachments`, and `attachment_paths`. The mail channel
+assembles an outgoing message from this rendering plus the recipient's
+`route_for("mail")`, applies the configured sender defaults
+(`Mail::always_from(...)`, `always_to(...)`, etc.), and dispatches
+through the configured mail transport.
 
 If the renderer returns a rendering with neither `html` nor `text`,
 delivery fails fast - blank notification mail is never sent silently.
+
+An empty `subject` falls back to the notification's name after its last
+`::`, in title case: words split at case changes and at `_`, `-`, and
+`.`, so `InvoicePaid` is sent as `Invoice Paid`, as Laravel's mail
+channel falls back to the class name.
+
+#### Attachments
+
+`MailRendering` attaches files four ways, as Laravel's `MailMessage`
+does:
+
+```rust
+use suprnova::mail::Attachment;
+use suprnova::notifications::channels::mail::{AttachOptions, MailRendering};
+
+fn to_mail(statement: &Statement) -> MailRendering {
+    MailRendering {
+        subject: "Your statement".into(),
+        text: Some("Your statement is attached.".into()),
+        ..Default::default()
+    }
+    // In memory.
+    .attach(Attachment::new("summary.csv", statement.csv(), "text/csv"))
+    .attach_data(statement.terms(), "terms.txt", "text/plain")
+    // By path, read when the mail is delivered.
+    .attach_path("storage/statements/42.pdf", AttachOptions {
+        name: Some("statement.pdf".into()),
+        ..Default::default()
+    })
+    .attach_many([
+        ("storage/legal/privacy.pdf", AttachOptions::default()),
+        ("storage/legal/fees.html", AttachOptions {
+            content_type: Some("text/html".into()),
+            ..Default::default()
+        }),
+    ])
+}
+```
+
+`attach_path` and `attach_many` record the paths in `attachment_paths`,
+and the channel reads each file when it delivers the mail, so a queued
+notification carries paths, not file contents. A file attached by path
+takes its own name unless `AttachOptions::name` gives one, and the
+content type its extension names unless `AttachOptions::content_type`
+gives one, `application/octet-stream` for an extension the framework
+does not know. A file that cannot be read fails the delivery with an
+error that names the path, and nothing is sent. Files attached by path
+follow the ones in `attachments`.
 
 #### `#[derive(NotificationMailable)]`
 
@@ -194,9 +245,9 @@ Every invariant is enforced at compile time - missing `subject`, empty
 body, conflicting variants, `from_name` without `from`, or unknown keys
 fail the build instead of failing at dispatch.
 
-For attachments (binary payloads) or per-instance dynamic recipients,
-hand-implement `NotificationMailable` and build the `MailRendering`
-directly.
+For attachments or per-instance dynamic recipients, hand-implement
+`NotificationMailable` and build the `MailRendering` directly, with the
+[attachment methods](#attachments) above.
 
 ### Database
 
@@ -341,6 +392,60 @@ no `BroadcastHub` is bound when a notification declares `"broadcast"`,
 the channel returns an error - a misconfigured application surfaces
 the problem instead of silently dropping the message. Publishing to a
 channel with zero live subscribers is not an error.
+
+A notification that implements `NotificationBroadcast` supplies its own
+`BroadcastMessage`, as Laravel's `toBroadcast` does. The message's data
+replaces `data()` as the payload, and `on_queue` or `on_connection`
+sends the publish through a queued `BroadcastNotificationJob` on that
+queue and connection. Register the notification once at boot:
+
+```rust
+use suprnova::notifications::channels::broadcast::{
+    BroadcastMessage, NotificationBroadcast, register_broadcast_renderer,
+};
+
+impl NotificationBroadcast for OrderShipped {
+    fn to_broadcast(&self) -> BroadcastMessage {
+        BroadcastMessage::new(serde_json::json!({ "tracking": self.tracking }))
+            .on_queue("broadcasts")
+    }
+}
+
+// At boot, next to the other registrations.
+register_broadcast_renderer::<OrderShipped>()?;
+```
+
+A message that names neither a queue nor a connection publishes at once.
+A queued message does not need a hub at delivery; the worker publishes it
+to the hub bound in its own container, and the job fails, to be retried,
+when none is bound. The framework registers `BroadcastNotificationJob`
+with the worker, so you never call `register_job` for it.
+
+After the publish, or the push of the job, the channel dispatches
+`BroadcastNotificationCreated` with the notification's name, the route,
+the data, and the message's queue and connection, so you can listen for
+every broadcast notification:
+
+```rust
+use std::sync::Arc;
+use suprnova::{BroadcastNotificationCreated, EventFacade};
+
+EventFacade::listen::<BroadcastNotificationCreated, _>(Arc::new(BroadcastAudit)).await;
+```
+
+The event fires only after the broadcast went out or was queued. An error
+from a listener is logged and does not fail the delivery.
+
+To assert a queued broadcast, install `Queue::fake()` and use
+`assert_pushed_on_queue::<BroadcastNotificationJob>("broadcasts", |job| ...)`.
+
+#### Why Suprnova diverges
+
+Laravel's `BroadcastNotificationCreated` is a `ShouldBroadcast` event, so
+every broadcast notification goes through the queue. Suprnova publishes
+at once unless the message names a queue or a connection, which keeps a
+broadcast real-time on an application without a running worker, and
+keeps failing at delivery when no hub is bound.
 
 See [Broadcasting](broadcasting.md) for hub setup and WebSocket
 plumbing.
@@ -506,6 +611,23 @@ them onto every per-channel `SendNotificationJob` push. A notification that
 overrides none of the five gets the exact envelope a bare `Notify::queue`
 call always produced.
 
+`delay(&self, channel)` delays one channel's job, as Laravel's `withDelay`
+and `#[Delay]` do. It answers per channel, because each channel is its own
+job: a digest can reach the database at once and the inbox an hour later.
+The default, `None`, pushes every channel at once:
+
+```rust
+impl Notification for WeeklyDigest {
+    fn notification_name() -> &'static str { "WeeklyDigest" }
+    fn channels(&self) -> Vec<&'static str> { vec!["mail", "database"] }
+    fn data(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    fn delay(&self, channel: &str) -> Option<std::time::Duration> {
+        (channel == "mail").then_some(std::time::Duration::from_secs(3600))
+    }
+}
+```
+
 ```rust
 struct WelcomeDigest;
 
@@ -524,8 +646,8 @@ Set `fail_on_timeout(&self)` to `true` when a timeout means the delivery is
 unrecoverable rather than transient: the worker dead-letters on the first
 timeout instead of retrying up to `max_tries`.
 
-These five methods apply only to `Notify::queue` - `Notify::send` runs
-in-process and has no queue envelope to tune.
+These methods, `delay` included, apply only to `Notify::queue` -
+`Notify::send` runs in-process and has no queue envelope to tune.
 
 ### Queued notifications inside a transaction
 
@@ -557,9 +679,10 @@ DB::transaction(|_tx| {
 
 Inside a transaction, `Notify::queue` pushes the per-channel jobs at the
 commit, and a rollback discards them. Outside a transaction it pushes them at
-once. A notification that returns `false` defers to the process-wide
-`QUEUE_AFTER_COMMIT` setting, which makes every push wait for the commit. See
-[After-commit dispatch](queues.md#after-commit-dispatch).
+once. A notification that returns `false` makes no choice: the queue
+connection's own after-commit setting decides, then the process-wide
+`QUEUE_AFTER_COMMIT`. See
+[Which setting decides](queues.md#which-setting-decides).
 
 ### Why Suprnova diverges
 
@@ -755,12 +878,14 @@ surprising under concurrent load.
 | `NotificationDispatcher`, `NotificationFactory` | `suprnova::` |
 | `AnonymousNotifiable` | `suprnova::` |
 | `MailChannel`, `MailRendering`, `NotificationMailable` | `suprnova::` |
+| `AttachOptions`, `PathAttachment` | `suprnova::` |
 | `register_mail_renderer::<N>()` | `suprnova::` |
 | `DatabaseChannel`, `StoredNotification` | `suprnova::` |
 | `WebPushChannel` | `suprnova::` |
-| `BroadcastChannel` | `suprnova::` |
+| `BroadcastChannel`, `BroadcastMessage`, `NotificationBroadcast`, `BroadcastNotificationJob` | `suprnova::` |
+| `register_broadcast_renderer::<N>()` | `suprnova::` |
 | `SendNotificationJob` | `suprnova::` |
-| `NotificationSending`, `NotificationSent`, `NotificationFailed` | `suprnova::` |
+| `NotificationSending`, `NotificationSent`, `NotificationFailed`, `BroadcastNotificationCreated` | `suprnova::` |
 | `set_dispatcher`, `register_notification_factory` | `suprnova::notifications::` |
 | `all_for`, `unread_for`, `read_for`, `mark_as_read`, `mark_as_unread`, `mark_all_as_read`, `delete_for` | `suprnova::notifications::` |
 | `CreateNotificationsTable`, `NotificationTimestampsToDatetime` | `suprnova::notifications::migrations::` |

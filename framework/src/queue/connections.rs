@@ -53,6 +53,10 @@ use std::sync::{Arc, RwLock};
 
 static CONNECTIONS: RwLock<BTreeMap<String, Arc<dyn QueueDriver>>> = RwLock::new(BTreeMap::new());
 
+/// The after-commit setting each connection was given in code, by name.
+/// See [`after_commit`].
+static AFTER_COMMIT: RwLock<BTreeMap<String, bool>> = RwLock::new(BTreeMap::new());
+
 const LOCK_CONTEXT: &str = "queue connection registry";
 
 /// Where a push that resolved to one connection name goes.
@@ -161,12 +165,99 @@ pub(crate) fn scoped_label(connection: &str) -> String {
     }
 }
 
-/// Remove every registered connection. Test support, reached through
-/// `queue::testing::forget_connections`: the registry is process-wide, so a
-/// test that registers a connection removes it again.
+/// Give the connection `name` its own after-commit setting, which wins over
+/// `QUEUE_<NAME>_AFTER_COMMIT`.
+pub(crate) fn set_after_commit(name: &str, on: bool) {
+    // A single insert; recover in place on poison, as the driver registry
+    // does, so one panicking caller cannot disable the setting for good.
+    AFTER_COMMIT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(name.to_owned(), on);
+}
+
+/// The after-commit setting of the connection `name`: the one set in code,
+/// else `QUEUE_<NAME>_AFTER_COMMIT` (see [`after_commit_variable`]), read at
+/// each call. `true` or `1` is `Some(true)`, `false` or `0` is
+/// `Some(false)`, and an unset variable is `None`. Any other value is
+/// `None` too, with a warning, so a typo decides nothing rather than
+/// deciding the wrong way.
+///
+/// Keyed by the connection name a push resolves to, not by the driver's
+/// label, because the name is what an operator configures, as a Laravel
+/// connection's `after_commit` sits in that connection's config.
+pub(crate) fn after_commit(name: &str) -> Option<bool> {
+    let set_in_code = AFTER_COMMIT
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(name)
+        .copied();
+    if set_in_code.is_some() {
+        return set_in_code;
+    }
+    let variable = after_commit_variable(name);
+    match std::env::var(&variable).as_deref() {
+        Ok("true") | Ok("1") => Some(true),
+        Ok("false") | Ok("0") => Some(false),
+        Err(_) => None,
+        Ok(other) => {
+            tracing::warn!(
+                variable = %variable,
+                value = %other,
+                "a queue connection's after-commit setting is not true, false, 1 or 0; \
+                 it is ignored"
+            );
+            None
+        }
+    }
+}
+
+/// `QUEUE_<NAME>_AFTER_COMMIT` for the connection `name`: upper-cased, with
+/// each character that is not an ASCII letter or digit written as `_`, so
+/// `audit-log` reads `QUEUE_AUDIT_LOG_AFTER_COMMIT`.
+pub(crate) fn after_commit_variable(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("QUEUE_{name}_AFTER_COMMIT")
+}
+
+/// Remove every registered connection, and every after-commit setting made
+/// in code. Test support, reached through
+/// `queue::testing::forget_connections`: both registries are process-wide,
+/// so a test that registers a connection removes it again.
 pub(crate) fn clear() {
     CONNECTIONS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
+    AFTER_COMMIT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::after_commit_variable;
+
+    #[test]
+    fn the_after_commit_variable_upper_cases_the_name_and_replaces_other_characters() {
+        assert_eq!(after_commit_variable("audit"), "QUEUE_AUDIT_AFTER_COMMIT");
+        assert_eq!(
+            after_commit_variable("audit-log.v2"),
+            "QUEUE_AUDIT_LOG_V2_AFTER_COMMIT"
+        );
+        assert_eq!(
+            after_commit_variable("Redis 2"),
+            "QUEUE_REDIS_2_AFTER_COMMIT"
+        );
+    }
 }

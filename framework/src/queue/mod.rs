@@ -113,7 +113,8 @@ pub struct EnvelopeOverrides {
     /// Backoff schedule. Outranks `Job::backoff()`.
     pub backoff: Option<BackoffSchedule>,
     /// Whether this one push waits for the surrounding transaction to commit.
-    /// Outranks [`Job::after_commit`].
+    /// Outranks [`Job::after_commit_choice`], the connection's setting and
+    /// `QUEUE_AFTER_COMMIT`.
     ///
     /// `Some(true)` defers a job that did not opt in (see
     /// [`Queue::push_after_commit`]); `Some(false)` is Laravel's
@@ -347,9 +348,10 @@ impl Queue {
     /// per dispatch - those take an explicit timestamp and never consult
     /// `Job::delay`.
     ///
-    /// Honors [`Job::after_commit`]: inside a
-    /// [`DB::transaction`](crate::DB::transaction) an opted-in job's push
-    /// waits for the commit and a rollback discards it.
+    /// Honors the after-commit order [`Job::after_commit_choice`] gives:
+    /// inside a [`DB::transaction`](crate::DB::transaction) a push that
+    /// waits for the commit is made at the commit, and a rollback discards
+    /// it.
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
         Self::dispatch_push(
             job,
@@ -431,9 +433,9 @@ impl Queue {
     /// always wins over the job's own default. [`Queue::push`] is the
     /// entry point that honors `Job::delay`.
     ///
-    /// [`Job::after_commit`] still applies: the push can wait for the
-    /// surrounding transaction, and `available_at` is preserved exactly as
-    /// given when it does.
+    /// The after-commit order [`Job::after_commit_choice`] gives still
+    /// applies: the push can wait for the surrounding transaction, and
+    /// `available_at` is preserved exactly as given when it does.
     pub async fn push_later<J: Job>(
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
@@ -576,13 +578,19 @@ impl Queue {
             return Ok(());
         }
         let context = crate::context::Context::dehydrate();
-        if overrides.after_commit.unwrap_or_else(waits_for_commit::<J>)
-            && (tx.is_some() || crate::database::after_commit::in_transaction())
-        {
+        // The connection is resolved before the decision, because the
+        // connection's own setting is one of its steps; outside a
+        // transaction there is nothing to decide.
+        let deferred_on = if tx.is_some() || crate::database::after_commit::in_transaction() {
             let connection = overrides
                 .connection
                 .clone()
                 .unwrap_or_else(connection_of::<J>);
+            waits_for_commit::<J>(overrides.after_commit, &connection).then_some(connection)
+        } else {
+            None
+        };
+        if let Some(connection) = deferred_on {
             connections::target(&connection)?;
             let callback: crate::database::after_commit::AfterCommitCallback =
                 Box::new(move || {
@@ -703,9 +711,10 @@ impl Queue {
     /// [`Job::delay`]: naming a window at the call site is the explicit
     /// statement, so the envelope becomes available one window from now.
     ///
-    /// Honors [`Job::after_commit`] like the rest of the [`Queue::push`]
-    /// family - the window is armed at the commit, in the same step that
-    /// writes the envelope, so a rollback arms nothing.
+    /// Honors the after-commit order [`Job::after_commit_choice`] gives,
+    /// like the rest of the [`Queue::push`] family - the window is armed at
+    /// the commit, in the same step that writes the envelope, so a rollback
+    /// arms nothing.
     ///
     /// Returns `Err` when the job also declares [`Job::unique_id`], for the
     /// reason [`Job::debounce_for`] gives.
@@ -755,10 +764,13 @@ impl Queue {
     /// Requires the cache layer to be bootstrapped (the dedupe lock lives
     /// in [`Cache`](crate::cache::Cache)). Returns an internal error if
     /// `J::unique_id(&job)` returns `None`.
-    /// Honors [`Job::after_commit`] too, with one asymmetry that matters: the
-    /// dedupe lock is taken **now**, so a second `push_unique` inside the same
-    /// transaction is still suppressed, and only the envelope waits for the
-    /// commit. A rollback releases that lock owner-scoped.
+    ///
+    /// Honors the after-commit order [`Job::after_commit_choice`] gives (with
+    /// no per-push step, since it takes no [`EnvelopeOverrides`]), with one
+    /// asymmetry that matters: the dedupe lock is taken **now**, so a second
+    /// `push_unique` inside the same transaction is still suppressed, and
+    /// only the envelope waits for the commit. A rollback releases that lock
+    /// owner-scoped.
     pub async fn push_unique<J: Job>(job: J) -> Result<bool, FrameworkError> {
         Self::push_unique_at::<J>(job, AvailableAt::FromJobDelay).await
     }
@@ -815,7 +827,8 @@ impl Queue {
         // that owns the ambient transaction; `commit_on_success_owned` runs the
         // body on this same task, but reading it once keeps that an
         // implementation detail rather than a dependency.
-        let defer = waits_for_commit::<J>() && crate::database::after_commit::in_transaction();
+        let defer = crate::database::after_commit::in_transaction()
+            && waits_for_commit::<J>(None, &connection_of::<J>());
         let deferred_key = key.clone();
         // Taken here for the reason `dispatch_push` gives: a deferred push
         // builds its envelope at the commit, outside the caller's scope.
@@ -971,10 +984,11 @@ impl Queue {
     /// element of `jobs` shares the same concrete `J`, so they share the
     /// same declared delay.
     ///
-    /// Honors [`Job::after_commit`] the same way, and for the same reason the
-    /// partition is all-or-nothing: `jobs` is monomorphic, so one `J` decides
-    /// for the whole batch. Laravel partitions a heterogeneous array here;
-    /// Suprnova has nothing to partition.
+    /// Honors the after-commit order [`Job::after_commit_choice`] gives (with
+    /// no per-push step), and for the same reason the partition is
+    /// all-or-nothing: `jobs` is monomorphic, so one `J` and its one
+    /// connection decide for the whole batch. Laravel partitions a
+    /// heterogeneous array here; Suprnova has nothing to partition.
     ///
     /// Honors [`Job::debounce_for`] as separate pushes do: each job arms its
     /// window in order, and once the driver accepts the batch each window is
@@ -997,7 +1011,9 @@ impl Queue {
         }
         // Taken here for the reason `dispatch_push` gives.
         let context = crate::context::Context::dehydrate();
-        if waits_for_commit::<J>() && crate::database::after_commit::in_transaction() {
+        if crate::database::after_commit::in_transaction()
+            && waits_for_commit::<J>(None, &connection_of::<J>())
+        {
             driver_for_job::<J>()?;
             return crate::database::after_commit::register_callback(Box::new(move || {
                 Box::pin(async move { Self::bulk_immediately::<J>(jobs, context).await })
@@ -1519,6 +1535,33 @@ impl Queue {
         connections::names()
     }
 
+    /// Give the connection `connection` its own after-commit setting: with
+    /// `on`, a push to it inside a transaction waits for the commit unless
+    /// the push or the job says otherwise; with `on` false, it does not
+    /// wait even under `QUEUE_AFTER_COMMIT`. Mirrors the `after_commit`
+    /// option of a Laravel queue connection.
+    ///
+    /// The setting wins over `QUEUE_<CONNECTION>_AFTER_COMMIT` and keys on
+    /// the name a push resolves to, the default connection's
+    /// ([`Queue::connection_name`]) included. See
+    /// [`Job::after_commit_choice`] for the whole order.
+    pub fn set_connection_after_commit(connection: &str, on: bool) {
+        connections::set_after_commit(connection, on);
+    }
+
+    /// The after-commit setting of the connection `connection`, or `None`
+    /// when it has none and the decision falls to `QUEUE_AFTER_COMMIT`.
+    ///
+    /// A setting made with [`Queue::set_connection_after_commit`] wins;
+    /// otherwise `QUEUE_<CONNECTION>_AFTER_COMMIT` is read at each call, the
+    /// name upper-cased and every character other than a letter or digit
+    /// written as `_` (`audit-log` reads `QUEUE_AUDIT_LOG_AFTER_COMMIT`).
+    /// `true` or `1` waits, `false` or `0` does not, and any other value is
+    /// ignored with a warning.
+    pub fn connection_after_commit(connection: &str) -> Option<bool> {
+        connections::after_commit(connection)
+    }
+
     /// Set the name of the default connection, the one [`Queue::set_driver`]
     /// installs. It is carried in queue lifecycle events, and it is the name
     /// a job selects the default connection by. Defaults to the driver's
@@ -1615,10 +1658,10 @@ pub(crate) fn pausable_from_env() -> bool {
     )
 }
 
-/// Whether every push waits for the surrounding transaction to commit,
-/// whatever the job declares. Mirrors the `after_commit` option of a Laravel
-/// queue connection. Reads `QUEUE_AFTER_COMMIT` fresh: `"true"` or `"1"`
-/// turns it on, anything else, or unset, leaves it off.
+/// Whether every push waits for the surrounding transaction to commit when
+/// nothing closer decides. The last step of [`waits_for_commit`]. Reads
+/// `QUEUE_AFTER_COMMIT` fresh: `"true"` or `"1"` turns it on, anything
+/// else, or unset, leaves it off.
 pub(crate) fn after_commit_from_env() -> bool {
     matches!(
         std::env::var("QUEUE_AFTER_COMMIT").as_deref(),
@@ -1626,17 +1669,22 @@ pub(crate) fn after_commit_from_env() -> bool {
     )
 }
 
-/// Whether a push of `J` that names no per-push choice waits for the
-/// surrounding transaction: the job asked for it, or `QUEUE_AFTER_COMMIT`
-/// asks for it on behalf of every job.
+/// Whether a push of `J` to `connection` waits for the surrounding
+/// transaction: the first of these that decides, as Laravel's
+/// `Queue::shouldDispatchAfterCommit` lets a job's own `afterCommit` win
+/// over its connection's.
 ///
-/// The two are joined with "or" because `Job::after_commit` answers `false`
-/// both for a job that never chose and for one that chose `false`, so the
-/// process-wide setting cannot be overruled from the trait. One push can
-/// still go ahead of the commit with
-/// [`EnvelopeOverrides::after_commit`] set to `Some(false)`.
-fn waits_for_commit<J: Job>() -> bool {
-    J::after_commit() || after_commit_from_env()
+/// 1. `push_choice`, the push's own [`EnvelopeOverrides::after_commit`];
+/// 2. the job's [`Job::after_commit_choice`];
+/// 3. the connection's setting, [`Queue::connection_after_commit`];
+/// 4. `QUEUE_AFTER_COMMIT`; otherwise the push does not wait.
+///
+/// Each step is read only when the ones before it left the choice open.
+fn waits_for_commit<J: Job>(push_choice: Option<bool>, connection: &str) -> bool {
+    push_choice
+        .or_else(J::after_commit_choice)
+        .or_else(|| connections::after_commit(connection))
+        .unwrap_or_else(after_commit_from_env)
 }
 
 /// Wire the in-memory queue driver as the default. Idempotent.

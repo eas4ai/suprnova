@@ -25,7 +25,9 @@ pub use database_read::{
     StoredNotification, all_for, delete_for, mark_all_as_read, mark_as_read, mark_as_unread,
     read_for, unread_for,
 };
-pub use events::{NotificationFailed, NotificationSending, NotificationSent};
+pub use events::{
+    BroadcastNotificationCreated, NotificationFailed, NotificationSending, NotificationSent,
+};
 pub use notify_job::SendNotificationJob;
 pub use testing::{
     FakeRecord, NotifyFakeGuard, assert_count, assert_nothing_sent, assert_nothing_sent_to,
@@ -162,6 +164,18 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// pushed at once.
     fn after_commit(&self) -> bool {
         false
+    }
+
+    /// How long `Notify::queue` holds this notification's job for `channel`
+    /// before a worker may take it. Default `None` for every channel.
+    /// Mirrors Laravel's `withDelay($notifiable, $channel)` and the
+    /// `#[Delay]` attribute on a notification.
+    ///
+    /// Per channel because each channel is its own job: a digest can reach
+    /// the database at once and the inbox an hour later. `Notify::send`
+    /// ignores it, since nothing is queued there.
+    fn delay(&self, _channel: &str) -> Option<Duration> {
+        None
     }
 }
 
@@ -529,9 +543,14 @@ impl Notify {
     /// better than the previous shape's worker-side double-send on
     /// partial failure.
     ///
+    /// A channel for which [`Notification::delay`] answers `Some` is pushed
+    /// with that delay, through
+    /// [`Queue::later_with`](crate::queue::Queue::later_with), the same
+    /// overrides and all; every other channel is pushed at once.
+    ///
     /// Under [`Notify::fake`] the notification is recorded for each
     /// declared channel that resolves a route - no queue push, no channel
-    /// execution, so none of the five queue-tuning methods are consulted.
+    /// execution, so none of the queue-tuning methods are consulted.
     pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
         N: Notification,
@@ -584,7 +603,12 @@ impl Notify {
                 notification_payload: payload.clone(),
                 channels: vec![(*channel).to_string()],
             };
-            crate::queue::Queue::push_with(job, overrides.clone()).await?;
+            match notification.delay(channel) {
+                Some(delay) => {
+                    crate::queue::Queue::later_with(delay, job, overrides.clone()).await?
+                }
+                None => crate::queue::Queue::push_with(job, overrides.clone()).await?,
+            }
         }
         Ok(())
     }

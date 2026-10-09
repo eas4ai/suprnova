@@ -1,6 +1,7 @@
 //! Notification lifecycle events.
 //!
-//! Three events surround every channel delivery:
+//! Three events surround every channel delivery, and the broadcast channel
+//! adds a fourth, [`BroadcastNotificationCreated`]:
 //!
 //! - [`NotificationSending`] - dispatched *before* the channel runs. If any
 //!   listener returns an error, the channel is skipped (the dispatcher treats
@@ -11,6 +12,8 @@
 //! - [`NotificationFailed`] - dispatched when a channel returns an error.
 //!   The dispatcher then propagates the underlying error per its existing
 //!   first-failure-stops contract.
+//! - [`BroadcastNotificationCreated`] - dispatched by the broadcast channel
+//!   once it has published a notification, or pushed the job that will.
 //!
 //! Events carry only the notification *name* and JSON *payload* - not the
 //! original `&dyn Notifiable` - because they cross the `Event` trait's
@@ -88,5 +91,36 @@ pub struct NotificationFailed {
 impl Event for NotificationFailed {
     fn event_name() -> &'static str {
         "Suprnova::Notifications::Failed"
+    }
+}
+
+/// Dispatched by the broadcast channel once it has published a
+/// notification, or pushed the job that publishes it. Mirrors Laravel's
+/// `BroadcastNotificationCreated`, which listeners use to see every
+/// broadcast notification and how it was routed.
+///
+/// It fires after the publish or the push succeeded, so a listener never
+/// hears of a broadcast that did not happen; a listener's error is logged
+/// and does not fail the delivery, which has already taken place.
+#[derive(Clone, Debug)]
+pub struct BroadcastNotificationCreated {
+    /// `Notification::notification_name()` of the broadcast notification,
+    /// also the event name subscribers receive.
+    pub notification: String,
+    /// The broadcast channel name: the recipient's `route_for("broadcast")`.
+    pub route: String,
+    /// The payload subscribers receive: the notification's
+    /// `NotificationBroadcast::to_broadcast()` data, or its `data()`.
+    pub data: Value,
+    /// The queue connection the message named, when it is published by a
+    /// queued job.
+    pub connection: Option<String>,
+    /// The queue the message named, when it is published by a queued job.
+    pub queue: Option<String>,
+}
+
+impl Event for BroadcastNotificationCreated {
+    fn event_name() -> &'static str {
+        "Suprnova::Notifications::BroadcastNotificationCreated"
     }
 }
