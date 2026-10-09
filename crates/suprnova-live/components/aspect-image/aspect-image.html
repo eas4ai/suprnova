@@ -1,0 +1,8 @@
+{#
+  suprnova.aspect-image - an image that reserves its box (DATA-001).
+  The img itself carries the ratio, so no wrapper enters the document;
+  the ratio is a named token, never a literal on the element.
+#}
+{% macro aspect_image(src, alt, ratio="wide", loading="lazy") %}
+<img class="sn-aspect-image" src="{{ src }}" alt="{{ alt }}" data-sn-ratio="{{ ratio }}" loading="{{ loading }}" decoding="async">
+{% endmacro %}
