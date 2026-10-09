@@ -999,6 +999,7 @@ where
                 (self.pivot_related_key.clone(), PivotMatch::In(keys)),
             ],
             &self.pivot_filters,
+            &[&self.pivot_foreign_key, &self.pivot_related_key],
         )
         .await?;
         let mut indexed = std::collections::HashMap::new();
@@ -1168,6 +1169,7 @@ where
                 PivotMatch::Eq(self.parent_key_value.clone()),
             )],
             &self.pivot_filters,
+            &[&self.pivot_foreign_key, &self.pivot_related_key],
         )
         .await?;
 
@@ -1652,6 +1654,7 @@ pub(crate) async fn load_pivot_rows<P>(
     connection: Option<&'static str>,
     conditions: Vec<(String, PivotMatch)>,
     filters: &PivotFilters,
+    identity_columns: &[&str],
 ) -> Result<Vec<P>, FrameworkError>
 where
     P: Model,
@@ -1722,6 +1725,17 @@ where
         .map(P::try_from_storage)
         .collect::<Result<Vec<_>, _>>()?;
     P::__mark_query_result(&mut pivots);
+    for pivot in &mut pivots {
+        // A surrogate id keeps the normal model deletion path.
+        if P::PRIMARY_KEY == "id" && pivot.field_value("id").is_some_and(|id| !id.is_null()) {
+            continue;
+        }
+        let identity =
+            PivotIdentity::from_columns(table, connection, identity_columns, |column| {
+                pivot.field_value(column)
+            })?;
+        pivot.__set_pivot_identity(identity);
+    }
     Ok(pivots)
 }
 
@@ -1738,6 +1752,7 @@ pub async fn __eager_pivot_rows<P>(
     table: &str,
     connection: Option<&'static str>,
     column: &str,
+    related_column: &str,
     keys: Vec<serde_json::Value>,
     type_match: Option<(&str, &str)>,
 ) -> Result<Vec<P>, FrameworkError>
@@ -1758,14 +1773,101 @@ where
         Send + Into<sea_orm::Value>,
 {
     let mut conditions = vec![(column.to_string(), PivotMatch::In(keys))];
+    let mut identity_columns = vec![column, related_column];
     if let Some((type_column, type_value)) = type_match {
+        identity_columns.push(type_column);
         conditions.push((
             type_column.to_string(),
             PivotMatch::Eq(serde_json::Value::String(type_value.to_string())),
         ));
     }
-    load_pivot_rows::<P>(table, connection, conditions, &PivotFilters::default()).await
+    load_pivot_rows::<P>(
+        table,
+        connection,
+        conditions,
+        &PivotFilters::default(),
+        &identity_columns,
+    )
+    .await
 }
+
+/// Keep the relation's table and original keys so an id-less pivot deletes one attachment.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct PivotIdentity {
+    pub(crate) table: String,
+    pub(crate) connection: Option<&'static str>,
+    pub(crate) keys: Vec<(String, serde_json::Value)>,
+}
+
+impl PivotIdentity {
+    /// Keep decoded original keys together so the model's binder can encode them at deletion.
+    fn from_columns(
+        table: &str,
+        connection: Option<&'static str>,
+        columns: &[&str],
+        mut read: impl FnMut(&str) -> Option<serde_json::Value>,
+    ) -> Result<Self, FrameworkError> {
+        let keys = columns
+            .iter()
+            .map(|column| {
+                crate::database::validate_identifier(column)?;
+                let value = read(column).ok_or_else(|| {
+                    FrameworkError::param(format!("pivot key `{column}` is not a model column"))
+                })?;
+                Ok(((*column).to_owned(), value))
+            })
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
+        Ok(Self {
+            table: table.to_owned(),
+            connection,
+            keys,
+        })
+    }
+
+    /// Delete by original relation keys on the connection that supplied the pivot.
+    pub(crate) async fn delete(&self, binder: super::ColumnBinder) -> Result<(), FrameworkError> {
+        crate::database::validate_identifier(&self.table)?;
+        crate::render_cache::orm::atomic(self.connection, || async {
+            let exec = ExecutorChoice::resolve_write(None, None, self.connection).await?;
+            let backend = exec.backend();
+            let mut values = Vec::new();
+            let mut terms = Vec::new();
+            for (column, value) in &self.keys {
+                crate::database::validate_identifier(column)?;
+                if value.is_null() {
+                    terms.push(format!("{column} IS NULL"));
+                } else {
+                    let value =
+                        binder(column, value).unwrap_or_else(|| json_value_to_sea_value(value));
+                    let placeholder = crate::database::placeholder::typed_placeholder(
+                        backend,
+                        values.len() + 1,
+                        &value,
+                    )?;
+                    values.push(value);
+                    terms.push(format!("{column} = {placeholder}"));
+                }
+            }
+            if terms.is_empty() {
+                return Err(FrameworkError::param(
+                    "pivot deletion requires its relation keys",
+                ));
+            }
+            exec.run(Statement::from_sql_and_values(
+                backend,
+                format!("DELETE FROM {} WHERE {}", self.table, terms.join(" AND ")),
+                values,
+            ))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+            crate::render_cache::orm::after_bulk_write(&self.table).await
+        })
+        .await
+    }
+}
+
+pub(crate) const PIVOT_IDENTITY: &str = "__suprnova_pivot_identity";
 
 /// Shared INSERT path used by `attach` / `attach_with` / `sync`. The
 /// connection-or-transaction handle is taken as a generic `&C: ConnectionTrait`

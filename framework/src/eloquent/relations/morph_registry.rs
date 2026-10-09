@@ -49,6 +49,8 @@ pub struct MorphTypeEntry {
     /// `TypeId` itself isn't a stable const, so it can't be stored
     /// directly in an `inventory::submit!` constant.
     pub type_id: fn() -> TypeId,
+    /// Build this owner's scoped predicates so morph existence matches its normal reads.
+    pub query_constraints: fn() -> crate::eloquent::Builder<()>,
 }
 
 inventory::collect!(MorphTypeEntry);

@@ -30,7 +30,7 @@ pub mod timestamps;
 pub mod unique_id;
 
 pub use attrs::Attrs;
-pub use builder::{Builder, Direction, IntoColumn, IntoVal};
+pub use builder::{Builder, Direction, IntoColumn, IntoMorphTypes, IntoVal};
 pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
     AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,

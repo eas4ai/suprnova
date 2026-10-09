@@ -1624,6 +1624,18 @@ WHERE chain. AND-combined filters don't care about order, but
 left-to-right matters for any clause whose side-effect order is
 visible (e.g. ordering, having, raw fragments).
 
+You call `apply_scopes()` to keep a builder with its registered scopes and
+soft-delete filter already applied. You inspect the resulting SQL or run
+the same builder. Repeated calls keep each scope's clauses once. You set
+`without_global_scopes()` or `with_trashed()` before applying scopes when
+you need those opt-outs.
+
+```rust
+let query = Article::query().apply_scopes();
+let sql = query.to_sql();
+let rows = query.get().await?;
+```
+
 ### Opting out of a global scope
 
 Each model the `#[suprnova::model]` macro touches gets two static
@@ -4509,36 +4521,33 @@ Unknown relation names render the safe-fail form (`EXISTS (SELECT 1
 WHERE 1 = 0)`), which evaluates to `FALSE` and returns zero rows. A
 typo never leaks a full-table scan.
 
-### `MorphTo` divergence
+### `MorphTo` existence
 
-Laravel's `MorphTo` inverse (`whereMorphedTo`, `whereHasMorph`) walks
-multiple target tables because the morph child carries a `*_type`
-discriminator that picks one of N possible parents. Suprnova's
-`MorphTo` lowers to a per-family enum at macro expansion time - the
-target type is statically a `<Family>Morph { Variant1(...), ... }`,
-not a single SQL table. The existence engine can't render one fixed
-`EXISTS (SELECT 1 FROM <table>)` for that case because there is no
-single table.
-
-Recommended migration: do the existence check at the morph-child level
-instead. Where Laravel writes:
-
-```php
-Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
-```
-
-Suprnova writes:
+You use `has_morph` or `doesnt_have_morph` with your `MorphTo` relation's
+name and registered morph names. You also use a model's registered alias
+or Rust type name. You pass `"*"` to query every registered morph type.
+The wildcard absence form includes rows whose type column is null.
+Explicit type lists match only those types, including their aliases.
 
 ```rust
-Comment::query()
-    .filter("commentable_type", "post")
-    .where_has::<Post, _>("commentable_post", |q| q.filter("published", true))
+let comments = Comment::query()
+    .where_has_morph("commentable", ["post"], |q: Builder<()>, kind| {
+        q.filter("published", kind == "post")
+    })
+    .get()
+    .await?;
+let missing = Comment::query()
+    .doesnt_have_morph("commentable", "*")
     .get()
     .await?;
 ```
 
-The narrower-typed form gives full IDE completion on the inner
-builder, which the loosely-typed `whereHasMorph` cannot.
+You use `where_has_morph` or `where_doesnt_have_morph` to constrain each
+type's existence query. Your closure receives a builder and the canonical
+morph name once per selected type. The target's global scopes and soft-delete
+filter apply. An unknown morph type or a relation that is not `MorphTo`
+returns an error when you compile or execute the query. An empty type list
+matches no rows for existence, and every row for absence.
 
 ### Cheap builder shortcuts
 
@@ -4634,6 +4643,11 @@ let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
 assert!(alice.is(&also_alice));
 assert!(alice.is_not(&bob));
 ```
+
+You use `force_destroy(keys)` to remove matching rows physically, including
+rows you already soft-deleted. You receive the number removed. Duplicate
+or missing keys add nothing to the count, and an empty list returns zero.
+Each removed row fires its force-delete lifecycle events.
 
 ### `*Quietly` variants - suppress lifecycle events
 
