@@ -50,6 +50,17 @@
 //! - [`ResourceRoutes::scoped`], [`ResourceRoutes::with_trashed`] and
 //!   [`ResourceRoutes::missing`] set the routes' binding fields and
 //!   scoping, soft-deleted rows and missing-row answer.
+//! - [`ResourceRoutes::middleware`] runs a [`ControllerMiddleware`] on the
+//!   actions it is scoped to.
+//!
+//! ## Controller middleware
+//!
+//! A controller declares its own middleware, Laravel's `HasMiddleware`:
+//! [`ResourceController::middleware`] returns a list of
+//! [`ControllerMiddleware`] values, each scoped with `only` or `except`. A
+//! module named by `resource!` declares the same list in a
+//! `pub fn middleware()`. The resource's routes run each one after the
+//! group's middleware and after the middleware given at registration.
 //!
 //! A dotted name nests: `users.posts` registers `/users/{user}/posts` and
 //! `/users/{user}/posts/{post}` under `users.posts.*`.
@@ -68,12 +79,15 @@
 //! - `names` (Laravel) + `rename` (Rust) - both alias.
 
 use super::binding::{HandlerRef, MissingHook, RouteBindingOptions, boxed_missing};
+use super::macros::{convert_route_params, join_paths};
 use super::router::{BoxedHandler, Router};
 use crate::FrameworkError;
 use crate::auth::{Auth, Authenticatable};
 use crate::authorization::Gate;
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, Next, boxed_as};
+use crate::session::SessionBlock;
+use crate::session::blocking::register_route_block;
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -228,6 +242,112 @@ where
     }
 }
 
+/// What a [`ControllerMiddleware`] runs: a middleware value, or the name of
+/// an alias or group, resolved when the resource registers.
+#[derive(Clone)]
+enum ControllerMiddlewareSource {
+    Boxed(BoxedMiddleware),
+    Named(String),
+}
+
+/// A middleware a resource controller declares, scoped to some of its
+/// actions: Laravel's `Controllers\Middleware`.
+///
+/// List these in [`ResourceController::middleware`], in the
+/// `pub fn middleware()` of a module named by `resource!`, or pass one to
+/// [`ResourceRoutes::middleware`] or [`ResourceDef::middleware`]. Without
+/// `only` or `except`, it runs on every action of the resource.
+///
+/// ```rust,no_run
+/// use suprnova::routing::{ControllerMiddleware, ResourceAction, ResourceController};
+/// # use suprnova::{async_trait, Middleware, Next, Request, Response};
+/// # struct Audit;
+/// # #[async_trait]
+/// # impl Middleware for Audit {
+/// #     async fn handle(&self, request: Request, next: Next) -> Response { next(request).await }
+/// # }
+///
+/// struct PostsController;
+///
+/// impl ResourceController for PostsController {
+///     fn middleware(&self) -> Vec<ControllerMiddleware> {
+///         vec![
+///             ControllerMiddleware::named("auth").except(&[ResourceAction::Index, ResourceAction::Show]),
+///             ControllerMiddleware::new(Audit).only(&[ResourceAction::Destroy]),
+///         ]
+///     }
+/// }
+/// ```
+///
+/// An action keeps a middleware when `only` lists it, or `only` was never
+/// called, and `except` does not list it. `only(&[])` therefore runs the
+/// middleware on no action, as Laravel's `only([])` does. `update` covers
+/// both `PUT` and `PATCH`.
+#[derive(Clone)]
+pub struct ControllerMiddleware {
+    source: ControllerMiddlewareSource,
+    only: Option<Vec<ResourceAction>>,
+    except: Vec<ResourceAction>,
+}
+
+impl ControllerMiddleware {
+    /// Run `middleware`. It is boxed once, and every action it is scoped
+    /// to shares it.
+    pub fn new<M: Middleware + 'static>(middleware: M) -> Self {
+        Self {
+            source: ControllerMiddlewareSource::Boxed(boxed_as(middleware)),
+            only: None,
+            except: Vec::new(),
+        }
+    }
+
+    /// Run the middleware `name` stands for: an alias such as `"auth"`, an
+    /// alias with arguments such as `"throttle:60,1"`, or a group.
+    ///
+    /// The name is resolved when the resource registers, as
+    /// `middleware_named` resolves it on a route. A name that is not
+    /// registered fails the registration: `try_register` returns the error
+    /// and `register` panics at boot.
+    pub fn named(name: &str) -> Self {
+        Self {
+            source: ControllerMiddlewareSource::Named(name.to_string()),
+            only: None,
+            except: Vec::new(),
+        }
+    }
+
+    /// Run the middleware on these actions only. Mirrors Laravel's
+    /// `Middleware::only`; a second call replaces the first.
+    pub fn only(mut self, actions: &[ResourceAction]) -> Self {
+        self.only = Some(actions.to_vec());
+        self
+    }
+
+    /// Run the middleware on every action but these. Mirrors Laravel's
+    /// `Middleware::except`; a second call replaces the first.
+    pub fn except(mut self, actions: &[ResourceAction]) -> Self {
+        self.except = actions.to_vec();
+        self
+    }
+
+    /// Whether the middleware runs on `action`: Laravel's
+    /// `methodExcludedByOptions`, negated.
+    fn applies_to(&self, action: ResourceAction) -> bool {
+        self.only.as_ref().is_none_or(|only| only.contains(&action))
+            && !self.except.contains(&action)
+    }
+
+    /// The middleware this stands for, resolved once for every action.
+    fn resolve(&self) -> Result<Vec<BoxedMiddleware>, FrameworkError> {
+        match &self.source {
+            ControllerMiddlewareSource::Boxed(middleware) => Ok(vec![middleware.clone()]),
+            ControllerMiddlewareSource::Named(name) => {
+                crate::middleware::resolve_named_middleware(name)
+            }
+        }
+    }
+}
+
 /// REST resource controller. Implement on a unit struct (or anything
 /// `Send + Sync + 'static`) and pass to [`Router::resource`] /
 /// [`Router::api_resource`].
@@ -283,6 +403,16 @@ pub trait ResourceController: Send + Sync + 'static {
         let _ = request;
         Box::pin(async { not_implemented("destroy") })
     }
+
+    /// The middleware this controller runs on its actions: Laravel's
+    /// `HasMiddleware::middleware`. Read once, when the resource registers.
+    ///
+    /// Each one runs on the actions it is scoped to, after the group's
+    /// middleware and after the middleware given at registration with
+    /// [`ResourceRoutes::middleware`]. None by default.
+    fn middleware(&self) -> Vec<ControllerMiddleware> {
+        Vec::new()
+    }
 }
 
 fn not_implemented(action: &str) -> Response {
@@ -317,6 +447,9 @@ struct ResourceSpec {
     /// When set by `authorize_resource`, produces the per-action
     /// authorization middleware attached to each generated route.
     authorize: Option<AuthorizeFactory>,
+    /// The middleware given at registration with `middleware()`, each on
+    /// the actions it is scoped to.
+    middleware: Vec<ControllerMiddleware>,
 }
 
 impl ResourceSpec {
@@ -332,6 +465,7 @@ impl ResourceSpec {
             missing: None,
             suppress_names: false,
             authorize: None,
+            middleware: Vec::new(),
         }
     }
 }
@@ -538,6 +672,18 @@ macro_rules! resource_spec_methods {
             }));
             self
         }
+
+        /// Run `middleware` on the actions it is scoped to, as a
+        /// controller's own list does (Laravel's `middlewareFor`, scoped by
+        /// `only` and `except`). It runs after the group's middleware and
+        /// before the middleware the controller declares.
+        ///
+        /// A name that is not registered fails the registration:
+        /// `try_register` returns the error and `register` panics at boot.
+        pub fn middleware(mut self, middleware: ControllerMiddleware) -> Self {
+            self.spec.middleware.push(middleware);
+            self
+        }
     };
 }
 
@@ -615,10 +761,13 @@ impl ResourceRoutes {
     /// `Err(FrameworkError)` on duplicate registration; otherwise
     /// identical.
     pub fn try_register(self) -> Result<Router, FrameworkError> {
+        let declared = self.controller.middleware();
         register_resource(
             self.router,
             self.spec,
             ResourceHandlers::Controller(self.controller),
+            declared,
+            None,
         )
     }
 }
@@ -648,6 +797,9 @@ impl From<ResourceRoutes> for Router {
 pub struct ResourceDef {
     spec: ResourceSpec,
     functions: Vec<(ResourceAction, Arc<BoxedHandler>, HandlerRef)>,
+    /// What the module's `pub fn middleware()` returned, the list a
+    /// [`ResourceController`] gives through its trait method.
+    declared: Vec<ControllerMiddleware>,
 }
 
 impl ResourceDef {
@@ -658,7 +810,16 @@ impl ResourceDef {
         Self {
             spec: ResourceSpec::new(name, actions),
             functions: Vec::new(),
+            declared: Vec::new(),
         }
+    }
+
+    /// The middleware the module declares in `pub fn middleware()`, or none
+    /// when it declares no such function. Built by `resource!`.
+    #[doc(hidden)]
+    pub fn __controller_middleware(mut self, middleware: Vec<ControllerMiddleware>) -> Self {
+        self.declared = middleware;
+        self
     }
 
     /// Add the function of one action. Built by `resource!`, which names
@@ -694,7 +855,60 @@ impl ResourceDef {
             router,
             self.spec,
             ResourceHandlers::Functions(self.functions),
+            self.declared,
+            None,
         )
+    }
+
+    /// Register the resource's routes inside a `group!`: under the group's
+    /// prefix and name prefix, with the group's middleware, session block
+    /// and binding settings ahead of the resource's own.
+    pub(crate) fn try_register_in_group(
+        self,
+        router: Router,
+        group: &GroupScope<'_>,
+    ) -> Result<Router, FrameworkError> {
+        register_resource(
+            router,
+            self.spec,
+            ResourceHandlers::Functions(self.functions),
+            self.declared,
+            Some(group),
+        )
+    }
+}
+
+/// What a `group!` gives the resources inside it: its joined prefix and
+/// name prefix, its middleware (the parent groups' first), its session
+/// block and its binding settings.
+pub(crate) struct GroupScope<'a> {
+    pub(crate) prefix: &'a str,
+    pub(crate) name_prefix: &'a str,
+    pub(crate) middleware: &'a [BoxedMiddleware],
+    pub(crate) block: Option<SessionBlock>,
+    pub(crate) bindings: &'a RouteBindingOptions,
+}
+
+/// What the `resource!` expansion calls. Not public API.
+///
+/// `resource!` glob-imports this module, then the controller module inside
+/// it. A `pub fn middleware()` of the controller module shadows the empty
+/// `middleware` below, so the expansion calls the
+/// module's when there is one and this one otherwise: a proc macro cannot
+/// see whether a module defines a function, but name resolution can.
+#[doc(hidden)]
+pub mod __resource_support {
+    use super::{ControllerMiddleware, ResourceAction, ResourceDef};
+
+    /// The middleware of a controller module that declares none.
+    pub fn middleware() -> Vec<ControllerMiddleware> {
+        Vec::new()
+    }
+
+    /// Start the resource. Called through the glob import, which keeps the
+    /// import used when the controller module shadows `middleware`.
+    pub fn __resource_def(name: &str, actions: &[ResourceAction]) -> ResourceDef {
+        ResourceDef::__new(name, actions)
     }
 }
 
@@ -806,13 +1020,34 @@ impl ResourceLayout {
 }
 
 /// Register every action of a resource: its route, its name, its
-/// authorization middleware and its binding settings. `update` answers
-/// PATCH beside PUT, as Laravel registers it.
+/// middleware and its binding settings. `update` answers PATCH beside PUT,
+/// as Laravel registers it.
+///
+/// A route's middleware runs in Laravel's `gatherMiddleware` order: the
+/// group's, then the middleware given at registration, then the
+/// controller's own (`declared`: what [`ResourceController::middleware`]
+/// or the module's `pub fn middleware()` returned), then the
+/// `authorize_resource` check,
+/// which needs the user the middleware before it authenticated. Each
+/// [`ControllerMiddleware`] is resolved once, before any route is added,
+/// so a name that is not registered fails the registration whole.
 fn register_resource(
     mut router: Router,
     spec: ResourceSpec,
     handlers: ResourceHandlers,
+    declared: Vec<ControllerMiddleware>,
+    group: Option<&GroupScope<'_>>,
 ) -> Result<Router, FrameworkError> {
+    let scoped_middleware: Vec<(ControllerMiddleware, Vec<BoxedMiddleware>)> = spec
+        .middleware
+        .iter()
+        .cloned()
+        .chain(declared)
+        .map(|middleware| {
+            let resolved = middleware.resolve()?;
+            Ok((middleware, resolved))
+        })
+        .collect::<Result<_, FrameworkError>>()?;
     let layout = ResourceLayout::of(&spec);
     let trashed: Vec<ResourceAction> = match &spec.trashed {
         Some(listed) if !listed.is_empty() => listed.clone(),
@@ -823,14 +1058,26 @@ fn register_resource(
         ],
         None => Vec::new(),
     };
-    let options = |action: ResourceAction| RouteBindingOptions {
-        scoped: spec.binding_fields.as_ref().map(|_| true),
-        with_trashed: trashed.contains(&action),
-        missing: spec.missing.clone(),
+    let options = |action: ResourceAction| {
+        let own = RouteBindingOptions {
+            scoped: spec.binding_fields.as_ref().map(|_| true),
+            with_trashed: trashed.contains(&action),
+            missing: spec.missing.clone(),
+        };
+        match group {
+            Some(group) => own.within(group.bindings),
+            None => own,
+        }
     };
 
     for action in spec.actions.iter().copied() {
         let (method, path, default_name) = layout.route(action);
+        // Inside a group the path takes the group's prefix, and a `:param`
+        // in the prefix becomes `{param}`, as a group's routes do.
+        let path = match group {
+            Some(group) => convert_route_params(&join_paths(group.prefix, &path)),
+            None => path,
+        };
         let (handler, record) = handlers.handler(action)?;
         let mut methods = vec![method];
         if action == ResourceAction::Update {
@@ -840,11 +1087,27 @@ fn register_resource(
             router.try_insert_method(&method, &path, handler.clone())?;
             router.note_route_record(method.clone(), &path, record);
             *router.bindings.options_mut(method.clone(), &path) = options(action);
-            // Attach the per-action authorization middleware (if
-            // `authorize_resource` was called) keyed by the matched pattern,
-            // the same key the dispatcher recovers via `match_route`. PATCH
-            // gets the PUT verb's middleware so neither verb is an ungated
-            // bypass of the other.
+            if let Some(group) = group {
+                for middleware in group.middleware {
+                    router.add_middleware(method.clone(), &path, middleware.clone());
+                }
+                if let Some(block) = group.block {
+                    register_route_block(&method, &path, block);
+                }
+            }
+            // Each middleware on the actions it is scoped to, keyed by the
+            // matched pattern as the dispatcher looks it up. PATCH gets what
+            // PUT gets, so neither verb skips a middleware of `update`.
+            for (scope, resolved) in &scoped_middleware {
+                if scope.applies_to(action) {
+                    for middleware in resolved {
+                        router.add_middleware(method.clone(), &path, middleware.clone());
+                    }
+                }
+            }
+            // The per-action authorization middleware (if
+            // `authorize_resource` was called), last, after the middleware
+            // that authenticates the user it checks.
             if let Some(factory) = spec.authorize.as_ref()
                 && let Some(mw) = factory(action)
             {
@@ -854,13 +1117,18 @@ fn register_resource(
 
         // The route NAME is claimed once in the process-wide table, and
         // recorded on the router for every verb of the action, so a PATCH
-        // to `update` reports `posts.update` as its PUT does.
+        // to `update` reports `posts.update` as its PUT does. A group's
+        // name prefix goes in front, as it does for the group's routes.
         if !spec.suppress_names {
-            let effective_name = spec
+            let name = spec
                 .name_overrides
                 .get(action.key())
                 .cloned()
                 .unwrap_or(default_name);
+            let effective_name = match group {
+                Some(group) => format!("{}{name}", group.name_prefix),
+                None => name,
+            };
             super::router::try_register_route_name(&effective_name, &path)?;
             for method in methods {
                 router.note_route_name(method, &path, &effective_name);

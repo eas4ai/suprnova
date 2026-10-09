@@ -625,6 +625,19 @@ security-shaped bug because redirects would route to whichever
 registration happened to win. Use `RouteBuilder::try_name` (or
 `suprnova::routing::try_register_route_name`) for the fallible variant.
 
+`route_has(&[...])` tells you whether names are registered, as Laravel's
+`Route::has` does. It is true only when every name in the list is:
+
+```rust
+use suprnova::route_has;
+
+if route_has(&["login", "register"]) {
+    // link to both pages
+}
+```
+
+One unregistered name makes it false. An empty list is true.
+
 ## Per-route middleware
 
 Chain `.middleware(M)` on any route builder:
@@ -660,6 +673,11 @@ route. The middleware map is keyed by `(method, path)`, so attaching
 auth to `POST /api/posts` never bleeds onto a public `GET /api/posts`
 on the same path. For the middleware contract and writing your own, see
 [Middleware](middleware.md).
+
+A route leaves out a middleware its group gives it with
+`.without_middleware::<M>()` or `.without_middleware_named("auth")`, as
+Laravel's `withoutMiddleware` does. The global middleware stays. See
+[Leaving middleware out](middleware.md#leaving-middleware-out).
 
 ## Route groups
 
@@ -809,6 +827,35 @@ Fallback supports its own middleware chain (`fallback!(handler).middleware(M)`).
 If no fallback is registered, the framework returns a plain-text
 `404 Not Found`.
 
+### When only the method is wrong
+
+A path that a route of another method matches is not a 404. As Laravel
+does, the router checks the other methods (`GET`, `HEAD`, `POST`, `PUT`,
+`PATCH`, `DELETE`, `OPTIONS`, `QUERY`) and answers with the ones that
+match:
+
+```rust
+routes! {
+    get!("/posts/{id}", controllers::posts::show),
+}
+```
+
+| Request | Answer |
+|---|---|
+| `DELETE /posts/1` | `405`, `Allow: GET, HEAD`, and the error body `{"message": "The DELETE method is not supported for route posts/1. Supported methods: GET, HEAD.", "request_id": "..."}` |
+| `OPTIONS /posts/1` | `200` with an empty body and `Allow: GET,HEAD` |
+| `DELETE /nothing/here` | the fallback, or the `404` |
+
+`Allow` lists the methods in the order above. `HEAD` stands beside `GET`
+because a `GET` route answers `HEAD`. A route whose
+[constraints](#parameter-constraints) refuse the path is not counted, so
+`DELETE /posts/abc` is still a `404` when `{id}` must be a number. The
+fallback only answers a path that no route of any method matches.
+
+Both answers run through the global middleware, as the `404` does. The
+CORS middleware therefore still answers a preflight `OPTIONS` request
+before the router's `200` is reached.
+
 ## Resource routing
 
 For a standard 7-action REST surface, implement `ResourceController` and
@@ -927,6 +974,60 @@ list scopes without fields. `with_trashed` binds soft-deleted rows on the
 actions it names, `show`, `edit` and `update` when it names none.
 `missing` answers for every route of the resource when a binding finds
 nothing. The controller form takes the same four.
+
+### Controller middleware
+
+A controller declares the middleware its actions run: a `ResourceController`
+in its `middleware` method, and a module named by `resource!` in a
+`pub fn middleware()`. See
+[Controller middleware](controllers.md#controller-middleware).
+
+`.middleware(ControllerMiddleware)` on the registration scopes one more the
+same way, with `only` and `except`. It is Laravel's `middlewareFor`:
+
+```rust
+use suprnova::routing::{ControllerMiddleware, ResourceAction};
+
+Router::new()
+    .resource("posts", PostsCtl)
+    .middleware(ControllerMiddleware::named("auth").except(&[ResourceAction::Index]))
+    .middleware(ControllerMiddleware::new(AuditMiddleware).only(&[ResourceAction::Destroy]))
+    .into();
+```
+
+`resource!` takes the same `.middleware(...)`. On every route of the
+resource the middleware runs in this order:
+
+1. the middleware of the group around the resource;
+2. the middleware given with `.middleware(...)` here;
+3. the middleware the controller declares;
+4. the check of `authorize_resource`, which needs the user the middleware
+   before it authenticated.
+
+A name that no alias or group carries fails the registration:
+`try_register` returns the error, and `register` panics at boot.
+
+### Resources inside a group
+
+`resource!` is an item of `group!`, as Laravel's `Route::resource` is
+inside `Route::group`. The resource takes the group's prefix, name prefix,
+middleware, session block and binding settings:
+
+```rust
+routes! {
+    group!("/admin", {
+        resource!("posts", controllers::admin::posts),
+    })
+    .middleware_named("auth")
+    .name("admin."),
+}
+```
+
+This registers `/admin/posts` through `/admin/posts/{post}/edit`, named
+`admin.posts.index` through `admin.posts.destroy`, each running `auth`
+before the controller's own middleware. The `Router::group(...)` builder
+and the controller form, `Router::resource`, register no resources inside
+a group.
 
 ### Bulk registration
 
@@ -1110,6 +1211,12 @@ top-level route tables; the builder reads better when you're composing
 routers dynamically (plugins, generated routes, tests). Pick whichever
 fits the call site - there's no canonical answer because both shapes
 are first-class.
+
+**The fallback answers every method.** Laravel registers its fallback as
+a `GET` route that matches any path, so a `POST` to an unknown path there
+is a `405` that lists `GET, HEAD`. Suprnova's fallback is not a route of
+any method: it answers a path no route matches, whatever the method, and
+the `405` is for paths your own routes match.
 
 **Boot-time panics, not silent shadowing.** A duplicate route name or
 pattern collision panics at startup. Laravel's array-keyed registries

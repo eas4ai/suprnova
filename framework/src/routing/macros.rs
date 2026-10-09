@@ -50,11 +50,12 @@ pub const fn validate_route_path(path: &'static str) -> &'static str {
     }
     path
 }
-use crate::middleware::{BoxedMiddleware, Middleware, boxed_as};
+use crate::middleware::{BoxedMiddleware, Middleware, MiddlewareExclusion, boxed_as};
 use crate::routing::binding::{
     HandlerRef, RouteBindingOptions, boxed_missing, handler_ref, record_of,
 };
 use crate::routing::params::ParamConstraint;
+use crate::routing::resource::{GroupScope, ResourceDef};
 use crate::routing::router::{
     ANY_METHODS, BoxedHandler, Router, query_method, register_route_name,
 };
@@ -211,9 +212,54 @@ pub struct RouteDefBuilder<H> {
     handler: H,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    exclusions: Vec<MiddlewareExclusion>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
     bindings: RouteBindingOptions,
+}
+
+/// The methods of a route builder that collects its settings before it
+/// registers, for leaving out middleware its group gives it:
+/// `without_middleware`, `without_middleware_named` and
+/// `try_without_middleware_named`.
+macro_rules! exclusion_methods {
+    () => {
+        /// Leave every middleware of type `M` out of this route, when its
+        /// group or its own registration gives it: Laravel's
+        /// `withoutMiddleware(M::class)`.
+        ///
+        /// The type matches a middleware added by type and one an alias
+        /// resolved to. The sibling routes of the group keep it, and the
+        /// global middleware is not route middleware, so it still runs.
+        pub fn without_middleware<M: Middleware + 'static>(mut self) -> Self {
+            self.exclusions.push(MiddlewareExclusion::of_type::<M>());
+            self
+        }
+
+        /// Leave the middleware a name stands for out of this route: the
+        /// alias with its arguments, as in `"throttle:60,1"`, or every
+        /// middleware of a group. Laravel's `withoutMiddleware('auth')`.
+        ///
+        /// An alias matches the middleware resolved from the same alias and
+        /// arguments only. Use `without_middleware::<M>()` to leave out a
+        /// type however it was named.
+        ///
+        /// # Panics
+        ///
+        /// When the name is not registered, as `middleware_named` panics.
+        /// That is at boot. Use `try_without_middleware_named` to get the
+        /// error instead.
+        pub fn without_middleware_named(self, name: &str) -> Self {
+            self.try_without_middleware_named(name)
+                .unwrap_or_else(|e| panic!("{e}"))
+        }
+
+        /// Fallible sibling of `without_middleware_named`.
+        pub fn try_without_middleware_named(mut self, name: &str) -> Result<Self, FrameworkError> {
+            self.exclusions.extend(MiddlewareExclusion::named(name)?);
+            Ok(self)
+        }
+    };
 }
 
 /// The route-binding methods of a route builder that collects its settings
@@ -268,6 +314,7 @@ where
             handler,
             name: None,
             middlewares: Vec::new(),
+            exclusions: Vec::new(),
             block: None,
             constraints: Vec::new(),
             bindings: RouteBindingOptions::default(),
@@ -275,6 +322,8 @@ where
     }
 
     binding_methods!();
+
+    exclusion_methods!();
 
     /// Hold a parameter of this route to a constraint. A request whose
     /// value the constraint refuses gets a 404, and the handler is not run.
@@ -360,11 +409,12 @@ where
             HttpMethod::Query => router.query(&converted_path, self.handler),
         };
 
-        // Apply any middleware
+        // Apply any middleware, then leave out what the route excludes.
         let builder = self
             .middlewares
             .into_iter()
             .fold(builder, |b, m| b.middleware_boxed(m));
+        let builder = builder.with_exclusions(self.exclusions);
         let builder = self
             .constraints
             .into_iter()
@@ -717,6 +767,7 @@ pub struct AnyRouteDefBuilder<H> {
     handler: H,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    exclusions: Vec<MiddlewareExclusion>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
     bindings: RouteBindingOptions,
@@ -733,6 +784,7 @@ where
             handler,
             name: None,
             middlewares: Vec::new(),
+            exclusions: Vec::new(),
             block: None,
             constraints: Vec::new(),
             bindings: RouteBindingOptions::default(),
@@ -740,6 +792,8 @@ where
     }
 
     binding_methods!();
+
+    exclusion_methods!();
 
     /// Hold a parameter of this route to a constraint, for every method.
     /// See [`RouteDefBuilder::constrain`], which says when a constraint
@@ -798,6 +852,7 @@ where
             .middlewares
             .into_iter()
             .fold(multi, |b, m| b.middleware_boxed(m));
+        let multi = multi.with_exclusions(self.exclusions);
         let multi = self
             .constraints
             .into_iter()
@@ -1141,6 +1196,7 @@ pub struct GroupRoute {
     handler: Arc<BoxedHandler>,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    exclusions: Vec<MiddlewareExclusion>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
     record: HandlerRef,
@@ -1157,6 +1213,7 @@ pub struct GroupAnyRoute {
     handler: Arc<BoxedHandler>,
     name: Option<&'static str>,
     middlewares: Vec<BoxedMiddleware>,
+    exclusions: Vec<MiddlewareExclusion>,
     block: Option<SessionBlock>,
     constraints: Vec<(String, ParamConstraint)>,
     record: HandlerRef,
@@ -1164,7 +1221,7 @@ pub struct GroupAnyRoute {
 }
 
 /// An item that can be added to a route group - a single-method route,
-/// a multi-method (`any!`) route, or a nested group.
+/// a multi-method (`any!`) route, a nested group, or a `resource!`.
 pub enum GroupItem {
     /// A single-method route
     Route(GroupRoute),
@@ -1172,6 +1229,9 @@ pub enum GroupItem {
     AnyRoute(GroupAnyRoute),
     /// A nested group with its own prefix and middleware
     NestedGroup(Box<GroupDef>),
+    /// A resource whose routes take the group's prefix, name prefix and
+    /// middleware, Laravel's `Route::resource` inside `Route::group`.
+    Resource(Box<ResourceDef>),
 }
 
 /// Trait for types that can be converted into a GroupItem
@@ -1485,6 +1545,11 @@ impl GroupDef {
                     // belongs to *this* route's method, never to siblings on the
                     // same path under a different method.
                     let http_method = route.method.as_hyper();
+                    // The route's exclusions first, so the group middleware
+                    // it leaves out is never added.
+                    for exclusion in route.exclusions {
+                        router.exclude_middleware(http_method.clone(), full_path, exclusion);
+                    }
                     for mw in &combined_middleware {
                         router.add_middleware(http_method.clone(), full_path, mw.clone());
                     }
@@ -1540,6 +1605,9 @@ impl GroupDef {
                     // Without this, auth / CSRF / rate-limit attached to
                     // an `any!` route would silently skip some verbs.
                     for method in ANY_METHODS.iter() {
+                        for exclusion in &any_route.exclusions {
+                            router.exclude_middleware(method.clone(), full_path, exclusion.clone());
+                        }
                         for mw in &combined_middleware {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
@@ -1576,6 +1644,22 @@ impl GroupDef {
                         &group_bindings,
                     );
                 }
+                GroupItem::Resource(resource) => {
+                    // The resource registers on the router by value; it is
+                    // taken out of the slot and put back. A registration
+                    // error stops the boot, as a group route's does.
+                    let scope = GroupScope {
+                        prefix: &full_prefix,
+                        name_prefix: &name_prefix,
+                        middleware: &combined_middleware,
+                        block: group_block,
+                        bindings: &group_bindings,
+                    };
+                    let taken = std::mem::take(router);
+                    *router = resource
+                        .try_register_in_group(taken, &scope)
+                        .unwrap_or_else(|e| panic!("{e}"));
+                }
             }
         }
     }
@@ -1598,6 +1682,7 @@ where
             handler: Arc::new(boxed),
             name: self.name,
             middlewares: self.middlewares,
+            exclusions: self.exclusions,
             block: self.block,
             constraints: self.constraints,
             record: handler_ref::<H>(),
@@ -1626,6 +1711,12 @@ impl IntoGroupItem for GroupDef {
     }
 }
 
+impl IntoGroupItem for ResourceDef {
+    fn into_group_item(self) -> GroupItem {
+        GroupItem::Resource(Box::new(self))
+    }
+}
+
 impl<H, Fut> AnyRouteDefBuilder<H>
 where
     H: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1642,6 +1733,7 @@ where
             handler: Arc::new(boxed),
             name: self.name,
             middlewares: self.middlewares,
+            exclusions: self.exclusions,
             block: self.block,
             constraints: self.constraints,
             record: handler_ref::<H>(),

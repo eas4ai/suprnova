@@ -172,6 +172,12 @@ pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
 /// arguments as any handler does. A dotted name nests: `users.posts`
 /// registers `/users/{user}/posts/{post}` under `users.posts.*`.
 ///
+/// A module that declares `pub fn middleware() -> Vec<ControllerMiddleware>`
+/// gets that middleware on its routes, each on the actions it is scoped to,
+/// as Laravel's `HasMiddleware` does; a module without one gets none.
+/// Inside `group!`, the resource takes the group's prefix, name prefix and
+/// middleware.
+///
 /// ```rust,ignore
 /// routes! {
 ///     resource!("posts", controllers::posts),

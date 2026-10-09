@@ -146,6 +146,54 @@ Router::new()
     .middleware(AuthMiddleware);
 ```
 
+A resource controller can also declare the middleware of its own actions.
+See [Controller middleware](controllers.md#controller-middleware).
+
+### Leaving middleware out
+
+A route leaves out a middleware its group gives it, as Laravel's
+`withoutMiddleware` does. Name the middleware by type or by alias:
+
+```rust
+use suprnova::{routes, get, post, group};
+use crate::middleware::EnsureJson;
+
+routes! {
+    group!("/api", {
+        get!("/posts", controllers::posts::index),
+        // The health check answers plain text, so it leaves EnsureJson out.
+        get!("/health", controllers::health::check).without_middleware::<EnsureJson>(),
+        // The webhook carries no session, so it leaves the alias out.
+        post!("/webhook", controllers::webhooks::receive).without_middleware_named("auth"),
+    })
+    .middleware(EnsureJson)
+    .middleware_named("auth"),
+}
+```
+
+`/api/posts` still runs both. The two forms match differently:
+
+| Call | Leaves out |
+|---|---|
+| `.without_middleware::<M>()` | Every middleware of type `M`, added by type or through an alias. |
+| `.without_middleware_named("auth")` | The middleware resolved from the alias `auth`. |
+| `.without_middleware_named("throttle:60,1")` | The middleware resolved from `throttle:60,1` only. `throttle:30,1` stays. |
+| `.without_middleware_named("api")` | Every middleware of the group `api`. |
+
+A few rules hold for both:
+
+- **The order of the calls does not matter.** The route leaves the
+  middleware out whether the group adds it before or after the call.
+- **The global middleware stays.** It is not route middleware, as in
+  Laravel, where `withoutMiddleware` removes route middleware only.
+- **Only this route changes.** Its sibling routes in the group keep the
+  middleware.
+
+The methods are on `get!` and its siblings, `any!`, and the routes of
+`Router::get` and its siblings. A name that no alias or group carries
+makes `.without_middleware_named` panic at boot, as `.middleware_named`
+does; `.try_without_middleware_named(name)` returns the error instead.
+
 ## Execution order
 
 At runtime the chain runs outside-in:
@@ -604,6 +652,13 @@ synchronisation point on the global middleware list and re-allocate
 - The chain itself is composed by nesting `Arc<dyn Fn>` closures, so
   per-request work is one `Arc::clone` per layer rather than a fresh
   allocation.
+
+Leaving middleware out by name diverges too. Laravel resolves an alias
+to its class and compares class names, so `withoutMiddleware('json')`
+also removes `EnsureJson::class` added by class. Suprnova compares the
+alias and its arguments as written, and `.without_middleware::<M>()` is
+the form that removes a type however it was added. A name that no alias
+or group carries stops the boot, where Laravel ignores it.
 
 The user-facing surface - `handle(request, next)`, the `global_middleware!`
 macro, named aliases, priority lists, terminable hooks - is the same

@@ -109,7 +109,7 @@ pub trait Middleware: Send + Sync {
     async fn handle(&self, request: Request, next: Next) -> Response;
 }
 
-pub(crate) use identity::{alias_of, boxed_as, name_as};
+pub(crate) use identity::{MiddlewareExclusion, alias_of, boxed_as, name_as};
 
 /// Convert a Middleware trait object into a BoxedMiddleware
 ///
