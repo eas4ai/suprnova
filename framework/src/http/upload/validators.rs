@@ -151,18 +151,27 @@ impl UploadValidator for ImageFile {
 
 /// `MimeType<L>` - accepts a fixed list provided by an allowlist type.
 pub trait MimeAllowlist: Send + Sync + Default {
-    /// The set of allowed MIME types.
+    /// The set of allowed MIME types. An entry may be a `type/*` wildcard,
+    /// which admits every subtype of that type except `image/svg+xml`: an
+    /// SVG document can carry script, so it passes only when the list
+    /// names `image/svg+xml` itself.
     fn allowed() -> &'static [&'static str];
 }
 
+/// Whether `mime` is in `allowed`, named exactly or covered by a `type/*`
+/// wildcard, as Laravel's `mimetypes` rule matches `image/*`. A wildcard
+/// never covers SVG. SVG is markup that can run script where it is served,
+/// and Laravel's `image` rule leaves it out unless asked, so only an
+/// allowlist that names `image/svg+xml` admits it.
 fn mime_allowed(allowed: &[&str], mime: &str) -> bool {
     allowed.iter().any(|pattern| {
         pattern.eq_ignore_ascii_case(mime)
-            || pattern.strip_suffix("/*").is_some_and(|family| {
-                mime.split_once('/').is_some_and(|(actual, subtype)| {
-                    !subtype.is_empty() && family.eq_ignore_ascii_case(actual)
-                })
-            })
+            || (!mime.eq_ignore_ascii_case(SVG)
+                && pattern.strip_suffix("/*").is_some_and(|family| {
+                    mime.split_once('/').is_some_and(|(actual, subtype)| {
+                        !subtype.is_empty() && family.eq_ignore_ascii_case(actual)
+                    })
+                }))
     })
 }
 
@@ -180,7 +189,9 @@ fn mime_allowed(allowed: &[&str], mime: &str) -> bool {
 ///
 /// SVG is the one image type that is markup. An allowlist naming
 /// `image/svg+xml` accepts a part whose content [`is_svg_document`], and
-/// never a part that only declares the type.
+/// never a part that only declares the type. An `image/*` wildcard does not
+/// name it (see [`mime_allowed`]), so an SVG document fails that allowlist
+/// as the wrong type.
 fn validate_against_allowlist(
     sniff: &[u8],
     size: u64,
@@ -599,6 +610,23 @@ mod tests {
         // An SVG is still refused by an allowlist that does not name SVG.
         let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
         assert!(run(svg, Some("image/svg+xml")).is_err());
+    }
+
+    /// A `type/*` wildcard admits every subtype of its type except SVG,
+    /// which only an allowlist that names `image/svg+xml` admits.
+    #[test]
+    fn a_wildcard_admits_every_subtype_but_svg() {
+        assert!(mime_allowed(&["image/*"], "image/png"));
+        assert!(mime_allowed(&["IMAGE/*"], "image/webp"));
+        assert!(!mime_allowed(&["image/*"], SVG));
+        assert!(!mime_allowed(&["image/*"], "IMAGE/SVG+XML"));
+        assert!(!mime_allowed(&["image/*"], "image/"), "an empty subtype");
+        assert!(mime_allowed(&["image/svg+xml"], SVG));
+        assert!(mime_allowed(&["image/*", "IMAGE/SVG+XML"], SVG));
+        // The other families are unchanged.
+        assert!(mime_allowed(&["text/*"], "text/xml"));
+        assert!(mime_allowed(&["application/*"], "application/pdf"));
+        assert!(!mime_allowed(&["application/*"], "image/png"));
     }
 
     fn refused_key(result: Result<(), FrameworkError>) -> String {

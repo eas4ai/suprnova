@@ -52,7 +52,7 @@ terminal method to execute.
 
 ```rust
 // Equality.
-DB::table("users").r#where("email", "alice@example.com").get().await?;
+DB::table("users").db_where("email", "alice@example.com").get().await?;
 
 // Arbitrary operator. Allowlist: =, <>, <, <=, >, >=, LIKE, NOT LIKE,
 // ILIKE, NOT ILIKE, IS, IS NOT.
@@ -72,10 +72,12 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
-`r#where(column, value)`, `db_where(column, value)` and `filter(column, value)`
-use `=`. You pass an operator with `filter_op`; `or_where` and
-`or_where_op` add their comparisons with `OR`. A null value in an equality
-comparison becomes `IS NULL`, with no null binding.
+`db_where(column, value)` and `filter(column, value)` use `=`.
+`r#where(column, value)` is the same comparison under Laravel's name: `where`
+is a Rust keyword, so you write it as the raw identifier `r#where`. You pass
+an operator with `filter_op`; `or_where` and `or_where_op` add their
+comparisons with `OR`. A null value in an equality comparison becomes
+`IS NULL`, with no null binding.
 
 A `u64` above `i64::MAX` compares as the number it is, whatever the
 column's type, in a filter and in a raw fragment's bindings alike, so the
@@ -292,9 +294,10 @@ in `select`.
 
 For more than one condition, `join_with`, `left_join_with`, and
 `right_join_with`, and `cross_join_with` pass a `JoinClause` to a closure. `on` and `or_on`
-compare two columns. `filter`, `filter_op`, `or_filter`, and
-`or_filter_op` compare a column with a value, and `db_where`,
-`db_where_op`, `or_where`, and `or_where_op` are their Laravel names:
+compare two columns. `db_where`, `db_where_op`, `or_where`, and
+`or_where_op` compare a column with a value, as Laravel's `where` and
+`orWhere` do in a join closure. `filter`, `filter_op`, `or_filter`, and
+`or_filter_op` do the same:
 
 ```rust
 // INNER JOIN users ON users.id = posts.author_id

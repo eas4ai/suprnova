@@ -528,3 +528,74 @@ async fn equality_nulls_and_flat_or_helpers_preserve_scopes() {
         assert!(!ids.contains(&6), "the soft-delete scope still applies");
     }
 }
+
+/// The falsifier: `db_where("a", 1)`, `filter("a", 1)` and `r#where("a", 1)`
+/// each compile to `a = ?` with the value bound, never written into the
+/// SQL, and a null value compiles to `IS NULL` with nothing bound.
+#[tokio::test]
+async fn model_db_where_filter_and_raw_where_compile_to_one_bound_equality() {
+    let _fx = seeded_sqlite().await;
+    type Shortcut = fn(Builder<QhItem>) -> Builder<QhItem>;
+    let shortcuts: [(&str, Shortcut); 3] = [
+        ("db_where", |query| query.db_where("a", 1)),
+        ("filter", |query| query.filter("a", 1)),
+        ("r#where", |query| query.r#where("a", 1)),
+    ];
+    for (name, shortcut) in shortcuts {
+        // Without the soft-delete scope, the comparison is the whole clause.
+        let (sql, bindings) = shortcut(items().with_trashed())
+            .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sql, "SELECT * FROM qh_items WHERE a = ?", "{name}");
+        assert_eq!(bindings, vec![SeaValue::BigInt(Some(1))], "{name}");
+        let (sql, _) = shortcut(items().with_trashed())
+            .try_to_sql_with_bindings_for(DatabaseBackend::Postgres)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(sql.ends_with("WHERE a = $1"), "{name}: {sql}");
+        // With the scope, the trashed row 6, whose `a` is 1, stays out.
+        assert_eq!(
+            ids_matching(shortcut(items()), "a = 1").await,
+            vec![1, 2, 3],
+            "{name}"
+        );
+    }
+
+    // A text value is bound too, so a quote in it is data.
+    let (sql, bindings) = items()
+        .with_trashed()
+        .db_where("code", "ab-1' OR '1' = '1")
+        .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
+        .expect("renders");
+    assert_eq!(sql, "SELECT * FROM qh_items WHERE code = ?");
+    assert!(
+        matches!(&bindings[..], [SeaValue::String(Some(code))] if code.as_str() == "ab-1' OR '1' = '1"),
+        "{bindings:?}"
+    );
+
+    let null_shortcuts: [(&str, Shortcut); 2] = [
+        ("db_where", |query| query.db_where("label", Value::Null)),
+        ("filter", |query| query.filter("label", Value::Null)),
+    ];
+    for (name, shortcut) in null_shortcuts {
+        let (sql, bindings) = shortcut(items().with_trashed())
+            .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sql, "SELECT * FROM qh_items WHERE label IS NULL", "{name}");
+        assert!(bindings.is_empty(), "{name}: {bindings:?}");
+        assert_eq!(
+            ids_matching(shortcut(items()), "label IS NULL").await,
+            vec![2, 4],
+            "{name}"
+        );
+    }
+
+    // A column name that is not an identifier fails before any SQL runs.
+    assert!(
+        items()
+            .db_where("a; DROP TABLE qh_items", 1)
+            .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
+            .is_err()
+    );
+    assert!(items().filter("a = 1 OR 1", 1).get().await.is_err());
+    assert_eq!(items().count().await.expect("count"), 5, "nothing ran");
+}

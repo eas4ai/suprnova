@@ -806,7 +806,9 @@ Built-in validators in `suprnova::http::upload::validators`:
   (Named after Laravel's own rule; the plain `Image` name belongs to the
   image-manipulation pipeline - see [Images](images.md).)
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
-  `MimeAllowlist` type. You can allow `image/*` to admit any image subtype.
+  `MimeAllowlist` type. An entry such as `image/*` admits every subtype of
+  its type except `image/svg+xml`: an SVG passes only when your allowlist
+  names `image/svg+xml`, alone or beside `image/*`.
   The type is detected from the file's magic bytes.
   The client's `Content-Type` counts only for bytes that carry no magic
   (`text/csv`, `application/json`), never for a type that has some: bytes
@@ -936,6 +938,12 @@ Laravel checks an array's size with `array|max:N`, a validation rule that
 runs after PHP has buffered the whole request, so too many files is a `422`.
 `max_count` bounds the request while it streams, before the extra part is
 read, so it refuses the request the way the byte cap does.
+
+Laravel's `mimetypes:image/*` rule admits a file detected as
+`image/svg+xml`, because the wildcard matches any `image/` type. `MimeType`
+leaves SVG out of `image/*`, as Laravel's `image` rule leaves it out unless
+you pass `allow_svg`. An SVG is markup that can run script, so you name
+`image/svg+xml` to accept one.
 
 ### Authorize and after-validation hooks
 
