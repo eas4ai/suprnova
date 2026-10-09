@@ -25,7 +25,7 @@ use super::sqlite::connect_sqlite;
     tags: MorphToMany<UpTag, UpTaggable> { name = "taggable" },
 })]
 pub struct UpOwner {
-    pub id: i64,
+    pub id: u64,
     pub name: String,
 }
 
@@ -39,7 +39,7 @@ pub struct UpRole {
 /// The pivot, with a `u64` extra column.
 #[model(table = "up_owner_roles")]
 pub struct UpOwnerRole {
-    pub id: i64,
+    pub id: u64,
     pub up_owner_id: i64,
     pub up_role_id: u64,
     pub note: Option<u64>,
@@ -55,7 +55,7 @@ pub struct UpTag {
 /// The polymorphic pivot.
 #[model(table = "up_taggables")]
 pub struct UpTaggable {
-    pub id: i64,
+    pub id: u64,
     pub up_tag_id: u64,
     pub taggable_id: i64,
     pub taggable_type: String,
