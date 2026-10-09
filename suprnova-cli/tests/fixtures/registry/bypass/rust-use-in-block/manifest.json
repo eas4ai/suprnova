@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-use-in-block",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

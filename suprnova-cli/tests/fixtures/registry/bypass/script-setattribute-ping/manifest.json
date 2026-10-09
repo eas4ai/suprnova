@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-setattribute-ping",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

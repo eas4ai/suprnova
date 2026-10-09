@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.avatar",
+  "version": 1,
+  "root": "suprnova-ui/avatar",
+  "files": [
+    "avatar.html",
+    "avatar.css"
+  ],
+  "elements": []
+}
