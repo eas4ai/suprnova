@@ -193,3 +193,25 @@ async fn startup_passes_when_the_default_is_the_s3_disk_the_environment_register
         .expect("the s3 disk the environment registers is the default disk FILESYSTEM_DISK names");
     assert!(Storage::disk("s3").is_ok());
 }
+
+#[tokio::test]
+async fn revised_unset_disk_defaults_to_local() {
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let _guard = Storage::fake();
+    clear_variables();
+    Storage::register_memory("local");
+    let disk = Storage::default_disk().expect("PAR-016 unset default resolves local");
+    disk.write("revised.txt", b"local".to_vec())
+        .await
+        .expect("write local");
+    assert_eq!(
+        Storage::disk("local")
+            .expect("local disk")
+            .read("revised.txt")
+            .await
+            .expect("read local")
+            .to_vec(),
+        b"local"
+    );
+}
