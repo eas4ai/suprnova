@@ -36,11 +36,40 @@ pub struct EnumList {
 
 async fn fixture() -> Fixture {
     let fixture = Fixture::sqlite().await;
-    fixture.exec("CREATE TABLE gap_enum_lists (id INTEGER PRIMARY KEY, statuses TEXT NOT NULL, active INTEGER NOT NULL, note TEXT NULL)").await;
+    fixture.exec("CREATE TABLE gap_enum_lists (id INTEGER PRIMARY KEY, statuses JSON NOT NULL, active INTEGER NOT NULL, note TEXT NULL)").await;
     fixture
         .exec("INSERT INTO gap_enum_lists VALUES (1, '[\"draft\",\"live\"]', 1, NULL)")
         .await;
     fixture
+}
+
+/// Laravel writes the list as a JSON array, so the column must be JSON: a
+/// `TEXT` storage type cannot read a Postgres `json` or `jsonb` column.
+#[test]
+fn enum_collection_column_is_declared_as_json() {
+    use suprnova::eloquent::EloquentModel;
+    use suprnova::sea_orm::{ColumnTrait, EntityTrait, sea_query::ColumnType};
+    let column = <<EnumList as EloquentModel>::Entity as EntityTrait>::Column::Statuses;
+    assert_eq!(column.def().get_column_type(), &ColumnType::Json);
+}
+
+#[tokio::test]
+async fn json_enum_column_round_trips_draft_and_live() {
+    let _fixture = fixture().await;
+    let mut model = EnumList::find(1).await.unwrap().unwrap();
+    assert_eq!(model.statuses, vec![Status::Draft, Status::Live]);
+    assert_eq!(
+        model.get_raw_original("statuses"),
+        Some(json!(["draft", "live"]))
+    );
+    model.statuses = vec![Status::Draft, Status::Live];
+    model.save().await.unwrap();
+    let reloaded = EnumList::find(1).await.unwrap().unwrap();
+    assert_eq!(reloaded.statuses, vec![Status::Draft, Status::Live]);
+    assert_eq!(
+        reloaded.get_raw_original("statuses"),
+        Some(json!(["draft", "live"]))
+    );
 }
 
 #[tokio::test]
@@ -54,7 +83,7 @@ async fn laravel_enum_list_reads_and_writes_only_storage_strings() {
     assert_eq!(reloaded.statuses, model.statuses);
     assert_eq!(
         reloaded.get_raw_original("statuses"),
-        Some(json!("[\"live\",\"draft\",\"live\"]"))
+        Some(json!(["live", "draft", "live"]))
     );
     model.statuses.clear();
     model.save().await.unwrap();
@@ -66,38 +95,45 @@ async fn laravel_enum_list_reads_and_writes_only_storage_strings() {
             .statuses
             .is_empty()
     );
-    assert_eq!(model.get_raw_original("statuses"), Some(json!("[]")));
+    assert_eq!(model.get_raw_original("statuses"), Some(json!([])));
 }
 
 #[test]
 fn enum_collection_handles_empty_duplicates_and_rejects_invalid_storage() {
     assert!(
-        AsEnumCollection::<Status>::from_storage(&"[]".to_owned())
+        AsEnumCollection::<Status>::from_storage(&json!([]))
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         AsEnumCollection::<Status>::to_storage(&vec![Status::Draft, Status::Draft]).unwrap(),
-        "[\"draft\",\"draft\"]"
+        json!(["draft", "draft"])
     );
-    for invalid in ["not json", "null", "{}", "[1]", "[\"unknown\"]"] {
+    for invalid in [
+        json!("not json"),
+        json!("[\"draft\"]"),
+        json!(null),
+        json!({}),
+        json!([1]),
+        json!(["unknown"]),
+    ] {
         assert!(
-            AsEnumCollection::<Status>::from_storage(&invalid.to_owned()).is_err(),
+            AsEnumCollection::<Status>::from_storage(&invalid).is_err(),
             "{invalid}"
         );
     }
     let dynamic = AsEnumCollection::<Status>::into_dyn();
     assert_eq!(
         dynamic
-            .from_storage_json(&json!("[\"draft\",\"live\"]"))
+            .from_storage_json(&json!(["draft", "live"]))
             .unwrap(),
         json!(["Draft", "Live"])
     );
     assert_eq!(
         dynamic.to_storage_json(&json!(["Draft", "Live"])).unwrap(),
-        json!("[\"draft\",\"live\"]")
+        json!(["draft", "live"])
     );
-    assert!(dynamic.from_storage_json(&json!(["draft"])).is_err());
+    assert!(dynamic.from_storage_json(&json!("[\"draft\"]")).is_err());
     assert!(dynamic.to_storage_json(&json!(["unknown"])).is_err());
 }
 
@@ -121,10 +157,7 @@ async fn raw_originals_include_every_loaded_value_before_casts_and_ignore_mutati
     let originals = model.get_raw_originals().unwrap();
     assert_eq!(originals.len(), 4);
     assert_eq!(originals.get("id"), Some(&json!(1)));
-    assert_eq!(
-        originals.get("statuses"),
-        Some(&json!("[\"draft\",\"live\"]"))
-    );
+    assert_eq!(originals.get("statuses"), Some(&json!(["draft", "live"])));
     assert_eq!(originals.get("active"), Some(&json!(1)));
     assert_eq!(originals.get("note"), Some(&Value::Null));
     assert_eq!(model.get_original("active").unwrap(), Some(json!(true)));
@@ -137,4 +170,35 @@ async fn raw_originals_include_every_loaded_value_before_casts_and_ignore_mutati
         unsaved.get_raw_original_or("active", "absent"),
         json!("absent")
     );
+}
+
+#[test]
+fn enum_collection_binds_a_storage_array_as_native_json() {
+    use suprnova::sea_orm;
+    assert_eq!(
+        AsEnumCollection::<Status>::bind_json(&json!(["draft", "live"])),
+        Some(sea_orm::Value::Json(Some(Box::new(json!([
+            "draft", "live"
+        ])))))
+    );
+    assert_eq!(AsEnumCollection::<Status>::bind_json(&json!("draft")), None);
+    assert_eq!(
+        AsEnumCollection::<Status>::bind_json(&json!(["unknown"])),
+        None
+    );
+    assert_eq!(AsEnumCollection::<Status>::bind_json(&json!([1])), None);
+}
+
+#[tokio::test]
+async fn mass_update_writes_the_enum_list_as_a_json_array() {
+    let _fixture = fixture().await;
+    let updated = EnumList::query()
+        .filter("id", 1)
+        .update_all(suprnova::attrs! { statuses: json!(["live"]) })
+        .await
+        .unwrap();
+    assert_eq!(updated, 1);
+    let reloaded = EnumList::find(1).await.unwrap().unwrap();
+    assert_eq!(reloaded.statuses, vec![Status::Live]);
+    assert_eq!(reloaded.get_raw_original("statuses"), Some(json!(["live"])));
 }

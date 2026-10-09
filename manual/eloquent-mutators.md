@@ -510,8 +510,11 @@ re-orders.
 
 ### `AsEnumCollection<E>`
 
-You store `Vec<E>` in a JSON-encoded `TEXT` column. Each element uses the
-same `AsRef<str>` value as `AsEnum<E>`, rather than its serde enum name:
+You store `Vec<E>` in a JSON column: `json` or `jsonb` on Postgres, `json`
+on MySQL and MariaDB, or text holding JSON on SQLite. The cast stores a JSON
+array, so the column must be native JSON on Postgres, which refuses to read a
+`json` or `jsonb` value into text. Each element uses the same `AsRef<str>`
+value as `AsEnum<E>`, rather than its serde enum name:
 
 ```rust
 use suprnova::{AsEnumCollection, model};
@@ -524,11 +527,12 @@ pub struct User {
 ```
 
 You read a Laravel enum collection such as `["Admin","Editor"]` into your
-variants and write only those storage strings. You preserve order and
-repeated variants. An empty vector stores `[]`. Invalid JSON, non-string
-members, and unknown variants return a validation error. You use the same
-`FromStr + AsRef<str>` bounds as `AsEnum`; runtime cast overrides also require
-`Serialize + DeserializeOwned` so the dispatcher can represent your variants.
+variants and write only those storage strings, as a JSON array. You preserve
+order and repeated variants. An empty vector stores `[]`. A value that is not a
+JSON array of strings, and unknown variants, return a validation error. You use
+the same `FromStr + AsRef<str>` bounds as `AsEnum`; runtime cast overrides also
+require `Serialize + DeserializeOwned` so the dispatcher can represent your
+variants.
 
 ## Encryption and hashing
 
