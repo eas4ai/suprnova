@@ -95,5 +95,3 @@ pub mod timestamps;
 pub mod typed_attrs;
 pub mod unique_id;
 
-/// Laravel gap contracts share the mechanism filter.
-pub mod laravel_gaps;
