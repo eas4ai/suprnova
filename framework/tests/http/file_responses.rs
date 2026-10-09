@@ -616,3 +616,26 @@ async fn download_bytes_encodes_a_non_ascii_name() {
         Some(CATALAN_NAME),
     );
 }
+
+#[tokio::test]
+async fn revised_file_response_advertises_byte_ranges() {
+    let dir = tempfile::tempdir().expect("temporary file directory");
+    let path = write_file(dir.path(), "ranges.txt", b"0123456789");
+    let (status, headers, body) = serve("/ranges", move || {
+        let path = path.clone();
+        async move {
+            HttpResponse::file(&path, None)
+                .await
+                .map_err(HttpResponse::from)
+        }
+    })
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body.as_ref(), b"0123456789");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        header(&headers, "accept-ranges"),
+        "bytes",
+        "PAR-002 advertises byte ranges"
+    );
+}

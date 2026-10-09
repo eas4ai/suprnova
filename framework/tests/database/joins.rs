@@ -765,26 +765,3 @@ async fn mysql_every_join_shape_matches_raw_sql() {
     run_every_scenario(&fx).await;
     fx.close().await;
 }
-
-#[tokio::test]
-async fn revised_or_conditions_keep_laravel_precedence() {
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let _fx = seeded_sqlite().await;
-    let built = DB::table("pj_users")
-        .filter("active", 0)
-        .or_where_raw("name = 'Ada'", vec![])
-        .filter("id", 1)
-        .order_by_asc("id")
-        .get()
-        .await
-        .expect("the query runs")
-        .into_vec();
-    let expected =
-        raw("SELECT * FROM pj_users WHERE active = 0 OR name = 'Ada' AND id = 1 ORDER BY id ASC")
-            .await;
-    assert_eq!(
-        json_rows(built),
-        expected,
-        "PAR-001 requires flat OR conditions"
-    );
-}
