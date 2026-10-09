@@ -139,7 +139,7 @@ struct RequestFacts {
     /// `PUT`, `PATCH` or `DELETE`: a `302` is answered as `303`.
     needs_303: bool,
     is_prefetch: bool,
-    is_precognitive: bool,
+    is_precognitive: Arc<std::sync::atomic::AtomicBool>,
     /// The router matched a route (Laravel's `$request->route()`).
     matched_route: bool,
     /// `X-Inertia-Partial-Component`, when the visit is a partial reload.
@@ -149,7 +149,8 @@ struct RequestFacts {
 }
 
 impl RequestFacts {
-    fn capture(request: &Request) -> Self {
+    fn capture(request: &mut Request) -> Self {
+        let is_precognitive = request.precognition_state();
         let method = request.method();
         let is_inertia = request.is_inertia();
         let is_get = *method == hyper::Method::GET;
@@ -161,9 +162,7 @@ impl RequestFacts {
                 hyper::Method::PUT | hyper::Method::PATCH | hyper::Method::DELETE
             ),
             is_prefetch: visit::is_prefetch(|name| request.header(name)),
-            is_precognitive: request
-                .header("Precognition")
-                .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            is_precognitive,
             matched_route: request.route_pattern().is_some(),
             partial_component: request
                 .header("X-Inertia-Partial-Component")
@@ -236,7 +235,9 @@ impl InertiaHeadersMiddleware {
             || !facts.is_get
             || !facts.matched_route
             || facts.is_prefetch
-            || facts.is_precognitive
+            || facts
+                .is_precognitive
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
         }
@@ -251,9 +252,9 @@ impl InertiaHeadersMiddleware {
 
 #[async_trait]
 impl Middleware for InertiaHeadersMiddleware {
-    async fn handle(&self, request: Request, next: Next) -> Response {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
         // Capture before `next` consumes the request.
-        let facts = RequestFacts::capture(&request);
+        let facts = RequestFacts::capture(&mut request);
         let visit = Arc::new(match &self.hooks {
             Some(hooks) => Visit::capture_with_hooks(&request, hooks.clone(), self.hooks_location),
             None => Visit::capture(&request),

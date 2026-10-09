@@ -2390,8 +2390,8 @@ async fn a_json_form_reports_every_field_that_does_not_parse_under_its_name() {
     assert_eq!(form.address.street, "Main");
 }
 
-async fn typed_form_handler(req: Request) -> Response {
-    let form = UrlencodedTyped::from_request(req).await?;
+#[suprnova::handler]
+async fn typed_form_handler(form: UrlencodedTyped) -> Response {
     Ok(HttpResponse::json(json!({ "title": form.title })))
 }
 
@@ -2470,7 +2470,11 @@ async fn an_inertia_form_request_gets_its_field_errors_back_in_props_errors() {
 
 #[tokio::test]
 async fn a_precognitive_form_request_reports_the_fields_it_was_asked_about() {
-    let app = App::new(Router::new().post("/profile", typed_form_handler));
+    let app = App::new(
+        Router::new()
+            .post("/profile", typed_form_handler)
+            .middleware(suprnova::Precognitive),
+    );
     let ask = |only: &'static str| {
         Outgoing::post("/profile", b"count=abc&ratio=1&active=true".to_vec())
             .content_type("application/x-www-form-urlencoded")

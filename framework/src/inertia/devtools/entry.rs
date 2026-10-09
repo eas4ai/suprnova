@@ -37,7 +37,7 @@ pub(crate) struct RequestFacts {
     url: String,
     headers: Map<String, Value>,
     pub(crate) is_inertia: bool,
-    precognition: bool,
+    precognition: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deferred: bool,
     poll: bool,
     partial: bool,
@@ -143,7 +143,7 @@ impl RequestFacts {
             url: request.full_url(),
             headers,
             is_inertia,
-            precognition: truthy(&request, "Precognition"),
+            precognition: request.precognition_state(),
             deferred: truthy(&request, DEFERRED_HEADER),
             poll: truthy(&request, POLL_HEADER),
             partial: truthy(&request, "X-Inertia-Partial-Component"),
@@ -458,7 +458,10 @@ fn redirect_location(response: &HttpResponse) -> Option<String> {
 /// extension's deferred and poll headers, a partial reload, a prefetch,
 /// and a navigation.
 fn request_type(facts: &RequestFacts, rendered: bool) -> &'static str {
-    if facts.precognition {
+    if facts
+        .precognition
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         "precognition"
     } else if !facts.is_inertia {
         if rendered { "initial" } else { "http" }

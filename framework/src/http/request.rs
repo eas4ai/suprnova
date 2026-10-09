@@ -153,6 +153,10 @@ struct RouteAction(&'static str);
 #[derive(Clone)]
 struct RouteName(Option<String>);
 
+/// Middleware's protocol mark, kept with the request as it moves through the chain.
+#[derive(Clone)]
+struct PrecognitiveMark(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 /// The values a route's bindings resolved, by handler argument, kept in the
 /// request's extensions rather than in a field: a request is moved by value
 /// through every middleware, and each move copies the struct, so a field
@@ -683,7 +687,40 @@ impl Request {
         self.parts.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
-    /// Get the Content-Type header
+    /// Whether the client asks for validation, before route middleware opts in.
+    pub fn is_attempting_precognition(&self) -> bool {
+        self.header("Precognition")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    }
+
+    /// Whether Precognitive middleware enabled validation without handler work.
+    pub fn is_precognitive(&self) -> bool {
+        self.parts
+            .extensions
+            .get::<PrecognitiveMark>()
+            .is_some_and(|mark| mark.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Enable validation-only dispatch after route middleware accepts the attempt.
+    pub(crate) fn set_precognitive(&mut self) {
+        self.precognition_state()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Let outer observers see a mark route middleware sets after they hand over the request.
+    pub(crate) fn precognition_state(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.parts
+            .extensions
+            .get_or_insert_with(|| {
+                PrecognitiveMark(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )))
+            })
+            .0
+            .clone()
+    }
+
+    /// Get the Content-Type header to select the request body parser.
     pub fn content_type(&self) -> Option<&str> {
         self.header("content-type")
     }

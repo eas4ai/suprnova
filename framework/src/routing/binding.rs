@@ -1459,6 +1459,9 @@ impl RouterBindings {
                     checks_binders,
                     idle,
                     missing,
+                    skips_precognitive_body: role == "handler"
+                        && entry.handler.record().is_none()
+                        && matches!(entry.handler.unrecorded, UnrecordedHandler::BindsNothing),
                     plans: RwLock::new(Vec::new()),
                 })
             };
@@ -1718,6 +1721,9 @@ pub(crate) struct RouteSettings {
     /// The route's `missing()` handler; `None` for the settings a
     /// `missing()` handler itself binds by.
     missing: Option<Arc<RouteMissing>>,
+    /// Closures and plain functions have no extractors to run before a
+    /// precognitive answer. Recorded and generic handlers stop after extraction.
+    skips_precognitive_body: bool,
     /// The plan of each handler that bound on this route without a plan
     /// from the startup checks, by the key its generated code passes and
     /// the name of its instantiation.
@@ -1730,6 +1736,11 @@ pub(crate) struct RouteSettings {
 type UnplannedKey = (TypeId, &'static str);
 
 impl RouteSettings {
+    /// Whether dispatch can answer Precognition before calling this handler.
+    pub(crate) fn skips_precognitive_body(&self) -> bool {
+        self.skips_precognitive_body
+    }
+
     /// Whether the route has a `missing()` handler.
     pub(crate) fn has_missing(&self) -> bool {
         self.missing.is_some()
@@ -2348,6 +2359,7 @@ mod tests {
             checks_binders: true,
             idle: None,
             missing: None,
+            skips_precognitive_body: true,
             plans: RwLock::new(Vec::new()),
         };
         let described = AtomicUsize::new(0);

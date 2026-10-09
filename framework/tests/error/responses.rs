@@ -222,7 +222,10 @@ fn validation_4xx_keeps_per_field_errors() {
     let (status, body) = render(err);
 
     assert_eq!(status, 422);
-    assert_eq!(body["message"], "The given data was invalid.");
+    assert_eq!(
+        body["message"],
+        "The email field must be a valid email address."
+    );
     assert!(
         body["errors"]["email"]
             .as_array()

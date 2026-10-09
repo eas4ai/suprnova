@@ -75,7 +75,7 @@ fn validation_router() -> Router {
         })
         .post("/submit", |_request: Request| async {
             Err(HttpResponse::json(json!({
-                "message": "The given data was invalid.",
+                "message": "The email field is required.",
                 "errors": {"email": ["The email field is required."]},
             }))
             .status(422))
