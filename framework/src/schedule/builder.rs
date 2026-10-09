@@ -39,6 +39,8 @@ pub struct TaskBuilder {
     pub(crate) without_overlapping: bool,
     pub(crate) overlap_ttl: Option<Duration>,
     pub(crate) on_one_server: bool,
+    /// Preserve an explicit opt-out when the schedule applies its election default.
+    pub(crate) on_every_server: bool,
     pub(crate) one_server_ttl: Option<Duration>,
     pub(crate) run_in_background: bool,
     pub(crate) timezone: Option<Tz>,
@@ -60,6 +62,7 @@ impl TaskBuilder {
             without_overlapping: false,
             overlap_ttl: None,
             on_one_server: false,
+            on_every_server: false,
             one_server_ttl: None,
             run_in_background: false,
             timezone: None,
@@ -109,6 +112,7 @@ impl TaskBuilder {
             without_overlapping: false,
             overlap_ttl: None,
             on_one_server: false,
+            on_every_server: false,
             one_server_ttl: None,
             run_in_background: false,
             timezone: None,
@@ -652,6 +656,14 @@ impl TaskBuilder {
     /// [`Cache::lock`]: crate::cache::Cache::lock
     pub fn on_one_server(mut self) -> Self {
         self.on_one_server = true;
+        self.on_every_server = false;
+        self
+    }
+
+    /// Run on every server so this task can opt out of the schedule's election.
+    pub fn on_every_server(mut self) -> Self {
+        self.on_one_server = false;
+        self.on_every_server = true;
         self
     }
 
@@ -664,6 +676,7 @@ impl TaskBuilder {
     /// anything from a minute to just under an hour works.
     pub fn on_one_server_for(mut self, ttl: Duration) -> Self {
         self.on_one_server = true;
+        self.on_every_server = false;
         self.one_server_ttl = Some(ttl);
         self
     }

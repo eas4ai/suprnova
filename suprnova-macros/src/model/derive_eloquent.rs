@@ -36,6 +36,40 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // here; the parser captured the same value the runtime would
     // return.
     let table = &input.table;
+    let default_fields = input
+        .item
+        .fields
+        .iter()
+        .filter_map(|field| field.ident.as_ref())
+        .filter(|field| *field != "__eager" && *field != "__pivot")
+        .map(|field| {
+            let value = match input.defaults.iter().find(|(name, _)| name == field) {
+                Some((_, expression)) => quote! { (#expression).into() },
+                None => quote! { ::core::default::Default::default() },
+            };
+            quote! { #field: #value }
+        });
+    let default_attributes_impl = if input.defaults.is_empty() {
+        quote! {}
+    } else {
+        let fields = input.defaults.iter().map(|(field, _)| {
+            let name = field.to_string();
+            quote! {
+                attributes.insert(#name, ::suprnova::serde_json::to_value(&defaults.#field)
+                    .map_err(|error| ::suprnova::FrameworkError::validation(
+                        #name, ::std::format!("could not serialize the default: {}", error),
+                    ))?);
+            }
+        });
+        quote! {
+            fn default_attributes() -> ::core::result::Result<::suprnova::Attrs, ::suprnova::FrameworkError> {
+                let defaults = <Self as ::core::default::Default>::default();
+                let mut attributes = ::suprnova::Attrs::new();
+                #(#fields)*
+                ::core::result::Result::Ok(attributes)
+            }
+        }
+    };
 
     // `touches` names relations, and both attributes are parsed from
     // the same `#[model(...)]` invocation - so a name that doesn't
@@ -1372,7 +1406,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         impl ::core::default::Default for #struct_ident {
             fn default() -> Self {
                 Self {
-                    #( #field_idents: ::core::default::Default::default(), )*
+                    #( #default_fields, )*
                     #relations_fields_init
                 }
             }
@@ -1381,6 +1415,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         #[::suprnova::__async_trait::async_trait]
         impl ::suprnova::eloquent::Model for #struct_ident {
             fn primary_key_name() -> &'static str { #pk_name }
+
+            #default_attributes_impl
 
 
             #fillable_impl

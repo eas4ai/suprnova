@@ -6342,7 +6342,10 @@ where
         kind: KeysetKind,
         row: &M,
     ) -> Result<Value, FrameworkError> {
-        match row.field_value(pk) {
+        // A cast can change the key's value or type. The cursor must bind
+        // the stored key the database ordered, before any model cast.
+        // Hand-written models without a kept row retain their field fallback.
+        match row.get_raw_original(pk).or_else(|| row.field_value(pk)) {
             Some(key) if kind.fits(&key) => Ok(key),
             _ => Err(Self::keyset_refusal(
                 method,

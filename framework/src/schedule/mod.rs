@@ -139,7 +139,11 @@ pub type ScheduledTaskJoin = (String, Result<(), FrameworkError>);
 pub struct Schedule {
     tasks: Vec<TaskEntry>,
     default_timezone: Option<Tz>,
+    always_on_one_server: bool,
+    every_server_tasks: std::collections::HashSet<String>,
 }
+
+const INTERRUPT_KEY: &str = "suprnova:schedule:interrupt";
 
 /// Acknowledgement that a per-process scheduler lock is accurate because
 /// the deployment really does run exactly one scheduler.
@@ -210,6 +214,39 @@ impl Schedule {
         Self {
             tasks: Vec::new(),
             default_timezone: None,
+            always_on_one_server: false,
+            every_server_tasks: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Elect one server for every task so replicas share each due tick.
+    /// Tasks marked [`TaskBuilder::on_every_server`] keep running on all servers.
+    /// This also applies to tasks you registered before this call.
+    pub fn always_on_one_server(&mut self) -> &mut Self {
+        self.always_on_one_server = true;
+        for task in &mut self.tasks {
+            if !self.every_server_tasks.contains(&task.name) {
+                task.on_one_server = true;
+            }
+        }
+        self
+    }
+
+    /// Record an interrupt in your cache so running schedulers stop starting tasks.
+    /// Cache write errors are returned to the caller.
+    pub async fn interrupt() -> Result<(), FrameworkError> {
+        crate::cache::Cache::forever(INTERRUPT_KEY, &crate::clock::now().timestamp_micros()).await
+    }
+
+    /// Read the interrupt mark so you can tell whether a run should stop.
+    /// Cache read errors are returned; a missing cache binding means no mark.
+    pub async fn has_been_interrupted_since(
+        when: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, FrameworkError> {
+        match crate::cache::Cache::get::<i64>(INTERRUPT_KEY).await {
+            Ok(mark) => Ok(mark.is_some_and(|mark| mark >= when.timestamp_micros())),
+            Err(FrameworkError::ServiceNotFound { .. }) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -448,6 +485,7 @@ impl Schedule {
     /// new task is not inserted.
     pub fn try_add(&mut self, builder: TaskBuilder) -> Result<&mut Self, FrameworkError> {
         let task_index = self.tasks.len();
+        let on_every_server = builder.on_every_server;
         let mut entry = builder.build(task_index);
         if self.tasks.iter().any(|task| task.name == entry.name) {
             return Err(FrameworkError::internal(format!(
@@ -460,6 +498,11 @@ impl Schedule {
         // `timezone()` outranks `app.schedule_timezone`.
         if entry.timezone.is_none() {
             entry.timezone = self.default_timezone;
+        }
+        if on_every_server {
+            self.every_server_tasks.insert(entry.name.clone());
+        } else if self.always_on_one_server {
+            entry.on_one_server = true;
         }
         self.tasks.push(entry);
         Ok(self)
@@ -552,6 +595,14 @@ impl Schedule {
     }
 }
 
+/// Clear the previous run's mark while allowing unbootstrapped schedules.
+async fn clear_interrupt() -> Result<(), FrameworkError> {
+    match crate::cache::Cache::forget(INTERRUPT_KEY).await {
+        Ok(_) | Err(FrameworkError::ServiceNotFound { .. }) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Common body shared by [`Schedule::run_due_tasks_into`] and
 /// [`Schedule::run_all_tasks_into`].
 ///
@@ -572,40 +623,23 @@ where
     I: IntoIterator<Item = &'a TaskEntry>,
 {
     let mut inline = Vec::new();
-    for task in tasks {
+    if let Err(error) = clear_interrupt().await {
+        return vec![("<schedule>".to_string(), Err(error))];
+    }
+    let started_at = crate::clock::now();
+    for (index, task) in tasks.into_iter().enumerate() {
+        if index > 0 {
+            match Schedule::has_been_interrupted_since(started_at).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    inline.push(("<schedule>".to_string(), Err(error)));
+                    break;
+                }
+            }
+        }
         if task.run_in_background {
-            let name = task.name.clone();
-            let panic_name = name.clone();
-            let guard_name = name.clone();
-            let handler: BoxedTask = Arc::clone(&task.task);
-            let without_overlapping = task.without_overlapping;
-            let overlap_ttl = task.overlap_ttl;
-            let on_one_server = task.on_one_server;
-            let one_server_ttl = task.one_server_ttl;
-            let state = Arc::clone(&task.state);
-            joinset.spawn(async move {
-                let outcome = AssertUnwindSafe(async move {
-                    task::run_handler_with_optional_overlap_guard(
-                        &guard_name,
-                        handler,
-                        without_overlapping,
-                        overlap_ttl,
-                        on_one_server,
-                        one_server_ttl,
-                        state,
-                    )
-                    .await
-                })
-                .catch_unwind()
-                .await;
-                let result = match outcome {
-                    Ok(r) => r,
-                    Err(_payload) => Err(FrameworkError::internal(format!(
-                        "scheduled task '{panic_name}' panicked"
-                    ))),
-                };
-                (name, result)
-            });
+            spawn_background_task(task, joinset);
         } else {
             // Inline tasks run on the caller's task; without a panic boundary
             // a panicking handler would unwind the scheduler daemon
@@ -628,6 +662,42 @@ where
         }
     }
     inline
+}
+
+/// Spawn a scheduled task with the same election and panic boundary as inline work.
+fn spawn_background_task(task: &TaskEntry, joinset: &mut JoinSet<ScheduledTaskJoin>) {
+    let name = task.name.clone();
+    let panic_name = name.clone();
+    let guard_name = name.clone();
+    let handler: BoxedTask = Arc::clone(&task.task);
+    let without_overlapping = task.without_overlapping;
+    let overlap_ttl = task.overlap_ttl;
+    let on_one_server = task.on_one_server;
+    let one_server_ttl = task.one_server_ttl;
+    let state = Arc::clone(&task.state);
+    joinset.spawn(async move {
+        let outcome = AssertUnwindSafe(async move {
+            task::run_handler_with_optional_overlap_guard(
+                &guard_name,
+                handler,
+                without_overlapping,
+                overlap_ttl,
+                on_one_server,
+                one_server_ttl,
+                state,
+            )
+            .await
+        })
+        .catch_unwind()
+        .await;
+        let result = match outcome {
+            Ok(r) => r,
+            Err(_payload) => Err(FrameworkError::internal(format!(
+                "scheduled task '{panic_name}' panicked"
+            ))),
+        };
+        (name, result)
+    });
 }
 
 /// Drain every remaining task in `joinset` and append its result to `out`.

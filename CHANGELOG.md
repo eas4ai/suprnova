@@ -8,6 +8,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
+  elects one replica per tick for every task; `.on_every_server()` opts out.
+- **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
+  mark. Runs stop before starting another task, and the next run clears it.
+- **Stored keys for chunk cursors.** `chunk_by_id` advances from the raw stored
+  key, so primary-key casts cannot skip or repeat rows.
+- **A database default scoped to one task.** `DB::with_default_connection(name, future)`
+  routes default database and model queries to that pool. `DB::default_connection()`
+  names the current pool, and concurrent tasks keep their own defaults.
+- **Declared model defaults.** `#[model(defaults(field = value, ...))]` fills new
+  instances and partial creates while preserving supplied attributes.
+
 - **Language-specific slugs.** `Str::slug_in` applies the named language's
   ASCII spelling, including German `ä` as `ae`.
 - **Word limits keep markup.** `Str::words` limits space-separated runs

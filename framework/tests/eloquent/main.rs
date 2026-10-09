@@ -90,3 +90,5 @@ pub mod sync_without_detaching;
 pub mod timestamps;
 pub mod typed_attrs;
 pub mod unique_id;
+
+pub mod laravel_delta;

@@ -460,6 +460,22 @@ where
     <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    /// Build an unsaved instance so you can read declared defaults before saving.
+    /// A model without declared defaults keeps its ordinary `Default` values.
+    fn new() -> Self
+    where
+        Self: Default,
+    {
+        Self::default()
+    }
+
+    /// Supply trusted initial attributes so partial creates keep model defaults.
+    /// Caller attributes override these values after mass-assignment filtering.
+    /// Serialization errors are returned before creation events or writes.
+    fn default_attributes() -> Result<Attrs, FrameworkError> {
+        Ok(Attrs::new())
+    }
+
     /// Primary-key column name. The macro emits the value from the
     /// `primary_key = "..."` attribute (default `"id"`).
     fn primary_key_name() -> &'static str {
@@ -936,7 +952,8 @@ where
     /// runs. Listeners on (1) / (2) may mutate the in-flight `Attrs`
     /// through the `Arc<tokio::sync::Mutex<Attrs>>` they receive.
     async fn create(attrs: Attrs) -> Result<Self, FrameworkError> {
-        let filtered = Self::fillable_filter().apply_checked(attrs)?;
+        let filtered =
+            Self::default_attributes()?.merge(Self::fillable_filter().apply_checked(attrs)?);
         // Wrap the filtered attrs in an Arc<Mutex<_>> so cancellable
         // listeners (Creating, Saving) can mutate the in-flight
         // values before the INSERT runs.
@@ -1805,7 +1822,8 @@ where
         tx: &crate::database::Transaction,
         attrs: Attrs,
     ) -> Result<Self, FrameworkError> {
-        let filtered = Self::fillable_filter().apply_checked(attrs)?;
+        let filtered =
+            Self::default_attributes()?.merge(Self::fillable_filter().apply_checked(attrs)?);
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(filtered));
         Self::__dispatch_creating(shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), true).await?;

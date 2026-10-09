@@ -622,6 +622,26 @@ refuses to boot in production instead, on the same reasoning as the
 in-memory rate limiter: a control that silently does much less than it
 claims is worse than one that is visibly absent.
 
+### A single-server default
+
+Call `schedule.always_on_one_server()` to elect one server for every task,
+including tasks you already registered. You use the same shared cache and
+lock TTL as `on_one_server()`. Add `.on_every_server()` to a task when you
+want each server to run it. The last per-task choice wins.
+
+### Interrupting a run
+
+Run `./target/release/app schedule:interrupt` to write an interrupt mark in
+your shared cache. You let a running task finish, then stop the run before
+it starts another task. Background tasks that already started finish too.
+The next run clears the mark before it starts tasks.
+
+You can write the same mark with `Schedule::interrupt().await?` and read it
+with `Schedule::has_been_interrupted_since(started_at).await?`, where
+`started_at` is a `chrono::DateTime<chrono::Utc>`. You receive cache errors
+as `FrameworkError`. A run stops and reports an error when its configured
+cache cannot clear or read the mark.
+
 ### Running in Background
 
 Detach tasks from the per-tick critical path so they don't block other due
