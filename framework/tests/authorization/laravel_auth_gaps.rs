@@ -677,8 +677,12 @@ async fn a_failing_listener_never_changes_the_decision() {
 
 #[test]
 #[serial]
-fn a_sync_check_outside_a_runtime_answers_and_dispatches_nothing() {
+fn a_sync_check_outside_a_runtime_dispatches_its_event() {
     register_gates();
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "this test runs outside a Tokio runtime"
+    );
     let _events = EventFacade::fake();
     let user7 = GapUser { id: 7 };
 
@@ -690,7 +694,145 @@ fn a_sync_check_outside_a_runtime_answers_and_dispatches_nothing() {
     assert!(
         Gate::raw("gaps-update", &user7, &GapPost { author_id: 8 }).is_some_and(|r| r.denied())
     );
-    assert!(evaluated("gaps-update").is_empty());
+    assert!(Gate::raw("gaps-nothing", &user7, &GapPost::default()).is_none());
+
+    let event = |decision| GateEvaluated {
+        user_type: Some(std::any::type_name::<GapUser>()),
+        user_id: None,
+        action: "gaps-update".to_owned(),
+        resource_type: std::any::type_name::<GapPost>(),
+        decision,
+    };
+    assert_eq!(
+        evaluated("gaps-update"),
+        vec![event(Some(true)), event(Some(false))]
+    );
+    let nothing = evaluated("gaps-nothing");
+    assert_eq!(nothing.len(), 1);
+    assert_eq!(nothing[0].decision, None);
+}
+
+/// Counts the `GapUser` events it receives once a Tokio timer has fired,
+/// then fails every one. The timer needs a runtime, so the count shows the
+/// dispatch ran to completion on one.
+struct SleepyFailingAudit(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl Listener<GateEvaluated> for SleepyFailingAudit {
+    async fn handle(&self, event: &GateEvaluated) -> Result<(), FrameworkError> {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if event.user_type == Some(std::any::type_name::<GapUser>()) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Err(FrameworkError::internal("audit log unavailable"))
+    }
+}
+
+#[test]
+#[serial]
+fn a_sync_check_outside_a_runtime_runs_its_listeners_and_keeps_its_decision() {
+    register_gates();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _forget = ForgetListeners;
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime to register the listener on")
+        .block_on(EventFacade::listen::<GateEvaluated, _>(Arc::new(
+            SleepyFailingAudit(calls.clone()),
+        )));
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "the checks below run outside a Tokio runtime"
+    );
+    let user7 = GapUser { id: 7 };
+
+    // The listener has run when the check returns, and its failure does
+    // not change the answer.
+    assert!(Gate::allows(
+        "gaps-update",
+        &user7,
+        &GapPost { author_id: 7 }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(Gate::denies(
+        "gaps-update",
+        &user7,
+        &GapPost { author_id: 8 }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// A signed-in user whose type registers no gate, policy or hook: only the
+/// user itself can name its type.
+#[derive(Debug)]
+struct BareUser {
+    id: i64,
+}
+
+impl Authenticatable for BareUser {
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// Signs the default guard in as the `BareUser` whose id `X-Bare-User` names.
+struct LoginAsBare;
+
+#[async_trait::async_trait]
+impl Middleware for LoginAsBare {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(id) = header_id(&request, "x-bare-user") {
+            Auth::set_user(Arc::new(BareUser { id }));
+        }
+        next(request).await
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn the_event_names_a_signed_in_user_whose_type_registered_nothing() {
+    let client = client(MiddlewareRegistry::new().append(LoginAsBare));
+    let _events = EventFacade::fake();
+
+    // `inspect_current`: nothing answers for a `BareUser`, so the answer is
+    // the default denial and the event names the user's own type.
+    let headers = [
+        ("X-Bare-User", "9"),
+        ("X-Action", "gaps-bare-undefined"),
+        ("X-Author", "9"),
+    ];
+    let (current, _) = compare_as(&client, &headers).await;
+    assert_eq!(current, format!("{:?}", GateResponse::deny()));
+    assert_eq!(
+        evaluated("gaps-bare-undefined"),
+        vec![GateEvaluated {
+            user_type: Some(std::any::type_name::<BareUser>()),
+            user_id: Some("9".to_owned()),
+            action: "gaps-bare-undefined".to_owned(),
+            resource_type: std::any::type_name::<GapPost>(),
+            decision: None,
+        }]
+    );
+
+    // `#[authorize]`: `gaps-create` is defined for `GapUser` only, so a
+    // `BareUser` gets the default denial, and the event names it too.
+    client
+        .get("/authorized")
+        .header("X-Bare-User", "9")
+        .send()
+        .await
+        .assert_status(403);
+    let events = evaluated("gaps-create");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].user_type, Some(std::any::type_name::<BareUser>()));
+    assert_eq!(events[0].user_id.as_deref(), Some("9"));
+    assert_eq!(events[0].decision, None);
 }
 
 // ── Response::authorize keeps the code ───────────────────────────────────────
