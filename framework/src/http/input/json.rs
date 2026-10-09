@@ -497,6 +497,14 @@ pub(super) fn read_value<'de, S: DeserializeSeed<'de>>(
         path: path.to_owned(),
         collector,
     })
+    .inspect_err(|_| {
+        if collector.precognitive {
+            collector
+                .stopped
+                .borrow_mut()
+                .get_or_insert_with(|| path.to_owned());
+        }
+    })
 }
 
 /// Recover shape mismatches before serde consumes a field visitor.

@@ -182,6 +182,8 @@ struct Collector {
     /// JSON reads may recover field shapes only during selected Precognition.
     precognitive: bool,
     failures: RefCell<Vec<(String, Recorded)>>,
+    /// The innermost field whose failed recovery stopped a precognitive read.
+    stopped: RefCell<Option<String>>,
     /// The input names already recorded: a field is reported once, by the
     /// first failure found for it.
     recorded: RefCell<HashSet<String>>,
