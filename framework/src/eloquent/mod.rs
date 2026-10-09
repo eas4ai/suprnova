@@ -177,9 +177,11 @@ pub trait EloquentModel: Sized {
     /// the same check in 13.25.
     const HAS_TIMESTAMPS: bool = false;
 
-    /// The `updated_at` column name, honouring
-    /// `#[model(updated_at = "...")]`. Meaningful only when
-    /// [`Self::HAS_TIMESTAMPS`] is `true`.
+    /// Name the declared creation timestamp so default chronological ordering stays correct.
+    const CREATED_AT_COLUMN: &'static str = "created_at";
+
+    /// The `updated_at` column name, honouring `#[model(updated_at = "...")]`.
+    /// Preserve it when model writes touch a timestamped row.
     const UPDATED_AT_COLUMN: &'static str = "updated_at";
 
     /// The parameter a query binds when it compares `column` with `value`,

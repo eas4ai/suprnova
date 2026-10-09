@@ -110,6 +110,13 @@ DB::table("orders")
 An empty `where_in` list matches no row, and an empty `where_not_in`
 list excludes none.
 
+You pass inclusive bounds with `where_between(column, low..=high)` or
+`where_not_between(column, low..=high)`. The `or_where_between` and
+`or_where_not_between` forms keep the same flat OR precedence. You can
+use a plain column, `DB::raw("score + 1")`, or a scalar `DB::table`
+subquery as the column. Plain names still pass identifier validation;
+your subquery's values stay bound.
+
 #### OR conditions
 
 Each `or_*` method adds a flat `OR` condition. You get SQL precedence:
@@ -127,7 +134,8 @@ DB::table("users")
 ```
 
 The `or_` family is `or_where`, `or_where_op`, `or_where_in`, `or_where_not_in`, `or_where_null`,
-`or_where_not_null`, `or_where_raw`, and the three grouped helpers below.
+`or_where_not_null`, `or_where_raw`, `or_where_between`,
+`or_where_not_between`, and the three grouped helpers below.
 
 #### One comparison across several columns
 
@@ -232,6 +240,25 @@ DB::table("orders")
 expression to the end of the list, so it combines with `select`. The
 expression is written into the query as given, so never build it from
 request data.
+
+You use `DB::raw(expression)` when SQL must evaluate an expression in
+`group_by`, `having` or `having_op`. You write trusted SQL there; the
+expression is never a bound value:
+
+```rust
+let rows = DB::table("orders")
+    .select_raw("status_id, SUM(total) AS total")
+    .group_by(DB::raw("status_id + 0"))
+    .having_op(DB::raw("SUM(total)"), ">", 100i64)
+    .get().await?;
+```
+
+You keep application values in bindings with
+`select_raw_with_bindings(sql, Vec<sea_orm::Value>)`,
+`where_raw(sql, bindings)` and `order_by_raw(sql, bindings)`. You write
+portable `?` markers; Postgres receives correctly numbered `$N` markers.
+On a model query, you use `order_by_raw_with_bindings` for a bound
+ordering and keep `order_by_raw(sql)` for SQL without bindings.
 
 ### Joins
 
@@ -350,6 +377,20 @@ let rooms = DB::table("rooms")
     .await?;
 ```
 
+You call `oldest()` to order a table by `created_at` ascending, or
+`oldest_by(column)` to choose another column, expression or scalar
+subquery. On a model query, `oldest()` and `latest()` use your model's
+declared creation timestamp, including a renamed `created_at` option.
+You override it with `oldest_by(column)` or `latest_by(column)`.
+
+You use `in_random_order(None)` without a seed, or
+`in_random_order(42)` with a seed, on either builder. On MySQL, you get
+`RAND(seed)`. On Postgres, you set the connection seed in the same
+statement before ordering by `random()`. Repeating the seed on the same
+rows and connection repeats the order on those engines. On SQLite, you
+can pass the seed, but `RANDOM()` has no seed support and your order
+remains random. You still receive each matching row once.
+
 ### Terminals
 
 ```rust
@@ -371,6 +412,19 @@ let n: u64 = DB::table("audit_log")
     .count()
     .await?;
 ```
+
+You call `first_or_fail()` when a missing row must produce a 404. The
+default message names the table or model. You supply your own message
+with `first_or_fail_with(message)` on either builder; database failures
+still return their original error.
+
+You read the largest value with `max::<i64>(column).await?`, choosing
+the Rust type your column uses. You receive `None` for an empty set or
+SQL NULL, and an error if the value cannot decode into your chosen type.
+You can pass a plain column, `DB::raw(expression)` or a scalar subquery.
+
+You inspect a table query's SQL with `to_sql_for(backend)`. You receive
+`Result<(String, Vec<sea_orm::Value>), FrameworkError>` and no query runs.
 
 On a query with `group_by`, `count()` returns the number of groups.
 
@@ -412,6 +466,23 @@ parameters. An explicit null is emitted as SQL `NULL` because the JSON
 attribute map no longer carries its original Rust type; all non-null values
 remain parameter-bound. The same rule applies to typed Eloquent mass writes
 and many-to-many pivot extras.
+
+You mix raw assignments and bound values with `UpdateAttrs` on either
+builder. You keep `attrs!` for updates containing only data:
+
+```rust
+use suprnova::{DB, UpdateAttrs};
+
+let mut changes = UpdateAttrs::new();
+changes.insert("views", DB::raw("views + 1"));
+changes.insert("status", "published");
+DB::table("posts").filter("id", 42i64).update(changes).await?;
+```
+
+You can also pass an array for one kind of assignment:
+`update([("views", DB::raw("views + 1"))])`. You validate assignment
+column names as usual. Raw expressions contain trusted SQL and reach the
+database unbound; you never build them from request data.
 
 A `u64` above `i64::MAX` is written as the number it is, and no column
 stores a rounded value of it. A `numeric` or text column stores it exactly

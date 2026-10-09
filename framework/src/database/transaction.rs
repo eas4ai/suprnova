@@ -56,15 +56,11 @@
 //! [`Transaction::after_commit`] or
 //! [`Queue::push_after_commit_with_tx`](crate::Queue::push_after_commit_with_tx).
 //!
-//! ## Nested `DB::transaction` is rejected at runtime
+//! ## Nested closure transactions
 //!
-//! SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
-//! it on a connection that's already holding a transaction starts a
-//! brand-new physical transaction that commits / rolls back
-//! independently of the outer scope. That's a silent data-integrity
-//! footgun, so [`DB::transaction`] checks `CURRENT_TX` up front
-//! and returns a database error instead of producing the wrong
-//! semantics. Use [`Transaction::savepoint`] for nested behaviour.
+//! Nested closure transactions use SeaORM savepoints on the ambient
+//! connection. An inner rollback leaves the enclosing transaction open;
+//! releasing an inner savepoint keeps its callbacks until the outer outcome.
 
 use crate::database::DB;
 use crate::database::clauses::quote_identifier;
@@ -86,6 +82,9 @@ use std::time::Duration;
 /// duplicates the pair, and the connection name is small + immutable
 /// for the transaction's lifetime.
 pub(crate) struct TxState {
+    parent: Option<Arc<TxState>>,
+    depth: usize,
+    children: Arc<ChildFinalizers>,
     pub(crate) tx: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
     /// Callbacks queued by
@@ -158,10 +157,58 @@ impl Drop for ScopeFinalizer {
     }
 }
 
+#[derive(Default)]
+struct ChildFinalizers {
+    count: std::sync::atomic::AtomicUsize,
+    done: tokio::sync::Notify,
+}
+
+// A cancelled inner scope can still be rolling back in its owned task.
+// Keep the enclosing outcome behind that rollback instead of treating the
+// child's reference as a leaked application handle.
+struct ParentCompletion(Option<Arc<ChildFinalizers>>);
+impl Drop for ParentCompletion {
+    fn drop(&mut self) {
+        if let Some(parent) = &self.0 {
+            parent
+                .count
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            parent.done.notify_one();
+        }
+    }
+}
+
 /// Own the physical outcome, event listeners, and callback sequence as one
 /// completion task. The caller's generic closure and return value never move
 /// into this task, so neither needs an added `'static` bound.
 async fn finish_transaction(state: Arc<TxState>, commit: bool) -> Result<(), TransactionFailure> {
+    let parent = state.parent.clone();
+    let completion = ParentCompletion(parent.as_ref().map(|state| state.children.clone()));
+    let result = CURRENT_TX
+        .scope(parent, finish_transaction_inner(state, commit))
+        .await;
+    // The child's ambient scope is gone before its enclosing finalizer wakes.
+    drop(completion);
+    result
+}
+
+async fn finish_transaction_inner(
+    state: Arc<TxState>,
+    commit: bool,
+) -> Result<(), TransactionFailure> {
+    loop {
+        let notified = state.children.done.notified();
+        if state
+            .children
+            .count
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            break;
+        }
+        notified.await;
+    }
+    let parent = state.parent.clone();
     let (after_commit, on_rollback) = super::after_commit::drain(&state);
     let tx = state.tx.clone();
     let connection_name = state.connection_name.clone();
@@ -204,6 +251,23 @@ async fn finish_transaction(state: Arc<TxState>, commit: bool) -> Result<(), Tra
                 .compensate()
                 .await;
             return Err(FrameworkError::database(error.to_string()).into());
+        }
+        if let Some(parent) = &parent {
+            parent
+                .after_commit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(after_commit);
+            parent
+                .on_rollback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(on_rollback);
+            emit_tx_event(super::events::TransactionCommitted {
+                connection_name: connection_name.to_string(),
+            })
+            .await;
+            return Ok(());
         }
         drop(on_rollback);
         // Arm the committed branch before invoking any listener code. A
@@ -1661,9 +1725,8 @@ impl DB {
     /// see [`Job::after_commit`](crate::queue::Job::after_commit). Every
     /// registered callback still runs; the first error is the one you get.
     ///
-    /// Nested `DB::transaction` calls are rejected with a database
-    /// error - SeaORM's `begin()` doesn't compose. Use
-    /// [`Transaction::savepoint`] for nested-rollback behaviour.
+    /// Nested calls use savepoints on the same connection. An inner rollback
+    /// leaves your outer transaction open, so you can handle the inner error.
     ///
     /// ## Example
     ///
@@ -1833,11 +1896,45 @@ impl DB {
         settled.value.map_err(TransactionFailure::from)
     }
 
+    /// Report nesting depth so you can distinguish an outer transaction from a savepoint.
+    pub fn transaction_level() -> usize {
+        CURRENT_TX
+            .try_with(|state| state.as_ref().map_or(0, |state| state.depth))
+            .unwrap_or(0)
+    }
+
+    /// Register a guard that runs before BEGIN or a nested savepoint starts.
+    /// Returning an error prevents the transaction and preserves your error.
+    pub fn before_starting_transaction<F>(listener: F)
+    where
+        F: Fn() -> Result<(), FrameworkError> + Send + Sync + 'static,
+    {
+        super::events::current_observation()
+            .before_transaction
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::new(listener));
+    }
+
+    fn notify_before_transaction() -> Result<(), FrameworkError> {
+        for scope in super::events::reached_observations() {
+            let listeners = scope
+                .before_transaction
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            for listener in listeners {
+                listener()?;
+            }
+        }
+        Ok(())
+    }
+
     /// [`Self::transaction_scoped`] before it decides what to return: the
     /// closure's value and the outcome of finalizing are kept apart, so
     /// [`Self::transaction_with_isolation`] can keep a committed value when
     /// only an after-commit callback failed. `Err` means the closure never
-    /// ran: the nesting refusal, no connection, or a failed `BEGIN`.
+    /// ran: a listener failure, no connection, or a failed `BEGIN`.
     async fn transaction_settled<G, Fut, T>(
         isolation_level: Option<IsolationLevel>,
         make: G,
@@ -1847,37 +1944,35 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
-        // Reject nested calls before doing any work. Without this
-        // guard, `conn.inner().begin()` below would start a brand-new
-        // top-level transaction on a pooled connection that's
-        // independent of the outer scope - silently corrupting the
-        // composition semantics callers expect.
-        let nested = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
-        if nested {
-            return Err(FrameworkError::database(
-                "nested DB::transaction is not supported; use tx.savepoint(name) for nested rollback",
-            )
-            .into());
+        Self::notify_before_transaction()?;
+        let parent = CURRENT_TX.try_with(Clone::clone).ok().flatten();
+        let depth = parent.as_ref().map_or(1, |state| state.depth + 1);
+        let (tx, conn_name) = if let Some(state) = &parent {
+            let tx = state
+                .tx
+                .begin()
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            (tx, state.connection_name.clone())
+        } else {
+            let conn = DB::connection()?;
+            let tx = conn
+                .inner()
+                .begin_with_config(isolation_level, None)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            (tx, Arc::<str>::from(DB::default_connection()))
+        };
+        if let Some(state) = &parent {
+            state
+                .children
+                .count
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
-
-        let conn = DB::connection()?;
-        let conn_name: Arc<str> = DB::default_connection().into();
-        // `begin_with_config(None, None)` is what SeaORM's own `begin()`
-        // delegates to, so a caller that asked for no isolation level gets
-        // exactly the backend default `DB::transaction` has always opened
-        // with; only `transaction_with_isolation` ever passes `Some`.
-        let tx = conn
-            .inner()
-            .begin_with_config(isolation_level, None)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        // BEGIN succeeded - fire TransactionBeginning before the
-        // closure runs so listeners observe the open tx.
-        emit_tx_event(super::events::TransactionBeginning {
-            connection_name: conn_name.to_string(),
-        })
-        .await;
         let tx_state = Arc::new(TxState {
+            parent,
+            depth,
+            children: Arc::new(ChildFinalizers::default()),
             tx: Arc::new(tx),
             connection_name: conn_name,
             after_commit: std::sync::Mutex::new(Vec::new()),
@@ -1893,7 +1988,16 @@ impl DB {
             connection_name: tx_state.connection_name.clone(),
             registry: tx_state.clone(),
         };
-        let result = CURRENT_TX.scope(Some(tx_state), make(transaction)).await;
+        let result = CURRENT_TX
+            .scope(Some(tx_state), async move {
+                // Install the new scope before listeners observe the successful BEGIN.
+                emit_tx_event(super::events::TransactionBeginning {
+                    connection_name: transaction.connection_name.to_string(),
+                })
+                .await;
+                make(transaction).await
+            })
+            .await;
 
         // Transfer state before the next await. Dropping the caller now only
         // stops waiting: the physical outcome, listeners, and callbacks remain
@@ -1937,6 +2041,7 @@ impl DB {
     /// calling `begin_transaction`, especially on SQLite (where the
     /// single shared connection is checked out for the tx duration).
     pub async fn begin_transaction() -> Result<Transaction, FrameworkError> {
+        Self::notify_before_transaction()?;
         let conn = DB::connection()?;
         let conn_name: Arc<str> = DB::default_connection().into();
         let tx = conn
@@ -1953,6 +2058,9 @@ impl DB {
         // `Transaction::rollback`. It is never installed as `CURRENT_TX`, so
         // only calls that name the handle reach it.
         let registry = Arc::new(TxState {
+            parent: None,
+            depth: 1,
+            children: Arc::new(ChildFinalizers::default()),
             tx: inner.clone(),
             connection_name: conn_name.clone(),
             after_commit: std::sync::Mutex::new(Vec::new()),

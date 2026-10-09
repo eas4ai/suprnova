@@ -85,9 +85,8 @@ impl crate::database::DB {
     /// discards the callbacks registered since its savepoint, as Laravel
     /// discards those of a nested transaction that rolls back; callbacks
     /// registered before the savepoint, after the rollback, or inside a
-    /// savepoint that is kept still run at the commit. Suprnova refuses a
-    /// nested `DB::transaction`, so the transaction a callback waits for is
-    /// always the outermost one.
+    /// savepoint that is kept still run at the commit. Successful nested
+    /// transactions defer their callbacks until the outermost commit.
     ///
     /// The callback is an async closure returning `Result`, the shape the
     /// after-commit queue that [`Job::after_commit`](crate::queue::Job::after_commit)
@@ -127,6 +126,16 @@ impl crate::database::DB {
         Fut: Future<Output = Result<(), FrameworkError>> + Send + 'static,
     {
         register_callback(Box::new(move || Box::pin(callback()))).await
+    }
+
+    /// Queue compensation for the enclosing transaction or savepoint rollback.
+    /// Outside a transaction the callback is discarded because no rollback occurs.
+    pub async fn after_rollback<F, Fut>(callback: F) -> Result<(), FrameworkError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), FrameworkError>> + Send + 'static,
+    {
+        register_rollback_callback(Box::new(move || Box::pin(callback()))).await
     }
 }
 
@@ -349,7 +358,7 @@ async fn run_after_commit_list(
 /// behind it); a child cancelled only by runtime shutdown is logged as
 /// lost work.
 async fn run_one_callback(cb: AfterCommitCallback) -> Result<(), FrameworkError> {
-    let child = spawn_owned(async move { cb().await });
+    let child = spawn_owned(scoped_callback(async move { cb().await }));
     match child.await {
         Ok(outcome) => outcome,
         Err(join_err) => Err(FrameworkError::internal(format!(
@@ -387,10 +396,10 @@ pub(crate) async fn run_rollback(callbacks: Vec<AfterCommitCallback>) {
     // Savepoint rollback also enters here after slicing callbacks out of
     // the registry. Its caller can be cancelled, so own the whole list
     // before awaiting the first callback.
-    if let Err(error) = spawn_owned(async move {
+    if let Err(error) = spawn_owned(scoped_callback(async move {
         let mut callbacks = callbacks;
         run_rollback_list(&mut callbacks).await;
-    })
+    }))
     .await
     {
         tracing::error!(
@@ -466,7 +475,7 @@ impl GuardedCallbacks {
     pub(crate) async fn run_after_commit(mut self) -> Result<(), FrameworkError> {
         let mut callbacks = std::mem::take(&mut self.after_commit);
         self.complete = true;
-        spawn_owned(async move { run_after_commit_list(&mut callbacks).await })
+        spawn_owned(scoped_callback(async move { run_after_commit_list(&mut callbacks).await }))
             .await
             .map_err(|error| FrameworkError::internal(format!(
                 "after-commit runner ended without a result (the transaction itself committed): {error}"
@@ -493,7 +502,7 @@ impl Drop for GuardedCallbacks {
         let after_commit = std::mem::take(&mut self.after_commit);
         let on_rollback = std::mem::take(&mut self.on_rollback);
         let committed = self.committed;
-        spawn_detached(async move {
+        spawn_detached(scoped_callback(async move {
             if committed {
                 let mut rest = after_commit;
                 // Errors are already logged inside; nothing to surface to.
@@ -501,7 +510,7 @@ impl Drop for GuardedCallbacks {
             } else {
                 compensate(after_commit, on_rollback).await;
             }
-        });
+        }));
     }
 }
 
@@ -520,6 +529,16 @@ pub(crate) fn spawn_detached(future: impl Future<Output = ()> + Send + 'static) 
              async runtime is running to complete them; deferred work is lost",
         );
     }
+}
+
+// Rollback compensation belongs to the still open enclosing transaction.
+// Finalization tasks choose their own ambient scope instead.
+fn scoped_callback<T>(future: impl Future<Output = T>) -> impl Future<Output = T> {
+    let transaction = super::transaction::CURRENT_TX
+        .try_with(Clone::clone)
+        .ok()
+        .flatten();
+    super::transaction::CURRENT_TX.scope(transaction, future)
 }
 
 /// Own finalization work independently of its caller while retaining the

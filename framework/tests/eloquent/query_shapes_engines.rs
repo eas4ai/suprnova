@@ -209,12 +209,12 @@ async fn unions_page_count_and_order() {
 /// DATA-037: random order runs on every engine and returns every row.
 async fn random_order_runs() {
     assert_eq!(
-        sorted_ids(items().in_random_order()).await,
+        sorted_ids(items().in_random_order(None)).await,
         vec![1, 2, 3, 4, 5, 6]
     );
     assert!(
         items()
-            .in_random_order()
+            .in_random_order(None)
             .first()
             .await
             .unwrap_or_else(|e| panic!("first() in random order: {e}"))

@@ -35,6 +35,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and direction, with named typed boundaries available through `Cursor::parameter`.
 - **Page item transformations.** `through` changes a length-aware, simple or
   cursor page's item type while preserving all pagination metadata.
+- **Missing-row messages on query builders.** `first_or_fail` names the model
+  or table, and `first_or_fail_with` accepts your message while keeping HTTP 404.
+- **Nested closure transactions.** Inner `DB::transaction` calls use savepoints;
+  an inner rollback keeps the outer transaction open.
+- **Transaction depth.** `DB::transaction_level()` reports the ambient nesting level.
+- **Rollback callbacks.** `DB::after_rollback` runs compensation for the enclosing
+  rollback and preserves callbacks from successful inner scopes until the outer outcome.
+- **Guards before transactions.** `DB::before_starting_transaction` runs listeners
+  before BEGIN or a savepoint and propagates a listener's error without starting it.
+- **Raw query expressions.** `DB::raw` supplies SQL for updates, grouping and
+  aggregate filters while ordinary values and raw-fragment bindings stay bound.
+- **Table query ranges.** `where_between`, `where_not_between` and their OR forms
+  accept inclusive bounds, raw expressions and scalar subqueries.
+- **Table query maximums.** `max` reads typed values and returns none for an empty set.
+- **Table queries ordered by age.** `oldest` and `oldest_by` order rows ascending.
+- **Seeded random query ordering.** Both builders accept a seed, use RAND(seed)
+  on MySQL and setseed with random() on Postgres; SQLite accepts the seed without seeding.
+
 - **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
   elects one replica per tick for every task; `.on_every_server()` opts out.
 - **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
@@ -896,6 +914,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   keep their document metadata at the root without merging the first item's metadata.
 - **Empty results have page one.** Length-aware pagination reports one last
   page and includes its page-one link when there are no matching rows.
+- **Model ordering follows timestamp declarations.** `oldest` and `latest` use
+  the model's declared creation column, including renamed timestamps.
+
 - **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
   dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports
   whether it was registered.

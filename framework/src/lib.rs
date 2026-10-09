@@ -173,6 +173,7 @@ pub use database::{
     RouteColumn, RouteParam, SchemaDump, StoredDateTime, Transaction, TransactionBeginning,
     TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource, WhereIn,
 };
+pub use database::{QueryExpression, RawExpression, UpdateAttrs, UpdateValue};
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{

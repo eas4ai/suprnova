@@ -192,6 +192,16 @@ async fn large_unsigned_writes(
     }
 }
 
+use super::expression::{QueryExpression, UpdateAttrs, UpdateValue, random_order};
+use crate::eloquent::builder::{rewrite_raw_placeholders, validate_raw_placeholders};
+
+#[derive(Debug, Clone)]
+enum TableOrder {
+    Column(QueryExpression, Direction),
+    Raw(String, Vec<SeaValue>),
+    Random(Option<u64>),
+}
+
 /// One entry in a [`DbTableBuilder`]'s select list.
 #[derive(Debug, Clone)]
 enum SelectItem {
@@ -201,6 +211,69 @@ enum SelectItem {
     /// A caller-written expression from [`DbTableBuilder::select_raw`],
     /// written verbatim.
     Raw(String),
+    BoundRaw(String, Vec<SeaValue>),
+    Maximum(QueryExpression),
+}
+
+impl SelectItem {
+    fn render(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        counter: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        match self {
+            Self::Column(column) => render_select_column(backend, column),
+            Self::Raw(sql) => Ok(sql.clone()),
+            Self::Maximum(column) => Ok(format!(
+                "MAX({}) AS __suprnova_max",
+                column.render(backend, values, counter)?
+            )),
+            Self::BoundRaw(sql, bindings) => {
+                render_bound_fragment(backend, sql, bindings, values, counter)
+            }
+        }
+    }
+}
+
+impl TableOrder {
+    fn render(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        counter: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        match self {
+            Self::Column(column, direction) => {
+                let direction = if matches!(direction, Direction::Asc) {
+                    "ASC"
+                } else {
+                    "DESC"
+                };
+                Ok(format!(
+                    "{} {direction}",
+                    column.render(backend, values, counter)?
+                ))
+            }
+            Self::Raw(sql, bindings) => {
+                render_bound_fragment(backend, sql, bindings, values, counter)
+            }
+            Self::Random(seed) => Ok(random_order(backend, *seed)),
+        }
+    }
+}
+
+fn render_bound_fragment(
+    backend: DbBackend,
+    sql: &str,
+    bindings: &[SeaValue],
+    values: &mut Vec<SeaValue>,
+    counter: &mut usize,
+) -> Result<String, FrameworkError> {
+    let sql = rewrite_raw_placeholders(backend, sql, bindings, *counter)?;
+    *counter += bindings.len();
+    values.extend_from_slice(bindings);
+    Ok(sql)
 }
 
 /// Standalone query builder returned by
@@ -218,8 +291,9 @@ pub struct DbTableBuilder {
     table: String,
     joins: Vec<JoinClause>,
     conditions: Vec<Condition>,
-    groups: Vec<String>,
-    order: Vec<(String, Direction)>,
+    groups: Vec<QueryExpression>,
+    havings: Vec<Condition>,
+    order: Vec<TableOrder>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_items: Vec<SelectItem>,
@@ -245,6 +319,7 @@ impl DbTableBuilder {
             joins: Vec::new(),
             conditions: Vec::new(),
             groups: Vec::new(),
+            havings: Vec::new(),
             order: Vec::new(),
             limit_value: None,
             offset_value: None,
@@ -702,9 +777,185 @@ impl DbTableBuilder {
     }
 
     /// Add a `GROUP BY col` term. Multiple calls chain in order.
-    pub fn group_by(mut self, col: impl Into<String>) -> Self {
+    pub fn group_by(mut self, col: impl Into<QueryExpression>) -> Self {
         self.groups.push(col.into());
         self
+    }
+
+    /// Bind values in a trusted projection while keeping its SQL explicit.
+    pub fn select_raw_with_bindings(
+        mut self,
+        sql: impl Into<String>,
+        bindings: Vec<SeaValue>,
+    ) -> Self {
+        self.select_items
+            .push(SelectItem::BoundRaw(sql.into(), bindings));
+        self
+    }
+
+    /// Bind values in a trusted ordering expression.
+    pub fn order_by_raw(mut self, sql: impl Into<String>, bindings: Vec<SeaValue>) -> Self {
+        self.order.push(TableOrder::Raw(sql.into(), bindings));
+        self
+    }
+
+    /// Filter an aggregate with a validated column, raw expression or subquery.
+    pub fn having(self, column: impl Into<QueryExpression>, value: impl Into<SeaValue>) -> Self {
+        self.having_op(column, "=", value)
+    }
+
+    /// Filter an aggregate with an explicit validated comparison operator.
+    pub fn having_op(
+        mut self,
+        column: impl Into<QueryExpression>,
+        op: &str,
+        value: impl Into<SeaValue>,
+    ) -> Self {
+        self.havings.push(Condition::ExpressionCompare {
+            column: column.into(),
+            op: op.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Keep rows inside an inclusive range without binding the column expression.
+    pub fn where_between<V: Into<SeaValue> + Clone>(
+        mut self,
+        column: impl Into<QueryExpression>,
+        range: std::ops::RangeInclusive<V>,
+    ) -> Self {
+        let low = range.start().clone().into();
+        let high = range.end().clone().into();
+        self.conditions.push(Condition::Between {
+            column: column.into(),
+            low,
+            high,
+            negated: false,
+        });
+        self
+    }
+
+    /// Keep rows outside an inclusive range, including expression columns.
+    pub fn where_not_between<V: Into<SeaValue> + Clone>(
+        mut self,
+        column: impl Into<QueryExpression>,
+        range: std::ops::RangeInclusive<V>,
+    ) -> Self {
+        let low = range.start().clone().into();
+        let high = range.end().clone().into();
+        self.conditions.push(Condition::Between {
+            column: column.into(),
+            low,
+            high,
+            negated: true,
+        });
+        self
+    }
+
+    /// Add a flat OR range predicate while preserving explicit groups.
+    pub fn or_where_between<V: Into<SeaValue> + Clone>(
+        mut self,
+        column: impl Into<QueryExpression>,
+        range: std::ops::RangeInclusive<V>,
+    ) -> Self {
+        let mut clause = Self::new(self.table.clone()).where_between(column, range);
+        if let Some(condition) = clause.conditions.pop() {
+            push_or(&mut self.conditions, condition);
+        }
+        self
+    }
+
+    /// Add a flat OR predicate for values outside the inclusive range.
+    pub fn or_where_not_between<V: Into<SeaValue> + Clone>(
+        mut self,
+        column: impl Into<QueryExpression>,
+        range: std::ops::RangeInclusive<V>,
+    ) -> Self {
+        let mut clause = Self::new(self.table.clone()).where_not_between(column, range);
+        if let Some(condition) = clause.conditions.pop() {
+            push_or(&mut self.conditions, condition);
+        }
+        self
+    }
+
+    /// Randomize rows; SQLite accepts the seed but its RANDOM() has no seed support.
+    /// MySQL uses RAND(seed), and Postgres sets the connection seed before random().
+    pub fn in_random_order(mut self, seed: impl Into<Option<u64>>) -> Self {
+        self.order.push(TableOrder::Random(seed.into()));
+        self
+    }
+
+    /// Order by created_at ascending when you use conventional table timestamps.
+    pub fn oldest(self) -> Self {
+        self.oldest_by("created_at")
+    }
+
+    /// Order by your chosen creation column or expression ascending.
+    pub fn oldest_by(mut self, column: impl Into<QueryExpression>) -> Self {
+        self.order
+            .push(TableOrder::Column(column.into(), Direction::Asc));
+        self
+    }
+
+    /// Return a table-naming 404 so missing rows can become HTTP responses.
+    pub async fn first_or_fail(self) -> Result<DynamicRow, FrameworkError> {
+        let message = format!("No rows found in table {}", self.table);
+        self.first_or_fail_with(message).await
+    }
+
+    /// Return your message with a 404 when the query matches no row.
+    pub async fn first_or_fail_with(
+        self,
+        message: impl Into<String>,
+    ) -> Result<DynamicRow, FrameworkError> {
+        let message = message.into();
+        self.first()
+            .await?
+            .ok_or_else(|| FrameworkError::not_found(message))
+    }
+
+    /// Read the maximum value with typed decoding and None for an empty set.
+    pub async fn max<T: super::ColumnValue>(
+        self,
+        column: impl Into<QueryExpression>,
+    ) -> Result<Option<T>, FrameworkError> {
+        self.validate_inputs()?;
+        let column = column.into();
+        column.validate()?;
+        self.observe_reads();
+        let mut reads = ReadSet::default();
+        column.collect_tables(&mut reads);
+        reads.observe();
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            self.connection_override.as_deref(),
+            None,
+        )
+        .await?;
+        let backend = exec.backend();
+        let mut copy = self;
+        copy.order.clear();
+        copy.select_items = vec![SelectItem::Maximum(column)];
+        let (sql, values) = copy.render_select(backend)?;
+        let row = exec
+            .query_one(Statement::from_sql_and_values(backend, sql, values))
+            .await?;
+        match row {
+            Some(row) => {
+                super::column_value::unless_null::<T>(&row, "__suprnova_max").map_err(Into::into)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Inspect backend SQL and bindings so you can verify engine-specific queries.
+    pub fn to_sql_for(
+        &self,
+        backend: DbBackend,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
+        self.validate_inputs()?;
+        self.render_select(backend)
     }
 
     // ---- Joins ---------------------------------------------------------
@@ -951,13 +1202,15 @@ impl DbTableBuilder {
     /// Add an `ORDER BY col DESC` term. Multiple `order_by_*` calls
     /// chain in insertion order.
     pub fn order_by_desc(mut self, col: impl Into<String>) -> Self {
-        self.order.push((col.into(), Direction::Desc));
+        self.order
+            .push(TableOrder::Column(col.into().into(), Direction::Desc));
         self
     }
 
     /// Add an `ORDER BY col ASC` term.
     pub fn order_by_asc(mut self, col: impl Into<String>) -> Self {
-        self.order.push((col.into(), Direction::Asc));
+        self.order
+            .push(TableOrder::Column(col.into().into(), Direction::Asc));
         self
     }
 
@@ -973,7 +1226,8 @@ impl DbTableBuilder {
     /// Laravel's `reorder($column, $direction)`.
     pub fn reorder_by(mut self, col: impl Into<String>, direction: Direction) -> Self {
         self.order.clear();
-        self.order.push((col.into(), direction));
+        self.order
+            .push(TableOrder::Column(col.into().into(), direction));
         self
     }
 
@@ -997,8 +1251,13 @@ impl DbTableBuilder {
     pub(crate) fn validate_inputs(&self) -> Result<(), FrameworkError> {
         crate::database::validate_identifier(&self.table)?;
         for item in &self.select_items {
-            if let SelectItem::Column(col) = item {
-                validate_select_column(col)?;
+            match item {
+                SelectItem::Column(col) => validate_select_column(col)?,
+                SelectItem::BoundRaw(sql, bindings) => {
+                    validate_raw_placeholders(sql, bindings.len())?
+                }
+                SelectItem::Maximum(column) => column.validate()?,
+                SelectItem::Raw(_) => {}
             }
         }
         for join in &self.joins {
@@ -1008,10 +1267,17 @@ impl DbTableBuilder {
             validate_condition(condition)?;
         }
         for col in &self.groups {
-            crate::database::validate_identifier(col)?;
+            col.validate()?;
         }
-        for (col, _dir) in &self.order {
-            crate::database::validate_identifier(col)?;
+        for condition in &self.havings {
+            validate_condition(condition)?;
+        }
+        for order in &self.order {
+            match order {
+                TableOrder::Column(column, _) => column.validate()?,
+                TableOrder::Raw(sql, bindings) => validate_raw_placeholders(sql, bindings.len())?,
+                TableOrder::Random(_) => {}
+            }
         }
         Ok(())
     }
@@ -1026,7 +1292,7 @@ impl DbTableBuilder {
         if self
             .select_items
             .iter()
-            .any(|item| matches!(item, SelectItem::Raw(raw) if raw_select_may_read(raw)))
+            .any(|item| matches!(item, SelectItem::Raw(raw) | SelectItem::BoundRaw(raw, _) if raw_select_may_read(raw)))
         {
             out.raw_fragment = true;
         }
@@ -1035,6 +1301,19 @@ impl DbTableBuilder {
         }
         for condition in &self.conditions {
             condition_tables(condition, out);
+        }
+        for column in &self.groups {
+            column.collect_tables(out);
+        }
+        for condition in &self.havings {
+            condition_tables(condition, out);
+        }
+        for order in &self.order {
+            match order {
+                TableOrder::Column(column, _) => column.collect_tables(out),
+                TableOrder::Raw(_, _) => out.raw_fragment = true,
+                TableOrder::Random(_) => {}
+            }
         }
     }
 
@@ -1313,12 +1592,13 @@ impl DbTableBuilder {
     /// missing `filter` visible to reviewers. Non-null attributes are bound;
     /// explicit nulls use the constant SQL literal `NULL` to retain the target
     /// column type on PostgreSQL.
-    pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    pub async fn update(self, attrs: impl Into<UpdateAttrs>) -> Result<u64, FrameworkError> {
+        let attrs = attrs.into();
         let connection = self.connection_override.clone();
         crate::render_cache::orm::atomic(connection.as_deref(), || self.update_inner(attrs)).await
     }
 
-    async fn update_inner(mut self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    async fn update_inner(mut self, attrs: UpdateAttrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Err(FrameworkError::database(format!(
                 "DB::table(\"{}\")::update called with empty attrs",
@@ -1341,7 +1621,7 @@ impl DbTableBuilder {
         .await?;
         let backend = exec.backend();
         self.resolve_joined_write_key(&exec).await?;
-        let large = large_unsigned_writes(&exec, &self.table, &attrs).await?;
+        let large = large_unsigned_writes(&exec, &self.table, &attrs.bound()).await?;
         let (sql, values) = self.render_update(&attrs, &large, backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let result = exec
@@ -1360,7 +1640,7 @@ impl DbTableBuilder {
     ///
     /// [`Builder<M>`]: crate::eloquent::Builder
     #[doc(alias = "update")]
-    pub async fn update_all(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    pub async fn update_all(self, attrs: impl Into<UpdateAttrs>) -> Result<u64, FrameworkError> {
         self.update(attrs).await
     }
 
@@ -1468,10 +1748,7 @@ impl DbTableBuilder {
             let items = self
                 .select_items
                 .iter()
-                .map(|item| match item {
-                    SelectItem::Column(col) => render_select_column(backend, col),
-                    SelectItem::Raw(raw) => Ok(raw.clone()),
-                })
+                .map(|item| item.render(backend, values, counter))
                 .collect::<Result<Vec<_>, _>>()?;
             sql.push_str(&items.join(", "));
         }
@@ -1489,24 +1766,22 @@ impl DbTableBuilder {
             let groups: Vec<String> = self
                 .groups
                 .iter()
-                .map(|col| quote_identifier(backend, col))
-                .collect();
+                .map(|col| col.render(backend, values, counter))
+                .collect::<Result<_, _>>()?;
             sql.push_str(&groups.join(", "));
         }
 
+        if !self.havings.is_empty() {
+            sql.push_str(" HAVING ");
+            sql.push_str(&render_conditions(&self.havings, backend, values, counter)?);
+        }
         if !self.order.is_empty() {
             sql.push_str(" ORDER BY ");
-            let order: Vec<String> = self
+            let order = self
                 .order
                 .iter()
-                .map(|(col, dir)| {
-                    let dir_sql = match dir {
-                        Direction::Asc => "ASC",
-                        Direction::Desc => "DESC",
-                    };
-                    format!("{} {dir_sql}", quote_identifier(backend, col))
-                })
-                .collect();
+                .map(|order| order.render(backend, values, counter))
+                .collect::<Result<Vec<_>, FrameworkError>>()?;
             sql.push_str(&order.join(", "));
         }
 
@@ -1616,7 +1891,7 @@ impl DbTableBuilder {
 
     fn render_update(
         &self,
-        attrs: &Attrs,
+        attrs: &UpdateAttrs,
         large: &HashMap<String, SeaValue>,
         backend: DbBackend,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
@@ -1636,13 +1911,19 @@ impl DbTableBuilder {
         }
         sql.push_str(" SET ");
         let sets: Vec<String> = attrs
-            .keys()
-            .map(|col| {
-                let v = attrs
-                    .get(col)
-                    .expect("key present in iter must be present in get");
-                let expression =
-                    write_value_expression(backend, col, v, large, &mut values, &mut counter);
+            .iter()
+            .map(|(col, value)| {
+                let expression = match value {
+                    UpdateValue::Bound(value) => write_value_expression(
+                        backend,
+                        col,
+                        value,
+                        large,
+                        &mut values,
+                        &mut counter,
+                    ),
+                    UpdateValue::Raw(raw) => raw.0.clone(),
+                };
                 format!("{} = {expression}", quote_identifier(backend, col))
             })
             .collect();
@@ -2447,7 +2728,7 @@ mod where_clause_render_tests {
         attrs.insert("active", false);
         let err = DbTableBuilder::new("users")
             .where_binary("email", "Alice@example.com")
-            .render_update(&attrs, &HashMap::new(), DbBackend::Sqlite)
+            .render_update(&attrs.into(), &HashMap::new(), DbBackend::Sqlite)
             .expect_err("UPDATE renders through the same clause builder");
         assert!(
             format!("{err}").contains("where_binary is not supported"),
@@ -2464,7 +2745,7 @@ mod where_clause_render_tests {
         attrs.insert("name", "Bob");
         let (sql, values) = DbTableBuilder::new("users")
             .filter("id", 7i64)
-            .render_update(&attrs, &HashMap::new(), DbBackend::Postgres)
+            .render_update(&attrs.into(), &HashMap::new(), DbBackend::Postgres)
             .expect("no binary term, so Postgres renders");
         assert_eq!(sql, r#"UPDATE "users" SET "name" = $1 WHERE "id" = $2"#);
         assert_eq!(values.len(), 2, "got: {values:?}");

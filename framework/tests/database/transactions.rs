@@ -286,32 +286,6 @@ async fn reads_inside_transaction_see_pending_writes_in_same_tx() {
 }
 
 #[tokio::test]
-async fn nested_db_transaction_is_rejected_at_runtime() {
-    // Spec §"Nested DB::transaction is rejected at runtime": calling
-    // DB::transaction inside an already-active transaction must error
-    // instead of starting a sibling top-level transaction that would
-    // commit / rollback independently of the outer scope. Users wanting
-    // nested-rollback semantics use `tx.savepoint(name)`.
-    let _db = fixture().await;
-
-    let outer: Result<(), FrameworkError> = DB::transaction(|_tx| {
-        Box::pin(async move {
-            let inner =
-                DB::transaction(|_t| Box::pin(async move { Ok::<(), FrameworkError>(()) })).await;
-            assert!(inner.is_err(), "nested DB::transaction must error");
-            let msg = format!("{}", inner.unwrap_err());
-            assert!(
-                msg.contains("nested DB::transaction is not supported"),
-                "error message points users at savepoint: {msg}"
-            );
-            Ok(())
-        })
-    })
-    .await;
-    assert!(outer.is_ok());
-}
-
-#[tokio::test]
 async fn builder_with_tx_routes_through_explicit_transaction() {
     // Builder::with_tx pins a read to the supplied tx without
     // installing CURRENT_TX. Pair it with Model::*_with_tx for
