@@ -1,0 +1,6 @@
+{
+  "name": "acme.widget",
+  "root": "acme-ui/widget",
+  "title": "Widget",
+  "files": ["widget.html", "widget.css"]
+}
