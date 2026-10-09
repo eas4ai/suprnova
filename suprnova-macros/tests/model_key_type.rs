@@ -27,6 +27,7 @@ fn scratch_root() -> PathBuf {
 
 const MEMBERS: &[&str] = &[
     "inferred",
+    "naive",
     "mismatch",
     "unknown-model-key",
     "unknown-model-value",
@@ -139,6 +140,17 @@ mod key_type_and_settings {
         assert_compiles(
             &cargo_check(&workspace, "inferred"),
             "each key type is its primary-key field's type",
+        );
+    }
+
+    /// The model package's naive setting reaches managed and ordinary fields,
+    /// while an explicit field cast still wins.
+    #[test]
+    fn naive_datetime_settings_reach_the_model_fields() {
+        let workspace = workspace("naive");
+        assert_compiles(
+            &cargo_check(&workspace, "naive"),
+            "the declared naive casts and overrides",
         );
     }
 

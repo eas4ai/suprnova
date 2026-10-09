@@ -265,8 +265,8 @@ fn expected_columns(backend: DbBackend) -> Vec<Expect> {
         expect("default_int", "int").default(&["7"]),
         expect("default_str", "varchar").default(&["x"]).length(255),
         expect("default_bool", "bool").default(&["true", "1"]),
-        expect("created_at", "varchar").length(255),
-        expect("updated_at", "varchar").length(255),
+        expect("created_at", "varchar").nullable().length(255),
+        expect("updated_at", "varchar").nullable().length(255),
         expect("deleted_at", "varchar").nullable().length(255),
     ]
 }
@@ -354,10 +354,11 @@ pub async fn every_column_type(conn: &DatabaseConnection) {
         }
         // MySQL shows `unsigned` in the column type; a key column that
         // differs in signedness from `id()` is refused by the database.
-        if matches!(want.logical, "id" | "bigint") {
+        if backend == DbBackend::MySql && matches!(want.logical, "id" | "bigint") {
             assert!(
-                !column.declared.to_lowercase().contains("unsigned"),
-                "column {name}: {:?} must be signed",
+                column.declared.to_lowercase().contains("unsigned")
+                    == (name == "id" || name == "owner_id"),
+                "column {name}: {:?} has the expected signedness",
                 column.declared
             );
         }

@@ -403,6 +403,12 @@ enum Commands {
         /// Replace the migrations the dump records with PrunedMigration names
         #[arg(long)]
         prune: bool,
+        /// Dump a named connection from DATABASE_<NAME>_URL instead of DATABASE_URL
+        #[arg(long)]
+        database: Option<String>,
+        /// Leave migration ledger rows out while keeping its table
+        #[arg(long)]
+        without_migration_data: bool,
     },
     /// Sync database schema to entity files (runs migrations + generates entities)
     #[command(name = "db:sync")]
@@ -723,8 +729,13 @@ fn main() {
         Commands::MigrateFresh { force, schema_path } => {
             commands::migrate_fresh::run(force, schema_path);
         }
-        Commands::SchemaDump { path, prune } => {
-            commands::schema_dump::run(path, prune);
+        Commands::SchemaDump {
+            path,
+            prune,
+            database,
+            without_migration_data,
+        } => {
+            commands::schema_dump::run(path, prune, database, without_migration_data);
         }
         Commands::DbSync {
             skip_migrations,

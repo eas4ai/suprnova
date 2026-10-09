@@ -92,7 +92,7 @@ pub struct LdCounter {
 /// `[package.metadata.suprnova.model]`.
 #[model(table = "ld_stamps", fillable = ["title"])]
 pub struct LdStamp {
-    pub id: i64,
+    pub id: u64,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -852,9 +852,9 @@ pub async fn u64_query_terminals(conn: &DatabaseConnection) {
 }
 
 /// Without the `[package.metadata.suprnova]` tables, which this package does
-/// not carry, `id()` and `foreign_id()` create signed columns and a
-/// `DateTime<Utc>` field without a cast stores text, as before PAR-045.
-pub async fn nothing_changes_without_the_settings(conn: &DatabaseConnection) {
+/// not carry, `id()` and `foreign_id()` create unsigned MySQL columns and a
+/// `DateTime<Utc>` field without a cast stores text, while timestamps are nullable.
+pub async fn laravel_schema_defaults_without_settings(conn: &DatabaseConnection) {
     let manager = SchemaManager::new(conn);
     drop_tables(conn, &["ld_stamps", "ld_signed"]).await;
     Schema::create(&manager, "ld_signed", |t| {
@@ -865,7 +865,7 @@ pub async fn nothing_changes_without_the_settings(conn: &DatabaseConnection) {
     .expect("create ld_signed");
     for column in catalog::columns(conn, "ld_signed").await {
         match conn.get_database_backend() {
-            DbBackend::MySql => assert_eq!(column.declared, "bigint", "{}", column.name),
+            DbBackend::MySql => assert_eq!(column.declared, "bigint unsigned", "{}", column.name),
             DbBackend::Postgres => assert_eq!(column.family, "bigint", "{}", column.name),
             _ => assert_eq!(column.family, "integer", "{}", column.name),
         }
@@ -878,6 +878,12 @@ pub async fn nothing_changes_without_the_settings(conn: &DatabaseConnection) {
     })
     .await
     .expect("create ld_stamps");
+    for column in catalog::columns(conn, "ld_stamps").await {
+        if ["created_at", "updated_at"].contains(&column.name.as_str()) {
+            assert!(column.nullable, "{} is nullable by default", column.name);
+        }
+    }
+
     let _guard = TestContainer::fake();
     TestContainer::singleton(DbConnection::from_raw(conn.clone()));
     let stamp = LdStamp::create(attrs! { title: "text" })
@@ -948,20 +954,20 @@ async fn mysql_u64_query_terminals() {
 }
 
 #[tokio::test]
-async fn sqlite_nothing_changes_without_the_settings() {
-    nothing_changes_without_the_settings(&connect_sqlite().await).await;
+async fn sqlite_laravel_schema_defaults_without_settings() {
+    laravel_schema_defaults_without_settings(&connect_sqlite().await).await;
 }
 
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
-async fn postgres_nothing_changes_without_the_settings() {
-    nothing_changes_without_the_settings(&connect_postgres().await).await;
+async fn postgres_laravel_schema_defaults_without_settings() {
+    laravel_schema_defaults_without_settings(&connect_postgres().await).await;
 }
 
 #[tokio::test]
 #[serial]
 #[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
-async fn mysql_nothing_changes_without_the_settings() {
-    nothing_changes_without_the_settings(&connect_mysql().await).await;
+async fn mysql_laravel_schema_defaults_without_settings() {
+    laravel_schema_defaults_without_settings(&connect_mysql().await).await;
 }

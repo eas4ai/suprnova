@@ -307,17 +307,23 @@ assignments.
 
 ## Unsigned keys on MySQL
 
-Laravel's `id()` creates `BIGINT UNSIGNED` on MySQL. A new scaffold's
-`users.id` is already unsigned there. An application whose `users.id` is
-unsigned on MySQL sets `unsigned_ids = true` in its `Cargo.toml`, so its own
-new tables match:
+Your new tables use unsigned IDs on MySQL by default. You use `id()` and
+`foreign_id()` to match Laravel's keys, and `timestamps()` to create
+nullable timestamps. A new scaffold's `users.id` is already unsigned.
+Declare unsigned keys as `u64` in your models.
+
+If your existing tables use signed IDs, keep that shape in new migrations
+with the opt-out:
 
 ```toml
 [package.metadata.suprnova.schema]
-unsigned_ids = true
+unsigned_ids = false
 ```
 
-Models read those keys into `u64` fields. See [Migrations](migrations.md).
+`#[suprnova::main]` installs it before migrations. Without that entry point,
+you call `suprnova::schema::Schema::set_unsigned_ids(false)` before your first
+migration. You keep signed columns on Postgres and SQLite with either
+setting. See [Migrations](migrations.md).
 
 ## What Suprnova does not support
 

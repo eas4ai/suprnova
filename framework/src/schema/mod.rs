@@ -65,11 +65,11 @@
 //!
 //! # Column types
 //!
-//! A column is `NOT NULL` unless it is marked `.nullable()`.
+//! A column is `NOT NULL` unless marked `.nullable()` or created by `timestamps()`.
 //!
 //! | Method | Column |
 //! |---|---|
-//! | `id()` | `id`, `BIGINT`, auto-increment, primary key |
+//! | `id()` | `id`, `BIGINT`, unsigned on MySQL, auto-increment, primary key |
 //! | `unsigned_id()` | `id()`, `UNSIGNED` on MySQL: Laravel's `id()` |
 //! | `foreign_id(name)` | `BIGINT`, the type of `id()` |
 //! | `unsigned_foreign_id(name)` | the type of `unsigned_id()`: Laravel's `foreignId` |
@@ -93,11 +93,10 @@
 //! | `ulid(name)` | `CHAR(26)` |
 //! | `binary(name)` | `bytea` on Postgres, `BLOB` elsewhere |
 //!
-//! After [`Schema::use_unsigned_ids`], `id()` and `foreign_id()` create
-//! what `unsigned_id()` and `unsigned_foreign_id()` create, in every
-//! migration the program runs. A binary built with `#[suprnova::main]`
-//! turns it on with `unsigned_ids = true` under
-//! `[package.metadata.suprnova.schema]` in its `Cargo.toml`.
+//! IDs are unsigned on MySQL by default, as Laravel creates them. A binary
+//! built with `#[suprnova::main]` installs `unsigned_ids = false` under
+//! `[package.metadata.suprnova.schema]` to keep signed IDs. Another entry
+//! point calls [`Schema::set_unsigned_ids`] before migrations run.
 //!
 //! Where the databases differ the builder does what Laravel does instead of
 //! refusing: `unsigned` and `.after(column)` apply on MySQL only, and the
@@ -245,9 +244,9 @@ async fn run(manager: &SchemaManager<'_>, steps: Vec<Step>) -> Result<(), DbErr>
 /// `unsigned_foreign_id()` create. One setting for the whole process, so
 /// every migration a binary runs, its own and a library's, makes the same
 /// columns; [`Schema::use_unsigned_ids`] sets it.
-static UNSIGNED_IDS: AtomicBool = AtomicBool::new(false);
+static UNSIGNED_IDS: AtomicBool = AtomicBool::new(true);
 
-/// Whether [`Schema::use_unsigned_ids`] has run in this process.
+/// Whether the process uses unsigned MySQL IDs.
 pub(crate) fn unsigned_ids() -> bool {
     UNSIGNED_IDS.load(Ordering::Relaxed)
 }
@@ -258,21 +257,18 @@ pub(crate) fn unsigned_ids() -> bool {
 pub struct Schema;
 
 impl Schema {
-    /// Makes every later `id()` create what `unsigned_id()` creates, and
-    /// every later `foreign_id(name)` what `unsigned_foreign_id(name)`
-    /// creates: `BIGINT UNSIGNED` on MySQL, and the same signed `BIGINT` as
-    /// before on Postgres and SQLite, which have no unsigned integers. These
-    /// are the columns Laravel's `id()` and `foreignId()` create on MySQL,
-    /// and a model reads them into `u64` fields.
+    /// Selects ID signedness before migrations so an existing signed MySQL schema stays compatible.
     ///
-    /// The setting holds for the whole process and cannot be undone, so every
-    /// migration the program runs makes the same columns. `#[suprnova::main]`
-    /// calls this before anything else runs when the binary's `Cargo.toml`
-    /// sets `unsigned_ids = true` in `[package.metadata.suprnova.schema]`. A
-    /// program that runs migrations without `#[suprnova::main]` calls it
-    /// itself, before its first migration.
+    /// IDs are unsigned by default on MySQL. Other backends keep signed IDs.
+    /// `#[suprnova::main]` installs the binary's `unsigned_ids` manifest setting.
+    /// Call this before migrations when you use another entry point.
+    pub fn set_unsigned_ids(enabled: bool) {
+        UNSIGNED_IDS.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Restores Laravel's default unsigned MySQL IDs before migrations run.
     pub fn use_unsigned_ids() {
-        UNSIGNED_IDS.store(true, Ordering::Relaxed);
+        Self::set_unsigned_ids(true);
     }
 
     /// Creates `table` with the columns, indexes and foreign keys `define`

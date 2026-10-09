@@ -58,25 +58,18 @@ impl SchemaDump {
     /// is read through its own connection. The file is replaced only when
     /// the dump succeeds.
     pub async fn dump<M: MigratorTrait>(url: &str, path: &Path) -> Result<(), FrameworkError> {
-        let known = Engine::from_scheme(url)?;
-        // A missing tool is reported before any connection is tried.
-        if let Some(engine) = known
-            && let Some(tool) = engine.dump_tool()
-        {
-            find_tool(tool)?;
-        }
-        let db = connect(url).await?;
-        let engine = match known {
-            Some(engine) => engine,
-            None => Engine::of(&db).await?,
-        };
-        let mut sql = match engine {
-            Engine::Sqlite => sqlite_schema(&db).await?,
-            Engine::Postgres => postgres_schema(url).await?,
-            Engine::Mysql | Engine::Mariadb => mysql_schema(url, engine).await?,
-        };
-        sql.push_str(&ledger_inserts::<M>(&db, engine).await?);
-        write_replacing(path, &sql)
+        Self::dump_with_options::<M>(url, path, false).await
+    }
+
+    /// Writes a schema snapshot, optionally leaving migration rows out so
+    /// you can load its schema without an applied migration history.
+    pub async fn dump_with_options<M: MigratorTrait>(
+        url: &str,
+        path: &Path,
+        without_migration_data: bool,
+    ) -> Result<(), FrameworkError> {
+        let (schema, ledger) = dump_contents::<M>(url, !without_migration_data).await?;
+        write_replacing(path, &format!("{schema}{ledger}"))
     }
 
     /// Loads the dump at `path` into the database at `url`: Postgres with
@@ -144,8 +137,25 @@ impl SchemaDump {
         path: &Path,
         migrations: &Path,
     ) -> Result<Vec<String>, FrameworkError> {
-        Self::dump::<M>(url, path).await?;
-        Self::prune(migrations, path)
+        Self::dump_and_prune_with_options::<M>(url, path, migrations, false).await
+    }
+
+    /// Writes the snapshot and prunes applied migrations even when you
+    /// choose to leave their ledger rows out of the snapshot.
+    pub async fn dump_and_prune_with_options<M: MigratorTrait>(
+        url: &str,
+        path: &Path,
+        migrations: &Path,
+        without_migration_data: bool,
+    ) -> Result<Vec<String>, FrameworkError> {
+        let (schema, ledger) = dump_contents::<M>(url, true).await?;
+        let sql = if without_migration_data {
+            schema
+        } else {
+            format!("{schema}{ledger}")
+        };
+        write_replacing(path, &sql)?;
+        Self::prune_contents(migrations, &ledger)
     }
 
     /// Prunes the migrations in `migrations` (a project's `src/migrations`)
@@ -159,12 +169,15 @@ impl SchemaDump {
     /// `name()` differs from its file name, or when a pruned migration is
     /// not declared and listed the way `suprnova make:migration` writes it.
     pub fn prune(migrations: &Path, dump: &Path) -> Result<Vec<String>, FrameworkError> {
-        let sql = read(dump)?;
+        Self::prune_contents(migrations, &read(dump)?)
+    }
+
+    fn prune_contents(migrations: &Path, sql: &str) -> Result<Vec<String>, FrameworkError> {
         let module_path = migrations.join("mod.rs");
         let module = read(&module_path)?;
         let mut lines: Vec<String> = module.lines().map(str::to_owned).collect();
         let mut pruned = Vec::new();
-        for name in ledger_versions(&sql) {
+        for name in ledger_versions(sql) {
             let identifier =
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             let marker = format!("Box::new(suprnova::PrunedMigration::new(\"{name}\"))");
@@ -224,6 +237,36 @@ impl SchemaDump {
         }
         Ok(pruned.into_iter().map(|(name, _)| name).collect())
     }
+}
+
+/// Read the schema and, when needed, the ledger through the same connection.
+async fn dump_contents<M: MigratorTrait>(
+    url: &str,
+    include_ledger: bool,
+) -> Result<(String, String), FrameworkError> {
+    let known = Engine::from_scheme(url)?;
+    // A missing tool is reported before any connection is tried.
+    if let Some(engine) = known
+        && let Some(tool) = engine.dump_tool()
+    {
+        find_tool(tool)?;
+    }
+    let db = connect(url).await?;
+    let engine = match known {
+        Some(engine) => engine,
+        None => Engine::of(&db).await?,
+    };
+    let sql = match engine {
+        Engine::Sqlite => sqlite_schema(&db).await?,
+        Engine::Postgres => postgres_schema(url).await?,
+        Engine::Mysql | Engine::Mariadb => mysql_schema(url, engine).await?,
+    };
+    let ledger = if include_ledger {
+        ledger_inserts::<M>(&db, engine).await?
+    } else {
+        String::new()
+    };
+    Ok((sql, ledger))
 }
 
 /// The code of the migration called `name` in `migrations`: its file, or

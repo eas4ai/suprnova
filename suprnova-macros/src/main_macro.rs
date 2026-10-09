@@ -195,7 +195,7 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
 /// The statements that install the binary's schema settings, and an
 /// `include_bytes!` of the manifest they came from, so cargo re-expands
 /// `main` when the settings change: cargo does not fingerprint
-/// `[package.metadata]`. Nothing for a package without a manifest.
+/// `[package.metadata]`. A missing package directory leaves the library defaults in place.
 fn schema_installation(
     read: Option<&crate::package_settings::Read<crate::package_settings::SchemaSettings>>,
 ) -> TokenStream2 {
@@ -206,11 +206,8 @@ fn schema_installation(
         Some(path) => quote! { const _: &[u8] = ::core::include_bytes!(#path); },
         None => TokenStream2::new(),
     };
-    let unsigned_ids = if read.settings.unsigned_ids {
-        quote! { ::suprnova::schema::Schema::use_unsigned_ids(); }
-    } else {
-        TokenStream2::new()
-    };
+    let enabled = read.settings.unsigned_ids;
+    let unsigned_ids = quote! { ::suprnova::schema::Schema::set_unsigned_ids(#enabled); };
     quote! {
         #tracking
         #unsigned_ids
@@ -225,8 +222,7 @@ mod tests {
     use super::*;
     use syn::parse2;
 
-    /// `unsigned_ids = true` becomes the documented call, and nothing else
-    /// does: a package without the table, or with `false`, gets no call.
+    /// Both settings become the documented call so false overrides the unsigned default.
     #[test]
     fn unsigned_ids_installs_the_documented_call() {
         use crate::package_settings::{Read, SchemaSettings};
@@ -235,15 +231,21 @@ mod tests {
             manifest: None,
         };
         let off = Read {
-            settings: SchemaSettings::default(),
+            settings: SchemaSettings {
+                unsigned_ids: false,
+            },
             manifest: None,
         };
         assert!(
             schema_installation(Some(&on))
                 .to_string()
-                .contains("Schema :: use_unsigned_ids ()")
+                .contains("Schema :: set_unsigned_ids (true)")
         );
-        assert!(schema_installation(Some(&off)).is_empty());
+        assert!(
+            schema_installation(Some(&off))
+                .to_string()
+                .contains("Schema :: set_unsigned_ids (false)")
+        );
         assert!(schema_installation(None).is_empty());
     }
 

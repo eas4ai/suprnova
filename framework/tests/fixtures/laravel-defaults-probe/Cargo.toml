@@ -27,7 +27,7 @@ publish = false
 datetime_cast = "native"
 
 [package.metadata.suprnova.schema]
-unsigned_ids = true
+unsigned_ids = false
 
 # `#[suprnova::main]`, which installs `unsigned_ids` from the table above.
 [[bin]]

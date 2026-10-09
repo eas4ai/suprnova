@@ -1,11 +1,12 @@
 //! PAR-045 through a package that carries both settings: the casts
 //! `#[suprnova::model]` chose from `datetime_cast = "native"`, and the
-//! columns this package's binaries create with `unsigned_ids = true`.
+//! columns this package's binaries create with `unsigned_ids = false`.
 //!
 //! Each backend test runs the three binaries in turn against one database:
 //! `plain-probe` (no setting), `documented-call-probe` (the documented
-//! call) and `laravel-defaults-probe` (`#[suprnova::main]`). With the
-//! setting, MySQL gets `BIGINT UNSIGNED` keys; Postgres and SQLite get the
+//! call) and `laravel-defaults-probe` (`#[suprnova::main]`). Without the
+//! setting, MySQL gets `BIGINT UNSIGNED` keys; the opt-out keeps signed keys.
+//! Postgres and SQLite get the
 //! columns `plain-probe` created. The models then write and read the
 //! native columns. The Postgres and MySQL tests need `PG_TEST_URL` and
 //! `MYSQL_TEST_URL`; `scripts/check-laravel-defaults.sh` creates both, and
@@ -250,24 +251,24 @@ async fn settings_reach_models_and_migrations(url: &str) {
 
     if backend == DbBackend::MySql {
         assert!(
-            plain.iter().all(|declared| declared == "bigint"),
-            "without the setting the keys are signed: {plain:?}"
+            plain.iter().all(|declared| declared == "bigint unsigned"),
+            "without the setting the keys are unsigned: {plain:?}"
         );
         assert!(
-            documented
-                .iter()
-                .all(|declared| declared == "bigint unsigned"),
-            "the documented call makes them unsigned: {documented:?}"
+            documented.iter().all(|declared| declared == "bigint"),
+            "the documented call makes them signed: {documented:?}"
         );
         assert!(
-            main.iter().all(|declared| declared == "bigint unsigned"),
-            "#[suprnova::main] makes them unsigned: {main:?}"
+            main.iter().all(|declared| declared == "bigint"),
+            "#[suprnova::main] installs the signed opt-out: {main:?}"
         );
     } else {
         assert_eq!(documented, plain, "the documented call changes no column");
         assert_eq!(main, plain, "#[suprnova::main] changes no column");
     }
 
+    reset(&conn).await;
+    migrate_with(PLAIN, url);
     models_round_trip(&conn).await;
     reset(&conn).await;
 }

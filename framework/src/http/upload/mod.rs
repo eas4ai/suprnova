@@ -795,6 +795,8 @@ async fn parse_parts<F>(
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
+    let transform = req.prepared_input();
+    let target = req.validation_redirect_target();
     let MultipartLimits {
         max_body_bytes,
         max_parts,
@@ -991,7 +993,7 @@ where
         // is the canonical marker of a file part. Text parts may carry
         // a `Content-Type`, so we don't use `mime.is_some()` as the
         // discriminator.
-        let collected = collect_part(
+        let collected = match collect_part(
             &mut field,
             &name,
             &mut per_field_validator,
@@ -1005,14 +1007,20 @@ where
             check_chunks,
         )
         .await
-        .map_err(|err| match err {
-            FrameworkError::InvalidUpload(message) => {
+        {
+            Ok(collected) => collected,
+            Err(FrameworkError::InvalidUpload(message)) => {
                 let mut errors = ValidationErrors::new();
                 errors.add(field_error_key(&name, Some(index)), *message);
-                FrameworkError::validation_errors(errors)
+                let input = if target.is_some() {
+                    crate::Request::multipart_old_input(&payload)?
+                } else {
+                    serde_json::Value::Null
+                };
+                return Err(crate::Request::validation_failure(errors, target, input));
             }
-            other => other,
-        })?;
+            Err(error) => return Err(error),
+        };
 
         let value = match collected {
             Collected::File(part) => {
@@ -1030,7 +1038,7 @@ where
                 }
             }
             Collected::Text(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => MultipartValue::Text(text),
+                Ok(text) => MultipartValue::Text(transform(&name, text)),
                 Err(not_utf8) => MultipartValue::NonUtf8Text(not_utf8.into_bytes()),
             },
         };
@@ -1125,11 +1133,13 @@ where
 ///
 /// # Stage order
 ///
-/// The extractor runs `authorize`, before any byte of the body is read;
+/// The extractor runs `prepare_for_validation`, then `authorize`, before
+/// any byte of the body is read;
 /// then the extraction, with each field's validation; then
 /// `after_validation`; then `after_validation_async`; then the handler.
-/// Each stage runs only after the one before it succeeded, so a database
-/// check in the async hook never sees a malformed or missing field.
+/// Real requests merge field and hook errors once a value is constructed.
+/// Missing or malformed scalar input and streaming failures stop extraction.
+/// Marked Precognition requests keep their stage gates.
 ///
 /// # Hook errors
 ///
@@ -1142,20 +1152,27 @@ where
 /// the second photo.
 #[async_trait::async_trait]
 pub trait MultipartRequestHooks {
+    /// Prepares input before authorization so validation sees normalized text.
+    ///
+    /// Register deferred changes with `Request::transform_input` to keep the body unread.
+    fn prepare_for_validation(_req: &mut crate::http::Request) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
     /// Called BEFORE the body is consumed. Return `false` to short-circuit
     /// with `FrameworkError::Unauthorized` (maps to HTTP 403 in this codebase).
     fn authorize(_req: &crate::http::Request) -> bool {
         true
     }
 
-    /// Called AFTER the struct is fully constructed and every field passed
-    /// its own validation. Return a non-empty `Err(ValidationErrors)` to
+    /// Called after construction so real requests merge cross-field and field errors.
+    /// Return a non-empty `Err(ValidationErrors)` to
     /// surface cross-field validation failures as a 422 response.
     fn after_validation(&self) -> Result<(), crate::error::ValidationErrors> {
         Ok(())
     }
 
-    /// Async cross-field hook, run after [`after_validation`] succeeded and
+    /// Async cross-field hook, run after [`after_validation`] on real requests and
     /// before the handler: the place for database checks such as `Unique`
     /// or `Exists`, which need `.await`. Return a non-empty
     /// `Err(ValidationErrors)` to answer 422.

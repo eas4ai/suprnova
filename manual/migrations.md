@@ -244,15 +244,15 @@ The layer lives at `suprnova::schema::Schema`. Import it by that path.
 
 ### Column methods
 
-A column is `NOT NULL` unless you call `.nullable()`. The table lists the column
+A column is `NOT NULL` unless you call `.nullable()` or use `timestamps()`. The table lists the column
 each method creates. The SQLite column is the type name SQLite stores, and its
 affinity is what the database reports.
 
 | Method | SQLite | Postgres | MySQL |
 |--------|--------|----------|-------|
-| `id()` | `integer`, auto-increment, primary key | `bigserial`, primary key | `bigint`, auto-increment, primary key |
+| `id()` | `integer`, auto-increment, primary key | `bigserial`, primary key | `bigint unsigned`, auto-increment, primary key |
 | `unsigned_id()` | as `id()` | as `id()` | `bigint unsigned`, auto-increment, primary key |
-| `foreign_id(name)` | `integer` | `bigint` | `bigint` |
+| `foreign_id(name)` | `integer` | `bigint` | `bigint unsigned` |
 | `unsigned_foreign_id(name)` | `integer` | `bigint` | `bigint unsigned` |
 | `big_integer(name)` | `integer` | `bigint` | `bigint` |
 | `integer(name)` | `integer` | `integer` | `int` |
@@ -301,13 +301,12 @@ each integer type into one Rust type only: `i16` for `tiny_integer` and
 
 Laravel's `id()` and `foreignId()` are `BIGINT UNSIGNED` on MySQL, and MySQL
 refuses a foreign key whose type differs from the referenced column's, sign
-included. A new table that points at a Laravel `users` table uses
-`unsigned_foreign_id`:
+included. Use the default `id()` and `foreign_id()` for your new tables:
 
 ```rust
 Schema::create(manager, "orders", |t| {
-    t.unsigned_id();
-    t.unsigned_foreign_id("user_id").constrained("users").cascade_on_delete();
+    t.id();
+    t.foreign_id("user_id").constrained("users").cascade_on_delete();
     t.enumeration("status", &["draft", "paid"]).default("draft");
     t.timestamps_tz();
 })
@@ -339,27 +338,29 @@ one: `find` returns `None`, and a route that binds such a key answers 404. A
 negative value in the column fails the read, naming the column. The tests of
 a Laravel port can therefore run on the SQLite `TestDatabase`.
 
-To give every migration Laravel's keys without writing `unsigned_id()`, set
-`unsigned_ids` in the `Cargo.toml` of the package that builds your binary:
+You get unsigned IDs on MySQL by default, as Laravel creates them. Set
+`unsigned_ids = false` in the package that builds your binary when your
+schema needs signed IDs:
 
 ```toml
 [package.metadata.suprnova.schema]
-unsigned_ids = true
+unsigned_ids = false
 ```
 
-`#[suprnova::main]` reads the setting when the binary is built and installs it
-before `main` runs. From then on, `id()` creates what `unsigned_id()` creates
-and `foreign_id()` what `unsigned_foreign_id()` creates, in every migration
-the binary runs, a library's migrations included. Postgres and SQLite columns
-don't change. A key or a value the framework doesn't know fails the build and
-names it. A new project carries the setting commented out in `Cargo.toml`.
+`#[suprnova::main]` installs the setting before your entry point runs.
+Every migration uses it, including migrations from libraries. Your Postgres
+and SQLite columns stay signed. An unknown key or value fails the build
+with an error naming it. Your scaffold carries the opt-out commented out.
 
-A program that runs migrations without `#[suprnova::main]` installs the same
-setting with one call before its first migration:
+If you run migrations without `#[suprnova::main]`, install the signed
+opt-out before your first migration:
 
 ```rust
-suprnova::schema::Schema::use_unsigned_ids();
+suprnova::schema::Schema::set_unsigned_ids(false);
 ```
+
+Use `Schema::set_unsigned_ids(true)` or `Schema::use_unsigned_ids()` to
+restore the default before migrations.
 
 ### Modifiers
 
@@ -386,7 +387,8 @@ truncates it. Declare
 
 ### Timestamps and soft deletes
 
-`t.timestamps()` adds `created_at` and `updated_at`, both `NOT NULL`.
+You use `t.timestamps()` to add nullable `created_at` and `updated_at`, as
+Laravel does.
 `t.soft_deletes()` adds a nullable `deleted_at`. These are `VARCHAR(255)`
 columns on every backend, not native date-time columns.
 
@@ -577,12 +579,6 @@ that an index, a unique constraint or a foreign key covers: record the
 
 ### Why Suprnova diverges
 
-- `id()` is a signed `BIGINT` on MySQL by default, where Laravel's is
-  unsigned, because the MySQL driver reads a signed column only into a signed
-  field, and Rust code usually keys a row with `i64`. `unsigned_id()` and
-  `unsigned_foreign_id()` create Laravel's types one column at a time, and
-  `unsigned_ids = true` under `[package.metadata.suprnova.schema]` makes
-  `id()` and `foreign_id()` create them in every migration.
 - Laravel's `enum` is `enumeration`: `enum` is a Rust keyword.
 - `references(table, column)` takes both names in one call, where Laravel
   chains `->references($column)->on($table)`.
@@ -974,13 +970,19 @@ suprnova migrate           # Apply again
 ## Squashing migrations
 
 A project with years of migrations can replace them with one snapshot.
+Use `--without-migration-data` to omit ledger rows from your dump. Use
+`--database reporting` to select `DATABASE_REPORTING_URL`; an unknown name
+fails with an error naming it. Otherwise you dump `DATABASE_URL`.
+
 `suprnova schema:dump` writes the database's schema and its migration
 ledger to `database/schema/<engine>-schema.sql`, where the engine is
 `sqlite`, `postgres`, `mysql`, or `mariadb`:
 
 ```bash
 suprnova schema:dump            # writes database/schema/postgres-schema.sql
-suprnova schema:dump --prune    # and prunes the migrations the dump covers
+suprnova schema:dump --prune    # and prunes the applied migrations
+suprnova schema:dump --without-migration-data
+suprnova schema:dump --database reporting
 ```
 
 Commit the dump. When `migrate`, `migrate:fresh`, or `serve` meets a

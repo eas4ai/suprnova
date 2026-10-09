@@ -30,3 +30,14 @@ test-group = 'laravel-database-mysql'
 [[profile.default.overrides]]
 filter = 'binary(live_async_backpressure) & test(=a_chatty_island_cannot_starve_its_sibling_on_one_transport)'
 threads-required = "num-test-threads"
+
+# Schema dump engine cases reset one disposable database per engine.
+# A mutex inside each test process cannot serialize nextest processes.
+[[profile.default.overrides]]
+filter = 'binary(schema_dump) & test(/^engines::/)'
+test-group = 'serial-binaries'
+
+# Each key-type/settings fixture starts a cargo check in a shared target directory.
+[[profile.default.overrides]]
+filter = 'binary(model_key_type)'
+test-group = 'serial-binaries'
