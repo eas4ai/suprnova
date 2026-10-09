@@ -1,0 +1,270 @@
+//! The image driver boundary.
+//!
+//! Everything in this module is backend-agnostic on purpose: `&[u8]` goes in,
+//! `Vec<u8>` comes out, and no codec type ever crosses the line. That is the
+//! whole justification for having a trait here rather than calling a codec
+//! directly - this subsystem already swapped its backend once during design
+//! (from the `image` crate to OxideAV), and the next swap, or an app that
+//! needs a format the framework deliberately does not ship, costs one `impl`
+//! rather than a rewrite.
+//!
+//! [`Transformation`] deliberately mirrors Laravel's transformation objects
+//! rather than any backend's filter names, so a custom driver reads the same
+//! instruction set the manual documents.
+
+use crate::error::FrameworkError;
+
+use super::color::Color;
+use super::custom::CustomTransformation;
+
+/// Default encode quality, matching Laravel's `Image::quality()` default.
+///
+/// Only the lossy encoders read it. See [`ImagePipeline::quality`] for which
+/// formats honour the knob and which ignore it.
+pub const DEFAULT_IMAGE_QUALITY: u8 = 70;
+
+/// The container an [`Image`](super::Image) pipeline encodes to.
+///
+/// Deliberately no AVIF variant: AVIF is absent rather than present and
+/// always failing, because a variant that never works is a partial
+/// scaffold. It is added the day the in-house AV1 encoder publishes - see
+/// the images chapter of the manual.
+///
+/// Deliberately not `#[non_exhaustive]`: a custom [`ImageDriver`] that
+/// matches on this enum stops compiling when a format is added, so its
+/// author decides how to encode the new format instead of inheriting a
+/// wildcard arm that guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputFormat {
+    /// JPEG. Lossy; honours [`ImagePipeline::quality`].
+    Jpeg,
+    /// PNG. Lossless; ignores quality, as in Laravel's encoder table.
+    Png,
+    /// WebP, lossy (VP8) at [`ImagePipeline::quality`] whenever the image
+    /// allows it.
+    ///
+    /// The built-in `oxideav` driver writes WebP lossless (VP8L), ignoring
+    /// quality, in three cases:
+    ///
+    /// - any pixel is not fully opaque: its lossy encoder has no alpha
+    ///   channel, so a lossy file would drop the transparency;
+    /// - a side is longer than 16383 px, the largest a VP8 frame can be;
+    /// - the format is [`OutputFormat::WebPLossless`].
+    ///
+    /// The `magick` driver draws the line elsewhere - see
+    /// [`MagickCliDriver`](super::MagickCliDriver).
+    WebP,
+    /// WebP, always lossless (VP8L). Ignores quality.
+    ///
+    /// Served and saved exactly like [`OutputFormat::WebP`], as `image/webp`
+    /// with the `webp` extension; only the encoding differs.
+    WebPLossless,
+    /// GIF. Palette-quantised to at most 256 colours before encoding.
+    Gif,
+    /// Windows bitmap. Lossless; ignores quality.
+    Bmp,
+}
+
+impl OutputFormat {
+    /// The `Content-Type` this format is served under.
+    ///
+    /// Used by [`Image::to_response`](super::Image::to_response) and
+    /// [`Image::mime_type`](super::Image::mime_type), so the value a handler
+    /// sends and the value a caller reads back can never drift apart.
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::WebP | Self::WebPLossless => "image/webp",
+            Self::Gif => "image/gif",
+            Self::Bmp => "image/bmp",
+        }
+    }
+
+    /// The conventional file extension, without a leading dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::WebP | Self::WebPLossless => "webp",
+            Self::Gif => "gif",
+            Self::Bmp => "bmp",
+        }
+    }
+}
+
+/// One step of an image pipeline.
+///
+/// Recorded, not executed: an [`Image`](super::Image) accumulates these and
+/// the driver replays them at terminal time. Keeping them as plain data is
+/// what lets the pipeline stay lazy and stay cloneable.
+///
+/// `#[non_exhaustive]`, unlike [`OutputFormat`]: transformations are added
+/// as Laravel's set grows, and a custom [`ImageDriver`] must already answer
+/// one it does not know. Its wildcard arm returns an error naming the step,
+/// which is what both built-in drivers would do with an unknown format.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum Transformation {
+    /// Force exact dimensions, ignoring the source aspect ratio.
+    Resize {
+        /// Target width in pixels.
+        width: u32,
+        /// Target height in pixels.
+        height: u32,
+    },
+    /// Resize to a width, deriving the height from the source aspect ratio.
+    ResizeWidth(u32),
+    /// Resize to a height, deriving the width from the source aspect ratio.
+    ResizeHeight(u32),
+    /// Fit inside a box, preserving aspect ratio and never enlarging.
+    Scale {
+        /// Bounding width in pixels.
+        width: u32,
+        /// Bounding height in pixels.
+        height: u32,
+    },
+    /// Scale to at most a width, preserving aspect ratio, never enlarging.
+    ScaleWidth(u32),
+    /// Scale to at most a height, preserving aspect ratio, never enlarging.
+    ScaleHeight(u32),
+    /// Cut a rectangle out of the source.
+    Crop {
+        /// Rectangle width in pixels.
+        width: u32,
+        /// Rectangle height in pixels.
+        height: u32,
+        /// Left edge, in pixels from the source's left.
+        x: u32,
+        /// Top edge, in pixels from the source's top.
+        y: u32,
+    },
+    /// Fill the target box, cropping the overflow from the centre.
+    Cover {
+        /// Target width in pixels.
+        width: u32,
+        /// Target height in pixels.
+        height: u32,
+    },
+    /// Fit inside the target box, preserving aspect ratio. No padding.
+    Contain {
+        /// Bounding width in pixels.
+        width: u32,
+        /// Bounding height in pixels.
+        height: u32,
+    },
+    /// Rotate clockwise by an arbitrary angle, growing the canvas to fit.
+    Rotate {
+        /// Clockwise angle in degrees.
+        degrees: f32,
+        /// Fill for the corners the turn exposes. `None` takes the output
+        /// format's default: white for JPEG and GIF, which cannot hold
+        /// transparency, and transparent for PNG, WebP and BMP.
+        background: Option<Color>,
+    },
+    /// Mirror top-to-bottom (Laravel's `flip`).
+    FlipVertically,
+    /// Mirror left-to-right (Laravel's `flop`).
+    FlipHorizontally,
+    /// Gaussian blur, strength `0..=100`.
+    Blur(u32),
+    /// Unsharp-mask sharpen, strength `0..=100`.
+    Sharpen(u32),
+    /// Desaturate to grey while staying in a colour layout.
+    Grayscale,
+    /// Apply the source's EXIF orientation here, unless decoding already
+    /// did (Laravel's `orient`).
+    ///
+    /// Both drivers orient on decode by default, which makes this a no-op.
+    /// With `IMAGE_AUTO_ORIENT=false` the pixels arrive as the sensor wrote
+    /// them, and this is where the pipeline turns them.
+    Orient,
+    /// A transformation the application registered with
+    /// [`register_transformation`](super::register_transformation), applied
+    /// to the decoded pixels at this place in the pipeline.
+    Custom(CustomTransformation),
+}
+
+impl Transformation {
+    /// The custom transformation registered as `name`, for
+    /// [`Image::transform`](super::Image::transform).
+    pub const fn custom(name: &'static str) -> Self {
+        Self::Custom(CustomTransformation::new(name))
+    }
+}
+
+/// A complete recorded pipeline: what to do, what to encode to, how hard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePipeline {
+    /// Steps to replay, in the order the caller chained them.
+    pub transformations: Vec<Transformation>,
+    /// Target format. `None` re-encodes to the format the source was in,
+    /// matching Laravel's "keep the format unless asked" behaviour.
+    pub format: Option<OutputFormat>,
+    /// Encode quality, always in `1..=100`.
+    ///
+    /// Honoured by JPEG, and by [`OutputFormat::WebP`] whenever it encodes
+    /// lossy. Ignored by PNG, GIF, and BMP - the same encoder table Laravel
+    /// documents. The built-in driver also ignores it in the three cases it
+    /// writes WebP lossless: an image with any pixel not fully opaque, an
+    /// image with a side longer than 16383 px, and
+    /// [`OutputFormat::WebPLossless`].
+    pub quality: u8,
+}
+
+impl Default for ImagePipeline {
+    fn default() -> Self {
+        Self {
+            transformations: Vec::new(),
+            format: None,
+            quality: DEFAULT_IMAGE_QUALITY,
+        }
+    }
+}
+
+/// A backend that can decode, transform, and re-encode image bytes.
+///
+/// # Contract
+///
+/// A conforming driver **enforces the configured
+/// [`ImageConfig`](super::ImageConfig) limits before allocating for a
+/// decode** - it reads [`media::config()`](super::config) (or its own
+/// equivalent) and refuses input whose declared dimensions exceed
+/// [`max_dimension`](super::ImageConfig::max_dimension) or whose decoded size
+/// would exceed [`max_alloc_bytes`](super::ImageConfig::max_alloc_bytes).
+/// The framework cannot enforce this on a driver's behalf, because the
+/// framework never sees the decoded buffer; a driver that skips the check
+/// hands an attacker a decompression bomb. Both built-in drivers parse the
+/// input's header and check before a single pixel is allocated.
+///
+/// Implementations must not panic on hostile input - return an error. The
+/// terminal wrapper turns a panicking driver into
+/// [`FrameworkError::internal`], but that is a net for genuine bugs, not a
+/// substitute for validation.
+///
+/// [`Transformation`] is `#[non_exhaustive]`, so a driver's `match` on it
+/// ends in a wildcard arm. That arm returns an error naming the step,
+/// rather than skipping it: an image that silently loses a step is a wrong
+/// image nobody notices. A [`Transformation::Custom`] step can be run with
+/// [`CustomTransformation::apply`] on the decoded pixels.
+pub trait ImageDriver: Send + Sync + 'static {
+    /// Decode `contents`, replay `pipeline`, and encode the result.
+    ///
+    /// Returns the complete encoded file, ready to write or serve.
+    fn process(&self, contents: &[u8], pipeline: &ImagePipeline)
+    -> Result<Vec<u8>, FrameworkError>;
+
+    /// Report the pixel dimensions of the image in `contents`.
+    ///
+    /// Callers hand this the *processed* bytes, so the answer reflects the
+    /// finished image the way Laravel's `dimensions()` does.
+    fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError>;
+
+    /// Report the average colour of the image in `contents` as `#rrggbb`.
+    ///
+    /// Alpha is dropped, matching Laravel's `dominantColor()`.
+    fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError>;
+
+    /// Short driver name, for diagnostics and `IMAGE_DRIVER` round-tripping.
+    fn name(&self) -> &'static str;
+}

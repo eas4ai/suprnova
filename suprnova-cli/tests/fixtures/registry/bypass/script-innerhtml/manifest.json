@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-innerhtml",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

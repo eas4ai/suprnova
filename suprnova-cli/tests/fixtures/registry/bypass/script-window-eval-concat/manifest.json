@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-window-eval-concat",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
