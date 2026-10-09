@@ -5,6 +5,7 @@ pub mod casts;
 pub mod collections;
 pub mod exists;
 pub mod hiding;
+pub mod morph_owners;
 pub mod queries;
 pub mod relations;
 pub mod scopes;
