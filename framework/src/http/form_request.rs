@@ -4,7 +4,7 @@
 //! validation, and authorization.
 
 use super::Request;
-use super::body::{parse_form, parse_json, parse_multipart};
+use super::body::{parse_form, parse_json, parse_multipart_with_route_inputs};
 use super::extract::FromRequest;
 use crate::error::{FrameworkError, ValidationErrors};
 use async_trait::async_trait;
@@ -188,6 +188,17 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         crate::http::body::global_max_request_body_bytes()
     }
 
+    /// Supply trusted route values before parsing, so path parameters win over body input.
+    ///
+    /// The `Data` derive implements this for `from_route_param` fields. Keeping
+    /// these values here lets every form request use the same parsing,
+    /// authorization, validation and Precognition pipeline.
+    fn route_inputs(
+        _req: &Request,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, FrameworkError> {
+        Ok(serde_json::Map::new())
+    }
+
     /// Extract and validate data from the request
     ///
     /// This method:
@@ -204,14 +215,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             return Err(FrameworkError::Unauthorized);
         }
 
-        // Detect Precognition envelope BEFORE consuming the body so
-        // we know how to short-circuit. The client sends:
-        //   Precognition: true                       - opt into the protocol
-        //   Precognition-Validate-Only: a,b,c        - filter errors to these fields
-        let is_precognition = req
-            .header("Precognition")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // Only the route middleware opts into validation without dispatch.
+        let is_precognition = req.is_precognitive();
         let validate_only: Vec<String> = req
             .header("Precognition-Validate-Only")
             .map(|raw| {
@@ -248,17 +253,23 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         if !is_form && !is_multipart && !is_json {
             return Err(FrameworkError::UnsupportedMediaType);
         }
+        let route_inputs = Self::route_inputs(&req)?;
 
         // Collect and parse body. Honor the per-struct cap, a multipart body
         // included; `body_bytes_with_cap` and the multipart parser read
         // `Content-Length` from headers and pre-reject oversized requests
         // with 413 before consuming any body bytes.
         let parsed = if is_multipart {
-            parse_multipart(req, Self::max_body_bytes()).await
+            parse_multipart_with_route_inputs(req, Self::max_body_bytes(), route_inputs).await
         } else {
             let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
-            if is_form {
+            if route_inputs.is_empty() && is_form {
                 parse_form(&bytes)
+            } else if is_form {
+                super::input::parse_form_with_route_inputs(&bytes, route_inputs)
+                    .map_err(|error| error.into_framework_error("Failed to parse form body"))
+            } else if !route_inputs.is_empty() {
+                parse_json_with_route_inputs(&bytes, route_inputs)
             } else {
                 parse_json(&bytes)
             }
@@ -344,6 +355,36 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 
         Ok(data)
     }
+}
+
+fn parse_json_with_route_inputs<T: DeserializeOwned>(
+    bytes: &bytes::Bytes,
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, FrameworkError> {
+    let mut input = if bytes.is_empty() {
+        serde_json::Map::new()
+    } else {
+        match serde_json::from_slice(bytes) {
+            Ok(serde_json::Value::Object(input)) => input,
+            Ok(_) => {
+                return Err(FrameworkError::domain(
+                    "Failed to parse JSON body: the body must be a JSON object",
+                    422,
+                ));
+            }
+            Err(error) => {
+                return Err(FrameworkError::domain(
+                    format!("Failed to parse JSON body: {error}"),
+                    422,
+                ));
+            }
+        }
+    };
+    input.extend(route_inputs);
+    let merged = serde_json::to_vec(&input).map_err(|error| {
+        FrameworkError::internal(format!("Failed to merge route input: {error}"))
+    })?;
+    parse_json(&bytes::Bytes::from(merged))
 }
 
 /// Collapse a (possibly empty) validation error bag into the Precognition

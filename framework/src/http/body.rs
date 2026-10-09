@@ -268,6 +268,15 @@ pub(crate) async fn parse_multipart<T: DeserializeOwned>(
     req: crate::http::Request,
     max_body_bytes: usize,
 ) -> Result<T, FrameworkError> {
+    parse_multipart_with_route_inputs(req, max_body_bytes, serde_json::Map::new()).await
+}
+
+/// Keep multipart limits and file handling shared when a form also has route inputs.
+pub(crate) async fn parse_multipart_with_route_inputs<T: DeserializeOwned>(
+    req: crate::http::Request,
+    max_body_bytes: usize,
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, FrameworkError> {
     let payload = crate::http::upload::parse_multipart_streaming_with_limits(
         req,
         crate::http::upload::MultipartLimits {
@@ -279,6 +288,10 @@ pub(crate) async fn parse_multipart<T: DeserializeOwned>(
         |_, _, _| Ok(()),
     )
     .await?;
-    crate::http::input::parse_multipart_input(payload)
-        .map_err(|error| error.into_framework_error("Failed to parse multipart body"))
+    let parsed = if route_inputs.is_empty() {
+        crate::http::input::parse_multipart_input(payload)
+    } else {
+        crate::http::input::parse_multipart_with_route_inputs(payload, route_inputs)
+    };
+    parsed.map_err(|error| error.into_framework_error("Failed to parse multipart body"))
 }

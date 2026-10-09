@@ -419,12 +419,18 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         #fn_vis #async_token fn #fn_name #fn_generics(__suprnova_req: ::suprnova::Request) #fn_output {
             #site_check
             #probes
+            let __suprnova_precognitive = __suprnova_req.is_precognitive();
             #input_binding
             #unplanned
             #(#bind_pass)*
             #(#path_pass)*
             #(#checks)*
             #(#body_pass)*
+            if __suprnova_precognitive {
+                return ::core::result::Result::Err(
+                    ::suprnova::FrameworkError::PrecognitionSuccess.into(),
+                );
+            }
             #fn_block
         }
 
