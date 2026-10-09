@@ -815,12 +815,13 @@ Built-in validators in `suprnova::http::upload::validators`:
   `dimensions` constraints, taken from your own `DimensionLimits` type:
   `min_width`, `max_width`, `min_height`, `max_height`, `width`, `height`
   and `ratio`. Each is an associated function that returns `None` unless
-  you override it. The size is read from the image header in the first
-  16 KiB of the file, without decoding it, for the types `ImageFile`
-  accepts. A file whose size cannot be read there is refused too: another
-  type, an SVG, a corrupt header, or a JPEG whose metadata (a camera's
-  EXIF block and thumbnail, for example) pushes its size past the first
-  16 KiB.
+  you override it. The size is read from the image header, for the types
+  `ImageFile` accepts, without decoding the image. The header can sit
+  anywhere in the file: the extractor reads it as the file streams in, and
+  passes over a JPEG's metadata (a camera's EXIF block and thumbnail, for
+  example) and an AVIF or HEIC file's leading boxes without keeping them.
+  A file whose size cannot be read is refused too: another type, an SVG, a
+  corrupt header, or a file that ends before its header does.
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
   `MimeAllowlist` type. An entry such as `image/*` admits every subtype of
   its type except `image/svg+xml`: an SVG passes only when your allowlist
@@ -950,6 +951,13 @@ impl UploadValidator for PdfOnly {
 }
 ```
 
+`validate_final` sees the first 16 KiB of the file in `sniff`. The
+extractor calls `validate_received`, whose default runs `validate_final`.
+Override `validate_received` instead when you need what the extractor read
+from the whole file: its `ReceivedPart` carries the `sniff`, the `size`,
+the declared `content_type`, and the `image_size` that `Dimensions<D>`
+checks.
+
 ### Per-field caps and array bounds
 
 The byte cap on the total body is global (25 MiB by default for
@@ -990,13 +998,10 @@ leaves SVG out of `image/*`, as Laravel's `image` rule leaves it out unless
 you pass `allow_svg`. An SVG is markup that can run script, so you name
 `image/svg+xml` to accept one.
 
-Laravel's `dimensions` reads the whole stored file, so it finds a JPEG's
-size wherever the header puts it, and it passes an SVG without checking
-it. A streaming validator sees only the first 16 KiB of a file, so
-`Dimensions<D>` refuses a file whose size is not stated there, and an SVG
-has no pixel size to check. The limits are functions of a type rather
-than a rule string, because a validator is built with `Default` inside
-the derive and takes no arguments.
+Laravel's `dimensions` passes an SVG without checking it. `Dimensions<D>`
+refuses one, because an SVG has no pixel size to check. The limits are
+functions of a type rather than a rule string, because a validator is
+built with `Default` inside the derive and takes no arguments.
 
 ### Authorize and after-validation hooks
 

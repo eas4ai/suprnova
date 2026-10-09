@@ -9,8 +9,14 @@
 //! full contents in memory, validators receive a bounded **sniff buffer**
 //! (the first ~16 KiB of the part, sufficient for magic-byte detection)
 //! plus the **total accumulated size** in bytes. Validators that care
-//! about content (e.g. [`ImageFile`], [`MimeType`], [`Dimensions`]) consult
-//! `sniff`; validators that care about size (e.g. [`MaxSize`]) consult `size`.
+//! about content (e.g. [`ImageFile`], [`MimeType`]) consult `sniff`;
+//! validators that care about size (e.g. [`MaxSize`]) consult `size`.
+//!
+//! An image's width and height can sit past the sniff buffer, after a
+//! JPEG's metadata segments or an AVIF or HEIC file's leading boxes. The
+//! extractor reads them from every chunk of a file part as it streams in,
+//! keeping none of the bytes it passes over, and hands them to the final
+//! check in a [`ReceivedPart`], which is where [`Dimensions`] reads them.
 //!
 //! # Refusing a file
 //!
@@ -20,6 +26,7 @@
 //! name. Any other error is a failure to check the file and keeps its own
 //! status.
 
+use super::image_size::image_dimensions;
 use crate::FrameworkError;
 use crate::validation::message::ValidationMessage;
 
@@ -30,12 +37,13 @@ use crate::validation::message::ValidationMessage;
 /// For each declared `UploadedFile<V>` field on a `#[derive(MultipartRequest)]`
 /// struct, the derive macro constructs a single `V` instance via
 /// `Default::default()` at the start of request handling and reuses it
-/// across **both** [`validate_chunk`](Self::validate_chunk) and
-/// [`validate_final`](Self::validate_final) calls for that field.
+/// across **both** the [`validate_chunk`](Self::validate_chunk) calls and
+/// the final check, [`validate_received`](Self::validate_received), whose
+/// default runs [`validate_final`](Self::validate_final), for that field.
 ///
 /// # State
 ///
-/// Both methods take `&self`. If your validator needs to accumulate
+/// Every method takes `&self`. If your validator needs to accumulate
 /// state across chunks (e.g. a rolling hash, a running CRC), use
 /// **interior mutability** (`std::cell::Cell`, `std::sync::Mutex`,
 /// `std::sync::atomic::*`). Because the same `&V` is threaded through
@@ -46,8 +54,8 @@ use crate::validation::message::ValidationMessage;
 ///
 /// Tuple impls run validators in declaration order:
 /// `(ImageFile, MaxSize<5_242_880>)` runs `ImageFile::validate_chunk` first,
-/// then `MaxSize::validate_chunk` (per chunk); `validate_final` runs in
-/// the same order. Short-circuits on first `Err`.
+/// then `MaxSize::validate_chunk` (per chunk); `validate_received` and
+/// `validate_final` run in the same order. Short-circuits on first `Err`.
 ///
 /// # Errors
 ///
@@ -73,7 +81,8 @@ pub trait UploadValidator: Send + Sync + Default {
         Ok(())
     }
 
-    /// Called once when the part is fully received.
+    /// Called once when the part is fully received, by
+    /// [`validate_received`](Self::validate_received)'s default.
     ///
     /// - `sniff` is the bounded 16 KiB prefix captured during parsing
     ///   (same buffer threaded through `validate_chunk`).
@@ -88,6 +97,77 @@ pub trait UploadValidator: Send + Sync + Default {
     ) -> Result<(), FrameworkError> {
         let _ = (sniff, size, content_type);
         Ok(())
+    }
+
+    /// Called once when the part is fully received, with what the
+    /// extractor read from the whole part. Both extractors call this, not
+    /// [`validate_final`](Self::validate_final).
+    ///
+    /// The default runs `validate_final` on the part's sniff buffer, size
+    /// and declared type, so a validator that needs nothing past the first
+    /// 16 KiB implements `validate_final` alone. Override this one to read
+    /// what [`ReceivedPart`] carries from further in, as [`Dimensions`] reads
+    /// the image size.
+    fn validate_received(&self, part: &ReceivedPart<'_>) -> Result<(), FrameworkError> {
+        self.validate_final(part.sniff(), part.size(), part.content_type())
+    }
+}
+
+/// A file part as the extractor received it, for
+/// [`UploadValidator::validate_received`].
+///
+/// The sniff buffer holds only the first 16 KiB of a part, and an image's
+/// width and height can sit further in: after a JPEG's metadata segments,
+/// such as a camera's EXIF block and thumbnail, or after the boxes that
+/// lead an AVIF or HEIC file. The extractor reads the size from every chunk
+/// as the part streams in, keeping none of the bytes it passes over, so a
+/// validator reads it here without the whole part in memory.
+#[derive(Debug, Clone, Copy)]
+pub struct ReceivedPart<'a> {
+    sniff: &'a [u8],
+    size: u64,
+    content_type: Option<&'a str>,
+    image_size: Option<(u32, u32)>,
+}
+
+impl<'a> ReceivedPart<'a> {
+    /// Built by the extractors from what they read of one part.
+    pub(crate) fn new(
+        sniff: &'a [u8],
+        size: u64,
+        content_type: Option<&'a str>,
+        image_size: Option<(u32, u32)>,
+    ) -> Self {
+        Self {
+            sniff,
+            size,
+            content_type,
+            image_size,
+        }
+    }
+
+    /// The first up to 16 KiB of the part, the buffer
+    /// [`UploadValidator::validate_chunk`] saw.
+    pub fn sniff(&self) -> &'a [u8] {
+        self.sniff
+    }
+
+    /// The part's size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The `Content-Type` the client declared for the part. Untrusted:
+    /// the content's own bytes say what it is.
+    pub fn content_type(&self) -> Option<&'a str> {
+        self.content_type
+    }
+
+    /// The width and height the image's header states, read from the whole
+    /// part, for the types [`ImageFile`] accepts. `None` for another type,
+    /// for a header the part ends before, and for a zero side.
+    pub fn image_size(&self) -> Option<(u32, u32)> {
+        self.image_size
     }
 }
 
@@ -175,7 +255,7 @@ const IMAGE_TYPES: &[&str] = &[
 /// The media type of `sniff` when its magic bytes name one of
 /// [`IMAGE_TYPES`]. `infer::get` needs at most the first few dozen bytes for
 /// these formats, so the bounded sniff buffer always holds enough.
-fn accepted_image_type(sniff: &[u8]) -> Option<&'static str> {
+pub(super) fn accepted_image_type(sniff: &[u8]) -> Option<&'static str> {
     infer::get(sniff)
         .map(|kind| kind.mime_type())
         .filter(|mime| IMAGE_TYPES.contains(mime))
@@ -493,83 +573,46 @@ pub trait DimensionLimits: Send + Sync + Default {
 /// `Dimensions<D>` - checks an image's width and height against the limits
 /// of `D`, Laravel's `dimensions` rule.
 ///
-/// The width and height come from the image's header in the sniff buffer,
-/// without decoding a pixel, for the types [`ImageFile`] accepts. A file
-/// that breaks a limit is refused with `validation-dimensions`, and so is a
-/// file whose dimensions cannot be read: a type `ImageFile` refuses, an SVG,
-/// a corrupt header, or a header that does not end within the first 16 KiB
-/// (a JPEG whose metadata segments run past that point). Pair it with
-/// [`ImageFile`] so a file that is no image reads `validation-image` first.
+/// The width and height come from the image's header, without decoding a
+/// pixel, for the types [`ImageFile`] accepts, wherever the header sits:
+/// the extractor reads it as the part streams in, past a JPEG's metadata
+/// segments or an AVIF or HEIC file's leading boxes, as Laravel's rule
+/// reads the stored file. A file that breaks a limit is refused with
+/// `validation-dimensions`, and so is a file whose dimensions cannot be
+/// read: a type `ImageFile` refuses, an SVG, a corrupt header, or a header
+/// the file ends before. Pair it with [`ImageFile`] so a file that is no
+/// image reads `validation-image` first.
 #[derive(Default)]
 pub struct Dimensions<D: DimensionLimits>(std::marker::PhantomData<D>);
 
 impl<D: DimensionLimits + 'static> UploadValidator for Dimensions<D> {
+    /// Reads the size from `sniff` alone, for a caller that holds the whole
+    /// file there. The extractors call
+    /// [`validate_received`](UploadValidator::validate_received), which has
+    /// the size read from the whole part.
     fn validate_final(
         &self,
         sniff: &[u8],
         _size: u64,
         _ct: Option<&str>,
     ) -> Result<(), FrameworkError> {
-        match image_dimensions(sniff) {
-            Some((width, height)) if dimensions_fit::<D>(width, height) => Ok(()),
-            _ => Err(FrameworkError::invalid_upload(
-                ValidationMessage::keyed("validation-dimensions")
-                    .fallback("The file has invalid image dimensions."),
-            )),
-        }
+        check_dimensions::<D>(image_dimensions(sniff))
+    }
+
+    fn validate_received(&self, part: &ReceivedPart<'_>) -> Result<(), FrameworkError> {
+        check_dimensions::<D>(part.image_size())
     }
 }
 
-/// The width and height an image's header states, for the types
-/// [`ImageFile`] accepts. `None` for another type, for a header the sniff
-/// buffer does not hold in full, and for a zero side, which no limit can
-/// be checked against.
-fn image_dimensions(sniff: &[u8]) -> Option<(u32, u32)> {
-    let (width, height) = match accepted_image_type(sniff)? {
-        "image/bmp" => bmp_dimensions(sniff)?,
-        _ => {
-            let size = imagesize::blob_size(sniff).ok()?;
-            (
-                u32::try_from(size.width).ok()?,
-                u32::try_from(size.height).ok()?,
-            )
-        }
-    };
-    (width > 0 && height > 0).then_some((width, height))
-}
-
-/// A BMP's width and height, read as PHP's `getimagesize` reads them: a
-/// 12-byte OS/2 header holds two 16-bit sides, and every later header two
-/// signed 32-bit sides, where a negative height marks a top-down bitmap
-/// and is taken as its absolute value. `imagesize` reads both forms as
-/// unsigned 32-bit numbers, which makes a top-down bitmap four billion
-/// pixels tall, so BMP is read here.
-fn bmp_dimensions(sniff: &[u8]) -> Option<(u32, u32)> {
-    let le_u32 = |at: usize| {
-        sniff
-            .get(at..at + 4)?
-            .try_into()
-            .ok()
-            .map(u32::from_le_bytes)
-    };
-    let le_i32 = |at: usize| {
-        sniff
-            .get(at..at + 4)?
-            .try_into()
-            .ok()
-            .map(i32::from_le_bytes)
-    };
-    let le_u16 = |at: usize| {
-        sniff
-            .get(at..at + 2)?
-            .try_into()
-            .ok()
-            .map(u16::from_le_bytes)
-    };
-    match le_u32(14)? {
-        12 => Some((u32::from(le_u16(18)?), u32::from(le_u16(20)?))),
-        13..=64 | 108 | 124 => Some((u32::try_from(le_i32(18)?).ok()?, le_i32(22)?.unsigned_abs())),
-        _ => None,
+/// Refuse with `validation-dimensions` unless `size` was read and meets
+/// every limit `D` sets.
+fn check_dimensions<D: DimensionLimits>(size: Option<(u32, u32)>) -> Result<(), FrameworkError> {
+    match size {
+        Some((width, height)) if dimensions_fit::<D>(width, height) => Ok(()),
+        _ => Err(FrameworkError::invalid_upload(
+            ValidationMessage::keyed("validation-dimensions")
+                .fallback("The file has invalid image dimensions."),
+        )),
     }
 }
 
@@ -616,6 +659,10 @@ where
         self.0.validate_final(sniff, size, ct)?;
         self.1.validate_final(sniff, size, ct)
     }
+    fn validate_received(&self, part: &ReceivedPart<'_>) -> Result<(), FrameworkError> {
+        self.0.validate_received(part)?;
+        self.1.validate_received(part)
+    }
 }
 
 impl<A, B, C> UploadValidator for (A, B, C)
@@ -638,6 +685,11 @@ where
         self.0.validate_final(sniff, size, ct)?;
         self.1.validate_final(sniff, size, ct)?;
         self.2.validate_final(sniff, size, ct)
+    }
+    fn validate_received(&self, part: &ReceivedPart<'_>) -> Result<(), FrameworkError> {
+        self.0.validate_received(part)?;
+        self.1.validate_received(part)?;
+        self.2.validate_received(part)
     }
 }
 

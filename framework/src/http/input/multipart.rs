@@ -32,7 +32,7 @@ use super::nested::{FilePart, Nested};
 use super::placeholder::Placeholder;
 use super::{Collector, FieldError, InputError, struct_field_names};
 use crate::error::FrameworkError;
-use crate::http::upload::validators::UploadValidator;
+use crate::http::upload::validators::{ReceivedPart, UploadValidator};
 use crate::http::upload::{FieldFailure, MultipartPayload, UploadedFile, UploadedFileBacking};
 use crate::validation::message::ValidationMessage;
 
@@ -170,7 +170,12 @@ fn checked<V: UploadValidator, E: de::Error>(
     let verdict = validator
         .validate_chunk(&file.sniff, file.size)
         .and_then(|()| {
-            validator.validate_final(&file.sniff, file.size, file.content_type.as_deref())
+            validator.validate_received(&ReceivedPart::new(
+                &file.sniff,
+                file.size,
+                file.content_type.as_deref(),
+                file.image_size,
+            ))
         });
     match verdict {
         Ok(()) => Ok(match file.backing {
@@ -361,6 +366,7 @@ mod tests {
             content_type: None,
             inferred_extension: None,
             sniff: bytes.to_vec(),
+            image_size: None,
         }
     }
 

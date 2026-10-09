@@ -65,6 +65,9 @@ pub(super) struct FilePart {
     pub(super) inferred_extension: Option<&'static str>,
     /// The first bytes of the part, at most 16 KiB.
     pub(super) sniff: Vec<u8>,
+    /// The width and height the part's image header states, read from the
+    /// whole part as it streamed in.
+    pub(super) image_size: Option<(u32, u32)>,
 }
 
 /// The members bracketed names put under one place, as a PHP array holds
@@ -299,6 +302,7 @@ impl Nested<'static> {
                     content_type,
                     inferred_extension,
                     sniff,
+                    image_size,
                 } => Node::File(Box::new(FilePart {
                     backing,
                     size,
@@ -306,6 +310,7 @@ impl Nested<'static> {
                     content_type,
                     inferred_extension,
                     sniff,
+                    image_size,
                 })),
             };
             nested.insert(Cow::Owned(name), node);
