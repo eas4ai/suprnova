@@ -23,3 +23,4 @@ pub mod persistence_fail_closed;
 pub mod precognition;
 pub mod previous_url_open_redirect;
 pub mod store_container_binding;
+pub mod laravel_http_gaps;
