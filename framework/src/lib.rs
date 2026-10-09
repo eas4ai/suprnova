@@ -301,8 +301,8 @@ pub use filesystem::{
 pub use hashing::{
     Algorithm as HashAlgorithm, Argon2Options, Argon2iHasher, Argon2idHasher, BcryptHasher,
     BcryptOptions, DEFAULT_COST as HASH_DEFAULT_COST, DEFAULT_ROUNDS as HASH_DEFAULT_ROUNDS,
-    HashConfig, HashInfo, Hasher, MAX_BCRYPT_PASSWORD_BYTES, hash, info as hash_info, is_hashed,
-    needs_rehash, verify,
+    HashConfig, HashInfo, Hasher, MAX_BCRYPT_PASSWORD_BYTES, extend as hash_extend, hash,
+    info as hash_info, is_hashed, needs_rehash, verify,
 };
 pub use http::TrustHosts;
 pub use http::body::{

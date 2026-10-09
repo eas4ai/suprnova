@@ -5,6 +5,7 @@ pub mod argon2_and_driver_swap;
 pub mod async_and_truncation;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+pub mod laravel_auth_gaps;
 #[path = "../support/own_process.rs"]
 mod own_process;
 #[path = "../support/own_process_async.rs"]

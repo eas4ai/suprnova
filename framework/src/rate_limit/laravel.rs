@@ -226,8 +226,21 @@ impl RateLimiter {
     /// Resolve a named limiter callback. Returns `None` when no limiter
     /// has been registered under that name. Mirrors
     /// `RateLimiter::limiter($name)`.
+    ///
+    /// The callback wraps the registered one, as Laravel's does. When the
+    /// registered callback returns several limits, each limit whose key
+    /// another limit of the same result shares gets its
+    /// [`Limit::fallback_key`](super::Limit::fallback_key) instead. Without
+    /// that, `Limit::per_minute(2).by("a")` and `Limit::per_hour(10).by("a")`
+    /// count in one bucket, and the minute's limit trips on the hour's hits.
+    /// [`ThrottleRequestsMiddleware`](super::ThrottleRequestsMiddleware)
+    /// resolves named limiters through this method, so it counts the same
+    /// buckets a direct caller sees, each under `<name>:<key>`.
     pub fn limiter(name: &str) -> Option<Arc<NamedLimiterFn>> {
-        registry().get(name)
+        let registered = registry().get(name)?;
+        Some(Arc::new(move |request: &Request| {
+            with_distinct_keys(registered(request))
+        }))
     }
 
     /// Whether a named limiter has been registered.
@@ -300,6 +313,32 @@ impl RateLimiter {
         Self::increment(key, decay_seconds, 1).await
     }
 
+    /// Count one hit in a 60-second window. Mirrors Laravel's `hit($key)`,
+    /// whose decay defaults to 60 seconds; Rust has no default arguments,
+    /// so the default has a name of its own. Returns the new counter value.
+    pub async fn hit_for_minute(key: &str) -> Result<i64, FrameworkError> {
+        Self::increment(key, 60, 1).await
+    }
+
+    /// Count one hit in a window that ends at `expires_at`. Mirrors
+    /// Laravel's `hit($key, $date)`, which takes a date as well as a number
+    /// of seconds. The decay is the whole seconds from now until
+    /// `expires_at`, and zero once `expires_at` has passed; a decay of zero
+    /// opens no window (see [`increment`](Self::increment)). Returns the new
+    /// counter value.
+    ///
+    /// The window is measured against the wall clock, as every window of
+    /// this facade is, so `expires_at` is compared with the system time,
+    /// not with [`crate::clock::now`].
+    pub async fn hit_until(
+        key: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, FrameworkError> {
+        let seconds_left = expires_at.timestamp().saturating_sub(unix_now_secs());
+        let decay_seconds = u64::try_from(seconds_left).unwrap_or(0);
+        Self::increment(key, decay_seconds, 1).await
+    }
+
     /// Atomic increment-and-check: bump the counter by 1, open the window if
     /// needed, and decide on the **post-increment** count whether the bucket
     /// is now over its limit. Returns `true` when this hit pushed the count
@@ -344,12 +383,23 @@ impl RateLimiter {
     /// The `:timer` deadline is set via `Cache::add` - only the first
     /// caller in the window pins the deadline; subsequent callers in
     /// the same window leave it untouched.
+    ///
+    /// A `decay_seconds` of zero opens no window, as in Laravel, whose cache
+    /// `add` refuses a time to live that is not positive: no timer is
+    /// written, a counter with an open window counts the step in that
+    /// window, and a counter the step creates is forgotten again, so it
+    /// cannot count forever without a time to live.
     pub async fn increment(
         key: &str,
         decay_seconds: u64,
         amount: i64,
     ) -> Result<i64, FrameworkError> {
         let key = Self::clean_rate_limiter_key(key);
+        if decay_seconds == 0 {
+            let new_value = Cache::increment(&key, amount).await?;
+            forget_windowless_counter(&key, new_value, Some(amount)).await?;
+            return Ok(new_value);
+        }
         let timer_key = format!("{key}{TIMER_SUFFIX}");
         let decay = Duration::from_secs(decay_seconds);
         let available_at = unix_now_secs() + decay_seconds as i64;
@@ -368,12 +418,20 @@ impl RateLimiter {
 
     /// Decrement the counter by `amount`. Mirrors
     /// `RateLimiter::decrement($key, $decaySeconds, $amount)`.
+    ///
+    /// A `decay_seconds` of zero opens no window, as it does for
+    /// [`increment`](Self::increment).
     pub async fn decrement(
         key: &str,
         decay_seconds: u64,
         amount: i64,
     ) -> Result<i64, FrameworkError> {
         let key = Self::clean_rate_limiter_key(key);
+        if decay_seconds == 0 {
+            let new_value = Cache::decrement(&key, amount).await?;
+            forget_windowless_counter(&key, new_value, amount.checked_neg()).await?;
+            return Ok(new_value);
+        }
         let timer_key = format!("{key}{TIMER_SUFFIX}");
         let decay = Duration::from_secs(decay_seconds);
         let available_at = unix_now_secs() + decay_seconds as i64;
@@ -409,47 +467,27 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Sanitise a rate-limiter key. Mirrors
-    /// `RateLimiter::cleanRateLimiterKey($key)` for the strip stage:
-    /// removes `&abc;` HTML-entity markers from the user-supplied input
-    /// so the resulting cache key stays printable. The function is
-    /// deterministic and idempotent inside Suprnova; consumers who need
-    /// byte-identical hashing with a PHP service should run their
-    /// `htmlentities` pre-step on the input themselves before calling
-    /// this - Laravel's `htmlentities` step encodes non-ASCII bytes,
-    /// which is unnecessary for Rust `String`s but which we deliberately
-    /// don't replicate.
+    /// Clean a rate-limiter key the way Laravel's
+    /// `RateLimiter::cleanRateLimiterKey($key)` does:
+    /// `preg_replace('/&([a-z])[a-z]+;/i', '$1', htmlentities($key))`.
+    ///
+    /// The key is first encoded as PHP's `htmlentities` encodes it under
+    /// its default flags (`ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`,
+    /// UTF-8): each character with a named HTML 4.01 entity becomes that
+    /// entity, `&`, `<`, `>` and `"` included, and `'` becomes `&#039;`.
+    /// Then each `&name;` marker of two or more ASCII letters is reduced to
+    /// its first letter. So `café` cleans to `cafe`, `a&b` to `aab`, and
+    /// `Ω` to `O`, and a key counts in the bucket Laravel counts it in,
+    /// which a Laravel application sharing the cache store reads too. An
+    /// entity named with digits (`&sup2;`, `&frac12;`) and `&#039;` stay
+    /// encoded, as they do in Laravel.
+    ///
+    /// Every counter method cleans its key with this function, once.
+    /// Cleaning is not idempotent: `it's` cleans to `it&#039;s`, and that
+    /// cleans to `ita#039;s`. Pass the raw key to the counter methods, not
+    /// a cleaned one.
     pub fn clean_rate_limiter_key(key: &str) -> String {
-        // Strip `&abc;` entity markers - same shape as Laravel's
-        // `preg_replace('/&([a-z])[a-z]+;/i', '$1', htmlentities($key))`.
-        // We skip Laravel's preceding `htmlentities` because the binary
-        // range of a Rust `String` is already UTF-8-clean - Laravel's
-        // `htmlentities` is there to encode binary garbage into a safe
-        // ASCII subset before the strip, which is moot here.
-        let mut out = String::with_capacity(key.len());
-        let chars: Vec<char> = key.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '&' {
-                // Look for `&letter+;` of length >= 2 letters.
-                let mut j = i + 1;
-                if j < chars.len() && chars[j].is_ascii_alphabetic() {
-                    let first = chars[j];
-                    j += 1;
-                    while j < chars.len() && chars[j].is_ascii_alphabetic() {
-                        j += 1;
-                    }
-                    if j < chars.len() && chars[j] == ';' && (j - i - 1) >= 2 {
-                        out.push(first);
-                        i = j + 1;
-                        continue;
-                    }
-                }
-            }
-            out.push(chars[i]);
-            i += 1;
-        }
-        out
+        strip_entity_markers(&super::html_entities::htmlentities(key))
     }
 
     /// Run `callback` if the bucket is under `max_attempts`; otherwise
@@ -519,6 +557,81 @@ async fn restore_counter_ttl(
     Ok(())
 }
 
+/// Forget a counter that a step with a decay of zero created, so it does
+/// not count forever.
+///
+/// A zero decay writes no timer and seeds no counter, so a step on a key
+/// with no open window creates the counter with no time to live on both
+/// shipped backends. Such a counter outlives every window and would make
+/// `hit_and_check` refuse the key until it is cleared. A new value equal to
+/// the first step from zero (`from_zero`) is that case, and the counter is
+/// forgotten, as Laravel's `put` with a time to live of zero forgets it. A
+/// counter with an open window comes back with another value and keeps its
+/// time to live.
+async fn forget_windowless_counter(
+    key: &str,
+    new_value: i64,
+    from_zero: Option<i64>,
+) -> Result<(), FrameworkError> {
+    if from_zero == Some(new_value) {
+        Cache::forget(key).await?;
+    }
+    Ok(())
+}
+
+/// Give each limit of a [`LimitResult::Many`] whose key another limit of
+/// the same result shares its [`fallback_key`](super::Limit::fallback_key),
+/// as the callback Laravel's `RateLimiter::limiter` returns does. Every
+/// limit of a shared key is renamed, the first one too, so two limits on
+/// `a` count under `a:attempts:2:decay:60` and `a:attempts:10:decay:3600`.
+/// A single limit and a response pass through unchanged.
+fn with_distinct_keys(result: LimitResult) -> LimitResult {
+    let LimitResult::Many(mut limits) = result else {
+        return result;
+    };
+    let mut uses: HashMap<String, usize> = HashMap::new();
+    for limit in &limits {
+        *uses.entry(limit.key.clone()).or_default() += 1;
+    }
+    for limit in &mut limits {
+        if uses.get(&limit.key).is_some_and(|count| *count > 1) {
+            limit.key = limit.fallback_key();
+        }
+    }
+    LimitResult::Many(limits)
+}
+
+/// The strip step of Laravel's `cleanRateLimiterKey`:
+/// `preg_replace('/&([a-z])[a-z]+;/i', '$1', $encoded)`. Each `&`, two or
+/// more ASCII letters and `;` become the first letter. The markers are
+/// ASCII, so the scan works on bytes and copies everything else through
+/// whole, which keeps the UTF-8 of the rest intact.
+fn strip_entity_markers(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut stripped = String::with_capacity(encoded.len());
+    let mut copied_up_to = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'&' {
+            let letters = bytes[index + 1..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_alphabetic())
+                .count();
+            let end = index + 1 + letters;
+            if letters >= 2 && bytes.get(end) == Some(&b';') {
+                stripped.push_str(&encoded[copied_up_to..index]);
+                stripped.push(char::from(bytes[index + 1]));
+                index = end + 1;
+                copied_up_to = index;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    stripped.push_str(&encoded[copied_up_to..]);
+    stripped
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::limit::Limit;
@@ -532,27 +645,44 @@ mod tests {
         g
     }
 
+    /// Each expected value is what PHP 8.4 answers for
+    /// `preg_replace('/&([a-z])[a-z]+;/i', '$1', htmlentities($key))`.
     #[test]
-    fn clean_strips_entity_markers() {
-        assert_eq!(RateLimiter::clean_rate_limiter_key("abc"), "abc");
-        // `&amp;` -> `a`.
-        assert_eq!(RateLimiter::clean_rate_limiter_key("a&amp;b"), "aab");
-        // `&copy;` -> `c`.
-        assert_eq!(
-            RateLimiter::clean_rate_limiter_key("c&copy;d"),
-            "ccd",
-            "named entity should reduce to first letter"
-        );
-        // Bare `&` left alone.
-        assert_eq!(RateLimiter::clean_rate_limiter_key("foo&bar"), "foo&bar");
+    fn clean_encodes_then_strips_as_laravel_does() {
+        for (key, cleaned) in [
+            ("abc", "abc"),
+            ("café", "cafe"),
+            ("a&b", "aab"),
+            ("foo&bar", "fooabar"),
+            // An entity in the input is encoded again first.
+            ("a&amp;b", "aaamp;b"),
+            ("c&copy;d", "cacopy;d"),
+            ("<script>", "lscriptg"),
+            ("\"q\"", "qqq"),
+            ("naïve résumé", "naive resume"),
+            ("Straße", "Strase"),
+            ("€5", "e5"),
+            ("α→β", "arb"),
+            // Names with digits and the numeric apostrophe stay encoded.
+            ("x²", "x&sup2;"),
+            ("it's", "it&#039;s"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                RateLimiter::clean_rate_limiter_key(key),
+                cleaned,
+                "cleaning {key:?}"
+            );
+        }
     }
 
     #[test]
-    fn clean_preserves_unicode() {
+    fn clean_reduces_a_greek_letter_and_keeps_a_character_without_an_entity() {
         assert_eq!(
             RateLimiter::clean_rate_limiter_key("user:Ω:42"),
-            "user:Ω:42"
+            "user:O:42"
         );
+        assert_eq!(RateLimiter::clean_rate_limiter_key("日本"), "日本");
     }
 
     #[tokio::test]

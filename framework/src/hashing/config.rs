@@ -52,9 +52,24 @@ impl Algorithm {
 
 /// Resolved hashing config: driver + per-algorithm parameters +
 /// algorithm-verification gate.
+///
+/// # A driver registered by name
+///
+/// `HASH_DRIVER` may name a driver registered with
+/// [`hashing::extend`](super::extend) instead of a built-in algorithm.
+/// [`HashConfig::from_env`] then accepts the name and leaves
+/// [`driver`](Self::driver) at its default, and the name travels beside
+/// the config to the driver builder, never inside it. It is neither a
+/// field of this struct nor a variant of [`Algorithm`], so an
+/// application's struct literal of `HashConfig` and its exhaustive `match`
+/// on `Algorithm` keep compiling. A registered driver's own
+/// [`Hasher::algorithm`](super::Hasher::algorithm) says which algorithm
+/// family its hashes belong to.
 #[derive(Debug, Clone)]
 pub struct HashConfig {
-    /// Active algorithm. Selected by `HASH_DRIVER`. Default: bcrypt.
+    /// Active algorithm. Selected by `HASH_DRIVER`. Default: bcrypt. Stays
+    /// at the default when `HASH_DRIVER` names a registered driver (see
+    /// the type's documentation).
     pub driver: Algorithm,
     /// Bcrypt cost / rounds. Range `4..=31`. Default: 12.
     pub rounds: u32,
@@ -62,7 +77,8 @@ pub struct HashConfig {
     /// OWASP 2024). Minimum: 8.
     pub memory: u32,
     /// Argon time / iterations. Argon-only. Default: 4 (OWASP 2024).
-    /// Minimum: 1.
+    /// Minimum: 1. Read from `HASH_TIME`, or from `ARGON_TIME`, the name
+    /// Laravel's hashing configuration reads, when `HASH_TIME` is unset.
     pub time: u32,
     /// Argon parallelism. Argon-only. Default: 1 (matches OWASP and
     /// libsodium's behaviour). Minimum: 1.
@@ -102,15 +118,36 @@ impl HashConfig {
     /// values return `FrameworkError::param` with the offending var
     /// name + value so misconfiguration surfaces at first hash, not at
     /// runtime as a silent default.
+    ///
+    /// `HASH_DRIVER` names a built-in algorithm or a driver registered
+    /// with [`hashing::extend`](super::extend); a name that is neither
+    /// fails. `ARGON_TIME` sets [`time`](Self::time) when `HASH_TIME` is
+    /// unset, under the same minimum of 1; when both are set, `HASH_TIME`
+    /// wins and `ARGON_TIME` is not read.
     pub fn from_env() -> Result<Self, FrameworkError> {
+        Self::from_env_with_driver_name().map(|(config, _)| config)
+    }
+
+    /// [`HashConfig::from_env`], with the name of the registered driver
+    /// `HASH_DRIVER` selects, if it selects one. The name is returned beside
+    /// the config rather than in it; the type's documentation says why.
+    pub(super) fn from_env_with_driver_name() -> Result<(Self, Option<String>), FrameworkError> {
         let mut cfg = HashConfig::default();
+        let mut registered_driver = None;
 
         if let Some(s) = env_opt("HASH_DRIVER") {
-            cfg.driver = Algorithm::parse(&s).ok_or_else(|| {
-                FrameworkError::param(format!(
-                    "HASH_DRIVER `{s}` not recognised; expected one of bcrypt, argon, argon2i, argon2id"
-                ))
-            })?;
+            match Algorithm::parse(&s) {
+                Some(algorithm) => cfg.driver = algorithm,
+                None if super::is_registered_driver(s.trim()) => {
+                    registered_driver = Some(s.trim().to_owned());
+                }
+                None => {
+                    return Err(FrameworkError::param(format!(
+                        "HASH_DRIVER `{s}` not recognised; expected one of bcrypt, argon, \
+                         argon2i, argon2id, or a driver registered with hashing::extend"
+                    )));
+                }
+            }
         }
 
         if let Some(s) = env_opt("HASH_ROUNDS") {
@@ -133,10 +170,16 @@ impl HashConfig {
             cfg.memory = n;
         }
 
-        if let Some(s) = env_opt("HASH_TIME") {
-            let n = parse_u32("HASH_TIME", &s)?;
+        // `HASH_TIME` first; Laravel's own name, `ARGON_TIME`, when it is unset.
+        let time = env_opt("HASH_TIME")
+            .map(|s| ("HASH_TIME", s))
+            .or_else(|| env_opt("ARGON_TIME").map(|s| ("ARGON_TIME", s)));
+        if let Some((name, s)) = time {
+            let n = parse_u32(name, &s)?;
             if n == 0 {
-                return Err(FrameworkError::param("HASH_TIME=0 is invalid; minimum 1"));
+                return Err(FrameworkError::param(format!(
+                    "{name}=0 is invalid; minimum 1"
+                )));
             }
             cfg.time = n;
         }
@@ -159,7 +202,7 @@ impl HashConfig {
             cfg.max_concurrency = Some(parse_limit("HASH_MAX_CONCURRENCY", &s)?);
         }
 
-        Ok(cfg)
+        Ok((cfg, registered_driver))
     }
 }
 
@@ -216,6 +259,7 @@ pub(super) mod tests {
             "HASH_ROUNDS",
             "HASH_MEMORY",
             "HASH_TIME",
+            "ARGON_TIME",
             "HASH_THREADS",
             "HASH_VERIFY",
             "HASH_MAX_CONCURRENCY",
