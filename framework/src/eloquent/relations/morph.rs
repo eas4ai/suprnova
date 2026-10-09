@@ -95,12 +95,8 @@ where
     /// construction keeps the wrapper's chainable surface free of
     /// `T: IntoVal` bounds.
     ///
-    /// Stored on the struct (rather than consumed at construction)
-    /// because future overrides like `.parent_key(...)` would need to
-    /// rebuild the inner builder, and admin tooling reading the
-    /// [`Relation`] surface needs to surface this value alongside the
-    /// morph metadata.
-    #[allow(dead_code)]
+    /// Retained so `create`, `save` and `upsert` write the owner's key
+    /// after filtering caller attributes.
     parent_key_value: serde_json::Value,
     /// Morph family name - e.g. `"commentable"`. Controls both the
     /// `<name>_id` and `<name>_type` column names on the child table.
@@ -110,9 +106,8 @@ where
     /// column. Defaults to `to_snake(struct_name)` at the macro
     /// emission site; can be overridden per-struct via
     /// `#[model(morph_type = "...")]`. Stored for the [`Relation`]
-    /// impl + admin introspection; consumed once at construction
-    /// (cloned into the inner builder's WHERE clause).
-    #[allow(dead_code)]
+    /// impl and child writes. Reads accept aliases; writes keep this
+    /// canonical name.
     morph_type_value: String,
     /// The parent's column the children's `<name>_id` holds: the
     /// parent model's primary key, or the relation's `lk = "..."` the
@@ -251,6 +246,73 @@ where
     /// Laravel-shape alias for [`Self::limit`].
     pub fn take(self, n: u64) -> Self {
         self.limit(n)
+    }
+
+    /// Create a child with trusted ownership while guarding caller attributes.
+    pub async fn create(self, attrs: crate::eloquent::Attrs) -> Result<R, FrameworkError> {
+        let mut attrs = R::fillable_filter().apply_checked(attrs)?;
+        attrs.insert(format!("{}_id", self.morph_name), self.parent_key_value);
+        attrs.insert(format!("{}_type", self.morph_name), self.morph_type_value);
+        crate::eloquent::unguarded(|| R::create(attrs)).await
+    }
+
+    /// Insert a new child or save an existing child with this owner's keys.
+    pub async fn save(self, model: R) -> Result<R, FrameworkError>
+    where
+        R: crate::Persistable,
+        <R::Entity as sea_orm::EntityTrait>::ActiveModel:
+            sea_orm::TryIntoModel<<R::Entity as sea_orm::EntityTrait>::Model>,
+    {
+        use sea_orm::{IntoActiveModel, TryIntoModel};
+        let mut reset = model.clone();
+        reset.reset_primary_key();
+        let unsaved = model.__eager_cache().is_some_and(|cache| {
+            crate::eloquent::changes::original_row(Some(cache.row_state())).is_none()
+        }) && reset.primary_key_value() == model.primary_key_value();
+        let mut am = model.clone().try_into_storage()?.into_active_model();
+        let mut keys = crate::eloquent::Attrs::new();
+        keys.insert(format!("{}_id", self.morph_name), self.parent_key_value);
+        keys.insert(format!("{}_type", self.morph_name), self.morph_type_value);
+        R::apply_attrs_to_active_model(&mut am, keys)?;
+        let changed = R::try_from_storage(
+            am.try_into_model()
+                .map_err(|error| FrameworkError::database(error.to_string()))?,
+        )?;
+        if unsaved {
+            changed.persist().await
+        } else {
+            let mut previous = match model
+                .__eager_cache()
+                .and_then(|cache| crate::eloquent::changes::original_row(Some(cache.row_state())))
+            {
+                Some(row) => R::__model_from_stored_row(row.as_any()).ok_or_else(|| {
+                    FrameworkError::internal("morph save: original row has the wrong model type")
+                })??,
+                None => model,
+            };
+            R::__mark_query_result(std::slice::from_mut(&mut previous));
+            crate::eloquent::model::save_changed_columns(&previous, changed).await
+        }
+    }
+
+    /// Fill each row's owner keys before the builder performs a bulk upsert.
+    pub async fn upsert(
+        self,
+        mut rows: Vec<crate::eloquent::Attrs>,
+        unique_by: Vec<&str>,
+        update: Option<Vec<&str>>,
+    ) -> Result<u64, FrameworkError> {
+        for row in &mut rows {
+            row.insert(
+                format!("{}_id", self.morph_name),
+                self.parent_key_value.clone(),
+            );
+            row.insert(
+                format!("{}_type", self.morph_name),
+                self.morph_type_value.clone(),
+            );
+        }
+        self.inner.upsert(rows, unique_by, update).await
     }
 
     /// Execute and return the first matching child row.
@@ -444,6 +506,42 @@ where
     pub fn order_by(mut self, col: impl IntoColumn, dir: Direction) -> Self {
         self.inner = self.inner.order_by(col, dir);
         self
+    }
+
+    /// Bound lazy reads and apply the same bound per parent during eager loading.
+    pub fn limit(mut self, n: u64) -> Self {
+        self.inner = self.inner.limit(n);
+        self
+    }
+
+    /// Use Laravel's alias for the same per-parent bound.
+    pub fn take(self, n: u64) -> Self {
+        self.limit(n)
+    }
+
+    /// Create a child whose morph columns identify this owner.
+    pub async fn create(self, attrs: crate::eloquent::Attrs) -> Result<R, FrameworkError> {
+        self.inner.create(attrs).await
+    }
+
+    /// Insert or save a child with the morph columns of this owner.
+    pub async fn save(self, model: R) -> Result<R, FrameworkError>
+    where
+        R: crate::Persistable,
+        <R::Entity as sea_orm::EntityTrait>::ActiveModel:
+            sea_orm::TryIntoModel<<R::Entity as sea_orm::EntityTrait>::Model>,
+    {
+        self.inner.save(model).await
+    }
+
+    /// Set trusted ownership on every row before its bulk upsert.
+    pub async fn upsert(
+        self,
+        rows: Vec<crate::eloquent::Attrs>,
+        unique_by: Vec<&str>,
+        update: Option<Vec<&str>>,
+    ) -> Result<u64, FrameworkError> {
+        self.inner.upsert(rows, unique_by, update).await
     }
 
     /// Execute and return the single matching child row (if any).

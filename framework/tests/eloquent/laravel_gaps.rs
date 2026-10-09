@@ -3,3 +3,5 @@
 
 pub mod exists;
 pub mod queries;
+pub mod relations;
+pub mod scopes;

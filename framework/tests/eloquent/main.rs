@@ -34,6 +34,8 @@ pub mod joins_model;
 mod key_ring;
 /// Contract tests observe the Laravel relation delta.
 pub mod laravel_delta;
+/// Tests observe the agreed data gaps.
+pub mod laravel_gaps;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;

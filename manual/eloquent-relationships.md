@@ -315,6 +315,19 @@ for r in &roles {
 }
 ```
 
+You delete a loaded pivot without a surrogate `id` through its original
+foreign-key pair. You declare one key as the pivot model's `primary_key`
+and keep both keys as fields. You obtain the pivot from a lazy or eager
+relation read, then clone it because `delete()` consumes the model:
+
+```rust
+role.pivot::<RoleUser>().clone().delete().await?;
+```
+
+Your other attachments remain in place. A loaded morph pivot also uses its
+original type column, so another morph family with the same keys remains.
+A pivot with a surrogate `id` uses its ordinary model deletion path.
+
 ### Mapping related records in chunks
 
 You call `chunk_map(size, closure)` on `BelongsToMany`, `HasOneThrough` or
@@ -540,6 +553,26 @@ let video_comments = video.comments().get().await?;   // only commentable_type =
 child's `commentable_type` column. Default is the snake-cased struct
 name, but overriding is the right move for any model you're shipping -
 table-renaming refactors shouldn't break the polymorphic key.
+
+You create or save a child through `MorphOne` or `MorphMany` to fill its
+owner id and canonical type. The relation's ownership overrides caller
+values, including guarded ownership columns. Your other create attributes
+retain the model's mass-assignment rules.
+
+```rust
+let comment = post.comments().create(attrs! { body: "Hello" }).await?;
+let comment = post.comments().save(comment).await?;
+let changed = post.comments().upsert(
+    vec![attrs! { body: "Hello" }],
+    vec!["commentable_id", "commentable_type", "body"],
+    Some(vec!["body"]),
+).await?;
+```
+
+You pass a new model to `save` to insert it, or a stored model to update it.
+You use `upsert(rows, unique_by, update)` to fill ownership on every row
+before the bulk write. You choose a database unique constraint for
+`unique_by`. Empty rows return zero. Database errors return to you.
 
 #### Morph aliases
 
@@ -804,6 +837,12 @@ let mine = Post::query()
     .await?;
 ```
 
+You query a `MorphTo` with `has_morph`, `doesnt_have_morph`,
+`where_has_morph` or `where_doesnt_have_morph`. You supply registered morph
+names or `"*"`. The `where_` closure receives `Builder<()>` and the
+canonical morph name per type. Wildcard absence also includes null type
+columns. See [MorphTo existence](eloquent.md#morphto-existence).
+
 ### How it works
 
 The engine walks the relation inventory at query-build time. For each
@@ -887,6 +926,20 @@ let users = User::query()
     .get()
     .await?;
 // 4 queries: users, posts IN users.id, comments IN posts.id, authors IN comments.user_id.
+```
+
+You cap eager has-one, has-many, morph-one and morph-many reads per parent
+with `limit(n)` or `take(n)` in your constraint closure. Each parent keeps
+up to that many matching children, in your chosen order. The child query
+uses `ROW_NUMBER()` partitioned by its foreign key, including on SQLite.
+Without an explicit order, you receive rows in primary-key order. A zero
+limit loads no children. Lazy relation access keeps a plain `LIMIT`.
+
+```rust
+let posts = Post::query()
+    .with_where(("comments", |q: Builder<Comment>| q.order_by_desc("id").limit(2)))
+    .get()
+    .await?;
 ```
 
 ### `with_count` and aggregates

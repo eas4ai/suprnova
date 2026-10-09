@@ -2666,7 +2666,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::None => __sn_builder,
                     };
                     let rows: ::std::vec::Vec<#target_ty> =
-                        __sn_builder.get().await?.into_vec();
+                        __sn_builder.__eager_limit(#fk).get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, #target_ty> = HashMap::new();
                     for r in rows.into_iter() {
@@ -2677,7 +2677,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         )
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        by_fk.insert(key, r);
+                        by_fk.entry(key).or_insert(r);
                     }
                     for p in parents.iter_mut() {
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
@@ -2858,7 +2858,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::None => __sn_builder,
                     };
                     let rows: ::std::vec::Vec<#target_ty> =
-                        __sn_builder.get().await?.into_vec();
+                        __sn_builder.__eager_limit(#fk).get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -2942,6 +2942,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             #pivot_table,
                             <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                             #pivot_fk,
+                            #pivot_related,
                             pk_values.clone(),
                             ::core::option::Option::None,
                         )
@@ -3359,12 +3360,8 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        // First row wins (per HasOne semantics) - we
-                        // sort by id ASC implicitly via the order the
-                        // groups were built, but explicit `LIMIT 1`
-                        // logic isn't worth a separate dispatch path
-                        // because MorphOne is by contract 0-or-1 row.
-                        let row = by_fk.remove(&key).and_then(|mut v| v.pop());
+                        // Keep the first row in the query's chosen order.
+                        let row = by_fk.remove(&key).and_then(|v| v.into_iter().next());
                         p.__eager.set_one::<#target_ty>(#name_str, row);
                     }
                 }
@@ -3411,7 +3408,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::core::option::Option::Some(f) => f(__sn_builder),
                         ::core::option::Option::None => __sn_builder,
                     };
-                    let rows: ::std::vec::Vec<#target_ty> = __sn_builder.get().await?.into_vec();
+                    let rows: ::std::vec::Vec<#target_ty> = __sn_builder.__eager_limit(#id_col).get().await?.into_vec();
                     use ::std::collections::HashMap;
                     let mut by_fk: HashMap<::std::string::String, ::std::vec::Vec<#target_ty>>
                         = HashMap::new();
@@ -3486,6 +3483,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             #pivot_table,
                             <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                             #id_col,
+                            #pivot_related,
                             pk_values.clone(),
                             ::core::option::Option::Some((#type_col, #parent_morph_type)),
                         )
@@ -3654,6 +3652,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             #pivot_table,
                             <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                             #pivot_fk,
+                            #id_col,
                             pk_values.clone(),
                             ::core::option::Option::Some((#type_col, #target_morph_type)),
                         )
