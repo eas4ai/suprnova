@@ -5,7 +5,7 @@ use crate::query_helpers_model::QhItem;
 use chrono::{DateTime, Utc};
 use sea_orm::DbBackend;
 use serde_json::json;
-use suprnova::{DB, Model, UpdateAttrs, model};
+use suprnova::{Builder, DB, Model, UpdateAttrs, model};
 
 /// A renamed creation timestamp proves ordering uses declared model metadata.
 #[model(
@@ -20,6 +20,15 @@ pub struct GapTime {
     pub created_on: DateTime<Utc>,
     /// Supply the paired timestamp that enables timestamp management.
     pub modified_on: DateTime<Utc>,
+}
+
+/// A parent whose eager children rank by the seeded order in a window.
+#[model(table = "gap_random_bins", relations = {
+    items: HasMany<QhItem> { fk = "b" },
+})]
+pub struct GapRandomBin {
+    /// Each bin owns the items whose `b` names it.
+    pub id: i64,
 }
 
 async fn fixture() -> Fixture {
@@ -341,4 +350,163 @@ async fn seeded_random_order_over_a_join_on_sqlite_repeats_each_row_once() {
     let mut sorted = first;
     sorted.sort_unstable();
     assert_eq!(sorted, (1..=12).collect::<Vec<_>>());
+}
+
+/// Rows a seeded SQLite order must keep apart: ids 1 and 4294967297 agree
+/// mod 2^32, and adding a seed to an id near `i64::MAX` overflows SQLite's
+/// integer range. Column `a` is indexed and runs against the id order, so a
+/// filter on it reads the rows in another order than a full scan does.
+/// Bin 1 holds the two small ids and bin 2 the two large ones.
+async fn wide_key_fixture() -> Fixture {
+    let fx = Fixture::sqlite().await;
+    fx.exec("CREATE TABLE qh_items (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, label TEXT, code TEXT, description TEXT, deleted_at TEXT)").await;
+    fx.exec("CREATE INDEX qh_items_a ON qh_items (a)").await;
+    fx.exec(&format!(
+        "INSERT INTO qh_items VALUES (1, 4, 1, 1, 'x', 'one', '', NULL), \
+         (4294967297, 3, 1, 1, 'x', 'two', '', NULL), \
+         ({}, 2, 2, 2, 'x', 'three', '', NULL), ({}, 1, 2, 2, 'x', 'four', '', NULL)",
+        i64::MAX - 1,
+        i64::MAX
+    ))
+    .await;
+    fx.exec("CREATE TABLE gap_random_bins (id INTEGER PRIMARY KEY)")
+        .await;
+    fx.exec("INSERT INTO gap_random_bins VALUES (1), (2)").await;
+    fx
+}
+
+fn wide_ids() -> Vec<i64> {
+    vec![1, 4_294_967_297, i64::MAX - 1, i64::MAX]
+}
+
+async fn item_ids(query: Builder<QhItem>) -> Vec<i64> {
+    query.get().await.unwrap().iter().map(|r| r.id).collect()
+}
+
+#[tokio::test]
+async fn seeded_random_order_on_sqlite_is_the_same_whichever_plan_reads_the_rows() {
+    let _fx = wide_key_fixture().await;
+    for seed in [1, 42, u64::MAX] {
+        let scanned = item_ids(QhItem::query().in_random_order_seeded(seed)).await;
+        let indexed = item_ids(
+            QhItem::query()
+                .filter_op("a", ">", 0)
+                .in_random_order_seeded(seed),
+        )
+        .await;
+        assert_eq!(scanned, indexed, "seed {seed}");
+        assert_eq!(
+            scanned,
+            item_ids(QhItem::query().in_random_order_seeded(seed)).await
+        );
+        let mut sorted = scanned;
+        sorted.sort_unstable();
+        assert_eq!(sorted, wide_ids(), "seed {seed}");
+    }
+    // Seed 42 gives ids 1 and 4294967297 one expression value; the key
+    // orders the pair.
+    let order = item_ids(
+        QhItem::query()
+            .filter_op("a", ">", 0)
+            .in_random_order_seeded(42),
+    )
+    .await;
+    let at = |id| order.iter().position(|&x| x == id).unwrap();
+    assert!(at(1) < at(4_294_967_297), "{order:?}");
+}
+
+#[tokio::test]
+async fn seeded_random_order_orders_a_union_and_its_pages_on_sqlite() {
+    let _fx = wide_key_fixture().await;
+    let plain = item_ids(QhItem::query().in_random_order_seeded(42)).await;
+    let union = || {
+        QhItem::query()
+            .filter("b", 1)
+            .union(QhItem::query().filter("b", 2))
+            .in_random_order_seeded(42)
+    };
+    let first = item_ids(union()).await;
+    assert_eq!(first, item_ids(union()).await);
+    assert_eq!(first, plain, "a union orders by the same key as its rows");
+    let page = union().paginate(3).await.unwrap();
+    assert_eq!(page.total, 4);
+    assert_eq!(
+        page.data.iter().map(|r| r.id).collect::<Vec<_>>(),
+        plain[..3]
+    );
+    let simple = union().simple_paginate(2).await.unwrap();
+    assert_eq!(
+        simple.data.iter().map(|r| r.id).collect::<Vec<_>>(),
+        plain[..2]
+    );
+    assert!(simple.has_more);
+    assert_eq!(item_ids(union().skip(2).take(2)).await, plain[2..]);
+    // Set before `union`, the order and limit keep the first query to the
+    // first of its own rows in the seeded order.
+    let head = QhItem::query()
+        .filter("b", 1)
+        .in_random_order_seeded(42)
+        .take(1)
+        .union(QhItem::query().filter("b", 2));
+    let mut ids = item_ids(head).await;
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, i64::MAX - 1, i64::MAX]);
+    assert!(
+        QhItem::query()
+            .filter("b", 9)
+            .union(QhItem::query().filter("b", 8))
+            .in_random_order_seeded(42)
+            .get()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn seeded_random_order_ranks_eager_children_per_parent_on_sqlite() {
+    let _fx = wide_key_fixture().await;
+    let plain = item_ids(QhItem::query().in_random_order_seeded(42)).await;
+    let first_of = |bin: i64| -> i64 {
+        let members: &[i64] = if bin == 1 {
+            &[1, 4_294_967_297]
+        } else {
+            &[i64::MAX - 1, i64::MAX]
+        };
+        *plain.iter().find(|id| members.contains(id)).unwrap()
+    };
+    let loaded = |bins: Vec<GapRandomBin>| -> Vec<(i64, Vec<i64>)> {
+        bins.iter()
+            .map(|bin| {
+                (
+                    bin.id,
+                    bin.items_loaded().iter().map(|r| r.id).collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![(1, vec![first_of(1)]), (2, vec![first_of(2)])];
+    let bins = GapRandomBin::query()
+        .order_by_asc("id")
+        .with_where(("items", |q: Builder<QhItem>| {
+            q.in_random_order_seeded(42).take(1)
+        }))
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    assert_eq!(loaded(bins), expected);
+    let bins = GapRandomBin::query()
+        .order_by_asc("id")
+        .with_where(("items", |q: Builder<QhItem>| {
+            q.filter_op("a", ">", 2)
+                .union(QhItem::query().filter_op("a", "<=", 2))
+                .in_random_order_seeded(42)
+                .take(1)
+        }))
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    assert_eq!(loaded(bins), expected, "a window over a union");
 }
