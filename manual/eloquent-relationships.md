@@ -250,8 +250,24 @@ An id the relation already holds is skipped, not rewritten, so its row
 keeps its extra pivot columns and its `created_at` and `updated_at`. The
 new rows get timestamps when the relation has `with_timestamps`. The
 inserts run in one transaction, so one that fails rolls back the others.
-Like `sync`, it returns `()` rather than Laravel's attached, detached, and
-updated report.
+You receive `SyncChanges` from both methods: `attached`, `detached` and
+`updated` hold JSON ids. `sync_without_detaching` always reports an empty
+`detached` list. You supply per-id columns with `(id, Attrs)` records:
+
+```rust
+let changes = user.roles()
+    .sync_without_detaching([(2, attrs! { assigned_at: now })])
+    .await?;
+assert_eq!(changes.updated, vec![serde_json::json!(2)]);
+```
+
+An existing row updates only when a supplied column changes. You keep
+unsupplied columns, and an unchanged row keeps its timestamps. A changed
+row receives `updated_at` when you enable `with_timestamps`. Both methods
+reconcile and write inside one transaction. You add `.touch_parent()`
+when the parent timestamp must advance after a relation change. An
+inverse relation named in the related model's `touches` also enables that
+parent touch; `without_touching` suppresses it.
 
 Reading goes through the two-query strategy:
 
@@ -311,7 +327,8 @@ The full family:
 | `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
 
 Every method has an `or_` twin that folds into a disjunction with the
-term before it, the same way `or_where` does on `Builder`. A closure
+term before it. Inside a closure, the builder's `or_*` conditions are
+flat and follow SQL precedence. A closure
 group stays atomic inside that disjunction, so
 `.where_pivot_null("note").or_where_pivot_group(|q| ...)` reads as
 `note IS NULL OR (...)` and not as a flattened chain.
@@ -329,25 +346,21 @@ untrusted input.
 
 The same family is on `MorphToMany` and `MorphedByMany`.
 
-### Why Suprnova diverges: pivot filters are read-only
+### Pivot filters on writes and eager loads
 
 Two boundaries, both deliberate.
 
-**A pivot filter never narrows a write.** Laravel folds `wherePivot`
-constraints into `detach()`, so `->wherePivot('active', 1)->detach()`
-deletes only the active join rows. Suprnova builds its pivot `DELETE`
-by hand, and a read predicate that silently does or does not reach a
-delete is a difference you cannot see from the call site. So `attach`,
-`attach_with`, `detach` and `sync` return an error while any filter is
-set. Split the two intents:
+You use pivot filters with `sync` and `sync_without_detaching` to narrow
+the current set, updates and detachments. A row outside the filter stays
+as it is. A new record still needs the pivot columns its filter expects:
 
 ```rust
-// Read what matches, then act on it explicitly.
-let stale = user.roles().where_pivot("active", 0i64).get().await?;
-for role in &stale {
-    user.roles().detach(role.id).await?;
-}
+let changes = user.roles().where_pivot("active", 1i64)
+    .sync([(role.id, attrs! { active: 1 })]).await?;
 ```
+
+`attach`, `attach_with` and `detach` still refuse a pivot filter.
+Polymorphic pivot mutators also retain that refusal.
 
 **Eager loading does not carry pivot filters.** `user_query.with(["roles"])`
 runs through the relation's generated eager-load path, which scans the

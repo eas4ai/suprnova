@@ -132,6 +132,7 @@ where
         current.__eager_cache(),
         false,
         M::__decoded_values_equal,
+        None,
     )?;
     M::__dispatch_updated(previous, &current).await?;
     M::__dispatch_saved(&current).await?;
@@ -321,14 +322,114 @@ fn record_save_on(
     current: Option<&crate::eloquent::relations::EagerLoadCache>,
     adopt: bool,
     decoded_equal: crate::eloquent::changes::DecodedEqual,
+    written_columns: Option<&[String]>,
 ) -> Result<(), FrameworkError> {
     let saved = row_state(saved);
     let current = row_state(current);
-    crate::eloquent::changes::record_save(saved, current, decoded_equal)?;
+    crate::eloquent::changes::record_save(saved, current, decoded_equal, written_columns)?;
     if adopt && let (Some(saved), Some(current)) = (saved, current) {
         saved.adopt(current);
     }
     Ok(())
+}
+
+/// Judge dirtiness from the kept row before timestamp injection or database access.
+fn save_is_dirty<M>(model: &M, attrs: &Attrs) -> Result<bool, FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(original) = crate::eloquent::changes::original_row(row_state(model.__eager_cache()))
+    else {
+        return Ok(true);
+    };
+    let row = model.clone().try_into_storage()?;
+    let current =
+        serde_json::to_value(&row).map_err(|error| FrameworkError::internal(error.to_string()))?;
+    let original_json = original.to_json()?;
+    if let Some(current) = current.as_object() {
+        for (column, value) in current {
+            if original_json.get(column) != Some(value)
+                && !M::__decoded_values_equal(column, original.as_any(), &row)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    let serialized =
+        serde_json::to_value(model).map_err(|error| FrameworkError::internal(error.to_string()))?;
+    Ok(attrs
+        .iter()
+        .any(|(column, value)| serialized.get(column) != Some(value)))
+}
+
+/// Keep concurrent changes to clean columns while writing an instance's dirty values.
+fn prune_save_columns<M>(
+    model: &M,
+    attrs: &Attrs,
+    am: &mut <M::Entity as EntityTrait>::ActiveModel,
+) -> Result<Vec<String>, FrameworkError>
+where
+    M: Model,
+    M: From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    use sea_orm::{ActiveModelTrait, ActiveValue, IdenStatic};
+    let written = |am: &<M::Entity as EntityTrait>::ActiveModel| -> Vec<String> {
+        <M::Entity as EntityTrait>::Column::iter()
+            .filter(|column| matches!(am.get(*column), ActiveValue::Set(_)))
+            .map(|column| column.as_str().to_string())
+            .collect()
+    };
+    let Some(original) = crate::eloquent::changes::original_row(row_state(model.__eager_cache()))
+    else {
+        return Ok(written(am));
+    };
+    let Some(original_row) = original
+        .as_any()
+        .downcast_ref::<<M::Entity as EntityTrait>::Model>()
+    else {
+        return Ok(written(am));
+    };
+    let old = original_row.clone().into_active_model();
+    let current = model.clone().try_into_storage()?;
+    let serialized =
+        serde_json::to_value(model).map_err(|error| FrameworkError::internal(error.to_string()))?;
+    for column in <M::Entity as EntityTrait>::Column::iter() {
+        if <M::Entity as EntityTrait>::PrimaryKey::iter()
+            .any(|key| key.into_column().as_str() == column.as_str())
+        {
+            continue;
+        }
+        let ActiveValue::Set(new) = am.get(column) else {
+            continue;
+        };
+        let listener_changed = attrs
+            .get(column.as_str())
+            .is_some_and(|v| serialized.get(column.as_str()) != Some(v));
+        let unchanged = old.get(column).into_value().as_ref() == Some(&new)
+            || (!listener_changed
+                && M::__decoded_values_equal(column.as_str(), original.as_any(), &current)?);
+        if unchanged {
+            am.not_set(column);
+        }
+    }
+    Ok(written(am))
 }
 
 /// The Eloquent CRUD lifecycle. Auto-implemented for every
@@ -958,13 +1059,13 @@ where
         Ok(row)
     }
 
-    /// Persist any field changes on this row. The full row is sent to
-    /// the database - T4 doesn't track per-field dirty state.
+    /// Persist the fields that differ from the instance's kept original values.
+    /// A clean save fires `Saving` and `Saved` without reading or updating the row.
     ///
     /// ## Lifecycle events (Phase 10C T1)
     ///
-    /// 1. `Updating { previous, attrs }` - cancellable
-    /// 2. `Saving { attrs, is_creating: false }` - cancellable
+    /// 1. `Saving { attrs, is_creating: false }` - cancellable
+    /// 2. `Updating { previous, attrs }` - cancellable, only when dirty
     /// 3. *UPDATE lands*
     /// 4. `Updated { previous, current }`
     /// 5. `Saved { model: current }`
@@ -991,8 +1092,12 @@ where
         let attrs = Attrs::from(attrs_value);
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(attrs));
 
-        Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
+        if !save_is_dirty(self, &*shared.lock().await)? {
+            Self::__dispatch_saved(self).await?;
+            return Ok(());
+        }
+        Self::__dispatch_updating(self, shared.clone()).await?;
 
         // Audit HIGH `eloquent` #2 - read the (possibly listener-
         // mutated) attrs back from the shared map and overlay onto
@@ -1002,7 +1107,8 @@ where
         let final_attrs = shared.lock().await.clone();
         let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
-        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
+        Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
+        let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
         // T11/T12: route through resolve_write.
         let current =
             crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
@@ -1027,6 +1133,7 @@ where
             current.__eager_cache(),
             true,
             Self::__decoded_values_equal,
+            Some(&written_columns),
         )?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -1082,6 +1189,7 @@ where
             current.__eager_cache(),
             false,
             Self::__decoded_values_equal,
+            None,
         )?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -1143,6 +1251,13 @@ where
     /// something, and after an insert.
     fn get_changes(&self) -> Attrs {
         crate::eloquent::changes::changes(row_state(self.__eager_cache()))
+    }
+
+    /// Read a changed attribute's previous stored value so observers can audit a save.
+    /// An unchanged or unknown attribute returns `None`. A clean or failed save keeps
+    /// the record of the last successful change, as [`Self::get_changes`] does.
+    fn get_previous(&self, attribute: &str) -> Option<serde_json::Value> {
+        crate::eloquent::changes::previous(row_state(self.__eager_cache()), attribute)
     }
 
     /// The original value of `attribute`, read through the model's casts,
@@ -1550,7 +1665,7 @@ where
     // same order as the non-tx variant.
 
     /// Persist this row's in-memory state through `tx`. Same lifecycle
-    /// event sequence as [`Self::save`] (`Updating` → `Saving` →
+    /// event sequence as [`Self::save`] (`Saving` → `Updating` →
     /// UPDATE → `Updated` → `Saved`). Used with
     /// [`DB::begin_transaction`](crate::DB::begin_transaction) when the
     /// closure form doesn't fit the caller's control flow. Refuses a
@@ -1565,8 +1680,12 @@ where
         let attrs = Attrs::from(attrs_value);
         let shared = std::sync::Arc::new(tokio::sync::Mutex::new(attrs));
 
-        Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
+        if !save_is_dirty(self, &*shared.lock().await)? {
+            Self::__dispatch_saved(self).await?;
+            return Ok(());
+        }
+        Self::__dispatch_updating(self, shared.clone()).await?;
 
         // Audit HIGH `eloquent` #2 - match `save()`'s lifecycle: read
         // the listener-mutated attrs back and apply them to the
@@ -1574,7 +1693,8 @@ where
         let final_attrs = shared.lock().await.clone();
         let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
-        Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
+        Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
+        let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let updated = exec
             .update_active(am)
@@ -1588,6 +1708,7 @@ where
             current.__eager_cache(),
             true,
             Self::__decoded_values_equal,
+            Some(&written_columns),
         )?;
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -1631,6 +1752,7 @@ where
             current.__eager_cache(),
             false,
             Self::__decoded_values_equal,
+            None,
         )?;
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -2353,7 +2475,7 @@ pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
     match v {
         serde_json::Value::String(s) => Value::String(Some(s.clone())),
         serde_json::Value::Bool(b) => Value::Bool(Some(*b)),
-        serde_json::Value::Number(n) if n.is_i64() => Value::BigInt(Some(n.as_i64().unwrap())),
+        serde_json::Value::Number(n) if n.is_i64() => Value::BigInt(n.as_i64()),
         serde_json::Value::Number(n) if n.is_u64() => {
             // SeaORM has no unsigned 64-bit type that maps cleanly here;
             // fall back to i64 if it fits, else to string.
@@ -2362,7 +2484,7 @@ pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
                 .map(|i| Value::BigInt(Some(i)))
                 .unwrap_or_else(|| Value::String(Some(n.to_string())))
         }
-        serde_json::Value::Number(n) if n.is_f64() => Value::Double(Some(n.as_f64().unwrap())),
+        serde_json::Value::Number(n) if n.is_f64() => Value::Double(n.as_f64()),
         serde_json::Value::Null => Value::String(None),
         _ => Value::String(Some(v.to_string())),
     }

@@ -155,11 +155,11 @@ async fn or_forms_of_the_grouped_helpers() {
                 .filter("label", "z")
                 .or_where_any(["b", "c"], "=", 2)
                 .filter("a", 1),
-            "(label = 'z' OR (b = 2 OR c = 2)) AND a = 1"
+            "label = 'z' OR (b = 2 OR c = 2) AND a = 1"
         )
         .await,
-        vec![1, 2],
-        "an or_ helper folds into the condition before it and no further"
+        vec![1, 2, 5],
+        "flat OR leaves the following AND on its right branch"
     );
 }
 
@@ -257,7 +257,7 @@ async fn raw_and_null_or_forms() {
                 .where_raw("a + b = ?", vec![2.into()])
                 .or_where_raw("c = ? AND a = ?", vec![2.into(), 0.into()])
                 .filter_op("id", "<", 5),
-            "(a + b = 2 OR (c = 2 AND a = 0)) AND id < 5"
+            "a + b = 2 OR c = 2 AND a = 0 AND id < 5"
         )
         .await,
         vec![4],
@@ -428,7 +428,7 @@ async fn where_any_all_and_none_keep_their_or_inside_parentheses() {
 }
 
 #[tokio::test]
-async fn or_where_any_all_and_none_fold_into_the_previous_condition() {
+async fn or_where_any_all_and_none_keep_flat_precedence() {
     let _fx = seeded_sqlite().await;
     or_forms_of_the_grouped_helpers().await;
 }
@@ -525,4 +525,108 @@ async fn mysql_every_query_helper_matches_raw_sql() {
     seed(&fx).await;
     run_every_scenario().await;
     fx.close().await;
+}
+
+#[tokio::test]
+async fn equality_shortcuts_and_bound_nulls_match_sql() {
+    let _fx = seeded_sqlite().await;
+    DB::enable_query_log().expect("log");
+    let rows = items()
+        .r#where("a", 1)
+        .or_where("b", 2)
+        .filter("c", 2)
+        .order_by_asc("id")
+        .get()
+        .await
+        .expect("equality");
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.get_int("id").expect("id"))
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        DB::get_query_log().expect("log")[0].sql,
+        "SELECT * FROM \"pq_items\" WHERE \"a\" = ? OR \"b\" = ? AND \"c\" = ? ORDER BY \"id\" ASC"
+    );
+    assert_eq!(
+        ids_matching(
+            items().db_where("label", SeaValue::String(None)),
+            "label IS NULL"
+        )
+        .await,
+        vec![2, 4]
+    );
+    assert_eq!(
+        ids_matching(
+            items()
+                .filter("id", 1)
+                .or_where("label", SeaValue::String(None)),
+            "id = 1 OR label IS NULL"
+        )
+        .await,
+        vec![1, 2, 4]
+    );
+    assert_eq!(
+        ids_matching(items().filter_op("a", "=", 1), "a = 1").await,
+        vec![1, 2, 3]
+    );
+}
+
+#[tokio::test]
+async fn every_or_helper_keeps_a_following_and_flat() {
+    let _fx = seeded_sqlite().await;
+    for (query, branch) in [
+        (
+            items().filter("id", 1).or_where_any(["a", "b"], "=", 0),
+            "(a = 0 OR b = 0)",
+        ),
+        (
+            items().filter("id", 1).or_where_all(["a", "b"], "=", 0),
+            "(a = 0 AND b = 0)",
+        ),
+        (
+            items().filter("id", 1).or_where_none(["a", "b"], "=", 1),
+            "NOT (a = 1 OR b = 1)",
+        ),
+        (
+            items().filter("id", 1).or_where_in("id", [4i64]),
+            "id IN (4)",
+        ),
+        (
+            items().filter("id", 1).or_where_not_in("id", [2i64]),
+            "id NOT IN (2)",
+        ),
+        (
+            items().filter("id", 1).or_where_in("id", slots_on("mon")),
+            "id IN (SELECT item_id FROM pq_slots WHERE day = 'mon')",
+        ),
+        (
+            items()
+                .filter("id", 1)
+                .or_where_not_in("id", slots_on("tue")),
+            "id NOT IN (SELECT item_id FROM pq_slots WHERE day = 'tue')",
+        ),
+        (
+            items()
+                .filter("id", 1)
+                .or_where_raw("b = ?", vec![2.into()]),
+            "b = 2",
+        ),
+        (
+            items().filter("id", 1).or_where_null("label"),
+            "label IS NULL",
+        ),
+        (
+            items().filter("id", 1).or_where_not_null("label"),
+            "label IS NOT NULL",
+        ),
+    ] {
+        let raw = format!("id = 1 OR {branch} AND id = 4");
+        let ids = ids_matching(query.filter("id", 4), &raw).await;
+        assert!(
+            ids.contains(&1),
+            "the first OR branch is unrestricted: {raw}"
+        );
+    }
 }

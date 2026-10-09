@@ -310,6 +310,49 @@ impl DbTableBuilder {
         self.filter_op(col, "=", val)
     }
 
+    /// Use the equality shortcut without spelling an explicit operator.
+    pub fn db_where(self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
+        self.filter(col, val)
+    }
+
+    /// Use Rust's escaped `where` name for the equality shortcut.
+    pub fn r#where(self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
+        self.filter(col, val)
+    }
+
+    /// Append equality with flat OR precedence, allowing a null value as IS NULL.
+    pub fn or_where(mut self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
+        push_or(
+            &mut self.conditions,
+            Condition::Compare {
+                column: col.into(),
+                op: "=".to_string(),
+                value: val.into(),
+                binary: false,
+            },
+        );
+        self
+    }
+
+    /// Append an OR comparison with an operator that is validated before execution.
+    pub fn or_where_op(
+        mut self,
+        col: impl Into<String>,
+        op: impl Into<String>,
+        val: impl Into<SeaValue>,
+    ) -> Self {
+        push_or(
+            &mut self.conditions,
+            Condition::Compare {
+                column: col.into(),
+                op: op.into(),
+                value: val.into(),
+                binary: false,
+            },
+        );
+        self
+    }
+
     /// Add a `WHERE col <op> ?` clause with an explicit operator
     /// (`>`, `>=`, `<`, `<=`, `<>`, `LIKE`, etc.). Multiple calls AND
     /// together.
@@ -371,6 +414,21 @@ impl DbTableBuilder {
         self
     }
 
+    /// Compare two identifiers with a validated operator without binding either one.
+    pub fn where_column_op(
+        mut self,
+        first: impl Into<String>,
+        op: impl Into<String>,
+        second: impl Into<String>,
+    ) -> Self {
+        self.conditions.push(Condition::Columns {
+            first: first.into(),
+            op: op.into(),
+            second: second.into(),
+        });
+        self
+    }
+
     /// Add a `WHERE col IN (...)` clause. `values` is a list of values,
     /// each bound as a parameter, or a [`DbTableBuilder`] used as a
     /// subquery whose own values bind in place. An empty list matches no
@@ -393,7 +451,7 @@ impl DbTableBuilder {
         self
     }
 
-    /// `OR col IN (...)`, folded into the condition before it; see
+    /// `OR col IN (...)`, appended with flat SQL precedence; see
     /// [`Self::where_in`] for what `values` takes.
     pub fn or_where_in(
         mut self,
@@ -407,7 +465,7 @@ impl DbTableBuilder {
         self
     }
 
-    /// `OR col NOT IN (...)`, folded into the condition before it.
+    /// `OR col NOT IN (...)`, appended with flat SQL precedence.
     pub fn or_where_not_in(
         mut self,
         col: impl Into<String>,
@@ -438,7 +496,7 @@ impl DbTableBuilder {
         self
     }
 
-    /// `OR col IS NULL`, folded into the condition before it.
+    /// `OR col IS NULL`, appended with flat SQL precedence.
     pub fn or_where_null(mut self, col: impl Into<String>) -> Self {
         push_or(
             &mut self.conditions,
@@ -450,7 +508,7 @@ impl DbTableBuilder {
         self
     }
 
-    /// `OR col IS NOT NULL`, folded into the condition before it.
+    /// `OR col IS NOT NULL`, appended with flat SQL precedence.
     pub fn or_where_not_null(mut self, col: impl Into<String>) -> Self {
         push_or(
             &mut self.conditions,
@@ -484,7 +542,7 @@ impl DbTableBuilder {
         self
     }
 
-    /// `OR <sql>`, folded into the condition before it; see
+    /// `OR <sql>`, appended with flat SQL precedence; see
     /// [`Self::where_raw`].
     pub fn or_where_raw(mut self, sql: impl Into<String>, bindings: Vec<SeaValue>) -> Self {
         push_or(
@@ -545,8 +603,7 @@ impl DbTableBuilder {
         self.push_grouped(cols, op, val, Grouping::Any, false)
     }
 
-    /// `OR (c1 op ? OR c2 op ? ...)`, folded into the condition before
-    /// it; see [`Self::where_any`].
+    /// `OR (c1 op ? OR c2 op ? ...)`, appended with flat SQL precedence; see [`Self::where_any`].
     pub fn or_where_any<I, S>(
         self,
         cols: I,
@@ -570,8 +627,7 @@ impl DbTableBuilder {
         self.push_grouped(cols, op, val, Grouping::All, false)
     }
 
-    /// `OR (c1 op ? AND c2 op ? ...)`, folded into the condition before
-    /// it.
+    /// `OR (c1 op ? AND c2 op ? ...)`, appended with flat SQL precedence.
     pub fn or_where_all<I, S>(
         self,
         cols: I,
@@ -595,8 +651,7 @@ impl DbTableBuilder {
         self.push_grouped(cols, op, val, Grouping::None, false)
     }
 
-    /// `OR NOT (c1 op ? OR c2 op ? ...)`, folded into the condition
-    /// before it.
+    /// `OR NOT (c1 op ? OR c2 op ? ...)`, appended with flat SQL precedence.
     pub fn or_where_none<I, S>(
         self,
         cols: I,
@@ -725,6 +780,20 @@ impl DbTableBuilder {
         self.joins.push(JoinClause::new(
             JoinKind::Cross,
             JoinTarget::Table(table.into()),
+        ));
+        self
+    }
+
+    /// Keep closure conditions on a cross join so they constrain its row pairs.
+    pub fn cross_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Cross,
+            JoinTarget::Table(table.into()),
+            build,
         ));
         self
     }
@@ -975,20 +1044,6 @@ impl DbTableBuilder {
         let mut reads = ReadSet::default();
         self.collect_tables(&mut reads);
         reads.observe();
-    }
-
-    /// Refuse a write on a builder that carries joins. The `UPDATE` and
-    /// `DELETE` this builder renders name one table and would ignore the
-    /// joins, so they would touch rows the joins were there to exclude.
-    fn refuse_joins(&self, operation: &str) -> Result<(), FrameworkError> {
-        if self.joins.is_empty() {
-            return Ok(());
-        }
-        Err(FrameworkError::database(format!(
-            "DB::table(\"{}\")::{operation} does not support joins: the statement would \
-             ignore them; filter with where_in or where_exists on a subquery instead",
-            self.table
-        )))
     }
 
     /// Execute the SELECT and return every matching row as a
@@ -1267,7 +1322,6 @@ impl DbTableBuilder {
                 self.table
             )));
         }
-        self.refuse_joins("update")?;
         // Audit HIGH `database` #2 - same validation as insert; the
         // attrs keys land in `SET col = ?` so they must be safe
         // identifiers.
@@ -1326,7 +1380,6 @@ impl DbTableBuilder {
     }
 
     async fn delete_inner(self) -> Result<u64, FrameworkError> {
-        self.refuse_joins("delete")?;
         // Audit HIGH `database` #2 - identifier + operator validation.
         self.validate_inputs()?;
         // T11/T12: route through resolve_write.
@@ -1462,6 +1515,29 @@ impl DbTableBuilder {
         Ok(sql)
     }
 
+    /// Select physical row identities so joined writes affect exactly the selected rows.
+    fn render_write_where(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        if self.joins.is_empty() || backend == DbBackend::MySql {
+            return self.render_where_clauses(backend, values, n);
+        }
+        let identity = if backend == DbBackend::Postgres {
+            "ctid"
+        } else {
+            "rowid"
+        };
+        let query = self.clone().select([format!("{}.{identity}", self.table)]);
+        let select = query.render_select_into(backend, values, n)?;
+        Ok(format!(
+            " WHERE {} IN ({select})",
+            quote_identifier(backend, identity)
+        ))
+    }
+
     fn render_update(
         &self,
         attrs: &Attrs,
@@ -1471,7 +1547,18 @@ impl DbTableBuilder {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
 
-        let mut sql = format!("UPDATE {} SET ", quote_identifier(backend, &self.table));
+        let mut sql = format!("UPDATE {}", quote_identifier(backend, &self.table));
+        if backend == DbBackend::MySql {
+            for join in &self.joins {
+                sql.push_str(&super::clauses::render_join(
+                    join,
+                    backend,
+                    &mut values,
+                    &mut counter,
+                )?);
+            }
+        }
+        sql.push_str(" SET ");
         let sets: Vec<String> = attrs
             .keys()
             .map(|col| {
@@ -1485,7 +1572,7 @@ impl DbTableBuilder {
             .collect();
         sql.push_str(&sets.join(", "));
 
-        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
+        sql.push_str(&self.render_write_where(backend, &mut values, &mut counter)?);
 
         Ok((sql, values))
     }
@@ -1493,8 +1580,23 @@ impl DbTableBuilder {
     fn render_delete(&self, backend: DbBackend) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
-        let mut sql = format!("DELETE FROM {}", quote_identifier(backend, &self.table));
-        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
+        let table = quote_identifier(backend, &self.table);
+        let mut sql = if backend == DbBackend::MySql && !self.joins.is_empty() {
+            format!("DELETE {table} FROM {table}")
+        } else {
+            format!("DELETE FROM {table}")
+        };
+        if backend == DbBackend::MySql {
+            for join in &self.joins {
+                sql.push_str(&super::clauses::render_join(
+                    join,
+                    backend,
+                    &mut values,
+                    &mut counter,
+                )?);
+            }
+        }
+        sql.push_str(&self.render_write_where(backend, &mut values, &mut counter)?);
         Ok((sql, values))
     }
 }
@@ -2357,7 +2459,7 @@ mod where_clause_render_tests {
     }
 
     #[test]
-    fn grouped_helpers_and_or_forms_render_their_parentheses() {
+    fn grouped_helpers_keep_parentheses_and_or_forms_stay_flat() {
         let (sql, values) = DbTableBuilder::new("items")
             .filter("a", 1)
             .where_any(["b", "c"], "=", 2)
@@ -2371,8 +2473,8 @@ mod where_clause_render_tests {
             sql,
             concat!(
                 r#"SELECT * FROM "items" WHERE "a" = $1 "#,
-                r#"AND ("b" = $2 OR "c" = $3 OR "label" IS NULL) "#,
-                r#"AND (NOT ("d" like $4 OR "e" like $5) OR f + g = $6) "#,
+                r#"AND ("b" = $2 OR "c" = $3) OR "label" IS NULL "#,
+                r#"AND NOT ("d" like $4 OR "e" like $5) OR f + g = $6 "#,
                 r#"ORDER BY "id" DESC"#,
             )
         );

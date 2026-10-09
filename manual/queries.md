@@ -52,7 +52,7 @@ terminal method to execute.
 
 ```rust
 // Equality.
-DB::table("users").filter("email", "alice@example.com").get().await?;
+DB::table("users").r#where("email", "alice@example.com").get().await?;
 
 // Arbitrary operator. Allowlist: =, <>, <, <=, >, >=, LIKE, NOT LIKE,
 // ILIKE, NOT ILIKE, IS, IS NOT.
@@ -71,6 +71,11 @@ DB::table("audit_log")
 right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
+
+`r#where(column, value)`, `db_where(column, value)` and `filter(column, value)`
+use `=`. You pass an operator with `filter_op`; `or_where` and
+`or_where_op` add their comparisons with `OR`. A null value in an equality
+comparison becomes `IS NULL`, with no null binding.
 
 A `u64` above `i64::MAX` compares as the number it is, whatever the
 column's type, in a filter and in a raw fragment's bindings alike, so the
@@ -92,6 +97,7 @@ DB::table("users").where_not_null("verified_at").get().await?;
 
 // Two columns compared, with no value.
 DB::table("orders").where_column("shipped_at", "paid_at").get().await?;
+DB::table("orders").where_column_op("shipped_at", ">", "paid_at").get().await?;
 
 // A raw fragment. Write each value as `?` and pass it in the bindings;
 // Postgres gets `$N` markers numbered for their place in the statement.
@@ -106,11 +112,12 @@ list excludes none.
 
 #### OR conditions
 
-Each `or_*` method folds its condition into the one before it, so an
-`OR` widens that one condition and never the whole `WHERE` clause:
+Each `or_*` method adds a flat `OR` condition. You get SQL precedence:
+`where(a).or_where(b).where(c)` means `a OR b AND c`, and `AND` binds
+before `OR`. You use a grouped helper when comparisons must stay together:
 
 ```rust
-// WHERE active = ? AND (role IN (?, ?) OR invited_by IS NOT NULL)
+// WHERE active = ? AND role IN (?, ?) OR invited_by IS NOT NULL
 DB::table("users")
     .filter("active", true)
     .where_in("role", ["admin", "editor"])
@@ -119,7 +126,7 @@ DB::table("users")
     .await?;
 ```
 
-The `or_` family is `or_where_in`, `or_where_not_in`, `or_where_null`,
+The `or_` family is `or_where`, `or_where_op`, `or_where_in`, `or_where_not_in`, `or_where_null`,
 `or_where_not_null`, `or_where_raw`, and the three grouped helpers below.
 
 #### One comparison across several columns
@@ -146,7 +153,7 @@ let staff = DB::table("users")
 The comparisons sit in parentheses, so an `OR` inside never reaches the
 conditions around it: `filter("a", 1).where_any(["b", "c"], "=", 2)`
 returns only rows whose `a` is 1. `or_where_any`, `or_where_all`, and
-`or_where_none` fold the group into the condition before it. An empty
+`or_where_none` add the parenthesized group with a flat `OR`. An empty
 column list adds no condition.
 
 #### Subqueries
@@ -230,7 +237,8 @@ request data.
 
 `join`, `left_join`, and `right_join` take the table and one `ON`
 condition between two columns. To join a table under an alias, write
-`"table as alias"`. `cross_join` takes only the table. This query lists
+`"table as alias"`. `cross_join` takes the table; `cross_join_with` also
+takes a closure whose conditions become its `ON` clause. This query lists
 every post with its category and author:
 
 ```rust
@@ -256,14 +264,14 @@ such as `id` or `name`, overwrite one another in the row, so alias them
 in `select`.
 
 For more than one condition, `join_with`, `left_join_with`, and
-`right_join_with` pass a `JoinClause` to a closure. `on` and `or_on`
+`right_join_with`, and `cross_join_with` pass a `JoinClause` to a closure. `on` and `or_on`
 compare two columns. `filter`, `filter_op`, `or_filter`, and
 `or_filter_op` compare a column with a value, and `db_where`,
 `db_where_op`, `or_where`, and `or_where_op` are their Laravel names:
 
 ```rust
 // INNER JOIN users ON users.id = posts.author_id
-//   AND (posts.views > ? OR users.role = ?)
+//   AND posts.views > ? OR users.role = ?
 let rows = DB::table("posts")
     .join_with("users", |join| {
         join.on("users.id", "=", "posts.author_id")
@@ -275,8 +283,8 @@ let rows = DB::table("posts")
 ```
 
 A join condition's value is a bound parameter, like every other value.
-An `or_*` condition folds into the condition before it, as in the
-`WHERE` clause. A join other than `cross_join` needs at least one
+You get the same flat `AND` and `OR` precedence in an `ON` clause as
+in a `WHERE` clause. A join other than `cross_join` needs at least one
 condition: the query fails with an error before it runs otherwise.
 
 To join a subquery, pass another `DB::table` builder and an alias to
@@ -444,10 +452,9 @@ but it's rarely correct. Always look at a `delete()` / `delete_all()`
 call and check whether there's a `filter` in front of it. The same is
 true of `update` / `update_all`.
 
-`update` and `delete` return an error on a builder with a join. The
-statement they render names one table, so it would ignore the join and
-change rows the join was there to exclude. To narrow the rows by another
-table, use `where_in` or `where_exists` with a subquery.
+`update` and `delete` keep every join and predicate when selecting rows
+to change. You write columns on the builder's base table; joined tables
+only constrain the match. Both methods return the affected base-row count.
 
 #### Insert backend split
 
@@ -721,23 +728,13 @@ same and only the mechanism differs: public-surface code in Suprnova
 returns `Result` rather than panicking, so the refusal arrives as an
 `Err` from the terminal instead of an exception from the grammar.
 
-An `or_*` call folds into the condition before it. Laravel keeps a flat
-list of conditions joined by `and` and `or`, and SQL precedence then
-binds each `and` before any `or`. So `where(a)->where(b)->orWhere(c)`
-means `(a AND b) OR c` in Laravel and `a AND (b OR c)` here. Suprnova's
-rule matches the model builder's, and an `or` never widens past a
-condition written before it. When you port a query that mixes the two,
-check the SQL it renders; for Laravel's reading, write the condition
-with `where_raw`.
-
 Laravel's `join` and `whereExists` also take a closure that builds the
 subquery, an Eloquent builder, or a raw expression. Here a subquery is
 always a `DB::table` builder, and a join's closure only adds conditions.
 The column-list helpers take the operator every time -
 `where_any(cols, "=", value)` - because Rust has no optional arguments.
-`update` and `delete` refuse a join, where Laravel's MySQL grammar
-renders `UPDATE ... JOIN`, because the portable statement would ignore
-it.
+You use `where_column_op(a, op, b)` for a column comparison with an
+operator, because Rust cannot overload `where_column(a, b)` by arity.
 
 ## Next
 
