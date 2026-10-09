@@ -696,14 +696,22 @@ impl Auth {
         {
             return Err(FrameworkError::Unauthorized);
         }
-        if !super::active_user_provider()?
-            .validate_credentials(user.as_ref(), &serde_json::json!({"password": password}))
+        let provider = super::active_user_provider()?;
+        let credentials = serde_json::json!({"password": password});
+        if !provider
+            .validate_credentials(user.as_ref(), &credentials)
             .await?
         {
             let mut errors = crate::ValidationErrors::new();
             errors.add("password", "The password is incorrect.");
             return Err(FrameworkError::Validation(errors));
         }
+        // The password was proven, so the hash is rewritten here as at
+        // sign-in, as Laravel's `logoutOtherDevices` rehashes after its
+        // password check; `validate_credentials` itself does not write.
+        provider
+            .rehash_password_if_required(user.as_ref(), &credentials)
+            .await?;
         let selector = current.auth_guard_remember_selector(&guard);
         let engine = crate::magnetar_integration::optional_password_engine();
         let binding = current

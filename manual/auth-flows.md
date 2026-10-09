@@ -8,8 +8,9 @@ lockout, and framework TOTP challenges.
 Five surfaces ship under the namespace:
 
 - `EmailVerification` mints and consumes framework `auth_flow_tokens`, sends
-  mail through the [`Mail`](mail.md) facade, and marks the authenticated token
-  owner verified through the configured `UserProvider`.
+  the link through the user's `send_email_verification_notification`, a
+  [notification](notifications.md) by default, and marks the authenticated
+  token owner verified through the configured `UserProvider`.
 - `PasswordReset` uses the installed Magnetar engine when available. Without
   Magnetar, verified accounts can reset through the configured `UserProvider`
   and framework `auth_flow_tokens`; unverified accounts fail closed because a
@@ -32,9 +33,10 @@ Two route-gate middleware ship in the same namespace:
 - `TwoFactorChallengeMiddleware` composes before `AuthMiddleware` and redirects
   a session with a pending framework TOTP challenge to the challenge form.
 
-Transactional messages always use the framework [`Mail`](mail.md) facade.
-Magnetar supplies security engines and storage contracts; it does not install a
-second application mail transport.
+Transactional messages always go out through the framework [`Mail`](mail.md)
+transport, the verification link as a mail notification. Magnetar supplies
+security engines and storage contracts; it does not install a second
+application mail transport.
 
 ### Where state lives
 
@@ -66,7 +68,9 @@ transient mail-transport failure, or a dispatcher error after the
 mutation cannot roll the mutation back.
 
 - `EmailVerification::verify` requires the authenticated token owner, consumes
-  the token, and marks the user verified before firing `EmailVerified`.
+  the token, and marks the user verified before firing `EmailVerified`. An
+  account that is already verified has the token consumed and keeps its
+  verification time, and no event fires.
 - `PasswordReset::complete` commits through the installed Magnetar engine when
   available, including first-proof policy, auth-epoch advancement, and atomic
   revocation. The provider fallback is verified-account-only: it consumes the
@@ -140,7 +144,7 @@ impl MustVerifyEmail for User {
 ```
 
 The verification handler must run inside authenticated session scope. A valid
-token for another user is rejected without being consumed.
+token for another user is refused with `403` and is not consumed.
 
 ### Password reset and lockout
 
@@ -238,6 +242,7 @@ time:
 |---|---|---|
 | `APP_NAME` | `"Suprnova"` | Subject branding and the `otpauth://` issuer label that authenticator apps display. |
 | `MAIL_FROM` | none - **errors when unset** | Envelope `From` on every outgoing message. Set to a verified sender domain. |
+| `PASSWORD_RESET_TIMEBOX_MS` | `200` | How long `PasswordReset::send_link` holds every answer, in milliseconds. `0` turns the hold off. A value that is not a whole number makes `send_link` return an error before it looks anything up. |
 
 `MAIL_FROM` deliberately has no default. Defaulting to a placeholder
 like `noreply@example.com` would silently break DMARC / SPF in
@@ -263,10 +268,10 @@ the configured provider. Four operations cover the lifecycle:
 
 | Method | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Mint + mail, given a user already in hand. |
-| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Normalizes an unknown provider result to `Ok(())`; token storage and mail failures still return `Err`, and execution time is not equalized. |
+| `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Mint the token and send the link through the user's `send_email_verification_notification`, given a user already in hand. |
+| `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Sends through the provider's `send_email_verification_notification`. Normalizes an unknown provider result to `Ok(())`; token storage and mail failures still return `Err`, and execution time is not equalized. |
 | `check` | `check(token: &str) -> Result<bool>` | Non-consuming - safe to call on a landing page. |
-| `verify` | `verify(token: &str) -> Result<String>` | Actor-bound and single-use: the authenticated user must own the token; success consumes it, marks the user verified, and returns that user ID. |
+| `verify` | `verify(token: &str) -> Result<String>` | Actor-bound and single-use: the authenticated user must own the token; success consumes it, marks the user verified, and returns that user ID. Another account's token gets `403`; an unknown, expired or used token gets `400`. |
 
 ```rust
 use suprnova::auth_flows::EmailVerification;
@@ -286,7 +291,61 @@ let user_id: String = EmailVerification::verify(&token_str).await?;
 `verify` fires `EmailVerified` on success - listeners are the right
 place to unlock additional functionality (welcome email, default
 follows, "complete your profile" CTA) without coupling them to the
-verification handler. The event carries the provider's user id.
+verification handler. The event carries the provider's user id. When the
+provider's `is_email_verified` already reports the account verified, `verify`
+consumes the token and returns the user ID without a new stamp and without the
+event, so a second link never moves the first verification time.
+
+### Sending your own verification message
+
+`send_link` mints the token, builds the link, and passes it to the user's
+`MustVerifyEmail::send_email_verification_notification`. The default sends the
+framework's `VerifyEmailNotification` to `email()` as an on-demand mail
+notification through `Notify`. It goes through the mail channel of the
+dispatcher you bound with `notifications::set_dispatcher`, or through the
+framework's mail channel when you bound none, so verification mail needs no
+notification setup.
+
+Override the method to send your own message. The framework then sends
+nothing itself, and the link you receive carries the same single-use token, so
+`verify` accepts it:
+
+```rust
+use chrono::{DateTime, Utc};
+use suprnova::{FrameworkError, Mail, MustVerifyEmail};
+
+impl MustVerifyEmail for User {
+    fn email(&self) -> &str {
+        &self.email
+    }
+
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+
+    fn set_email_verified_at(&mut self, value: Option<DateTime<Utc>>) {
+        self.email_verified_at = value;
+    }
+
+    async fn send_email_verification_notification(
+        &self,
+        verification_link: &str,
+    ) -> Result<(), FrameworkError> {
+        Mail::raw(format!("Confirm your address: {verification_link}"), |mail| {
+            mail.to(self.email.as_str()).subject("Confirm your address")
+        })
+        .await
+    }
+}
+```
+
+`resend` holds only the ID the provider returned, so it sends through
+`UserProvider::send_email_verification_notification(id, verification_link)`.
+`EloquentUserProvider` loads the model and calls the model's method, so your
+override runs on both paths. The provider default sends the framework's
+notification to `verification_email(id)`, greeting the name of
+`flow_user_by_id(id)`, and returns an error when the provider reports no
+verification address.
 
 ### The resend endpoint (anti-enumeration)
 
@@ -355,17 +414,18 @@ async fn verify_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 The route's user is the user of the guard the last `AuthMiddleware` checked,
 or of the default guard, and `verify` reads and stamps it through that guard's
 provider; behind `AuthMiddleware::for_guard("admin")` it is the admin user,
-never the default guard's user in the same session. A token belonging to
-another account returns the same invalid-token response and remains unused.
-On success, the provider marks the authenticated owner verified and the facade
-fires `EmailVerified`.
+never the default guard's user in the same session. A live token belonging to
+another account returns `403` with the message `This action is unauthorized.`
+and remains unused. An unknown, expired or used token returns `400` with the
+message `invalid or expired verification token`. On success, the provider
+marks the authenticated owner verified and the facade fires `EmailVerified`.
 
 A link proves the mailbox it was sent to, and no other. The token carries a
 digest of that address, and `verify` compares it with the account's current
 verification address, which the provider's `verification_email` reports.
 When the account changed its address after the link was sent, `verify`
-returns the same invalid-token response, leaves the token unused, and marks
-nothing verified. The provider stamps the verification through
+returns `403` `This action is unauthorized.`, leaves the token unused, and
+marks nothing verified. The provider stamps the verification through
 `mark_email_verified_for`, which writes only while the address is still the
 one the link was sent to, so a change that lands while `verify` runs is
 refused too; the token is spent by then, and the user asks for a new link. A
@@ -404,10 +464,23 @@ none names one. It asks that guard's provider. Behind
 through the `admin` guard's provider, and a verified default-guard user
 signed in on the same session does not pass it.
 
-The choice between **403 JSON** and **302 HTML redirect** is made at
-route-registration time via the constructor - there is no
-request-content sniffing, matching the pattern set by
-`AuthMiddleware::new` / `AuthMiddleware::redirect_to`:
+The middleware decides each answer from the request:
+
+- A request that expects JSON (`Request::expects_json`) gets `403` with
+  `{"message": "Your email address is not verified."}`, even when the
+  middleware names a redirect.
+- Any other request gets the redirect the middleware names: `302`, or `409`
+  with `X-Inertia-Location` for an Inertia visit. The redirect goes through
+  `Redirect::guest`, so the intended URL is stored by its rule: a `GET` stores
+  its own path and query, any other request stores the page the user was on.
+  After verification, `Redirect::intended` sends the user back.
+- With no redirect named, as with `new()`, every caller gets the `403`.
+
+Name the redirect by path with `redirect_to(path)` or by route with
+`redirect_to_route(name)`. The route name is resolved on each request through
+`routing::try_route`, so the redirect follows the route's path and public
+root. A name no route carries fails the request with a `500` whose error names
+the route, and so does a route whose path needs parameters.
 
 ```rust
 use suprnova::{AuthMiddleware, EnsureEmailVerifiedMiddleware, group, get};
@@ -420,10 +493,11 @@ group!("/api")
         get!("/me", profile::show),
     ]);
 
-// Web surface - 302 (or 409 + X-Inertia-Location for Inertia visits).
+// Web surface - 302 to the route's path (or 409 + X-Inertia-Location for
+// Inertia visits), 403 JSON for a request that expects JSON.
 group!("/dashboard")
     .middleware(AuthMiddleware::redirect_to("/login"))
-    .middleware(EnsureEmailVerifiedMiddleware::redirect_to("/email/verify"))
+    .middleware(EnsureEmailVerifiedMiddleware::redirect_to_route("verification.notice"))
     .routes([
         get!("/", dashboard::index),
     ]);
@@ -449,13 +523,30 @@ if let Some(user) = Auth::user_as::<User>().await? {
 }
 ```
 
+### Why Suprnova diverges
+
+Laravel's `EnsureEmailIsVerified` redirects to the `verification.notice` route
+when no route is named. `EnsureEmailVerifiedMiddleware::new()` names no
+redirect and answers `403` to every caller: the framework registers no
+verification page, and a route name nobody registered would fail every
+request. An application made with `suprnova new` names its page
+`verification.notice`, so `redirect_to_route("verification.notice")` gives
+Laravel's behavior there.
+
+Laravel's verification link is a signed URL that carries the user's ID and a
+hash of the address. Suprnova's link carries a single-use token stored in
+`auth_flow_tokens` and bound to the address. A used link cannot be replayed,
+which a signed URL allows until it expires. `verify` answers the checks a
+signed URL makes in Laravel's `EmailVerificationRequest`, another account's
+link and a changed address, with the same `403`.
+
 ## Password Reset
 
 `PasswordReset` has four operations:
 
 | Method | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Uses Magnetar when installed; otherwise issues a framework token only for a verified user from an explicitly reset-capable provider. Unknown and unverified addresses return `Ok(())`. |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Uses Magnetar when installed; otherwise issues a framework token only for a verified user from an explicitly reset-capable provider and sends the link through the provider's `send_password_reset_notification`. Unknown and unverified addresses return `Ok(())`. Every answer is held for `PASSWORD_RESET_TIMEBOX_MS`. |
 | `check` | `check(token: &str) -> Result<bool>` | Non-consuming validation through Magnetar or the framework token store used by the provider fallback. |
 | `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Runs Magnetar's atomic first-proof transaction when installed; otherwise rotates a verified provider user and revokes framework session/remember state. |
 | `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Returns committed Magnetar counts or the provider fallback's explicit framework revocation outcomes. |
@@ -479,14 +570,75 @@ let user_id: String = PasswordReset::complete(&token, &new_password).await?;
 it inside the credential engine. Do not pre-hash it. An empty or whitespace-only
 password returns HTTP 400 before the engine is called.
 
+### Sending your own reset message
+
+On the provider path, `send_link` mints the token, builds the link, and passes
+it to `UserProvider::send_password_reset_notification(id, reset_link)`.
+`EloquentUserProvider` loads the model and calls its
+`CanResetPassword::send_password_reset_notification`. The default sends the
+framework's `PasswordResetMail` to `email_for_reset()`, which stays the address
+your model chooses for reset mail. The default mail greets the reader without a
+name, because `CanResetPassword` has none to read.
+
+Override the method to send your own message; the framework then sends nothing
+itself, and `complete` accepts the link you receive:
+
+```rust
+use suprnova::{CanResetPassword, FrameworkError, Mail};
+
+impl CanResetPassword for User {
+    fn email_for_reset(&self) -> &str {
+        &self.email
+    }
+
+    fn set_password_hash(&mut self, hash: &str) {
+        self.password = hash.to_string();
+    }
+
+    async fn send_password_reset_notification(
+        &self,
+        reset_link: &str,
+    ) -> Result<(), FrameworkError> {
+        Mail::raw(format!("Choose a new password: {reset_link}"), |mail| {
+            mail.to(self.email.as_str()).subject("Your password reset link")
+        })
+        .await
+    }
+}
+```
+
+A custom reset-capable provider keeps the provider default, which sends the
+framework's mail to the address `flow_user_by_id(id)` returns and greets its
+name, or overrides `send_password_reset_notification`. The default returns an
+error when `flow_user_by_id` finds no user. The Magnetar path holds an address,
+not a model, and always sends the framework's mail.
+
 ### Bounded anti-enumeration behavior
 
 `PasswordReset::send_link` returns `Ok(())` for an unknown address only after
 the abuse-limiter, mail configuration, engine, and storage checks succeed.
 Configuration, limiter, storage, and mail failures still return `Err`. The
 dogfood controller gives successful known- and unknown-account requests the
-same HTTP status and body, but the implementation does not equalize their
-execution time.
+same HTTP status and body.
+
+`send_link` also holds every answer until `PASSWORD_RESET_TIMEBOX_MS`
+milliseconds have passed since the call began, `200` by default as Laravel's
+`auth.timebox_duration` is: a known address and an unknown one, the abuse
+refusal and every error. An unknown address therefore answers no sooner than
+a known one, unless the work for the known one takes longer than the timebox.
+Raise the value if your mail transport is slower than that:
+
+```bash
+PASSWORD_RESET_TIMEBOX_MS=500
+```
+
+### Why Suprnova diverges
+
+Laravel's broker answers an unknown address with the `INVALID_USER` status.
+`send_link` answers `Ok(())` for it, as for a sent link, so a handler cannot
+show a different message by mistake. `email_for_reset` has no default, unlike
+Laravel's `getEmailForPasswordReset`, because the trait has no address field
+to fall back to.
 
 ### `complete` side effects
 
@@ -1070,6 +1222,67 @@ separation preserves compatibility for applications using
 `two_factor_credentials`, but applications should not enroll the same account
 through both stores.
 
+## Password rehash on sign-in
+
+A provider's `validate_credentials` answers whether the password matches and
+writes nothing, as Laravel's `validateCredentials` does. `Auth::validate` and a
+guard's `validate` therefore leave the stored hash as it is.
+
+The rewrite of a stored hash runs in the sign-in instead, through
+`UserProvider::rehash_password_if_required(user, credentials)`: after the
+password validates and before the user is signed in, in the session guard's
+`attempt` and `once`, and in `Auth::logout_other_devices` after its password
+check. The default does nothing. `EloquentUserProvider` and
+`DatabaseUserProvider` rewrite a `$2b$` or Argon2id hash as the `$2y$` hash
+Laravel accepts while the shared-database setting is on (see
+[Running on a Laravel Database](laravel-database.md)). A rewrite that cannot
+be minted or stored fails the sign-in with that error and leaves the stored
+hash as it was; the next sign-in tries again.
+
+A custom provider upgrades hashes on sign-in by implementing the method:
+
+```rust
+use std::sync::Arc;
+use suprnova::serde_json::Value;
+use suprnova::{Authenticatable, FrameworkError, UserProvider, async_trait, hashing};
+
+pub struct LegacyUsers;
+
+#[async_trait]
+impl UserProvider for LegacyUsers {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        legacy::find(id).await
+    }
+
+    async fn rehash_password_if_required(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+    ) -> Result<(), FrameworkError> {
+        let password = credentials.get("password").and_then(|v| v.as_str());
+        if let (Some(plaintext), Some(stored)) = (password, user.get_auth_password())
+            && hashing::needs_rehash(stored)
+        {
+            let fresh = hashing::hash_async(plaintext).await?;
+            legacy::store_hash(&user.get_auth_identifier(), &fresh).await?;
+        }
+        Ok(())
+    }
+}
+```
+
+### Why Suprnova diverges
+
+Laravel rehashes on sign-in whenever its hasher reports that a hash needs it,
+unless `hashing.rehash_on_login` is off. The built-in Suprnova providers
+rewrite only while the shared-database setting is on, because their rewrite
+exists to keep a hash a Laravel application on the same database can verify.
+Outside that setting they leave the hash as it is; implement
+`rehash_password_if_required` on your provider to upgrade hashes on sign-in.
+
 ## Remember-me
 
 `suprnova::auth_flows::remember_me` re-exports the legacy
@@ -1097,7 +1310,7 @@ Nine events fire across the flows, one per security-state transition:
 
 | Event | Fired by | Carries |
 |---|---|---|
-| `EmailVerified` | `EmailVerification::verify` on success | `user_id: String` |
+| `EmailVerified` | `EmailVerification::verify` on success, for an account that was not verified yet | `user_id: String` |
 | `PasswordResetLinkSent` | `PasswordReset::send_link` on success - anti-enumeration silent for absent emails | `user_id: String`, `email: String` |
 | `PasswordResetCompleted` | `PasswordReset::complete` on success | `user_id: String` |
 | `AccountLocked` | `BruteForce::record_failed_attempt` on the unlocked → locked transition | `email: String`, `failed_attempts: u32` |
@@ -1178,6 +1391,35 @@ accessors. When the guard drops, the previously-bound transport is
 restored - tests that interleave fakes with explicit transport
 binding do not leak state.
 
+### `Notify::fake()`
+
+The verification link goes out as a `VerifyEmailNotification`. Under
+`Notify::fake()` it is recorded instead of sent, and the typed record gives
+you the link:
+
+```rust
+use suprnova::auth_flows::{EmailVerification, VerifyEmailNotification};
+use suprnova::notifications::Notify;
+
+#[tokio::test]
+async fn send_link_notifies_the_users_address() {
+    let notify = Notify::fake();
+    // ... drive the flow ...
+    EmailVerification::send_link(&user, "https://app.example.com/verify")
+        .await
+        .unwrap();
+    let sent = notify
+        .sent::<VerifyEmailNotification>("alice@example.com", |_| true)
+        .unwrap();
+    let link = &sent[0].mail.verification_link;
+    assert!(link.starts_with("https://app.example.com/verify?token="));
+}
+```
+
+The notification's public payload, which the untyped records and the
+`NotificationSending` listeners see, leaves the link out: the link carries a
+single-use token.
+
 ### `EventFacade::fake()`
 
 The same shape, but for events:
@@ -1218,6 +1460,9 @@ Canonical source examples are:
   single-use tokens.
 - `framework/tests/auth_flows/password_reset.rs` for Magnetar delegation and completion
   outcomes.
+- `framework/tests/auth_flows/laravel_auth_gaps.rs` for the verification and reset
+  hooks, the reset timebox, the verified gate's per-request answer, and the
+  rehash on sign-in.
 - `framework/tests/magnetar_integration/default_engine.rs` for real default-engine setup.
 - `framework/tests/auth_flows/brute_force.rs` for lockout lifecycle.
 - `framework/tests/auth_flows/two_factor_challenge_flow.rs` for the retained framework
@@ -1235,9 +1480,11 @@ test adapter once for the whole binary.
 | Symbol | Purpose |
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, and actor-bound `verify`; `verify` returns the user ID. |
-| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON and `redirect_to(path)` for browser or Inertia redirects. |
+| `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON to every caller; `redirect_to(path)` and `redirect_to_route(name)` for browser or Inertia redirects, with 403 JSON for a request that expects JSON. |
+| `suprnova::auth_flows::VerifyEmailNotification` | The framework's verification notification, rendered from `EmailVerificationMail`. |
 | `suprnova::auth_flows::PasswordReset` | Magnetar-first reset with a verified-account `UserProvider` fallback over framework `auth_flow_tokens`. |
-| `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade. |
+| `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade; `send_email_verification_notification` sends the link. |
+| `suprnova::CanResetPassword` | Application-user contract for the provider reset path; `send_password_reset_notification` sends the link. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM table definition for framework verification tokens. |
 | `suprnova::auth_flows::BruteForce` | Magnetar-backed account lockout facade. |
 | `suprnova::auth_flows::LoginThrottleMiddleware` | HTTP middleware that returns 429 before the login handler when the account is locked. |
@@ -1254,6 +1501,8 @@ test adapter once for the whole binary.
   `Auth` facade, `AuthMiddleware`.
 - [Mail](mail.md) - the transport layer the `send_link` calls
   dispatch through.
+- [Notifications](notifications.md) - the channel the verification
+  notification goes through.
 - [Events](events.md) - registering listeners for the nine
   auth-flow events.
 - [Rate Limiting](rate-limiting.md) - pair

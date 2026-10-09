@@ -4,7 +4,10 @@
 //! provider-agnostic [`TokenStore`]
 //! (the `auth_flow_tokens` table), marks the user verified through the
 //! application's configured [`UserProvider`](crate::auth::UserProvider), and
-//! dispatches the verification email through Suprnova's [`crate::Mail`] facade.
+//! sends the link through the user's
+//! [`MustVerifyEmail::send_email_verification_notification`], whose default
+//! sends the framework's
+//! [`VerifyEmailNotification`](crate::auth_flows::VerifyEmailNotification).
 //! Verification fires an [`EmailVerified`](crate::auth_flows::events::EmailVerified)
 //! event so listeners can react (e.g. unlock additional functionality, send a
 //! welcome email).
@@ -20,6 +23,15 @@
 //! work purely by email and token.
 //!
 //! # Failure semantics on `verify()`
+//!
+//! A token that is live but answers for another account, or for an address
+//! the account no longer has, is refused with `403 This action is
+//! unauthorized.`, as Laravel's `EmailVerificationRequest::authorize` refuses
+//! an id or email-hash mismatch, and stays unused. An unknown, expired or
+//! consumed token is refused with `400 invalid or expired verification
+//! token`. An account that is already verified has its token consumed and
+//! keeps its verification timestamp, with no `EmailVerified` event, as
+//! Laravel's `fulfill` skips both.
 //!
 //! Token consumption (the single-use stamp) and the provider's
 //! `mark_email_verified` both happen before the `EmailVerified` event fires. A
@@ -41,17 +53,23 @@
 
 use crate::auth::active_user_provider;
 use crate::auth::must_verify_email::MustVerifyEmail;
-use crate::auth_flows::mail::EmailVerificationMail;
 use crate::auth_flows::token_store::{TokenPurpose, TokenStore};
 use crate::error::FrameworkError;
-use crate::mail::Mail;
+
+/// The message of a `verify` refusal for a token that is live but proves
+/// nothing for the route's user, Laravel's `AuthorizationException` text.
+const UNAUTHORIZED: &str = "This action is unauthorized.";
+
+/// The message of a `verify` refusal for a token that is unknown, expired or
+/// consumed.
+const INVALID_TOKEN: &str = "invalid or expired verification token";
 
 /// Facade for email-verification token operations.
 ///
 /// All methods operate over the framework's `auth_flow_tokens` table and the
 /// application's configured [`UserProvider`](crate::auth::UserProvider) - no
-/// global auth instance to initialise first. Mail goes out through the
-/// [`crate::Mail`] facade.
+/// global auth instance to initialise first. The link goes out through the
+/// user's [`MustVerifyEmail::send_email_verification_notification`].
 ///
 /// # Example
 ///
@@ -90,19 +108,25 @@ pub struct EmailVerification;
 
 impl EmailVerification {
     /// Mint a verification token for `user`, build the verification URL, and
-    /// dispatch [`EmailVerificationMail`] to the user's email via the
-    /// [`crate::Mail`] facade.
+    /// send it through the user's
+    /// [`MustVerifyEmail::send_email_verification_notification`].
+    ///
+    /// The default of that method sends the framework's
+    /// [`VerifyEmailNotification`](crate::auth_flows::VerifyEmailNotification)
+    /// to the user's email; a model that overrides it sends its own message,
+    /// and the framework sends nothing else. Either way the link carries the
+    /// same single-use token, bound to the user's [`MustVerifyEmail::email`].
     ///
     /// The URL has the shape `{base_url}?token={plaintext_token}` (a trailing
     /// slash on `base_url` is trimmed first; an existing query string gets `&`
     /// instead of `?`). The token is issued with
     /// [`TokenPurpose::EmailVerification`]'s default TTL (24h).
     ///
-    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM`
-    /// (required - errors if unset) from the process environment. Defaulting
-    /// `MAIL_FROM` to a placeholder breaks DMARC/SPF in production, so the
-    /// facade fails closed instead of silently sending from a domain the
-    /// operator doesn't control.
+    /// Reads `MAIL_FROM` (required - errors if unset) before it mints, and
+    /// the default notification reads it and `APP_NAME` (defaults to
+    /// `"Suprnova"`) again when it sends. Defaulting `MAIL_FROM` to a
+    /// placeholder breaks DMARC/SPF in production, so the facade fails closed
+    /// instead of silently sending from a domain the operator doesn't control.
     pub async fn send_link<U: MustVerifyEmail>(
         user: &U,
         base_url: &str,
@@ -112,33 +136,21 @@ impl EmailVerification {
             user.email(),
         )
         .await?;
-        Self::issue_and_mail(
-            &user.get_auth_identifier(),
-            user.email(),
-            user.name().map(str::to_string),
-            base_url,
-        )
-        .await
+        let link = Self::issue_link(&user.get_auth_identifier(), user.email(), base_url).await?;
+        user.send_email_verification_notification(&link).await
     }
 
-    /// Issue an email-verification token for `id`, append it to `base_url`, and
-    /// send the verification mail to `email` (greeting `name` if present).
+    /// Issue an email-verification token for `id`, bound to the mailbox
+    /// `email`, and return `base_url` with the token appended.
     ///
-    /// Shared pipeline for [`send_link`](Self::send_link) and
-    /// [`resend`](Self::resend): mint with [`TokenPurpose::EmailVerification`]'s
-    /// default TTL, build the `{base_url}?token=…` URL via
-    /// [`append_token_query`](crate::auth_flows::append_token_query), read
-    /// `APP_NAME` / `MAIL_FROM` (fail-closed), and dispatch through the
-    /// [`crate::Mail`] facade.
-    async fn issue_and_mail(
-        id: &str,
-        email: &str,
-        name: Option<String>,
-        base_url: &str,
-    ) -> Result<(), FrameworkError> {
+    /// Shared by [`send_link`](Self::send_link) and [`resend`](Self::resend):
+    /// mint with [`TokenPurpose::EmailVerification`]'s default TTL and build
+    /// the `{base_url}?token=…` URL via
+    /// [`append_token_query`](crate::auth_flows::append_token_query).
+    async fn issue_link(id: &str, email: &str, base_url: &str) -> Result<String, FrameworkError> {
         // Validate the fail-closed `MAIL_FROM` read before issuing a token, so a
         // misconfigured sender fails fast without leaving an orphan token row.
-        let from_address = crate::auth_flows::require_mail_from()?;
+        crate::auth_flows::require_mail_from()?;
 
         let token = TokenStore::issue_bound(
             id,
@@ -147,17 +159,7 @@ impl EmailVerification {
             |random| mailbox_binding(random, email),
         )
         .await?;
-        let url = crate::auth_flows::append_token_query(base_url, &token);
-
-        let mail = EmailVerificationMail {
-            to_address: email.to_string(),
-            user_name: name,
-            verification_link: url,
-            app_name: crate::auth_flows::app_name(),
-            from_address,
-        };
-
-        Mail::to(email).send(mail).await
+        Ok(crate::auth_flows::append_token_query(base_url, &token))
     }
 
     /// Resend a verification link by email - the anti-enumeration entry point.
@@ -165,9 +167,15 @@ impl EmailVerification {
     /// Looks the user up through the active
     /// [`UserProvider`](crate::auth::UserProvider) and only mints + sends a
     /// token when an account is on file. An unknown email is a silent no-op:
-    /// no token is issued, no mail is dispatched, and the method still returns
+    /// no token is issued, nothing is sent, and the method still returns
     /// `Ok(())` so a caller (and a network observer) cannot distinguish
     /// "no such account" from "link sent."
+    ///
+    /// The lookup returns an id, not the model, so the link goes out through
+    /// [`UserProvider::send_email_verification_notification`](crate::auth::UserProvider::send_email_verification_notification).
+    /// `EloquentUserProvider` loads the model there and calls its
+    /// [`MustVerifyEmail::send_email_verification_notification`], so a model
+    /// that sends its own message does so here as well.
     ///
     /// `base_url` is the verification landing URL; the same `{base_url}?token=…`
     /// shape and `MAIL_FROM` / `APP_NAME` rules as [`send_link`](Self::send_link)
@@ -178,13 +186,16 @@ impl EmailVerification {
             email,
         )
         .await?;
-        let Some(user) = active_user_provider()?.retrieve_by_email(email).await? else {
+        let provider = active_user_provider()?;
+        let Some(user) = provider.retrieve_by_email(email).await? else {
             // Anti-enumeration: absent account → no token, no mail, no signal.
             return Ok(());
         };
 
-        Self::issue_and_mail(&user.id, &user.email, user.name, base_url).await?;
-        Ok(())
+        let link = Self::issue_link(&user.id, &user.email, base_url).await?;
+        provider
+            .send_email_verification_notification(&user.id, &link)
+            .await
     }
 
     /// Check whether `token` is a live, unused verification token without
@@ -203,7 +214,10 @@ impl EmailVerification {
     ///
     /// The token must belong to the user of the route's guard - the guard
     /// the last `AuthMiddleware` checked, or the default guard - and is
-    /// checked and stamped through that guard's provider.
+    /// checked and stamped through that guard's provider. A live token that
+    /// belongs to another account is refused with `403` and stays unused, as
+    /// Laravel's `EmailVerificationRequest::authorize` refuses an id that is
+    /// not the signed-in user's.
     ///
     /// Single-use: a second `verify` on the same token returns an error (the
     /// [`TokenStore`] stamps `used_at` atomically). An invalid or expired
@@ -212,14 +226,21 @@ impl EmailVerification {
     /// The token proves the mailbox it was mailed to and no other: when the
     /// account's verification address (the provider's
     /// [`verification_email`](crate::auth::UserProvider::verification_email))
-    /// is no longer that mailbox, `verify` refuses the token and leaves it
-    /// unused. A token issued before tokens carried their mailbox is refused
-    /// the same way; the user asks for a new link. The stamp itself goes
-    /// through
+    /// is no longer that mailbox, `verify` refuses the token with `403` and
+    /// leaves it unused, as Laravel refuses a link whose email hash is not
+    /// the account's. A token issued before tokens carried their mailbox is
+    /// refused the same way; the user asks for a new link. The stamp itself
+    /// goes through
     /// [`mark_email_verified_for`](crate::auth::UserProvider::mark_email_verified_for),
     /// which writes only while the address is still that mailbox, so an
     /// address change that lands while `verify` runs is refused too, with
     /// the token already spent.
+    ///
+    /// An account the provider's
+    /// [`is_email_verified`](crate::auth::UserProvider::is_email_verified)
+    /// already reports verified has the token consumed and its id returned,
+    /// without a new stamp and without `EmailVerified`, as Laravel's
+    /// `fulfill` skips both. Its first verification time stays as it was.
     ///
     /// Fires [`crate::auth_flows::events::EmailVerified`] on success. The
     /// event dispatch is best-effort: a listener panic or transient dispatcher
@@ -233,11 +254,14 @@ impl EmailVerification {
     ///
     /// # Errors
     ///
-    /// - [`crate::FrameworkError::bad_request`] (400) when the token is
-    ///   invalid, already consumed, or expired, or was mailed to an address
-    ///   the account no longer has.
-    /// - Whatever the provider returns from `mark_email_verified_for` when
-    ///   the storage layer fails.
+    /// - [`crate::FrameworkError::Domain`] `403` `This action is
+    ///   unauthorized.` when the token is live but belongs to another account
+    ///   or was mailed to an address the account no longer has.
+    /// - [`crate::FrameworkError::bad_request`] (400) `invalid or expired
+    ///   verification token` when the token is unknown, already consumed, or
+    ///   expired, or the address changed while `verify` ran.
+    /// - Whatever the provider returns from `is_email_verified` or
+    ///   `mark_email_verified_for` when the storage layer fails.
     /// - The "no provider configured" error from the active-user-provider
     ///   resolver when no `UserProvider` is registered.
     pub async fn verify(token: &str) -> Result<String, FrameworkError> {
@@ -246,11 +270,15 @@ impl EmailVerification {
         let actor_user_id = crate::Auth::route_user_id().await?.ok_or_else(|| {
             FrameworkError::bad_request("authenticated email verification is required")
         })?;
-        let owner = TokenStore::owner(token, TokenPurpose::EmailVerification).await?;
-        if owner.as_deref() != Some(actor_user_id.as_str()) {
-            return Err(FrameworkError::bad_request(
-                "invalid or expired verification token",
-            ));
+        // `owner` answers only for a live, unused token, so `None` is the
+        // unknown, expired or consumed token, and another owner is a live
+        // link that proves nothing for this user.
+        match TokenStore::owner(token, TokenPurpose::EmailVerification).await? {
+            None => return Err(FrameworkError::bad_request(INVALID_TOKEN)),
+            Some(owner) if owner != actor_user_id => {
+                return Err(FrameworkError::domain(UNAUTHORIZED, 403));
+            }
+            Some(_) => {}
         }
         let provider = crate::Auth::route_user_provider()?;
         let Some(mailbox) = provider
@@ -258,25 +286,25 @@ impl EmailVerification {
             .await?
             .filter(|email| bound_to_mailbox(token, email))
         else {
-            return Err(FrameworkError::bad_request(
-                "invalid or expired verification token",
-            ));
+            return Err(FrameworkError::domain(UNAUTHORIZED, 403));
         };
+        // Read before the token is spent, so a storage error here leaves the
+        // link usable.
+        let already_verified = provider.is_email_verified(&actor_user_id).await?;
         let user_id = TokenStore::consume(token, TokenPurpose::EmailVerification)
             .await?
-            .ok_or_else(|| FrameworkError::bad_request("invalid or expired verification token"))?;
+            .ok_or_else(|| FrameworkError::bad_request(INVALID_TOKEN))?;
         if user_id != actor_user_id {
-            return Err(FrameworkError::bad_request(
-                "invalid or expired verification token",
-            ));
+            return Err(FrameworkError::bad_request(INVALID_TOKEN));
+        }
+        if already_verified {
+            return Ok(user_id);
         }
         // The address can change after the read above. The provider stamps
         // the verification only while it is still the mailbox the link was
         // mailed to.
         if !provider.mark_email_verified_for(&user_id, &mailbox).await? {
-            return Err(FrameworkError::bad_request(
-                "invalid or expired verification token",
-            ));
+            return Err(FrameworkError::bad_request(INVALID_TOKEN));
         }
         // Intentionally discard the dispatch error - verification has already
         // committed; a downstream listener failure must not surface as a
@@ -336,6 +364,7 @@ mod tests {
     // need a real `UserProvider` + DB and are covered by the integration test
     // in `framework/tests/email_verify.rs`.
     use crate::auth::Authenticatable;
+    use crate::mail::Mail;
     use chrono::{DateTime, Utc};
     use std::any::Any;
     use std::sync::Arc;

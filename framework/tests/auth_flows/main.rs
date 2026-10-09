@@ -21,6 +21,8 @@ pub mod email_verified_middleware_fail_closed;
 #[cfg(feature = "testing")]
 pub mod email_verify;
 pub mod email_verify_engines;
+#[cfg(feature = "testing")]
+pub mod laravel_auth_gaps;
 pub mod login_throttle_backend_error;
 pub mod password_reset;
 pub mod password_reset_provider;

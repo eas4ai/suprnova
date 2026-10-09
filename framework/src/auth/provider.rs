@@ -94,12 +94,43 @@ pub trait UserProvider: Send + Sync + 'static {
     ///
     /// Default implementation returns false (not supported).
     /// Override this if you need password validation.
+    ///
+    /// It answers whether the password matches and writes nothing, as
+    /// Laravel's `validateCredentials` does: `Auth::validate` and a guard's
+    /// `validate` call it to check a password without signing anybody in.
+    /// A rewrite of the stored hash belongs in
+    /// [`rehash_password_if_required`](Self::rehash_password_if_required),
+    /// which only a sign-in calls.
     async fn validate_credentials(
         &self,
         _user: &dyn Authenticatable,
         _credentials: &serde_json::Value,
     ) -> Result<bool, FrameworkError> {
         Ok(false)
+    }
+
+    /// Rewrite the user's stored password hash when it needs it, after the
+    /// password in `credentials` was validated and before the user is signed
+    /// in. Default: does nothing.
+    ///
+    /// The session guard calls it in `attempt` and `once`, and
+    /// `Auth::logout_other_devices` after its password check, as Laravel's
+    /// `SessionGuard` calls `rehashPasswordIfRequired`. The sign-in is the
+    /// one moment the plaintext is at hand and proven, so a new hash can be
+    /// minted from it. An error fails the sign-in: a provider that cannot
+    /// store the hash it needs returns that error rather than signing in a
+    /// user on a hash it meant to replace.
+    ///
+    /// `EloquentUserProvider` and `DatabaseUserProvider` rewrite a hash a
+    /// Laravel application on the same database would refuse while
+    /// [`LaravelDatabase::is_shared`](crate::LaravelDatabase::is_shared) is
+    /// on (LDB-004).
+    async fn rehash_password_if_required(
+        &self,
+        _user: &dyn Authenticatable,
+        _credentials: &serde_json::Value,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
     }
 
     /// Run a fixed-cost hash verification to absorb the timing signal
@@ -243,5 +274,73 @@ pub trait UserProvider: Send + Sync + 'static {
         Err(FrameworkError::internal(
             "this user provider does not support email verification",
         ))
+    }
+
+    /// Send the verification link to the user `id` names.
+    ///
+    /// [`crate::auth_flows::EmailVerification::resend`] holds only the id
+    /// the provider returned, not the model, so it sends through this
+    /// method. The default sends the framework's
+    /// [`VerifyEmailNotification`](crate::auth_flows::VerifyEmailNotification)
+    /// to [`verification_email`](Self::verification_email), the address
+    /// `verify` checks the link against, greeting the name of
+    /// [`flow_user_by_id`](Self::flow_user_by_id). `EloquentUserProvider`
+    /// loads the model and calls its
+    /// [`MustVerifyEmail::send_email_verification_notification`](crate::MustVerifyEmail::send_email_verification_notification),
+    /// so a model that sends its own message is honoured on this path too.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider reports no verification address
+    /// for `id`: a provider that cannot name the address cannot verify the
+    /// link either, and dropping the message without a word would hide that.
+    /// Also returns the error of the notification.
+    async fn send_email_verification_notification(
+        &self,
+        id: &str,
+        verification_link: &str,
+    ) -> Result<(), FrameworkError> {
+        let Some(address) = self.verification_email(id).await? else {
+            return Err(FrameworkError::internal(
+                "the user provider reports no verification address for this user; \
+                 implement verification_email or flow_user_by_id, or override \
+                 send_email_verification_notification",
+            ));
+        };
+        let name = self.flow_user_by_id(id).await?.and_then(|user| user.name);
+        crate::auth_flows::mail::send_verification_notification(&address, name, verification_link)
+            .await
+    }
+
+    /// Send the password-reset link to the user `id` names.
+    ///
+    /// [`crate::auth_flows::PasswordReset::send_link`] holds only the id the
+    /// provider returned, not the model, so its provider path sends through
+    /// this method. The default sends the framework's
+    /// [`PasswordResetMail`](crate::auth_flows::PasswordResetMail) to the
+    /// address [`flow_user_by_id`](Self::flow_user_by_id) returns, the one
+    /// the reset flow also sends the password-changed mail to.
+    /// `EloquentUserProvider` loads the model and calls its
+    /// [`CanResetPassword::send_password_reset_notification`](crate::CanResetPassword::send_password_reset_notification),
+    /// as Laravel's broker calls `sendPasswordResetNotification` on the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`flow_user_by_id`](Self::flow_user_by_id)
+    /// finds no user for `id`, so a reset-capable provider that cannot name
+    /// the address does not drop the link without a word. Also returns the
+    /// error of the mail.
+    async fn send_password_reset_notification(
+        &self,
+        id: &str,
+        reset_link: &str,
+    ) -> Result<(), FrameworkError> {
+        let Some(user) = self.flow_user_by_id(id).await? else {
+            return Err(FrameworkError::internal(
+                "the user provider reports no address for this user; implement \
+                 flow_user_by_id or override send_password_reset_notification",
+            ));
+        };
+        crate::auth_flows::mail::send_password_reset_mail(&user.email, user.name, reset_link).await
     }
 }

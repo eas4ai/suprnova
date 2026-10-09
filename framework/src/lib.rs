@@ -572,6 +572,7 @@ pub use auth_flows::{
     EmailVerification, EmailVerificationMail, EnrollmentResponse, EnsureEmailVerifiedMiddleware,
     PasswordChangedMail, PasswordReset, PasswordResetLinkSent, PasswordResetMail, TwoFactor,
     TwoFactorChallengeFailed, TwoFactorChallengeMiddleware, TwoFactorChallenged, TwoFactorUser,
+    VerifyEmailNotification,
 };
 #[doc(hidden)]
 pub use clap as __clap;

@@ -2,8 +2,10 @@
 //!
 //! These three mailables back the email-verification, password-reset, and
 //! password-changed lifecycle the [`EmailVerification`](crate::auth_flows::EmailVerification)
-//! / [`PasswordReset`](crate::auth_flows::PasswordReset) facades drive. They
-//! are dispatched via the ordinary [`Mail`](crate::Mail) facade:
+//! / [`PasswordReset`](crate::auth_flows::PasswordReset) facades drive. The
+//! verification message goes out as a [`VerifyEmailNotification`], a mail
+//! notification through [`Notify`] that renders [`EmailVerificationMail`];
+//! the others are dispatched via the ordinary [`Mail`] facade:
 //!
 //! ```rust,no_run
 //! # use suprnova::Mail;
@@ -28,9 +30,15 @@
 //! body does not escape because its consumers (mail clients in
 //! plaintext-mode) render it verbatim and `&` / `<` are not special there.
 
-use crate::mail::{Address, Mailable};
+use crate::error::FrameworkError;
+use crate::mail::{Address, Mail, Mailable};
+use crate::notifications::channels::mail::{
+    MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
+};
+use crate::notifications::{Notification, NotificationDispatcher, Notify};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Read `MAIL_FROM_NAME` for the outgoing display name, treating unset/blank as
 /// "no name". Read at send time so it survives the mailable's serde round-trip
@@ -127,6 +135,132 @@ impl Mailable for EmailVerificationMail {
     fn from(&self) -> Option<Address> {
         Some(build_from(&self.from_address, mail_from_name()))
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// VerifyEmailNotification
+// ──────────────────────────────────────────────────────────────────────
+
+/// The framework's "verify your email" notification, Laravel's
+/// `VerifyEmail`.
+///
+/// [`MustVerifyEmail::send_email_verification_notification`](crate::MustVerifyEmail::send_email_verification_notification)
+/// and the provider's default send it to the verification address as an
+/// on-demand mail notification. It goes out through the mail channel of the
+/// dispatcher bound with
+/// [`notifications::set_dispatcher`](crate::notifications::set_dispatcher)
+/// when that dispatcher has one, and through the framework's
+/// [`MailChannel`] otherwise, so an application needs no notification setup
+/// for verification mail. Under [`Notify::fake`] it is recorded instead,
+/// and a test reads the link back with `sent::<VerifyEmailNotification>`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VerifyEmailNotification {
+    /// The message the mail channel renders: the subject, bodies and sender
+    /// of [`EmailVerificationMail`], so a notification reads exactly as the
+    /// mail the facade sent before.
+    pub mail: EmailVerificationMail,
+}
+
+impl Notification for VerifyEmailNotification {
+    fn notification_name() -> &'static str {
+        "suprnova.auth.verify_email"
+    }
+
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+
+    fn data(&self) -> serde_json::Value {
+        // The link carries a single-use bearer token. `data()` reaches the
+        // `NotificationSending` and `NotificationSent` listeners, so the
+        // link stays out of it; the mail channel renders from `self.mail`.
+        serde_json::json!({
+            "to_address": self.mail.to_address,
+            "app_name": self.mail.app_name,
+        })
+    }
+}
+
+impl NotificationMailable for VerifyEmailNotification {
+    fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
+        Ok(MailRendering {
+            subject: self.mail.render_subject()?,
+            html: self.mail.render_html()?,
+            text: self.mail.render_text()?,
+            from: Mailable::from(&self.mail),
+            ..Default::default()
+        })
+    }
+}
+
+/// Send the framework's [`VerifyEmailNotification`] for `verification_link`
+/// to `address`, greeting `user_name`. The default of both verification
+/// hooks, the model's and the provider's.
+///
+/// Reads `APP_NAME` and the fail-closed `MAIL_FROM` at send time, as the
+/// mailables do.
+pub(crate) async fn send_verification_notification(
+    address: &str,
+    user_name: Option<String>,
+    verification_link: &str,
+) -> Result<(), FrameworkError> {
+    let notification = VerifyEmailNotification {
+        mail: EmailVerificationMail {
+            to_address: address.to_owned(),
+            user_name,
+            verification_link: verification_link.to_owned(),
+            app_name: crate::auth_flows::app_name(),
+            from_address: crate::auth_flows::require_mail_from()?,
+        },
+    };
+    notify_by_mail(address, &notification).await
+}
+
+/// Send `notification` to `address` as an on-demand mail notification.
+///
+/// Under [`Notify::fake`] it is recorded. Otherwise it goes through the
+/// bound dispatcher when that dispatcher has a `mail` channel, and through a
+/// dispatcher holding only the framework's [`MailChannel`] when no
+/// dispatcher is bound or the bound one has no mail channel: a framework
+/// message must not be dropped because the application never set up
+/// notifications. The renderer is registered on each send for the same
+/// reason; registering it again replaces the entry with the same renderer.
+async fn notify_by_mail<N: NotificationMailable>(
+    address: &str,
+    notification: &N,
+) -> Result<(), FrameworkError> {
+    let recipient = Notify::route("mail", address)?;
+    if crate::notifications::testing::is_active() {
+        return Notify::send(&recipient, notification).await;
+    }
+    register_mail_renderer::<N>()?;
+    let dispatcher = crate::notifications::dispatcher_for_queue()
+        .ok()
+        .filter(|dispatcher| dispatcher.channel("mail").is_some())
+        .unwrap_or_else(|| {
+            Arc::new(NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new())))
+        });
+    dispatcher.notify(&recipient, notification).await
+}
+
+/// Send the framework's [`PasswordResetMail`] for `reset_link` to
+/// `address`, greeting `user_name`. The default of both reset hooks, the
+/// model's and the provider's.
+///
+/// Reads `APP_NAME` and the fail-closed `MAIL_FROM` at send time.
+pub(crate) async fn send_password_reset_mail(
+    address: &str,
+    user_name: Option<String>,
+    reset_link: &str,
+) -> Result<(), FrameworkError> {
+    let mail = PasswordResetMail {
+        to_address: address.to_owned(),
+        user_name,
+        reset_link: reset_link.to_owned(),
+        app_name: crate::auth_flows::app_name(),
+        from_address: crate::auth_flows::require_mail_from()?,
+    };
+    Mail::to(address).send(mail).await
 }
 
 // ──────────────────────────────────────────────────────────────────────
