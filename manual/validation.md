@@ -31,6 +31,7 @@ Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
 `AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`, `Digits`,
 `DateFormat`, [`Accepted`, `Prohibited`, `Missing`](#accepted-prohibited-and-missing),
+[`RequiredIf::when`](#requiring-a-field-on-a-condition),
 [`Password`](#password-strength) (strength checks only). Built-in
 `ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`, and
 `Accepted`, `Prohibited` and `Missing` again for JSON fields.
@@ -413,6 +414,31 @@ validate! { self =>
 }
 ```
 
+### Requiring a field on a condition
+
+`RequiredIf::when(condition)` is Laravel's `Rule::requiredIf`. The
+condition is a `bool`, or a closure that returns one each time the rule
+checks a value. While the condition holds, the rule is `Required`, with the
+`validation-required` message. When it does not hold, the rule passes every
+value. The rule reads no other field, so it is a plain `Rule` and takes no
+`=> with ctx`:
+
+```rust
+use suprnova::{validate, ValidationErrors, rules::RequiredIf};
+
+fn after_validation(&self) -> Result<(), ValidationErrors> {
+    let business = self.account_type == "business";
+    validate! { self =>
+        company_name ?=> RequiredIf::when(business);
+        vat_number ?=> RequiredIf::when(|| business && self.country != "US");
+    }
+}
+```
+
+Put the rule on a `?=>` row when the field is an `Option`, so it can fail a
+field the client did not send. To require a field when another field has a
+given value, use `RequiredIf { other, value }` instead.
+
 ### Excluding a field
 
 `ExcludeIf { other, value }` and `ExcludeUnless { other, value }` are
@@ -771,6 +797,13 @@ for error bags, `with_all_errors`, and where the redirect points.
   through the catalog at the serialization boundary. Translate or reword
   any of them by defining the same id in `lang/<locale>/validation.ftl` -
   no rule wrapping. See [Localization](localization.md).
+- **Derive messages.** A `#[validate(...)]` failure reads the catalog id
+  `validation-<code>`, where `<code>` is the validator crate's code with
+  `_` as `-`. `#[validate(ip)]`, `ip(v4)` and `ip(v6)` all report `ip`, so
+  they read `The address field must be a valid IP address.`, as Laravel's
+  `ip` does. `range` with only a `max` reads `The quantity field must not
+  be greater than 100.`, Laravel's numeric `max` message; a string's
+  `length(max = ...)` keeps `must be at most 100 characters`.
 - **`Min` / `Max` / `Between`** are string-length rules (counted in Unicode
   scalar values). For numeric bounds, validate with `#[validate(range(...))]`
   on the derive or a custom rule - the length rules are not value
@@ -785,6 +818,7 @@ for error bags, `with_all_errors`, and where the redirect points.
 | JSON-shaped rule (array/object) | `field => ArrayKeys(&[...]);` / `field => Distinct { .. };` |
 | Optional "if present" | `field ?: Rule;` |
 | Conditionally-required optional | `field ?=> Rule => with ctx;` |
+| Required while a condition holds | `field ?=> RequiredIf::when(condition);` |
 | Async / DB-backed rule | `after_validation_async` + `AsyncRule::check_async` |
 | Uniqueness | `Unique::new(t, c)` + `UNIQUE` constraint + `from_unique_violation` |
 | Existence | `Exists::new(t, c)` + a foreign key constraint |

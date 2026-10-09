@@ -7701,6 +7701,7 @@ dependencies = [
  "icu_list",
  "icu_locale_core",
  "image",
+ "imagesize",
  "indexmap 2.14.0",
  "infer",
  "intl-memoizer",

@@ -147,58 +147,170 @@ pub fn middleware_logging() -> &'static str {
 
 /// Template for generating new middleware with make:middleware command.
 ///
-/// Emits a real, working middleware skeleton: it logs the inbound method,
-/// path, and per-request id, runs the inner handler, and logs completion
-/// time once the response is in hand. Production-safe out of the box -
-/// users replace the body with whatever they actually need (auth checks,
-/// CORS, tracing context, etc).
+/// The body passes the request on and returns the handler's response,
+/// as Laravel's `stubs/middleware.stub` does, so the new middleware changes
+/// nothing until you give it logic. Its doc comment says where checks and
+/// response work go.
 pub fn middleware_template(name: &str, struct_name: &str) -> String {
     format!(
         r#"//! {name} middleware
 
-use std::time::Instant;
-
-use suprnova::{{async_trait, current_request_id, Middleware, Next, Request, Response}};
+use suprnova::{{async_trait, Middleware, Next, Request, Response}};
 
 /// {name} middleware.
-///
-/// Times the wrapped request and logs both the inbound and outbound
-/// events with the per-request id installed by the framework's
-/// `RequestIdMiddleware`. Replace the body below with your own logic
-/// when you need different behavior.
 pub struct {struct_name};
 
 #[async_trait]
 impl Middleware for {struct_name} {{
+    /// Handle an incoming request.
+    ///
+    /// Code before `next(request).await` runs before the route's handler:
+    /// return a response there to stop the request. Code after it can
+    /// change the response the handler returned.
     async fn handle(&self, request: Request, next: Next) -> Response {{
-        let method = request.method().to_string();
-        let path = request.path().to_string();
-        let request_id = current_request_id()
-            .map(|id| id.as_str().to_string())
-            .unwrap_or_default();
-        let started_at = Instant::now();
-
-        println!(
-            "[{struct_name}] --> {{}} {{}} (request_id={{}})",
-            method, path, request_id,
-        );
-
-        let response = next(request).await;
-
-        println!(
-            "[{struct_name}] <-- {{}} {{}} ({{}} ms, request_id={{}})",
-            method,
-            path,
-            started_at.elapsed().as_millis(),
-            request_id,
-        );
-
-        response
+        next(request).await
     }}
 }}
 "#,
         name = name,
         struct_name = struct_name
+    )
+}
+
+/// The test `make:middleware --test` writes under `tests/`: it runs the
+/// middleware in front of a route through `TestClient`, the framework's
+/// in-process client, and asserts the route's response comes back.
+///
+/// `crate_name` is the application's library crate, `module_path` the
+/// path from it to the middleware (`middleware::admin`), and `test_name`
+/// the test function's name.
+pub fn middleware_test_template(
+    crate_name: &str,
+    module_path: &str,
+    struct_name: &str,
+    test_name: &str,
+) -> String {
+    render_placeholders(
+        r#"//! `{struct}` runs in front of a route.
+
+use {crate}::{module}::{struct};
+use suprnova::testing::TestClient;
+use suprnova::{MiddlewareRegistry, Request, Response, Router};
+
+async fn handled(_req: Request) -> Response {
+    suprnova::http::text("handled")
+}
+
+#[tokio::test]
+async fn {test}() {
+    let router = Router::new().get("/", handled);
+    let client = TestClient::new(router, MiddlewareRegistry::new().append({struct}));
+
+    client.get("/").send().await.assert_ok().assert_see("handled");
+}
+"#,
+        &[
+            ("{crate}", crate_name),
+            ("{module}", module_path),
+            ("{struct}", struct_name),
+            ("{test}", test_name),
+        ],
+    )
+}
+
+/// `templates/<path>.html` scaffolded by `make:view`: the markup the
+/// view struct's `title` field fills.
+pub fn view_html_template() -> &'static str {
+    "<div>\n    <h1>{{ title }}</h1>\n</div>\n"
+}
+
+/// `src/views/<path>.rs` scaffolded by `make:view`: a `#[suprnova::view]`
+/// struct naming its template, which the macro checks when the crate
+/// compiles.
+pub fn view_template(view_path: &str, struct_name: &str) -> String {
+    render_placeholders(
+        r#"//! The `{path}` view.
+
+/// The data `templates/{path}` renders.
+///
+/// `#[suprnova::view]` compiles the template against this struct, so a
+/// name the template reads that the struct lacks fails the build.
+#[suprnova::view(path = "{path}")]
+pub struct {struct} {
+    /// The page heading.
+    pub title: String,
+}
+"#,
+        &[("{path}", view_path), ("{struct}", struct_name)],
+    )
+}
+
+/// The test `make:view --test` writes under `tests/`: it renders the view
+/// with a title and asserts the title is in the HTML.
+pub fn view_test_template(
+    crate_name: &str,
+    module_path: &str,
+    struct_name: &str,
+    view_path: &str,
+    test_name: &str,
+) -> String {
+    render_placeholders(
+        r#"//! `{struct}` renders `templates/{path}`.
+
+use {crate}::{module}::{struct};
+use suprnova::view::ViewTemplate;
+
+#[test]
+fn {test}() {
+    let view = {struct} {
+        title: "Rendered heading".to_string(),
+    };
+    let mut html = String::new();
+    view.render_view(&mut html).expect("the view renders");
+
+    assert!(html.contains("<h1>Rendered heading</h1>"), "{html}");
+}
+"#,
+        &[
+            ("{crate}", crate_name),
+            ("{module}", module_path),
+            ("{struct}", struct_name),
+            ("{path}", view_path),
+            ("{test}", test_name),
+        ],
+    )
+}
+
+/// The test `make:inertia --test` writes under `tests/`: a route answers
+/// with the page, and the test asserts the response names it and that its
+/// file exists under `frontend/src/pages`. `inertia_response!` also checks
+/// the file when the test compiles.
+pub fn inertia_page_test_template(component: &str, test_name: &str) -> String {
+    render_placeholders(
+        r#"//! The `{component}` Inertia page renders.
+
+use suprnova::testing::TestClient;
+use suprnova::{inertia_response, MiddlewareRegistry, Request, Response, Router};
+
+async fn page(req: Request) -> Response {
+    inertia_response!(&req, "{component}", {})
+}
+
+#[tokio::test]
+async fn {test}() {
+    let client = TestClient::new(Router::new().get("/", page), MiddlewareRegistry::new());
+
+    client
+        .get("/")
+        .inertia()
+        .send()
+        .await
+        .assert_ok()
+        .assert_inertia()
+        .component_exists("{component}", true);
+}
+"#,
+        &[("{component}", component), ("{test}", test_name)],
     )
 }
 
@@ -319,8 +431,13 @@ impl TypedCommand for {struct_name} {{
 ///
 /// Dispatches to the right per-frontend snippet so the generated file
 /// compiles in the user's actual project.
-pub fn inertia_page_template(component_name: &str, frontend: Frontend) -> String {
+///
+/// `component` is the Inertia component name, with its directory when the
+/// page is nested (`Admin/UsersPage`); the React function and every heading
+/// use the last segment, since a function name cannot hold a `/`.
+pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
     let ext = frontend.page_ext();
+    let component_name = component.rsplit('/').next().unwrap_or(component);
     match frontend {
         Frontend::React => format!(
             r#"export default function {component_name}() {{
@@ -328,24 +445,26 @@ pub fn inertia_page_template(component_name: &str, frontend: Frontend) -> String
     <div className="font-sans p-8 max-w-xl mx-auto">
       <h1 className="text-3xl font-bold">{component_name}</h1>
       <p className="mt-2">
-        Edit <code className="bg-gray-100 px-1 rounded">frontend/src/pages/{component_name}.{ext}</code> to get started.
+        Edit <code className="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
       </p>
     </div>
   )
 }}
 "#,
             component_name = component_name,
+            component = component,
             ext = ext,
         ),
         Frontend::Svelte => format!(
             r#"<div class="font-sans p-8 max-w-xl mx-auto">
   <h1 class="text-3xl font-bold">{component_name}</h1>
   <p class="mt-2">
-    Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component_name}.{ext}</code> to get started.
+    Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
   </p>
 </div>
 "#,
             component_name = component_name,
+            component = component,
             ext = ext,
         ),
         Frontend::Vue => format!(
@@ -356,12 +475,13 @@ pub fn inertia_page_template(component_name: &str, frontend: Frontend) -> String
   <div class="font-sans p-8 max-w-xl mx-auto">
     <h1 class="text-3xl font-bold">{component_name}</h1>
     <p class="mt-2">
-      Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component_name}.{ext}</code> to get started.
+      Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
     </p>
   </div>
 </template>
 "#,
             component_name = component_name,
+            component = component,
             ext = ext,
         ),
     }

@@ -2,9 +2,10 @@
 
 The `suprnova make:*` family scaffolds the conventional file for each
 piece of a project - a controller, an action, a middleware, a console
-command, a domain error, a scheduled task, an Inertia page or props
-struct, a database migration - and wires the new module into its
-parent `mod.rs` (and where needed, `src/lib.rs` and `cmd/main.rs`).
+command, a domain error, a scheduled task, a checked view, an Inertia
+page or props struct, a database migration - and wires the new module
+into its parent `mod.rs` (and where needed, `src/lib.rs` and
+`cmd/main.rs`).
 Reach for them when you'd otherwise be retyping the same boilerplate + `pub mod x;` import line, which is most of the time.
 
 ## make:controller
@@ -98,65 +99,97 @@ actions compose with the container.
 ## make:middleware
 
 Scaffold a middleware - a unit struct that implements
-`suprnova::Middleware`. The default body times the inner handler and
-logs the inbound + outbound events with the per-request id, so it
-runs end-to-end the first time.
+`suprnova::Middleware`. Its `handle` passes the request to `next` and
+returns the response, as Laravel's middleware stub does, so the new
+middleware changes nothing until you give it logic.
 
 ```bash
 suprnova make:middleware Auth
 suprnova make:middleware RateLimit
+suprnova make:middleware Admin/EnsureRole --test
 ```
 
 The name is PascalCased; a `Middleware` suffix is appended if missing.
 The file uses the snake-cased base name (without the suffix), e.g.
 `Auth` → `src/middleware/auth.rs`, struct `AuthMiddleware`.
 
+A nested name writes under a subdirectory, as Laravel's
+`make:middleware Admin/EnsureRole` writes under
+`app/Http/Middleware/Admin`: `Admin/EnsureRole` (or `Admin\EnsureRole`)
+writes `src/middleware/admin/ensure_role.rs`, struct
+`EnsureRoleMiddleware`, reached as
+`crate::middleware::admin::EnsureRoleMiddleware`.
+
 ### Generated file
 
 ```rust
 // src/middleware/auth.rs
-use std::time::Instant;
+use suprnova::{async_trait, Middleware, Next, Request, Response};
 
-use suprnova::{async_trait, current_request_id, Middleware, Next, Request, Response};
-
+/// Auth middleware.
 pub struct AuthMiddleware;
 
 #[async_trait]
 impl Middleware for AuthMiddleware {
+    /// Handle an incoming request.
+    ///
+    /// Code before `next(request).await` runs before the route's handler:
+    /// return a response there to stop the request. Code after it can
+    /// change the response the handler returned.
     async fn handle(&self, request: Request, next: Next) -> Response {
-        let method = request.method().to_string();
-        let path = request.path().to_string();
-        let request_id = current_request_id()
-            .map(|id| id.as_str().to_string())
-            .unwrap_or_default();
-        let started_at = Instant::now();
-
-        println!(
-            "[AuthMiddleware] --> {} {} (request_id={})",
-            method, path, request_id,
-        );
-
-        let response = next(request).await;
-
-        println!(
-            "[AuthMiddleware] <-- {} {} ({} ms, request_id={})",
-            method, path, started_at.elapsed().as_millis(), request_id,
-        );
-
-        response
+        next(request).await
     }
 }
 ```
 
+### With `--test`
+
+`--test` also writes `tests/<path>_middleware.rs`
+(`tests/admin_ensure_role_middleware.rs` for `Admin/EnsureRole`). The test
+puts the middleware in front of a route, sends a request through
+`TestClient`, and asserts the route's response comes back. It imports
+the middleware from your library crate, so run the command from the
+project root, where `Cargo.toml` and `src/lib.rs` are:
+
+```rust
+// tests/admin_ensure_role_middleware.rs
+use my_app::middleware::admin::EnsureRoleMiddleware;
+use suprnova::testing::TestClient;
+use suprnova::{MiddlewareRegistry, Request, Response, Router};
+
+async fn handled(_req: Request) -> Response {
+    suprnova::http::text("handled")
+}
+
+#[tokio::test]
+async fn admin_ensure_role_middleware_passes_the_request_to_the_route() {
+    let router = Router::new().get("/", handled);
+    let client = TestClient::new(router, MiddlewareRegistry::new().append(EnsureRoleMiddleware));
+
+    client.get("/").send().await.assert_ok().assert_see("handled");
+}
+```
+
+When you give the middleware logic, change the test to match it. See
+[HTTP Tests](http-tests.md) for the client.
+
 ### What it wires
 
-1. Writes `src/middleware/<snake>.rs`.
-2. Adds `mod <snake>;` + `pub use <snake>::<StructName>;` to
-   `src/middleware/mod.rs` (creates it if needed).
-3. Prints both the per-route shape
+1. Writes `src/middleware/<snake>.rs`, or for a nested name the same file
+   under `src/middleware/<dir>/`. An existing file is never overwritten.
+2. Adds `mod <snake>;` + `pub use <snake>::<StructName>;` to the module
+   file of that directory (`src/middleware/mod.rs`, or
+   `src/middleware/admin/mod.rs`), creating it if needed.
+3. For a nested name, declares each directory in the one above it:
+   `pub mod admin;` in `src/middleware/mod.rs`.
+4. With `--test`, writes the test under `tests/`.
+5. Prints both the per-route shape
    (`.get("/path", handler).middleware(AuthMiddleware)`) and the
-   global shape (`global_middleware!(middleware::AuthMiddleware)` in
-   `bootstrap.rs`).
+   global shape (`global_middleware!(crate::middleware::AuthMiddleware)`
+   in `bootstrap.rs`).
+
+Every file is checked before anything is written, and the command writes
+all of them or none.
 
 See [Middleware](middleware.md) for the full chain semantics,
 ordering, and the global vs per-route distinction.
@@ -485,6 +518,89 @@ run-as-cron vs run-as-daemon trade.
 
 ---
 
+## make:view
+
+Scaffold a checked view, Laravel's `make:view`: an Askama template under
+`templates/` and a `#[suprnova::view]` struct that names it. The macro
+compiles the template against the struct, so a name the template reads
+that the struct lacks fails the build.
+
+```bash
+suprnova make:view welcome
+suprnova make:view admin.dashboard
+suprnova make:view admin/dashboard --test
+```
+
+`admin.dashboard` and `admin/dashboard` name the same view, as in
+Laravel: the template is `templates/admin/dashboard.html`, and the struct
+is `DashboardView` in `src/views/admin/dashboard.rs`, reached as
+`crate::views::admin::dashboard::DashboardView`. Each segment is letters,
+digits, `_` and `-`, starting with a letter; the template path keeps the
+segment as you write it, and the module name is its snake case
+(`reports.user-summary` → `templates/reports/user-summary.html`,
+`src/views/reports/user_summary.rs`).
+
+### Generated files
+
+```html
+<!-- templates/admin/dashboard.html -->
+<div>
+    <h1>{{ title }}</h1>
+</div>
+```
+
+```rust
+// src/views/admin/dashboard.rs
+/// The data `templates/admin/dashboard.html` renders.
+#[suprnova::view(path = "admin/dashboard.html")]
+pub struct DashboardView {
+    /// The page heading.
+    pub title: String,
+}
+```
+
+Render it from a handler with `ViewTemplate::render_view`, and return the
+HTML:
+
+```rust
+use suprnova::view::ViewTemplate;
+use suprnova::{FrameworkError, HttpResponse, Request, Response};
+
+use crate::views::admin::dashboard::DashboardView;
+
+pub async fn dashboard(_req: Request) -> Response {
+    let mut html = String::new();
+    DashboardView { title: "Dashboard".into() }
+        .render_view(&mut html)
+        .map_err(|failure| FrameworkError::internal(format!("dashboard view: {failure:?}")))?;
+    Ok(HttpResponse::html(html))
+}
+```
+
+### With `--test`
+
+`--test` also writes `tests/<path>_view.rs`
+(`tests/admin_dashboard_view.rs`), which renders the view with a title
+and asserts the title is in the HTML. It imports the view from your
+library crate, so run the command from the project root.
+
+### What it wires
+
+1. Refuses to overwrite: if the template, the view file or (with
+   `--test`) the test exists, the command says which and writes nothing.
+   Pass `--force` to overwrite them.
+2. Writes `templates/<path>.html` and `src/views/<path>.rs`.
+3. Declares the modules on the way: `pub mod views;` in `src/lib.rs`,
+   `pub mod admin;` in `src/views/mod.rs` and `pub mod dashboard;` in
+   `src/views/admin/mod.rs`, creating each module file it needs. A
+   declaration that is already there is left alone.
+4. With `--test`, writes the test under `tests/`.
+
+Every file is checked before anything is written, and the command writes
+all of them or none.
+
+---
+
 ## make:inertia
 
 Scaffold either an Inertia page component (default) or a typed Data
@@ -497,12 +613,21 @@ emits the matching file extension.
 ```bash
 suprnova make:inertia About
 suprnova make:inertia UserProfile
+suprnova make:inertia Admin/Users --test
 ```
 
 The name is PascalCased and the suffix `Page` is appended if missing,
 so `About` → `AboutPage`. The file lands in `frontend/src/pages/`
 with the per-frontend extension: `AboutPage.svelte` for Svelte,
 `AboutPage.tsx` for React, `AboutPage.vue` for Vue.
+
+A nested name writes under the same directory of `frontend/src/pages/`,
+and the component is named with it: `Admin/Users` writes
+`frontend/src/pages/Admin/UsersPage.svelte`, rendered as
+`"Admin/UsersPage"`. Directory segments keep the spelling you give them.
+
+An existing page is kept: the command says so and writes nothing. Pass
+`--force` to overwrite it.
 
 Example (Svelte):
 
@@ -521,6 +646,38 @@ Render it from a controller:
 ```rust
 inertia_response!(&req, "AboutPage", props)
 ```
+
+`--test` also writes `tests/<path>.rs` (`tests/admin_users_page.rs` for
+`Admin/Users`). The test answers a request with the page through
+`TestClient` and asserts that the response names the component and that
+its file exists under `frontend/src/pages`:
+
+```rust
+// tests/admin_users_page.rs
+use suprnova::testing::TestClient;
+use suprnova::{inertia_response, MiddlewareRegistry, Request, Response, Router};
+
+async fn page(req: Request) -> Response {
+    inertia_response!(&req, "Admin/UsersPage", {})
+}
+
+#[tokio::test]
+async fn admin_users_page_renders() {
+    let client = TestClient::new(Router::new().get("/", page), MiddlewareRegistry::new());
+
+    client
+        .get("/")
+        .inertia()
+        .send()
+        .await
+        .assert_ok()
+        .assert_inertia()
+        .component_exists("Admin/UsersPage", true);
+}
+```
+
+`--force` overwrites the test too. `--test` and `--data` cannot be
+combined.
 
 See [Frontend Pages](frontend-pages.md) and
 [Inertia Responses](frontend-inertia-responses.md) for the bridge
@@ -647,8 +804,13 @@ the same way in `src/lib.rs`.
 
 So every `suprnova make:*` generator does two things instead of one:
 it writes the new file *and* edits the closest `mod.rs` (and, for
-`make:task` and `make:command`, `src/lib.rs` and `cmd/main.rs` as
-well). That's why every generator prints a `Created src/.../mod.rs`
+`make:task`, `src/lib.rs` and `cmd/main.rs` as well, and for `make:view`,
+`src/lib.rs`). A nested name declares every module on the way to its
+file, since each directory is a module of its own.
+
+Laravel's `--test` writes a PHPUnit or Pest test under `tests/Feature`.
+Suprnova's writes a Rust integration test under `tests/`, one file per
+generated item, which imports the item from your library crate. That's why every generator prints a `Created src/.../mod.rs`
 or `Updated src/.../mod.rs` line - the wiring is part of the work,
 not a follow-up step you remember on your own.
 
@@ -661,10 +823,13 @@ not a follow-up step you remember on your own.
 | `make:controller <name>` | `src/controllers/<snake>.rs` | `controllers/mod.rs` |
 | `make:action <Name>` | `src/actions/<snake>_action.rs` | `actions/mod.rs` |
 | `make:middleware <Name>` | `src/middleware/<snake>.rs` | `middleware/mod.rs` |
+| `make:middleware <Dir>/<Name> --test` | `src/middleware/<dir>/<snake>.rs`, `tests/<dir>_<snake>_middleware.rs` | `middleware/<dir>/mod.rs`, `middleware/mod.rs` |
+| `make:view <dir>.<name>` | `templates/<dir>/<name>.html`, `src/views/<dir>/<snake>.rs` | `views/<dir>/mod.rs`, `views/mod.rs`, `lib.rs` |
 | `make:command <name>` | `src/commands/<snake>.rs` | `commands/mod.rs` (+ warns about `lib.rs`) |
 | `make:error <Name>` | `src/errors/<snake>.rs` | `errors/mod.rs` |
 | `make:task <Name>` | `src/tasks/<snake>_task.rs` | `tasks/mod.rs`, `schedule.rs`, `lib.rs`, `main.rs` |
 | `make:inertia <Name>` | `frontend/src/pages/<Name>Page.<ext>` | (no module wiring) |
+| `make:inertia <Dir>/<Name> --test` | `frontend/src/pages/<Dir>/<Name>Page.<ext>`, `tests/<dir>_<name>_page.rs` | (no module wiring) |
 | `make:inertia <Name> --data` | `app/src/props/<snake>.rs` | (no module wiring) |
 | `make:migration <name>` | `migrations/YYYYMMDDHHMMSS_<name>.rs` | (no module wiring) |
 | `generate-types` | `frontend/src/types/inertia-props.ts` | n/a |

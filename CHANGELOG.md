@@ -964,6 +964,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   name uses that editor's URL format, a value holding `{file}` is a template,
   and any other name opens `<name>://open?file=...&line=...`.
 
+- **Required while a condition holds.** `RequiredIf::when(condition)` takes a
+  `bool` or a closure answering one, requires the field with the required
+  message while it holds and passes the field otherwise, as Laravel's
+  `Rule::requiredIf` does.
+- **Image dimensions on uploads.** `Dimensions<D>` reads an image's width and
+  height from its header and refuses the file with `validation-dimensions`
+  when it breaks the `min_width`, `max_width`, `min_height`, `max_height`,
+  `width`, `height` or `ratio` a `DimensionLimits` type sets, or when its size
+  cannot be read.
+- **The IP address message.** `#[validate(ip)]` reads `The address field must
+  be a valid IP address.` in place of the generic failure message.
+- **Nested middleware names.** `make:middleware Admin/EnsureRole` writes
+  `src/middleware/admin/ensure_role.rs` and declares each module on the way.
+- **Middleware tests.** `make:middleware --test` writes a test under `tests/`
+  that runs the middleware in front of a route through `TestClient`.
+- **`make:view`.** `make:view admin.dashboard` (or `admin/dashboard`) writes
+  `templates/admin/dashboard.html` and a `#[suprnova::view]` struct naming it
+  in `src/views/admin/dashboard.rs`, declares its modules, keeps existing
+  files unless `--force` is given, and with `--test` writes a test that
+  renders it.
+- **Nested Inertia pages.** `make:inertia Admin/Users` writes
+  `frontend/src/pages/Admin/UsersPage.<ext>`, `--force` overwrites an
+  existing page, and `--test` writes a test that renders the page and checks
+  its file.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -1717,6 +1742,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **The frame that created an error shows where.** In a build without debug
   info, the development error page gives the innermost application frame the
   error's creation site as its location.
+
+- **The numeric max message.** `#[validate(range(max = 10))]` reads `must not
+  be greater than 10`, Laravel's wording; a string's `length(max = ...)` keeps
+  its message.
+- **`ImageFile` accepts Laravel's image types.** It accepts JPEG, PNG, GIF,
+  BMP, WebP, AVIF, HEIC and HEIF and refuses every other type, TIFF, PSD, ICO
+  and JPEG XL included; an SVG passes only a `MimeType` allowlist that names
+  it.
+- **Generated middleware passes the request on.** `make:middleware` writes a
+  `handle` that returns `next(request).await`, as Laravel's stub does, in
+  place of a body that printed request timing.
 
 ### Fixed
 

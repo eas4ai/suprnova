@@ -802,9 +802,25 @@ Built-in validators in `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - stops reading the body at the chunk that takes the file
   past `N` bytes.
-- `ImageFile` - rejects parts whose magic bytes don't claim `image/*`.
-  (Named after Laravel's own rule; the plain `Image` name belongs to the
-  image-manipulation pipeline - see [Images](images.md).)
+- `ImageFile` - accepts the image types Laravel's `image` rule accepts,
+  detected from the file's magic bytes: JPEG, PNG, GIF, BMP, WebP, AVIF,
+  HEIC and HEIF. Every other type is refused, other images included: TIFF,
+  PSD, ICO and JPEG XL. SVG is refused too, because it is markup that can
+  carry script; to accept it on purpose, use a `MimeType<L>` allowlist that
+  names `image/svg+xml`, as Laravel accepts it only through
+  `image:allow_svg`. (Named after Laravel's own rule; the plain `Image`
+  name belongs to the image-manipulation pipeline - see
+  [Images](images.md).)
+- `Dimensions<D>` - checks an image's width and height against Laravel's
+  `dimensions` constraints, taken from your own `DimensionLimits` type:
+  `min_width`, `max_width`, `min_height`, `max_height`, `width`, `height`
+  and `ratio`. Each is an associated function that returns `None` unless
+  you override it. The size is read from the image header in the first
+  16 KiB of the file, without decoding it, for the types `ImageFile`
+  accepts. A file whose size cannot be read there is refused too: another
+  type, an SVG, a corrupt header, or a JPEG whose metadata (a camera's
+  EXIF block and thumbnail, for example) pushes its size past the first
+  16 KiB.
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
   `MimeAllowlist` type. An entry such as `image/*` admits every subtype of
   its type except `image/svg+xml`: an SVG passes only when your allowlist
@@ -822,7 +838,35 @@ Built-in validators in `suprnova::http::upload::validators`:
 - `()` - no-op; `UploadedFile<()>` accepts any bytes.
 
 Validators compose as tuples: `(ImageFile, MaxSize<5_242_880>)` runs both,
-short-circuiting on the first failure.
+short-circuiting on the first failure. Put `ImageFile` before
+`Dimensions<D>`, so a file that is not an image reports `validation-image`:
+
+```rust
+use suprnova::{DimensionLimits, Dimensions, ImageFile, MaxSize, MultipartRequest, UploadedFile};
+
+/// A square avatar, at most 1000 pixels wide.
+#[derive(Default)]
+pub struct Avatar;
+
+impl DimensionLimits for Avatar {
+    fn max_width() -> Option<u32> {
+        Some(1000)
+    }
+    fn ratio() -> Option<f64> {
+        Some(1.0)
+    }
+}
+
+#[derive(MultipartRequest)]
+pub struct ProfilePhoto {
+    #[field("avatar")]
+    pub avatar: UploadedFile<(ImageFile, Dimensions<Avatar>, MaxSize<2_097_152>)>,
+}
+```
+
+`ratio` is the width divided by the height, so write `Some(3.0 / 2.0)`
+for Laravel's `ratio=3/2`. An image passes when its own ratio is within
+Laravel's tolerance of about one pixel.
 
 ### Validation errors
 
@@ -847,6 +891,7 @@ validation catalog by its key:
 | A file part where text belongs | `validation-string` |
 | A file over `MaxSize<N>`, the limit in kilobytes as Laravel words it | `validation-max-file` |
 | A file `ImageFile` refuses | `validation-image` |
+| A file `Dimensions<D>` refuses, or whose size it cannot read | `validation-dimensions` |
 | A file `MimeType<L>` refuses, with the allowed types | `validation-mimetypes` |
 
 A text part whose bytes aren't UTF-8, as a page served in a legacy
@@ -944,6 +989,14 @@ Laravel's `mimetypes:image/*` rule admits a file detected as
 leaves SVG out of `image/*`, as Laravel's `image` rule leaves it out unless
 you pass `allow_svg`. An SVG is markup that can run script, so you name
 `image/svg+xml` to accept one.
+
+Laravel's `dimensions` reads the whole stored file, so it finds a JPEG's
+size wherever the header puts it, and it passes an SVG without checking
+it. A streaming validator sees only the first 16 KiB of a file, so
+`Dimensions<D>` refuses a file whose size is not stated there, and an SVG
+has no pixel size to check. The limits are functions of a type rather
+than a rule string, because a validator is built with `Default` inside
+the derive and takes no arguments.
 
 ### Authorize and after-validation hooks
 

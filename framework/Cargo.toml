@@ -119,6 +119,13 @@ writeable = { version = "0.6", optional = true }
 
 # Phase 4 - filesystem, uploads, and validation
 infer = "0.19"
+# The `Dimensions` upload validator reads an image's width and height from
+# its header in the 16 KiB sniff buffer, without decoding pixels. The same
+# exact version and parser the Live engine probes upload headers with, so
+# the tree holds one copy. The features are the formats `ImageFile` accepts
+# (HEIC, HEIF and AVIF share the `heif` container parser) except BMP, which
+# `validators.rs` reads itself because `imagesize` misreads a top-down BMP.
+imagesize = { version = "=0.15.0", default-features = false, features = ["gif", "heif", "jpeg", "png", "webp"] }
 multer = "3"
 # Signing and the AWS credential chain for the `sqs` queue driver, at the
 # revision opendal's S3 service already uses, so the two share one copy.

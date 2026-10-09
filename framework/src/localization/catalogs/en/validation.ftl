@@ -59,14 +59,16 @@ validation-password-uncompromised = The given { $field } has appeared in a data 
 ### Ids for multipart extraction (`#[derive(MultipartRequest)]`) and its
 ### upload validators. `validation-format` is a text part that does not
 ### parse as its field's type. `validation-max-file` takes `$max` in
-### kilobytes, as Laravel's `max` rule for files does, and
-### `validation-mimetypes` takes `$values`, the allowed types.
+### kilobytes, as Laravel's `max` rule for files does,
+### `validation-mimetypes` takes `$values`, the allowed types, and
+### `validation-dimensions` takes none, as Laravel's `dimensions` does.
 
 validation-format = The { $field } field format is invalid.
 validation-file = The { $field } field must be a file.
 validation-string = The { $field } field must be a string.
 validation-max-file = The { $field } field must not be greater than { $max } kilobytes.
 validation-image = The { $field } field must be an image.
+validation-dimensions = The { $field } field has invalid image dimensions.
 validation-mimetypes = The { $field } field must be a file of type: { $values }.
 
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
@@ -94,12 +96,13 @@ validation-range =
     { $kind ->
         [equal] The { $field } field must be exactly { $equal }.
         [min] The { $field } field must be at least { $min }.
-        [max] The { $field } field must be at most { $max }.
+        [max] The { $field } field must not be greater than { $max }.
         [range] The { $field } field must be between { $min } and { $max }.
        *[other] The { $field } field is out of range.
     }
 validation-must-match = The { $field } field must match the field it is paired with.
 validation-regex = The { $field } field format is invalid.
+validation-ip = The { $field } field must be a valid IP address.
 validation-accepted = The { $field } field must be accepted.
 validation-digits = The { $field } field must be { $digits } digits.
 validation-date-format = The { $field } field must match the format { $format }.

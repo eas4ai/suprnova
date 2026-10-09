@@ -11,7 +11,8 @@
 //!   [`rules::AlphaNum`], [`rules::AlphaDash`], [`rules::Url`],
 //!   [`rules::UrlProtocols`], [`rules::HttpUrl`], [`rules::Uuid`],
 //!   [`rules::Password`] (strength checks only - see [`AsyncRule`] below
-//!   for its `uncompromised()` half).
+//!   for its `uncompromised()` half), [`rules::RequiredWhen`] (built by
+//!   [`rules::RequiredIf::when`]).
 //! - [`ValueRule`] - pure sync check on a JSON-shaped value (array or
 //!   object), for rules a bare string can't carry enough structure for.
 //!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`],
@@ -1260,6 +1261,74 @@ pub mod rules {
                     .arg("other", self.other)
                     .arg("value", self.value)
                     .fallback(format!("required when {} is {}", self.other, self.value)))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl RequiredIf {
+        /// Laravel's `Rule::requiredIf($condition)`: require the field only
+        /// when `condition` holds, whatever the other fields say.
+        ///
+        /// `condition` is a `bool` or a closure answering one, and the
+        /// returned [`RequiredWhen`] reads it each time it checks a value.
+        /// A closure suits a condition the form's fields cannot express,
+        /// such as the signed-in user's role or a feature flag. When the
+        /// condition holds the rule is [`Required`], with its
+        /// `validation-required` message; when it does not, the rule passes
+        /// every value, as Laravel's rule turns into `required` or into no
+        /// rule at all.
+        ///
+        /// ```rust
+        /// # use suprnova::{Rule, rules::RequiredIf};
+        /// let is_admin = true;
+        /// assert!(RequiredIf::when(is_admin).passes("").is_err());
+        /// assert!(RequiredIf::when(|| false).passes("").is_ok());
+        /// ```
+        pub fn when<C: RequiredCondition>(condition: C) -> RequiredWhen<C> {
+            RequiredWhen { condition }
+        }
+    }
+
+    /// The condition [`RequiredIf::when`] reads: a `bool`, or a closure
+    /// answering one each time the rule checks a value.
+    ///
+    /// The closure form lets the answer change between checks, as a
+    /// Laravel closure passed to `Rule::requiredIf` is called when the
+    /// validator runs rather than when the rule is built.
+    pub trait RequiredCondition {
+        /// Whether the field is required.
+        fn holds(&self) -> bool;
+    }
+
+    impl RequiredCondition for bool {
+        fn holds(&self) -> bool {
+            *self
+        }
+    }
+
+    impl<F: Fn() -> bool> RequiredCondition for F {
+        fn holds(&self) -> bool {
+            self()
+        }
+    }
+
+    /// The rule [`RequiredIf::when`] builds: Laravel's `Rule::requiredIf`.
+    ///
+    /// It requires the field with [`Required`]'s `validation-required`
+    /// message while its [`RequiredCondition`] holds, and passes every
+    /// value otherwise. It is a plain [`Rule`], so it needs no form
+    /// context: put it on a `field => ...` row of [`crate::validate!`], or
+    /// on a `field ?=> ...` row so it can fail an absent `Option` field.
+    pub struct RequiredWhen<C> {
+        condition: C,
+    }
+
+    impl<C: RequiredCondition> Rule for RequiredWhen<C> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if self.condition.holds() {
+                Required.passes(value)
             } else {
                 Ok(())
             }
