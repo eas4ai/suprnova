@@ -94,15 +94,19 @@ static REGISTRY: LazyLock<RwLock<HashMap<String, Registration>>> =
 /// The jobs the framework itself pushes, present before any application
 /// code runs.
 ///
-/// `Mail::queue` and `Mail::later` push [`SendMailJob`](crate::mail::SendMailJob)
-/// and `Notify::queue` pushes
-/// [`SendNotificationJob`](crate::notifications::notify_job::SendNotificationJob).
-/// An application never writes either type, so it cannot be expected to
-/// register them. Without these entries a worker would dead-letter every
-/// queued mail and notification as `unknown job`, and the `sync` driver
-/// would fail the push itself.
+/// `Mail::queue` and `Mail::later` push [`SendMailJob`](crate::mail::SendMailJob),
+/// `Notify::queue` pushes
+/// [`SendNotificationJob`](crate::notifications::notify_job::SendNotificationJob),
+/// and the broadcast notification channel pushes
+/// [`BroadcastNotificationJob`](crate::notifications::channels::broadcast::BroadcastNotificationJob)
+/// for a message that names a queue or a connection. An application never
+/// writes any of these types, so it cannot be expected to register them.
+/// Without these entries a worker would dead-letter every queued mail,
+/// notification and broadcast as `unknown job`, and the `sync` driver would
+/// fail the push itself.
 fn framework_jobs() -> HashMap<String, Registration> {
     use crate::mail::SendMailJob;
+    use crate::notifications::channels::broadcast::BroadcastNotificationJob;
     use crate::notifications::notify_job::SendNotificationJob;
     HashMap::from([
         (
@@ -112,6 +116,10 @@ fn framework_jobs() -> HashMap<String, Registration> {
         (
             SendNotificationJob::job_name().to_string(),
             registration_for::<SendNotificationJob>(),
+        ),
+        (
+            BroadcastNotificationJob::job_name().to_string(),
+            registration_for::<BroadcastNotificationJob>(),
         ),
     ])
 }
@@ -2144,7 +2152,11 @@ mod tests {
     #[test]
     fn the_framework_jobs_are_registered_before_any_register_job_call() {
         let names = registered_job_names();
-        for job in ["Suprnova::SendMail", "Suprnova::SendNotification"] {
+        for job in [
+            "Suprnova::SendMail",
+            "Suprnova::SendNotification",
+            "Suprnova::BroadcastNotification",
+        ] {
             assert!(names.iter().any(|n| n == job), "{job} missing: {names:?}");
             assert!(middleware_for(job).is_empty(), "{job} has no middleware");
         }

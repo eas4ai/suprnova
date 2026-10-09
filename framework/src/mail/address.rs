@@ -97,4 +97,54 @@ impl Attachment {
             content_type: content_type.into(),
         }
     }
+
+    /// Whether `other` has the same name, bytes and content type. Mirrors
+    /// Laravel's `Attachment::isEquivalent`, which compares the data, the
+    /// `as` name and the `mime` type.
+    ///
+    /// A test asserts with it that a message carries a file, not merely a
+    /// file of that name: see
+    /// [`OutgoingMessage::has_equivalent_attachment`](crate::mail::OutgoingMessage::has_equivalent_attachment).
+    pub fn is_equivalent(&self, other: &Attachment) -> bool {
+        self.is_equivalent_with(other, &other.filename, &other.content_type)
+    }
+
+    /// Whether `other` is equivalent once `name` and `content_type` stand in
+    /// for its own: the bytes must match, and this attachment must carry
+    /// that name and type. Mirrors the `$options` argument of Laravel's
+    /// `Attachment::isEquivalent`, whose `as` and `mime` replace the other
+    /// attachment's.
+    pub fn is_equivalent_with(&self, other: &Attachment, name: &str, content_type: &str) -> bool {
+        self.filename == name && self.content_type == content_type && self.content == other.content
+    }
+
+    /// Whether `other` has the same name and bytes, whatever its content
+    /// type: what makes a later attachment a duplicate of an earlier one,
+    /// as Laravel's `attachData` keeps one attachment per name and data.
+    fn duplicates(&self, other: &Attachment) -> bool {
+        self.filename == other.filename && self.content == other.content
+    }
+}
+
+/// Append `attachment` unless one with the same name and bytes is already
+/// in `list`; the earlier one is kept.
+pub(crate) fn push_attachment(list: &mut Vec<Attachment>, attachment: Attachment) {
+    if !list.iter().any(|kept| kept.duplicates(&attachment)) {
+        list.push(attachment);
+    }
+}
+
+/// Merge `first` and `then` into one list with one attachment for each
+/// distinct name and bytes, in order, the first of each kept. Both the send
+/// path and the queue worker merge a mailable's `attachments()` with the
+/// builder's through this, so the two paths cannot disagree.
+pub(crate) fn merge_attachments(
+    first: Vec<Attachment>,
+    then: impl IntoIterator<Item = Attachment>,
+) -> Vec<Attachment> {
+    let mut merged = Vec::with_capacity(first.len());
+    for attachment in first.into_iter().chain(then) {
+        push_attachment(&mut merged, attachment);
+    }
+    merged
 }

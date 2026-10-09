@@ -9,6 +9,7 @@ mod env_lock;
 pub mod fake;
 pub mod file_transport;
 pub mod in_memory;
+pub mod laravel_infra_gaps;
 pub mod log;
 pub mod mailable_subject_tera;
 pub mod mailgun;

@@ -272,8 +272,8 @@ pub use ::opendal;
 pub use ::tokio;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
-    ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherConfig,
-    PusherScheme, pusher_channel_auth, pusher_user_auth,
+    ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherClient,
+    PusherConfig, PusherScheme, pusher_channel_auth, pusher_user_auth,
 };
 pub use bus::testing::{dispatched, dispatched_after_response, dispatched_sync};
 pub use bus::{AfterResponseIo, after_response_connection};
@@ -646,17 +646,22 @@ pub use eloquent::observers::{
 };
 // `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs - re-exported
 // at the crate root automatically. No `pub use` needed here.
-pub use notifications::channels::broadcast::BroadcastChannel;
+pub use notifications::channels::broadcast::{
+    BroadcastChannel, BroadcastMessage, BroadcastNotificationJob, NotificationBroadcast,
+    register_broadcast_renderer,
+};
 pub use notifications::channels::database::DatabaseChannel;
 pub use notifications::channels::mail::{
-    MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
+    AttachOptions, MailChannel, MailRendering, NotificationMailable, PathAttachment,
+    register_mail_renderer,
 };
 #[cfg(feature = "web-push")]
 pub use notifications::channels::webpush::WebPushChannel;
 pub use notifications::{
-    AnonymousNotifiable, Channel, DynNotification, Notifiable, Notification,
-    NotificationDispatcher, NotificationFactory, NotificationFailed, NotificationSending,
-    NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob, StoredNotification,
+    AnonymousNotifiable, BroadcastNotificationCreated, Channel, DynNotification, Notifiable,
+    Notification, NotificationDispatcher, NotificationFactory, NotificationFailed,
+    NotificationSending, NotificationSent, Notify, NotifyFakeGuard, SendNotificationJob,
+    StoredNotification,
 };
 
 pub use ws::{WebSocketHandler, WsConfig, WsReceiver, WsSender, WsSocket};

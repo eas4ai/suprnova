@@ -188,15 +188,33 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// with the sugar [`Queue::push_after_commit`](crate::queue::Queue::push_after_commit)
     /// for opting one dispatch in. Default: `false`.
     ///
-    /// `QUEUE_AFTER_COMMIT=true` turns this on for every job in the
-    /// process, as the `after_commit` option of a Laravel queue connection
-    /// does. A job cannot turn that off here, because `false` is also the
-    /// answer of a job that never chose. The per-push override can.
+    /// `false` here means "no choice": the connection's setting or
+    /// `QUEUE_AFTER_COMMIT` can still defer the job. To keep a job ahead of
+    /// the commit whatever they say, override [`Self::after_commit_choice`].
     fn after_commit() -> bool
     where
         Self: Sized,
     {
         false
+    }
+
+    /// This job's own answer to "wait for the commit?": `Some(true)`,
+    /// `Some(false)`, or `None` for no choice. Defaults to `Some(true)` when
+    /// [`Self::after_commit`] is `true` and `None` otherwise.
+    ///
+    /// A push waits for the surrounding transaction by the first of these
+    /// that decides: the push's own
+    /// [`EnvelopeOverrides::after_commit`](crate::queue::EnvelopeOverrides),
+    /// this choice, the connection's setting
+    /// ([`Queue::connection_after_commit`](crate::queue::Queue::connection_after_commit)),
+    /// then `QUEUE_AFTER_COMMIT`. Return `Some(false)` for a job that must
+    /// reach a worker before the commit even when its connection or the
+    /// process waits, as a Laravel job's `$afterCommit = false` does.
+    fn after_commit_choice() -> Option<bool>
+    where
+        Self: Sized,
+    {
+        Self::after_commit().then_some(true)
     }
 
     /// Per-instance unique key for dedupe. Return `Some(id)` to make this job

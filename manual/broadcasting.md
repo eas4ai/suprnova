@@ -859,6 +859,66 @@ pub async fn register() {
 status or cannot be reached. The error names the status and up to 200
 bytes of the answer, never the secret or the request signature.
 
+### Query the service
+
+The in-process hub knows only the members of this process. To ask the
+service itself, which sees every connection to it, use the hub's
+`PusherClient`, or build one with `PusherClient::new(config, registry)`.
+It is the client Laravel's `Broadcast::pusher($config)` and
+`PusherBroadcaster::getPusher` return:
+
+```rust
+use suprnova::{FrameworkError, PusherBroadcastHub};
+use suprnova::broadcasting::BroadcastEnvelope;
+
+async fn who_is_in_the_room(hub: &PusherBroadcastHub) -> Result<(), FrameworkError> {
+    let client = hub.client();
+
+    // GET /apps/{app_id}/channels/presence-room/users
+    let user_ids: Vec<String> = client.presence_users("room").await?;
+
+    // GET /apps/{app_id}/channels?filter_by_prefix=presence-&info=user_count
+    let occupied = client.channels(Some("presence-"), &["user_count"]).await?;
+
+    // GET /apps/{app_id}/channels/private-orders.42?info=subscription_count
+    let order = client.channel("orders.42", &["subscription_count"]).await?;
+
+    // One POST /apps/{app_id}/batch_events for both events.
+    client
+        .trigger_batch(&[
+            BroadcastEnvelope::new("orders.42", "OrderShipped", serde_json::json!({ "id": 42 })),
+            BroadcastEnvelope::new("news", "Posted", serde_json::json!({})),
+        ])
+        .await?;
+
+    // POST /apps/{app_id}/users/42/terminate_connections
+    client.terminate_user_connections("42").await?;
+
+    // Any other signed GET, relative to /apps/{app_id}.
+    let answer = client.get("/channels", &[("filter_by_prefix", "private-")]).await?;
+    println!("{user_ids:?} {occupied} {order} {answer}");
+    Ok(())
+}
+```
+
+The client sends channel names through the registry's wire mapping, so
+`presence_users("room")` asks about `presence-room` when the registry
+holds `room` as a presence channel, and refuses a channel the registry
+does not hold as one. `channels` sends its prefix as given, since a
+prefix is a wire prefix and not a channel name. `channels`, `channel`,
+and `get` return the service's JSON answer.
+
+Every request carries Pusher's signature, with `body_md5` only for a
+request that has a body. An error names the status and up to 200 bytes
+of the answer, never the secret or a signature. `trigger_batch`
+publishes to the service only, not to the in-process hub. Pusher
+Channels takes at most 10 events per batch and answers a larger batch
+with an error, which `trigger_batch` returns.
+
+The hub's own `list_members` keeps answering from the in-process hub.
+The endpoints come from Pusher's HTTP API documentation, which every
+Pusher-protocol server follows.
+
 ### Mount the authorization routes
 
 Echo asks your server to sign every private, presence, and encrypted
@@ -1026,6 +1086,15 @@ through `Channel::visibility`, and the default is private. Every event on
 a channel uses the same Pusher name, and a restricted channel cannot
 leak through a public one.
 
+## Broadcast notifications
+
+A notification that lists `"broadcast"` in its channels reaches the hub
+through the `BroadcastChannel`. The notification's `to_broadcast()`
+message can send the publish through the queue with `on_queue` or
+`on_connection`, and every delivery dispatches a
+`BroadcastNotificationCreated` event. For the details, see
+[Notifications](notifications.md#broadcast).
+
 ## Testing broadcasts
 
 `RecordingBroadcastHub` is the Suprnova analogue of Laravel's
@@ -1079,6 +1148,8 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `Broadcast::fake()` | `RecordingBroadcastHub` bound as `dyn BroadcastHub` |
 | `assertBroadcasted` | `RecordingBroadcastHub::assert_broadcast(channel, event)` |
 | Pusher / Reverb driver | `PusherBroadcastHub` (Pusher Channels, Soketi, Reverb); see [Pusher, Soketi and Reverb](#pusher-soketi-and-reverb) |
+| `Broadcast::pusher($config)`, `PusherBroadcaster::getPusher()` | `PusherClient::new(config, registry)`, `PusherBroadcastHub::client()`; see [Query the service](#query-the-service) |
+| `BroadcastNotificationCreated` | `suprnova::BroadcastNotificationCreated`; see [Broadcast notifications](#broadcast-notifications) |
 | Ably driver | none; `InMemoryBroadcastHub` (single-process) or `SeaStreamerBroadcastHub` (cross-process over Redis Streams) |
 | `/broadcasting/auth` | `pusher_channel_auth` and `pusher_user_auth`, mounted by hand |
 | Echo client library | Laravel Echo with the `pusher` broadcaster against `PusherBroadcastHub`; for the in-process hub, wire the JSON envelope protocol from the browser by hand |
@@ -1099,7 +1170,8 @@ the event itself - see [Events](events.md#testing--eventfacadefake).
 | `suprnova::broadcasting::BroadcastEnvelope` | One published event: `channel`, `event`, `data`, `except`. `new(ch, ev, data)` builder; `.with_except(socket_id)` for per-dispatch exclusion. |
 | `suprnova::broadcasting::ClientFrame` / `ServerFrame` | The JSON-envelope wire types. `ServerFrame::Lagged { channel, skipped }` surfaces per-channel ring-buffer overflows. |
 | `suprnova::broadcasting::BroadcastingWsHandler` | The framework's reusable `WebSocketHandler`. Constructor: `BroadcastingWsHandler::new(hub, registry)`. Pass to `ws!()`. |
-| `suprnova::PusherBroadcastHub` | Pusher-protocol hub. `new(config, registry)`; `auth()` returns the `PusherAuth` to bind. Also delivers to in-process subscribers. |
+| `suprnova::PusherBroadcastHub` | Pusher-protocol hub. `new(config, registry)`; `auth()` returns the `PusherAuth` to bind; `client()` returns its `PusherClient`. Also delivers to in-process subscribers. |
+| `suprnova::PusherClient` | Pusher HTTP API client. `new(config, registry)`, `channels(prefix, info)`, `channel(name, info)`, `presence_users(name)`, `trigger_batch(envelopes)`, `terminate_user_connections(user_id)`, `get(path, params)`. |
 | `suprnova::PusherConfig` / `PusherScheme` | Pusher connection settings. `from_env()`, `from_env_prefix(prefix)`, `new(app_id, key, secret)` plus builder methods. `Debug` redacts the secret and master key. |
 | `suprnova::PusherAuth` | The signing state the authorization endpoints resolve from the container. |
 | `suprnova::pusher_channel_auth` / `pusher_user_auth` | Echo's channel authorization and user authentication endpoints. |
