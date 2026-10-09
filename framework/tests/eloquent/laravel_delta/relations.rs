@@ -126,6 +126,147 @@ async fn seed_through(owner: &DeltaOwner, count: i64) -> Vec<i64> {
     ids
 }
 
+async fn scoped_relation_pools() -> (TestDatabase, DeltaOwner, String) {
+    use sea_orm::ConnectionTrait;
+    use suprnova::{ConnectionRegistry, DbConnection};
+
+    let (primary, owner, _) = fixture().await;
+    primary
+        .execute_unprepared(
+            "INSERT INTO delta_records (id, owner_code, name, score) VALUES (1, 'one', 'counter', 70)",
+        )
+        .await
+        .expect("primary counter");
+    let reporting = DbConnection::from_raw(
+        sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("reporting"),
+    );
+    for sql in [
+        "CREATE TABLE delta_owners (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE)",
+        "CREATE TABLE delta_records (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_code TEXT NOT NULL DEFAULT '', member_code TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, score INTEGER NOT NULL DEFAULT 0 CHECK(score >= 0), secret TEXT NOT NULL DEFAULT '', deleted_at TEXT, UNIQUE(owner_code, name))",
+        "INSERT INTO delta_owners (id, code) VALUES (1, 'one')",
+        "INSERT INTO delta_records (id, owner_code, name, score) VALUES (1, 'one', 'counter', 12)",
+    ] {
+        reporting
+            .inner()
+            .execute_unprepared(sql)
+            .await
+            .expect("reporting fixture");
+    }
+    let name = format!("relation_reporting_{}", uuid::Uuid::new_v4());
+    ConnectionRegistry::register_existing(&name, reporting)
+        .await
+        .expect("register reporting");
+    (primary, owner, name)
+}
+
+#[tokio::test]
+async fn scoped_relation_increment_reloads_from_task_default() {
+    let (_primary, owner, reporting) = scoped_relation_pools().await;
+    DB::with_default_connection(&reporting, async {
+        let scoped_owner = DeltaOwner::find(owner.id).await?.expect("reporting owner");
+        let row = scoped_owner
+            .records()
+            .increment_or_create(attrs! { name: "counter" }, "score", 99, 5, attrs! {})
+            .await?;
+        assert_eq!(row.id, 1);
+        assert_eq!(row.score, 17);
+        let row = scoped_owner
+            .record()
+            .increment_or_create(attrs! { name: "counter" }, "score", 99, 3, attrs! {})
+            .await?;
+        assert_eq!(row.score, 20);
+        assert_eq!(
+            DeltaRecord::find(1).await?.expect("stored counter").score,
+            20
+        );
+
+        // This counter has no primary counterpart, so its reload must also stay scoped.
+        let created = scoped_owner
+            .records()
+            .increment_or_create(attrs! { name: "reporting-only" }, "score", 4, 2, attrs! {})
+            .await?;
+        assert_eq!(created.score, 4);
+        let incremented = scoped_owner
+            .records()
+            .increment_or_create(attrs! { name: "reporting-only" }, "score", 99, 2, attrs! {})
+            .await?;
+        assert_eq!(incremented.id, created.id);
+        assert_eq!(incremented.score, 6);
+        Ok(())
+    })
+    .await
+    .expect("scoped increment");
+    assert_eq!(
+        DeltaRecord::find(1)
+            .await
+            .expect("primary")
+            .expect("counter")
+            .score,
+        70
+    );
+    assert_eq!(
+        DeltaRecord::query().count().await.expect("primary count"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn scoped_relation_unique_recovery_reads_from_task_default() {
+    use sea_orm::ConnectionTrait;
+
+    let (primary, owner, reporting) = scoped_relation_pools().await;
+    primary
+        .execute_unprepared(
+            "INSERT INTO delta_records (id, owner_code, name, score) VALUES (2, 'one', 'recovery', 70)",
+        )
+        .await
+        .expect("primary recovery row");
+    DB::with_default_connection(&reporting, async {
+        let scoped_owner = DeltaOwner::find(owner.id).await?.expect("reporting owner");
+        assert!(scoped_owner.records().filter("name", "recovery").first().await?.is_none());
+        // Insert the competing row after the initial lookup. FAIL preserves that
+        // row when the second trigger insert raises a real unique violation.
+        DB::connection()?
+            .inner()
+            .execute_unprepared(
+                "CREATE TRIGGER race_delta_record BEFORE INSERT ON delta_records
+                 WHEN NEW.name = 'recovery' AND NOT EXISTS (
+                     SELECT 1 FROM delta_records WHERE owner_code = NEW.owner_code AND name = NEW.name
+                 ) BEGIN
+                     INSERT INTO delta_records (id, owner_code, name, score) VALUES (2, NEW.owner_code, NEW.name, 20);
+                     INSERT OR FAIL INTO delta_records (id, owner_code, name, score) VALUES (3, NEW.owner_code, NEW.name, 99);
+                 END",
+            )
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        let row = scoped_owner
+            .records()
+            .first_or_create(attrs! { name: "recovery" }, attrs! { score: 99 })
+            .await?;
+        assert_eq!(row.id, 2);
+        assert_eq!(row.owner_code, "one");
+        assert_eq!(row.score, 20);
+        assert_eq!(scoped_owner.records().filter("name", "recovery").count().await?, 1);
+        Ok(())
+    })
+    .await
+    .expect("scoped unique recovery");
+    assert_eq!(
+        DeltaRecord::find(2)
+            .await
+            .expect("primary")
+            .expect("recovery row")
+            .score,
+        70
+    );
+    assert_eq!(
+        DeltaRecord::query().count().await.expect("primary count"),
+        2
+    );
+}
+
 #[tokio::test]
 async fn has_many_first_or_create_sets_guarded_custom_key_and_keeps_other_attributes_guarded() {
     let (_db, owner, other) = fixture().await;
