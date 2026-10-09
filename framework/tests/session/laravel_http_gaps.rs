@@ -284,7 +284,7 @@ async fn a_json_body_token_decides_before_the_headers_unless_it_is_empty() {
         .await;
     assert_refused(&refused, "a set JSON _token decides before a valid header");
 
-    // A `_token` that is not a string holds no token: the header decides.
+    // A PHP-falsy `_token` such as `null` holds no token: the header decides.
     let passed = client
         .post("/gaps/submit")
         .json(&json!({ "_token": null, "count": 3 }))
@@ -292,6 +292,57 @@ async fn a_json_body_token_decides_before_the_headers_unless_it_is_empty() {
         .send()
         .await;
     assert_eq!(passed.status(), 200);
+}
+
+/// PHP-falsy values other than `""` and `"0"` also fall through to the
+/// headers, as Laravel's `input('_token') ?:` reads them.
+#[tokio::test]
+async fn a_falsy_json_body_token_falls_through_to_the_headers() {
+    let client = client(routes_with_echo(), Arc::default());
+    let token = bootstrap(&client).await;
+
+    for falsy in [json!(0), json!(0.0), json!(false), json!([]), json!({})] {
+        let passed = client
+            .post("/gaps/submit")
+            .json(&json!({ "_token": falsy }))
+            .header("X-CSRF-TOKEN", token.clone())
+            .send()
+            .await;
+        assert_eq!(
+            passed.status(),
+            200,
+            "a falsy _token of {falsy} is no value, so the valid header decides"
+        );
+    }
+}
+
+/// A JSON `_token` that is present but not a string can never match the
+/// session token, so the request is refused with 419 and the headers are
+/// not consulted. Laravel keeps such a value rather than falling through.
+#[tokio::test]
+async fn a_non_string_json_body_token_refuses_before_the_headers() {
+    let client = client(routes_with_echo(), Arc::default());
+    let token = bootstrap(&client).await;
+
+    for value in [
+        json!(123),
+        json!(-1),
+        json!(0.5),
+        json!(true),
+        json!([1]),
+        json!({ "a": 1 }),
+    ] {
+        let refused = client
+            .post("/gaps/submit")
+            .json(&json!({ "_token": value }))
+            .header("X-CSRF-TOKEN", token.clone())
+            .send()
+            .await;
+        assert_refused(
+            &refused,
+            &format!("a JSON _token of {value} is kept, so the valid header is not read"),
+        );
+    }
 }
 
 /// A body sent as JSON that does not parse holds no token, whatever text
