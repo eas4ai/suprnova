@@ -1,0 +1,1174 @@
+mod commands;
+// The registry is the library's module, reached through the library crate
+// rather than compiled a second time into the binary: much of it (the test
+// fetcher, the authoring commands' primitives) is public API the binary's
+// commands never call, and a private copy would report it all as dead.
+use suprnova_cli::registry;
+// The same file helpers the registry writes with, from the library crate.
+use suprnova_cli::secure_fs;
+mod templates;
+pub mod ui;
+
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use commands::console_forward::ConsoleCommand;
+use commands::queue_failed::FailedJobs;
+use commands::ssr::SsrCommand;
+
+#[derive(Parser)]
+#[command(name = "suprnova")]
+#[command(about = "A CLI for scaffolding Suprnova web applications", long_about = None)]
+#[command(version)]
+#[command(disable_help_subcommand = true)]
+#[command(disable_version_flag = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Print version
+    // Hand-declared rather than clap's generated flag, which offers `-V`
+    // only; `-v` is the spelling people reach for.
+    #[arg(
+        short = 'v',
+        short_alias = 'V',
+        long = "version",
+        action = clap::ArgAction::Version
+    )]
+    version: (),
+}
+
+/// The verbs of `live:registry`, each run from a library's root but `new`.
+#[derive(Subcommand)]
+enum LiveRegistryCommand {
+    /// Scaffold a library: library.json, an example component, a preview
+    /// application, and a signing key kept outside the project
+    New {
+        /// The library's namespace (e.g., acme): lowercase letters, digits
+        /// and hyphens; the library is created in ./<namespace>
+        namespace: String,
+        /// The address the library will be published at (e.g.,
+        /// github.com/acme/acme-ui), written as library.json's source and
+        /// covered by every signature, so the example is signed at once
+        #[arg(long, value_name = "ADDRESS")]
+        source: String,
+    },
+    /// Check every component as live:add would, and list its capabilities
+    Check,
+    /// Check every component, then sign each one, all or nothing
+    Sign,
+    /// Hand the library to a new signing key and re-sign every component
+    ///
+    /// Reads the current private key as `sign` does (SUPRNOVA_LIBRARY_KEY or
+    /// the configuration directory), makes a new key pair, writes the new
+    /// private key to <config>/suprnova/library-keys/<fingerprint hex>.key,
+    /// names it as publicKey in library.json, and re-signs every component,
+    /// all or nothing. It advances library.json's version one patch: every
+    /// signature changes, and live:add refuses a released version whose
+    /// signed content changed, so a rotation ships as a new release. A handover is one hop,
+    /// so previousKeys is rewritten as one statement per former key, each
+    /// naming the new key: the current key signs one, and so does every
+    /// former key whose private key file is in the configuration directory
+    /// under its fingerprint. A former key whose file is missing is refused
+    /// by fingerprint unless --drop-key names it; an application still pinned
+    /// to a dropped key must pin the new key by hand. Refused when
+    /// library.json's source is empty, or when any component fails a check.
+    RotateKey {
+        /// Drop the statement of this former key, whose private key file is
+        /// lost (repeatable, one flag per key)
+        #[arg(long = "drop-key", value_name = "FINGERPRINT")]
+        drop_key: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create a new Suprnova project
+    New {
+        /// The name of the project to create
+        name: Option<String>,
+
+        /// Skip all prompts and use defaults
+        #[arg(long)]
+        no_interaction: bool,
+
+        /// Skip git initialization
+        #[arg(long)]
+        no_git: bool,
+
+        /// Frontend framework (svelte, react, vue). Prompts if omitted.
+        /// Conflicts with --api.
+        #[arg(long, conflicts_with = "api")]
+        frontend: Option<String>,
+
+        /// Scaffold a JSON:API-only project (no Inertia, no frontend).
+        #[arg(long)]
+        api: bool,
+
+        /// Emit a portless.json so `suprnova dev:tls` can serve the app
+        /// at https://<name>.localhost. Opt-in; nothing else changes.
+        #[arg(long)]
+        with_portless: bool,
+    },
+    /// Start the development servers (backend + frontend)
+    Serve {
+        /// Backend port. Overrides SERVER_PORT/.env and pins the port
+        /// exactly (no free-port scan). Defaults to SERVER_PORT, else
+        /// 8765, scanning upward if that port is busy.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+
+        /// Frontend (Vite) port. Overrides VITE_PORT/.env and pins the
+        /// port exactly. Defaults to VITE_PORT, else 5765, scanning
+        /// upward if that port is busy.
+        #[arg(long)]
+        frontend_port: Option<u16>,
+
+        /// Only start backend server
+        #[arg(long, conflicts_with = "frontend_only")]
+        backend_only: bool,
+
+        /// Only start frontend server
+        #[arg(long)]
+        frontend_only: bool,
+
+        /// Skip TypeScript type generation
+        #[arg(long)]
+        skip_types: bool,
+
+        /// Type i64, u64, i128, u128, isize and usize as `number | bigint`
+        /// on every type regeneration, as `generate-types --big-integers`
+        /// does, even when no `preserve_big_integers(..)` call under src/
+        /// turns big-integer preservation on
+        #[arg(long)]
+        big_integers: bool,
+
+        /// Don't respawn a crashed dev process - tear the whole session
+        /// down instead (the pre-restart behaviour).
+        #[arg(long)]
+        no_restart: bool,
+
+        /// Give up retrying a crashed dev process after this many
+        /// consecutive failed respawn attempts, matching Laravel's
+        /// `--restart-tries=5`. A process that stays up 30s resets its
+        /// count, same as the backoff delay itself. Ignored with
+        /// --no-restart, which already ends the session on the first
+        /// crash.
+        #[arg(long, default_value_t = 5)]
+        restart_tries: u32,
+
+        /// Prefix each forwarded output line with an HH:MM:SS clock time.
+        /// Has no additional effect combined with --json (every JSON
+        /// event already carries its own timestamp).
+        #[arg(long)]
+        timestamps: bool,
+
+        /// When the pending migrations run: once when serve starts
+        /// (start), on every restart of the backend (always), or not at
+        /// all (never)
+        #[arg(long, value_enum, default_value_t, conflicts_with = "no_migrate")]
+        migrate: commands::serve::MigrateWhen,
+
+        /// Run no migrations. The same as --migrate never
+        #[arg(long)]
+        no_migrate: bool,
+
+        /// Emit one JSON object per line on stdout (NDJSON) instead of
+        /// colored [name]-prefixed text - one event per process start,
+        /// output line, exit, restart, and session shutdown. Replaces
+        /// the human-readable stdout output entirely; see
+        /// manual/cli-serve.md#json-output for the event schema.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register an HTTPS dev URL (https://<name>.localhost) and trust
+    /// portless's CA in your browsers' certificate stores
+    #[command(name = "dev:tls")]
+    DevTls {
+        /// App name for the URL. Defaults to the project's Cargo.toml
+        /// package name.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Backend port to route to. Defaults to SERVER_PORT, else 8765.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+
+        /// Only trust the CA; skip registering the portless route.
+        #[arg(long)]
+        no_alias: bool,
+
+        /// Skip the interactive confirmation before modifying your browsers'
+        /// certificate stores. Does not apply when the CA's fingerprint has
+        /// changed since the last run - that always needs a human.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Run the web server (app runtime)
+    #[command(name = "web:run")]
+    WebRun,
+    /// Generate TypeScript types from Rust InertiaProps structs
+    GenerateTypes {
+        /// Output file path (default: frontend/src/types/inertia-props.ts)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+
+        /// Watch for changes and regenerate
+        #[arg(long, short = 'w')]
+        watch: bool,
+
+        /// Also generate route types (frontend/src/types/routes.ts)
+        #[arg(long)]
+        routes: bool,
+
+        /// Type i64, u64, i128, u128, isize and usize as `number | bigint`
+        /// even when no `preserve_big_integers(..)` call under src/ turns
+        /// big-integer preservation on
+        #[arg(long)]
+        big_integers: bool,
+    },
+    /// Generate a new middleware
+    #[command(name = "make:middleware")]
+    MakeMiddleware {
+        /// Name of the middleware (e.g., Auth, RateLimit, Admin/EnsureRole)
+        name: String,
+        /// Also write a test under tests/ that runs the middleware
+        #[arg(long)]
+        test: bool,
+    },
+    /// Generate a new controller
+    #[command(name = "make:controller")]
+    MakeController {
+        /// Name of the controller (e.g., users, user_profile)
+        name: String,
+    },
+    /// Generate a new action
+    #[command(name = "make:action")]
+    MakeAction {
+        /// Name of the action (e.g., AddTodo, CreateUser)
+        name: String,
+    },
+    /// Scaffold a Live component with its view and registration
+    #[command(name = "live:make")]
+    LiveMake {
+        /// Name of the component (e.g., Counter, TodoList, todo-list)
+        name: String,
+        /// Report what would be written without touching the project
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Install a Live component from the shipped library or a third-party one
+    #[command(name = "live:add")]
+    LiveAdd {
+        /// The component: a shipped name (e.g., field),
+        /// [<host>/]<owner>/<library>/<component>[@<version>], an https://
+        /// URL of a component directory, or a ./path to one on disk
+        name: Option<String>,
+        /// Install the component whose manifest.json is at this path in a
+        /// library tree on disk
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Replace a file the application has edited, and accept a
+        /// downgrade or a release whose content changed
+        #[arg(long)]
+        force: bool,
+        /// Fetch, verify, scan and report the plan without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm a third-party plan without a terminal; approves no
+        /// capability and pins no key
+        #[arg(long)]
+        yes: bool,
+        /// Approve a capability the component uses (repeatable): database,
+        /// network, files, mail, queue, cache, session, environment, process
+        #[arg(long = "allow", value_name = "CAPABILITY")]
+        allow: Vec<String>,
+    },
+    /// Wait until no live:add holds the project lock, restoring an
+    /// interrupted install first; `serve` runs it before each build
+    #[command(name = "live:wait")]
+    LiveWait {
+        /// A cargo command to run once no install holds the lock, holding a
+        /// shared lock until its build finishes (e.g. -- run --bin app)
+        #[arg(last = true)]
+        cargo: Vec<String>,
+    },
+    /// Author a Live component library: scaffold it, check it, sign it
+    #[command(name = "live:registry")]
+    LiveRegistry {
+        #[command(subcommand)]
+        command: LiveRegistryCommand,
+    },
+    /// Check every registered Live view with the integrated checker
+    #[command(name = "live:check")]
+    LiveCheck {
+        /// Template root to load (repeatable); defaults to askama.toml's
+        /// `dirs` or `templates/`
+        #[arg(long = "templates")]
+        templates: Vec<std::path::PathBuf>,
+        /// Succeed when the only diagnostics are unproved dynamic structures
+        #[arg(long)]
+        allow_unproved: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
+    /// Report safe Live runtime, registry, provider, and artifact state
+    #[command(name = "live:inspect")]
+    LiveInspect {
+        /// Print the report as one JSON document instead of the formatted view
+        #[arg(long)]
+        json: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
+    /// Publish the reviewed Live runtime artifacts into a directory
+    #[command(name = "live:assets")]
+    LiveAssets {
+        /// Directory inside the project that receives `<identity>/<file>`
+        /// (e.g., public/__live)
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Replace an existing publication whose bytes differ
+        #[arg(long)]
+        replace: bool,
+        /// Seconds to wait for the application helper, build time included
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+    },
+    /// Generate a new console command
+    #[command(name = "make:command")]
+    MakeCommand {
+        /// Name of the command (e.g., `clean-cache`, `mail:send`, `CleanCache`)
+        name: String,
+    },
+    /// Generate a new domain error
+    #[command(name = "make:error")]
+    MakeError {
+        /// Name of the error (e.g., UserNotFound, InvalidInput)
+        name: String,
+    },
+    /// Generate a new Inertia page or Data struct
+    #[command(name = "make:inertia")]
+    MakeInertia {
+        /// Name of the page or struct (e.g., About, Admin/Users, UserProps)
+        name: String,
+        /// Scaffold a #[derive(Data, Validate)] struct in app/src/props/ instead of a frontend page
+        #[arg(long)]
+        data: bool,
+        /// Overwrite the page (or the Data struct) and its test if they exist
+        #[arg(long)]
+        force: bool,
+        /// Also write a test under tests/ that renders the page
+        #[arg(long, conflicts_with = "data")]
+        test: bool,
+    },
+    /// Generate a checked view: a template and its #[view] struct
+    #[command(name = "make:view")]
+    MakeView {
+        /// Name of the view (e.g., welcome, admin.dashboard, admin/dashboard)
+        name: String,
+        /// Overwrite the template, the view struct and its test if they exist
+        #[arg(long)]
+        force: bool,
+        /// Also write a test under tests/ that renders the view
+        #[arg(long)]
+        test: bool,
+    },
+    /// Generate a new database migration
+    #[command(name = "make:migration")]
+    MakeMigration {
+        /// Name of the migration (e.g., create_users_table, add_email_to_users)
+        name: String,
+    },
+    /// Generate a new scheduled task
+    #[command(name = "make:task")]
+    MakeTask {
+        /// Name of the task (e.g., CleanupLogs, SendReminders)
+        name: String,
+    },
+    /// Run all pending database migrations, after loading the schema dump
+    /// into a database that has run none
+    Migrate {
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<String>,
+    },
+    /// Rollback the last database migration(s)
+    #[command(name = "migrate:rollback")]
+    MigrateRollback {
+        /// Number of migrations to rollback
+        #[arg(long, default_value = "1")]
+        step: u32,
+    },
+    /// Show the status of all migrations
+    #[command(name = "migrate:status")]
+    MigrateStatus,
+    /// Drop all tables and re-run all migrations
+    #[command(name = "migrate:fresh")]
+    MigrateFresh {
+        /// Required when APP_ENV is production. Even then the command still
+        /// asks you to type the environment name at an interactive prompt -
+        /// the flag alone will not drop a production database.
+        #[arg(long)]
+        force: bool,
+        /// The schema dump to load instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        schema_path: Option<String>,
+    },
+    /// Write the database's schema and migration ledger to a dump file
+    #[command(name = "schema:dump")]
+    SchemaDump {
+        /// Where to write the dump instead of database/schema/<engine>-schema.sql
+        #[arg(long)]
+        path: Option<String>,
+        /// Replace the migrations the dump records with PrunedMigration names
+        #[arg(long)]
+        prune: bool,
+        /// Dump a named connection from DATABASE_<NAME>_URL instead of DATABASE_URL
+        #[arg(long)]
+        database: Option<String>,
+        /// Leave migration ledger rows out while keeping its table
+        #[arg(long)]
+        without_migration_data: bool,
+    },
+    /// Sync database schema to entity files (runs migrations + generates entities)
+    #[command(name = "db:sync")]
+    DbSync {
+        /// Skip running migrations before sync
+        #[arg(long)]
+        skip_migrations: bool,
+        /// Regenerate model files (overwrites existing custom models with new Eloquent-like API)
+        #[arg(long)]
+        regenerate_models: bool,
+    },
+    /// Generate a production-ready Dockerfile
+    #[command(name = "docker:init")]
+    DockerInit,
+    /// Generate docker-compose.yml for local development
+    #[command(name = "docker:compose")]
+    DockerCompose {
+        /// Include Mailpit email testing service
+        #[arg(long)]
+        with_mailpit: bool,
+        /// Include MinIO S3-compatible storage service
+        #[arg(long)]
+        with_minio: bool,
+    },
+    /// Run the database seeders (all of them, or the one named)
+    #[command(name = "db:seed")]
+    DbSeed {
+        /// Name of the one seeder to run
+        seeder: Option<String>,
+        /// Name of the one seeder to run, as an option: --class=UserSeeder
+        #[arg(long, conflicts_with = "seeder")]
+        class: Option<String>,
+    },
+    /// Delete the rows that prunable models no longer need
+    #[command(name = "model:prune")]
+    ModelPrune {
+        /// Prune one model only, named by its type name (User)
+        #[arg(long)]
+        model: Option<String>,
+        /// Report how many rows would be deleted, and delete none
+        #[arg(long)]
+        pretend: bool,
+    },
+    /// Run all due scheduled tasks once (typically called by cron every minute)
+    #[command(name = "schedule:run")]
+    ScheduleRun,
+    /// Start the scheduler daemon (runs continuously, checks every minute)
+    #[command(name = "schedule:work")]
+    ScheduleWork,
+    /// List all registered scheduled tasks
+    #[command(name = "schedule:list")]
+    ScheduleList {
+        /// IANA timezone the listing should be read in (default: UTC)
+        #[arg(long)]
+        timezone: Option<String>,
+    },
+    /// List the failed queue jobs
+    #[command(name = "queue:failed")]
+    QueueFailed,
+    /// Push failed queue jobs back onto the queue
+    #[command(name = "queue:retry")]
+    QueueRetry {
+        /// Ids of the failed jobs to retry, or `all` for every one
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Delete one failed queue job
+    #[command(name = "queue:forget")]
+    QueueForget {
+        /// Id of the failed job to delete
+        id: String,
+    },
+    /// Delete the failed queue jobs
+    #[command(name = "queue:flush")]
+    QueueFlush {
+        /// Only delete jobs that failed more than this many hours ago
+        #[arg(long)]
+        hours: Option<u64>,
+    },
+    /// Delete the failed queue jobs older than --hours
+    #[command(name = "queue:prune-failed")]
+    QueuePruneFailed {
+        /// Delete jobs that failed more than this many hours ago
+        #[arg(long, default_value = "24")]
+        hours: u64,
+    },
+    /// Start the workflow worker daemon
+    #[command(name = "workflow:work")]
+    WorkflowWork,
+    /// Install workflow migrations
+    #[command(name = "workflow:install")]
+    WorkflowInstall,
+    /// Run the Inertia SSR worker in the foreground, through the app binary
+    ///
+    /// Runs `cargo run --bin <package> -- ssr:start` from the project
+    /// directory, so the Inertia configuration the application installed
+    /// decides the bundle, the runtime and the checks. The application runs
+    /// in its own process group; Ctrl-C, Ctrl-\, Ctrl-Z, fg, SIGTERM and
+    /// SIGHUP reach it through the CLI, which exits with its status.
+    #[command(name = "ssr:start")]
+    SsrStart {
+        /// Run the bundle under this runtime (node, bun, deno, or a path)
+        /// instead of the configured one.
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    /// Stop the Inertia SSR worker, through the app binary
+    ///
+    /// Runs the application binary's `ssr:stop`, which sends GET /shutdown
+    /// to the worker at the configured URL.
+    #[command(name = "ssr:stop")]
+    SsrStop {
+        /// Succeed when no worker is running.
+        #[arg(long)]
+        graceful: bool,
+    },
+    /// Check the Inertia SSR worker's health, through the app binary
+    ///
+    /// Runs the application binary's `ssr:check`, which asks the installed
+    /// SSR gateway's health check.
+    #[command(name = "ssr:check")]
+    SsrCheck,
+    /// Generate a new APP_KEY (32-byte AES-256, base64 URL-safe, no padding)
+    #[command(name = "key:generate")]
+    KeyGenerate {
+        /// Print only the key (no surrounding hint text). Suitable for
+        /// `APP_KEY=$(suprnova key:generate --show)`.
+        #[arg(long)]
+        show: bool,
+    },
+}
+
+/// The parser `main` runs, with the curated top-level help screen.
+///
+/// Only the top-level command's help is replaced. Every subcommand keeps
+/// clap's own generated help, and clap answers `-h` / `--help` while it is
+/// still parsing - before it validates required arguments, and long before
+/// `main` reaches the dispatch below. A help request can therefore never
+/// run a command.
+fn cli_command() -> clap::Command {
+    Cli::command().override_help(ui::help_text())
+}
+
+fn main() {
+    let mut matches = cli_command().get_matches();
+    let cli = match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(err) => err.format(&mut cli_command()).exit(),
+    };
+
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            ui::print_help();
+            return;
+        }
+    };
+
+    match command {
+        Commands::New {
+            name,
+            no_interaction,
+            no_git,
+            frontend,
+            api,
+            with_portless,
+        } => {
+            commands::new::run(name, no_interaction, no_git, frontend, api, with_portless);
+        }
+        Commands::Serve {
+            port,
+            frontend_port,
+            backend_only,
+            frontend_only,
+            skip_types,
+            big_integers,
+            no_restart,
+            restart_tries,
+            timestamps,
+            json,
+            migrate,
+            no_migrate,
+        } => {
+            let migrate = if no_migrate {
+                commands::serve::MigrateWhen::Never
+            } else {
+                migrate
+            };
+            commands::serve::run(
+                port,
+                frontend_port,
+                backend_only,
+                frontend_only,
+                skip_types,
+                commands::generate_types::GenerateOptions { big_integers },
+                no_restart,
+                restart_tries,
+                timestamps,
+                json,
+                migrate,
+            );
+        }
+        Commands::DevTls {
+            name,
+            port,
+            no_alias,
+            yes,
+        } => {
+            commands::dev_tls::run(name, port, no_alias, yes);
+        }
+        Commands::WebRun => {
+            commands::web_run::run();
+        }
+        Commands::GenerateTypes {
+            output,
+            watch,
+            routes,
+            big_integers,
+        } => {
+            commands::generate_types::run(
+                output,
+                watch,
+                routes,
+                commands::generate_types::GenerateOptions { big_integers },
+            );
+        }
+        Commands::MakeMiddleware { name, test } => {
+            commands::make_middleware::run(name, test);
+        }
+        Commands::MakeController { name } => {
+            commands::make_controller::run(name);
+        }
+        Commands::MakeAction { name } => {
+            commands::make_action::run(name);
+        }
+        Commands::LiveMake { name, dry_run } => {
+            commands::live_make::run(name, dry_run);
+        }
+        Commands::LiveAdd {
+            name,
+            manifest,
+            force,
+            dry_run,
+            yes,
+            allow,
+        } => {
+            commands::live_add::run(commands::live_add::Request {
+                name,
+                manifest,
+                force,
+                dry_run,
+                yes,
+                allow,
+            });
+        }
+        Commands::LiveWait { cargo } => {
+            commands::serve::wait_for_installs(cargo);
+        }
+        Commands::LiveRegistry { command } => {
+            use suprnova_cli::registry::registry_commands;
+            let outcome = match command {
+                LiveRegistryCommand::New { namespace, source } => {
+                    let directory = std::path::PathBuf::from(&namespace);
+                    registry_commands::new(&namespace, &directory, &source)
+                }
+                LiveRegistryCommand::Check => registry_commands::check(std::path::Path::new(".")),
+                LiveRegistryCommand::Sign => registry_commands::sign(std::path::Path::new(".")),
+                LiveRegistryCommand::RotateKey { drop_key } => {
+                    registry_commands::rotate_key(std::path::Path::new("."), &drop_key)
+                }
+            };
+            if let Err(error) = outcome {
+                ui::error(&error.to_string());
+                std::process::exit(1);
+            }
+        }
+        Commands::LiveCheck {
+            templates,
+            allow_unproved,
+            timeout_secs,
+        } => {
+            commands::live_check::run(templates, allow_unproved, timeout_secs);
+        }
+        Commands::LiveInspect { json, timeout_secs } => {
+            commands::live_inspect::run(json, timeout_secs);
+        }
+        Commands::LiveAssets {
+            out,
+            replace,
+            timeout_secs,
+        } => {
+            commands::live_assets::run(out, replace, timeout_secs);
+        }
+        Commands::MakeCommand { name } => {
+            commands::make_command::run(name);
+        }
+        Commands::MakeError { name } => {
+            commands::make_error::run(name);
+        }
+        Commands::MakeInertia {
+            name,
+            data,
+            force,
+            test,
+        } => {
+            commands::make_inertia::run(name, data, force, test);
+        }
+        Commands::MakeView { name, force, test } => {
+            commands::make_view::run(name, force, test);
+        }
+        Commands::MakeMigration { name } => {
+            commands::make_migration::run(name);
+        }
+        Commands::MakeTask { name } => {
+            commands::make_task::run(name);
+        }
+        Commands::Migrate { schema_path } => {
+            commands::migrate::run(schema_path);
+        }
+        Commands::MigrateRollback { step } => {
+            commands::migrate_rollback::run(step);
+        }
+        Commands::MigrateStatus => {
+            commands::migrate_status::run();
+        }
+        Commands::MigrateFresh { force, schema_path } => {
+            commands::migrate_fresh::run(force, schema_path);
+        }
+        Commands::SchemaDump {
+            path,
+            prune,
+            database,
+            without_migration_data,
+        } => {
+            commands::schema_dump::run(path, prune, database, without_migration_data);
+        }
+        Commands::DbSync {
+            skip_migrations,
+            regenerate_models,
+        } => {
+            commands::db_sync::run(skip_migrations, regenerate_models);
+        }
+        Commands::DockerInit => {
+            commands::docker_init::run();
+        }
+        Commands::DockerCompose {
+            with_mailpit,
+            with_minio,
+        } => {
+            commands::docker_compose::run(with_mailpit, with_minio);
+        }
+        Commands::DbSeed { seeder, class } => {
+            commands::console_forward::run(ConsoleCommand::Seed {
+                class: class.or(seeder),
+            });
+        }
+        Commands::ModelPrune { model, pretend } => {
+            commands::console_forward::run(ConsoleCommand::Prune { model, pretend });
+        }
+        Commands::ScheduleRun => {
+            commands::schedule_run::run();
+        }
+        Commands::ScheduleWork => {
+            commands::schedule_work::run();
+        }
+        Commands::ScheduleList { timezone } => {
+            commands::schedule_list::run(timezone.as_deref());
+        }
+        Commands::QueueFailed => {
+            commands::queue_failed::run(FailedJobs::List);
+        }
+        Commands::QueueRetry { ids } => {
+            commands::queue_failed::run(FailedJobs::Retry(ids));
+        }
+        Commands::QueueForget { id } => {
+            commands::queue_failed::run(FailedJobs::Forget(id));
+        }
+        Commands::QueueFlush { hours } => {
+            commands::queue_failed::run(FailedJobs::Flush(hours));
+        }
+        Commands::QueuePruneFailed { hours } => {
+            commands::queue_failed::run(FailedJobs::Prune(hours));
+        }
+        Commands::WorkflowWork => {
+            commands::workflow_work::run();
+        }
+        Commands::WorkflowInstall => {
+            commands::workflow_install::run();
+        }
+        Commands::SsrStart { runtime } => {
+            commands::ssr::run(SsrCommand::Start { runtime });
+        }
+        Commands::SsrStop { graceful } => {
+            commands::ssr::run(SsrCommand::Stop { graceful });
+        }
+        Commands::SsrCheck => {
+            commands::ssr::run(SsrCommand::Check);
+        }
+        Commands::KeyGenerate { show } => {
+            commands::key_generate::run(show);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    /// Every subcommand this CLI defines, read back from clap itself so a
+    /// subcommand added later is covered without editing this test.
+    fn subcommand_names() -> Vec<String> {
+        let names: Vec<String> = cli_command()
+            .get_subcommands()
+            .map(|sc| sc.get_name().to_string())
+            .collect();
+        assert!(
+            names.len() > 30,
+            "expected the CLI's full subcommand list, got {names:?}"
+        );
+        names
+    }
+
+    /// A help request must never produce parsed arguments, for any
+    /// subcommand.
+    ///
+    /// `Ok` here is the defect this test exists for: it is exactly the
+    /// state in which `main` would fall through to the dispatch and run
+    /// the command (`suprnova migrate:fresh --help` dropped every table in
+    /// a local environment; `suprnova generate-types --help` rewrote the
+    /// types file). `Err(DisplayHelp)` is clap having answered during
+    /// parsing, which returns to `main` as a printed help screen and exit
+    /// code 0.
+    #[test]
+    fn help_flags_never_reach_dispatch_for_any_subcommand() {
+        for name in subcommand_names() {
+            for flag in ["--help", "-h"] {
+                let error = cli_command()
+                    .try_get_matches_from(["suprnova", name.as_str(), flag])
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("`suprnova {name} {flag}` parsed into a runnable command")
+                    });
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp,
+                    "`suprnova {name} {flag}` must display help, got {:?}",
+                    error.kind()
+                );
+                let rendered = error.render().to_string();
+                assert!(
+                    rendered.contains(&format!("Usage: suprnova {name}")),
+                    "`suprnova {name} {flag}` must print that subcommand's own \
+                     help; got:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// `--help` written before the subcommand is the same trap in a
+    /// different argument order. clap answers it at the top level, so it
+    /// cannot dispatch either.
+    #[test]
+    fn a_help_flag_before_a_subcommand_never_reaches_dispatch() {
+        for name in subcommand_names() {
+            for flag in ["--help", "-h"] {
+                let error = cli_command()
+                    .try_get_matches_from(["suprnova", flag, name.as_str()])
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("`suprnova {flag} {name}` parsed into a runnable command")
+                    });
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp,
+                    "`suprnova {flag} {name}` must display help, got {:?}",
+                    error.kind()
+                );
+            }
+        }
+    }
+
+    /// The top-level flags keep the curated screen rather than clap's
+    /// generated one.
+    #[test]
+    fn the_top_level_help_flags_print_the_curated_screen() {
+        for flag in ["--help", "-h"] {
+            let error = cli_command()
+                .try_get_matches_from(["suprnova", flag])
+                .expect_err("a help request never yields parsed arguments");
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+            let rendered = error.render().to_string();
+            for expected in ["USAGE:", "live:make", "migrate:fresh"] {
+                assert!(
+                    rendered.contains(expected),
+                    "`suprnova {flag}` must print the curated screen \
+                     (missing {expected:?}); got:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    /// `--version` never had the same defect, and this pins why: the flag
+    /// carries `ArgAction::Version`, so clap answers it while parsing
+    /// instead of handing `main` a value it could ignore.
+    #[test]
+    fn version_flags_are_answered_while_parsing() {
+        for flag in ["--version", "-v", "-V"] {
+            let error = cli_command()
+                .try_get_matches_from(["suprnova", flag])
+                .expect_err("a version request never yields parsed arguments");
+            assert_eq!(
+                error.kind(),
+                ErrorKind::DisplayVersion,
+                "`suprnova {flag}` must print the version, got {:?}",
+                error.kind()
+            );
+        }
+    }
+
+    /// The command name every curated help line documents, read back from
+    /// the screen's own table so the test cannot drift from what is
+    /// printed. A line reads `make:controller <name>`; the name is the
+    /// first token and the rest is the argument sketch.
+    fn help_screen_commands() -> Vec<String> {
+        ui::HELP_SECTIONS
+            .iter()
+            .flat_map(|(_, commands)| commands.iter())
+            .map(|(command, _)| {
+                command
+                    .split_whitespace()
+                    .next()
+                    .expect("every help line names a command")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The curated help screen lists every subcommand clap defines, and
+    /// nothing that is not one.
+    ///
+    /// Both sides are derived: the commands come from clap through
+    /// `subcommand_names`, the lines from `ui::HELP_SECTIONS`. Neither is a
+    /// hand-written list, so a subcommand added tomorrow fails here until
+    /// someone writes its line, and a line left behind by a removed
+    /// subcommand fails here too.
+    ///
+    /// There is no exception list. Every subcommand this CLI defines is a
+    /// command a user is meant to run - there is no internal or deprecated
+    /// one to hide - so any future exception has to be added here
+    /// deliberately, named, and justified in a comment.
+    #[test]
+    fn the_curated_help_screen_lists_every_subcommand() {
+        let mut screen = help_screen_commands();
+        let mut defined = subcommand_names();
+
+        let missing: Vec<&String> = defined.iter().filter(|n| !screen.contains(n)).collect();
+        let unknown: Vec<&String> = screen.iter().filter(|n| !defined.contains(n)).collect();
+        assert!(
+            missing.is_empty() && unknown.is_empty(),
+            "the curated help screen and clap disagree: \
+             {missing:?} are subcommands with no line on the screen, \
+             {unknown:?} are lines on the screen that name no subcommand"
+        );
+
+        screen.sort();
+        defined.sort();
+        assert_eq!(
+            screen, defined,
+            "the curated help screen names the same commands as clap but not \
+             the same number of times; a duplicated line is the usual cause"
+        );
+    }
+
+    /// `serve` migrates when it starts unless it is told otherwise.
+    #[test]
+    fn serve_takes_when_to_migrate() {
+        use commands::serve::MigrateWhen;
+
+        let when = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(Cli {
+                command:
+                    Some(Commands::Serve {
+                        migrate,
+                        no_migrate,
+                        ..
+                    }),
+                ..
+            }) => Ok((migrate, no_migrate)),
+            Ok(_) => panic!("`{}` must be serve", argv.join(" ")),
+            Err(e) => Err(e.to_string()),
+        };
+
+        assert_eq!(
+            when(&["suprnova", "serve"]),
+            Ok((MigrateWhen::Start, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate", "always"]),
+            Ok((MigrateWhen::Always, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--migrate=never"]),
+            Ok((MigrateWhen::Never, false))
+        );
+        assert_eq!(
+            when(&["suprnova", "serve", "--no-migrate"]),
+            Ok((MigrateWhen::Start, true)),
+            "the flag alone; `main` reads it as never"
+        );
+        assert!(
+            when(&["suprnova", "serve", "--migrate", "always", "--no-migrate"]).is_err(),
+            "always and never at once is a mistake to report"
+        );
+        assert!(when(&["suprnova", "serve", "--migrate", "sometimes"]).is_err());
+    }
+
+    /// `schedule:list` takes the flag the application's own command
+    /// takes. It was a unit variant, so the CLI refused `--timezone` with
+    /// exit code 2 before the application could see it.
+    #[test]
+    fn schedule_list_takes_the_timezone_the_application_takes() {
+        for argv in [
+            vec!["suprnova", "schedule:list", "--timezone=Asia/Tokyo"],
+            vec!["suprnova", "schedule:list", "--timezone", "Asia/Tokyo"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::ScheduleList { timezone }) => {
+                    assert_eq!(timezone.as_deref(), Some("Asia/Tokyo"));
+                }
+                _ => panic!("`{}` must be schedule:list", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "schedule:list"]).expect("the flag is optional");
+        match cli.command {
+            Some(Commands::ScheduleList { timezone }) => assert_eq!(timezone, None),
+            _ => panic!("`suprnova schedule:list` must be schedule:list"),
+        }
+    }
+
+    /// `db:seed` names its seeder the two ways the console's own command
+    /// takes it, and not both at once.
+    #[test]
+    fn db_seed_takes_the_seeder_as_a_name_or_as_the_class_option() {
+        for argv in [
+            vec!["suprnova", "db:seed", "UserSeeder"],
+            vec!["suprnova", "db:seed", "--class=UserSeeder"],
+            vec!["suprnova", "db:seed", "--class", "UserSeeder"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
+            match cli.command {
+                Some(Commands::DbSeed { seeder, class }) => {
+                    assert_eq!(class.or(seeder).as_deref(), Some("UserSeeder"));
+                }
+                _ => panic!("`{}` must be db:seed", argv.join(" ")),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["suprnova", "db:seed"]).expect("a bare db:seed parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::DbSeed {
+                seeder: None,
+                class: None
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from(["suprnova", "db:seed", "A", "--class=B"]).is_err(),
+            "two names for one seeder is a mistake the CLI must not guess at"
+        );
+    }
+
+    #[test]
+    fn model_prune_takes_the_options_the_console_command_takes() {
+        let cli = Cli::try_parse_from(["suprnova", "model:prune", "--model=User", "--pretend"])
+            .expect("`suprnova model:prune --model=User --pretend` parses");
+        match cli.command {
+            Some(Commands::ModelPrune { model, pretend }) => {
+                assert_eq!(model.as_deref(), Some("User"));
+                assert!(pretend);
+            }
+            _ => panic!("it must be model:prune"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["suprnova", "model:prune"]).expect("a bare model:prune parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ModelPrune {
+                model: None,
+                pretend: false
+            })
+        ));
+    }
+
+    /// `live:registry new` takes the address the library is published at,
+    /// and refuses to run without it: every signature covers the address.
+    #[test]
+    fn live_registry_new_requires_the_published_address() {
+        let parsed = match Cli::try_parse_from([
+            "suprnova",
+            "live:registry",
+            "new",
+            "acme",
+            "--source",
+            "github.com/acme/acme-ui",
+        ]) {
+            Ok(Cli {
+                command:
+                    Some(Commands::LiveRegistry {
+                        command: LiveRegistryCommand::New { namespace, source },
+                    }),
+                ..
+            }) => (namespace, source),
+            _ => panic!("`live:registry new acme --source <address>` must parse"),
+        };
+        assert_eq!(
+            parsed,
+            ("acme".to_owned(), "github.com/acme/acme-ui".to_owned())
+        );
+        let error = match Cli::try_parse_from(["suprnova", "live:registry", "new", "acme"]) {
+            Err(error) => error,
+            Ok(_) => panic!("without --source the command is refused"),
+        };
+        assert!(error.to_string().contains("--source"), "{error}");
+    }
+
+    /// A subcommand invoked without a help flag still parses, or the
+    /// assertions above would pass against a CLI that parses nothing.
+    #[test]
+    fn a_subcommand_without_a_help_flag_still_parses() {
+        let matches = cli_command()
+            .try_get_matches_from(["suprnova", "migrate:fresh"])
+            .expect("`suprnova migrate:fresh` parses");
+        assert_eq!(matches.subcommand_name(), Some("migrate:fresh"));
+    }
+}

@@ -3518,7 +3518,7 @@ fn render_exists(
     let outer_table = outer.map_or(spec.parent_table.as_str(), |table| table.table);
     let is_outer =
         |table: &str| !table.is_empty() && (table == spec.parent_table || table == outer_table);
-    let aliased = false && (is_outer(&spec.pivot_table) || is_outer(&spec.target_table));
+    let aliased = is_outer(&spec.pivot_table) || is_outer(&spec.target_table);
     // The names the probe's own references write for its tables.
     let (target, pivot) = if aliased {
         (

@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.combobox",
+  "files": [
+    "combobox.html",
+    "combobox.css",
+    "combobox.js"
+  ],
+  "elements": [
+    "sn-combobox"
+  ]
+}
