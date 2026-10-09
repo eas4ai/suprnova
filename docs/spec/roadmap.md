@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-parity-round-4
+Current: laravel-delta
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -693,6 +693,37 @@ Requirements: PAR-001, PAR-002, PAR-003, PAR-004, PAR-005, PAR-006, PAR-009, PAR
    `par-schema-dump`, `par-multipart-validation`, `par-laravel-defaults`),
    each rebound on a fail receipt for the revised text.
    Done when they pass on a committed tree, the manual passages are in
+   place, and the review is recorded.
+
+## laravel-delta
+
+Requirements: PAR-089, PAR-090, PAR-091, PAR-092, PAR-093, PAR-094, PAR-095, PAR-096, PAR-097, PAR-098
+
+43. laravel-delta - the eighth of the parity rounds the developer ordered
+   on 2026-10-07 (17:35), ruled build by the parity default: the
+   thirty-seven delta rows of the parity log, the members Laravel 13.35.0
+   added or changed that Suprnova lacks, grouped by area into PAR-089 to
+   PAR-098.
+   Delivery: the schedule-wide one-server switch, `schedule:interrupt` and
+   the interrupt check in `framework/src/schedule/`; the raw chunk cursor
+   and the task-scoped default connection in `framework/src/database/` and
+   `framework/src/eloquent/`; model defaults in the `#[model]` macro;
+   `chunk_map`, `first_or_create`, `increment_or_create`, `find_or_new` and
+   `is` on the relations; the worker controls on `queue:work`, the queue
+   fake's negative and filtered assertions, `dispatch_after_response` and
+   the bus fake's accessors in `framework/src/queue/`, `framework/src/bus/`
+   and the app's command set; the markdown response; the `QUERY` method and
+   `query!` in `framework/src/routing/` and `framework/src/http/`;
+   `logout_other_devices` in `framework/src/auth/`; the typed notification
+   fake in `framework/src/notifications/`; the disk-handle copy and move,
+   the list `forget`, the named `purge` and `set` in
+   `framework/src/filesystem/`; a `laravel_delta` test module in each of
+   the schedule, database, eloquent, queue, bus, http, routing, auth,
+   notifications and filesystem suites; the manual chapters each area owns
+   and the changelog.
+   Mechanisms: `par-laravel-delta` (the `laravel_delta` modules of the ten
+   suites).
+   Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:

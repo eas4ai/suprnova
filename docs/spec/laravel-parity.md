@@ -1596,3 +1596,129 @@ Falsifier: `manual/documentation.md` links no Precognition chapter; the chapter 
 Mechanism: `par-precognition`.
 Rationale: Rows 061 and 063 of the Precognition group; Laravel's `precognition.md` covers these and Suprnova's manual had only scattered mentions.
 Status: Agreed 2026-10-08
+
+## Laravel 13.35.0 API delta
+
+The members Laravel 13.35.0 added or changed since the parity program's
+baseline that the review ruled build: the thirty-seven delta rows of the
+parity log, grouped by area.
+
+[PAR-089] `Schedule::always_on_one_server()` MUST make every task of the
+schedule run on one server, as each task's `on_one_server` does, unless a
+task opts out with `on_every_server()`. A `schedule:interrupt` command MUST
+record an interrupt mark in the cache, `Schedule::has_been_interrupted_since(when)`
+MUST answer whether a mark newer than `when` exists, and a schedule run
+MUST consult it before starting each task after the first, stopping the
+run when interrupted, as Laravel's `ScheduleRunCommand` does between
+repeats; the mark MUST be cleared when the next run starts.
+Falsifier: with `always_on_one_server()` two schedulers on the same cache store both run a task in the same minute, or a task marked `on_every_server()` runs on one only; `schedule:interrupt` leaves `has_been_interrupted_since(start)` false, or a run started after the interrupt does not clear it; or a run that is interrupted after its first task starts its second.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `Schedule::$alwaysOnOneServer`, `Schedule::alwaysOnOneServer`, `Schedule::hasBeenInterruptedSince` and the two facade spellings of the Laravel 13.35.0 delta; Laravel's `Schedule::alwaysOnOneServer`, its `schedule:interrupt` command and `ScheduleRunCommand`'s interrupt check.
+Status: Agreed 2026-10-09
+
+[PAR-090] `chunk_by_id` MUST take its cursor from the stored key as the
+database returned it, not from the value after the model's casts, so a cast
+primary key never produces a cursor that misses or repeats rows.
+`DB::with_default_connection(name, future)` MUST run the future with that
+connection as the default for every `DB` call and model query inside it,
+scoped to the task so a concurrent request keeps its own default, and
+`DB::default_connection()` MUST name the connection in force.
+Falsifier: a model whose key has a cast chunks by id and a row is missed or seen twice; inside `with_default_connection("reporting", ..)` a `DB::table` query or a model query reaches the default connection, or a concurrent task's query reaches `reporting`; or `default_connection()` names the wrong one inside or after the scope.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `BuildsQueries::getLastIdFromChunk` and `DB::setDefaultConnection` of the delta; 13.35.0 reads the raw stored key in `getLastIdFromChunk`, and a process-wide default switch would leak across concurrent requests in a Rust server, so the scope is the task.
+Status: Agreed 2026-10-09
+
+[PAR-091] `#[model]` MUST accept a `defaults` declaration naming attribute
+values a new instance starts with: `Model::new()` and `create` with
+partial attributes MUST fill every declared default the caller did not
+give, before the attributes are read or saved, and MUST leave a given
+attribute as given; a model without the declaration MUST behave as it
+does today.
+Falsifier: a model declaring `defaults(status = "draft", votes = 0)` created with only a `title` saves another `status` or `votes`, or created with `status = "live"` saves `draft`; `Model::new()` reads `status` as anything but `draft` before a save; or a model without the declaration changes its construction.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `HasDefaultAttributes`, `HasDefaultAttributes::defaults` and `HasAttributes::mergeDefaultAttributes` of the delta; Laravel 13.35.0's `HasDefaultAttributes` merges `defaults()` into a new model's attributes.
+Status: Agreed 2026-10-09
+
+[PAR-092] Relations MUST offer the keyed and chunked operations Laravel
+13.35.0 added: `chunk_map(size, closure)` on belongs-to-many and the
+through relations, running the closure per related record in chunks of
+`size` and returning the mapped values in order; `first_or_create` and
+`increment_or_create(attributes, column, default, step, extra)` on has-one,
+has-many and belongs-to-many relations, creating the related record with
+the relation's keys set (and the pivot row attached for belongs-to-many)
+or incrementing `column` by `step` on the record found; `find_or_new(key)`
+on the through relations, searching the records the relation reaches and
+returning a new unsaved instance when none matches; and `is(model)` on
+has-one-through, answering with one query whether the relation's target is
+that model.
+Falsifier: `chunk_map` on a belongs-to-many of 25 records with size 10 calls the closure other than 25 times or returns values out of order; `increment_or_create` on a has-many finds no record and creates one without the foreign key, or finds one and leaves `column` unchanged or changes it by other than `step`; `first_or_create` on a belongs-to-many creates the record without attaching it; `find_or_new` on a through relation returns a record the relation does not reach, or a saved instance when none matches; or `is` loads the target instead of asking the database once, or answers true for another model.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `BelongsToMany::chunkMap`, `BelongsToMany::incrementOrCreate`, `HasOneOrMany::incrementOrCreate`, `HasOneOrManyThrough::chunkMap`, `HasOneOrManyThrough::findOrNew` and `HasOneThrough::is` of the delta.
+Status: Agreed 2026-10-09
+
+[PAR-093] `queue:work` MUST accept Laravel's worker controls: `--sleep`
+(seconds to pause when no job is available), `--tries`, `--timeout`,
+`--once` (process one job and exit), `--stop-when-empty` and `--memory`
+(megabytes; the worker exits with status 12 once its resident memory
+exceeds it, so a supervisor restarts it), beside its existing options.
+The queue fake MUST offer `assert_not_pushed::<J>(closure)` and a closure
+filter on `assert_pushed_on_queue`. `Bus::dispatch_after_response(command)`
+MUST run the command after the response has been sent, and the bus fake
+MUST offer `dispatched::<C>()`, `dispatched_sync::<C>()` and
+`dispatched_after_response::<C>()`, each returning the captured commands
+of that type for the iterator to filter.
+Falsifier: `queue:work --once` processes a second job; `--stop-when-empty` keeps the worker running on an empty queue; `--memory=1` on a worker whose resident memory is above one megabyte does not exit with status 12 after a job; `--sleep=3` polls an empty queue more often than every three seconds; `assert_not_pushed::<J>(|j| j.id == 7)` passes when such a job was pushed, or `assert_pushed_on_queue::<J>("emails", |j| j.id == 7)` passes when only another job of the type reached that queue; a command dispatched after the response runs before the response's bytes are sent, or is missing from `dispatched_after_response::<C>()`; or `dispatched::<C>()` misses a dispatched command.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `WorkCommand::$signature`, `artisan queue:work`, `Queue::assertNotPushed`, `Queue::assertPushedOn`, `Bus::dispatched`, `Bus::dispatchedSync` and `Bus::dispatchedAfterResponse` of the delta; Laravel's `queue:work` options, its exit status 12 on the memory limit, and `BusFake`'s accessors.
+Status: Agreed 2026-10-09
+
+[PAR-094] `HttpResponse::markdown(body)` and the `markdown` helper MUST
+build a `200` response with `Content-Type: text/markdown; charset=utf-8`
+and the body as given, as `text` and `html` build theirs.
+Falsifier: `markdown("# Hi")` answers another content type or charset, another status, or a changed body.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `ResponseFactory::markdown` and `Response::markdown` of the delta; Laravel 13.35.0 added the constructor.
+Status: Agreed 2026-10-09
+
+[PAR-095] The router MUST accept the `QUERY` method: `query!(path,
+handler)` registers a route for it, a `QUERY` request to a route
+registered with `any!` MUST reach it, and `QUERY` MUST be listed where the
+router names the methods it accepts, so a client sending `QUERY` is not
+refused at the router.
+Falsifier: a `QUERY` request to a `query!` route answers `405` or `404`; a `QUERY` request to an `any!` route is refused; or `query!` is missing from the routing macros or the manual's method list.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `Router::$verbs`, `Router::query` and `Route::query` of the delta; Laravel 13.35.0 added `QUERY` to `Router::$verbs` and `Route::query`.
+Status: Agreed 2026-10-09
+
+[PAR-096] `Auth::logout_other_devices(password)` MUST verify the password
+against the current user, and on success invalidate every other session
+of that user and every remember token but the current session's, leaving
+the current session signed in; a wrong password MUST leave every session
+as it is and answer a validation failure on `password`.
+Falsifier: after `logout_other_devices` with the right password another session of the user still answers as signed in, or the current session is signed out; with a wrong password another session is signed out, or the answer is not a validation failure on `password`.
+Mechanism: `par-laravel-delta`.
+Rationale: Row `Auth::logoutOtherDevices` of the delta; Laravel's `SessionGuard::logoutOtherDevices` keeps the current session and rehashes the password into the remember cookie, a mechanism Suprnova does not need since its sessions are revoked by id.
+Status: Agreed 2026-10-09
+
+[PAR-097] The notification fake MUST offer `sent::<N>(recipient, closure)`,
+returning the recorded notifications of that type sent to the recipient
+that the closure accepts, `assert_sent_to::<N>(recipient, closure)` and
+`assert_not_sent_to::<N>(recipient)`, so a test can assert that one
+notification type did or did not reach a recipient and inspect its
+contents; the existing untyped assertions MUST keep working.
+Falsifier: `assert_not_sent_to::<Invoice>(route)` passes when an `Invoice` reached the route; `assert_sent_to::<Invoice>(route, |n| n.total == 10)` passes when only an `Invoice` with another total reached it; `sent::<Invoice>(route, |_| true)` misses a recorded `Invoice` or returns another type; or an existing `assert_sent_to(route, name)` call stops compiling.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `Notification::assertSentTo`, `Notification::assertNotSentTo` and `Notification::sent` of the delta; a typed closure covers Laravel's property-map form, as the event fakes do.
+Status: Agreed 2026-10-09
+
+[PAR-098] `Storage` MUST offer `copy_to_disk` and `move_to_disk`, each
+taking the source disk and path and the destination disk and path, where a
+disk is named by a string or a disk handle, moving by copying and then
+deleting the source; `Storage::forget` MUST take one name or a list of
+names; `Storage::purge(name)` MUST drop one disk and `Storage::purge_all()`
+every disk; and `Storage::set(name, disk)` MUST store a ready-made disk
+under a name, replacing any disk of that name.
+Falsifier: `move_to_disk("local", "a.txt", "archive", "a.txt")` leaves the source or does not write the destination; `copy_to_disk` with a disk handle as the destination is refused; `forget(["a", "b"])` leaves one registered; `purge("a")` drops another disk, or `purge_all()` leaves one; or a disk stored with `set` is not the one `disk(name)` returns.
+Mechanism: `par-laravel-delta`.
+Rationale: Rows `Storage::copyToDisk`, `Storage::moveToDisk`, `Storage::forgetDisk`, `Storage::purge` and `Storage::set` of the delta; Laravel 13.35.0's `FilesystemManager` takes a disk name or an enum for each.
+Status: Agreed 2026-10-09
