@@ -1,7 +1,7 @@
 # CSRF
 
-`CsrfMiddleware` validates a per-session token on every state-changing
-request (POST / PUT / PATCH / DELETE). It mirrors Laravel 13's
+`CsrfMiddleware` validates a per-session token on every request whose
+method is not `GET`, `HEAD` or `OPTIONS`. It mirrors Laravel 13's
 `PreventRequestForgery` - same token sources, same `XSRF-TOKEN` cookie
 convention, same `Sec-Fetch-Site` origin verification, same 419 token
 mismatch / 403 origin mismatch split - implemented on top of Suprnova's
@@ -35,11 +35,11 @@ before CSRF reads its token.
 
 ```mermaid
 flowchart TD
-    state{"state-changing request?<br/>POST / PUT / PATCH / DELETE"}
+    state{"reading method?<br/>GET / HEAD / OPTIONS"}
     excluded{"excluded path?<br/>.except / .except_method"}
     origin{"origin policy passes?<br/>Sec-Fetch-Site"}
     session{"session has a token?"}
-    form{"form body with a _token value?"}
+    form{"form or JSON body with a _token value?"}
     header{"X-CSRF-TOKEN value?"}
     xsrf{"X-XSRF-TOKEN value?"}
     check{"token matches the session's?"}
@@ -48,8 +48,8 @@ flowchart TD
     deny403["403"]
     deny419["419"]
 
-    state -- "no" --> fast
-    state -- "yes" --> excluded
+    state -- "yes" --> fast
+    state -- "no" --> excluded
     excluded -- "yes" --> fast
     excluded -- "no" --> origin
     origin -- "passes" --> run
@@ -71,14 +71,22 @@ GET, HEAD, and OPTIONS are never token-checked, but they still hit the
 bottom of the middleware so the `XSRF-TOKEN` cookie attaches to the
 response. That's how SPA clients first acquire the cookie.
 
+Every other method is checked, as Laravel's `isReading` decides:
+`POST`, `PUT`, `PATCH` and `DELETE`, and also `QUERY` and extension
+methods such as WebDAV's `PROPFIND`. A `QUERY` request to a `query!` route
+therefore sends its token like a `POST` does. A method the middleware does
+not know is not known to be safe, so it is checked.
+
 ## Token sources, in priority order
 
 The middleware takes the token from the first of three places that has a
 value, in Laravel's order (`getTokenFromRequest`):
 
-1. **`_token` form field** - for `application/x-www-form-urlencoded`
-   posts from a traditional HTML form. A field sent twice counts by its
-   last value.
+1. **`_token` in the body** - the `_token` field of an
+   `application/x-www-form-urlencoded` post from a traditional HTML form,
+   or the top-level `_token` string of a JSON body (any `Content-Type`
+   that names `/json` or `+json`, as Laravel's `isJson` reads it). A name
+   sent twice counts by its last value.
 2. **`X-CSRF-TOKEN` header** - what a hand-written request sends after
    reading the `<meta name="csrf-token">` tag.
 3. **`X-XSRF-TOKEN` header** - Laravel / Axios / Angular convention:
@@ -88,7 +96,17 @@ value, in Laravel's order (`getTokenFromRequest`):
 The first source with a value is the token, and the others aren't read: a
 form whose `_token` is wrong fails even beside a right header, and a
 right `_token` passes whatever header came with it. A source counts as
-having no value as PHP's `?:` reads one: absent, empty, or `0`.
+having no value as PHP's `?:` reads one: absent, empty, or `0`. A JSON
+`_token` that is not a string, or a JSON body that does not parse, holds no
+token, and the headers decide.
+
+```ts
+await fetch('/posts', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ _token: token, title: 'Hello' }),
+});
+```
 
 To read `_token`, the middleware buffers a form-urlencoded body up to the
 server's request body limit (8 MiB unless you set another with
@@ -98,15 +116,19 @@ before the token check. The downstream handler still sees the full form
 bag - the buffering is transparent, so `_token` stays in the parsed form
 for any handler that wants to look at it.
 
+A JSON body is read up to the same limit and kept for the handler, which
+still reads all of it. A JSON body over the limit is left to the handler,
+whose own cap can be larger (`#[form_request(max_body_bytes = ...)]`), and
+holds no token, so it has to send its token in a header.
+
 ### Why Suprnova diverges
 
 Laravel reads `_token` from all request input: the query string and a
-JSON or multipart body as well as a form body. Suprnova reads it from a
-form-urlencoded body only. A token in the query string leaks into server
-logs, browser history and `Referer` headers. A JSON or multipart body
-would have to be read whole before the handler, and a multipart body
-streams its files to the handler as they arrive. Those clients send the
-token in a header.
+multipart body as well as a form or JSON body. Suprnova reads it from a
+form-urlencoded or JSON body only. A token in the query string leaks into
+server logs, browser history and `Referer` headers. A multipart body
+streams its files to the handler as they arrive, so it would have to be
+read whole before the handler. Those clients send the token in a header.
 
 ## The frontend side
 
@@ -381,7 +403,9 @@ timing oracle.
 ## Token regeneration
 
 The session middleware regenerates the CSRF token on login and logout
-to prevent session fixation. If you need to force a new token outside
+to prevent session fixation. `regenerate_session_id()` issues a new token
+too, as Laravel's `Session::regenerate` does, so a token read before the
+regeneration is refused after it. If you need to force a new token outside
 those flows (e.g. after a sensitive privilege change), call
 `regenerate_csrf_token()`:
 
@@ -467,8 +491,10 @@ reference shape for higher-level integration tests.
 | `$except = ['stripe/*']` | `.except(["stripe/*"])` |
 | Glob `*` (mid / leading / trailing) | Same - full `Str::is` semantics |
 | `XSRF-TOKEN` cookie + `X-XSRF-TOKEN` header round-trip | Same convention |
+| `isReading`: `GET`, `HEAD`, `OPTIONS` pass unchecked | Same: every other method is checked, `QUERY` and extension methods included |
 | `getTokenFromRequest`: `_token`, then `X-CSRF-TOKEN`, then `X-XSRF-TOKEN` | Same order, the first with a value decides |
-| `_token` read from any input: query string, JSON, multipart, form | **Diverged:** form-urlencoded body only |
+| `_token` read from any input: query string, JSON, multipart, form | **Diverged:** a form-urlencoded or JSON body only |
+| `Session::regenerate` regenerates the token | Same: `regenerate_session_id()` issues a new token |
 | `XSRF-TOKEN` on every response, the session always saved | **Diverged:** a refused or failed response (4xx/5xx) to a request without a stored session gets no token and stores no session |
 | `$addHttpCookie = false` | `.without_xsrf_cookie()` |
 | `PreventRequestForgery::allowSameSite(true)` | `.allow_same_site()` |

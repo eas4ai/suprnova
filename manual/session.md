@@ -151,9 +151,17 @@ valid:
 ```rust
 use suprnova::session::{regenerate_session_id, regenerate_csrf_token};
 
-regenerate_session_id();        // new id, same data
+regenerate_session_id();        // new id and new CSRF token, same data
 regenerate_csrf_token();        // new CSRF token, same id and data
 ```
+
+`regenerate_session_id()` also issues a new CSRF token, as Laravel's
+`Session::regenerate` does. A token that a page read before the
+regeneration is refused with `419` after it, so a page planted with the
+old session cannot submit with the new one. Send the new token from the
+`XSRF-TOKEN` cookie that the response carries, or from the
+`<meta name="csrf-token">` tag of the next page. `SessionMiddleware`
+destroys the old session row when it stores the new one.
 
 To clear the session entirely (logout):
 

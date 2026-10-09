@@ -302,6 +302,7 @@ pub use hashing::{
     HashConfig, HashInfo, Hasher, MAX_BCRYPT_PASSWORD_BYTES, hash, info as hash_info, is_hashed,
     needs_rehash, verify,
 };
+pub use http::TrustHosts;
 pub use http::body::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
     set_global_max_request_body_bytes,

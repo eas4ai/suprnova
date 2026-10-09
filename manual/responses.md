@@ -305,13 +305,16 @@ let session = Cookie::new("session_id", "abc123")
 
 Four convenience constructors cover common patterns:
 
-- `Cookie::forget(name)` - empty value, `Max-Age=0`, path `/`, no
-  domain. Use this on logout to instruct the browser to drop the cookie.
+- `Cookie::forget(name)` - empty value, `Max-Age=0`, `Secure` and
+  `HttpOnly`, with the `Path`, `Domain` and `SameSite` of the session
+  configuration. Use this on logout to instruct the browser to drop the
+  cookie.
 - `Cookie::forget_with(name, path, domain)` - the scoped form. A browser
   only drops a cookie when the deletion cookie's `Path` and `Domain`
   match the ones it was set with, so a cookie set with `Path=/admin` or
-  `Domain=.example.com` survives a plain `forget`. Pass `None` for
-  either argument to keep the default.
+  `Domain=.example.com` needs a deletion cookie with the same. An
+  explicit path or domain wins. Pass `None` for either argument to take
+  the session configuration's value.
 - `Cookie::forever(name, value)` - five-year `Max-Age`.
 - `Cookie::encrypted(name, plaintext)` - writes AES-256-GCM ciphertext
   whose AAD is bound to the cookie's logical name. Read it with
@@ -319,6 +322,26 @@ Four convenience constructors cover common patterns:
   The value opens under that name and in no other way: the value of
   another cookie does not open, and `read_encrypted_for` returns an
   error for it. Requires `APP_KEY` to be set at boot. See [Encryption](encryption.md).
+
+A deletion cookie takes its defaults from the session configuration, as
+Laravel's cookie jar takes them from `session.path`, `session.domain` and
+`session.same_site`, so it matches the cookies your application sets with
+the session's scope:
+
+| Attribute | Value |
+|---|---|
+| `Path` | `SESSION_PATH`, or the public root of the request (`/` at the host root), or `/` under a `__Host-` session cookie prefix |
+| `Domain` | `SESSION_DOMAIN`, or none |
+| `SameSite` | `SESSION_SAME_SITE`, read as the session cookie reads it (`strict`, `none`, anything else `Lax`) |
+| `Secure`, `HttpOnly` | Always set |
+
+With `SESSION_PATH=/app`, `SESSION_DOMAIN=.example.com` and
+`SESSION_SAME_SITE=strict`, `Cookie::forget("prefs")` sends
+`prefs=; Path=/app; HttpOnly; Secure; SameSite=Strict; Domain=.example.com; Max-Age=0`.
+Inside a request that `SessionMiddleware` serves, the configuration you
+gave that middleware is the one read; elsewhere the `SESSION_*` variables
+are. `without_cookie` and `without_cookies` build their deletion cookies
+with `Cookie::forget`, so they follow the same rules.
 
 Removing several cookies at once - the usual logout shape - is
 `without_cookies`, available on `HttpResponse`, on `Response` through
