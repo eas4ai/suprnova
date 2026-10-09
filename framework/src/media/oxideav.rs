@@ -85,7 +85,7 @@ use crate::error::FrameworkError;
 
 use super::ImageConfig;
 use super::color::{Color, flatten_rgba};
-use super::custom::ImagePixels;
+use super::custom::{ImagePixels, TransformationSettings};
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
 use super::metadata::{self, ColourClass, IccData, Kept, SrgbConversion};
 use super::orientation::Orientation;
@@ -235,6 +235,9 @@ struct Steps {
     /// The background of the last rotation, which JPEG and GIF output
     /// flattens transparency onto; white when nothing rotated.
     flatten_onto: Color,
+    /// The pipeline's settings, which its custom steps recorded with
+    /// `Image::transform_with` find theirs in.
+    settings: TransformationSettings,
 }
 
 impl Steps {
@@ -244,6 +247,7 @@ impl Steps {
             applied,
             target,
             flatten_onto: Color::WHITE,
+            settings: TransformationSettings::default(),
         }
     }
 }
@@ -684,6 +688,7 @@ impl ImageDriver for OxideAvImageDriver {
             // no encoder counterpart, which cannot happen for these five.
             .unwrap_or(OutputFormat::Png);
         let mut steps = Steps::new(target, decoded.orientation, decoded.oriented);
+        steps.settings = pipeline.settings.clone();
         let canvas = self.transform(decoded.canvas, pipeline, &config, &mut steps)?;
         self.finish(
             canvas,
@@ -1169,10 +1174,11 @@ fn orient(canvas: Canvas, orientation: Orientation) -> Canvas {
 fn custom(
     canvas: Canvas,
     transformation: super::CustomTransformation,
+    settings: &TransformationSettings,
     config: &ImageConfig,
 ) -> Result<Canvas, FrameworkError> {
     let pixels = ImagePixels::new(canvas.width, canvas.height, canvas.pixels)?;
-    let out = transformation.apply(pixels)?;
+    let out = transformation.apply_with(pixels, settings)?;
     let (width, height) = (out.width(), out.height());
     sniff::enforce_limits(width, height, config)?;
     Canvas::packed(width, height, out.into_pixels())
@@ -1195,6 +1201,8 @@ fn apply(
             let factor = f64::from(height) / f64::from(h);
             resize(canvas, scaled(w, factor), height, config)
         }
+        Transformation::ResizeWidthOnly(width) => resize(canvas, width, h, config),
+        Transformation::ResizeHeightOnly(height) => resize(canvas, w, height, config),
         Transformation::Scale { width, height } => {
             let factor = fit_factor(w, h, width, height).min(1.0);
             resize(canvas, scaled(w, factor), scaled(h, factor), config)
@@ -1254,7 +1262,9 @@ fn apply(
                 None => canvas,
             })
         }
-        Transformation::Custom(transformation) => custom(canvas, transformation, config),
+        Transformation::Custom(transformation) => {
+            custom(canvas, transformation, &steps.settings, config)
+        }
     }
 }
 

@@ -285,6 +285,27 @@ You receive described output and error output in the order you add their
 lines, including mixed streams. Each described line ends with one newline,
 including an empty line or a line you already end with a newline.
 
+A faked started process reveals its output a line at a time, as a real one
+would write it, so you can test code that polls a running process. Each call
+of `output()` or `latest_output()` reveals the next standard output line:
+`output()` returns every line revealed so far, and `latest_output()` returns
+the line it revealed, or the empty string when no line is left. The two share
+one count. `error_output()` and `latest_error_output()` do the same for the
+error output:
+
+```rust
+fake.when("worker", Process::describe().output("one").output("two"));
+
+let worker = Process::command(["worker"]).start()?;
+assert_eq!(worker.latest_output(), "one\n");
+assert_eq!(worker.output(), "one\ntwo\n");
+assert_eq!(worker.latest_output(), "");
+```
+
+A line that `running()` showed counts as revealed, and every line is revealed
+once `running()` returns `false`. The result `wait()` returns always holds the
+whole output.
+
 `.id(n)` sets the process id a described process reports, and
 `.replace_output(text)` and `.replace_error_output(text)` set all of its
 lines at once. A faked started process records the signals sent to it, for
@@ -298,9 +319,25 @@ an empty success or `.when_empty(result)` gives the result to answer.
 The assertions are `assert_ran`, `assert_ran_with(|process| ...)`,
 `assert_ran_times`, `assert_ran_count`, `assert_ran_in_order`, `assert_not_ran` (and
 `assert_didnt_run`) and `assert_nothing_ran`; `recorded()` returns every
-faked process with its command line, working directory, environment,
-input and result. Runs, starts, pools and pipes are all faked and
-recorded.
+faked process with its command line, argument list, quoted command line,
+working directory, environment, input and result. Runs, starts, pools and
+pipes are all faked and recorded.
+
+`assert_ran` and the patterns match the arguments joined by spaces, so
+`["printf", "a b"]` and `["printf", "a", "b"]` look the same to them. When
+the split matters, `assert_ran_args(&["printf", "a b"])` compares the
+argument list exactly, and `assert_ran_command_line("printf 'a b'")` compares
+the command line with each argument quoted for a POSIX shell, as
+`InvokedProcess::command()` reports it. A shell line has no argument list, so
+`assert_ran_args` never matches one; its command line is the line as given:
+
+```rust
+Process::command(["printf", "a b"]).run().await?;
+
+fake.assert_ran("printf a b");
+fake.assert_ran_args(&["printf", "a b"]);
+fake.assert_ran_command_line("printf 'a b'");
+```
 
 The fake is process-global, like `Storage::fake`, and its guard
 serializes the tests that take one. A test that runs real processes at
@@ -322,6 +359,10 @@ tests out of a binary whose tests fake, or mark them `#[serial]`.
 - **The fake is a guard.** `Process::fake()` returns the fake, and the
   assertions are its methods, so a test cannot assert against a fake it
   did not install.
+- **`assert_ran` matches the joined line.** Laravel's `assertRan` compares
+  an array command as an array. Here `assert_ran` and the patterns match the
+  arguments joined by spaces, which reads the way you type the command, and
+  `assert_ran_args` compares the list when the split matters.
 
 ## Next
 

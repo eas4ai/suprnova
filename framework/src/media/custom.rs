@@ -10,6 +10,7 @@
 //! so the module's promise that no caller text reaches an argument position
 //! still holds.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -98,24 +99,106 @@ impl ImagePixels {
     }
 }
 
-/// The function behind a registered custom transformation.
-type PixelFunction = dyn Fn(ImagePixels) -> Result<ImagePixels, FrameworkError> + Send + Sync;
+/// The settings of one step, kept with the name of their type for the
+/// errors that name it.
+#[derive(Clone)]
+struct StepSettings {
+    type_name: &'static str,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+/// The settings of the custom steps of one pipeline, recorded with
+/// [`Image::transform_with`](super::Image::transform_with).
+///
+/// The image holds them rather than the step, so a
+/// [`Transformation`](super::Transformation) and a [`CustomTransformation`]
+/// stay `Copy`: a step carries a key into this table. Clones of the image
+/// share the values, and the values are released when the last image or
+/// pipeline holding them is dropped. Two tables are equal when they hold
+/// the very same values.
+#[derive(Clone, Default)]
+pub struct TransformationSettings {
+    entries: Vec<StepSettings>,
+}
+
+impl TransformationSettings {
+    /// Keep `settings` and return the key a step finds them by.
+    pub(crate) fn push<S: Any + Send + Sync>(&mut self, settings: S) -> usize {
+        self.entries.push(StepSettings {
+            type_name: std::any::type_name::<S>(),
+            value: Arc::new(settings),
+        });
+        self.entries.len() - 1
+    }
+
+    /// How many steps' settings the table holds.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the table holds no settings: no step of the pipeline was
+    /// recorded with [`Image::transform_with`](super::Image::transform_with).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl fmt::Debug for TransformationSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The values are opaque; their types say what the steps carry.
+        f.debug_list()
+            .entries(self.entries.iter().map(|entry| entry.type_name))
+            .finish()
+    }
+}
+
+impl PartialEq for TransformationSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(&other.entries)
+                .all(|(left, right)| Arc::ptr_eq(&left.value, &right.value))
+    }
+}
+
+/// The function behind a registered custom transformation: the pixels and,
+/// for a step recorded with settings, those settings. Each registration
+/// wraps the application's function in the check of what the step carries.
+type CustomFunction =
+    dyn Fn(ImagePixels, Option<&StepSettings>) -> Result<ImagePixels, FrameworkError> + Send + Sync;
 
 /// A custom transformation, by the name it was registered under.
 ///
 /// A copyable handle rather than the function itself, so a
 /// [`Transformation`](super::Transformation) stays plain data that an
 /// [`Image`](super::Image) can record, clone and compare. The function is
-/// looked up when the pipeline runs.
+/// looked up when the pipeline runs. A step recorded with
+/// [`Image::transform_with`](super::Image::transform_with) also carries the
+/// key of its settings in the pipeline's [`TransformationSettings`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CustomTransformation {
     name: &'static str,
+    settings: Option<usize>,
 }
 
 impl CustomTransformation {
     /// A handle for the transformation registered as `name`.
     pub const fn new(name: &'static str) -> Self {
-        Self { name }
+        Self {
+            name,
+            settings: None,
+        }
+    }
+
+    /// A handle for `name` whose settings are the entry `key` of the
+    /// pipeline's table.
+    pub(crate) const fn with_settings(name: &'static str, key: usize) -> Self {
+        Self {
+            name,
+            settings: Some(key),
+        }
     }
 
     /// The name it is registered under.
@@ -125,11 +208,55 @@ impl CustomTransformation {
 
     /// Run the registered function on `pixels`.
     ///
-    /// Both built-in drivers call this at the transformation's place in the
-    /// pipeline; a custom [`ImageDriver`](super::ImageDriver) can too.
-    /// Errors, naming the transformation, when nothing is registered under
-    /// its name.
+    /// For a step without settings. A step recorded with
+    /// [`Image::transform_with`](super::Image::transform_with) finds its
+    /// settings in the pipeline, so it runs through
+    /// [`apply_with`](Self::apply_with) and errors here. Errors, naming
+    /// the transformation, when nothing is registered under its name.
     pub fn apply(self, pixels: ImagePixels) -> Result<ImagePixels, FrameworkError> {
+        if self.settings.is_some() {
+            return Err(FrameworkError::param(format!(
+                "image transformation `{}` was recorded with settings, which the pipeline \
+                 holds; run it with CustomTransformation::apply_with and the pipeline's settings",
+                self.name
+            )));
+        }
+        self.run(pixels, None)
+    }
+
+    /// Run the registered function on `pixels`, with the settings this
+    /// step was recorded with, from `settings`, the
+    /// [`settings`](super::ImagePipeline::settings) of the pipeline the
+    /// step belongs to.
+    ///
+    /// Both built-in drivers call this at the transformation's place in
+    /// the pipeline; a custom [`ImageDriver`](super::ImageDriver) can too.
+    /// Errors, naming the transformation, when nothing is registered under
+    /// its name, when the step's settings are not in `settings`, and when
+    /// they are not of the type the function was registered for.
+    pub fn apply_with(
+        self,
+        pixels: ImagePixels,
+        settings: &TransformationSettings,
+    ) -> Result<ImagePixels, FrameworkError> {
+        let step = match self.settings {
+            Some(key) => Some(settings.entries.get(key).ok_or_else(|| {
+                FrameworkError::param(format!(
+                    "image transformation `{}` has no settings in this pipeline; a step \
+                     recorded with Image::transform_with runs in the pipeline it was recorded in",
+                    self.name
+                ))
+            })?),
+            None => None,
+        };
+        self.run(pixels, step)
+    }
+
+    fn run(
+        self,
+        pixels: ImagePixels,
+        settings: Option<&StepSettings>,
+    ) -> Result<ImagePixels, FrameworkError> {
         let function = registered(self.name).ok_or_else(|| {
             FrameworkError::param(format!(
                 "image transformation `{}` is not registered; register it with \
@@ -137,20 +264,27 @@ impl CustomTransformation {
                 self.name
             ))
         })?;
-        function(pixels)
+        function(pixels, settings)
     }
 }
 
-fn registry() -> &'static RwLock<HashMap<&'static str, Arc<PixelFunction>>> {
-    static REGISTRY: OnceLock<RwLock<HashMap<&'static str, Arc<PixelFunction>>>> = OnceLock::new();
+fn registry() -> &'static RwLock<HashMap<&'static str, Arc<CustomFunction>>> {
+    static REGISTRY: OnceLock<RwLock<HashMap<&'static str, Arc<CustomFunction>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn registered(name: &str) -> Option<Arc<PixelFunction>> {
+fn registered(name: &str) -> Option<Arc<CustomFunction>> {
     let map = registry()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.get(name).cloned()
+}
+
+fn register(name: &'static str, function: Arc<CustomFunction>) {
+    let mut map = registry()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.insert(name, function);
 }
 
 /// Register a custom transformation under `name`, for
@@ -162,15 +296,66 @@ fn registered(name: &str) -> Option<Arc<PixelFunction>> {
 /// pixels the pipeline continues with, under either driver. Registering a
 /// name again replaces its function, as Laravel's array of handlers does.
 /// Call it during bootstrap; an image that names a transformation nothing is
-/// registered under fails with an error naming it.
+/// registered under fails with an error naming it. A step recorded with
+/// settings fails too: this function takes none. Use
+/// [`register_transformation_with`] for a transformation that does.
 pub fn register_transformation<F>(name: &'static str, transformation: F)
 where
     F: Fn(ImagePixels) -> Result<ImagePixels, FrameworkError> + Send + Sync + 'static,
 {
-    let mut map = registry()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    map.insert(name, Arc::new(transformation));
+    register(
+        name,
+        Arc::new(
+            move |pixels, settings: Option<&StepSettings>| match settings {
+                None => transformation(pixels),
+                Some(given) => Err(FrameworkError::param(format!(
+                    "image transformation `{name}` takes no settings, but its step carries a \
+                 `{}`; record it with Image::transform, or register it with \
+                 register_transformation_with",
+                    given.type_name
+                ))),
+            },
+        ),
+    );
+}
+
+/// Register a custom transformation under `name` whose function receives
+/// per-call settings of type `S` beside the pixels, for
+/// [`Image::transform_with`](super::Image::transform_with)`(name, settings)`.
+///
+/// Laravel's custom transformation is an object with its own fields, which
+/// the handler receives; here the fields are `S`, so one registration
+/// serves a pixelate of 4 on one image and of 8 on the next. The image, not
+/// the step, holds the settings. A step whose settings are not an `S`, or
+/// a step recorded without settings, fails the image with an error naming
+/// the transformation. Registering a name again replaces its function. The
+/// settings reach only this function; under the `magick` driver they never
+/// become an ImageMagick argument.
+pub fn register_transformation_with<S, F>(name: &'static str, transformation: F)
+where
+    S: Any + Send + Sync,
+    F: Fn(ImagePixels, &S) -> Result<ImagePixels, FrameworkError> + Send + Sync + 'static,
+{
+    let expected = std::any::type_name::<S>();
+    register(
+        name,
+        Arc::new(move |pixels, settings: Option<&StepSettings>| {
+            let Some(given) = settings else {
+                return Err(FrameworkError::param(format!(
+                    "image transformation `{name}` takes settings of type `{expected}`; \
+                     record it with Image::transform_with"
+                )));
+            };
+            match given.value.downcast_ref::<S>() {
+                Some(settings) => transformation(pixels, settings),
+                None => Err(FrameworkError::param(format!(
+                    "image transformation `{name}` takes settings of type `{expected}`, but \
+                     its step carries a `{}`",
+                    given.type_name
+                ))),
+            }
+        }),
+    );
 }
 
 #[cfg(test)]

@@ -262,8 +262,21 @@ match Laravel's `Storage::directories()` output - opendal's underlying
 | Laravel name           | opendal native        |
 |------------------------|-----------------------|
 | `make_directory(path)` | `create_dir(path)`    |
+| `ensure_directory_exists(path)` | `create_dir(path)` unless the directory exists |
 | `delete_directory(p)`  | `delete_with(p).recursive(true)` |
 | `move_to(from, to)`    | `rename(from, to)`    |
+
+`make_directory` and `ensure_directory_exists` take a directory path with or
+without its trailing slash, as Laravel does. opendal's `create_dir` accepts a
+directory only when the path ends in `/`, so the two add the slash for you. An
+empty path, the root, reaches `create_dir` unchanged. `ensure_directory_exists`
+checks for the directory first and succeeds when it is already there, so you
+can call it before every write into the directory:
+
+```rust,ignore
+disk.ensure_directory_exists("exports/2026").await?;
+disk.put("exports/2026/report.csv", csv).await?;
+```
 
 `move_to` falls back to `copy + delete` if the backend doesn't support
 rename, and to `read + write + delete` if it doesn't support copy either -
@@ -291,6 +304,59 @@ Both are backed by `Operator::presign_read` and `presign_write`, so they error
 with an `Unsupported` message on backends that do not implement presigning
 (the in-memory and local-filesystem drivers fall in this bucket; S3, Azure
 Blob, and GCS support it).
+
+#### Upload URLs from your own callback
+
+A disk that does not presign can still hand out upload URLs. Give it a
+callback with `Storage::build_temporary_upload_urls_using`, for example one
+that points at a route of your application that takes the upload. The
+callback receives the path and the lifetime and returns the
+`TemporaryUploadUrl`:
+
+```rust
+use std::collections::BTreeMap;
+use std::time::Duration;
+use suprnova::{DiskExt, Storage, TemporaryUploadUrl};
+
+# async fn doc() -> Result<(), suprnova::FrameworkError> {
+Storage::register_fs("local", "./storage")?;
+Storage::build_temporary_upload_urls_using("local", |path, lifetime| {
+    Ok(TemporaryUploadUrl {
+        url: format!(
+            "https://example.com/uploads/{path}?expires={}",
+            lifetime.as_secs()
+        ),
+        method: "PUT".to_owned(),
+        headers: BTreeMap::new(),
+    })
+})?;
+
+assert!(Storage::provides_temporary_upload_urls("local")?);
+let upload = Storage::disk("local")?
+    .temporary_upload_url("avatars/7.png", Duration::from_secs(300))
+    .await?;
+assert!(upload.url.starts_with("https://example.com/uploads/avatars/7.png"));
+# Ok(())
+# }
+```
+
+The callback comes first on every disk: a read-through disk and a disk that
+presigns by itself, such as S3, answer from the callback too. Setting a
+callback again replaces the one before, and the disk keeps its public URL.
+Take the disk with `Storage::disk` after you set the callback: a handle you
+took before keeps answering as it did. Registering the disk again drops the
+callback.
+
+`Storage::provides_temporary_upload_urls(disk)` tells you whether
+`temporary_upload_url` can answer on a disk: it is `true` when the disk has a
+callback or its backend presigns writes. A read-through disk answers for its
+primary.
+
+##### Why Suprnova diverges
+
+Laravel's local and read-through disks ask the callback first, while its S3
+disk keeps its own presigning and ignores the callback. Suprnova applies one
+rule to every disk, so the callback you set is the one that answers.
 
 ### Public URLs
 
@@ -489,7 +555,7 @@ it and every `DiskExt` convenience works unchanged.
 | `delete` | Both, fallback first |
 | `copy`, `rename` / `move_to` | Primary if it holds the source, otherwise streamed across from the fallback; a `rename` also deletes the fallback source |
 | `temporary_url` | Primary if it holds the object, otherwise the fallback |
-| `temporary_upload_url` | Primary only - an upload has to land where writes land |
+| `temporary_upload_url` | Primary only - an upload has to land where writes land; a callback from `Storage::build_temporary_upload_urls_using` answers ahead of the primary |
 
 Listing is primary-only by design. A union listing would have to reconcile
 paging and ordering across two backends, and it would report objects that a
@@ -840,12 +906,15 @@ so production code cannot reach for them.
 | `directories($dir, $recursive)`       | `disk.directories(dir, recursive)`                       |
 | `allDirectories($dir)`                | `disk.all_directories(dir)`                              |
 | `makeDirectory($path)`                | `disk.make_directory(path)`                              |
+| `File::ensureDirectoryExists($path)`  | `disk.ensure_directory_exists(path)`                     |
 | `deleteDirectory($path)`              | `disk.delete_directory(path)`                            |
 | `move($from, $to)`                    | `disk.move_to(from, to)` (or opendal-native `rename`)    |
 | `copy($from, $to)`                    | `disk.copy(from, to)` (opendal-native)                   |
 | `delete($path)`                       | `disk.delete(path)` (opendal-native)                     |
 | `temporaryUrl($path, $expiry)`        | `disk.temporary_url(path, expire)` (or opendal-native `presign_read`) |
 | `temporaryUploadUrl($path, $expiry)`  | `disk.temporary_upload_url(path, expire)` (or opendal-native `presign_write`) |
+| `buildTemporaryUploadUrlsUsing($cb)`  | `Storage::build_temporary_upload_urls_using(disk, callback)` |
+| `providesTemporaryUploadUrls()`       | `Storage::provides_temporary_upload_urls(disk)`          |
 | `download($path, $name)`              | `Storage::download(disk, path, name)`                    |
 | `response($path, $name)`              | `Storage::response(disk, path, name)`                    |
 | `Storage::fake()`                     | `Storage::fake()`                                        |

@@ -31,17 +31,22 @@
 pub(crate) mod fake;
 pub(crate) mod vendor;
 
+use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
 
 use crate::FrameworkError;
 
-pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
+pub use fake::{
+    FakeResponse, RecordedRequest, ResponseSequence, assert_not_sent, assert_sent, fake_response,
+};
 
 /// Process-global install count raised by [`Http::fail_on_real_calls`].
 /// While nonzero, [`RequestBuilder::send`] refuses to hit the real
@@ -57,6 +62,91 @@ static FAIL_ON_REAL_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 static REQWEST_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static REQWEST_CLIENT_NO_REDIRECT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// The clients built for a request's own connect timeout, by the timeout
+/// and whether they follow redirects. reqwest sets the connect timeout on
+/// the client, not on the request, so each distinct timeout gets a client
+/// of its own, built once and kept, as the two default clients are.
+static CONNECT_TIMEOUT_CLIENTS: Mutex<Option<HashMap<(Duration, bool), reqwest::Client>>> =
+    Mutex::new(None);
+
+/// A function every request passes through before it is sent.
+pub(crate) type RequestMiddleware = dyn Fn(RequestBuilder) -> RequestBuilder + Send + Sync;
+
+/// A function every response passes through before the caller sees it.
+pub(crate) type ResponseMiddleware = dyn Fn(ClientResponse) -> ClientResponse + Send + Sync;
+
+/// The global middleware and options, Laravel's factory-level
+/// `globalMiddleware` and `globalOptions`.
+#[derive(Clone, Default)]
+pub(crate) struct GlobalConfiguration {
+    request: Vec<Arc<RequestMiddleware>>,
+    response: Vec<Arc<ResponseMiddleware>>,
+    options: Option<Arc<RequestMiddleware>>,
+}
+
+impl GlobalConfiguration {
+    /// This configuration followed by `later`: the middleware of both, in
+    /// order, and the options of `later` when it has any.
+    fn then(mut self, later: GlobalConfiguration) -> Self {
+        self.request.extend(later.request);
+        self.response.extend(later.response);
+        if later.options.is_some() {
+            self.options = later.options;
+        }
+        self
+    }
+}
+
+/// The process-wide global configuration. Registrations made inside an
+/// [`Http::fake`] scope go to that scope instead.
+static GLOBAL_CONFIGURATION: RwLock<GlobalConfiguration> = RwLock::new(GlobalConfiguration {
+    request: Vec::new(),
+    response: Vec::new(),
+    options: None,
+});
+
+tokio::task_local! {
+    /// Set by [`Http::without_global_configuration`]: requests created on
+    /// this task while it is set take no global middleware or options.
+    static WITHOUT_GLOBAL_CONFIGURATION: ();
+}
+
+/// Change the global configuration: the one of the [`Http::fake`] scope
+/// active on this task, or else the process-wide one.
+fn configure_global(configure: impl FnOnce(&mut GlobalConfiguration)) {
+    let mut configure = Some(configure);
+    let scoped = fake::configure_scoped(|global| {
+        if let Some(configure) = configure.take() {
+            configure(global);
+        }
+    });
+    if !scoped && let Some(configure) = configure.take() {
+        // The lists are whole after any panic, so a poisoned lock goes on
+        // with them.
+        let mut global = GLOBAL_CONFIGURATION
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        configure(&mut global);
+    }
+}
+
+/// The global configuration a request created now takes: none inside
+/// [`Http::without_global_configuration`], else the process-wide one
+/// followed by the one of the active [`Http::fake`] scope.
+fn current_global_configuration() -> GlobalConfiguration {
+    if WITHOUT_GLOBAL_CONFIGURATION.try_with(|()| ()).is_ok() {
+        return GlobalConfiguration::default();
+    }
+    let process = GLOBAL_CONFIGURATION
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    match fake::scoped_global() {
+        Some(scoped) => process.then(scoped),
+        None => process,
+    }
+}
 
 /// Default cap on a buffered outbound response body (25 MiB). A slow or
 /// malicious upstream can otherwise stream an unbounded body into memory
@@ -76,7 +166,42 @@ fn base_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
-        .user_agent(concat!("suprnova/", env!("CARGO_PKG_VERSION")))
+        .user_agent(USER_AGENT)
+}
+
+/// The client for a request: one of the two shared clients, or, for a
+/// request with its own connect timeout, the client kept for that timeout.
+fn client_for(
+    no_redirects: bool,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client, FrameworkError> {
+    let Some(connect_timeout) = connect_timeout else {
+        return Ok(if no_redirects {
+            client_no_redirect().clone()
+        } else {
+            client().clone()
+        });
+    };
+    // The map only grows by whole entries, so a poisoned lock goes on with
+    // it.
+    let mut clients = CONNECT_TIMEOUT_CLIENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let clients = clients.get_or_insert_with(HashMap::new);
+    if let Some(client) = clients.get(&(connect_timeout, no_redirects)) {
+        return Ok(client.clone());
+    }
+    let mut builder = base_builder().connect_timeout(connect_timeout);
+    if no_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    let client = builder.build().map_err(|e| {
+        FrameworkError::internal(format!(
+            "Http: building a client with a {connect_timeout:?} connect timeout failed: {e}"
+        ))
+    })?;
+    clients.insert((connect_timeout, no_redirects), client.clone());
+    Ok(client)
 }
 
 /// The default client. Follows redirects (reqwest's default cap of 10),
@@ -135,6 +260,164 @@ impl Http {
     /// Begin a DELETE request.
     pub fn delete(url: impl Into<String>) -> RequestBuilder {
         RequestBuilder::new(Method::Delete, url.into())
+    }
+
+    /// Begin a HEAD request: the response has the status and headers of a
+    /// GET and no body (Laravel's `head`).
+    pub fn head(url: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(Method::Head, url.into())
+    }
+
+    /// Pass every request created after this call through `middleware`
+    /// before it is sent (Laravel's `globalRequestMiddleware`).
+    ///
+    /// The middleware receives the request with its final URL and returns
+    /// the request to send; it can add headers, a token, or a signature.
+    /// It runs once per [`RequestBuilder::send`], before the first attempt,
+    /// in the order the middleware was registered. The fake records the
+    /// request as the middleware left it.
+    ///
+    /// Registered outside a fake it is process-wide: call it during boot.
+    /// Registered inside an [`Http::fake`] scope it belongs to that scope,
+    /// so tests running in parallel do not see each other's. The requests
+    /// the framework's vendor drivers send (mail providers, Pinecone) do not
+    /// go through the facade and stay outside it.
+    pub fn global_request_middleware(
+        middleware: impl Fn(RequestBuilder) -> RequestBuilder + Send + Sync + 'static,
+    ) {
+        let middleware: Arc<RequestMiddleware> = Arc::new(middleware);
+        configure_global(|global| global.request.push(middleware));
+    }
+
+    /// Pass the response of every request created after this call through
+    /// `middleware` before the caller sees it (Laravel's
+    /// `globalResponseMiddleware`).
+    ///
+    /// It sees every response, a faked one included, and each attempt of
+    /// a retried request; an attempt that got no response has nothing to
+    /// pass. Where it is registered decides where it applies, as for
+    /// [`Http::global_request_middleware`].
+    pub fn global_response_middleware(
+        middleware: impl Fn(ClientResponse) -> ClientResponse + Send + Sync + 'static,
+    ) {
+        let middleware: Arc<ResponseMiddleware> = Arc::new(middleware);
+        configure_global(|global| global.response.push(middleware));
+    }
+
+    /// Set the options every request starts with (Laravel's
+    /// `globalOptions`): `options` runs on each new request as it is
+    /// created, so what the request sets itself comes after and wins where
+    /// a setting replaces, such as a timeout. Headers are appended, so a
+    /// header set both ways is sent twice, the global one first.
+    ///
+    /// Calling it again replaces the options, as Laravel's does. Where it
+    /// is called decides where it applies, as for
+    /// [`Http::global_request_middleware`].
+    pub fn global_options(
+        options: impl Fn(RequestBuilder) -> RequestBuilder + Send + Sync + 'static,
+    ) {
+        let options: Arc<RequestMiddleware> = Arc::new(options);
+        configure_global(|global| global.options = Some(options));
+    }
+
+    /// Run `f` with the requests it creates taking no global middleware
+    /// and no global options (Laravel's `withoutGlobalConfiguration`).
+    ///
+    /// Only the requests created on this task inside `f` are left out:
+    /// the scope is a `tokio::task_local!`, so other requests of the
+    /// process keep their middleware while `f` runs, and work `f` spawns
+    /// with `tokio::spawn` does not inherit the scope.
+    pub async fn without_global_configuration<F, Fut, T>(f: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        WITHOUT_GLOBAL_CONFIGURATION
+            .scope((), async move { f().await })
+            .await
+    }
+
+    /// Answer every request whose URL matches `pattern` with `response`,
+    /// for as long as the fake lives (Laravel's `Http::fake([$url =>
+    /// $response])`).
+    ///
+    /// `*` matches any run of characters, and a leading `*` is implied, so
+    /// `"api.test/users/*"` matches `https://api.test/users/7`. Unlike
+    /// [`fake_response`], the stub is not used up. A [`fake_response`]
+    /// entry that matches answers first; the stubs of `fake_url`,
+    /// [`Http::fake_using`] and [`Http::fake_sequence`] are then asked in
+    /// the order they were registered.
+    ///
+    /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+    /// Panics if no fake scope is active on the current task.
+    pub fn fake_url(pattern: &str, response: FakeResponse) {
+        fake::fake_url(pattern, response);
+    }
+
+    /// Ask `callback` for the response to each request: `Some` answers it,
+    /// and `None` lets the stubs registered after it, and then the
+    /// default, answer (Laravel's `Http::fake(fn ($request) => ...)`).
+    ///
+    /// The callback receives the request as it is recorded, so it can
+    /// read the URL, the headers and the body.
+    ///
+    /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+    /// Panics if no fake scope is active on the current task.
+    pub fn fake_using(
+        callback: impl Fn(&RecordedRequest) -> Option<FakeResponse> + Send + Sync + 'static,
+    ) {
+        fake::fake_using(Arc::new(callback));
+    }
+
+    /// Answer the requests whose URL matches `pattern`, as for
+    /// [`Http::fake_url`], with the responses of the returned sequence in
+    /// turn (Laravel's `fakeSequence`). Push the responses on the sequence
+    /// it returns.
+    ///
+    /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+    /// Panics if no fake scope is active on the current task.
+    pub fn fake_sequence(pattern: &str) -> ResponseSequence {
+        fake::fake_sequence(pattern)
+    }
+
+    /// Switch the refusal of stray requests on or off (Laravel's
+    /// `preventStrayRequests`). While it is on, a request that no fake
+    /// answers fails instead of reaching the network.
+    ///
+    /// It is the process-wide switch [`Self::fail_on_real_calls`] and
+    /// [`Self::allow_real_calls`] move: `true` installs one hold on it, as
+    /// `fail_on_real_calls` does, and `false` releases every hold, as
+    /// `allow_real_calls` does.
+    pub fn prevent_stray_requests(on: bool) {
+        if on {
+            Self::fail_on_real_calls();
+        } else {
+            Self::allow_real_calls();
+        }
+    }
+
+    /// Whether stray requests are refused (Laravel's
+    /// `preventingStrayRequests`); [`Self::is_guarded`] under its Laravel
+    /// name.
+    pub fn preventing_stray_requests() -> bool {
+        Self::is_guarded()
+    }
+
+    /// Let a request inside this [`Http::fake`] scope that no stub
+    /// answers reach the network when its URL matches one of `patterns`,
+    /// even while stray requests are refused (Laravel's
+    /// `allowStrayRequests`). `*` matches any run of characters; no
+    /// leading `*` is implied. Calling it again replaces the patterns.
+    ///
+    /// Such a request is still recorded, and goes out through the real
+    /// client with its global middleware. Without the refusal on, a URL on
+    /// the list reaches the network too, where the fake would otherwise
+    /// answer an empty `200`.
+    ///
+    /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+    /// Panics if no fake scope is active on the current task.
+    pub fn allow_stray_requests(patterns: &[&str]) {
+        fake::allow_stray_requests(patterns);
     }
 
     /// Run an async test body inside a fake-HTTP scope.
@@ -377,6 +660,7 @@ pub(crate) enum Method {
     Put,
     Patch,
     Delete,
+    Head,
 }
 
 impl Method {
@@ -387,6 +671,7 @@ impl Method {
             Self::Put => "PUT",
             Self::Patch => "PATCH",
             Self::Delete => "DELETE",
+            Self::Head => "HEAD",
         }
     }
 
@@ -397,15 +682,16 @@ impl Method {
             Self::Put => reqwest::Method::PUT,
             Self::Patch => reqwest::Method::PATCH,
             Self::Delete => reqwest::Method::DELETE,
+            Self::Head => reqwest::Method::HEAD,
         }
     }
 
     /// Whether this method is idempotent per RFC 7231 §4.2.2 - sending
     /// the request more than once has the same effect as sending it once.
     /// Retries are only safe (no duplicated side effect) for idempotent
-    /// methods. GET/PUT/DELETE are idempotent; POST and PATCH are not.
+    /// methods. GET/HEAD/PUT/DELETE are idempotent; POST and PATCH are not.
     pub(crate) fn is_idempotent(self) -> bool {
-        matches!(self, Self::Get | Self::Put | Self::Delete)
+        matches!(self, Self::Get | Self::Head | Self::Put | Self::Delete)
     }
 }
 
@@ -414,6 +700,117 @@ pub(crate) enum Body {
     Json(serde_json::Value),
     Form(serde_json::Value),
     Raw(Bytes),
+    /// The parts [`RequestBuilder::attach`] added, encoded as
+    /// `multipart/form-data` when the request is prepared.
+    Multipart(Vec<MultipartPart>),
+}
+
+/// One part of a `multipart/form-data` body.
+#[derive(Debug, Clone)]
+pub(crate) struct MultipartPart {
+    name: String,
+    contents: Bytes,
+    filename: Option<String>,
+}
+
+/// What a request sends besides its method and URL, computed once: the
+/// wire and the fake's record take it from the same place, so the fake
+/// records the headers the request is sent with.
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared {
+    /// The request's headers, then the `Content-Type` its body sets and the
+    /// user agent, each unless the request set it.
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Option<Bytes>,
+}
+
+/// The user agent every request of the facade sends.
+const USER_AGENT: &str = concat!("suprnova/", env!("CARGO_PKG_VERSION"));
+
+/// What is written as `%XX` in a URL parameter: everything but the
+/// unreserved characters of RFC 3986, so a value cannot add a path
+/// segment, a query, a fragment or a host, as RFC 6570's simple string
+/// expansion, which Laravel's `withUrlParameters` uses, encodes it.
+const URL_PARAMETER: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// A name or file name inside a `Content-Disposition` header, with the
+/// three characters that would end or break the quoted string written as
+/// `%XX`, as browsers write a form's field names.
+fn disposition_value(value: &str) -> String {
+    value
+        .replace('"', "%22")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+impl Prepared {
+    /// Prepare `builder`: encode its body and set the headers that body
+    /// needs.
+    fn of(builder: &RequestBuilder) -> Result<Self, FrameworkError> {
+        let mut headers = builder.headers.clone();
+        let has = |headers: &[(String, String)], name: &str| {
+            headers
+                .iter()
+                .any(|(header, _)| header.eq_ignore_ascii_case(name))
+        };
+        let (content_type, body) = match &builder.body {
+            Some(Body::Json(value)) => (
+                Some("application/json".to_string()),
+                Some(Bytes::from(value.to_string())),
+            ),
+            Some(Body::Form(value)) => {
+                let encoded = serde_urlencoded::to_string(value).map_err(|e| {
+                    FrameworkError::internal(format!("Http::form body serialization failed: {e}"))
+                })?;
+                (
+                    Some("application/x-www-form-urlencoded".to_string()),
+                    Some(Bytes::from(encoded)),
+                )
+            }
+            Some(Body::Raw(bytes)) => (None, Some(bytes.clone())),
+            Some(Body::Multipart(parts)) => {
+                let boundary = format!("suprnova-{}", uuid::Uuid::new_v4().simple());
+                let mut encoded = Vec::new();
+                for part in parts {
+                    encoded.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+                    encoded.extend_from_slice(
+                        format!(
+                            "Content-Disposition: form-data; name=\"{}\"",
+                            disposition_value(&part.name)
+                        )
+                        .as_bytes(),
+                    );
+                    if let Some(filename) = &part.filename {
+                        encoded.extend_from_slice(
+                            format!("; filename=\"{}\"", disposition_value(filename)).as_bytes(),
+                        );
+                    }
+                    encoded.extend_from_slice(b"\r\n\r\n");
+                    encoded.extend_from_slice(&part.contents);
+                    encoded.extend_from_slice(b"\r\n");
+                }
+                encoded.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+                (
+                    Some(format!("multipart/form-data; boundary={boundary}")),
+                    Some(Bytes::from(encoded)),
+                )
+            }
+            None => (None, None),
+        };
+        if let Some(content_type) = content_type
+            && !has(&headers, "content-type")
+        {
+            headers.push(("content-type".to_string(), content_type));
+        }
+        if !has(&headers, "user-agent") {
+            headers.push(("user-agent".to_string(), USER_AGENT.to_string()));
+        }
+        Ok(Self { headers, body })
+    }
 }
 
 /// Retry policy attached to a [`RequestBuilder`].
@@ -495,11 +892,31 @@ pub struct RequestBuilder {
     /// through the non-following client so a 3xx is returned as-is rather
     /// than followed - an SSRF guard for user-influenced URLs.
     pub(crate) no_redirects: bool,
+    /// Put in front of a URL without a scheme when the request is sent.
+    pub(crate) base_url: Option<String>,
+    /// Merged into the URL's query when the request is sent.
+    pub(crate) query: Vec<(String, String)>,
+    /// Expanded into the URL's `{name}` placeholders when the request is
+    /// sent.
+    pub(crate) url_parameters: Vec<(String, String)>,
+    /// This request's own connect timeout; `None` keeps the shared
+    /// client's 10 seconds.
+    pub(crate) connect_timeout: Option<Duration>,
+    /// The global request middleware the request took when it was created.
+    pub(crate) request_middleware: Vec<Arc<RequestMiddleware>>,
+    /// The global response middleware the request took when it was
+    /// created.
+    pub(crate) response_middleware: Vec<Arc<ResponseMiddleware>>,
 }
 
 impl RequestBuilder {
+    /// A request taking the global configuration in force now, as
+    /// Laravel's factory hands it to each new pending request: the global
+    /// options run on it at once, so what the caller sets afterwards comes
+    /// after them, and the global middleware is kept for `send`.
     pub(crate) fn new(method: Method, url: String) -> Self {
-        Self {
+        let global = current_global_configuration();
+        let builder = Self {
             method,
             url,
             headers: Vec::new(),
@@ -510,7 +927,166 @@ impl RequestBuilder {
             retry_when: None,
             max_response_bytes: None,
             no_redirects: false,
+            base_url: None,
+            query: Vec::new(),
+            url_parameters: Vec::new(),
+            connect_timeout: None,
+            request_middleware: global.request,
+            response_middleware: global.response,
+        };
+        match global.options {
+            Some(options) => options(builder),
+            None => builder,
         }
+    }
+
+    /// The HTTP method: `"GET"`, `"POST"`, and so on. Lets a middleware
+    /// decide by the method.
+    pub fn method(&self) -> &'static str {
+        self.method.as_str()
+    }
+
+    /// The URL. Inside a global request middleware it is the URL the
+    /// request is sent to, its base URL, URL parameters and query applied;
+    /// before `send` it is the URL as given.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Put `url` in front of the request's URL when that URL does not
+    /// start with `http://` or `https://` (Laravel's `baseUrl`), with one
+    /// slash between them: `Http::get("users").base_url("https://api.test/v1")`
+    /// sends to `https://api.test/v1/users`. An absolute URL is sent as it
+    /// is. Calling it again replaces the base URL.
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+
+    /// Merge `params` into the URL's query (Laravel's
+    /// `withQueryParameters`). A name the URL already has takes the value
+    /// given here; the other names of the URL stay. The values are encoded
+    /// as a form encodes them. Calling it again adds more.
+    ///
+    /// The URL must be absolute once its base URL is applied, or `send`
+    /// fails.
+    pub fn query<K, V>(mut self, params: &[(K, V)]) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (name, value) in params {
+            self.query
+                .push((name.as_ref().to_string(), value.as_ref().to_string()));
+        }
+        self
+    }
+
+    /// Expand the `{name}` placeholders of the URL with `params` (Laravel's
+    /// `withUrlParameters`): `https://a.test/users/{id}` with `id` set to
+    /// `a/b` sends to `https://a.test/users/a%2Fb`.
+    ///
+    /// Every character of a value but the letters, the digits and `-`, `.`,
+    /// `_`, `~` is percent-encoded, so a value cannot add a path segment, a
+    /// query, a fragment or a host. A placeholder no value names is left as
+    /// it is. Only the simple `{name}` form is expanded. Calling it again
+    /// adds more.
+    pub fn url_parameters<P, K, V>(mut self, params: impl IntoIterator<Item = P>) -> Self
+    where
+        P: Borrow<(K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for pair in params {
+            let (name, value) = pair.borrow();
+            self.url_parameters
+                .push((name.as_ref().to_string(), value.as_ref().to_string()));
+        }
+        self
+    }
+
+    /// Add a file part to a `multipart/form-data` body (Laravel's
+    /// `attach`): `contents` under the field `name`, with `filename` when
+    /// the part is a file. Calling it again adds another part. It replaces
+    /// a JSON, form or raw body set before it, and [`Self::json`],
+    /// [`Self::form`] and [`Self::body`] replace the parts.
+    ///
+    /// The body is encoded when the request is sent, with a random
+    /// boundary in its `Content-Type`, and the fake records it encoded.
+    pub fn attach(
+        mut self,
+        name: impl Into<String>,
+        contents: impl AsRef<[u8]>,
+        filename: Option<&str>,
+    ) -> Self {
+        let part = MultipartPart {
+            name: name.into(),
+            contents: Bytes::copy_from_slice(contents.as_ref()),
+            filename: filename.map(str::to_string),
+        };
+        match &mut self.body {
+            Some(Body::Multipart(parts)) => parts.push(part),
+            _ => self.body = Some(Body::Multipart(vec![part])),
+        }
+        self
+    }
+
+    /// How long this request may take to connect (Laravel's
+    /// `connectTimeout`). The shared client allows 10 seconds.
+    ///
+    /// reqwest fixes the connect timeout when it builds a client, so each
+    /// distinct timeout gets a client of its own, built on first use and
+    /// kept; use a few fixed values rather than one computed per request.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// Apply the base URL, the URL parameters and the query to the URL,
+    /// and clear them, so applying again changes nothing.
+    fn resolve_url(&mut self) -> Result<(), FrameworkError> {
+        if let Some(base) = self.base_url.take() {
+            let absolute = ["http://", "https://"].iter().any(|scheme| {
+                self.url
+                    .get(..scheme.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+            });
+            if !absolute {
+                self.url = format!(
+                    "{}/{}",
+                    base.trim_end_matches('/'),
+                    self.url.trim_start_matches('/')
+                );
+            }
+        }
+        for (name, value) in std::mem::take(&mut self.url_parameters) {
+            let placeholder = format!("{{{name}}}");
+            if self.url.contains(&placeholder) {
+                let encoded = utf8_percent_encode(&value, URL_PARAMETER).to_string();
+                self.url = self.url.replace(&placeholder, &encoded);
+            }
+        }
+        let query = std::mem::take(&mut self.query);
+        if !query.is_empty() {
+            let mut url = url::Url::parse(&self.url).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "Http: query parameters need an absolute URL, and `{}` is none ({e}); \
+                     give the request a base_url",
+                    self.url
+                ))
+            })?;
+            let kept: Vec<(String, String)> = url
+                .query_pairs()
+                .into_owned()
+                .filter(|(name, _)| !query.iter().any(|(given, _)| given == name))
+                .collect();
+            url.query_pairs_mut()
+                .clear()
+                .extend_pairs(kept)
+                .extend_pairs(query);
+            self.url = url.into();
+        }
+        Ok(())
     }
 
     /// Do not follow HTTP redirects for this request: a 3xx response is
@@ -683,12 +1259,26 @@ impl RequestBuilder {
     /// retry policy is configured via [`Self::retry`], transient
     /// failures and 5xx responses are retried with exponential
     /// backoff (see [`Self::retry`] for the rules).
-    pub async fn send(self) -> Result<ClientResponse, FrameworkError> {
+    pub async fn send(mut self) -> Result<ClientResponse, FrameworkError> {
         // Surface a json()/form() serialization failure recorded on the
         // builder instead of sending a body that silently degraded to null.
         if let Some(err) = &self.body_error {
             return Err(FrameworkError::internal(err.clone()));
         }
+        // The global request middleware sees the URL the request goes to,
+        // and may change the request; whatever URL parts it adds are
+        // applied after it.
+        self.resolve_url()?;
+        for middleware in std::mem::take(&mut self.request_middleware) {
+            self = middleware(self);
+        }
+        if let Some(err) = &self.body_error {
+            return Err(FrameworkError::internal(err.clone()));
+        }
+        self.resolve_url()?;
+        let prepared = Prepared::of(&self)?;
+        let response_middleware = std::mem::take(&mut self.response_middleware);
+
         // Cap applied to whatever body the returned response buffers.
         let effective_max = self
             .max_response_bytes
@@ -699,7 +1289,10 @@ impl RequestBuilder {
         let mut last_err: Option<FrameworkError> = None;
         for attempt in 1..=max_attempts {
             let outcome = if fake::is_fake_active() {
-                fake::intercept(&self)
+                match fake::intercept(&self, &prepared) {
+                    fake::Interception::Answered(answer) => answer,
+                    fake::Interception::Network => build_and_send(&self, &prepared).await,
+                }
             } else if Http::is_guarded() {
                 // Process-global fail-closed mode: outbound calls
                 // that don't match an active fake error out instead
@@ -717,8 +1310,13 @@ impl RequestBuilder {
                     self.url,
                 )))
             } else {
-                build_and_send(&self).await
+                build_and_send(&self, &prepared).await
             };
+            let outcome = outcome.map(|response| {
+                response_middleware
+                    .iter()
+                    .fold(response, |response, middleware| middleware(response))
+            });
 
             match outcome {
                 Ok(resp) => {
@@ -792,28 +1390,26 @@ impl RequestBuilder {
 }
 
 /// Single attempt at the request. No retry logic, no fake interception.
-async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, FrameworkError> {
+/// The headers and the body come from `prepared`, the computation the
+/// fake records from too.
+async fn build_and_send(
+    builder: &RequestBuilder,
+    prepared: &Prepared,
+) -> Result<ClientResponse, FrameworkError> {
     // User-influenced URLs can opt out of redirect-following to close the
     // redirect-based SSRF vector; everything else uses the default
     // redirect-following client.
-    let http = if builder.no_redirects {
-        client_no_redirect()
-    } else {
-        client()
-    };
+    let http = client_for(builder.no_redirects, builder.connect_timeout)?;
     let mut req = http.request(builder.method.into_reqwest(), &builder.url);
 
-    for (k, v) in &builder.headers {
+    for (k, v) in &prepared.headers {
         req = req.header(k.as_str(), v.as_str());
     }
     if let Some(t) = builder.timeout {
         req = req.timeout(t);
     }
-    match &builder.body {
-        Some(Body::Json(v)) => req = req.json(v),
-        Some(Body::Form(v)) => req = req.form(v),
-        Some(Body::Raw(bytes)) => req = req.body(bytes.to_vec()),
-        None => {}
+    if let Some(body) = &prepared.body {
+        req = req.body(body.clone());
     }
 
     // Build the request so we can mutate its header map to inject
@@ -1181,7 +1777,8 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_methods_are_get_put_delete() {
+    fn idempotent_methods_are_get_head_put_delete() {
+        assert!(Method::Head.is_idempotent());
         assert!(Method::Get.is_idempotent());
         assert!(Method::Put.is_idempotent());
         assert!(Method::Delete.is_idempotent());

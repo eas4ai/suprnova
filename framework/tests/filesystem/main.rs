@@ -14,6 +14,7 @@ pub mod default_disk;
 pub mod disk_ext;
 pub mod disk_responses;
 pub mod filesystem;
+pub mod laravel_infra_gaps;
 pub mod path_traversal;
 pub mod public_url;
 pub mod read_through;

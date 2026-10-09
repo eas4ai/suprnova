@@ -111,6 +111,55 @@ impl ProcessFake {
         self
     }
 
+    /// Assert that a process with exactly these arguments ran, compared as
+    /// a list, as Laravel's `assertRan` compares an array command.
+    ///
+    /// `["printf", "a b"]` and `["printf", "a", "b"]` join to the same
+    /// command line, so [`assert_ran`](Self::assert_ran) cannot tell them
+    /// apart; this can. A shell line has no argument list and never
+    /// matches.
+    ///
+    /// # Panics
+    ///
+    /// When none did.
+    pub fn assert_ran_args(&self, args: &[&str]) -> &Self {
+        assert!(
+            self.recorded().iter().any(|process| {
+                process
+                    .args
+                    .as_deref()
+                    .is_some_and(|ran| ran.iter().map(String::as_str).eq(args.iter().copied()))
+            }),
+            "no process ran with the arguments {args:?}; ran: {:?}",
+            self.recorded()
+                .into_iter()
+                .map(|process| process.command_line)
+                .collect::<Vec<_>>()
+        );
+        self
+    }
+
+    /// Assert that a process with exactly this quoted command line ran:
+    /// each argument quoted for a POSIX shell where it needs it, as
+    /// [`InvokedProcess::command`](super::InvokedProcess::command) and
+    /// [`ProcessResult::command`] report it, or the shell line as given.
+    ///
+    /// # Panics
+    ///
+    /// When none did.
+    pub fn assert_ran_command_line(&self, command_line: &str) -> &Self {
+        let ran: Vec<String> = self
+            .recorded()
+            .into_iter()
+            .map(|process| process.command_line)
+            .collect();
+        assert!(
+            ran.iter().any(|line| line == command_line),
+            "the process `{command_line}` was not run; ran: {ran:?}"
+        );
+        self
+    }
+
     /// Assert that a process for which `check` holds ran.
     ///
     /// # Panics
@@ -213,8 +262,18 @@ impl ProcessFake {
 /// A process run under a fake, as the assertions see it.
 #[derive(Debug, Clone)]
 pub struct RecordedProcess {
-    /// The command line.
+    /// The command line: the arguments joined by spaces, or the shell line
+    /// as given. The patterns of [`ProcessFake::when`] and
+    /// [`ProcessFake::assert_ran`] match it.
     pub command: String,
+    /// The arguments, program first, as a list; `None` for a shell line.
+    /// Joined by spaces two lists can read the same, so
+    /// [`ProcessFake::assert_ran_args`] compares this.
+    pub args: Option<Vec<String>>,
+    /// The command line with each argument quoted for a POSIX shell where
+    /// it needs it, as [`InvokedProcess::command`](super::InvokedProcess::command)
+    /// reports it, or the shell line as given.
+    pub command_line: String,
     /// The working directory, when one was set.
     pub path: Option<PathBuf>,
     /// The environment changes, with `None` for a removed inherited variable.
@@ -300,6 +359,14 @@ impl FakeResult {
 /// newline in the output. A started process reports itself running for
 /// [`runs_for`](Self::runs_for) calls of `running`, showing a line of output
 /// at each.
+///
+/// A started process reveals its output a line at a time, as Laravel's
+/// fake does: each call of `output` or `latest_output` reveals the next
+/// standard output line, `output` answering every line revealed so far and
+/// `latest_output` the line it revealed, or the empty string when none is
+/// left. The error output works the same way. A line `running` showed is
+/// revealed already, and every line is once `running` has answered
+/// `false`. The result `wait` returns holds all of the output.
 #[derive(Debug, Clone, Default)]
 pub struct FakeDescription {
     id: Option<u32>,
@@ -539,6 +606,8 @@ pub(crate) fn resolve(pending: &PendingProcess) -> Result<Option<Canned>, Proces
     };
     lock(&state.recorded).push(RecordedProcess {
         command: command.clone(),
+        args: pending.arguments().map(<[String]>::to_vec),
+        command_line: pending.command_line(),
         path: pending.path.clone(),
         env: pending.env.clone(),
         input: pending.input.clone().unwrap_or_default(),
@@ -548,13 +617,22 @@ pub(crate) fn resolve(pending: &PendingProcess) -> Result<Option<Canned>, Proces
 }
 
 /// A started process under a fake.
+///
+/// Its output arrives a line at a time, as Laravel's `FakeInvokedProcess`
+/// gives it, so a test of code that polls a running process sees output
+/// arrive over time: each read of a stream reveals that stream's next
+/// line, and a line `running` showed is revealed already.
 pub(crate) struct FakeInvoked {
     canned: Canned,
     remaining: u32,
     stopped: bool,
     /// How many lines of output `running` has shown.
     shown: usize,
+    /// How many standard output lines the reads have revealed. The readers
+    /// take `&self`, so it is an atomic; `output` and `latest_output`
+    /// share it, as Laravel's `nextOutputIndex` is shared.
     out_read: AtomicUsize,
+    /// The same for standard error.
     err_read: AtomicUsize,
     callback: Mutex<Option<OutputCallback>>,
     signals: Mutex<Vec<Signal>>,
@@ -618,23 +696,51 @@ impl FakeInvoked {
         true
     }
 
+    /// Reveal the next line of `kind` and answer what the reader asks for:
+    /// every line revealed so far, or with `latest` the line this call
+    /// revealed, empty when none was left.
+    ///
+    /// The lines `running` showed count as revealed, and once `running`
+    /// has answered `false` (it showed them all) or the process was
+    /// stopped, every line is.
     pub(crate) fn read(&self, kind: OutputKind, latest: bool) -> String {
         if self.quiet {
             return String::new();
         }
-        let text = match kind {
-            OutputKind::Out => self.canned.output.clone(),
-            OutputKind::Err => self.canned.error_output.clone(),
-        };
-        if !latest {
-            return text;
-        }
-        let read = match kind {
+        let revealed = match kind {
             OutputKind::Out => &self.out_read,
             OutputKind::Err => &self.err_read,
         };
-        let from = read.swap(text.len(), Ordering::Relaxed).min(text.len());
-        text[from..].to_owned()
+        // The lines of the stream, in order. Collected per read rather than
+        // kept, so a started fake stays the size it was.
+        let lines: Vec<&str> = self
+            .canned
+            .chunks
+            .iter()
+            .filter(|(line_kind, _)| *line_kind == kind)
+            .map(|(_, line)| line.as_str())
+            .collect();
+        let shown = if self.stopped {
+            lines.len()
+        } else {
+            self.canned.chunks[..self.shown]
+                .iter()
+                .filter(|(shown_kind, _)| *shown_kind == kind)
+                .count()
+        };
+        let next = |count: usize| (count.max(shown) + 1).min(lines.len());
+        let before = match revealed.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            Some(next(count))
+        }) {
+            Ok(count) | Err(count) => count.max(shown),
+        };
+        if latest {
+            return lines
+                .get(before)
+                .map(|line| (*line).to_owned())
+                .unwrap_or_default();
+        }
+        lines[..next(before)].concat()
     }
 
     pub(crate) fn stop(&mut self) {
