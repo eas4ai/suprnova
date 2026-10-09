@@ -1,0 +1,721 @@
+use serde::{Deserialize, Serialize};
+use serial_test::serial;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::FrameworkError;
+use suprnova::async_trait;
+use suprnova::mail::address::Attachment;
+use suprnova::mail::memory::InMemoryMailTransport;
+use suprnova::mail::send_job::SendMailJob;
+use suprnova::mail::{Address, Mail, Mailable};
+use suprnova::queue::Queue;
+use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::memory::MemoryQueueDriver;
+use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct WelcomeMail {
+    name: String,
+}
+
+#[async_trait]
+impl Mailable for WelcomeMail {
+    fn mailable_name() -> &'static str {
+        "WelcomeMail"
+    }
+    fn subject(&self) -> String {
+        format!("Welcome, {}", self.name)
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Hi {{ name }}!".into())
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct EmptyBodyMail;
+
+#[async_trait]
+impl Mailable for EmptyBodyMail {
+    fn mailable_name() -> &'static str {
+        "EmptyBodyMail"
+    }
+    fn subject(&self) -> String {
+        "nope".into()
+    }
+    // No html_template_source, no text_template_source.
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_dispatches_through_queue_and_send_job_renders_via_transport() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    ));
+
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued mail must end up in the transport");
+    assert_eq!(msgs[0].subject, "Welcome, Alice");
+    assert_eq!(msgs[0].text.as_deref(), Some("Hi Alice!"));
+    assert_eq!(msgs[0].to.len(), 1);
+    assert_eq!(msgs[0].to[0].email, "alice@example.org");
+    assert_eq!(msgs[0].from.email, "noreply@suprnova.dev");
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_rejects_mailable_without_any_body_at_push_time() {
+    // Defense layer 1: MailBuilder::queue's empty-body guard must fire
+    // before any envelope is created. The queue driver stays empty.
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let err = Mail::to("alice@example.org")
+        .queue(EmptyBodyMail)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("EmptyBodyMail"),
+        "error mentions the Mailable name: {msg}"
+    );
+    assert!(
+        msg.contains("text_template_source") || msg.contains("html_template_source"),
+        "error suggests which methods to implement: {msg}"
+    );
+
+    // The queue stays empty - no envelope was committed.
+    let popped = driver.pop(Duration::from_secs(60)).await.unwrap();
+    assert!(popped.is_none(), "no envelope should have been pushed");
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
+    // If a Mailable's factory isn't registered, SendMailJob::handle
+    // returns `unknown mailable: {name}` from the registry. We invoke
+    // handle directly rather than round-tripping through the worker so
+    // the assertion is targeted at the registry lookup, not at
+    // end-to-end retry/dead-letter behavior. This protects against
+    // silent retry loops on a typo'd mailable_name.
+    use suprnova::queue::Job;
+
+    // A transport must be bound - handle resolves the transport AFTER
+    // the registry lookup, but we still set one to keep failure modes
+    // unambiguous.
+    let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
+
+    let job = SendMailJob {
+        to: vec!["alice@example.org".into()],
+        cc: vec![],
+        bcc: vec![],
+        reply_to: vec![],
+        from_override: None,
+        mailable_name: "TotallyUnregisteredMailable".to_string(),
+        mailable_payload: serde_json::json!({}),
+        tags: vec![],
+        metadata: Default::default(),
+        priority: None,
+        headers: vec![],
+        return_path: None,
+        subject_override: None,
+        attachments: vec![],
+    };
+    let err = job.handle().await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unknown mailable"),
+        "error names the missing registry entry: {msg}"
+    );
+    assert!(
+        msg.contains("TotallyUnregisteredMailable"),
+        "error names the missing mailable: {msg}"
+    );
+}
+
+// Regression: push-time guard must match `MailBuilder::send`'s guard
+// semantically. A Mailable with no template source but an override of
+// `render_html` that returns Some(...) must be accepted by BOTH paths.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct OverriddenRenderMail;
+
+#[async_trait]
+impl Mailable for OverriddenRenderMail {
+    fn mailable_name() -> &'static str {
+        "OverriddenRenderMail"
+    }
+    fn subject(&self) -> String {
+        "rendered".into()
+    }
+    // No template_source - relies entirely on the render override below.
+    fn render_html(&self) -> Result<Option<String>, FrameworkError> {
+        Ok(Some("<p>pre-rendered html, no template source</p>".into()))
+    }
+    fn from(&self) -> Option<Address> {
+        Some("noreply@suprnova.dev".into())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_queue_accepts_mailable_that_overrides_render_without_template_source() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+
+    let _ = suprnova::mail::register_mailable_factory::<OverriddenRenderMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    // Must succeed - the override produces a body even though
+    // html_template_source returns None.
+    Mail::to("alice@example.org")
+        .queue(OverriddenRenderMail)
+        .await
+        .expect("queue accepts mailables that override render_html");
+
+    // And the worker delivers the pre-rendered html through the transport.
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued override-mailable must deliver");
+    assert_eq!(
+        msgs[0].html.as_deref(),
+        Some("<p>pre-rendered html, no template source</p>")
+    );
+    assert!(
+        msgs[0].text.is_none(),
+        "no text body - only the html override produced output"
+    );
+}
+
+// Regression: a builder-side `.subject("...")` override and `.attach(...)`
+// extras applied to `Mail::to(...).queue(mailable)` must reach the rendered
+// outgoing message exactly the way they would on the sync `.send(...)` path.
+// Prior to the fix, both were silently dropped by `build_send_job`.
+#[tokio::test]
+#[serial]
+async fn mail_queue_threads_builder_subject_override_and_attachments_to_worker() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    register_job::<SendMailJob>();
+
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let invoice = Attachment::new("invoice.txt", b"PAID".to_vec(), "text/plain");
+
+    Mail::to("alice@example.org")
+        .subject("Override Subject")
+        .attach(invoice.clone())
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..200 {
+        if !capture.captured().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    let msgs = capture.captured();
+    assert_eq!(msgs.len(), 1, "queued mail must end up in the transport");
+    assert_eq!(
+        msgs[0].subject, "Override Subject",
+        "builder .subject(...) must override the mailable's render_subject on the queue path",
+    );
+    assert_eq!(
+        msgs[0].attachments.len(),
+        1,
+        "builder .attach(...) must reach the rendered message on the queue path",
+    );
+    assert_eq!(msgs[0].attachments[0].filename, "invoice.txt");
+    assert_eq!(msgs[0].attachments[0].content, b"PAID");
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct BulkMail {}
+
+#[async_trait]
+impl Mailable for BulkMail {
+    fn mailable_name() -> &'static str {
+        "BulkMail"
+    }
+    fn subject(&self) -> String {
+        "bulk".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("bulk body".into())
+    }
+    fn queue(&self) -> Option<&'static str> {
+        Some("bulk")
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_on_queue_lands_on_the_named_queue_not_default() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .on_queue("emails")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let default_pop = driver
+        .pop_from(Duration::from_secs(60), &["default".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        default_pop.is_none(),
+        "default must not drain a push routed to \"emails\""
+    );
+
+    let emails_pop = driver
+        .pop_from(Duration::from_secs(60), &["emails".to_string()])
+        .await
+        .unwrap()
+        .expect("\"emails\" must drain the routed push");
+    assert_eq!(emails_pop.envelope.queue.as_deref(), Some("emails"));
+}
+
+#[tokio::test]
+#[serial]
+async fn mail_on_queue_outranks_a_queue_route_and_the_mailables_own_hook() {
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<BulkMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::route::<SendMailJob>(None, Some("routed-mail")); // operator route
+
+    // No `.on_queue(...)` - `BulkMail::queue()` applies and outranks the route.
+    Mail::to("a@example.org").queue(BulkMail {}).await.unwrap();
+    let via_hook = driver
+        .pop_from(Duration::from_secs(60), &["bulk".to_string()])
+        .await
+        .unwrap()
+        .expect("Mailable::queue() outranks the registered route");
+    assert_eq!(via_hook.envelope.queue.as_deref(), Some("bulk"));
+    let routed = driver
+        .pop_from(Duration::from_secs(60), &["routed-mail".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        routed.is_none(),
+        "the route must not win over Mailable::queue()"
+    );
+
+    // `.on_queue(...)` outranks BOTH the route and the mailable's hook.
+    Mail::to("b@example.org")
+        .on_queue("urgent")
+        .queue(BulkMail {})
+        .await
+        .unwrap();
+    let via_builder = driver
+        .pop_from(Duration::from_secs(60), &["urgent".to_string()])
+        .await
+        .unwrap()
+        .expect("builder .on_queue(...) outranks Mailable::queue()");
+    assert_eq!(via_builder.envelope.queue.as_deref(), Some("urgent"));
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct InvoiceMail {
+    wait_for_commit: bool,
+}
+
+#[async_trait]
+impl Mailable for InvoiceMail {
+    fn mailable_name() -> &'static str {
+        "InvoiceMail"
+    }
+    fn subject(&self) -> String {
+        "Your invoice".into()
+    }
+    fn text_template_source(&self) -> Option<String> {
+        Some("Attached.".into())
+    }
+    fn after_commit(&self) -> bool {
+        self.wait_for_commit
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_mailable_that_opts_in_is_queued_at_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: true,
+                })
+                .await?;
+            assert_eq!(
+                Queue::size(None).await?,
+                0,
+                "the mail must not reach the queue before the commit"
+            );
+            Mail::to("alice@example.org")
+                .later(
+                    Duration::from_secs(60),
+                    InvoiceMail {
+                        wait_for_commit: true,
+                    },
+                )
+                .await?;
+            assert_eq!(Queue::size(None).await?, 0, "nor may a delayed one");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        2,
+        "both are queued at the commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rollback_discards_a_queued_mailable_that_opted_in() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    let result: Result<(), FrameworkError> = suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: true,
+                })
+                .await?;
+            Err(FrameworkError::internal("force rollback"))
+        })
+    })
+    .await;
+
+    assert!(result.is_err(), "the transaction rolled back");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        0,
+        "mail about work that was rolled back must never be queued"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_mailable_that_did_not_opt_in_is_queued_before_the_commit() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let _db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite");
+
+    suprnova::DB::transaction(|_tx| {
+        Box::pin(async {
+            Mail::to("alice@example.org")
+                .queue(InvoiceMail {
+                    wait_for_commit: false,
+                })
+                .await?;
+            assert_eq!(Queue::size(None).await?, 1, "the default is unchanged");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(driver.size(None).await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_carries_the_context_of_the_code_that_queued_it() {
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    suprnova::Context::scope(suprnova::ContextStore::default(), async {
+        suprnova::Context::add("trace_id", "abc");
+        Mail::to("alice@example.org")
+            .queue(WelcomeMail {
+                name: "Alice".into(),
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let envelope = driver
+        .pop(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the queued mail")
+        .envelope;
+    let context = envelope.context.expect("the mail job carries the context");
+    assert_eq!(
+        context.data.get("trace_id"),
+        Some(&serde_json::json!("abc"))
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn queued_mail_fires_message_sending_and_message_sent() {
+    // The manual promises both events for every successful dispatch.
+    // Changing `send` to `queue` must not silently drop them for audit or
+    // metrics listeners.
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    let _events = EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    let _ = Mail::set_transport(capture.clone());
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect("the worker starts");
+
+    assert_eq!(capture.captured().len(), 1, "the queued mail was delivered");
+    let sending = dispatched::<MessageSending>(|e| e.subject == "Welcome, Alice");
+    let sent = dispatched::<MessageSent>(|e| e.subject == "Welcome, Alice");
+    assert_eq!(sending.len(), 1, "MessageSending fires once on the worker");
+    assert_eq!(sent.len(), 1, "MessageSent fires once on the worker");
+    assert_eq!(sent[0].to[0].email, "alice@example.org");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_queued_send_fires_message_sending_but_not_message_sent() {
+    use suprnova::events::{EventFacade, dispatched};
+    use suprnova::mail::transport::{MailTransport, OutgoingMessage};
+    use suprnova::mail::{MessageSending, MessageSent};
+
+    struct Refusing;
+    #[async_trait]
+    impl MailTransport for Refusing {
+        async fn send(&self, _msg: &OutgoingMessage) -> Result<(), FrameworkError> {
+            Err(FrameworkError::internal("provider down"))
+        }
+    }
+
+    let _events = EventFacade::fake();
+    let _ = Mail::set_transport(Arc::new(Refusing));
+    let _ = suprnova::mail::register_mailable_factory::<WelcomeMail>();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail { name: "Bob".into() })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect("the worker starts");
+
+    assert_eq!(
+        dispatched::<MessageSending>(|e| e.subject == "Welcome, Bob").len(),
+        1
+    );
+    assert!(
+        dispatched::<MessageSent>(|e| e.subject == "Welcome, Bob").is_empty(),
+        "a failed send must not report MessageSent"
+    );
+}
+
+/// Set only in the child process that
+/// `a_worker_with_no_manual_job_registration_delivers_queued_mail` spawns.
+const SCAFFOLD_WORKER_CHILD: &str = "SUPRNOVA_SCAFFOLD_MAIL_WORKER_CHILD";
+
+/// The worker of an app built from the manual: a transport, a queue driver
+/// and the mailable factory, and no `register_job` call. It runs in its own
+/// process because the job registry is process-global and other tests in
+/// this binary register `SendMailJob` by hand, which would hide the defect.
+#[tokio::test]
+async fn scaffold_shaped_mail_worker_child() {
+    if std::env::var(SCAFFOLD_WORKER_CHILD).is_err() {
+        return;
+    }
+    let _events = suprnova::events::EventFacade::fake();
+    let capture = Arc::new(InMemoryMailTransport::new());
+    Mail::set_transport(capture.clone()).unwrap();
+    suprnova::mail::register_mailable_factory::<WelcomeMail>().unwrap();
+    let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    Mail::to("alice@example.org")
+        .queue(WelcomeMail {
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+    run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: Some(1),
+            queues: Vec::new(),
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect("the worker starts");
+
+    let exceptions: Vec<String> =
+        suprnova::events::dispatched::<suprnova::queue::events::JobExceptionOccurred>(|_| true)
+            .into_iter()
+            .map(|e| e.exception)
+            .collect();
+    let msgs = capture.captured();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the worker must deliver queued mail with no manual register_job; \
+         worker exceptions: {exceptions:?}"
+    );
+    assert_eq!(msgs[0].subject, "Welcome, Alice");
+}
+
+#[test]
+fn a_worker_with_no_manual_job_registration_delivers_queued_mail() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "queue::scaffold_shaped_mail_worker_child",
+            "--nocapture",
+        ])
+        .env(SCAFFOLD_WORKER_CHILD, "1")
+        .output()
+        .expect("spawn the worker child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("running 1 test"),
+        "the child filter matched no test (its module path changed?); stdout:\n{stdout}"
+    );
+    assert!(
+        output.status.success(),
+        "a worker that follows the manual must deliver queued mail; status: {}\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+}
