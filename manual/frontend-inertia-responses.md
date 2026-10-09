@@ -1937,43 +1937,287 @@ per-error decision - see
 
 ## Server-driven `<head>` elements
 
-Inertia 3.5 added a client option for letting the server decide what goes in
-`<head>` - useful when meta tags depend on the record you just loaded, and you
-don't want the title and OG tags to live in two places.
+`Head` manages the document `<head>`: the title, meta tags, Open Graph and
+X cards, icons, resource hints and JSON-LD schemas. It is Laravel Head's
+API. Every Inertia response shares the resolved head as a `head` prop of
+rendered elements, and the first visit writes the same elements into its
+`<head>`, so crawlers and link previews read them without JavaScript.
 
-This needs no framework support. The client reads the elements from an
-**ordinary prop**, so any handler can supply them:
+Register the defaults at boot and set page metadata in the handler:
 
 ```rust
-#[handler]
-async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
-    inertia_response!(&req, "Posts/Show", {
-        "post": post,
-        "head": [
-            format!("<title>{}</title>", post.title),
-            format!(r#"<meta property="og:title" content="{}">"#, post.title),
-        ],
-    })
+use suprnova::{Head, InertiaResponse, Request, Response, HttpResponse};
+
+pub fn register_head() {
+    Head::defaults(|head| head
+        .title("Laravel")
+        .title_suffix(" - Laravel")
+        .description("Build something great."));
+}
+
+pub async fn about(request: Request) -> Response {
+    // Renders `<title data-inertia="title">About - Laravel</title>`.
+    Head::title("About");
+    InertiaResponse::new("About")
+        .resolve(&request)
+        .await
+        .map_err(HttpResponse::from)
 }
 ```
 
-Opt in on the client:
+Then enable `serverHead` wherever you call `createInertiaApp()`, and in
+your SSR entry point if you have one:
 
 ```js
 createInertiaApp({
-  serverHead: true,        // reads the `head` prop
-  // serverHead: 'meta',   // or read a differently-named prop
-  // serverHead: (page) => [...],  // or compute from the whole page
+  serverHead: true,
 })
 ```
 
-Each string is an HTML element. The client stamps a `data-inertia` attribute on
-anything that lacks one so it can diff head elements across navigations; supply
-your own `data-inertia="og-title"` when you want stable identity rather than
-positional matching.
+### Resolution precedence
 
-Escape anything interpolated from user data - these strings are injected as
-HTML, so the usual rules apply.
+A page's head resolves from five layers, lowest first:
+
+1. The defaults, from `Head::defaults`.
+2. Route group metadata, from `with_head` on a group.
+3. Route metadata, from `with_head` on a route.
+4. Run-time metadata, from the `Head::title`, `Head::description` and
+   other calls the request makes.
+5. Error metadata, from `Head::errors`, for the response's error status.
+
+A higher layer replaces a lower one field by field: a run-time title
+replaces the route's title and keeps the route's description. A title
+takes the prefix and suffix of the layers below it, so `Head::title("About")`
+over the defaults above renders `About - Laravel`, while the defaults'
+own `Laravel` renders as it is. `exact_title("...")` ignores an inherited
+prefix and suffix. A repeatable value (an Open Graph image, an icon, a
+meta tag) keeps every entry, and adding the same key again (the image's
+URL, the icon's address, the meta tag's name) updates the earlier entry.
+Open Graph media a layer sets replaces the media of that kind from the
+layers below, so a page's image wins over a default image.
+
+### Route metadata
+
+Use `with_head` on a route, or on a group for all of its routes. It works
+on `get!`, `any!` and the other route macros, on `group!(...)`, and on
+`Router::group(...)`:
+
+```rust
+use suprnova::{get, group, routes};
+
+routes! {
+    get!("/contact", controllers::contact)
+        .with_head(|head| head.title("Contact Us").description("Get in touch.")),
+    group!("/admin", {
+        get!("/dashboard", controllers::admin::dashboard)
+            .with_head(|head| head.title("Dashboard")),
+    }).with_head(|head| head.robots("noindex, nofollow")),
+}
+```
+
+### Run-time metadata
+
+Each `Head` call sets the current request's metadata and returns a
+handle for more calls. Later calls win for single values:
+
+```rust
+use suprnova::Head;
+
+Head::title(&post.title)
+    .description(&post.summary)
+    .when(post.is_draft, |head| head.hidden_from_robots());
+```
+
+The request's metadata lives in the request's container scope, so
+concurrent requests never see each other's. Outside a request a `Head`
+call logs a warning and does nothing; `Head::try_update(|head| ...)`
+returns the error instead.
+
+`Head::canonical()` links the request's URL over `https`;
+`canonical_url("/about")` links another address, made absolute on the
+application's origin, and `canonical_keep_scheme()` keeps the URL's own
+scheme. `robots("noindex, nofollow")`, `robots_rules([...])`,
+`searchable_by_robots()` and `hidden_from_robots()` set the robots
+directives.
+
+### Error pages
+
+Register metadata per error status. It wins over every other layer when
+a response is rendered for that status:
+
+```rust
+use suprnova::Head;
+
+Head::errors(|errors| errors
+    .defaults(|head| head.robots("noindex, follow"))
+    .status(404, |head| head
+        .title("Page Not Found")
+        .description("The page you are looking for could not be found.")));
+```
+
+The Inertia [error page](#error-pages) applies it for the status it
+renders. When you render an error page another way, call
+`Head::status(404)` first.
+
+### Open Graph and X cards
+
+```rust
+use suprnova::Head;
+use suprnova::head::{ImageType, OgMedia, OgType, OpenGraph, TwitterCard, TwitterCardType};
+
+Head::defaults(|head| head
+    .og(OpenGraph::new().site_name("Laravel").kind(OgType::Website))
+    .twitter(TwitterCard::new().card(TwitterCardType::SummaryLargeImage)));
+
+Head::og_image(
+    OgMedia::new(&post.cover_url)
+        .alt(&post.cover_alt)
+        .width(1200)
+        .height(630)
+        .kind(ImageType::Jpeg),
+);
+```
+
+The document title and description fill a missing `og:title` and
+`og:description`. `og_video` and `og_audio` add video and audio entries.
+Once a layer calls `twitter(...)`, the X card renders, with its title,
+description and image filled from the document title, the description and
+the first Open Graph image; `twitter_image(...)` names another image.
+
+### Theme colors, application metadata and icons
+
+```rust
+use suprnova::Head;
+use suprnova::head::{Icon, ImageType, Media, Pwa};
+
+Head::defaults(|head| head
+    .theme_color("#ffffff", Media::Light)
+    .theme_color("#111827", Media::Dark)
+    .color_scheme("light dark")
+    .favicon(Icon::new("/favicon.svg").kind(ImageType::Svg))
+    .apple_touch_icon(Icon::new("/apple-touch-icon.png").sizes("180x180"))
+    .mask_icon("/safari-pinned-tab.svg", "#111827")
+    .pwa(Pwa::new("Laravel").manifest("/site.webmanifest")));
+```
+
+`theme_color(color, None)` sets one color for every media; `Media::Light`,
+`Media::Dark`, `Media::Portrait`, `Media::Landscape` and
+`Media::query("(min-width: 600px)")` scope it. `application_name`,
+`referrer`, `viewport`, `apple_web_app_title`, `web_app_capable`,
+`apple_web_app_status_bar_style`, `icon`, `apple_touch_startup_image` and
+`manifest` set the rest. `pwa(...)` sets the application name, the Apple
+web app title, web app capable, and the manifest, theme color, touch icon
+and status bar style you give it; the manifest file and the service worker
+stay yours to write.
+
+### Performance and discovery
+
+```rust
+use suprnova::Head;
+use suprnova::head::{Feed, Hint};
+
+Head::preload(Hint::new("/fonts/inter.woff2").as_kind("font").crossorigin())
+    .prefetch("/images/next.webp")
+    .preconnect("https://cdn.example.com")
+    .dns_prefetch("https://analytics.example.com")
+    .alternates([("en", "https://example.com/en/about"), ("x-default", "https://example.com/about")])
+    .feed(Feed::rss("/feed").title("Laravel RSS"));
+```
+
+`Head::paginate(&paginator)` writes the `prev` and `next` links of a
+length-aware or cursor page; `prev_page(url)` and `next_page(url)` set
+them by hand.
+
+### Custom tags and schemas
+
+`meta(name, content)` writes `property` for an `og:` or `article:` name and
+`name` otherwise; `meta_for(name, content, media)` adds a media query, and
+`meta_tag(MetaTag::new(..).property(true))` chooses the attribute.
+`link(rel, href)` and `link_tag(LinkTag::new(rel, href).attribute(..))`
+write a `<link>`. `schema(...)` adds a JSON-LD object, written as its own
+`<script type="application/ld+json">` element:
+
+```rust
+use suprnova::Head;
+use suprnova::head::Schema;
+
+Head::schema(Schema::of("Product").set("name", &product.name))
+    .schema(Schema::breadcrumbs().item("Home", "/").item("Shop", "/shop"))
+    .schema(Schema::faq().question("Is it free?", "Yes, it is open source."));
+```
+
+Every value is HTML-escaped. A schema's JSON escapes `<`, `>` and `&`, so
+a value that holds `</script>` cannot end the element.
+
+### Rendering
+
+An Inertia response carries the head as a `head` prop: one rendered
+element per string, each with a stable `data-inertia` key (`title`,
+`description`, `og:image:0`, `meta:format-detection`). The client adopts
+the first visit's elements by those keys and keeps them in step on every
+visit. A partial reload carries no `head` prop, so the client keeps the
+last full page's head. A response no layer sets anything for carries no
+`head` prop, so the page object of an application that does not use
+`Head` stays as it is, and an application that builds its own `head` prop
+keeps it: a prop the page or the shared data sets wins over `Head`'s. If
+your pages use a `head` prop of their own, rename `Head`'s:
+
+```rust
+suprnova::Head::inertia("_head"); // then `serverHead: '_head'` on the client
+```
+
+The first visit writes the elements into its `<head>` once. Under SSR,
+an element whose `data-inertia` key the SSR head already carries is left
+out, and so is the title when the SSR head has one, so each element
+appears once while every other SSR head element stays. While `Head` sets
+a title, the document writes no default title, and while it sets a
+viewport, the framework's own document writes no viewport of its own. A
+title set with `InertiaResponse::title` keeps working while no `Head`
+title is set.
+
+Tags that the first response writes and the client never changes, such as
+the viewport, the color scheme, icons and the manifest, can be Inertia
+globals. They are written into the first visit only, without a
+`data-inertia` key, and never into the `head` prop:
+
+```rust
+use suprnova::Head;
+
+Head::inertia_globals(|head| head
+    .viewport("width=device-width, initial-scale=1")
+    .color_scheme("light dark")
+    .manifest("/site.webmanifest"));
+```
+
+For a server-rendered view, `Head::render_html()` returns the resolved
+tags and `Head::to_array()` returns them as data, one object per tag with
+its `key`, `element`, `attributes` and `content`. `Head::canonical()` there
+needs the request's URL, which a route that declares `with_head` records;
+elsewhere give the URL with `canonical_url`.
+
+### Moving from Inertia's `<Head>` and title callbacks
+
+The starter kits pass a `title` callback to `createInertiaApp` and set
+titles with Inertia's `<Head>` component. When you adopt `Head`, remove the
+`title` callback from your app and SSR entry points so `Head` decides the
+final title, and move the tags your pages set with `<Head>` into `Head`, so
+the two never define the same element.
+
+### Why Suprnova diverges
+
+- **No Blade directive.** Laravel Head renders through `@head` in a Blade
+  layout. Suprnova's own Inertia document and root templates write the
+  head for you, and `Head::render_html()` serves other views.
+- **Keys name the element's role.** Laravel Head's keys are internal.
+  Suprnova's keys are documented above, so an SSR head that writes the same
+  key replaces the server's element.
+- **Run-time calls are request-scoped.** One Rust process serves many
+  requests at once, so the run-time layer lives in the request's container
+  scope, and the defaults in the application container, where
+  `TestContainer::fake()` isolates them.
+- **Builders, not named arguments.** Rust has no named arguments, so
+  `og(type: ..., title: ...)` becomes `og(OpenGraph::new().kind(..).title(..))`
+  and `ogImage(url, alt: ...)` becomes `og_image(OgMedia::new(url).alt(..))`.
 
 ## The root template
 
@@ -2224,7 +2468,8 @@ The address is the `.ssr_hot_url(...)` URL, else the file's content, else
 the `.vite_dev_server(...)` URL when the file is empty.
 `.ssr_hot_file(...)` names another file. Without the file the visit takes
 the worker path with its bundle check, whatever listens at the dev server's
-port. Production never goes hot.
+port. Production never goes hot. The same file decides the
+[Vite tags](#vite-tags) in development.
 
 A dev server that answers `/__inertia_ssr` with an error status is a
 failure like the worker's: the visit dispatches `SsrRenderFailed`, calls the
@@ -2393,6 +2638,70 @@ Laravel sets no SSR timeout of its own and inherits its HTTP client's
 otherwise hold every first visit for 30 seconds before the client-rendered
 fallback.
 
+## Vite tags
+
+The Inertia document writes the `<script>` and `<link>` tags of your Vite
+build. `Vite` writes the same tags for any other page, such as an Askama
+view or an error page, as Laravel's `@vite` directive does:
+
+```rust
+use suprnova::{FrameworkError, InertiaConfig, Vite};
+
+fn assets() -> Result<String, FrameworkError> {
+    // The configured entry points, the tags the Inertia document writes.
+    let app = Vite::to_html()?;
+    // Entry points you name.
+    let admin = Vite::tags(["src/admin.ts", "src/admin.css"])?;
+    Ok(format!("{app}{admin}"))
+}
+
+fn config() -> InertiaConfig {
+    // `src/app.css` loads on every page beside the entry point.
+    InertiaConfig::new().entry_points(["src/app.css"])
+}
+```
+
+`Vite` reads the configuration `Inertia::install` retained;
+`InertiaConfig::vite_tags(entry_points)` renders against a configuration
+you hold. With the build manifest, the tags name each entry's hashed
+script, its stylesheets and a `modulepreload` for each imported chunk,
+each file once, every stylesheet before the first script, and every URL
+under `assets_base_url` with the public root in front. A missing manifest
+is an error that names its path, and an entry the manifest lacks an error
+that names the entry. The Inertia document keeps its own answer to a
+missing manifest: the legacy `/assets/main.js` and `/assets/main.css`.
+
+Which files the tags name depends on the mode and the hot file:
+
+| Mode | Hot file | Manifest | The tags point at |
+|---|---|---|---|
+| Development | exists | any | the dev server at the file's URL |
+| Development | missing | exists | the manifest's files |
+| Development | missing | missing | the configured `vite_dev_server` |
+| Production | ignored | exists | the manifest's files |
+
+`InertiaConfig::hot_file()` and `Vite::hot_file()` answer the hot file's
+path, `public/hot` unless `ssr_hot_file(...)` names another.
+`Vite::is_running_hot()` answers whether the file exists, and
+`Vite::dev_server_url()` its trimmed content (the configured dev server URL
+when the file is empty), `None` without it. Production never reads the
+hot file: both answer as if it did not exist.
+
+`suprnova serve` writes the hot file only for a frontend that declares
+`@inertiajs/vite`. A frontend without it keeps the dev server tags until a
+build writes a manifest. If your development pages load stale built files
+instead of the dev server, a manifest from an earlier `vite build` is
+there: declare `@inertiajs/vite` in `frontend/package.json`, as every
+starter kit does, or delete the stale build.
+
+### Why Suprnova diverges
+
+Laravel goes hot whenever the hot file exists, in production too, so a hot
+file left in a deploy points visitors at a dev server. Suprnova never reads
+it in production, and in development without a hot file or a manifest it
+keeps the configured dev server, because `suprnova serve` writes no hot
+file for a frontend without the Inertia Vite plugin.
+
 ## Configuration
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
@@ -2440,9 +2749,11 @@ Frontend-specific defaults:
 Two attributes of the HTML shell are worth calling out.
 
 `<title>` comes from `.title(...)` on the response, or from
-`.default_title(...)` when the response set none. Under [SSR](#ssr) the
-page's own head wins over **both**: a worker head carrying a `<title>` is
-the document's only one, and the shell leaves its title out entirely.
+`.default_title(...)` when the response set none. A title
+[`Head`](#server-driven-head-elements) resolves wins over both. Under
+[SSR](#ssr) the page's own head wins over **all of them**: a worker head
+carrying a `<title>` is the document's only one, and the shell leaves its
+title out entirely.
 
 `<html lang="...">` is the one attribute the framework's own document does
 not let you set, because the right value is already known - it is the

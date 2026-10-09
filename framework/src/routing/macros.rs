@@ -355,6 +355,24 @@ where
         self
     }
 
+    /// Set this route's document head metadata, the route layer of
+    /// [`Head`](crate::Head): it wins over the defaults and the route
+    /// group's metadata, field by field, and the request's run-time calls
+    /// win over it. Laravel Head's `withHead`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{get, Request, Response};
+    /// # async fn contact(_req: Request) -> Response { suprnova::text("ok") }
+    /// get!("/contact", contact)
+    ///     .with_head(|head| head.title("Contact Us").description("Get in touch."));
+    /// ```
+    pub fn with_head(
+        self,
+        f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
+    ) -> Self {
+        self.middleware(crate::view::head::HeadLayer::route(f))
+    }
+
     /// Add middleware to this route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(boxed_as(middleware));
@@ -810,6 +828,24 @@ where
     pub fn name(mut self, name: &'static str) -> Self {
         self.name = Some(name);
         self
+    }
+
+    /// Set this route's document head metadata, the route layer of
+    /// [`Head`](crate::Head): it wins over the defaults and the route
+    /// group's metadata, field by field, and the request's run-time calls
+    /// win over it. Laravel Head's `withHead`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{any, Request, Response};
+    /// # async fn contact(_req: Request) -> Response { suprnova::text("ok") }
+    /// any!("/contact", contact)
+    ///     .with_head(|head| head.title("Contact Us").description("Get in touch."));
+    /// ```
+    pub fn with_head(
+        self,
+        f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
+    ) -> Self {
+        self.middleware(crate::view::head::HeadLayer::route(f))
     }
 
     /// Attach middleware that runs for every method the `any!` route
@@ -1365,6 +1401,18 @@ impl GroupDef {
         Fut: Future<Output = Response> + Send + 'static,
     {
         self.add(route)
+    }
+
+    /// Set the document head metadata of every route in this group, the
+    /// group layer of [`Head`](crate::Head): a route's own metadata and the
+    /// request's run-time calls win over it, field by field. A nested
+    /// group's metadata wins over its parent's. Laravel Head's
+    /// `Route::withHead(...)->group(...)`.
+    pub fn with_head(
+        self,
+        f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
+    ) -> Self {
+        self.middleware(crate::view::head::HeadLayer::group(f))
     }
 
     /// Add middleware to all routes in this group

@@ -2614,8 +2614,18 @@ pub trait AsyncRule: Send + Sync {
     /// # }
     /// ```
     ///
+    /// Inside a form's after-validation hook on a precognitive request
+    /// that lists fields in `Precognition-Validate-Only`, the rule does
+    /// not run for a field the request did not list, so it neither
+    /// queries nor fails, as Laravel drops the rules of unlisted fields
+    /// before validating ([`Precognition::should_validate`]).
+    ///
     /// [`validate!`]: crate::validate
+    /// [`Precognition::should_validate`]: crate::Precognition::should_validate
     async fn check_async(&self, value: &str, errs: &mut ValidationErrors, field: &str) {
+        if !crate::http::precognition::Precognition::should_validate(field) {
+            return;
+        }
         if let Err(msg) = self.passes(value).await {
             errs.add(field.to_string(), msg);
         }
@@ -2903,12 +2913,18 @@ pub mod async_rules {
 
         /// Check a typed value, bound as itself rather than as text, and
         /// push any failure onto `errs` under `field`.
+        ///
+        /// Like [`AsyncRule::check_async`], it does not run for a field a
+        /// precognitive request did not list.
         pub async fn check_value(
             &self,
             value: impl Into<Value> + Send,
             errs: &mut ValidationErrors,
             field: &str,
         ) {
+            if !crate::http::precognition::Precognition::should_validate(field) {
+                return;
+            }
             if let Some(msg) = self.failure(value.into()).await {
                 errs.add(field.to_string(), msg);
             }
@@ -2924,10 +2940,18 @@ pub mod async_rules {
         /// `#[validate(length(max = ..))]` attribute on the field): that
         /// stage runs first, and a request over the bound never reaches the
         /// database.
+        ///
+        /// A precognitive request selects it under `<field>.*`, the key
+        /// Laravel gives an array rule: `tag_ids.*` in
+        /// `Precognition-Validate-Only` runs it and `tag_ids` alone does
+        /// not.
         pub async fn check_each<T>(&self, values: &[T], errs: &mut ValidationErrors, field: &str)
         where
             T: Clone + Into<Value> + Sync,
         {
+            if !crate::http::precognition::Precognition::should_validate(&format!("{field}.*")) {
+                return;
+            }
             // Distinct values in first-appearance order, each with the
             // indexes that hold it. The key is the bound value's debug
             // form, which tells an integer `1` from a string `"1"`.

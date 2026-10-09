@@ -240,6 +240,9 @@ pub struct Cookie {
     name: String,
     value: String,
     options: CookieOptions,
+    /// Written without percent-encoding; set only by [`Cookie::raw`],
+    /// which checked the name and value byte by byte.
+    raw: bool,
 }
 
 impl Cookie {
@@ -255,7 +258,82 @@ impl Cookie {
             name: name.into(),
             value: value.into(),
             options: CookieOptions::default(),
+            raw: false,
         }
+    }
+
+    /// Create a cookie whose value is written to `Set-Cookie` as it is,
+    /// without percent-encoding, as Laravel's `Cookie::make` does with
+    /// `raw: true`.
+    ///
+    /// Use it when another system reads the cookie and expects the bytes
+    /// unchanged: a token holding `:` or `/`, or a value that is already
+    /// encoded. [`Self::new`] encodes those bytes, and a reader that does
+    /// not decode sees `%3A` where you wrote `:`.
+    ///
+    /// The encoding is what keeps an ordinary value from injecting a
+    /// header or an attribute, so the raw form checks its input instead:
+    /// the name must be an RFC 6265 token and every value byte a
+    /// cookie-octet (no space, `"`, `,`, `;`, `\`, control byte or byte
+    /// above `0x7E`). The defaults are those of [`Self::new`], and the
+    /// `__Host-` and `__Secure-` rules apply the same way.
+    ///
+    /// Requests are read with [`parse_cookies`], which decodes every
+    /// value, because a request does not say which cookies were written
+    /// raw. A raw value that holds `%` followed by two hex digits
+    /// therefore reads back decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Internal`](crate::FrameworkError::Internal)
+    /// naming the cookie and the first refused byte when the name is not a
+    /// token or the value holds a byte outside cookie-octet.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use suprnova::Cookie;
+    ///
+    /// let cookie = Cookie::raw("token", "a:b/c")?;
+    /// assert!(cookie.to_header_value().starts_with("token=a:b/c;"));
+    /// assert!(Cookie::raw("token", "x;Domain=evil").is_err());
+    /// # Ok::<(), suprnova::FrameworkError>(())
+    /// ```
+    pub fn raw(
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, crate::FrameworkError> {
+        let name = name.into();
+        let value = value.into();
+        if name.is_empty() {
+            return Err(crate::FrameworkError::internal(
+                "A raw cookie needs a name: the empty string is not an RFC 6265 token",
+            ));
+        }
+        if let Some(byte) = name.bytes().find(|byte| !is_token_byte(*byte)) {
+            return Err(crate::FrameworkError::internal(format!(
+                "The raw cookie name {name:?} holds the byte 0x{byte:02X}, which an \
+                     RFC 6265 token does not allow"
+            )));
+        }
+        if let Some(byte) = value.bytes().find(|byte| !is_cookie_octet(*byte)) {
+            return Err(crate::FrameworkError::internal(format!(
+                "The value of the raw cookie {name:?} holds the byte 0x{byte:02X}, \
+                     which is not a cookie-octet; use Cookie::new to percent-encode it"
+            )));
+        }
+        Ok(Self {
+            name,
+            value,
+            options: CookieOptions::default(),
+            raw: true,
+        })
+    }
+
+    /// Whether this cookie was built with [`Self::raw`] and is written
+    /// without percent-encoding.
+    pub fn is_raw(&self) -> bool {
+        self.raw
     }
 
     /// Get the cookie name
@@ -343,11 +421,14 @@ impl Cookie {
         // header faithfully.
         let host_prefixed = self.name.starts_with("__Host-");
         let secure_prefixed = self.name.starts_with("__Secure-");
-        let mut parts = vec![format!(
-            "{}={}",
-            url_encode(&self.name),
-            url_encode(&self.value)
-        )];
+        // A raw cookie's name and value were checked byte by byte when it
+        // was built, and `prefixed` only adds a token prefix, so they need
+        // no encoding to stay inside one attribute.
+        let mut parts = vec![if self.raw {
+            format!("{}={}", self.name, self.value)
+        } else {
+            format!("{}={}", url_encode(&self.name), url_encode(&self.value))
+        }];
 
         let mut path = sanitize_path(&self.options.path);
         if host_prefixed && path != "/" {
@@ -661,6 +742,18 @@ fn has_protected_prefix(name: &str) -> bool {
         name.get(..prefix.len())
             .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
     })
+}
+
+/// Whether `byte` may appear in an RFC 6265 cookie name: an RFC 7230
+/// `tchar`, any visible ASCII character except the separators.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// Whether `byte` is an RFC 6265 cookie-octet: visible ASCII except `"`,
+/// `,`, `;` and `\`, so no space, control byte or byte above `0x7E`.
+fn is_cookie_octet(byte: u8) -> bool {
+    matches!(byte, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
 }
 
 /// Percent-encode cookie names and values per [`COOKIE_ENCODE`].

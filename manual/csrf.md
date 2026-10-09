@@ -385,13 +385,43 @@ let token: Option<String> = csrf_token();
 let meta: String = csrf_meta_tag();
 // → <meta name="csrf-token" content="...">
 let field: String = csrf_field();
-// → <input type="hidden" name="_token" value="...">
+// → <input type="hidden" name="_token" value="..." autocomplete="off">
 ```
+
+The field carries `autocomplete="off"`, as Laravel's `csrf_field` does.
+Without it, a browser can restore the token a page held before into the
+field after a back navigation or a reload, and that token is stale once
+the session rotates it.
 
 The Inertia base view already calls `csrf_meta_tag()` for you - use
 `csrf_field()` when rendering a traditional HTML form from a Tera /
 Askama / minijinja template, and `csrf_token()` when you need the raw
 value for something custom.
+
+When a page must not render without a token, use the `try_*` siblings.
+They return an error that names the missing session, where Laravel's
+`csrf_token` throws `Application session store not set.`:
+
+```rust
+use suprnova::{FrameworkError, try_csrf_field, try_csrf_token};
+
+fn signup_form() -> Result<String, FrameworkError> {
+    let field = try_csrf_field()?;
+    Ok(format!("<form method=\"post\">{field}<button>Sign up</button></form>"))
+}
+
+fn token_header() -> Result<(String, String), FrameworkError> {
+    Ok(("X-CSRF-TOKEN".to_string(), try_csrf_token()?))
+}
+```
+
+### Why Suprnova diverges
+
+Laravel's `csrf_token()` throws outside a session. Suprnova's
+`csrf_token()` returns `None` and `csrf_field()` the empty string there,
+so a template rendered outside a request does not fail. `try_csrf_token()`
+and `try_csrf_field()` give you Laravel's failure as a `Result`, because
+public Suprnova functions return errors rather than panic.
 
 ## Constant-time comparison
 
@@ -488,8 +518,8 @@ reference shape for higher-level integration tests.
 | Laravel | Suprnova |
 |---|---|
 | `VerifyCsrfToken` / `PreventRequestForgery` middleware | `CsrfMiddleware` |
-| `csrf_token()` helper | `suprnova::csrf::csrf_token()` |
-| `csrf_field()` Blade helper | `suprnova::csrf::csrf_field()` |
+| `csrf_token()` helper | `suprnova::csrf::csrf_token()`; `try_csrf_token()` for the error outside a session |
+| `csrf_field()` Blade helper, with `autocomplete="off"` | `suprnova::csrf::csrf_field()`, the same markup; `try_csrf_field()` for the error outside a session |
 | `<meta name="csrf-token">` (Blade `@csrf` for forms) | `suprnova::csrf::csrf_meta_tag()` + auto-injected by Inertia base view |
 | `$except = ['stripe/*']` | `.except(["stripe/*"])` |
 | Glob `*` (mid / leading / trailing) | Same - full `Str::is` semantics |

@@ -349,6 +349,66 @@ async fn render(request: Request, mount: &LiveMount<Counter>) -> Response {
 - The document template places `{{ bootstrap|trusted_html }}` in `<head>` and
   each island where it belongs.
 
+### Shared view data
+
+A layout often needs a value every page has, such as the application's
+name or the signed-in user, without every view struct carrying a field for
+it. `View::share` makes a value available to every document and island the
+application renders afterwards, as Laravel's `View::share` does.
+`View::share_for_request` does the same for the current request alone, and
+its values win over the application's. A template reads a shared value
+with Askama's `value` filter, naming the type you shared:
+
+```rust
+use suprnova::{FrameworkError, Middleware, Next, Request, Response, View, async_trait};
+
+pub fn boot() {
+    View::share("app_name", "Acme".to_string());
+}
+
+pub struct ShareViewer;
+
+#[async_trait]
+impl Middleware for ShareViewer {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(name) = request.header("X-Viewer") {
+            View::share_for_request("viewer", name.to_string())?;
+        }
+        next(request).await
+    }
+}
+```
+
+```html
+<title>{% if let Ok(name) = "app_name"|value::<String> %}{{ name }}{% endif %}</title>
+<p>{% if let Ok(viewer) = "viewer"|value::<String> %}Hello, {{ viewer }}{% else %}Hello{% endif %}</p>
+```
+
+A value nobody shared fails the render, so test for it with `if let Ok(..)`
+where it can be missing. `View::shared::<T>(key)` answers the value a render
+would read: the request's value, else the application's, `None` when
+neither is a `T`. A view keeps reading its own fields by name; shared
+values arrive only through the `value` filter.
+
+The application's values belong to the application container, so a test
+under `TestContainer::fake()` sees only what it shared. A request's values
+live in the request's container scope; `View::share_for_request` returns an
+error outside one. A page whose render read a value shared for the request
+is never stored in the [render cache](render-cache.md), so it is never
+served to another request. `App::inertia_share` keeps reaching Inertia props
+only.
+
+#### Why Suprnova diverges
+
+Laravel's `View::share` is process-wide, which is safe because PHP serves
+one request per process. One Rust process serves many requests at once, so
+the request's own values need `View::share_for_request`, and a shared value
+reaches the template through Askama's runtime values rather than as a
+variable, because a checked template knows its variables at compile time.
+Live component templates do not receive shared values: a component's view
+is rendered again on its action requests, and a public seed is shared
+between visitors.
+
 ## Security boundaries
 
 Live never bypasses the framework's middleware. What each request needs:

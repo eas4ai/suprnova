@@ -57,6 +57,7 @@ pub mod middleware;
 
 pub use middleware::{CsrfMiddleware, OriginPolicy};
 
+use crate::FrameworkError;
 use crate::session::get_csrf_token;
 
 /// Get the current CSRF token
@@ -94,16 +95,77 @@ pub fn csrf_meta_tag() -> String {
 
 /// Generate a hidden CSRF input field for forms
 ///
+/// The field carries `autocomplete="off"`, as Laravel's `csrf_field` does:
+/// without it a browser can restore the token a page held before into the
+/// field after a back navigation or a reload, and that token can be stale
+/// once the session rotates it. Outside a session this is the empty
+/// string; use [`try_csrf_field`] to treat that as an error.
+///
 /// # Example
 ///
 /// ```rust,no_run
 /// use suprnova::csrf::csrf_field;
 ///
 /// let field = csrf_field();
-/// // Returns: <input type="hidden" name="_token" value="...">
+/// // Returns: <input type="hidden" name="_token" value="..." autocomplete="off">
 /// ```
 pub fn csrf_field() -> String {
     csrf_token()
-        .map(|token| format!(r#"<input type="hidden" name="_token" value="{}">"#, token))
+        .map(|token| field_markup(&token))
         .unwrap_or_default()
+}
+
+/// The session's CSRF token, or an error when no session is active.
+///
+/// Laravel's `csrf_token` throws `Application session store not set.`
+/// outside a session. [`csrf_token`] answers `None` there instead; this
+/// sibling returns the error, so code that must not render a form without
+/// a token can stop with `?`.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError::Internal`] naming the missing session when
+/// no session scope is installed, usually because `SessionMiddleware` is
+/// not registered for the route.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use suprnova::{FrameworkError, try_csrf_token};
+///
+/// fn token_header() -> Result<(String, String), FrameworkError> {
+///     Ok(("X-CSRF-TOKEN".to_string(), try_csrf_token()?))
+/// }
+/// ```
+pub fn try_csrf_token() -> Result<String, FrameworkError> {
+    csrf_token().ok_or_else(missing_session)
+}
+
+/// The hidden CSRF input field, or an error when no session is active.
+///
+/// [`csrf_field`] renders the empty string outside a session, so a form
+/// built there submits without a token and fails with `419`. This sibling
+/// fails where the form is built instead.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError::Internal`] naming the missing session when
+/// no session scope is installed.
+pub fn try_csrf_field() -> Result<String, FrameworkError> {
+    try_csrf_token().map(|token| field_markup(&token))
+}
+
+/// The field markup. The token is 40 alphanumeric characters, so it needs
+/// no escaping.
+fn field_markup(token: &str) -> String {
+    format!(r#"<input type="hidden" name="_token" value="{token}" autocomplete="off">"#)
+}
+
+/// The error the `try_*` helpers return outside a session, with Laravel's
+/// wording and the usual cause.
+fn missing_session() -> FrameworkError {
+    FrameworkError::internal(
+        "Application session store not set: no session is active for this request; \
+         register SessionMiddleware on the route that renders the CSRF token",
+    )
 }

@@ -1,4 +1,4 @@
-use super::config::{Frontend, InertiaConfig};
+use super::config::InertiaConfig;
 use super::dotted;
 use super::flash;
 use super::prop::ProvidesScrollMetadata;
@@ -154,6 +154,10 @@ pub struct InertiaResponse {
     /// [`new`](Self::new), through `#[track_caller]`, or the route
     /// definition of a `Router::inertia` page.
     render_source: &'static std::panic::Location<'static>,
+    /// The error status the page is rendered for, so the document head
+    /// takes the metadata `Head::errors` registered for it. Set by the
+    /// Inertia error page.
+    head_status: Option<u16>,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -384,7 +388,16 @@ impl InertiaResponse {
             view_data: super::root_template::InertiaViewData::default(),
             shared_data: true,
             render_source: std::panic::Location::caller(),
+            head_status: None,
         }
+    }
+
+    /// Render the document head for the error `status`, so the metadata
+    /// `Head::errors` registered for it applies. The Inertia error page
+    /// sets it for the status it renders.
+    pub(crate) fn head_status(mut self, status: u16) -> Self {
+        self.head_status = Some(status);
+        self
     }
 
     /// Name `location` as where this response was rendered, for a page
@@ -1392,7 +1405,15 @@ impl InertiaResponse {
             view_data,
             shared_data,
             render_source,
+            head_status,
         } = self;
+        // The document head `Head` resolves for this request (PAR-160): its
+        // tags go into the `head` prop and the first visit's `<head>`.
+        // `None` when no layer sets anything, which leaves the page as it is.
+        let head = crate::view::head::InertiaHead::for_response(
+            &|| crate::routing::url::to(req.path()),
+            head_status,
+        );
         // For the Inertia middleware, which tells a partial reload of this
         // page from a navigation by it when it records the previous URL.
         super::visit::record_rendered_component(&component);
@@ -1607,6 +1628,16 @@ impl InertiaResponse {
                 collector.rescued(key);
             }
         }
+        // The head prop rides every full visit and no partial reload, so the
+        // client keeps the last full page's head, as Laravel Head shares it.
+        // A prop of the same name the page or the shared data set wins.
+        if !filter.matched
+            && let Some(head) = &head
+            && !materialized.contains_key(head.prop())
+            && let Some(tags) = head.prop_value()
+        {
+            materialized.insert(head.prop().to_string(), tags);
+        }
 
         // Combine flash from three sources, in precedence order
         // (later writes override earlier so same-request entries win
@@ -1675,8 +1706,15 @@ impl InertiaResponse {
                     title.as_deref(),
                     ssr_result.as_ref(),
                     &view_data,
+                    head.as_ref(),
                 )?,
-                None => build_html_response(&page, &config, title.as_deref(), ssr_result.as_ref())?,
+                None => build_html_response(
+                    &page,
+                    &config,
+                    title.as_deref(),
+                    ssr_result.as_ref(),
+                    head.as_ref(),
+                )?,
             }
         };
         // Inertia DevTools records the page only once the response that
@@ -1743,6 +1781,7 @@ impl InertiaResponse {
             view_data: _,
             shared_data: _,
             render_source: _,
+            head_status: _,
         } = self;
         let (mut materialized, metadata) = resolve_props(
             props,
@@ -3015,17 +3054,14 @@ fn build_html_response<P: Serialize + ?Sized>(
     config: &InertiaConfig,
     title_override: Option<&str>,
     ssr: Option<&super::ssr::SsrResponse>,
+    head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
     let title = title_override.unwrap_or(&config.default_title);
     let csrf = csrf_token().unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
     let title_html = escape_html_text(title);
 
-    let head_extras = if config.development {
-        render_dev_head(config)
-    } else {
-        render_prod_head(config)
-    };
+    let head_extras = super::vite::shell_tags(config);
 
     // Inertia 3 reads the initial page from a sibling
     // `<script type="application/json" data-page="app">` whose textContent
@@ -3052,7 +3088,14 @@ fn build_html_response<P: Serialize + ?Sized>(
     // browsers, crawlers and the pre-hydration tab read, so the page's
     // real title would never be seen. The page's own head wins, which is
     // exactly what `default_title` documents itself as: a default.
-    let title_line = !contains_title_element(&ssr_head);
+    let title_line = !contains_title_element(&ssr_head) && !head.is_some_and(|h| h.has_title());
+    // The document head `Head` resolved (PAR-160), deduplicated against the
+    // SSR head by `data-inertia` key. A head that sets the viewport
+    // replaces the document's own.
+    let head_html = head
+        .map(|head| head.first_visit_html(&ssr_head))
+        .unwrap_or_default();
+    let viewport_line = !head.is_some_and(|h| h.has_viewport());
 
     // The document is written into one buffer, the page JSON serialized
     // straight into it. Serializing to a string, escaping that into a
@@ -3061,11 +3104,13 @@ fn build_html_response<P: Serialize + ?Sized>(
     let mut html = String::new();
     html.push_str("<!DOCTYPE html>\n<html lang=\"");
     html.push_str(&document_language_attr());
-    html.push_str(
-        "\">\n<head>\n<meta charset=\"UTF-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
-         <meta name=\"csrf-token\" content=\"",
-    );
+    html.push_str("\">\n<head>\n<meta charset=\"UTF-8\">\n");
+    if viewport_line {
+        html.push_str(
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n",
+        );
+    }
+    html.push_str("<meta name=\"csrf-token\" content=\"");
     html.push_str(&csrf_attr);
     html.push_str("\">\n");
     if title_line {
@@ -3073,6 +3118,7 @@ fn build_html_response<P: Serialize + ?Sized>(
         html.push_str(&title_html);
         html.push_str("</title>\n");
     }
+    html.push_str(&head_html);
     html.push_str(&ssr_head);
     html.push_str(&head_extras);
     html.push_str("</head>\n<body>\n");
@@ -3113,16 +3159,16 @@ fn build_template_response(
     title_override: Option<&str>,
     ssr: Option<&super::ssr::SsrResponse>,
     view_data: &super::root_template::InertiaViewData,
+    head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
     let csrf = csrf_token().unwrap_or_default();
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
-    let title = (!contains_title_element(&ssr_head))
+    let title = (!contains_title_element(&ssr_head) && !head.is_some_and(|h| h.has_title()))
         .then(|| title_override.unwrap_or(config.default_title.as_str()));
-    let assets = if config.development {
-        render_dev_head(config)
-    } else {
-        render_prod_head(config)
-    };
+    let head_tags = head
+        .map(|head| head.first_visit_html(&ssr_head))
+        .unwrap_or_default();
+    let assets = super::vite::shell_tags(config);
     let lang = document_language();
     super::root_template::render(
         template,
@@ -3130,6 +3176,7 @@ fn build_template_response(
             page,
             title,
             csrf_token: &csrf,
+            head_tags: &head_tags,
             ssr_head: &ssr_head,
             ssr_body: ssr.map(|s| s.body.as_str()),
             assets: &assets,
@@ -3159,7 +3206,7 @@ fn build_template_response(
 /// means hand-building a head string that is already invalid markup, and
 /// the cost is a missing default title rather than a broken document. A
 /// real parse is not worth carrying for that.
-fn contains_title_element(head: &str) -> bool {
+pub(crate) fn contains_title_element(head: &str) -> bool {
     const TAG: &str = "<title";
     let lower = strip_html_comments(&head.to_ascii_lowercase());
     lower.match_indices(TAG).any(|(at, _)| {
@@ -3239,98 +3286,6 @@ fn document_language() -> Cow<'static, str> {
     Cow::Borrowed("en")
 }
 
-fn render_dev_head(config: &InertiaConfig) -> String {
-    // HTML-escape vite_dev_server + entry_point before interpolation.
-    // These are normally trusted config values, but a misconfigured
-    // env / config file could otherwise break the shell or inject
-    // markup into the dev-time HTML.
-    //
-    // For the React preamble, the same `vite_dev_server` value is used
-    // inside a JS single-quoted string. We use `serde_json::to_string`
-    // to produce a safe JS string literal (it produces a double-quoted
-    // string that we re-wrap with the surrounding `'...'`-aware
-    // shape).
-    let server_attr = escape_html_attr(&config.vite_dev_server);
-    let entry_attr = escape_html_attr(&config.entry_point);
-
-    // React requires the `@react-refresh` preamble before any module loads;
-    // Svelte and Vue have HMR built into their Vite plugins and don't need
-    // any extra preamble script.
-    let preamble = match config.frontend {
-        Frontend::React => {
-            // `serde_json::to_string` always produces a double-quoted JSON
-            // literal (e.g. `"http://localhost:5173"`). Stripping the
-            // surrounding `"` and wrapping with `'` keeps the existing
-            // single-quote shape, while keeping all `\`/`'`/control-char
-            // escapes that serde_json already applied.
-            let js_server = serde_json::to_string(&config.vite_dev_server)
-                .unwrap_or_else(|_| "\"\"".to_string());
-            let js_server_inner = js_server.trim_matches('"');
-            // Re-escape any embedded single quotes for the wrapping `'…'`.
-            let js_server_safe = js_server_inner.replace('\'', "\\'");
-            format!(
-                "<script type=\"module\">\n\
-                 import RefreshRuntime from '{js_server_safe}/@react-refresh'\n\
-                 RefreshRuntime.injectIntoGlobalHook(window)\n\
-                 window.$RefreshReg$ = () => {{}}\n\
-                 window.$RefreshSig$ = () => (type) => type\n\
-                 window.__vite_plugin_react_preamble_installed__ = true\n\
-                 </script>\n"
-            )
-        }
-        Frontend::Svelte | Frontend::Vue => String::new(),
-    };
-
-    format!(
-        "{preamble}\
-         <script type=\"module\" src=\"{server_attr}/@vite/client\"></script>\n\
-         <script type=\"module\" src=\"{server_attr}/{entry_attr}\"></script>\n"
-    )
-}
-
-fn render_prod_head(config: &InertiaConfig) -> String {
-    // Resolve `entry_point` (e.g. `src/main.ts`) to the hashed output
-    // files via Vite's manifest.json. When the manifest is missing or
-    // doesn't contain the configured entry, fall back to the legacy
-    // hardcoded `/{assets_base_url}/main.{js,css}` shape so apps
-    // produced before the manifest layer keep booting. The fallback
-    // path emits a tracing::warn! at first read inside
-    // `InertiaConfig::vite_manifest`.
-    let base = asset_base(&config.assets_base_url);
-    let entry = &config.entry_point;
-    let url = |file: &str| escape_html_attr(&format!("{base}/{file}"));
-    if let Some(assets) = config.vite_manifest().and_then(|m| m.resolve_entry(entry)) {
-        let mut out = String::new();
-        for css in &assets.css {
-            out.push_str(&format!(
-                "<link rel=\"stylesheet\" href=\"{}\">\n",
-                url(css)
-            ));
-        }
-        for js in &assets.js {
-            out.push_str(&format!(
-                "<script type=\"module\" src=\"{}\"></script>\n",
-                url(js)
-            ));
-        }
-        for chunk in &assets.preload {
-            out.push_str(&format!(
-                "<link rel=\"modulepreload\" href=\"{}\">\n",
-                url(chunk)
-            ));
-        }
-        out
-    } else {
-        // Manifest absent or entry not present - legacy fallback.
-        format!(
-            "<script type=\"module\" src=\"{}\"></script>\n\
-             <link rel=\"stylesheet\" href=\"{}\">\n",
-            url("main.js"),
-            url("main.css")
-        )
-    }
-}
-
 /// The page object's `url`: the request's path and query, or what the
 /// application's resolver derives, carrying the public root (PFX-005).
 ///
@@ -3349,25 +3304,6 @@ fn page_url(resolver: Option<&super::config::UrlResolver>, req: &dyn InertiaRequ
         None => crate::routing::root::prefixed_owned(
             super::query_string::normalize_path_and_query(req.path_and_query()),
         ),
-    }
-}
-
-/// The base the Vite tags name their files under (PFX-005).
-///
-/// A root-relative `assets_base_url`, one that starts with a single `/`
-/// such as the default `/assets`, is served by the application and gets
-/// the public root in front. An absolute or network-path base (a CDN) is
-/// another host's path and is left as it is.
-///
-/// The base is classified before its trailing slashes are removed, so a
-/// base of `/`, which serves the assets at the root itself, is root-relative
-/// too and gives the root alone.
-fn asset_base(assets_base_url: &str) -> std::borrow::Cow<'_, str> {
-    let trimmed = assets_base_url.trim_end_matches('/');
-    if assets_base_url.starts_with('/') && !assets_base_url.starts_with("//") {
-        std::borrow::Cow::Owned(crate::routing::root::prefixed(trimmed))
-    } else {
-        std::borrow::Cow::Borrowed(trimmed)
     }
 }
 
@@ -3573,38 +3509,6 @@ mod tests {
         assert_eq!(text, "&lt;script&gt;");
     }
 
-    #[test]
-    fn dev_head_includes_react_preamble_for_react_only() {
-        let cfg = InertiaConfig::new().frontend(Frontend::React);
-        let head = render_dev_head(&cfg);
-        assert!(head.contains("@react-refresh"));
-        assert!(head.contains("__vite_plugin_react_preamble_installed__"));
-
-        let cfg = InertiaConfig::new().frontend(Frontend::Svelte);
-        let head = render_dev_head(&cfg);
-        assert!(!head.contains("@react-refresh"));
-
-        let cfg = InertiaConfig::new().frontend(Frontend::Vue);
-        let head = render_dev_head(&cfg);
-        assert!(!head.contains("@react-refresh"));
-    }
-
-    #[test]
-    fn dev_head_loads_correct_entry_point_per_frontend() {
-        let cfg = InertiaConfig::new().frontend(Frontend::Svelte);
-        let head = render_dev_head(&cfg);
-        assert!(head.contains("src/main.ts"));
-        assert!(!head.contains("src/main.tsx"));
-
-        let cfg = InertiaConfig::new().frontend(Frontend::React);
-        let head = render_dev_head(&cfg);
-        assert!(head.contains("src/main.tsx"));
-
-        let cfg = InertiaConfig::new().frontend(Frontend::Vue);
-        let head = render_dev_head(&cfg);
-        assert!(head.contains("src/main.ts"));
-    }
-
     #[tokio::test]
     async fn flash_emits_top_level_field() {
         let resp = InertiaResponse::new("Home").flash("toast", json!({"msg": "saved"}));
@@ -3745,7 +3649,8 @@ mod tests {
         assert_eq!(json.status_code(), 500);
         assert!(json.to_string().contains("cannot be encoded"), "{json}");
 
-        let Err(html) = build_html_response(&Unencodable, &InertiaConfig::default(), None, None)
+        let Err(html) =
+            build_html_response(&Unencodable, &InertiaConfig::default(), None, None, None)
         else {
             panic!("a first visit must not get a 200 with an empty page");
         };

@@ -386,20 +386,30 @@ async fn precognition_runs_the_async_hook_on_the_default_path() {
     );
 }
 
-/// Database rules in an after-hook keep their messages for every selection.
+/// A database rule in an after-hook runs only for a selected field: the
+/// hook's `Exists::check_each` on `tag_ids` is keyed `tag_ids.*`, as Laravel
+/// keys an array rule, so `tag_ids.*` selects it and `tag_ids` does not. The
+/// errors the rule reports when it runs keep every message.
 #[tokio::test]
 async fn precognition_validate_only_keeps_every_async_hook_error() {
     let _guard = TestContainer::fake();
     install_teams_db().await;
 
     let body = || serde_json::json!({ "team_id": 7, "tag_ids": [1, 3, 4] });
-    for fields in ["tag_ids", "tag_ids.*", "team_id,tag_ids", "team_id", ""] {
+    for fields in ["tag_ids.*", "team_id,tag_ids.*"] {
         assert_eq!(
             precognition_keys(
                 extract::<AssignTagsDto>(&[], body(), Precognition::Only(fields)).await
             ),
             ["tag_ids.1", "tag_ids.2"],
             "{fields}"
+        );
+    }
+    for fields in ["tag_ids", "team_id,tag_ids", "team_id", ""] {
+        let result = extract::<AssignTagsDto>(&[], body(), Precognition::Only(fields)).await;
+        assert!(
+            matches!(result, Err(FrameworkError::PrecognitionSuccess)),
+            "{fields}: got {result:?}"
         );
     }
 }
