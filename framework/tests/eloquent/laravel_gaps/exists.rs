@@ -523,3 +523,24 @@ async fn through_existence_uses_declared_keys_and_leaves_out_trashed_rows() {
         3
     );
 }
+
+#[tokio::test]
+async fn has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner() {
+    let _db = morph_fixture().await;
+    let post = MorphPost::create(attrs! { title: "kept" })
+        .await
+        .expect("post");
+    MorphComment::create(attrs! {
+        commentable_id: post.id,
+        commentable_type: "post",
+        body: "comment",
+    })
+    .await
+    .expect("comment");
+    let owned = MorphComment::query()
+        .has("commentable")
+        .get()
+        .await
+        .expect("has on a polymorphic owner");
+    assert_eq!(owned.len(), 1);
+}
