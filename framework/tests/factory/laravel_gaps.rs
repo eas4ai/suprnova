@@ -244,3 +244,233 @@ async fn create_many_leaves_the_hidden_field_out_of_the_output() {
     assert!(value.get("secret").is_none());
     assert!(saved[0].to_array().get("secret").is_none());
 }
+
+/// Reads a visit count written as decimal text, so an attribute must reach
+/// the field through the field's own deserializer.
+mod text_count {
+    pub fn serialize<S: serde::Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+        let text: String = serde::Deserialize::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Required columns the model skips on output, so an attribute set must
+/// reach each field directly rather than through the model's serde output.
+#[model(table = "gap_factory_skipped", timestamps = false)]
+#[serde(crate = "suprnova::serde")]
+pub struct FactorySkipped {
+    pub id: i64,
+    #[serde(rename = "displayName")]
+    pub name: String,
+    #[serde(skip_serializing)]
+    pub token: String,
+    #[serde(skip)]
+    pub note: String,
+    #[serde(with = "text_count")]
+    pub visits: i64,
+}
+
+struct FactorySkippedFactory;
+
+impl Factory for FactorySkippedFactory {
+    type Model = FactorySkipped;
+
+    fn definition() -> FactorySkipped {
+        FactorySkipped {
+            id: 0,
+            name: "definition".into(),
+            token: "definition token".into(),
+            note: "definition note".into(),
+            visits: 42,
+            ..Default::default()
+        }
+    }
+}
+
+async fn skipped_db() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE gap_factory_skipped (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            name TEXT NOT NULL, \
+            token TEXT NOT NULL, \
+            note TEXT NOT NULL, \
+            visits INTEGER NOT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+    db
+}
+
+async fn stored_skipped(db: &TestDatabase) -> Vec<(String, String, String, i64)> {
+    db.fetch_all(
+        "SELECT name, token, note, visits FROM gap_factory_skipped ORDER BY id",
+        vec![],
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            row.try_get::<String>("", "name").unwrap(),
+            row.try_get::<String>("", "token").unwrap(),
+            row.try_get::<String>("", "note").unwrap(),
+            row.try_get::<i64>("", "visits").unwrap(),
+        )
+    })
+    .collect()
+}
+
+fn skipped_row(name: &str, token: &str, note: &str, visits: i64) -> (String, String, String, i64) {
+    (name.into(), token.into(), note.into(), visits)
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_overrides_a_skip_serializing_field() {
+    let db = skipped_db().await;
+    let saved = FactorySkippedFactory::new()
+        .create_many([attrs! { token: "override token" }])
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(saved[0].id > 0);
+    assert_eq!(saved[0].token, "override token");
+    assert_eq!(saved[0].note, "definition note");
+    assert_eq!(
+        stored_skipped(&db).await,
+        vec![skipped_row(
+            "definition",
+            "override token",
+            "definition note",
+            42
+        )]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_overrides_a_skip_field() {
+    let db = skipped_db().await;
+    let saved = FactorySkippedFactory::new()
+        .create_many([attrs! { note: "override note" }])
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].note, "override note");
+    assert_eq!(saved[0].token, "definition token");
+    assert_eq!(
+        stored_skipped(&db).await,
+        vec![skipped_row(
+            "definition",
+            "definition token",
+            "override note",
+            42
+        )]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_keeps_skipped_fields_it_does_not_override() {
+    let db = skipped_db().await;
+    let saved = FactorySkippedFactory::new()
+        .create_many([attrs! { displayName: "x" }])
+        .await
+        .unwrap();
+    assert_eq!(saved[0].name, "x");
+    assert_eq!(saved[0].token, "definition token");
+    assert_eq!(saved[0].note, "definition note");
+    let saved = FactorySkippedFactory::new()
+        .with(|record| {
+            record.token = "builder token".into();
+            record.note = "builder note".into();
+        })
+        .create_many([attrs! { displayName: "y" }, attrs! { displayName: "z" }])
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[1].token, "builder token");
+    assert_eq!(saved[1].note, "builder note");
+    assert_eq!(
+        stored_skipped(&db).await,
+        vec![
+            skipped_row("x", "definition token", "definition note", 42),
+            skipped_row("y", "builder token", "builder note", 42),
+            skipped_row("z", "builder token", "builder note", 42),
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_reads_an_attribute_through_the_field_deserializer() {
+    let db = skipped_db().await;
+    let saved = FactorySkippedFactory::new()
+        .create_many([attrs! { visits: "7" }])
+        .await
+        .unwrap();
+    assert_eq!(saved[0].visits, 7);
+    assert_eq!(
+        stored_skipped(&db).await,
+        vec![skipped_row(
+            "definition",
+            "definition token",
+            "definition note",
+            7
+        )]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_refuses_an_attribute_that_names_no_field_or_does_not_fit() {
+    let db = skipped_db().await;
+    let error = FactorySkippedFactory::new()
+        .create_many([attrs! { token: "valid" }, attrs! { typo: "x" }])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("typo"), "{error}");
+    // The serialized name is the attribute; the Rust field name is not.
+    let error = FactorySkippedFactory::new()
+        .create_many([attrs! { name: "x" }])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("`name`"), "{error}");
+    let error = FactorySkippedFactory::new()
+        .create_many([attrs! { note: 42 }])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("note"), "{error}");
+    let error = FactorySkippedFactory::new()
+        .create_many([attrs! { visits: 7 }])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("visits"), "{error}");
+    assert!(stored_skipped(&db).await.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn create_many_leaves_skipped_fields_out_of_the_output() {
+    let _db = skipped_db().await;
+    let saved = FactorySkippedFactory::new()
+        .create_many([attrs! { token: "override token", note: "override note" }])
+        .await
+        .unwrap();
+    assert_eq!(saved[0].token, "override token");
+    assert_eq!(saved[0].note, "override note");
+    let json: serde_json::Value = serde_json::from_str(&saved[0].to_json()).unwrap();
+    assert_eq!(json["displayName"], "definition");
+    assert_eq!(json["visits"], "42");
+    assert!(json.get("token").is_none());
+    assert!(json.get("note").is_none());
+    let array = saved[0].to_array();
+    assert!(array.get("token").is_none());
+    assert!(array.get("note").is_none());
+}

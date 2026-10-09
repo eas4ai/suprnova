@@ -243,8 +243,9 @@ impl<M: Persistable + 'static> FactoryBuilder<M> {
     }
 
     /// Persists a count or per-record attribute maps over the factory definition.
-    /// Each map merges over every definition field, hidden ones included, and the
-    /// model is rebuilt with serde deserialization, so attributes need `Deserialize`.
+    /// Each map goes through [`Persistable::with_definition_attributes`], so a
+    /// field it names takes the new value and every other field keeps its
+    /// definition value, hidden and output-skipped fields included.
     /// Inserts run in order and stop on error. Use a transaction for atomicity.
     pub async fn create_many<R: FactoryRecords<M>>(
         self,
@@ -291,9 +292,10 @@ impl<M: Persistable + 'static> FactoryBuilder<M, true> {
 }
 
 /// Supplies a count or attribute maps so one factory can create different records.
-/// A count works for every model. Attribute maps merge over
-/// [`Persistable::definition_fields`], the unfiltered field map, so a field the
-/// model hides from its output can still be overridden and is never lost.
+/// A count works for every model. Attribute maps go through
+/// [`Persistable::with_definition_attributes`], which sets the named fields on
+/// the built model, so a field the model hides or skips on output can still be
+/// overridden and is never lost.
 pub trait FactoryRecords<M> {
     /// Builds all records before persistence so invalid attributes insert no rows.
     fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError>;
@@ -305,10 +307,11 @@ impl<M> FactoryRecords<M> for usize {
     }
 }
 
-// Merges over `definition_fields`, never the model's `Serialize` output: a
-// `#[suprnova::model]` serializes through its hidden and visible lists, and a
-// hidden field missing from the map could neither be overridden nor survive
-// the rebuild. `Persistable` is the bound because only `create_many` consumes
+// Applies each set to a freshly built record through `Persistable`, never by
+// rebuilding the model from its `Serialize` output: a `#[suprnova::model]`
+// serializes through its hidden and visible lists and leaves out the fields it
+// skips on output, and such a field could neither be overridden nor survive a
+// rebuild. `Persistable` is the bound because only `create_many` consumes
 // these records, and it already needs `Persistable` to insert them.
 impl<M> FactoryRecords<M> for Vec<crate::Attrs>
 where
@@ -316,20 +319,7 @@ where
 {
     fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
         self.into_iter()
-            .map(|attrs| {
-                let mut fields = builder.build_record().definition_fields()?;
-                for (name, value) in attrs.0 {
-                    if !fields.contains_key(&name) {
-                        return Err(crate::FrameworkError::bad_request(format!(
-                            "factory attribute `{name}` is not a serialized model field"
-                        )));
-                    }
-                    fields.insert(name, value);
-                }
-                serde_json::from_value(serde_json::Value::Object(fields)).map_err(|error| {
-                    crate::FrameworkError::bad_request(format!("factory attributes: {error}"))
-                })
-            })
+            .map(|attrs| builder.build_record().with_definition_attributes(attrs))
             .collect()
     }
 }

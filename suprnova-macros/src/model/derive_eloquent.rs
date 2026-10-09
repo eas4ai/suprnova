@@ -475,6 +475,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
     }
     let append_accessor_dispatch = serialization::emit_append_accessor_dispatch(&accessor_names);
+    let definition_attributes_method = serialization::emit_definition_attributes(input)?;
 
     // T8 - `fill` body arms. Mutator-routed fields call
     // `self.set_<field>(value.clone())?`; non-mutator fields
@@ -1615,9 +1616,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::__insert_built(self, #auto_increment).await
             }
 
-            // A factory's attribute sets merge over this map. The model's
-            // `Serialize` applies the hidden and visible lists, so the
-            // default would drop a hidden column the insert still needs.
+            // The model's fields as stored, for a caller of
+            // `definition_fields`. The model's `Serialize` applies the
+            // hidden and visible lists, so the default would drop a hidden
+            // column. Factory attribute sets no longer read this map: they
+            // go through `with_definition_attributes` below.
             fn definition_fields(
                 &self,
             ) -> ::core::result::Result<
@@ -1633,6 +1636,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )),
                 }
             }
+
+            // A factory's attribute sets reach this model here, field by
+            // field. The default merges over `definition_fields` and
+            // deserializes the whole model, which loses a field serde skips
+            // on output: the map has no value for it.
+            #definition_attributes_method
         }
 
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {
