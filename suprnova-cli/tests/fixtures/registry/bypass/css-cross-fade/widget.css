@@ -1,2 +1,0 @@
-.evil-widget { color: red; }
-.a { background-image: cross-fade("https://evil.test/a.png", "/b.png", 50%); } /* refused: css-url */
