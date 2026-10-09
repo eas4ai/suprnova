@@ -90,7 +90,8 @@ fn write() -> RwLockWriteGuard<'static, Registry> {
 }
 
 /// The names of the built-in channels, for the error an unknown one gets.
-const BUILT_IN: &str = "stdout, stderr, errorlog, single, daily, monthly, syslog, null, stack";
+const BUILT_IN: &str =
+    "stdout, stderr, errorlog, single, daily, monthly, syslog, null, stack, custom";
 
 /// The built-in channel `name`, configured from the environment, if it is
 /// one.
@@ -114,7 +115,7 @@ fn built_in(name: &str) -> Result<Option<LogChannel>, FrameworkError> {
                          every file)"
                     ))
                 })?,
-                None => 14,
+                None => 7,
             };
             LogChannel::daily(file()).days(days)
         }
@@ -139,6 +140,11 @@ fn built_in(name: &str) -> Result<Option<LogChannel>, FrameworkError> {
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         ),
+        "custom" => LogChannel::driver(var("LOG_CHANNEL_DRIVER").ok_or_else(|| {
+            FrameworkError::internal(
+                "the custom log channel needs LOG_CHANNEL_DRIVER to name a driver added with Log::extend",
+            )
+        })?),
         _ => return Ok(None),
     }))
 }
@@ -226,7 +232,11 @@ fn syslog(
 ) -> Result<Leaf, FrameworkError> {
     use super::sinks::SyslogSink;
     let socket = socket.unwrap_or_else(SyslogSink::default_socket);
-    let sink = SyslogSink::new(socket, facility).map_err(|error| {
+    let ident = std::env::var("APP_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "suprnova".to_owned());
+    let sink = SyslogSink::new(socket, facility, ident).map_err(|error| {
         FrameworkError::internal(format!("cannot open a syslog socket: {error}"))
     })?;
     Ok(Leaf::Sink(Arc::new(sink), level))
@@ -438,7 +448,8 @@ impl Log {
     }
 
     /// Add a driver: `factory` builds the sink of each channel defined with
-    /// [`LogChannel::driver`] and this name. The way to add Slack, a log
+    /// [`LogChannel::driver`] and this name, or the built-in `custom` channel
+    /// when `LOG_CHANNEL_DRIVER` names it. The way to add Slack, a log
     /// service, or anything else.
     pub fn extend<F>(driver: &str, factory: F)
     where

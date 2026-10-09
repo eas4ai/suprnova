@@ -18,17 +18,21 @@ let visits = redis.incr("visits", 1).await?;
 
 ## Connections
 
-The `default` connection reaches the server `REDIS_URL` names, and
-`redis://127.0.0.1:6379` when it is unset. The database index is the URL's
-path: `redis://127.0.0.1:6379/2` is database 2. To use other servers or
-databases, name them in the bootstrap:
+You connect through `default` using `REDIS_URL` when set. Otherwise, you
+configure the server with `REDIS_HOST` (`127.0.0.1`), `REDIS_PORT` (`6379`),
+`REDIS_PASSWORD` (none), and `REDIS_DB` (`0`). You select the database in
+the URL's path: `redis://127.0.0.1:6379/2` selects database 2. You connect
+through `cache` to the same server with the same credentials, using
+`REDIS_CACHE_DB` (`1`). You replace either built-in connection with a
+bootstrap definition. You name other servers or databases there too:
 
 ```rust
 use suprnova::Redis;
 
-pub async fn register() {
-    Redis::define("sessions", "redis://10.0.0.5:6379/0").expect("a Redis URL");
-    Redis::define("local", "unix:///run/redis/redis.sock").expect("a Redis URL");
+pub async fn register() -> Result<(), suprnova::FrameworkError> {
+    Redis::define("sessions", "redis://10.0.0.5:6379/0")?;
+    Redis::define("local", "unix:///run/redis/redis.sock")?;
+    Ok(())
 }
 ```
 
@@ -72,7 +76,24 @@ connection to the server.
 `Redis::connections()` lists the names resolved so far.
 `Redis::purge(name)` forgets one; it closes once nothing holds it, and the
 next `Redis::connection(name)` opens a new one. A name that no `define`
-gave, other than `default`, is an error.
+gave, other than `default` and `cache`, is an error.
+
+## Key prefixes
+
+You set `REDIS_PREFIX` to prefix every typed key, including keys in
+scripts, typed pipeline methods and blocking methods. You disable the
+prefix with an explicit empty value. When you leave it unset, you use the
+slug of `APP_NAME` followed by `-database-`; `APP_NAME=My Shop` gives you
+`my-shop-database-`. You use `Suprnova` as the default application name.
+You capture the prefix when you resolve each connection. You keep values,
+hash fields, list elements and Pub/Sub channels as given.
+
+You send keys as given through `command`, `execute_raw`, the pipeline's
+`command`, and `client()`. You include the prefix yourself when you access
+typed keys through these methods. You run `scan` with your matching
+pattern, which receives the prefix, and get the server's full keys,
+prefix included. You also get the full server key in blocking replies.
+You use a raw `DEL` to remove keys returned by `scan`.
 
 ## Commands
 
@@ -86,7 +107,7 @@ The common commands are typed methods. Values go in and come out as text:
 | Lists | `lpush`, `rpush`, `lpop`, `rpop`, `lrange` |
 | Sets | `sadd`, `srem`, `smembers` |
 | Sorted sets | `zadd`, `zrange`, `zrangebyscore` |
-| Other | `publish`, `eval` |
+| Other | `publish`, `eval`, `evalsha` |
 
 ```rust
 use suprnova::Redis;
@@ -114,6 +135,15 @@ if let RedisValue::Int(count) = redis.command("PFCOUNT", &["visitors"]).await? {
     println!("{count} distinct visitors");
 }
 ```
+
+You run a command line with
+`execute_raw(&["LRANGE", "full-key", "0", "-1"])`, giving the command name
+as its first argument. You get the same `RedisValue` as `command`, with
+the same retry policy and connection guards.
+
+You run a loaded script with `evalsha(sha, keys, args)` after you load it
+through `command("SCRIPT", &["LOAD", script])`. You prefix only the keys
+with `eval` and `evalsha`; you keep the script or SHA and `ARGV` as given.
 
 `command` sends a blocking command, such as `BLMPOP` or `XREAD` with
 `BLOCK`, on a connection of its own, as the typed blocking methods do.
@@ -259,11 +289,15 @@ let moved = redis
 
 ## Events
 
-`Redis::enable_events()` reports each command a connection runs to the
-listeners `Redis::listen` adds, with the connection's name, the command, its
-arguments, and how long it took. `Redis::listen_for_failures` hears the
-commands that fail, with the error. Events are off until enabled, and
-commands inside a pipeline or a transaction are not reported:
+You enable command events with `Redis::enable_events()`. You register
+application listeners through `EventFacade::listen` to receive
+`RedisCommandExecuted`. You also receive the same event through
+`Redis::listen`, with the connection's name, command, wire arguments and
+duration. You receive `RedisCommandFailed`, with its error, through both
+`EventFacade` and `Redis::listen_for_failures`. You see application
+listener errors in the logs, while the Redis command's result stays the
+same. You receive no events until you enable them, and no events for
+commands inside a pipeline or a transaction:
 
 ```rust
 use suprnova::Redis;
@@ -294,12 +328,13 @@ test:
 use suprnova::Redis;
 
 #[tokio::test]
-async fn counts_visits() {
-    Redis::define("default", "redis://127.0.0.1:6379/15").unwrap();
-    let redis = Redis::connection("default").unwrap();
-    redis.del(&["visits"]).await.unwrap();
+async fn counts_visits() -> Result<(), suprnova::FrameworkError> {
+    Redis::define("default", "redis://127.0.0.1:6379/15")?;
+    let redis = Redis::connection("default")?;
+    redis.del(&["visits"]).await?;
     // run the code under test
-    assert_eq!(redis.get("visits").await.unwrap().as_deref(), Some("1"));
+    assert_eq!(redis.get("visits").await?.as_deref(), Some("1"));
+    Ok(())
 }
 ```
 
@@ -312,10 +347,6 @@ in one test's runtime opens again in the next test's, so every
 - **Connections are named in the bootstrap.** Laravel reads them from
   `config/database.php`; `Redis::define` does the same job in code, with
   the URL holding the host, port, database, user, and password.
-- **No key prefix.** Laravel's phpredis client prefixes the keys of every
-  command because it knows which arguments are keys. `command` cannot know
-  that, so a prefix would apply to some commands and not others. Put the
-  prefix in the key: `format!("myapp:{key}")`.
 - **Only reads retry.** With `command_retries` set, Laravel sends any
   command again after a lost connection, writes included, and its list of
   retryable commands holds three writes. Suprnova never sends a write

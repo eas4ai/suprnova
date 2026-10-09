@@ -54,11 +54,12 @@ the one `tracing`'s events go to:
 | `stdout` | standard output, in the `LOG_FORMAT`; the default |
 | `stderr` (also `errorlog`) | standard error |
 | `single` | `storage/logs/suprnova.log`, appended to |
-| `daily` | `storage/logs/suprnova-2026-10-02.log`, a file a day, keeping the newest `LOG_DAILY_DAYS` (14; 0 keeps every file) |
+| `daily` | `storage/logs/suprnova-2026-10-02.log`, a file a day, keeping the newest `LOG_DAILY_DAYS` (7; 0 keeps every file) |
 | `monthly` | `storage/logs/suprnova-2026-10.log`, a file a month, keeping the newest 3 |
-| `syslog` | the local syslog socket, with the facility `LOG_SYSLOG_FACILITY` (`user`) |
+| `syslog` | the local syslog socket, with the facility `LOG_SYSLOG_FACILITY` (`user`) and `APP_NAME` as the ident (`suprnova` unless set) |
 | `null` | nowhere |
 | `stack` | every channel `LOG_STACK` lists, `single` unless set |
+| `custom` | the driver `LOG_CHANNEL_DRIVER` names, registered with `Log::extend` in the bootstrap |
 
 ```env
 LOG_CHANNEL=stack
@@ -133,6 +134,17 @@ impl LogSink for Webhook {
 Log::extend("webhook", |_channel| Ok(Arc::new(Webhook) as Arc<dyn LogSink>));
 Log::define("ops", LogChannel::driver("webhook").option("url", "https://..."));
 ```
+
+To use an extended driver as the built-in `custom` channel, register it in
+the bootstrap and set:
+
+```env
+LOG_CHANNEL=custom
+LOG_CHANNEL_DRIVER=webhook
+```
+
+You use `custom` without a `Log::define` call. Your application fails boot
+if `LOG_CHANNEL_DRIVER` is missing or names a driver you do not register.
 
 `MAIL_LOG_CHANNEL` names the channel the `log` mail transport writes to.
 

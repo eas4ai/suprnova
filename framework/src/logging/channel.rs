@@ -170,12 +170,12 @@ impl LogChannel {
     }
 
     /// A file a day, named from `path` with the date before the extension
-    /// (`app.log` becomes `app-2026-10-02.log`), keeping the newest 14
+    /// (`app.log` becomes `app-2026-10-02.log`), keeping the newest 7
     /// unless [`days`](Self::days) says otherwise.
     pub fn daily(path: impl AsRef<Path>) -> Self {
         Self::new(ChannelKind::Daily {
             path: path.as_ref().to_path_buf(),
-            days: 14,
+            days: 7,
         })
     }
 
@@ -188,7 +188,8 @@ impl LogChannel {
         })
     }
 
-    /// The local syslog, over its Unix socket.
+    /// The local syslog, over its Unix socket, with `APP_NAME` as the ident
+    /// (`suprnova` when it is not set).
     pub fn syslog() -> Self {
         Self::new(ChannelKind::Syslog {
             facility: None,

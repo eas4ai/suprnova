@@ -939,7 +939,7 @@ file** - an app that isn't localized sees no new artifact appear.
 
 ## Locale-aware formatting
 
-Seven functions on `Lang`, all ICU4X-backed, all reading the current
+You format values with `Lang` through ICU4X, using the current
 locale, all with `try_*` siblings that return
 `Result<String, FrameworkError>` instead of degrading:
 
@@ -970,7 +970,27 @@ The style enums: `DateStyle { Full, Long, Medium, Short }`,
 ("3 days ago"), positive the future ("in 3 days").
 
 `Lang::percentage(value, precision)` takes the percentage itself, `10.0`
-for ten percent, as Laravel's `Number::percentage` does.
+for ten percent, as Laravel's `Number::percentage` does. You round decimal
+ties half up, so `Lang::percentage(0.12345, 4)` gives `0.1235%`.
+You choose a locale without changing the current one with
+`Lang::percentage_in(10.0, 0, "de")?`, which gives `10` followed by the
+locale's no-break space and `%`.
+
+You use `Lang::format(value, precision)` for fixed fraction digits and
+`Lang::format_with_max_precision(value, precision, Some(max))` for at most
+`max` digits with trailing zeros removed. The maximum takes precedence
+over fixed precision. You apply the same control to percentages with
+`Lang::percentage_with_max_precision(value, precision, Some(max))`.
+Infinite values appear as `∞` or `-∞`; a value that is not a number appears
+as `NaN`. You receive formatting errors through `try_format` and
+`try_percentage_with_max_precision`.
+
+You set the default for calls outside a request with `Lang::use_locale("de")?`.
+A request locale still takes precedence. You run a synchronous closure in
+a temporary locale with `Lang::with_locale("fr", || Lang::percentage(10.0, 0))?`.
+The previous locale returns when the closure ends, including when it panics.
+An invalid locale returns an error before the closure runs.
+
 `Lang::abbreviate(value, precision)` divides by the largest of a thousand,
 a million, a billion, a trillion, and a quadrillion the value reaches and
 adds `K`, `M`, `B`, `T`, or `Q`, as Laravel's `Number::abbreviate` does;

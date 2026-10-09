@@ -6,10 +6,23 @@
 /// the call returns.
 #[derive(Debug, Default)]
 pub struct RedisPipeline {
+    prefix: String,
     pub(crate) commands: Vec<(String, Vec<Vec<u8>>)>,
 }
 
 impl RedisPipeline {
+    pub(crate) fn new(prefix: String) -> Self {
+        Self {
+            prefix,
+            commands: Vec::new(),
+        }
+    }
+
+    fn typed(&mut self, name: &str, args: &[&str]) -> &mut Self {
+        let args = super::keys::prefixed(name, args, &self.prefix);
+        self.command(name, &args)
+    }
+
     /// Queue any command.
     pub fn command<A: AsRef<[u8]>>(&mut self, name: &str, args: &[A]) -> &mut Self {
         self.commands.push((
@@ -21,62 +34,62 @@ impl RedisPipeline {
 
     /// Queue `SET key value`.
     pub fn set(&mut self, key: &str, value: &str) -> &mut Self {
-        self.command("SET", &[key, value])
+        self.typed("SET", &[key, value])
     }
 
     /// Queue `SETEX key seconds value`.
     pub fn set_ex(&mut self, key: &str, value: &str, seconds: u64) -> &mut Self {
-        self.command("SETEX", &[key, &seconds.to_string(), value])
+        self.typed("SETEX", &[key, &seconds.to_string(), value])
     }
 
     /// Queue `GET key`.
     pub fn get(&mut self, key: &str) -> &mut Self {
-        self.command("GET", &[key])
+        self.typed("GET", &[key])
     }
 
     /// Queue `DEL key...`.
     pub fn del(&mut self, keys: &[&str]) -> &mut Self {
-        self.command("DEL", keys)
+        self.typed("DEL", keys)
     }
 
     /// Queue `INCRBY key by`.
     pub fn incr(&mut self, key: &str, by: i64) -> &mut Self {
-        self.command("INCRBY", &[key, &by.to_string()])
+        self.typed("INCRBY", &[key, &by.to_string()])
     }
 
     /// Queue `DECRBY key by`.
     pub fn decr(&mut self, key: &str, by: i64) -> &mut Self {
-        self.command("DECRBY", &[key, &by.to_string()])
+        self.typed("DECRBY", &[key, &by.to_string()])
     }
 
     /// Queue `EXPIRE key seconds`.
     pub fn expire(&mut self, key: &str, seconds: i64) -> &mut Self {
-        self.command("EXPIRE", &[key, &seconds.to_string()])
+        self.typed("EXPIRE", &[key, &seconds.to_string()])
     }
 
     /// Queue `HSET key field value`.
     pub fn hset(&mut self, key: &str, field: &str, value: &str) -> &mut Self {
-        self.command("HSET", &[key, field, value])
+        self.typed("HSET", &[key, field, value])
     }
 
     /// Queue `LPUSH key value...`.
     pub fn lpush(&mut self, key: &str, values: &[&str]) -> &mut Self {
-        self.command("LPUSH", &with_key(key, values))
+        self.typed("LPUSH", &with_key(key, values))
     }
 
     /// Queue `RPUSH key value...`.
     pub fn rpush(&mut self, key: &str, values: &[&str]) -> &mut Self {
-        self.command("RPUSH", &with_key(key, values))
+        self.typed("RPUSH", &with_key(key, values))
     }
 
     /// Queue `SADD key member...`.
     pub fn sadd(&mut self, key: &str, members: &[&str]) -> &mut Self {
-        self.command("SADD", &with_key(key, members))
+        self.typed("SADD", &with_key(key, members))
     }
 
     /// Queue `ZADD key score member`.
     pub fn zadd(&mut self, key: &str, member: &str, score: f64) -> &mut Self {
-        self.command("ZADD", &[key, &score.to_string(), member])
+        self.typed("ZADD", &[key, &score.to_string(), member])
     }
 
     /// Queue `PUBLISH channel message`.

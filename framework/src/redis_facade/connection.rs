@@ -167,6 +167,7 @@ pub struct RedisConnection {
 struct Inner {
     name: String,
     client: redis::Client,
+    prefix: String,
     manager: Mutex<Option<Bound>>,
 }
 
@@ -200,11 +201,12 @@ fn seconds(timeout: Duration) -> String {
 }
 
 impl RedisConnection {
-    pub(crate) fn new(name: &str, client: redis::Client) -> Self {
+    pub(crate) fn new(name: &str, client: redis::Client, prefix: String) -> Self {
         Self {
             inner: Arc::new(Inner {
                 name: name.to_owned(),
                 client,
+                prefix,
                 manager: Mutex::new(None),
             }),
         }
@@ -323,25 +325,37 @@ impl RedisConnection {
     }
 
     /// Tell the listeners how `command` went, while events are enabled.
-    fn report(&self, command: &str, args: &[&[u8]], duration: Duration, error: Option<String>) {
+    async fn report(
+        &self,
+        command: &str,
+        args: &[&[u8]],
+        duration: Duration,
+        error: Option<String>,
+    ) {
         if !events::enabled() {
             return;
         }
         let arguments = args.iter().map(|arg| printable(arg)).collect();
         match error {
-            None => events::executed(&RedisCommandExecuted {
-                connection: self.inner.name.clone(),
-                command: command.to_owned(),
-                arguments,
-                duration,
-            }),
-            Some(error) => events::failed(&RedisCommandFailed {
-                connection: self.inner.name.clone(),
-                command: command.to_owned(),
-                arguments,
-                error,
-                duration,
-            }),
+            None => {
+                events::executed(&RedisCommandExecuted {
+                    connection: self.inner.name.clone(),
+                    command: command.to_owned(),
+                    arguments,
+                    duration,
+                })
+                .await
+            }
+            Some(error) => {
+                events::failed(&RedisCommandFailed {
+                    connection: self.inner.name.clone(),
+                    command: command.to_owned(),
+                    arguments,
+                    error,
+                    duration,
+                })
+                .await
+            }
         }
     }
 
@@ -359,7 +373,8 @@ impl RedisConnection {
             args,
             duration,
             result.as_ref().err().map(ToString::to_string),
-        );
+        )
+        .await;
         result
             .map(Into::into)
             .map_err(|error| self.error(command, error))
@@ -374,6 +389,7 @@ impl RedisConnection {
         retry: bool,
         blocking: bool,
     ) -> Result<T, FrameworkError> {
+        let args = super::keys::prefixed(command, args, &self.inner.prefix);
         let bytes: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
         let (result, duration) = self.exchange(command, &bytes, retry, blocking).await?;
         let converted = result
@@ -383,7 +399,8 @@ impl RedisConnection {
             &bytes,
             duration,
             converted.as_ref().err().map(ToString::to_string),
-        );
+        )
+        .await;
         converted.map_err(|error| self.error(command, error))
     }
 
@@ -431,6 +448,34 @@ impl RedisConnection {
         let blocking = blocks(&command, &bytes);
         let retry = !blocking && RETRYABLE.contains(&command.as_str());
         self.run(&command, &bytes, retry, blocking).await
+    }
+
+    /// Run a raw command line, including its command name, with no key prefix.
+    /// Reads use the same retry policy and connection guards as [`command`](Self::command).
+    ///
+    /// # Errors
+    ///
+    /// When the command line is empty, the name is not UTF-8, or `command` fails.
+    pub async fn execute_raw<A: AsRef<[u8]>>(
+        &self,
+        args: &[A],
+    ) -> Result<RedisValue, FrameworkError> {
+        let Some((name, arguments)) = args.split_first() else {
+            return Err(FrameworkError::internal(format!(
+                "the Redis connection '{}' needs a raw command name",
+                self.name()
+            )));
+        };
+        let name = std::str::from_utf8(name.as_ref()).map_err(|error| {
+            FrameworkError::from_external_with(
+                format!(
+                    "the Redis connection '{}' needs a UTF-8 command name",
+                    self.name()
+                ),
+                error,
+            )
+        })?;
+        self.command(name, arguments).await
     }
 
     /// `GET`: the value, or `None` when the key does not exist.
@@ -611,12 +656,41 @@ impl RedisConnection {
         keys: &[&str],
         args: &[&str],
     ) -> Result<RedisValue, FrameworkError> {
+        self.script("EVAL", script, keys, args).await
+    }
+
+    /// `EVALSHA`: run a script already loaded with `SCRIPT LOAD`, by its SHA1.
+    /// Only `keys` carry the connection's key prefix. The SHA and `args` do not.
+    ///
+    /// # Errors
+    ///
+    /// When the script is not loaded or the server rejects it or cannot be reached.
+    pub async fn evalsha(
+        &self,
+        sha: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, FrameworkError> {
+        self.script("EVALSHA", sha, keys, args).await
+    }
+
+    async fn script(
+        &self,
+        command: &str,
+        script: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, FrameworkError> {
         let count = keys.len().to_string();
+        let keys: Vec<String> = keys
+            .iter()
+            .map(|key| format!("{}{key}", self.inner.prefix))
+            .collect();
         let mut all = vec![script, count.as_str()];
-        all.extend_from_slice(keys);
+        all.extend(keys.iter().map(String::as_str));
         all.extend_from_slice(args);
         let bytes: Vec<&[u8]> = all.iter().map(|arg| arg.as_bytes()).collect();
-        self.run("EVAL", &bytes, false, false).await
+        self.run(command, &bytes, false, false).await
     }
 
     /// Every key matching `pattern`, by `SCAN` from the first cursor to the
@@ -677,7 +751,7 @@ impl RedisConnection {
         atomic: bool,
         what: &str,
     ) -> Result<Vec<RedisValue>, FrameworkError> {
-        let mut queued = RedisPipeline::default();
+        let mut queued = RedisPipeline::new(self.inner.prefix.clone());
         queue(&mut queued);
         if queued.commands.is_empty() {
             return Ok(Vec::new());
@@ -750,7 +824,8 @@ impl RedisConnection {
             &bytes,
             start.elapsed(),
             opened.as_ref().err().map(ToString::to_string),
-        );
+        )
+        .await;
         let stream = opened.map_err(|error| self.error(what, error))?;
         Ok(RedisSubscription {
             stream,

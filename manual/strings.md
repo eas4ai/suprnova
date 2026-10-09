@@ -28,6 +28,7 @@ assert_eq!(Str::slug("Laravel 5 Framework", "-"), "laravel-5-framework");
 assert_eq!(Str::slug("Ünïcödé Straße", "-"), "unicode-strasse");
 assert_eq!(Str::slug("Привет мир", "-"), "privet-mir");
 assert_eq!(Str::slug("foo bar", "_"), "foo_bar");
+assert_eq!(Str::slug_in("Ärger", "-", "de"), "aerger");
 ```
 
 The ASCII spelling is Laravel's own: the replacement map of
@@ -35,6 +36,10 @@ voku/portable-ascii, the package Laravel's `Str::ascii` uses, so a title
 gets the slug it gets in Laravel. That map spells Latin, Greek, Cyrillic,
 Arabic, and many other scripts, and drops what it can't spell, such as
 Han characters and emoji: `Str::slug("北京 city", "-")` is `city`.
+You choose the language's spelling with
+`Str::slug_in(title, separator, language)`. With German, you get `ae` for
+`ä`; with Esperanto, you get `cx` for `ĉ`. You pass an empty language to
+keep Unicode letters instead of transliterating them.
 
 ## Masks
 
@@ -63,10 +68,26 @@ assert_eq!(Str::limit("The quick brown fox", 12, "..."), "The quick br...");
 assert_eq!(Str::limit_words("The quick brown fox", 12, "..."), "The quick...");
 ```
 
+You keep the first `words` space-separated runs with
+`Str::words(value, words, end)` and add `end` when you cut. You count
+markup as part of a word and keep whitespace between words. You pass a
+zero word limit to leave the value as it is:
+
+```rust
+use suprnova::Str;
+
+assert_eq!(
+    Str::words("Perfectly balanced, as all things should be.", 3, " >>>"),
+    "Perfectly balanced, as >>>"
+);
+assert_eq!(Str::words("<b>bold</b> text here", 2, "..."), "<b>bold</b> text...");
+```
+
 `Str::excerpt(text, phrase, radius, omission)` frames the first match of
 a phrase, ignoring case, with up to `radius` characters on each side,
 in text of any number of lines. It returns `None` when the phrase is not
-there:
+there. You trim Laravel's invisible characters, including zero-width
+spaces, from the ends you cut:
 
 ```rust
 use suprnova::Str;
@@ -82,9 +103,9 @@ assert_eq!(
 `Str::plural(word, count)` and `Str::singular(word)` inflect by the rules
 of the current locale's language, the ones Laravel's `Pluralizer` uses
 from doctrine/inflector 2.1.0, the release Laravel 13 installs: English,
-French, Norwegian Bokmål, Portuguese, Spanish, and Turkish. Any other
-language uses the English rules. A count of 1 or -1 leaves the word as it
-is, and the result keeps the word's case:
+Esperanto, French, Italian, Norwegian Bokmål, Portuguese, Spanish, and
+Turkish. Any other language uses the English rules. A count of 1 or -1
+leaves the word as it is, and the result keeps the word's case:
 
 ```rust
 use suprnova::Str;
@@ -93,14 +114,23 @@ assert_eq!(Str::plural("child", 2), "children");
 assert_eq!(Str::plural("Person", 3), "People");
 assert_eq!(Str::plural("comment", 1), "comment");
 assert_eq!(Str::singular("people"), "person");
+assert_eq!(Str::plural_studly("VerifiedHuman", 2), "VerifiedHumans");
+assert_eq!(Str::plural_pascal("VerifiedHuman", 2), "VerifiedHumans");
+assert_eq!(Str::plural_with_count("car", 3), "3 cars");
 ```
 
 In a request whose locale is `fr`, `Str::plural("cheval", 2)` is
 `chevaux`; in `es`, `Str::plural("ciudad", 2)` is `ciudades`. Without the
 `localization` feature, the rules are English.
 
-Both read the current locale, so a page that [RenderCache](render-cache.md)
-stores and that calls them must vary by it: add
+You inflect the last word of the value with `Str::plural_studly` or
+`Str::plural_pascal`. You put the count before the inflected word with
+`Str::plural_with_count(word, count)`, using the current locale's integer
+format. You keep all digits even for the largest and smallest `i64`
+values. Without `localization`, you get plain decimal digits.
+
+You vary a page that [RenderCache](render-cache.md) stores by its locale
+when you call these inflection helpers: add
 `.vary(VarianceDimension::Locale)` to the route's policy. Without it,
 RenderCache declines to store the page.
 

@@ -1,6 +1,7 @@
 //! Plural and singular forms by doctrine/inflector's rules, the engine
 //! behind Laravel's `Pluralizer`.
 
+use super::inflector_additional_rules::{ESPERANTO, ITALIAN};
 use super::inflector_rules::{ENGLISH, FRENCH, NORWEGIAN_BOKMAL, PORTUGUESE, SPANISH, TURKISH};
 use regex::Regex;
 use std::collections::HashMap;
@@ -110,7 +111,9 @@ impl Language {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Tongue {
     English,
+    Esperanto,
     French,
+    Italian,
     NorwegianBokmal,
     Portuguese,
     Spanish,
@@ -121,7 +124,9 @@ impl Tongue {
     /// The rules for a language subtag such as `fr` or `pt`.
     pub(super) fn for_language(language: &str) -> Self {
         match language.to_ascii_lowercase().as_str() {
+            "eo" => Tongue::Esperanto,
             "fr" => Tongue::French,
+            "it" => Tongue::Italian,
             "nb" | "no" => Tongue::NorwegianBokmal,
             "pt" => Tongue::Portuguese,
             "es" => Tongue::Spanish,
@@ -131,7 +136,7 @@ impl Tongue {
     }
 
     fn compiled(self) -> &'static Language {
-        static LANGUAGES: [OnceLock<Language>; 6] = [const { OnceLock::new() }; 6];
+        static LANGUAGES: [OnceLock<Language>; 8] = [const { OnceLock::new() }; 8];
         let (slot, rules) = match self {
             Tongue::English => (0, &ENGLISH),
             Tongue::French => (1, &FRENCH),
@@ -139,6 +144,8 @@ impl Tongue {
             Tongue::Portuguese => (3, &PORTUGUESE),
             Tongue::Spanish => (4, &SPANISH),
             Tongue::Turkish => (5, &TURKISH),
+            Tongue::Esperanto => (6, &ESPERANTO),
+            Tongue::Italian => (7, &ITALIAN),
         };
         LANGUAGES[slot].get_or_init(|| Language::new(rules))
     }
@@ -175,7 +182,9 @@ mod tests {
     fn every_rule_compiles() {
         for rules in [
             &ENGLISH,
+            &ESPERANTO,
             &FRENCH,
+            &ITALIAN,
             &NORWEGIAN_BOKMAL,
             &PORTUGUESE,
             &SPANISH,

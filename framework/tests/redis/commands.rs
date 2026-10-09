@@ -1,7 +1,7 @@
 //! PAR-032: typed commands, any command, the client, retried reads, and
 //! the command events.
 
-use crate::support::{client_id, connection, cutting_proxy, kill_client, unique};
+use crate::support::{client_id, connection, cutting_proxy, kill_client, unique, wire_key};
 use serial_test::serial;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
@@ -103,7 +103,7 @@ async fn typed_commands_return_the_servers_replies() {
             .await
             .unwrap(),
         RedisValue::Array(vec![
-            RedisValue::Bytes(string.clone().into_bytes()),
+            RedisValue::Bytes(wire_key(&string).into_bytes()),
             RedisValue::Bytes(b"argument".to_vec()),
         ])
     );
@@ -120,7 +120,10 @@ async fn typed_commands_return_the_servers_replies() {
         .collect();
     assert_eq!(found.len(), 25, "scan walks every cursor");
     let scanned: Vec<&str> = found.iter().map(String::as_str).collect();
-    assert_eq!(redis.del(&scanned).await.unwrap(), 25);
+    assert_eq!(
+        redis.command("DEL", &scanned).await.unwrap(),
+        RedisValue::Int(25)
+    );
 
     assert_eq!(
         redis
@@ -147,7 +150,7 @@ async fn command_runs_any_command_and_returns_the_reply() {
     redis.rpush(&list, &["one", "two"]).await.unwrap();
     assert_eq!(
         redis
-            .command("LRANGE", &[list.as_str(), "0", "-1"])
+            .command("LRANGE", &[wire_key(&list).as_str(), "0", "-1"])
             .await
             .unwrap(),
         RedisValue::Array(vec![
@@ -156,17 +159,26 @@ async fn command_runs_any_command_and_returns_the_reply() {
         ])
     );
     assert_eq!(
-        redis.command("llen", &[list.as_str()]).await.unwrap(),
+        redis
+            .command("llen", &[wire_key(&list).as_str()])
+            .await
+            .unwrap(),
         RedisValue::Int(2),
         "a lower-case name works too"
     );
     assert_eq!(
-        redis.command("SET", &[list.as_str(), "x"]).await.unwrap(),
+        redis
+            .command("SET", &[wire_key(&list).as_str(), "x"])
+            .await
+            .unwrap(),
         RedisValue::Status("OK".into()),
         "SET replaces a key of any type"
     );
     assert_eq!(
-        redis.command("GET", &[list.as_str()]).await.unwrap(),
+        redis
+            .command("GET", &[wire_key(&list).as_str()])
+            .await
+            .unwrap(),
         RedisValue::Bytes(b"x".to_vec())
     );
     assert_eq!(
@@ -185,7 +197,7 @@ async fn client_is_a_client_of_the_same_server_and_database() {
     redis.set(&key, "shared").await.unwrap();
     let mut client = redis.client().unwrap();
     let value: Option<String> = suprnova::redis::cmd("GET")
-        .arg(&key)
+        .arg(wire_key(&key))
         .query_async(&mut client)
         .await
         .unwrap();
@@ -209,7 +221,10 @@ async fn a_read_is_sent_again_after_a_lost_connection() {
 
     kill_client(client_id(&redis).await).await;
     assert_eq!(
-        redis.command("GET", &[key.as_str()]).await.unwrap(),
+        redis
+            .command("GET", &[wire_key(&key).as_str()])
+            .await
+            .unwrap(),
         RedisValue::Bytes(b"still here".to_vec()),
         "GET given to command is one of the retryable commands"
     );
@@ -263,7 +278,7 @@ async fn a_write_the_server_applied_is_not_sent_again_when_its_reply_is_lost() {
             1,
             "{name} given to command was sent again"
         );
-        reader.del(&[key.as_str()]).await.unwrap();
+        reader.command("DEL", &[key.as_str()]).await.unwrap();
     }
     reader.del(&[counter.as_str(), key.as_str()]).await.unwrap();
 }
@@ -282,7 +297,10 @@ async fn a_read_whose_reply_is_lost_is_sent_again() {
 
     let (redis, proxy) = cut_once(&key).await;
     assert_eq!(
-        redis.command("GET", &[key.as_str()]).await.unwrap(),
+        redis
+            .command("GET", &[wire_key(&key).as_str()])
+            .await
+            .unwrap(),
         RedisValue::Bytes(b"there".to_vec())
     );
     assert_eq!(
@@ -321,7 +339,10 @@ async fn while_events_are_enabled_each_command_is_reported() {
     Redis::enable_events();
 
     redis.set(&key, "value").await.unwrap();
-    redis.command("STRLEN", &[key.as_str()]).await.unwrap();
+    redis
+        .command("STRLEN", &[wire_key(&key).as_str()])
+        .await
+        .unwrap();
 
     Redis::disable_events();
     redis.get(&key).await.unwrap();
@@ -339,9 +360,9 @@ async fn while_events_are_enabled_each_command_is_reported() {
         "SET and STRLEN, and not the GET after disable: {mine:?}"
     );
     assert_eq!(mine[0].command, "SET");
-    assert_eq!(mine[0].arguments, vec![key.clone(), "value".to_owned()]);
+    assert_eq!(mine[0].arguments, vec![wire_key(&key), "value".to_owned()]);
     assert_eq!(mine[1].command, "STRLEN");
-    assert_eq!(mine[1].arguments, vec![key.clone()]);
+    assert_eq!(mine[1].arguments, vec![wire_key(&key)]);
     redis.del(&[key.as_str()]).await.unwrap();
 }
 
@@ -367,7 +388,7 @@ async fn a_failed_command_is_reported_to_the_failure_listeners() {
         .collect();
     assert_eq!(mine.len(), 1, "{mine:?}");
     assert_eq!(mine[0].command, "INCRBY");
-    assert_eq!(mine[0].arguments, vec![key.clone(), "1".to_owned()]);
+    assert_eq!(mine[0].arguments, vec![wire_key(&key), "1".to_owned()]);
     assert!(
         mine[0].error.contains("not an integer"),
         "{}",
@@ -411,12 +432,18 @@ async fn child_runs_a_command_with_events_never_enabled() {
         return;
     }
     let executed = record_executed();
+    let application: Seen<RedisCommandExecuted> = Arc::default();
+    suprnova::EventFacade::listen::<RedisCommandExecuted, _>(Arc::new(ApplicationRecorder(
+        application.clone(),
+    )))
+    .await;
     let redis = connection("quiet");
     redis.command("PING", &[] as &[&str]).await.unwrap();
     assert!(
         executed.lock().unwrap().is_empty(),
         "no event before enable_events"
     );
+    assert!(application.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -427,7 +454,7 @@ async fn subscriptions_and_unreadable_replies_are_reported() {
     let channel = unique("channel");
     let key = unique("binary");
     redis
-        .command("SET", &[key.as_bytes(), b"\xff\xfe".as_slice()])
+        .command("SET", &[wire_key(&key).as_bytes(), b"\xff\xfe".as_slice()])
         .await
         .unwrap();
     let executed = record_executed();
@@ -466,4 +493,224 @@ async fn subscriptions_and_unreadable_replies_are_reported() {
     assert_eq!(failed[0].command, "GET");
     assert!(!error.to_string().is_empty());
     redis.del(&[key.as_str()]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn evalsha_loaded_script_and_execute_raw_return_server_replies() {
+    let redis = connection("raw-and-script");
+    let key = unique("script-key");
+    let script = "return redis.call('set', KEYS[1], ARGV[1])";
+    let sha = redis.command("SCRIPT", &["LOAD", script]).await.unwrap();
+    let sha = sha.as_str().unwrap();
+    assert_eq!(
+        redis
+            .evalsha(sha, &[key.as_str()], &["value"])
+            .await
+            .unwrap(),
+        RedisValue::Status("OK".to_owned())
+    );
+    assert_eq!(
+        redis
+            .execute_raw(&["GET", wire_key(&key).as_str()])
+            .await
+            .unwrap(),
+        RedisValue::Bytes(b"value".to_vec())
+    );
+    let list = unique("raw-list");
+    redis.rpush(&list, &["a", "b"]).await.unwrap();
+    let expected = RedisValue::Array(vec![
+        RedisValue::Bytes(b"a".to_vec()),
+        RedisValue::Bytes(b"b".to_vec()),
+    ]);
+    assert_eq!(
+        redis
+            .execute_raw(&["LRANGE", wire_key(&list).as_str(), "0", "-1"])
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        redis
+            .command("LRANGE", &[wire_key(&list).as_str(), "0", "-1"])
+            .await
+            .unwrap(),
+        expected
+    );
+    assert!(redis.execute_raw(&[] as &[&str]).await.is_err());
+    assert!(redis.execute_raw(&[b"\xff".as_slice()]).await.is_err());
+    assert!(redis.execute_raw(&["MULTI"]).await.is_err());
+    assert!(redis.execute_raw(&["SUBSCRIBE", "channel"]).await.is_err());
+    assert!(
+        redis
+            .evalsha("0000000000000000000000000000000000000000", &[], &[])
+            .await
+            .is_err()
+    );
+    redis.del(&[key.as_str(), list.as_str()]).await.unwrap();
+}
+
+struct ApplicationRecorder<T>(Seen<T>);
+
+#[suprnova::async_trait]
+impl<T: suprnova::Event> suprnova::Listener<T> for ApplicationRecorder<T> {
+    async fn handle(&self, event: &T) -> Result<(), suprnova::FrameworkError> {
+        self.0.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn application_dispatcher_and_redis_listeners_receive_the_same_events() {
+    let redis = connection("application-events");
+    let executed: Seen<RedisCommandExecuted> = Arc::default();
+    let failed: Seen<RedisCommandFailed> = Arc::default();
+    suprnova::EventFacade::listen::<RedisCommandExecuted, _>(Arc::new(ApplicationRecorder(
+        executed.clone(),
+    )))
+    .await;
+    suprnova::EventFacade::listen::<RedisCommandFailed, _>(Arc::new(ApplicationRecorder(
+        failed.clone(),
+    )))
+    .await;
+    let redis_executed = record_executed();
+    let redis_failed = record_failed();
+    let key = unique("event-key");
+    Redis::disable_events();
+    redis.set(&key, "before").await.unwrap();
+    assert!(executed.lock().unwrap().is_empty());
+    Redis::enable_events();
+    redis.set(&key, "not-an-integer").await.unwrap();
+    redis
+        .execute_raw(&["STRLEN", wire_key(&key).as_str()])
+        .await
+        .unwrap();
+    assert!(redis.incr(&key, 1).await.is_err());
+    redis
+        .pipeline(|pipe| {
+            pipe.get(&key);
+        })
+        .await
+        .unwrap();
+    redis
+        .transaction(|pipe| {
+            pipe.get(&key);
+        })
+        .await
+        .unwrap();
+    Redis::disable_events();
+    redis.get(&key).await.unwrap();
+    let own = |events: &Seen<RedisCommandExecuted>| -> Vec<RedisCommandExecuted> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.connection == redis.name())
+            .cloned()
+            .collect()
+    };
+    let executed = own(&executed);
+    assert_eq!(executed, own(&redis_executed));
+    assert_eq!(executed.len(), 2);
+    assert_eq!(executed[0].command, "SET");
+    assert!(executed[0].duration > std::time::Duration::ZERO);
+    assert_eq!(
+        executed[0].arguments,
+        vec![wire_key(&key), "not-an-integer".to_owned()]
+    );
+    assert_eq!(executed[1].command, "STRLEN");
+    assert_eq!(executed[1].arguments, vec![wire_key(&key)]);
+    let failed = failed.lock().unwrap().clone();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].connection, redis.name());
+    assert_eq!(failed[0].command, "INCRBY");
+    assert!(failed[0].duration > std::time::Duration::ZERO);
+    assert_eq!(failed[0].arguments, vec![wire_key(&key), "1".to_owned()]);
+    assert!(failed[0].error.contains("not an integer"));
+    assert!(redis_failed.lock().unwrap().contains(&failed[0]));
+    redis.del(&[key.as_str()]).await.unwrap();
+}
+
+#[test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+fn command_retries_add_to_the_one_read_retry_and_never_retry_writes() {
+    for (extra, drops, success, sent) in [
+        ("0", "1", "1", "2"),
+        ("2", "3", "1", "4"),
+        ("2", "4", "0", "4"),
+    ] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::child_checks_retry_budget",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("SUPRNOVA_REDIS_CHILD", "1")
+            .env("REDIS_COMMAND_RETRIES", extra)
+            .env("SUPRNOVA_REDIS_DROPS", drops)
+            .env("SUPRNOVA_REDIS_SUCCESS", success)
+            .env("SUPRNOVA_REDIS_SENT", sent)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "child process for command retry budgets"]
+async fn child_checks_retry_budget() {
+    if std::env::var_os("SUPRNOVA_REDIS_DROPS").is_none() {
+        return;
+    }
+    let reader = connection("budget-setup");
+    let key = unique("budget-key");
+    reader.set(&key, "present").await.unwrap();
+    let drops = std::env::var("SUPRNOVA_REDIS_DROPS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let sent: u64 = std::env::var("SUPRNOVA_REDIS_SENT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    for raw in [false, true] {
+        let proxy = crate::support::cutting_proxy_times(&key, drops).await;
+        let name = unique("budget-proxy");
+        Redis::define(&name, &proxy.url).unwrap();
+        let redis = Redis::connection(&name).unwrap();
+        redis.command("PING", &[] as &[&str]).await.unwrap();
+        let result = if raw {
+            redis.execute_raw(&["GET", wire_key(&key).as_str()]).await
+        } else {
+            redis.get(&key).await.map(|value| {
+                value.map_or(RedisValue::Nil, |value| {
+                    RedisValue::Bytes(value.into_bytes())
+                })
+            })
+        };
+        assert_eq!(
+            result.is_ok(),
+            std::env::var("SUPRNOVA_REDIS_SUCCESS").unwrap() == "1"
+        );
+        assert_eq!(proxy.times_sent(), sent);
+    }
+    let counter = unique("budget-write");
+    let proxy = crate::support::cutting_proxy_times(&counter, drops).await;
+    let name = unique("budget-write-proxy");
+    Redis::define(&name, &proxy.url).unwrap();
+    let redis = Redis::connection(&name).unwrap();
+    redis.command("PING", &[] as &[&str]).await.unwrap();
+    assert!(redis.incr(&counter, 1).await.is_err());
+    assert_eq!(proxy.times_sent(), 1);
+    assert_eq!(reader.get(&counter).await.unwrap().as_deref(), Some("1"));
+    reader.del(&[key.as_str(), counter.as_str()]).await.unwrap();
 }

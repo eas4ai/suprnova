@@ -1,13 +1,14 @@
 //! The `Redis` facade: named connections to Redis servers, for the
 //! commands the cache, the queue and the rate limiter do not run for you.
 //!
-//! The `default` connection reaches `REDIS_URL`; the application's
-//! bootstrap names others with [`Redis::define`]. Connections are resolved
-//! by name, opened on their first command, and kept until
+//! The `default` and `cache` connections read the Redis environment;
+//! the application's bootstrap names others with [`Redis::define`].
+//! Connections are resolved by name, opened on their first command, and kept until
 //! [`Redis::purge`].
 
 mod connection;
 mod events;
+mod keys;
 mod pipeline;
 mod subscription;
 mod value;
@@ -22,7 +23,7 @@ use crate::error::FrameworkError;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// Where the `default` connection goes when `REDIS_URL` is unset.
+/// The base settings before environment overrides are applied.
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 
 /// The connections the bootstrap defined, and the ones resolved.
@@ -56,6 +57,71 @@ fn client_for(url: &str, what: &str) -> Result<redis::Client, FrameworkError> {
     }
     crate::redis_client::open(url).map_err(|error| {
         FrameworkError::from_external_with(format!("{what}: the URL is not usable: {error}"), error)
+    })
+}
+
+/// Resolve configuration without opening a socket. Credentials stay out of URLs.
+fn environment_client(name: &str) -> Result<redis::Client, FrameworkError> {
+    let what = format!("the Redis connection '{name}'");
+    let url = std::env::var("REDIS_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
+    let base = client_for(
+        url.as_deref().unwrap_or(DEFAULT_URL),
+        &format!("{what}: REDIS_URL"),
+    )?;
+    let mut info = base.get_connection_info().clone();
+    let mut settings = info.redis_settings().clone();
+    let number = |key: &str, fallback: &str| -> Result<i64, FrameworkError> {
+        std::env::var(key)
+            .unwrap_or_else(|_| fallback.to_owned())
+            .parse()
+            .map_err(|_| {
+                FrameworkError::internal(format!("{what}: {key} must be a non-negative number"))
+            })
+            .and_then(|value| {
+                if value >= 0 {
+                    Ok(value)
+                } else {
+                    Err(FrameworkError::internal(format!(
+                        "{what}: {key} must be a non-negative number"
+                    )))
+                }
+            })
+    };
+    if url.is_none() {
+        let host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
+        let port = u16::try_from(number("REDIS_PORT", "6379")?).map_err(|_| {
+            FrameworkError::internal(format!("{what}: REDIS_PORT must fit a TCP port"))
+        })?;
+        info = info.set_addr(redis::ConnectionAddr::Tcp(host, port));
+        settings = settings.set_db(number("REDIS_DB", "0")?);
+        if let Some(password) = std::env::var("REDIS_PASSWORD")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            settings = settings.set_password(password);
+        }
+        if let Some(username) = std::env::var("REDIS_USERNAME")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            settings = settings.set_username(username);
+        }
+    }
+    if name == "cache" {
+        settings = settings.set_db(number("REDIS_CACHE_DB", "1")?);
+    }
+    redis::Client::open(info.set_redis_settings(settings)).map_err(|error| {
+        FrameworkError::from_external_with(format!("{what}: invalid configuration"), error)
+    })
+}
+
+/// The prefix is captured when the connection is resolved.
+fn key_prefix() -> String {
+    std::env::var("REDIS_PREFIX").unwrap_or_else(|_| {
+        let app = std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".to_owned());
+        format!("{}-database-", crate::strings::Str::slug(&app, "-"))
     })
 }
 
@@ -96,7 +162,7 @@ impl Redis {
         crate::redis_client::ensure_crypto_provider();
         let mut registry = registry();
         if registry.resolved.contains_key(name) {
-            let replaced = RedisConnection::new(name, client.clone());
+            let replaced = RedisConnection::new(name, client.clone(), key_prefix());
             registry.resolved.insert(name.to_owned(), replaced);
         }
         registry.defined.insert(name.to_owned(), client);
@@ -107,8 +173,8 @@ impl Redis {
     ///
     /// # Errors
     ///
-    /// When no connection has the name, or, for `default`, when `REDIS_URL`
-    /// is not a Redis URL.
+    /// When no connection has the name, the environment configuration is
+    /// invalid, or `REDIS_URL` is not a Redis URL.
     pub fn connection(name: &str) -> Result<RedisConnection, FrameworkError> {
         let mut registry = registry();
         if let Some(connection) = registry.resolved.get(name) {
@@ -116,13 +182,7 @@ impl Redis {
         }
         let client = match registry.defined.get(name) {
             Some(client) => client.clone(),
-            None if name == "default" => {
-                let url = std::env::var("REDIS_URL")
-                    .ok()
-                    .filter(|url| !url.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_URL.to_owned());
-                client_for(&url, "the default Redis connection's REDIS_URL")?
-            }
+            None if matches!(name, "default" | "cache") => environment_client(name)?,
             None => {
                 return Err(FrameworkError::internal(format!(
                     "no Redis connection is named '{name}': define it with Redis::define in the \
@@ -130,7 +190,7 @@ impl Redis {
                 )));
             }
         };
-        let connection = RedisConnection::new(name, client);
+        let connection = RedisConnection::new(name, client, key_prefix());
         registry
             .resolved
             .insert(name.to_owned(), connection.clone());
@@ -159,7 +219,8 @@ impl Redis {
     }
 
     /// Report every command a connection runs, outside a pipeline or a
-    /// transaction, to the listeners [`listen`](Self::listen) and
+    /// transaction, through the application's event dispatcher and to the
+    /// listeners [`listen`](Self::listen) and
     /// [`listen_for_failures`](Self::listen_for_failures) add. Off until
     /// called.
     pub fn enable_events() {
