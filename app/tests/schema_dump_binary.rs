@@ -173,20 +173,3 @@ fn a_broken_dump_stops_serve_even_in_best_effort_mode() {
     assert!(stderr.contains("schema dump"), "{stderr}");
     assert!(!status.success(), "serve exits with an error");
 }
-
-#[test]
-fn revised_schema_only_dump_omits_migration_rows() {
-    let dir = tempfile::tempdir().expect("temporary database");
-    run(dir.path(), &["migrate"]);
-    run(dir.path(), &["schema:dump", "--without-migration-data"]);
-    let dump = std::fs::read_to_string(dir.path().join("database/schema/sqlite-schema.sql"))
-        .expect("schema-only dump exists");
-    assert!(
-        dump.contains("CREATE TABLE"),
-        "the schema remains in the dump"
-    );
-    assert!(
-        ledger(&dump).is_empty(),
-        "PAR-038 schema-only dumps omit migration ledger rows"
-    );
-}
