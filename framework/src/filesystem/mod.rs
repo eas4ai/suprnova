@@ -42,6 +42,7 @@ mod read_through;
 mod registry;
 mod response;
 pub mod streaming;
+mod upload_urls;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -53,6 +54,8 @@ use crate::FrameworkError;
 use opendal::{Operator, services};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// The name of the disk [`bootstrap_from_env`] registers.
 pub const ENV_S3_DISK: &str = "s3";
@@ -1386,6 +1389,77 @@ impl Storage {
             )));
         }
         Ok(())
+    }
+
+    /// Answer the presigned uploads of the disk `disk` with `callback`
+    /// (Laravel's `buildTemporaryUploadUrlsUsing`).
+    ///
+    /// From now on [`DiskExt::temporary_upload_url`] on the handle
+    /// [`Storage::disk`] returns asks `callback` with the path and the
+    /// lifetime, and returns what it answers. The callback comes first on
+    /// every disk, a read-through disk and a disk that presigns by itself
+    /// included. Laravel's local and read-through disks ask it first too;
+    /// its S3 disk keeps its own presigning, and here one rule holds for
+    /// every disk. A disk without a presigning backend, such as a local or
+    /// an in-memory one, gets upload URLs this way, for example to a route
+    /// of the application that takes the upload.
+    ///
+    /// Setting a callback again replaces the one before. The disk keeps its
+    /// public URL. A handle taken before the call keeps answering as it
+    /// did, and registering the disk again drops the callback, as it drops
+    /// the public URL.
+    ///
+    /// # Errors
+    ///
+    /// When no disk is registered under `disk`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::collections::BTreeMap;
+    /// use suprnova::{Storage, TemporaryUploadUrl};
+    ///
+    /// # fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// Storage::build_temporary_upload_urls_using("local", |path, _lifetime| {
+    ///     Ok(TemporaryUploadUrl {
+    ///         url: format!("https://example.com/uploads/{path}"),
+    ///         method: "PUT".to_owned(),
+    ///         headers: BTreeMap::new(),
+    ///     })
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    pub fn build_temporary_upload_urls_using<F>(
+        disk: &str,
+        callback: F,
+    ) -> Result<(), FrameworkError>
+    where
+        F: Fn(&str, Duration) -> Result<TemporaryUploadUrl, FrameworkError> + Send + Sync + 'static,
+    {
+        let layer = upload_urls::UploadUrlLayer::new(Arc::new(callback));
+        if registry::set_upload_urls(disk, |operator| operator.layer(layer)) {
+            Ok(())
+        } else {
+            Err(FrameworkError::internal(format!(
+                "storage disk '{disk}' not registered; register the disk before it is given \
+                 a temporary upload URL callback"
+            )))
+        }
+    }
+
+    /// Whether the disk `disk` can answer
+    /// [`DiskExt::temporary_upload_url`]: it has a callback from
+    /// [`Storage::build_temporary_upload_urls_using`], or its backend
+    /// presigns writes, as S3 does (Laravel's `providesTemporaryUploadUrls`).
+    ///
+    /// A read-through disk answers for its primary, which is where its
+    /// uploads land.
+    ///
+    /// # Errors
+    ///
+    /// When no disk is registered under `disk`.
+    pub fn provides_temporary_upload_urls(disk: &str) -> Result<bool, FrameworkError> {
+        Ok(registry::get(disk)?.info().capability().presign_write)
     }
 
     /// The public URL of the file at `path` on the disk `disk`. Mirrors

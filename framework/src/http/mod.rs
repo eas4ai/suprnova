@@ -25,7 +25,7 @@ pub use cookie::{Cookie, CookieOptions, CookiePrefix, SameSite, parse_cookies};
 pub use extract::{FromParam, FromRequest};
 pub use file_response::ContentDisposition;
 pub use form_request::FormRequest;
-pub(crate) use request::BodyRead;
+pub(crate) use request::{BodyRead, glob_match};
 pub use request::{BodyState, Request, RequestParts};
 pub(crate) use response::{ErrorResponseDecided, NOT_FOUND_BODY};
 pub use response::{HttpResponse, Redirect, RedirectRouteBuilder, Response, ResponseExt};

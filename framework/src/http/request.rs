@@ -2238,7 +2238,7 @@ fn range_specificity(range: &str, ty: &str) -> Option<u8> {
 /// [`Request::route_is`]. Mirrors Laravel's `Str::is($pattern, $value)` -
 /// `*` matches any sequence (including empty). No `?` single-char or
 /// regex semantics; Laravel doesn't either.
-fn glob_match(pattern: &str, value: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, value: &str) -> bool {
     if pattern == value || pattern == "*" {
         return true;
     }

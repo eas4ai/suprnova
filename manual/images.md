@@ -74,6 +74,7 @@ filled memory.
 |---|---|
 | `resize(w, h)` | Exact dimensions, aspect ratio ignored |
 | `resize_width(w)` / `resize_height(h)` | One dimension, the other derived from the aspect ratio |
+| `resize_width_only(w)` / `resize_height_only(h)` | One dimension, the other kept at its current size, so the aspect ratio changes (Laravel's `resize(width: ...)`) |
 | `scale(w, h)` | Fit inside the box, preserving aspect ratio. **Never enlarges** |
 | `scale_width(w)` / `scale_height(h)` | Scale down to at most one dimension. Never enlarges |
 | `crop(w, h, x, y)` | Cut a rectangle out. Errors if it falls outside the image |
@@ -85,6 +86,7 @@ filled memory.
 | `flip()` / `flop()` | Laravel's names for the same two mirrors |
 | `orient()` | Apply the source's EXIF orientation here, if decoding did not |
 | `transform(transformation)` | Add any `Transformation`, a custom one included |
+| `transform_with(name, settings)` | Add a custom transformation and hand its function `settings` |
 | `blur(amount)` | Gaussian blur, `0..=100`. `0` is a no-op |
 | `sharpen(amount)` | Unsharp mask, `0..=100`. `0` is a no-op. `50` is the classic strength |
 | `grayscale()` | Desaturate. Spelled the Laravel way |
@@ -95,9 +97,31 @@ filled memory.
 | `using(driver)` | Process this image with the `oxideav` or `magick` driver (see [Backends](#backends)) |
 
 Values that would be nonsense are clamped rather than rejected:
-`blur(500)` records `100`, `quality(0)` records `1`. A crop that falls
-outside the image is a real error, not a clamp, because silently moving
-someone's crop box is worse than telling them.
+`blur(500)` records `100`, `quality(0)` records `1`, and a side of `0`
+given to `resize`, `cover` or a one-side resize records `1`, as Laravel's
+`Image` clamps it, so no driver, a custom one included, receives a zero
+side. A crop that falls outside the image is a real error, not a clamp,
+because silently moving someone's crop box is worse than telling them.
+
+The "only" resizes keep the other side at the size the image has at that
+point of the pipeline, not the source's, so they compose with the steps
+before them:
+
+```rust
+use suprnova::{FrameworkError, Image};
+
+async fn banner_strip() -> Result<(u32, u32), FrameworkError> {
+    // 40x20 -> 30x12 -> 10x12
+    Image::from_path("storage/photos/banner.png")
+        .resize(30, 12)
+        .resize_width_only(10)
+        .dimensions()
+        .await
+}
+```
+
+The new size meets the same decode limits as any resize target, under
+either driver.
 
 `rotate` takes arbitrary angles. A 90-degree multiple takes an exact
 axis-aligned path with no resampling; anything else is bilinear, and the
@@ -264,12 +288,61 @@ Register during bootstrap. Registering a name again replaces its
 function. An image that names a transformation nothing is registered
 under fails with an error that names it.
 
+### Settings per call
+
+A transformation that needs values per image, such as the block size of
+a pixelate, takes them as settings. Register it with
+`register_transformation_with`, naming the settings type in the function,
+and record the step with `transform_with(name, settings)`:
+
+```rust
+use suprnova::{FrameworkError, Image, ImagePixels, register_transformation_with};
+
+pub struct Pixelate {
+    pub size: u32,
+}
+
+pub fn register() {
+    register_transformation_with("pixelate", |mut pixels: ImagePixels, settings: &Pixelate| {
+        let width = pixels.width() as usize;
+        let height = pixels.height() as usize;
+        let size = settings.size.max(1) as usize;
+        let rgba = pixels.pixels_mut();
+        for y in 0..height {
+            for x in 0..width {
+                // Each pixel takes the colour of the top-left pixel of its block.
+                let block = ((y - y % size) * width + (x - x % size)) * 4;
+                rgba.copy_within(block..block + 4, (y * width + x) * 4);
+            }
+        }
+        Ok(pixels)
+    });
+}
+
+async fn coarse(path: &str) -> Result<Vec<u8>, FrameworkError> {
+    Image::from_path(path)
+        .transform_with("pixelate", Pixelate { size: 8 })
+        .to_png()
+        .to_bytes()
+        .await
+}
+```
+
+The image holds the settings, not the step, so `Transformation` stays
+`Copy`. Clones of the image share them, and they are released when the
+last clone is dropped. A step whose settings are not the type the
+transformation was registered with fails the image with an error that
+names the transformation. So does a settings transformation recorded
+with `transform(Transformation::custom(name))`, which carries no
+settings, and a transformation registered with `register_transformation`
+that is handed settings.
+
 Under the `magick` driver a custom step runs in Rust between two
 ImageMagick runs, which pass the image over stdout and stdin as a PNG
 that keeps the ICC profile and, while orientation is still to be applied,
 the EXIF. A pipeline with a custom step ends with the same profile and
 orientation tag as one without. The step contributes no ImageMagick
-argument.
+argument, and its settings reach only your function.
 
 ## Terminals
 
@@ -658,7 +731,9 @@ impl ImageDriver for MyDriver {
         // `OutputFormat` variant an arm, `WebPLossless` included: the
         // enum is not `#[non_exhaustive]`. `Transformation` is, so its
         // match ends in a wildcard arm that returns an error naming the
-        // step. Run a `Transformation::Custom` step with its `apply`.
+        // step. Run a `Transformation::Custom` step with
+        // `apply_with(pixels, &pipeline.settings)`, which hands a step
+        // recorded with `transform_with` its settings.
         todo!()
     }
 
@@ -800,6 +875,9 @@ unless you name a colour.
 driver's library. Suprnova's `register_transformation` takes a function
 over decoded RGBA that both drivers run, so changing `IMAGE_DRIVER` never
 drops a step, and no custom code reaches an ImageMagick argument.
+Laravel's handler receives the transformation object with its fields;
+here those fields are the settings `transform_with` records, which the
+image holds so that a step stays plain `Copy` data.
 
 **No `store_publicly`.** Visibility belongs to the disk in Suprnova, so
 `store` and `store_as` on a public disk are the public variants.

@@ -26,8 +26,9 @@ use suprnova::{Http, RetryOutcome, assert_not_sent, assert_sent, fake_response};
 
 /// Serializes every test that touches real-network IO or the
 /// `FAIL_ON_REAL_CALLS` flag. Pure-fake tests don't need to hold
-/// this lock - they're isolated via `tokio::task_local!`.
-static NETWORK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// this lock - they're isolated via `tokio::task_local!`. Shared with
+/// `laravel_infra_gaps`, whose tests move the same flag.
+pub(crate) static NETWORK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One-shot echo server. Accepts a single connection, captures the
 /// inbound request, replies with a JSON body that includes the

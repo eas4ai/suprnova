@@ -35,16 +35,47 @@ Http::post("https://api.example.com/users")
 Http::put("https://api.example.com/users/42")
 Http::patch("https://api.example.com/users/42")
 Http::delete("https://api.example.com/users/42")
+Http::head("https://api.example.com/users/42")
 ```
 
 Every verb returns a `RequestBuilder`. The URL can be any
-`impl Into<String>` - a `&str`, a `String`, or a `Cow<str>`. No
-URL-building helpers ship in the facade; format the URL yourself or
-reach for a query-string crate.
+`impl Into<String>` - a `&str`, a `String`, or a `Cow<str>`. `head`
+sends `HEAD`: the response has the status and headers a `GET` would
+have, and no body.
+
+## Building the URL
+
+Three builder methods put the URL together when the request is sent:
+
+```rust
+let resp = Http::get("users/{id}/orders")
+    .base_url("https://api.example.com/v2")
+    .url_parameters([("id", user_id.as_str())])
+    .query(&[("page", "2"), ("status", "open")])
+    .send()
+    .await?;
+// GET https://api.example.com/v2/users/42/orders?page=2&status=open
+```
+
+- `.base_url(url)` goes in front of a URL that does not start with
+  `http://` or `https://`, with one slash between the two. An absolute
+  URL is sent as it is, so one client setup can still call another host.
+- `.url_parameters(params)` expands each `{name}` in the URL. Every
+  character of a value except letters, digits, `-`, `.`, `_` and `~` is
+  percent-encoded, so `a/b` becomes `a%2Fb`: a value cannot add a path
+  segment, a query, a fragment or a host. A placeholder that no value names
+  stays as it is.
+- `.query(params)` merges the pairs into the URL's query. A name the URL
+  already has takes the new value, and the other names stay. The URL has
+  to be absolute by then, base URL included, or `send()` returns an error.
+
+`query` takes a slice of pairs, `&[("name", "value")]`, and
+`url_parameters` takes an array of pairs or any iterator of them. Calling
+either again adds more.
 
 ## Bodies
 
-Three ways to attach a body. Each one replaces any previously-set body.
+Four ways to attach a body. Each one replaces any previously-set body.
 
 ### JSON
 
@@ -106,6 +137,22 @@ Http::post("https://collector.example.com/ingest")
 `.body(bytes)` takes anything `impl Into<Bytes>`. You're responsible
 for the `Content-Type` header - `.body` doesn't set one.
 
+### Multipart
+
+```rust
+let avatar: Vec<u8> = std::fs::read("storage/avatar.png")?;
+Http::post("https://api.example.com/profile")
+    .attach("avatar", avatar, Some("avatar.png"))
+    .attach("caption", "Me, in 2026", None)
+    .send()
+    .await?;
+```
+
+`.attach(name, contents, filename)` adds a part to a
+`multipart/form-data` body: the bytes under the field `name`, with a file
+name when you give one. Each call adds a part. The body is encoded when the
+request is sent, with a random boundary in its `Content-Type`.
+
 ## Headers and auth
 
 ```rust
@@ -140,10 +187,21 @@ Http::get("https://slow.example.com/report")
     .await?;
 ```
 
-`.timeout(dur)` overrides both the connect and the total request
-timeout for this one call. There's no separate `connect_timeout`
-knob on the builder; the underlying reqwest client uses one combined
-timeout.
+`.timeout(dur)` sets the total time the request may take, connecting
+included. The shared client also gives up on a connection after 10
+seconds. `.connect_timeout(dur)` changes that for one request:
+
+```rust
+Http::get("https://flaky.example.com/health")
+    .connect_timeout(Duration::from_secs(2))
+    .timeout(Duration::from_secs(5))
+    .send()
+    .await?;
+```
+
+reqwest fixes the connect timeout when it builds a client, so each distinct
+connect timeout gets a client of its own, built on first use and kept. Use a
+few fixed values rather than one you compute per request.
 
 ## Redirects
 
@@ -175,6 +233,61 @@ if (300..400).contains(&resp.status()) {
 client; the default client - and every request that doesn't call it - is
 unchanged. This is the general-client analogue of the redirect lockdown
 the web-push sender already applies to attacker-controlled push endpoints.
+
+## Global middleware and options
+
+Some settings belong on every request: an `X-App` header, a token that
+signs each call, a log line for each response. Register them once, at
+boot:
+
+```rust
+use std::time::Duration;
+use suprnova::{ClientResponse, Http, RequestBuilder};
+
+Http::global_options(|request: RequestBuilder| {
+    request.timeout(Duration::from_secs(10))
+});
+Http::global_request_middleware(|request: RequestBuilder| {
+    request.header("X-App", "billing")
+});
+Http::global_response_middleware(|response: ClientResponse| {
+    tracing::debug!(status = response.status(), "outbound response");
+    response
+});
+```
+
+- `Http::global_options(f)` runs `f` on every request as it is created, so
+  what the request sets itself comes after and wins where a setting
+  replaces, such as a timeout. Headers are appended, so a header set both
+  ways is sent twice, the global one first. Calling it again replaces the
+  options.
+- `Http::global_request_middleware(f)` runs `f` on every request just
+  before it is sent, once per `send()`. The request it receives has its
+  final URL, which `request.url()` returns; `request.method()` returns the
+  method.
+- `Http::global_response_middleware(f)` runs `f` on every response before
+  your code sees it, each attempt of a retried request included.
+
+Middleware runs in the order you register it. A request takes the global
+configuration in force when it is created. `Http::without_global_configuration`
+creates requests without any of it:
+
+```rust
+let resp = Http::without_global_configuration(|| async {
+    Http::get("https://status.example.com/ping").send().await
+})
+.await?;
+```
+
+Only the requests created on the current task inside the closure are left
+out; other requests of the process keep their middleware. The mail and
+vector drivers of the framework call their providers without the facade,
+so global middleware never reaches them.
+
+Registered inside an `Http::fake` scope, global middleware and options
+belong to that scope and end with it, so tests running in parallel do not
+see each other's. A request inside the scope takes the process-wide
+configuration first, then the scope's.
 
 ## Retries
 
@@ -321,9 +434,9 @@ against the actual bytes, in case `Content-Length` is absent or lies.
 ## Escape hatch - raw reqwest
 
 The framework covers the common cases. When you need something we don't
-expose - streaming bodies, multipart uploads, redirect policy
-inspection, websocket upgrades - call `.into_inner()` to unwrap the
-underlying `reqwest::Response`:
+expose - streaming bodies, redirect policy inspection, websocket
+upgrades - call `.into_inner()` to unwrap the underlying
+`reqwest::Response`:
 
 ```rust
 let resp = Http::get("https://example.com/big-stream").send().await?;
@@ -338,9 +451,6 @@ while let Some(chunk) = stream.next().await {
 on a fake response - there's no underlying `reqwest::Response` in that
 case. The response-body cap also no longer applies once you take the
 raw response; you own the read from there.
-
-For outgoing multipart uploads, drop down to `reqwest::Client`
-directly via the same escape route.
 
 ## Testing with `Http::fake`
 
@@ -395,6 +505,48 @@ fake_response("GET", "/v1/customer", 200, json!({ "id": "cus_2" }));
 // Two GETs to /v1/customer get distinct responses; a third gets 200 {}.
 ```
 
+### Stubs that stay
+
+Three helpers register a stub that answers for as long as the fake lives.
+Each answers with a `FakeResponse`: `FakeResponse::new(status)`,
+`FakeResponse::json(status, value)` or `FakeResponse::text(status, body)`,
+with `.header(name, value)` and `.body(bytes)` to add to it.
+
+```rust
+use suprnova::{FakeResponse, Http};
+
+Http::fake(|| async {
+    // Every matching URL, every time.
+    Http::fake_url("api.example.com/users/*", FakeResponse::json(200, json!({ "id": 7 })));
+
+    // Decide in code; `None` lets the next stub answer.
+    Http::fake_using(|request| {
+        request
+            .has_header("X-Tenant", "acme")
+            .then(|| FakeResponse::new(403))
+    });
+
+    // Answered in turn, then the `when_empty` response.
+    Http::fake_sequence("api.example.com/jobs*")
+        .push(FakeResponse::new(201))
+        .push_status(202)
+        .when_empty(FakeResponse::new(204));
+
+    // ... code under test ...
+})
+.await;
+```
+
+In a URL pattern `*` matches any run of characters, and a leading `*` is
+implied, so `api.example.com/users/*` matches
+`https://api.example.com/users/7`. A sequence that runs out without a
+`when_empty` response fails the request; `.dont_fail_when_empty()` answers
+an empty `200` instead.
+
+A request is answered by a `fake_response` entry that matches first, then
+by the stubs in the order you registered them, then by the default
+`200 {}`.
+
 ### Assertions
 
 ```rust
@@ -406,8 +558,23 @@ assert_not_sent(|r| r.url.contains("/refunds"));
 ```
 
 `RecordedRequest` exposes `method: String`, `url: String`,
-`headers: Vec<(String, String)>`, and `body: Option<Vec<u8>>`. The
-predicate runs against every recorded request; assertion failures
+`headers: Vec<(String, String)>`, and `body: Option<Vec<u8>>`. The URL is
+the one the request is sent to, base URL, URL parameters and query
+applied, and the headers are the ones it is sent with: yours, the ones
+global middleware added, the `Content-Type` a JSON, form or multipart body
+sets, and the user agent. Five helpers read them, names compared without
+regard to case:
+
+```rust
+assert_sent(|r| {
+    r.is_json()
+        && r.has_header("X-App", "billing")
+        && r.header("authorization").is_some_and(|v| v.starts_with("Bearer "))
+});
+assert_sent(|r| r.is_form() || r.is_multipart());
+```
+
+The predicate runs against every recorded request; assertion failures
 print the recorded list with header values and bodies redacted (a
 small allowlist of `Content-Type`, `Accept`, and `User-Agent` is shown
 in full; everything else is `<redacted>`). That keeps bearer tokens
@@ -483,6 +650,31 @@ doesn't disarm the outer guard on the way out.
 The flag is process-global by design. The point is catching a
 `tokio::spawn`-ed future silently escaping a fake scope and pinging a
 real third party from CI. A per-task flag would miss that.
+
+Laravel's names move the same flag. `Http::prevent_stray_requests(true)`
+arms it as `fail_on_real_calls()` does, `Http::prevent_stray_requests(false)`
+releases it as `allow_real_calls()` does, and
+`Http::preventing_stray_requests()` answers whether it is armed.
+
+Inside a fake, `Http::allow_stray_requests(&patterns)` lets a request that
+no stub answers reach the network when its URL matches one of the patterns,
+even while stray requests are refused. Here `*` matches any run of
+characters and no leading `*` is implied:
+
+```rust
+Http::prevent_stray_requests(true);
+
+Http::fake(|| async {
+    // The local test server answers for real; anything else must be faked.
+    Http::allow_stray_requests(&["http://127.0.0.1:*"]);
+    // ...
+})
+.await;
+
+Http::prevent_stray_requests(false);
+```
+
+Such a request is still recorded, and goes out with its global middleware.
 
 ### `Http::spawn_with_fake_inheritance(future)`
 
@@ -562,7 +754,7 @@ requests look exactly like they did before. See
 
 ## Why Suprnova diverges
 
-Three small divergences from Laravel's `Http::` facade are worth calling
+A few divergences from Laravel's `Http::` facade are worth calling
 out.
 
 **Task-local fakes instead of a process-global mock store.** Laravel's
@@ -583,6 +775,25 @@ Use `.retry_non_idempotent(...)` to opt into retries for those methods
 only after making the write safe to replay, typically with an idempotency
 key the upstream honors.
 
+**Global configuration registered inside a fake belongs to the fake.**
+Laravel's tests each get a fresh application, so a test's global
+middleware ends with it. Suprnova's process outlives a test, so
+`Http::global_*` called inside an `Http::fake` scope register for that
+scope only, and `without_global_configuration` leaves out the requests of
+the current task rather than emptying the process-wide lists while other
+requests run.
+
+**`query` merges into the URL's query.** Guzzle replaces the query string
+of the URL with the `query` option. Suprnova keeps the URL's other names,
+so `query` adds to a URL that already has one. `url_parameters` expands
+only the simple `{name}` form of a URI template.
+
+**Stubs take a `FakeResponse`, and use-once entries answer first.**
+Laravel's `Http::fake([...])` takes a response, a status, a string or a
+closure in one array. Suprnova has one helper for each:
+`fake_url`, `fake_using` and `fake_sequence`. A `fake_response` entry, which
+is used up as it answers, is asked before them.
+
 **`retry_when` can only narrow, never widen.** Laravel's `retry()`
 `$when` callback fully replaces the "should retry" decision, so it can
 retry statuses the framework wouldn't otherwise touch (a 404, say).
@@ -600,7 +811,8 @@ for every retry the policy would make, but cannot turn a 2xx, 3xx, or
   the documented `into_inner()` escape hatch on a real response.
 - **The shared client is built once and lives forever.** Built lazily
   on first call to any `Http::*` verb, kept in a `OnceLock`. The
-  rustls TLS stack and the 30s default timeout are baked in.
+  rustls TLS stack and the 30s default timeout are baked in. A request
+  with its own `connect_timeout` uses a client kept for that timeout.
 - **JSON/form serialization failures fail loudly.** A
   `.json(&unserializable)` builder records the error and `send()`
   returns it as `FrameworkError::internal(...)`. The request never
