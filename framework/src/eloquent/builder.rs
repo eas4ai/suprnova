@@ -3472,20 +3472,70 @@ fn morph_type_list(
 /// counter - Postgres `$N` numbers stay monotonic across the parent's
 /// WHERE clause and the subquery body, the same way UNION arms do.
 ///
-/// `joined` is the outer query's own table when that query joins another
-/// (see [`JoinedTable`]): the correlation back to the parent then names
-/// the parent table quoted, as the outer FROM does.
+/// `outer` is the row the probe correlates to, with what the statement
+/// writes for it where the probe sits. It is the outer query's own table
+/// when that query joins another (see [`JoinedTable`]), whose correlation
+/// then names the table quoted, as the outer FROM does; or, for a probe
+/// nested in a `where_has` predicate, the related table of the probe
+/// around it, under that probe's name for it. `None` is a probe in an
+/// outer query without a join, which names the parent `spec.parent_table`.
+///
+/// ## A relation that points back at its own table
+///
+/// A category's `children`, a self-referential many-to-many, a through
+/// relation whose intermediate is the parent's table, or a morph owner of
+/// its own type puts the outer table's name inside the probe. Unaliased,
+/// `target.<fk> = parent.<pk>` then compares each inner row with itself,
+/// and the filter answers wrongly without an error. So when an inner table
+/// is the outer table, the probe writes `FROM <table> AS <alias>` with the
+/// reserved [`PROBE_RELATED_ALIAS`] (and [`PROBE_PIVOT_ALIAS`] for the
+/// pivot or intermediate), and every inner reference uses the alias: the
+/// correlation, the soft-delete and morph-type columns, the count form and
+/// the inner `where` terms. Only the inner side is renamed. The outer
+/// query keeps its name, so a qualified column in a `where_has` predicate
+/// still names the parent. A nested probe appends its depth to the alias
+/// (see [`probe_alias`]), so the levels never hide each other.
+///
+/// The alias is conditional because only a shared name needs it: every
+/// other probe renders the SQL it always has, byte for byte, so its text
+/// in query logs, tests and query plans does not change.
 fn render_exists(
     backend: DbBackend,
     spec: &ExistsSpec,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
-    joined: Option<JoinedTable<'_>>,
+    outer: Option<ProbeOuter<'_>>,
 ) -> Result<String, FrameworkError> {
     let mut where_parts: Vec<String> = Vec::new();
-    let parent = joined
-        .filter(|table| table.name == spec.parent_table)
-        .map_or(spec.parent_table.as_str(), |table| table.quoted);
+    let parent = outer
+        .filter(|table| table.table == spec.parent_table)
+        .map_or(spec.parent_table.as_str(), |table| table.sql);
+    let depth = outer.map_or(0, |table| table.depth);
+
+    // The outer table is the parent's, or the one the outer query (or the
+    // probe around this one) reads, should the two differ. An inner table
+    // with either name would hide it, so the probe aliases its tables.
+    let outer_table = outer.map_or(spec.parent_table.as_str(), |table| table.table);
+    let is_outer =
+        |table: &str| !table.is_empty() && (table == spec.parent_table || table == outer_table);
+    let aliased = is_outer(&spec.pivot_table) || is_outer(&spec.target_table);
+    // The names the probe's own references write for its tables.
+    let (target, pivot) = if aliased {
+        (
+            probe_alias(PROBE_RELATED_ALIAS, depth),
+            probe_alias(PROBE_PIVOT_ALIAS, depth),
+        )
+    } else {
+        (spec.target_table.clone(), spec.pivot_table.clone())
+    };
+    // The FROM entry for `table`, which the probe names `name`.
+    let from_entry = |table: &str, name: &str| {
+        if aliased {
+            format!("{table} AS {name}")
+        } else {
+            table.to_owned()
+        }
+    };
 
     // Three shapes - pivot, belongs-to, has - selected by which slots
     // the spec carries. The renderer is intentionally explicit rather
@@ -3495,25 +3545,23 @@ fn render_exists(
         // Pivot path. `target_table` JOIN `pivot_table` on
         // `pivot.related_key = target.related_pk`. The correlation
         // back to the parent goes on `pivot.parent_key = parent.pk`.
+        let pivot_from = from_entry(&spec.pivot_table, &pivot);
         let join_clause = if spec.related_pk.is_empty() || spec.pivot_related_key.is_empty() {
             // Degenerate pivot (no target join column). Fall back to
             // the parent-correlation alone - degrades gracefully when
             // the macro could only supply the parent side.
-            spec.pivot_table.clone()
+            pivot_from
         } else {
             format!(
-                "{pivot} INNER JOIN {target} ON {pivot}.{prk} = {target}.{tpk}",
-                pivot = spec.pivot_table,
-                target = spec.target_table,
+                "{pivot_from} INNER JOIN {target_from} ON {pivot}.{prk} = {target}.{tpk}",
+                target_from = from_entry(&spec.target_table, &target),
                 prk = spec.pivot_related_key,
                 tpk = spec.related_pk,
             )
         };
         where_parts.push(format!(
             "{pivot}.{ppk} = {parent}.{pk}",
-            pivot = spec.pivot_table,
             ppk = spec.pivot_parent_key,
-            parent = parent,
             pk = spec.parent_key,
         ));
         // A through relation's reads leave out what a trashed
@@ -3521,7 +3569,6 @@ fn render_exists(
         if !spec.pivot_soft_deletes_column.is_empty() {
             where_parts.push(format!(
                 "{pivot}.{col} IS NULL",
-                pivot = spec.pivot_table,
                 col = spec.pivot_soft_deletes_column,
             ));
         }
@@ -3531,7 +3578,6 @@ fn render_exists(
             values.push(SeaValue::String(Some(spec.morph_type_value.clone())));
             where_parts.push(format!(
                 "{pivot}.{col} = {ph}",
-                pivot = spec.pivot_table,
                 col = spec.morph_type_column,
             ));
         }
@@ -3541,20 +3587,16 @@ fn render_exists(
         // related row's `parent_key` (its owner key) must match it.
         where_parts.push(format!(
             "{target}.{owner_key} = {parent}.{fk}",
-            target = spec.target_table,
             owner_key = spec.parent_key,
-            parent = parent,
             fk = spec.foreign_key,
         ));
-        spec.target_table.clone()
+        from_entry(&spec.target_table, &target)
     } else if !spec.target_table.is_empty() {
         // Has path. The correlation column on the target side is
         // `foreign_key`; on the parent side it's `parent_key`.
         where_parts.push(format!(
             "{target}.{fk} = {parent}.{pk}",
-            target = spec.target_table,
             fk = spec.foreign_key,
-            parent = parent,
             pk = spec.parent_key,
         ));
         // A morph child (MorphOne / MorphMany) belongs to the parent under
@@ -3564,11 +3606,10 @@ fn render_exists(
             let list = morph_type_list(backend, &spec.morph_type_value, values, n)?;
             where_parts.push(format!(
                 "{target}.{col} IN ({list})",
-                target = spec.target_table,
                 col = spec.morph_type_column,
             ));
         }
-        spec.target_table.clone()
+        from_entry(&spec.target_table, &target)
     } else {
         // No target table and no pivot - there's no SQL we can render.
         // This shouldn't be reachable from the builder API, but if
@@ -3591,8 +3632,8 @@ fn render_exists(
     // so the column reads unambiguously inside the subquery.
     if !spec.related_soft_deletes_column.is_empty() && !spec.target_table.is_empty() {
         where_parts.push(format!(
-            "{}.{} IS NULL",
-            spec.target_table, spec.related_soft_deletes_column,
+            "{target}.{col} IS NULL",
+            col = spec.related_soft_deletes_column,
         ));
     }
 
@@ -3607,13 +3648,30 @@ fn render_exists(
     let inner_qualifier: Option<&str> = if spec.target_table.is_empty() {
         None
     } else {
-        Some(spec.target_table.as_str())
+        Some(target.as_str())
+    };
+    // A probe nested in the closure's terms correlates to this probe's
+    // target, under the name this probe gives it.
+    let nested = ProbeOuter {
+        table: &spec.target_table,
+        sql: &target,
+        depth: depth + 1,
     };
     if !spec.inner_terms.is_empty() {
         let predicate = crate::database::clauses::render_boolean_list(
             &spec.inner_terms,
             |term| matches!(term, WhereTerm::OrNext(_)),
-            |t| render_subquery_term(backend, inner_qualifier, t, values, n, spec.binder),
+            |t| {
+                render_probe_term(
+                    backend,
+                    inner_qualifier,
+                    Some(nested),
+                    t,
+                    values,
+                    n,
+                    spec.binder,
+                )
+            },
         )?;
         where_parts.push(format!("({predicate})"));
     }
@@ -3631,7 +3689,7 @@ fn render_exists(
         let sql = if spec.target_table.is_empty() {
             col.clone()
         } else {
-            format!("{}.{}", spec.target_table, col)
+            format!("{target}.{col}")
         };
         let column = Compared {
             name: col,
@@ -3683,6 +3741,51 @@ fn render_exists(
     })
 }
 
+/// The alias an `EXISTS` probe gives its related table when that table
+/// is the outer table (see [`render_exists`]). The `__suprnova_` prefix
+/// keeps it clear of the tables and aliases an application names.
+const PROBE_RELATED_ALIAS: &str = "__suprnova_related";
+
+/// The alias an `EXISTS` probe gives its pivot table, or a through
+/// relation's intermediate table, alongside [`PROBE_RELATED_ALIAS`].
+const PROBE_PIVOT_ALIAS: &str = "__suprnova_pivot";
+
+/// The row an `EXISTS` probe correlates to, as the statement names it
+/// where the probe sits.
+#[derive(Clone, Copy)]
+struct ProbeOuter<'a> {
+    /// The model's table.
+    table: &'a str,
+    /// What the correlation writes for that table: the table itself, its
+    /// quoted form when the outer query joins (see [`JoinedTable`]), or
+    /// the alias of the probe around this one.
+    sql: &'a str,
+    /// How many probes enclose this one: 0 in the outer query.
+    depth: usize,
+}
+
+impl<'a> From<JoinedTable<'a>> for ProbeOuter<'a> {
+    fn from(joined: JoinedTable<'a>) -> Self {
+        Self {
+            table: joined.name,
+            sql: joined.quoted,
+            depth: 0,
+        }
+    }
+}
+
+/// `base` as a probe `depth` levels deep writes it: as it is in the outer
+/// query, and with the depth appended inside another probe. A nested probe
+/// over the same table then never hides the alias of the probe around it,
+/// which its correlation names.
+fn probe_alias(base: &str, depth: usize) -> String {
+    if depth == 0 {
+        base.to_owned()
+    } else {
+        format!("{base}_{depth}")
+    }
+}
+
 /// Whether an owner count of `owners` satisfies `owners <op> count`, for
 /// `has_count` on a `MorphTo` relation, where the count is 0 or 1. `None`
 /// when `op` does not compare numbers.
@@ -3720,6 +3823,22 @@ fn owner_count_matches(op: &str, owners: i64, count: i64) -> Option<bool> {
 pub(crate) fn render_subquery_term(
     backend: DbBackend,
     qualifier: Option<&str>,
+    term: &WhereTerm,
+    values: &mut Vec<SeaValue>,
+    n: &mut usize,
+    binder: ColumnBinder,
+) -> Result<String, FrameworkError> {
+    render_probe_term(backend, qualifier, None, term, values, n, binder)
+}
+
+/// [`render_subquery_term`] with the probe it renders in. `outer` is that
+/// probe's related table, under the name the probe gives it, which an
+/// `EXISTS` nested in these terms correlates to (see [`render_exists`]);
+/// `None` outside a probe.
+fn render_probe_term(
+    backend: DbBackend,
+    qualifier: Option<&str>,
+    outer: Option<ProbeOuter<'_>>,
     term: &WhereTerm,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
@@ -3809,7 +3928,7 @@ pub(crate) fn render_subquery_term(
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::ColumnOp(a, op, b) => format!("{} {op} {}", q(a), q(b)),
         WhereTerm::OrNext(inner) => {
-            render_subquery_term(backend, qualifier, inner, values, n, binder)?
+            render_probe_term(backend, qualifier, outer, inner, values, n, binder)?
         }
         WhereTerm::Raw(sql, bindings) => {
             let bound: Vec<SeaValue> = bindings.iter().map(|v| untyped_value(backend, v)).collect();
@@ -3833,13 +3952,13 @@ pub(crate) fn render_subquery_term(
             format!("{lhs} = {ph}")
         }
         WhereTerm::Not(inner) => {
-            let inner_sql = render_subquery_term(backend, qualifier, inner, values, n, binder)?;
+            let inner_sql = render_probe_term(backend, qualifier, outer, inner, values, n, binder)?;
             format!("NOT ({inner_sql})")
         }
         WhereTerm::Or(terms) => {
             let parts: Vec<String> = terms
                 .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
+                .map(|t| render_probe_term(backend, qualifier, outer, t, values, n, binder))
                 .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
         }
@@ -3850,12 +3969,12 @@ pub(crate) fn render_subquery_term(
                 let sql = crate::database::clauses::render_boolean_list(
                     terms,
                     |term| matches!(term, WhereTerm::OrNext(_)),
-                    |t| render_subquery_term(backend, qualifier, t, values, n, binder),
+                    |t| render_probe_term(backend, qualifier, outer, t, values, n, binder),
                 )?;
                 format!("({sql})")
             }
         }
-        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, None)?,
+        WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, outer)?,
         WhereTerm::InQuery(col, query, negated) => {
             render_in_query(backend, &q(col), query, *negated, values, n)?
         }
@@ -4247,7 +4366,9 @@ impl<M> Builder<M> {
                     format!("({sql})")
                 }
             }
-            WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, joined)?,
+            WhereTerm::Exists(spec) => {
+                render_exists(backend, spec, values, n, joined.map(ProbeOuter::from))?
+            }
             WhereTerm::InQuery(col, query, negated) => render_in_query(
                 backend,
                 &joined_column(backend, joined, col),
