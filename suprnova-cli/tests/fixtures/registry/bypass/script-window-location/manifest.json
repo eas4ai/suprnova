@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-window-location",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
