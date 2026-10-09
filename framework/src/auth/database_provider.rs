@@ -228,13 +228,24 @@ impl DatabaseUserProvider {
     /// Store `hashed` in the password column of the user `id` names, and
     /// nothing else: the user's `remember_token`, which a Laravel
     /// application on the same database owns, is left as it was.
+    ///
+    /// A write that changes no row is a failed rewrite, not a success: a
+    /// database trigger can abandon the statement without an error (SQLite's
+    /// `RAISE(IGNORE)`), and the sign-in must not proceed on a hash that was
+    /// never stored (PAR-132).
     async fn write_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
         let mut attrs = crate::eloquent::attrs::Attrs::new();
         attrs.insert(self.password_column.clone(), hashed.to_owned());
-        DB::table(&self.table)
+        let changed = DB::table(&self.table)
             .filter(self.identifier_column.clone(), self.id_value(id).await?)
             .update(attrs)
             .await?;
+        if changed == 0 {
+            return Err(FrameworkError::internal(format!(
+                "the password rewrite for user {id} changed no row in {}",
+                self.table
+            )));
+        }
         Ok(())
     }
 

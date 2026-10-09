@@ -1368,6 +1368,51 @@ async fn a_rewrite_that_cannot_be_stored_fails_the_sign_in_and_keeps_the_hash() 
 
 #[tokio::test]
 #[serial]
+async fn a_rewrite_that_changes_no_row_fails_the_sign_in_and_keeps_the_hash() {
+    let _lock = crate::env_lock::lock_env_async().await;
+    let _shared = SharedSetting::set(true);
+    for (id, provider) in [
+        (
+            16,
+            Arc::new(EloquentUserProvider::<GapUser>::new()) as Arc<dyn UserProvider>,
+        ),
+        (17, Arc::new(DatabaseUserProvider::new("users"))),
+    ] {
+        let email = format!("silent-{id}@example.com");
+        let (h, hash) = rehash_harness(provider, id, &email).await;
+        // SQLite's RAISE(IGNORE) abandons the UPDATE without an error, so
+        // the statement reports zero changed rows and the hash stays `$2b$`.
+        h.db.conn()
+            .execute_unprepared(
+                "CREATE TRIGGER keep_hash BEFORE UPDATE OF password ON users \
+                 BEGIN SELECT RAISE(IGNORE); END",
+            )
+            .await
+            .expect("ignore password writes");
+        let credentials = Credentials::password(email.as_str(), "secret");
+
+        let (attempt, signed_in) = in_request(async {
+            let attempt = Auth::attempt(&credentials, false).await;
+            (attempt, Auth::check())
+        })
+        .await;
+        assert!(
+            attempt.is_err(),
+            "{id}: a rewrite that changed no row fails"
+        );
+        assert!(!signed_in, "{id}: nobody is signed in");
+        let once = in_request(Auth::once(&credentials)).await;
+        assert!(once.is_err(), "{id}: once fails the same way");
+        assert_eq!(
+            h.column(id, "password").await.as_deref(),
+            Some(hash.as_str()),
+            "{id}: the stored hash is as it was"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn with_the_setting_off_no_check_or_sign_in_writes_a_hash() {
     let _lock = crate::env_lock::lock_env_async().await;
     let _shared = SharedSetting::set(false);
