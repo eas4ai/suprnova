@@ -139,3 +139,12 @@ fn excerpt_frames_the_first_match() {
         Some("…é wörds h…")
     );
 }
+
+#[test]
+fn revised_excerpt_trims_invisible_characters() {
+    assert_eq!(
+        Str::excerpt("aaa\u{200b}hitbbb", "hit", 1, "...").as_deref(),
+        Some("...hitb..."),
+        "PAR-035 excerpt trims invisible characters beside the phrase"
+    );
+}
