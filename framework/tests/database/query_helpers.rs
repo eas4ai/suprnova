@@ -526,3 +526,17 @@ async fn mysql_every_query_helper_matches_raw_sql() {
     run_every_scenario().await;
     fx.close().await;
 }
+
+#[tokio::test]
+async fn revised_bound_null_means_is_null() {
+    let _fx = seeded_sqlite().await;
+    assert_eq!(
+        ids_matching(
+            items().filter("label", SeaValue::String(None)),
+            "label IS NULL"
+        )
+        .await,
+        vec![2, 4],
+        "PAR-006 null equality compiles to IS NULL"
+    );
+}

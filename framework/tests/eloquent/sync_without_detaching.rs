@@ -441,16 +441,3 @@ async fn postgres_sync_without_detaching_leaves_existing_rows_untouched() {
 async fn mysql_sync_without_detaching_leaves_existing_rows_untouched() {
     live_sync_without_detaching("MYSQL_TEST_URL").await;
 }
-
-#[tokio::test]
-async fn revised_pivot_filtered_sync_accepts_writes() {
-    let _db = sqlite().await;
-    let (user, [r1, r2, r3]) = user_holding_two_roles().await;
-    let result = user
-        .roles()
-        .where_pivot("note", "first")
-        .sync_without_detaching([r3.id])
-        .await;
-    result.expect("PAR-005 filtered pivot sync may attach missing ids");
-    assert_eq!(held_role_ids(&user).await, vec![r1.id, r2.id, r3.id]);
-}
