@@ -324,7 +324,7 @@ fn error_response(kind: EndpointErrorKind) -> Response {
 /// [`error_response`] for a failure with its error in hand: the client gets
 /// the same closed answer, and the response carries `error` as its
 /// in-process report.
-fn failure_response(kind: EndpointErrorKind, error: &dyn Error) -> Response {
+fn failure_response(kind: EndpointErrorKind, error: &(dyn Error + 'static)) -> Response {
     match error_response(kind) {
         Ok(response) => Ok(response.with_error_report_from(error)),
         Err(response) => Err(response.with_error_report_from(error)),

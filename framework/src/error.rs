@@ -11,9 +11,11 @@ use thiserror::Error;
 pub(crate) mod debug_page;
 pub(crate) mod frames;
 mod report;
+mod reporting;
 
 pub use report::ErrorReport;
 pub(crate) use report::{CaughtPanic, catch_panic};
+pub use reporting::{Exceptions, ReportableHandler};
 
 /// Trait for errors that can be converted to HTTP responses
 ///
@@ -1278,12 +1280,15 @@ impl FrameworkError {
     /// type already carries (`DbErr`, `AppError`, …) - the same reasoning
     /// recorded on [`Self::from_http_error`].
     ///
-    /// Maps to HTTP 500.
+    /// Maps to HTTP 500. [`ErrorReport::type_name`] and the development
+    /// error page name the error by the path `std::any::type_name` gives
+    /// for `E`.
     #[track_caller]
     pub fn from_external<E>(err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
+        report::remember_wrapped_type::<E>();
         Self::External {
             message: err.to_string(),
             source: Arc::new(err),
@@ -1298,12 +1303,15 @@ impl FrameworkError {
     /// the operation was, and the underlying error survives as structured
     /// data instead of being melted into a string.
     ///
-    /// Maps to HTTP 500.
+    /// Maps to HTTP 500. [`ErrorReport::type_name`] and the development
+    /// error page name the error by the path `std::any::type_name` gives
+    /// for `E`.
     #[track_caller]
     pub fn from_external_with<E>(message: impl Into<String>, err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
+        report::remember_wrapped_type::<E>();
         Self::External {
             message: message.into(),
             source: Arc::new(err),
@@ -1695,6 +1703,43 @@ impl FrameworkError {
 }
 
 impl FrameworkError {
+    /// The name [`ErrorReport::type_name`] gives this error:
+    /// `FrameworkError::<Variant>`, or for [`Self::External`] the type path
+    /// of the error it wraps.
+    ///
+    /// `External` cannot carry the name in a field without breaking every
+    /// `match` an application wrote against the public variant, so the
+    /// wrapped type is looked up in the list [`Self::from_external`] and
+    /// [`Self::from_external_with`] add their `E` to (see
+    /// `report::remember_wrapped_type`). An `External` built as a struct
+    /// literal around a type neither constructor ever wrapped is named
+    /// `FrameworkError::External`.
+    pub(crate) fn type_name(&self) -> &'static str {
+        match self {
+            Self::ServiceNotFound { .. } => "FrameworkError::ServiceNotFound",
+            Self::ParamError { .. } => "FrameworkError::ParamError",
+            Self::ValidationError { .. } => "FrameworkError::ValidationError",
+            Self::Database(_) => "FrameworkError::Database",
+            Self::Internal { .. } => "FrameworkError::Internal",
+            Self::Domain { .. } => "FrameworkError::Domain",
+            Self::Validation(_) => "FrameworkError::Validation",
+            Self::ValidationRedirect { .. } => "FrameworkError::ValidationRedirect",
+            Self::Unauthorized => "FrameworkError::Unauthorized",
+            Self::ModelNotFound { .. } => "FrameworkError::ModelNotFound",
+            Self::ParamParse { .. } => "FrameworkError::ParamParse",
+            Self::UnsupportedMediaType => "FrameworkError::UnsupportedMediaType",
+            Self::PrecognitionSuccess => "FrameworkError::PrecognitionSuccess",
+            Self::PrecognitionFailure(_) => "FrameworkError::PrecognitionFailure",
+            Self::InvalidUpload(_) => "FrameworkError::InvalidUpload",
+            Self::AlreadyReported => "FrameworkError::AlreadyReported",
+            Self::RateLimited { .. } => "FrameworkError::RateLimited",
+            Self::Timeout { .. } => "FrameworkError::Timeout",
+            Self::External { source, .. } => {
+                report::wrapped_type_name(&**source).unwrap_or("FrameworkError::External")
+            }
+        }
+    }
+
     /// Hand a newly created error to the frame recorder and return it.
     ///
     /// Every constructor and `From` conversion ends here, so with debug

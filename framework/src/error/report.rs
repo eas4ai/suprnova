@@ -13,13 +13,13 @@
 //! exactly one request, so two requests in flight in one process never
 //! mix their reports.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::Once;
+use std::sync::{Once, PoisonError, RwLock};
 
 use futures::FutureExt;
 
@@ -45,11 +45,13 @@ use super::frames::{self, RecordedFrames};
 /// With debug mode on, a report built while the server serves a request
 /// also holds the stack frames recorded where the error was created or
 /// the panic was raised. The development error page lists them. Two
-/// reports are equal when they report the same failure; the frames are
-/// not compared.
+/// reports are equal when they report the same failure; the frames and
+/// the type name are not compared.
 #[derive(Debug, Clone)]
 pub struct ErrorReport {
     kind: Kind,
+    /// See [`Self::type_name`].
+    type_name: Option<&'static str>,
     /// Where the error was created or the panic raised. `None` with debug
     /// off, and for an error created outside the request's own task.
     frames: Option<RecordedFrames>,
@@ -87,7 +89,10 @@ impl ErrorReport {
     /// The frames are the ones recorded in this request under the error's
     /// message, when there are any. Repeated messages take successive
     /// records, newest first, before the display text is deduplicated.
-    pub(crate) fn from_error(error: &dyn std::error::Error) -> Self {
+    ///
+    /// `error` is `'static` so the report can tell a `FrameworkError` from
+    /// another error and name its type; see [`Self::type_name`].
+    pub(crate) fn from_error(error: &(dyn std::error::Error + 'static)) -> Self {
         let mut chain = vec![error.to_string()];
         let frames = frames::recorded_for(&chain[0], 0);
         // Errors are recorded inner first, outer last. Count every source,
@@ -110,8 +115,13 @@ impl ErrorReport {
             }
             current = source.source();
         }
+        let type_name = match error.downcast_ref::<super::FrameworkError>() {
+            Some(framework) => Some(framework.type_name()),
+            None => wrapped_type_name(error),
+        };
         Self {
             kind: Kind::Error { chain },
+            type_name,
             frames,
             source_frames,
         }
@@ -129,6 +139,7 @@ impl ErrorReport {
             kind: Kind::Error {
                 chain: vec![message],
             },
+            type_name: None,
             frames: None,
             source_frames: Vec::new(),
         }
@@ -143,6 +154,7 @@ impl ErrorReport {
     ) -> Self {
         Self {
             kind: Kind::Panic { message, location },
+            type_name: Some("panic"),
             frames,
             source_frames: Vec::new(),
         }
@@ -166,6 +178,27 @@ impl ErrorReport {
             Kind::Error { chain } => chain,
             Kind::Panic { message, .. } => std::slice::from_ref(message),
         }
+    }
+
+    /// The type of what failed, as the development error page names it
+    /// beside the headline, the way Laravel's page heads with the
+    /// exception class:
+    ///
+    /// - for an error built by
+    ///   [`FrameworkError::from_external`](crate::FrameworkError::from_external)
+    ///   or
+    ///   [`from_external_with`](crate::FrameworkError::from_external_with),
+    ///   the path `std::any::type_name` gives for the error it wraps, such
+    ///   as `std::io::error::Error` for an `std::io::Error`;
+    /// - for any other `FrameworkError`, `FrameworkError::<Variant>`, such
+    ///   as `FrameworkError::ModelNotFound`;
+    /// - for a panic, `panic`.
+    ///
+    /// `None` when the type is not known: a report the framework built
+    /// from a response's message alone, or from an error of another type
+    /// that no `from_external` call has wrapped.
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name
     }
 
     /// Whether the panic boundary caught a panic, as opposed to an error
@@ -209,6 +242,70 @@ impl fmt::Display for ErrorReport {
             } => write!(f, "panicked: {message}"),
         }
     }
+}
+
+/// One error type [`FrameworkError::from_external`] or `from_external_with`
+/// has wrapped: its name, and a check that a type-erased error is of it.
+///
+/// [`FrameworkError::from_external`]: crate::FrameworkError::from_external
+struct WrappedType {
+    id: TypeId,
+    name: &'static str,
+    is: fn(&(dyn std::error::Error + 'static)) -> bool,
+}
+
+/// Every error type the process has wrapped in `FrameworkError::External`.
+///
+/// The variant keeps its source as `Arc<dyn Error>`, which forgets the
+/// concrete type's name, and it cannot gain a field for the name without
+/// breaking every `match` an application wrote against it. So each
+/// wrapping constructor adds its type here, once, and a report finds the
+/// name by asking each entry whether the source is of its type. The list
+/// grows with the number of distinct types the program wraps, which is
+/// fixed when it compiles, and never with the number of errors.
+///
+/// A push-only list whose critical sections are all code of this module,
+/// so a poisoned lock is read as it is.
+static WRAPPED_TYPES: RwLock<Vec<WrappedType>> = RwLock::new(Vec::new());
+
+/// Add `E` to [`WRAPPED_TYPES`] unless it is there already.
+pub(crate) fn remember_wrapped_type<E>()
+where
+    E: std::error::Error + 'static,
+{
+    let id = TypeId::of::<E>();
+    let known = |types: &[WrappedType]| types.iter().any(|wrapped| wrapped.id == id);
+    if known(&WRAPPED_TYPES.read().unwrap_or_else(PoisonError::into_inner)) {
+        return;
+    }
+    let mut types = WRAPPED_TYPES
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    if !known(&types) {
+        types.push(WrappedType {
+            id,
+            name: std::any::type_name::<E>(),
+            is: is_of::<E>,
+        });
+    }
+}
+
+/// Whether `error` is an `E`.
+fn is_of<E>(error: &(dyn std::error::Error + 'static)) -> bool
+where
+    E: std::error::Error + 'static,
+{
+    error.is::<E>()
+}
+
+/// The type path of `error`, when its type is in [`WRAPPED_TYPES`].
+pub(crate) fn wrapped_type_name(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    WRAPPED_TYPES
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|wrapped| (wrapped.is)(error))
+        .map(|wrapped| wrapped.name)
 }
 
 /// A panic [`catch_panic`] caught, with where it was raised when known.

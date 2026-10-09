@@ -52,7 +52,11 @@ fn err_response(status: u16, body: &str) -> Response {
 /// [`err_response`] for a failure on the server's side: the provider sees
 /// the same status and body, and the response carries `error` as its
 /// in-process report.
-fn failure_response(status: u16, body: &str, error: &dyn std::error::Error) -> Response {
+fn failure_response(
+    status: u16,
+    body: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> Response {
     Ok(HttpResponse::text(body)
         .status(status)
         .with_error_report_from(error))

@@ -926,6 +926,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `errors` and `processing` from its slot, and keep the sign-in page's
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
+- **Error reporting callbacks.** `Exceptions::reportable` runs your callback
+  for every reported error, or only for errors that wrap the type its closure
+  takes; `.stop()` keeps later callbacks and the `framework error` log line
+  from running for an error that callback receives.
+- **Reporting an error you handle.** `Exceptions::report` sends an error
+  through your callbacks and then the `framework error` log line.
+- **Errors that end a job's retries.** `Exceptions::dont_retry::<E>()` and
+  `Exceptions::dont_retry_when` name the errors that make the worker fail a
+  queued job at once, whatever tries it has left;
+  `Exceptions::should_stop_retries` answers for one error.
+- **Error types on the development error page.** The page names the wrapped
+  error's type, the `FrameworkError` variant, or `panic` above its headline,
+  and `ErrorReport::type_name` returns the same name.
+- **Editor links on the development error page.** With `APP_EDITOR` set,
+  each frame's location links to its line in your editor: a Laravel editor
+  name uses that editor's URL format, a value holding `{file}` is a template,
+  and any other name opens `<name>://open?file=...&line=...`.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -1641,6 +1659,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
   `<script data-page="app" type="application/json">`, failed with "no
   Inertia page object" (TS-01).
+
+- **Errors are reported through `Exceptions`.** A 5xx response, every failed
+  attempt of a queued job, and a console command that returns an error now
+  run your reportable callbacks before the `framework error` log line; a
+  console command's error is logged as well as printed.
+- **The frame that created an error shows where.** In a build without debug
+  info, the development error page gives the innermost application frame the
+  error's creation site as its location.
 
 ### Fixed
 

@@ -8,5 +8,6 @@ mod env_lock;
 #[path = "../support/env_snapshot.rs"]
 mod env_snapshot;
 pub mod external;
+pub mod laravel_http_gaps;
 pub mod panic_response_contract;
 pub mod responses;

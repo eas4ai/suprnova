@@ -636,6 +636,13 @@ curl -H 'Accept: text/html' http://localhost:8000/invoices/42
 
 ### What it shows
 
+- The type of what failed, above the headline, as Laravel's page shows
+  the exception class. An error built with `FrameworkError::from_external`
+  or `from_external_with` is named by the type it wraps, as
+  `std::any::type_name` spells it: `std::io::error::Error` for an
+  `std::io::Error`. Any other `FrameworkError` is named by its variant,
+  such as `FrameworkError::ModelNotFound`, and a panic is named `panic`.
+  `ErrorReport::type_name()` returns the same name.
 - The error chain, one line per source, or the panic message and the
   `file:line:column` where the panic was raised.
 - The site that created the error: the line of the call to a
@@ -662,7 +669,33 @@ made inside a function that is not `#[track_caller]` reports that
 function's line instead: with `.map_err(FrameworkError::from)?`, the site
 is a line of `Result::map_err` in the Rust toolchain, and the frames show
 the handler that called it. A build without debug info names each
-frame's function but not its line.
+frame's function but not its line. The frame that created the error is
+the exception: it shows the creation site as its location.
+
+### Open a frame in your editor
+
+Set `APP_EDITOR` and every frame with a location links to its line in
+your editor, as Laravel's `app.editor` does:
+
+```bash
+APP_EDITOR=vscode
+```
+
+- A name Laravel knows uses that editor's URL format. `vscode` links to
+  `vscode://file/{file}:{line}` and `phpstorm` to
+  `phpstorm://open?file={file}&line={line}`. The other names are
+  `antigravity`, `atom`, `cursor`, `emacs`, `fleet`, `idea`, `kiro`,
+  `macvim`, `neovim`, `netbeans`, `nova`, `sublime`, `textmate`, `trae`,
+  `vscode-insiders`, `vscode-insiders-remote`, `vscode-remote`,
+  `vscodium`, `windsurf`, `xdebug`, and `zed`.
+- A value that holds `{file}` is a template:
+  `APP_EDITOR=myeditor://{file}#{line}`.
+- Any other value `name` links to `name://open?file={file}&line={line}`.
+
+`{file}` is the absolute path of the frame's file. A relative location
+is resolved the way the page finds source lines: from the working
+directory first. `{line}` is the frame's line. Without `APP_EDITOR`, no
+frame carries a link.
 
 ### What it never shows
 

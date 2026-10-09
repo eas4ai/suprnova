@@ -428,7 +428,7 @@ impl HttpResponse {
     /// ran out of time - rather than returning a `FrameworkError` through
     /// `From<FrameworkError>`. The body stays what that code chose for the
     /// client; the report keeps what went wrong.
-    pub(crate) fn with_error_report_from(self, error: &dyn std::error::Error) -> Self {
+    pub(crate) fn with_error_report_from(self, error: &(dyn std::error::Error + 'static)) -> Self {
         self.with_error_report(ErrorReport::from_error(error))
     }
 
@@ -1717,12 +1717,10 @@ impl HttpResponse {
         let request_id = crate::logging::current_request_id().map(|id| id.as_str().to_string());
 
         if status >= 500 {
-            tracing::error!(
-                status,
-                error = %logged,
-                request_id = ?request_id,
-                "framework error"
-            );
+            // The application's reportable callbacks run first, then the
+            // `framework error` log line unless a stopping callback took
+            // the error (PAR-111).
+            crate::error::Exceptions::report(&err);
             // Dispatch ErrorOccurred. Spawn so we don't block response
             // conversion on listener execution. Guard with Handle::try_current()
             // so this `From` impl is safe to call from sync contexts that

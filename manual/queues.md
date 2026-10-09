@@ -1398,6 +1398,50 @@ that in mind, and prefer idempotent handlers: at-least-once delivery was
 always the contract, and this makes the redelivery path count honestly
 rather than silently.
 
+### Errors that end retries
+
+Some failures repeat on every attempt: a declined card, a deleted
+account, a payload the job can never parse. Name them once, in
+`bootstrap.rs`, and the worker fails the job at once, whatever attempts
+it has left:
+
+```rust
+use suprnova::{Exceptions, FrameworkError};
+
+#[derive(Debug)]
+pub struct CardDeclined;
+
+impl std::fmt::Display for CardDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the card was declined")
+    }
+}
+
+impl std::error::Error for CardDeclined {}
+
+pub fn register_retry_rules() {
+    // An error that wraps a `CardDeclined`.
+    Exceptions::dont_retry::<CardDeclined>();
+
+    // Any error the predicate accepts.
+    Exceptions::dont_retry_when(|error: &FrameworkError| error.status_code() == 422);
+}
+```
+
+`dont_retry::<E>()` matches an error whose wrapped source is an `E`, the
+error a job passed to `FrameworkError::from_external` or
+`from_external_with`. `Exceptions::should_stop_retries(&error)` answers
+the same question the worker asks. A job that fails this way is
+dead-lettered: it reaches the failed-jobs store and raises `JobFailed`,
+as a job that spent its tries does.
+
+The list applies to every job. To end the retries of one job type only,
+put `FailOnException` in that job's middleware.
+
+Every failed attempt is also reported through `Exceptions`, retried or
+not, so a callback registered with `Exceptions::reportable` sees each
+one. See [Error Handling](errors.md#report-errors-with-exceptions).
+
 ## Context on queued work
 
 A job runs after the request that queued it, often in another process.
