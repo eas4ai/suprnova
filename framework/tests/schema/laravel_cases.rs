@@ -368,7 +368,7 @@ pub async fn foreign_on_a_declared_column(conn: &DatabaseConnection) {
     .expect("create schema_states");
     Schema::create(&manager, "schema_orders", |t| {
         t.id();
-        t.big_integer("state_id");
+        t.unsigned_big_integer("state_id");
         t.foreign("state_id")
             .references("schema_states", "id")
             .name("orders_state_fk")
@@ -1096,17 +1096,28 @@ async fn foreign_key_rules(conn: &DatabaseConnection, table: &str) -> (String, S
     (rule("u"), rule("d"))
 }
 
-/// Reads one nullable integer column of every row, in `id` order.
-async fn integers(conn: &DatabaseConnection, table: &str, column: &str) -> Vec<Option<i64>> {
+/// Reads one nullable key column of every row, in `id` order. The column
+/// holds an `id()` key, `BIGINT UNSIGNED` on MySQL; Postgres and SQLite
+/// store it signed, and their drivers decode no `u64`.
+async fn integers(conn: &DatabaseConnection, table: &str, column: &str) -> Vec<Option<u64>> {
+    let backend = conn.get_database_backend();
     let rows = conn
         .query_all_raw(Statement::from_string(
-            conn.get_database_backend(),
+            backend,
             format!("SELECT {column} AS v FROM {table} ORDER BY id"),
         ))
         .await
         .expect("select integers");
     rows.iter()
-        .map(|row| row.try_get("", "v").expect("integer value"))
+        .map(|row| {
+            if backend == DbBackend::MySql {
+                row.try_get("", "v").expect("integer value")
+            } else {
+                row.try_get::<Option<i64>>("", "v")
+                    .expect("integer value")
+                    .map(|key| <u64 as TryFrom<i64>>::try_from(key).expect("a key is not negative"))
+            }
+        })
         .collect()
 }
 

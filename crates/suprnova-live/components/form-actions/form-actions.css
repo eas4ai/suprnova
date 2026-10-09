@@ -1,7 +1,0 @@
-.sn-form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--sn-density-gap);
-  margin-block-start: var(--sn-density-stack);
-}

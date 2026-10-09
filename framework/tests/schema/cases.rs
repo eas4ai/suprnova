@@ -15,7 +15,7 @@ use super::catalog;
 
 #[model(table = "schema_posts", soft_deletes, fillable = ["title"])]
 pub struct SchemaPost {
-    pub id: i64,
+    pub id: u64,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -35,7 +35,7 @@ pub struct SchemaPost {
     },
 )]
 pub struct NativeOwner {
-    pub id: i64,
+    pub id: u64,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -58,8 +58,8 @@ pub struct NativeOwner {
     },
 )]
 pub struct NativePost {
-    pub id: i64,
-    pub native_owner_id: i64,
+    pub id: u64,
+    pub native_owner_id: u64,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -77,7 +77,7 @@ pub struct NativePost {
     },
 )]
 pub struct NullableStampPost {
-    pub id: i64,
+    pub id: u64,
     pub title: String,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -96,7 +96,7 @@ pub struct NullableStampPost {
     },
 )]
 pub struct NaivePost {
-    pub id: i64,
+    pub id: u64,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -498,7 +498,7 @@ pub async fn native_timestamps_round_trip(conn: &DatabaseConnection) {
     .expect("create schema_native_owners");
     Schema::create(&manager, "schema_native_posts", |t| {
         t.id();
-        t.big_integer("native_owner_id");
+        t.foreign_id("native_owner_id");
         t.string("title");
         t.timestamps_tz();
         t.soft_deletes_tz();
@@ -1096,7 +1096,7 @@ pub async fn quoted_index_and_key_names(conn: &DatabaseConnection) {
 
     Schema::create(&manager, "schema_quote_children", |t| {
         t.id();
-        t.big_integer("mark_id");
+        t.unsigned_big_integer("mark_id");
         t.foreign("mark_id")
             .references("schema_quote_marks", "id")
             .name("fk`quote\"name");
@@ -1464,9 +1464,14 @@ impl MigrationName for CreateModernTable {
 #[async_trait::async_trait]
 impl MigrationTrait for CreateModernTable {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The SeaORM-style key is a signed `BIGINT`, and on MySQL a foreign
+        // key must match the sign of the column it references, so the column
+        // is declared signed rather than with `foreign_id`, which is
+        // unsigned there.
         Schema::create(manager, "schema_mix_modern", |t| {
             t.id();
-            t.foreign_id("legacy_id").constrained("schema_mix_legacy");
+            t.big_integer("legacy_id");
+            t.foreign("legacy_id").constrained("schema_mix_legacy");
         })
         .await
     }
