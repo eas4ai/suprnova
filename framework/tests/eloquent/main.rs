@@ -96,4 +96,3 @@ pub mod typed_attrs;
 pub mod unique_id;
 
 /// Observe the data-gap contract through the shared verification filter.
-pub mod laravel_gaps;
