@@ -1,0 +1,7 @@
+{
+  "name": "evil.css-import-nested",
+  "files": [
+    "widget.html",
+    "widget.css"
+  ]
+}
