@@ -571,6 +571,7 @@ pub use features::{Evaluator, EvaluatorRef, Feature};
 // `eloquent` module. The `ModelEntry` registry is populated at compile
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
+pub use eloquent::relations::belongs_to_many::{SyncChanges, SyncRecord};
 pub use eloquent::{
     AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
     AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,

@@ -30,6 +30,8 @@ use suprnova::{DB, FrameworkError, Model, attrs, model};
 pub struct SwdUser {
     pub id: i64,
     pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[model(table = "swd_roles")]
@@ -88,7 +90,7 @@ const REFUSED_ROLE_ID: i64 = 1000;
 async fn sqlite() -> TestDatabase {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     for sql in [
-        "CREATE TABLE swd_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE swd_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
         "CREATE TABLE swd_roles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
         "CREATE TABLE swd_role_user (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -280,18 +282,19 @@ async fn inside_a_transaction_that_rolls_back_nothing_is_attached() {
 }
 
 #[tokio::test]
-async fn a_relation_with_a_pivot_filter_refuses_to_write() {
+async fn a_filtered_sync_preserves_rows_outside_the_filter() {
     let _db = sqlite().await;
     let (user, [r1, r2, r3]) = user_holding_two_roles().await;
-
-    let err = user
-        .roles()
+    let before = pivot_rows(&user).await;
+    user.roles()
         .where_pivot("note", "first")
-        .sync_without_detaching([r3.id])
+        .sync([r3.id])
         .await
-        .expect_err("a pivot filter constrains reads only");
-    assert!(err.to_string().contains("reads only"), "{err}");
-    assert_eq!(held_role_ids(&user).await, vec![r1.id, r2.id]);
+        .expect("filtered sync");
+    assert_eq!(held_role_ids(&user).await, vec![r2.id, r3.id]);
+    let after = pivot_rows(&user).await;
+    assert_eq!(after[0], before[1], "the invisible row is unchanged");
+    assert!(after.iter().all(|row| row["swd_role_id"] != r1.id));
 }
 
 // ---- MorphToMany --------------------------------------------------------
@@ -393,7 +396,9 @@ async fn live_sync_without_detaching(env: &str) {
     // `DateTime<Utc>` field without a cast stores RFC 3339 text.
     let timestamp_type = "VARCHAR(255)";
     for sql in [
-        format!("CREATE TEMPORARY TABLE swd_users ({id_column}, name VARCHAR(255) NOT NULL)"),
+        format!(
+            "CREATE TEMPORARY TABLE swd_users ({id_column}, name VARCHAR(255) NOT NULL, created_at VARCHAR(255) NOT NULL, updated_at VARCHAR(255) NOT NULL)"
+        ),
         format!("CREATE TEMPORARY TABLE swd_roles ({id_column}, name VARCHAR(255) NOT NULL)"),
         format!(
             "CREATE TEMPORARY TABLE swd_role_user ({id_column}, \
@@ -440,4 +445,197 @@ async fn postgres_sync_without_detaching_leaves_existing_rows_untouched() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_sync_without_detaching_leaves_existing_rows_untouched() {
     live_sync_without_detaching("MYSQL_TEST_URL").await;
+}
+
+#[tokio::test]
+async fn sync_returns_inserted_deleted_and_only_changed_ids() {
+    let _db = sqlite().await;
+    let (user, [r1, r2, r3]) = user_holding_two_roles().await;
+    let changes = user.roles().sync([r2.id, r3.id]).await.expect("sync");
+    assert_eq!(changes.attached, vec![Value::from(r3.id)]);
+    assert_eq!(changes.detached, vec![Value::from(r1.id)]);
+    assert!(changes.updated.is_empty());
+    assert_eq!(held_role_ids(&user).await, vec![r2.id, r3.id]);
+}
+
+#[tokio::test]
+async fn per_id_columns_update_existing_rows_and_report_only_actual_changes() {
+    let _db = sqlite().await;
+    let clock = TestClock::freeze();
+    let (user, [r1, r2, r3]) = user_holding_two_roles().await;
+    let before = pivot_rows(&user).await;
+    clock.advance(Duration::seconds(60));
+    let changes = user
+        .roles()
+        .sync_without_detaching([
+            (r2.id, attrs! { note: "lead" }),
+            (r3.id, attrs! { note: "new" }),
+        ])
+        .await
+        .expect("pivot columns");
+    assert_eq!(changes.attached, vec![Value::from(r3.id)]);
+    assert_eq!(changes.updated, vec![Value::from(r2.id)]);
+    assert!(changes.detached.is_empty());
+    let after = pivot_rows(&user).await;
+    assert_eq!(after[0], before[0]);
+    assert_eq!(after[1]["id"], before[1]["id"]);
+    assert_eq!(after[1]["note"], "lead");
+    assert_eq!(after[1]["created_at"], before[1]["created_at"]);
+    assert_ne!(after[1]["updated_at"], before[1]["updated_at"]);
+    assert_eq!(after[2]["note"], "new");
+    clock.advance(Duration::seconds(60));
+    let unchanged = user
+        .roles()
+        .sync_without_detaching([(r2.id, attrs! { note: "lead" })])
+        .await
+        .expect("same columns");
+    assert!(unchanged.updated.is_empty());
+    assert_eq!(pivot_rows(&user).await, after);
+    assert_eq!(held_role_ids(&user).await, vec![r1.id, r2.id, r3.id]);
+    let changed = user
+        .roles()
+        .sync([(r2.id, attrs! { note: Value::Null })])
+        .await
+        .expect("sync update");
+    assert_eq!(changed.updated, vec![Value::from(r2.id)]);
+    assert_eq!(
+        changed.detached,
+        vec![Value::from(r1.id), Value::from(r3.id)]
+    );
+    assert_eq!(pivot_rows(&user).await[0]["note"], Value::Null);
+}
+
+#[tokio::test]
+async fn filtered_updates_do_not_touch_invisible_rows() {
+    let _db = sqlite().await;
+    let (user, [r1, r2, _]) = user_holding_two_roles().await;
+    let before = pivot_rows(&user).await;
+    let changes = user
+        .roles()
+        .where_pivot("note", "second")
+        .sync_without_detaching([(r2.id, attrs! { note: "lead" })])
+        .await
+        .expect("filtered update");
+    assert_eq!(changes.updated, vec![Value::from(r2.id)]);
+    assert_eq!(pivot_rows(&user).await[0], before[0]);
+    assert_eq!(held_role_ids(&user).await, vec![r1.id, r2.id]);
+}
+
+#[tokio::test]
+async fn a_touching_sync_advances_the_parent_only_after_changes() {
+    let _db = sqlite().await;
+    let clock = TestClock::freeze();
+    let (user, [r1, _, r3]) = user_holding_two_roles().await;
+    let before = user.updated_at;
+    clock.advance(Duration::seconds(60));
+    user.roles()
+        .touch_parent()
+        .sync_without_detaching([r3.id])
+        .await
+        .expect("touching sync");
+    let touched = SwdUser::find_or_fail(user.id).await.unwrap().updated_at;
+    assert!(touched > before);
+    clock.advance(Duration::seconds(60));
+    user.roles()
+        .touch_parent()
+        .sync_without_detaching([r1.id])
+        .await
+        .expect("no change");
+    assert_eq!(
+        SwdUser::find_or_fail(user.id).await.unwrap().updated_at,
+        touched
+    );
+    user.roles()
+        .touch_parent()
+        .sync([r1.id])
+        .await
+        .expect("detach touch");
+    assert!(SwdUser::find_or_fail(user.id).await.unwrap().updated_at > touched);
+}
+
+#[tokio::test]
+async fn pivot_updates_detaches_and_touches_roll_back_with_a_failed_attach() {
+    let _db = sqlite().await;
+    let clock = TestClock::freeze();
+    let (user, [_, r2, _]) = user_holding_two_roles().await;
+    let before = pivot_rows(&user).await;
+    clock.advance(Duration::seconds(60));
+    user.roles()
+        .touch_parent()
+        .sync([
+            (r2.id, attrs! { note: "lead" }),
+            (REFUSED_ROLE_ID, attrs! {}),
+        ])
+        .await
+        .expect_err("failed attach");
+    assert_eq!(pivot_rows(&user).await, before);
+    assert_eq!(
+        SwdUser::find_or_fail(user.id).await.unwrap().updated_at,
+        user.updated_at
+    );
+    user.roles()
+        .sync_without_detaching([Value::from("wrong type")])
+        .await
+        .expect_err("typed id");
+    let mut bad = suprnova::Attrs::new();
+    bad.insert("note; drop", "value");
+    user.roles()
+        .sync_without_detaching([(r2.id, bad)])
+        .await
+        .expect_err("identifier");
+    assert_eq!(pivot_rows(&user).await, before);
+}
+
+#[tokio::test]
+async fn a_failed_parent_touch_rolls_back_pivot_writes_and_touch_suppression_is_honoured() {
+    let db = sqlite().await;
+    let clock = TestClock::freeze();
+    let (user, [_, _, r3]) = user_holding_two_roles().await;
+    let before = pivot_rows(&user).await;
+    clock.advance(Duration::seconds(60));
+    db.execute_unprepared("CREATE TRIGGER refuse_parent_touch BEFORE UPDATE ON swd_users BEGIN SELECT RAISE(ABORT, 'parent touch'); END").await.unwrap();
+    user.roles()
+        .touch_parent()
+        .sync_without_detaching([r3.id])
+        .await
+        .expect_err("touch failure");
+    assert_eq!(pivot_rows(&user).await, before);
+    suprnova::eloquent::without_touching(async {
+        user.roles()
+            .touch_parent()
+            .sync_without_detaching([r3.id])
+            .await
+    })
+    .await
+    .expect("touch disabled");
+    assert_eq!(
+        SwdUser::find_or_fail(user.id).await.unwrap().updated_at,
+        user.updated_at
+    );
+}
+
+#[tokio::test]
+async fn a_caught_failure_inside_a_transaction_rolls_back_only_the_sync_call() {
+    let _db = sqlite().await;
+    let (user, roles) = user_holding_two_roles().await;
+    let original = pivot_rows(&user).await;
+    let owner = user.clone();
+    let expected = original.clone();
+    DB::transaction(|_tx| {
+        Box::pin(async move {
+            let result = owner
+                .roles()
+                .sync([
+                    (roles[1].id, attrs! { note: "changed" }),
+                    (999999, attrs! { note: "bad foreign key" }),
+                ])
+                .await;
+            assert!(result.is_err());
+            assert_eq!(pivot_rows(&owner).await, expected);
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("outer transaction still commits");
+    assert_eq!(pivot_rows(&user).await, original);
 }

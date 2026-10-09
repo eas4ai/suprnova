@@ -392,7 +392,7 @@ async fn or_where_key_with_no_prior_clause_behaves_like_where_key() {
 }
 
 #[test]
-fn or_where_key_renders_one_flat_or_group() {
+fn or_where_key_renders_flat_or_conditions() {
     use sea_orm::DbBackend;
     let (sql, vals) = ParUser::query()
         .filter("name", "A")
@@ -401,8 +401,8 @@ fn or_where_key_renders_one_flat_or_group() {
         .to_sql_with_bindings_for(DbBackend::Postgres);
 
     assert!(
-        sql.contains("(name = $1 OR id = $2 OR id != $3)"),
-        "consecutive or_* calls append into one group instead of nesting; got: {sql}"
+        sql.contains("WHERE name = $1 OR id = $2 OR id != $3"),
+        "consecutive or_* calls remain flat; got: {sql}"
     );
     assert_eq!(vals.len(), 3, "got: {vals:?}");
 }

@@ -14,7 +14,7 @@
 //! ```
 
 use sea_orm::{DatabaseBackend, Value as SeaValue};
-use serde_json::json;
+use serde_json::{Value, json};
 use suprnova::{Builder, DB, DbTableBuilder, Direction, Model, model};
 
 use crate::query_fixture::{Fixture, json_rows};
@@ -473,4 +473,58 @@ async fn mysql_model_query_helpers_match_raw_sql() {
     seed(&fx).await;
     run_every_scenario().await;
     fx.close().await;
+}
+
+#[tokio::test]
+async fn equality_nulls_and_flat_or_helpers_preserve_scopes() {
+    let _fx = seeded_sqlite().await;
+    let query = items()
+        .with_trashed()
+        .r#where("a", 1)
+        .or_where("b", 2)
+        .filter("c", 2);
+    assert_eq!(
+        query.to_sql_for(DatabaseBackend::Sqlite),
+        "SELECT * FROM qh_items WHERE a = ? OR b = ? AND c = ?"
+    );
+    assert_eq!(
+        ids_matching(items().db_where("label", Value::Null), "label IS NULL").await,
+        vec![2, 4]
+    );
+    assert_eq!(
+        ids_matching(
+            items().filter("id", 1).or_where("label", Value::Null),
+            "id = 1 OR label IS NULL"
+        )
+        .await,
+        vec![1, 2, 4]
+    );
+    for query in [
+        items().filter("id", 1).or_where_any(["a", "b"], "=", 0),
+        items().filter("id", 1).or_where_all(["a", "b"], "=", 0),
+        items().filter("id", 1).or_where_none(["a", "b"], "=", 1),
+        items().filter("id", 1).or_where_in("id", [4i64]),
+        items().filter("id", 1).or_where_not_in("id", [2i64]),
+        items().filter("id", 1).or_where_in("id", slots_on("mon")),
+        items()
+            .filter("id", 1)
+            .or_where_not_in("id", slots_on("tue")),
+        items()
+            .filter("id", 1)
+            .or_where_raw("b = ?", vec![json!(2)]),
+        items().filter("id", 1).or_where_null("label"),
+        items().filter("id", 1).or_where_not_null("label"),
+    ] {
+        let ids = query
+            .filter("id", 4)
+            .order_by_asc("id")
+            .get()
+            .await
+            .expect("flat helper")
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&1));
+        assert!(!ids.contains(&6), "the soft-delete scope still applies");
+    }
 }

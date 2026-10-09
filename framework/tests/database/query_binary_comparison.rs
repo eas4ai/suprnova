@@ -78,7 +78,7 @@ fn where_not_binary_renders_the_negated_modifier() {
 }
 
 #[test]
-fn or_where_binary_folds_into_the_preceding_clause() {
+fn or_where_binary_keeps_flat_sql_precedence() {
     let (sql, vals) = BinUser::query()
         .filter("email", "a@x.com")
         .or_where_binary("name", "Alice")
@@ -86,8 +86,8 @@ fn or_where_binary_folds_into_the_preceding_clause() {
         .try_to_sql_with_bindings_for(DbBackend::MySql)
         .expect("MySQL supports binary comparison");
     assert!(
-        sql.contains("(email = ? OR name = binary ? OR name != binary ?)"),
-        "consecutive or_* calls stay in one flat group; got: {sql}"
+        sql.contains("WHERE email = ? OR name = binary ? OR name != binary ?"),
+        "consecutive or_* calls remain flat; got: {sql}"
     );
     assert_eq!(vals.len(), 3, "got: {vals:?}");
 }

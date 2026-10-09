@@ -162,9 +162,8 @@ fn bare_table(item: &str) -> Option<&str> {
 // ---- Conditions -------------------------------------------------------------
 
 /// One condition in a [`DbTableBuilder`]'s `WHERE` list or in a join's
-/// `ON` list. The list joins with `AND`; an `or_*` call folds the new
-/// condition into the one before it as an [`Condition::Any`] group, so an
-/// `OR` only ever widens that one condition.
+/// `ON` list. Each term records its connector so SQL precedence applies
+/// to flat chains. Explicit groups keep their parentheses.
 #[derive(Debug, Clone)]
 pub(crate) enum Condition {
     /// `column op ?`. `binary` renders MySQL's `column op binary ?`,
@@ -210,6 +209,8 @@ pub(crate) enum Condition {
     Any(Vec<Condition>),
     /// `(c1 AND c2 ...)`, one atom wherever it sits.
     All(Vec<Condition>),
+    /// A term connected to the previous term with OR.
+    OrNext(Box<Condition>),
     /// `NOT (c)`.
     Not(Box<Condition>),
 }
@@ -254,19 +255,30 @@ pub(crate) fn grouped(
     })
 }
 
-/// Fold `condition` into the last one in `conditions` as a disjunction:
-/// into a trailing [`Condition::Any`] group so a run of `or_*` calls stays
-/// flat, around a plain condition otherwise, and as a plain condition when
-/// the list is empty.
+/// Append a disjunction without changing the preceding terms' grouping.
 pub(crate) fn push_or(conditions: &mut Vec<Condition>, condition: Condition) {
-    match conditions.pop() {
-        Some(Condition::Any(mut group)) => {
-            group.push(condition);
-            conditions.push(Condition::Any(group));
+    let condition = if conditions.is_empty() {
+        condition
+    } else {
+        Condition::OrNext(Box::new(condition))
+    };
+    conditions.push(condition);
+}
+
+/// Render a boolean list in insertion order so SQL decides precedence.
+pub(crate) fn render_boolean_list<T>(
+    terms: &[T],
+    is_or: impl Fn(&T) -> bool,
+    mut render: impl FnMut(&T) -> Result<String, FrameworkError>,
+) -> Result<String, FrameworkError> {
+    let mut sql = String::new();
+    for (index, term) in terms.iter().enumerate() {
+        if index != 0 {
+            sql.push_str(if is_or(term) { " OR " } else { " AND " });
         }
-        Some(last) => conditions.push(Condition::Any(vec![last, condition])),
-        None => conditions.push(condition),
+        sql.push_str(&render(term)?);
     }
+    Ok(sql)
 }
 
 /// Check every identifier and operator in `condition`, recursing into
@@ -296,7 +308,7 @@ pub(crate) fn validate_condition(condition: &Condition) -> Result<(), FrameworkE
                 validate_condition(condition)?;
             }
         }
-        Condition::Not(condition) => validate_condition(condition)?,
+        Condition::Not(condition) | Condition::OrNext(condition) => validate_condition(condition)?,
     }
     Ok(())
 }
@@ -338,11 +350,11 @@ pub(crate) fn render_conditions(
     values: &mut Vec<SeaValue>,
     n: &mut usize,
 ) -> Result<String, FrameworkError> {
-    let parts = conditions
-        .iter()
-        .map(|condition| render_condition(condition, backend, values, n))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parts.join(" AND "))
+    render_boolean_list(
+        conditions,
+        |term| matches!(term, Condition::OrNext(_)),
+        |term| render_condition(term, backend, values, n),
+    )
 }
 
 fn render_group(
@@ -377,6 +389,17 @@ fn render_condition(
             binary,
         } => {
             let column_sql = quote_identifier(backend, column);
+            if *binary && backend != DbBackend::MySql {
+                return Err(crate::database::binary_comparison_unsupported(backend));
+            }
+            if value == &value.as_null() {
+                let not = if matches!(op.as_str(), "=" | "<=>") {
+                    ""
+                } else {
+                    "NOT "
+                };
+                return Ok(format!("{column_sql} IS {not}NULL"));
+            }
             let ph = bind(backend, value, values, n)?;
             let op = if *binary {
                 match backend {
@@ -444,6 +467,7 @@ fn render_condition(
         Condition::All(conditions) => {
             render_group(conditions, " AND ", "1 = 1", backend, values, n)?
         }
+        Condition::OrNext(condition) => render_condition(condition, backend, values, n)?,
         Condition::Not(condition) => {
             let inner = render_condition(condition, backend, values, n)?;
             match condition.as_ref() {
@@ -514,7 +538,9 @@ pub(crate) fn condition_tables(condition: &Condition, out: &mut ReadSet) {
                 condition_tables(condition, out);
             }
         }
-        Condition::Not(condition) => condition_tables(condition, out),
+        Condition::Not(condition) | Condition::OrNext(condition) => {
+            condition_tables(condition, out)
+        }
         Condition::Raw { .. } => out.raw_fragment = true,
         Condition::Compare { .. }
         | Condition::Columns { .. }
@@ -655,10 +681,9 @@ pub(crate) enum JoinTarget {
 ///
 /// `on` compares two columns; `filter` / `db_where` compare a column with
 /// a value, which is always bound as a parameter. The conditions join
-/// with `AND`. Each `or_*` method folds its condition into the one before
-/// it, so `on(a).filter(b).or_where(c)` reads `a AND (b OR c)`: an `OR`
-/// widens one condition and never the whole `ON` clause. That is the same
-/// rule the builders' own `or_where` follows.
+/// with `AND` unless an `or_*` method adds a flat `OR`.
+/// `on(a).filter(b).or_where(c)` reads `a AND b OR c`, following SQL
+/// precedence. The query builders use the same rule.
 #[derive(Debug, Clone)]
 pub struct JoinClause {
     pub(crate) kind: JoinKind,
@@ -739,7 +764,7 @@ impl JoinClause {
         })
     }
 
-    /// `OR first op second`, folded into the condition before it.
+    /// `OR first op second`, appended with flat SQL precedence.
     pub fn or_on(
         self,
         first: impl Into<String>,
@@ -774,12 +799,12 @@ impl JoinClause {
         })
     }
 
-    /// `OR column = ?`, folded into the condition before it.
+    /// `OR column = ?`, appended with flat SQL precedence.
     pub fn or_filter(self, column: impl Into<String>, value: impl Into<SeaValue>) -> Self {
         self.or_filter_op(column, "=", value)
     }
 
-    /// `OR column op ?`, folded into the condition before it.
+    /// `OR column op ?`, appended with flat SQL precedence.
     pub fn or_filter_op(
         self,
         column: impl Into<String>,
@@ -940,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn or_folds_into_the_previous_condition_only() {
+    fn or_is_flat_and_keeps_binding_order() {
         let compare = |column: &str| Condition::Compare {
             column: column.into(),
             op: "=".into(),
@@ -953,10 +978,7 @@ mod tests {
         let mut values = Vec::new();
         let mut n = 0;
         let sql = render_conditions(&conditions, DbBackend::Postgres, &mut values, &mut n).unwrap();
-        assert_eq!(
-            sql,
-            "\"a\" = $1 AND (\"b\" = $2 OR \"c\" = $3 OR \"d\" = $4)"
-        );
+        assert_eq!(sql, "\"a\" = $1 AND \"b\" = $2 OR \"c\" = $3 OR \"d\" = $4");
         assert_eq!(values.len(), 4);
     }
 

@@ -219,7 +219,7 @@ async fn subquery_joins_and_count_on_a_model() {
         .expect("closure join runs");
     assert_eq!(
         with_closure.iter().map(|p| p.id).collect::<Vec<_>>(),
-        vec![101, 102, 103, 104]
+        vec![101, 102, 102, 103, 104, 104]
     );
 }
 
@@ -453,40 +453,89 @@ async fn a_joined_model_query_quotes_every_reference_to_its_mixed_case_table() {
 }
 
 #[tokio::test]
-async fn mass_writes_refuse_a_join() {
+async fn joined_mass_writes_match_only_joined_rows() {
     let _fx = seeded_sqlite().await;
+    DB::enable_query_log().expect("log");
     let joined = || {
         JmPost::query()
             .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
             .filter("jm_users.name", "Ada")
     };
-    assert!(
+    assert_eq!(
         joined()
-            .update_all(attrs! { title: "changed" })
+            .update(attrs! { title: "changed" })
             .await
-            .is_err(),
-        "update_all would ignore the join"
+            .expect("update"),
+        2
     );
-    assert!(
-        joined().delete_all().await.is_err(),
-        "delete_all would ignore the join"
+    assert_eq!(joined().delete().await.expect("soft delete"), 2);
+    assert_eq!(JmPost::query().count().await.expect("count"), 2);
+    assert_eq!(
+        joined()
+            .with_trashed()
+            .force_delete_all()
+            .await
+            .expect("delete"),
+        2
     );
-    assert!(
-        joined().force_delete_all().await.is_err(),
-        "force_delete_all would ignore the join"
+    assert_eq!(
+        JmPost::query().with_trashed().count().await.expect("count"),
+        3
     );
-    assert!(
-        joined().increment_each([("views", 1)]).await.is_err(),
-        "increment_each would ignore the join"
+    let log = DB::get_query_log().expect("log");
+    let predicate = r#" WHERE "jm_posts"."deleted_at" IS NULL AND "jm_users"."name" = ?"#;
+    let selector = format!(
+        r#" WHERE "rowid" IN (SELECT "jm_posts"."rowid" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id"{predicate})"#
     );
-    let untouched = JmPost::query()
-        .order_by_asc("id")
-        .get()
-        .await
-        .expect("read back");
-    assert_eq!(untouched.len(), 4, "nothing was deleted");
-    assert!(untouched.iter().all(|p| p.title != "changed"));
-    assert_eq!(untouched[0].views, 10, "nothing was incremented");
+    let update = log
+        .iter()
+        .find(|query| query.sql.starts_with("UPDATE"))
+        .expect("logged update");
+    assert_eq!(
+        update.sql,
+        format!(r#"UPDATE "jm_posts" SET "title" = ?{selector}"#)
+    );
+    assert_eq!(
+        update.bindings,
+        vec![
+            r#"String(Some("changed"))"#.to_string(),
+            r#"String(Some("Ada"))"#.to_string()
+        ]
+    );
+    let delete = log
+        .iter()
+        .find(|query| query.sql.starts_with("DELETE"))
+        .expect("logged delete");
+    assert_eq!(
+        delete.sql,
+        r#"DELETE FROM "jm_posts" WHERE "rowid" IN (SELECT "jm_posts"."rowid" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id" WHERE "jm_users"."name" = ?)"#
+    );
+    assert_eq!(delete.bindings, vec![r#"String(Some("Ada"))"#.to_string()]);
+}
+
+#[tokio::test]
+async fn or_is_flat_and_keeps_sql_precedence() {
+    let _fx = seeded_sqlite().await;
+    let query = JmPost::query()
+        .with_trashed()
+        .filter("id", 101)
+        .or_where("id", 102)
+        .filter("views", 50);
+    assert_eq!(
+        query.to_sql_for(DatabaseBackend::Sqlite),
+        "SELECT * FROM jm_posts WHERE id = ? OR id = ? AND views = ?"
+    );
+    assert_eq!(
+        query
+            .order_by_asc("id")
+            .get()
+            .await
+            .expect("read")
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>(),
+        vec![101, 102]
+    );
 }
 
 #[tokio::test]
@@ -554,4 +603,48 @@ async fn mysql_model_joins_match_raw_sql() {
     seed(&fx).await;
     run_every_scenario(&fx).await;
     fx.close().await;
+}
+
+#[tokio::test]
+async fn column_operator_and_cross_join_closure_match_raw_sql() {
+    let _fx = seeded_sqlite().await;
+    let query = JmPost::query()
+        .with_trashed()
+        .cross_join_with("jm_users", |j| {
+            j.on("jm_users.id", "=", "jm_posts.author_id")
+                .db_where("jm_users.name", "Linus")
+        })
+        .where_column_op("jm_posts.views", ">", "jm_users.id");
+    let (sql, bindings) = query
+        .try_to_sql_with_bindings_for(DatabaseBackend::Sqlite)
+        .expect("SQL");
+    assert_eq!(
+        sql,
+        "SELECT \"jm_posts\".* FROM \"jm_posts\" CROSS JOIN \"jm_users\" ON \"jm_users\".\"id\" = \"jm_posts\".\"author_id\" AND \"jm_users\".\"name\" = ? WHERE \"jm_posts\".\"views\" > \"jm_users\".\"id\""
+    );
+    assert_eq!(bindings, vec![SeaValue::from("Linus")]);
+    assert_eq!(
+        query
+            .get()
+            .await
+            .expect("rows")
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>(),
+        vec![102]
+    );
+    assert!(
+        JmPost::query()
+            .where_column_op("views", "=;", "id")
+            .get()
+            .await
+            .is_err()
+    );
+    assert!(
+        JmPost::query()
+            .where_column_op("a; drop", ">", "id")
+            .get()
+            .await
+            .is_err()
+    );
 }

@@ -236,7 +236,26 @@ where
         builder = builder.filter_null(column);
     }
     let mut builder = ScopeRegistry::apply_to::<M>(builder);
-    builder.where_terms.extend(callers_terms);
+    use crate::eloquent::builder::WhereTerm;
+    if !builder.where_terms.is_empty() {
+        if builder
+            .where_terms
+            .iter()
+            .any(|term| matches!(term, WhereTerm::OrNext(_)))
+        {
+            builder.where_terms = vec![WhereTerm::Group(builder.where_terms)];
+        }
+        if callers_terms
+            .iter()
+            .any(|term| matches!(term, WhereTerm::OrNext(_)))
+        {
+            builder.where_terms.push(WhereTerm::Group(callers_terms));
+        } else {
+            builder.where_terms.extend(callers_terms);
+        }
+    } else {
+        builder.where_terms = callers_terms;
+    }
     builder
 }
 

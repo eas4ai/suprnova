@@ -33,6 +33,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 use suprnova::database::{DatabaseConfig, DbConnection};
+use suprnova::eloquent::events::EventResult;
 use suprnova::eloquent::observers::Observer;
 use suprnova::testing::{TestClock, TestContainer, TestContainerGuard, TestDatabase};
 use suprnova::{AsBool, AsEncrypted, Attrs, DB, FrameworkError, Model, attrs, model};
@@ -124,6 +125,7 @@ struct Seen {
     changes: Vec<(String, Value)>,
     raw_original_is_admin: Option<Value>,
     original_is_admin: Option<Value>,
+    previous_is_admin: Option<Value>,
 }
 
 fn sorted_changes(changes: &Attrs) -> Vec<(String, Value)> {
@@ -158,6 +160,7 @@ where
         changes: sorted_changes(&current.get_changes()),
         raw_original_is_admin: current.get_raw_original("is_admin"),
         original_is_admin: current.get_original("is_admin")?,
+        previous_is_admin: current.get_previous("is_admin"),
     })
 }
 
@@ -177,6 +180,21 @@ struct AuditObserver;
 
 #[async_trait]
 impl Observer<ChangeUser> for AuditObserver {
+    async fn saving(&self, attrs: &mut Attrs, _is_creating: bool) -> EventResult {
+        let email = attrs.get("email").and_then(Value::as_str).unwrap_or("");
+        SEEN.lock()
+            .unwrap()
+            .push(see("saving", email, &ChangeUser::default()).expect("seen"));
+        EventResult::Ok
+    }
+
+    async fn updating(&self, previous: &ChangeUser, _attrs: &mut Attrs) -> EventResult {
+        SEEN.lock()
+            .unwrap()
+            .push(see("updating", &previous.email, previous).expect("seen"));
+        EventResult::Ok
+    }
+
     async fn created(&self, model: &ChangeUser) -> Result<(), FrameworkError> {
         let seen = see("created", &model.email, model)?;
         SEEN.lock().unwrap().push(seen);
@@ -219,6 +237,7 @@ impl Observer<LiveChangeUser> for LiveAuditObserver {
 /// What an observer of a save that flipped `is_admin` from `false` to
 /// `true`, and nothing else, must see.
 fn assert_saw_only_the_flip(seen: &Seen) {
+    assert_eq!(seen.previous_is_admin, Some(json!(0)));
     assert!(seen.is_admin_changed, "was_changed(is_admin): {seen:?}");
     assert!(!seen.name_changed, "was_changed(name): {seen:?}");
     assert!(
@@ -350,6 +369,7 @@ async fn an_insert_has_no_original_while_its_observers_run() {
             );
             assert_eq!(record.original_is_admin, None, "{event}: {record:?}");
             assert!(!record.anything_changed, "{event}: {record:?}");
+            assert_eq!(record.previous_is_admin, None);
         }
     }
     assert_eq!(
@@ -765,4 +785,104 @@ async fn postgres_save_reports_its_changes() {
 #[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
 async fn mysql_save_reports_its_changes() {
     live_save_reports_its_changes("MYSQL_TEST_URL").await;
+}
+
+#[tokio::test]
+async fn a_clean_save_fires_only_saving_and_saved_without_reading_or_writing() {
+    let db = sqlite().await;
+    ChangeUser::observe(AuditObserver).await;
+    let email = "clean@example.com";
+    let user = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: false })
+        .await
+        .unwrap();
+    let saving = seen_for("saving", email).len();
+    let saved = seen_for("saved", email).len();
+    db.execute_unprepared("CREATE TRIGGER refuse_clean_update BEFORE UPDATE ON par_change_users BEGIN SELECT RAISE(ABORT, 'clean update'); END").await.unwrap();
+    DB::enable_query_log().expect("log");
+    user.save().await.expect("clean save skips UPDATE");
+    assert!(
+        DB::get_query_log().expect("log").is_empty(),
+        "clean save runs no SQL"
+    );
+    DB::disable_query_log().expect("log");
+    assert_eq!(seen_for("saving", email).len(), saving + 1);
+    assert_eq!(seen_for("saved", email).len(), saved + 1);
+    assert!(seen_for("updating", email).is_empty());
+    assert!(seen_for("updated", email).is_empty());
+}
+
+#[tokio::test]
+async fn previous_values_follow_changes_and_survive_clean_or_failed_saves() {
+    let _db = sqlite().await;
+    let _taken = plain("Grace", "previous-taken@example.com").await;
+    let mut user = plain("Ada", "previous@example.com").await;
+    assert_eq!(user.get_previous("is_admin"), None);
+    user.is_admin = true;
+    user.save().await.unwrap();
+    assert_eq!(user.get_previous("is_admin"), Some(json!(0)));
+    assert_eq!(user.get_previous("name"), None);
+    assert_eq!(user.get_previous("unknown"), None);
+    user.save().await.unwrap();
+    assert_eq!(user.get_previous("is_admin"), Some(json!(0)));
+    user.email = "previous-taken@example.com".into();
+    user.save().await.expect_err("unique email");
+    assert_eq!(user.get_previous("is_admin"), Some(json!(0)));
+    user.email = "previous@example.com".into();
+    user.name = "Ada Lovelace".into();
+    user.save().await.unwrap();
+    assert_eq!(user.get_previous("name"), Some(json!("Ada")));
+    assert_eq!(user.get_previous("is_admin"), None);
+}
+
+#[tokio::test]
+async fn cleanliness_uses_memory_and_a_dirty_save_preserves_other_writers() {
+    let db = sqlite().await;
+    let mut user = plain("Ada", "memory@example.com").await;
+    db.execute_unprepared("UPDATE par_plain_users SET name = 'Other writer'")
+        .await
+        .unwrap();
+    user.save().await.expect("clean despite external write");
+    assert_eq!(
+        PlainUser::find_or_fail(user.id).await.unwrap().name,
+        "Other writer"
+    );
+    user.is_admin = true;
+    user.save().await.expect("dirty memory field");
+    let stored = PlainUser::find_or_fail(user.id).await.unwrap();
+    assert!(stored.is_admin);
+    assert_eq!(stored.name, "Other writer");
+    assert!(
+        !user.was_changed("name"),
+        "the save did not change the other writer's column"
+    );
+    assert_eq!(
+        sorted_changes(&user.get_changes()),
+        vec![("is_admin".to_string(), json!(1))]
+    );
+}
+
+#[tokio::test]
+async fn clean_timestamped_and_encrypted_models_run_no_update_after_time_advances() {
+    crate::key_ring::rotation_keys();
+    let db = sqlite().await;
+    db.execute_unprepared("CREATE TABLE par_secret_users (id INTEGER PRIMARY KEY AUTOINCREMENT, secret TEXT NOT NULL, is_admin INTEGER NOT NULL)").await.unwrap();
+    let clock = TestClock::freeze();
+    let post = ChangePost::create(attrs! { title: "Clean", body: "Text" })
+        .await
+        .unwrap();
+    let secret = SecretUser::create(attrs! { secret: "unchanged", is_admin: false })
+        .await
+        .unwrap();
+    let timestamp = post.updated_at;
+    clock.advance(Duration::seconds(60));
+    db.execute_unprepared("CREATE TRIGGER refuse_clean_post BEFORE UPDATE ON par_change_posts BEGIN SELECT RAISE(ABORT, 'unexpected post update'); END").await.unwrap();
+    db.execute_unprepared("CREATE TRIGGER refuse_clean_secret BEFORE UPDATE ON par_secret_users BEGIN SELECT RAISE(ABORT, 'unexpected secret update'); END").await.unwrap();
+    post.save().await.expect("clean timestamped save");
+    secret.save().await.expect("clean encrypted save");
+    assert_eq!(
+        ChangePost::find_or_fail(post.id).await.unwrap().updated_at,
+        timestamp
+    );
+    assert!(post.get_changes().is_empty());
+    assert!(secret.get_changes().is_empty());
 }

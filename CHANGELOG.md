@@ -8,6 +8,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Column comparisons take an operator.** Both query builders expose
+  `where_column_op(a, op, b)`, with the existing identifier and operator checks.
+- **Cross joins take conditions.** Both query builders expose
+  `cross_join_with(table, closure)`; the closure's `ON` values stay bound.
+- **Equality shortcuts on both builders.** `r#where(column, value)`,
+  `db_where(column, value)` and `or_where(column, value)` use `=`.
+- **Previous values after a model save.** `get_previous(attribute)` reads
+  the stored value before the last save changed that attribute, alongside
+  `was_changed`, `get_changes` and the original-value accessors.
+
 - **Precognition with per-route opt-in.** Add `Precognitive` to a route
   or group to validate a draft without running the handler body. A passing
   request answers `204` with `Precognition-Success: true`; every marked
@@ -734,6 +744,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Query conditions follow SQL precedence.** Every `or_` helper adds a
+  flat `OR`, so `where(a).or_where(b).where(c)` is `a OR b AND c`.
+  The grouped column helpers keep their parentheses, and model scopes
+  still constrain the whole caller condition list.
+- **Null equality values compile to `IS NULL`.** Both builders rewrite
+  a null `where` or `or_where` comparison instead of binding it after `=`.
+- **Joined builders update and delete matching rows.** Both builders
+  preserve the join when writing the base table; model deletion still
+  honors soft deletes. The model builder also exposes `update` and `delete`.
+- **A clean model save skips the update.** Dirtiness comes from the
+  instance's original values in memory, with no re-read. `Saving` and
+  `Saved` still fire, while `Updating` and `Updated` fire only for a dirty save.
+- **Pivot sync returns the changed ids.** `sync` and
+  `sync_without_detaching` return `SyncChanges` with attached, detached and
+  updated id lists instead of `()`.
+- **Pivot sync updates per-id columns.** Both methods accept `(id, Attrs)`
+  records and update existing rows only when their supplied columns change.
+  Unchanged rows keep their pivot columns and timestamps.
+- **Pivot filters constrain sync.** Both methods honor `where_pivot` and
+  its companions for the current set, updates and detachments, leaving
+  rows outside the filter untouched.
+- **Pivot sync touches a configured parent.** A relation's `.touch_parent()`
+  or a related model's inverse touch declaration enables the parent timestamp
+  update, in the same transaction as the pivot changes.
 
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request
