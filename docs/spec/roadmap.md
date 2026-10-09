@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-data
+Current: laravel-gaps-http
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -750,6 +750,44 @@ Requirements: PAR-099, PAR-100, PAR-101, PAR-102, PAR-103, PAR-104, PAR-105, PAR
    changelog.
    Mechanisms: `par-laravel-gaps-data` (the `laravel_gaps` modules of the
    seven suites).
+   Done when it passes on a committed tree, the manual passages are in
+   place, and the review is recorded.
+
+## laravel-gaps-http
+
+Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR-118, PAR-119, PAR-120, PAR-121
+
+45. laravel-gaps-http - the tenth of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build by the parity default: the
+   thirty-two rows of the log's routing, controller, request, response,
+   URL, middleware, CSRF, validation, error, view and session areas where
+   Suprnova lacks or differs from Laravel 13.35.0, grouped into PAR-111 to
+   PAR-120, with PAR-121, the polymorphic owner relation under the
+   existence filters, surfaced from the ninth round's review; `TrustProxies::at`, which the log keeps, and `View::with`,
+   which chained `with` and `prop` calls already cover, stay as they are.
+   Delivery: reportable callbacks, `Exceptions::report`, the stopped
+   retries, the error's type name and the editor links in
+   `framework/src/error/`, `framework/src/queue/` and the console; the
+   CSRF methods, the JSON `_token` and the token a regenerated session
+   gets in `framework/src/csrf/` and `framework/src/session/`; controller
+   middleware, `without_middleware`, the `405` and `OPTIONS` answers and
+   `route_has` in `framework/src/routing/`, `framework/src/middleware/`,
+   the server and the `resource!` macro; the signature middleware and the
+   URL helpers in `framework/src/routing/`; the guest redirect, the request
+   host, `TrustHosts`, `ajax` and cookie deletion in
+   `framework/src/http/`; the IP and numeric messages, `RequiredIf::when`,
+   `ImageFile` and `Dimensions` in `framework/src/validation/`, the English
+   catalog and the upload validators; `make:middleware`, `make:view` and
+   `make:inertia` in `suprnova-cli`; the `MorphTo` dispatch of `has`,
+   `doesnt_have`, `has_count` and `where_has` in
+   `framework/src/eloquent/builder.rs` with its tests in the eloquent
+   suite's `laravel_gaps` module; a `laravel_http_gaps` test module in
+   each of the error, queue, session, routing, http and validation suites
+   and in the CLI's `make_scaffolds` test; the manual chapters each area
+   owns and the changelog.
+   Mechanisms: `par-laravel-gaps-http` (the `laravel_http_gaps` modules of
+   the six suites and the CLI test) and `par-laravel-gaps-data` (the
+   `laravel_gaps` modules of the data suites, for PAR-121).
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 

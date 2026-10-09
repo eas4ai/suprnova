@@ -126,14 +126,18 @@ parentheses), `or_where_in` and `or_where_not_in` with a list or a
 subquery, `where_in` and `where_not_in` with a subquery, `or_where_raw`
 with bound values, `or_where_null` and `or_where_not_null`, and `reorder`,
 which drops the orderings already set and may set a new one. Every `or_`
-helper MUST be flat as PAR-001 says; `where(column, value)` and
-`or_where(column, value)` MUST be the two-argument shortcut for `=`; and
-a `where` or `or_where` whose bound value is null MUST compile to `IS
-NULL`, as Laravel turns a null comparison into `whereNull`.
-Falsifier: one of these helpers returns rows that differ from the equivalent raw SQL; a grouped helper lets an `or` escape its parentheses, so `where("a", 1).where_any(["b", "c"], "=", 2)` returns a row whose `a` is not 1; a subquery used by `where_in` loses its own bound values; `or_where("b", 2)` after `where("a", 1)` compiles with parentheses; `where("a", 1)` is not `where("a", "=", 1)`; or `where("deleted_at", Value::Null)` compiles to `= NULL` and matches nothing.
+helper MUST be flat as PAR-001 says; `db_where(column, value)`, its
+sibling `filter(column, value)` and `or_where(column, value)` MUST be
+the two-argument shortcut for `=` (Rust keeps `where` as a keyword;
+`db_where` is the developer's spelling from 2026-05-19, `r#where` the
+raw-identifier spelling of Laravel's name, both kept: the developer,
+2026-10-09 07:12); and a `db_where`, `filter` or `or_where` whose bound
+value is null MUST compile to `IS NULL`, as Laravel turns a null
+comparison into `whereNull`.
+Falsifier: one of these helpers returns rows that differ from the equivalent raw SQL; a grouped helper lets an `or` escape its parentheses, so `where("a", 1).where_any(["b", "c"], "=", 2)` returns a row whose `a` is not 1; a subquery used by `where_in` loses its own bound values; `or_where("b", 2)` after `where("a", 1)` compiles with parentheses; `db_where("a", 1)`, `filter("a", 1)` or `r#where("a", 1)` compiles to anything but `a = 1`; or `where("deleted_at", Value::Null)` compiles to `= NULL` and matches nothing.
 Mechanism: `par-query-helpers`.
 Rationale: Issue #128 and row 006 of the parity log: Laravel's `Builder::where` with two arguments, its `whereNull` rewrite for a null value, and the flat `orWhere*` helpers.
-Status: Agreed 2026-10-08
+Status: Agreed 2026-10-09
 
 [PAR-007] `DB::after_commit` MUST run a callback after the `DB::transaction`
 around it commits, at once when no `DB::transaction` is open, and never when
@@ -786,7 +790,11 @@ refuses as a validation failure: too large for `MaxSize`
 (`validation-max-file`, with the limit in kilobytes as Laravel words it),
 not an image (`validation-image`), or of a type `MimeType` does not allow
 (`validation-mimetypes`), where an allowed type MAY be a `type/*`
-wildcard that admits every subtype, as Laravel's `mimetypes` rule does.
+wildcard that admits every subtype, as Laravel's `mimetypes` rule does,
+except that `image/*` MUST NOT admit `image/svg+xml`: an SVG document
+passes only when `image/svg+xml` is named explicitly, as Laravel's
+`image` rule leaves SVG out unless asked (the developer, 2026-10-09
+05:58).
 Each message MUST come from the validation catalog by that key, so an
 application's `lang/<locale>/validation.ftl` overrides it. An
 `UploadValidator` MUST be able to return a validation failure with a
@@ -797,10 +805,10 @@ and the handler, and remove every temporary file the extraction wrote. A
 limit on the whole request, the body's byte cap, `max_parts` and a
 field's `max_count`, MUST refuse with 413 without reading the body
 further, and wins when one chunk crosses both kinds.
-Falsifier: a multipart form missing a required file, or with a PDF as the second element of a `#[field("files[]")]` field of images, answers anything but a 422 whose `errors` holds `files.1`, or through Inertia does not redirect back with it in `props.errors`; a text part that does not parse answers 400; a message ignores an application catalog's entry for its key; `MimeType::allow(["image/*"])` refuses a PNG or admits a PDF; an oversized file is read past the chunk that crossed `MaxSize`, or leaves a temporary file behind; a validator's operational error becomes a 422; or a body over its cap, too many parts or too many files for `max_count` is read further or answers other than 413.
+Falsifier: a multipart form missing a required file, or with a PDF as the second element of a `#[field("files[]")]` field of images, answers anything but a 422 whose `errors` holds `files.1`, or through Inertia does not redirect back with it in `props.errors`; a text part that does not parse answers 400; a message ignores an application catalog's entry for its key; `MimeType::allow(["image/*"])` refuses a PNG, admits a PDF or admits an SVG document, or `MimeType::allow(["image/svg+xml"])` refuses one; an oversized file is read past the chunk that crossed `MaxSize`, or leaves a temporary file behind; a validator's operational error becomes a 422; or a body over its cap, too many parts or too many files for `max_count` is read further or answers other than 413.
 Mechanism: `par-multipart-validation`.
 Rationale: Issue #139 and row 043 of the parity log: Laravel's `mimetypes` rule matches `image/*` by `ValidatesAttributes::validateMimetypes`; the typed field errors, the 413 limits and the magic-byte check stay.
-Status: Agreed 2026-10-08
+Status: Agreed 2026-10-09
 
 [PAR-044] Without `key_type`, `#[model]` MUST take the key type from the
 primary-key field's declared type, the field `primary_key` names, and a
@@ -1292,7 +1300,12 @@ PAR-068 revised to name `Inertia::share_data` and to type the errors under
 `with_all_errors(true)`.
 
 [PAR-071] DevTools recording MUST be gated by `InertiaConfig::devtools`:
-`enabled` unset records only when `APP_ENV` is set and names `local`
+an application that never calls `InertiaConfig::devtools(..)` records
+nothing, adds no header or tag and leaves the devtools paths to its own
+routing, as Laravel records only once its package is installed (the
+developer, 2026-10-09 05:58; the scaffold and the dogfood app make the
+call); once called, `enabled` unset records only when `APP_ENV` is set
+and names `local`
 (an unset `APP_ENV`, which the framework otherwise reads as local, does
 not: the developer, 2026-10-08 14:25), `true` and `false` decide
 outright; a request whose path matches one of the `except`
@@ -1303,10 +1316,10 @@ a failure anywhere in recording (an unserializable value, a misconfigured
 redaction list, a storage error) is swallowed and the entry dropped, a
 storage write failure is logged once at warn and suppresses recording for
 30 seconds, and with devtools off no header, tag or entry is produced.
-Falsifier: with `enabled` unset a request under `APP_ENV=local` leaves no entry or one under an unset or production `APP_ENV` leaves one; with `enabled(false)` a request under `APP_ENV=local` leaves an entry, or with `enabled(true)` one under a production `APP_ENV` leaves none; a request to `/_inertia/devtools/entries` or `/_suprnova/health` is recorded; a request under an `except` pattern of its own is recorded; a prop value that cannot be serialized, or a storage path that cannot be written, changes the status, body or headers of the response beyond the devtools headers; or a write failure is logged on every request.
+Falsifier: an application without a `devtools(..)` call leaves an entry, adds a header or tag or answers `/_inertia/devtools/entries` itself under `APP_ENV=local`; with `enabled` unset after the call a request under `APP_ENV=local` leaves no entry or one under an unset or production `APP_ENV` leaves one; with `enabled(false)` a request under `APP_ENV=local` leaves an entry, or with `enabled(true)` one under a production `APP_ENV` leaves none; a request to `/_inertia/devtools/entries` or `/_suprnova/health` is recorded; a request under an `except` pattern of its own is recorded; a prop value that cannot be serialized, or a storage path that cannot be written, changes the status, body or headers of the response beyond the devtools headers; or a write failure is logged on every request.
 Mechanism: `par-inertia-devtools`.
 Rationale: Rows DT-01 and DT-10; Laravel's `DevTools::enabled` defaults to the `local` environment, `devtools.except` skips its own and other tooling's paths, and `RequestRecorder::respondedWith` swallows every failure so a passive observer cannot turn the user's response into a 500.
-Status: Agreed 2026-10-08
+Status: Agreed 2026-10-09
 
 [PAR-072] Every recorded request MUST produce one entry: a ULID `id`; the
 `tabUuid`, `batchId` and `visitId` read from the `X-Inertia-Devtools-Tab`,
@@ -1759,13 +1772,14 @@ Mechanism: `par-laravel-gaps-data`.
 Rationale: Rows `Builder::applyScopes`, `QueriesRelationships::doesntHaveMorph` and `SoftDeletes::forceDestroy`.
 Status: Agreed 2026-10-09
 
-[PAR-101] A loaded model collection MUST offer `find(key)`, `find(model)`
-and `find(keys)` by primary key, with `find_or(key, default)`;
+[PAR-101] A loaded model collection MUST offer `find(key)`, `find_model(&model)`
+and `find_many(keys)` by primary key, with `find_or(key, default)`;
 `load_with(relation, closure)`, eager loading a relation onto the loaded
-models under the closure's constraints; `unique()` deduplicating by primary
-key and keeping the last copy, as Laravel's `Collection::unique` does; and
-`diff(other)` comparing by primary key.
-Falsifier: `find(3)` on a collection holding key 3 returns `None`, or `find([1, 3])` misses one; `load_with("posts", |q| q.where("published", true))` loads an unpublished post; `unique()` on two loads of the same row keeps the first copy or both; or `diff` keeps a model whose key the other collection holds.
+models under the closure's constraints; `unique_models()` deduplicating by
+primary key and keeping the last copy, as Laravel's `Collection::unique`
+does (the general `unique()` keeps its whole-value meaning); and
+`diff_models(other)` comparing by primary key.
+Falsifier: `find(3)` on a collection holding key 3 returns `None`, or `find_many([1, 3])` misses one; `load_with("posts", |q| q.where("published", true))` loads an unpublished post; `unique_models()` on two loads of the same row keeps the first copy or both; or `diff_models` keeps a model whose key the other collection holds.
 Mechanism: `par-laravel-gaps-data`.
 Rationale: Rows `Collection::find`, `Collection::load`, `Collection::unique` and `Collection::diff`; Laravel compares models by key, not by value.
 Status: Agreed 2026-10-09
@@ -1848,14 +1862,17 @@ Mechanism: `par-laravel-gaps-data`.
 Rationale: Rows `AbstractCursorPaginator::getParametersForItem`, `AbstractCursorPaginator::setCollection`, `Cursor::parameter` and `LengthAwarePaginator::__construct`.
 Status: Agreed 2026-10-09
 
-[PAR-109] The `DB::table` builder MUST offer `in_random_order(seed)`,
+[PAR-109] The `DB::table` builder MUST offer `in_random_order()`,
 `max`, `oldest`, `where_not_between`, `or_where_between` and
 `or_where_not_between` as the model builder does, with a subquery or a
 `DB::raw` expression accepted as the column where the model builder
-accepts one; `in_random_order` on both builders MUST accept a seed; and
+accepts one; `in_random_order_seeded(seed)` on both builders MUST order by a seeded
+random order beside the unseeded `in_random_order()`, which keeps
+compiling without an argument (Rust has no optional argument, so the
+seeded order is its own method); and
 `oldest` and `latest` on the model builder MUST order by the model's
 declared creation column.
-Falsifier: `DB::table("posts").max("views")` is missing or returns the wrong value; `in_random_order(42)` twice returns different orders on the same rows; `where_not_between("views", 1, 5)` on `DB::table` is missing, or its `or_` form groups wrongly; or `oldest()` on a model whose creation column is `added_at` orders by `created_at`.
+Falsifier: `DB::table("posts").max("views")` is missing or returns the wrong value; `in_random_order_seeded(42)` twice returns different orders on the same rows, or `in_random_order()` no longer compiles; `where_not_between("views", 1, 5)` on `DB::table` is missing, or its `or_` form groups wrongly; or `oldest()` on a model whose creation column is `added_at` orders by `created_at`.
 Mechanism: `par-laravel-gaps-data`.
 Rationale: Rows `Builder::inRandomOrder`, `Builder::max`, `Builder::oldest` and `Builder::whereNotBetween`; identifier validation stays, with raw expressions through the raw-specific forms.
 Status: Agreed 2026-10-09
@@ -1869,4 +1886,215 @@ and MUST run the root seeder that sets the order when no seeder is named.
 Falsifier: `call(["UserSeeder", "PostSeeder"])` runs them out of order or prints no lines, `call_silent` prints, `call_once` runs a seeder twice, or `call_with(seeder, params)` hands no parameters; a seeder cannot resolve a bound service; `db:seed` runs under `APP_ENV=production` without `--force`, or refuses with it; `--database reporting` seeds another connection; or `db:seed` with no name does not run the root seeder.
 Mechanism: `par-laravel-gaps-data`.
 Rationale: Rows `Seeder`, `Seeder::call` and `artisan db:seed`; Laravel's `db:seed` confirms in production and `Seeder::call` reports each seeder.
+Status: Agreed 2026-10-09
+
+## Laravel API gaps: HTTP
+
+The members of Laravel 13.35.0's routing, controller, request, response,
+URL, middleware, CSRF, validation, error, view and session surface that
+the parity review found missing or differing in Suprnova and ruled build:
+the thirty-two rows of the log's HTTP areas, grouped by area. Two rows of
+the same areas stay as they are: `TrustProxies::at`, which the log keeps
+because trusting every address would let any caller forge
+`X-Forwarded-For`, and `View::with`, which chained `with` and `prop` calls
+already cover.
+
+[PAR-111] `Exceptions::reportable(callback)` MUST register a callback that
+every reported error reaches before the default log, typed as Laravel's
+closures are: a callback taking `&FrameworkError` runs for every error,
+and one taking another error type `E` runs only for an error whose wrapped
+source downcasts to `E`; `.stop()` on the returned registration MUST keep
+the later callbacks and the default log from running for an error it
+handles. `Exceptions::report(&error)` MUST report an error the code
+handles itself, and every error the framework turns into a `5xx`
+response, every failed queue job attempt and every console command that
+returns an error MUST be reported the same way; the `ErrorOccurred` event
+stays. `Exceptions::dont_retry::<E>()` and
+`Exceptions::dont_retry_when(predicate)` MUST name the errors that end a
+queued job's retries, `Exceptions::should_stop_retries(&error)` MUST
+answer for them, and the worker MUST fail a job at once, without a further
+attempt, when it is true.
+Falsifier: a callback taking `&std::io::Error` does not run when `FrameworkError::from_external(io_error)` becomes a 500, or runs for `FrameworkError::internal("x")`; a registration with `.stop()` lets the `framework error` log line or a later callback run; `Exceptions::report(&err)` reaches no callback; a queued job that fails, or a console command that returns `Err`, reaches no callback; or a job failing with an error `dont_retry_when` accepts runs again before its tries are spent.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `Handler::reportable` and `Exceptions::shouldStopRetries` of the parity log's HTTP areas; Laravel sends HTTP, queue and console errors through `Handler::report`, and its worker asks `shouldStopRetries` before it retries.
+Status: Agreed 2026-10-09
+
+[PAR-112] The development error page MUST name the type of the error it
+reports, and `ErrorReport::type_name()` MUST return it: the path
+`std::any::type_name` gives for the concrete type handed to
+`FrameworkError::from_external` or `from_external_with` (for an
+`std::io::Error`, whatever `std::any::type_name::<std::io::Error>()`
+reports on the building toolchain),
+`FrameworkError::<Variant>` for the framework's own errors
+(`FrameworkError::ModelNotFound`), and `panic` for a panic. With
+`APP_EDITOR` set, every frame with a location MUST link to its line in the
+editor, as Laravel's `Frame::editorHref` does: a name from Laravel's
+editor list (`vscode`, `phpstorm`, `idea`, `cursor`, `zed`, `sublime` and
+the others `ResolvesDumpSource` names) uses that editor's URL format, a
+value holding `{file}` and `{line}` is a template filled with the absolute
+file path and the line, and any other name gives
+`<name>://open?file={file}&line={line}`; without `APP_EDITOR` no frame
+carries a link. The source lines shown for application frames stay.
+Falsifier: the page for a 500 from `FrameworkError::from_external(std::io::Error::other("disk"))` does not contain the text `std::any::type_name::<std::io::Error>()` returns, or a panic's page does not name `panic`; with `APP_EDITOR=vscode` an application frame at `src/handlers.rs:12` carries no `vscode://file/<absolute path>/src/handlers.rs:12` link; `APP_EDITOR=myeditor://{file}#{line}` is not filled in; or a frame carries a link with `APP_EDITOR` unset.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `Renderer\Exception::class` and `Renderer\Frame::__construct`; Laravel's page heads with the exception class and links each frame through `app.editor`. Argument lists have no counterpart, since Rust frames carry no argument values.
+Status: Agreed 2026-10-09
+
+[PAR-113] `CsrfMiddleware` MUST check the token on every method but `GET`,
+`HEAD` and `OPTIONS`, `QUERY` and extension methods such as `PROPFIND`
+included, as Laravel's `isReading` does, and MUST read `_token` from a
+JSON request body as it reads it from a form body: ahead of the
+`X-CSRF-TOKEN` and `X-XSRF-TOKEN` headers, with `""` and `"0"` counting as
+no value; the same-origin pass stays off by default.
+`regenerate_session_id()` MUST also issue a new CSRF token, as Laravel's
+`Session::regenerate` does, so a token read before it is refused after
+it; the old session row is still destroyed.
+Falsifier: a `QUERY` request without a token reaches its `query!` route behind `CsrfMiddleware`, or a `PROPFIND` request without one answers anything but 419; a `POST` with `Content-Type: application/json`, the body `{"_token": "<session token>"}` and no header answers 419; a JSON body whose `_token` is `""` beside a valid `X-CSRF-TOKEN` header answers 419; a same-origin request without a token passes under the default policy; or after `regenerate_session_id()` the session's CSRF token is the one it had before.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `ValidateCsrfToken`, `VerifyCsrfToken` and `Session::regenerate`; Laravel reads the token with `$request->input('_token')`, which covers JSON bodies, and `Store::regenerate` calls `regenerateToken`.
+Status: Agreed 2026-10-09
+
+[PAR-114] A resource controller MUST declare its own middleware, as
+Laravel's `HasMiddleware` does: `ResourceController::middleware()` returns
+a list of `ControllerMiddleware` values, each a middleware value or an
+alias name such as `"auth"` or `"throttle:60,1"`, scoped with
+`only(actions)` or `except(actions)`, and a module named by `resource!`
+MUST be able to declare the same list in a `pub fn middleware()`. The
+resource's routes MUST run each listed middleware on exactly the actions
+it is scoped to, after the group and route middleware, an unknown alias
+failing the registration as `middleware_named` does, and
+`ResourceRoutes::middleware` and `ResourceDef::middleware` MUST scope a
+`ControllerMiddleware` the same way at registration. A route MUST be able
+to leave out a middleware its group gives it, as Laravel's
+`withoutMiddleware` does, with `without_middleware::<M>()` or
+`without_middleware_named(name)`; the global middleware stays.
+Falsifier: a controller whose `middleware()` lists `ControllerMiddleware::new(Auth).only(&[ResourceAction::Store])` runs `Auth` on `index` or not on `store`; `.except(&[ResourceAction::Index])` runs it on `index`; an alias in the list is not resolved, or an unknown alias registers; `ResourceRoutes::middleware` scopes differently from the trait's list; the controller's middleware runs before the group's; or a route with `.without_middleware::<EnsureJson>()` in a group with `EnsureJson` still runs it, or a sibling route stops running it.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `HasMiddleware`, `Controllers\Middleware`, `Controllers\Middleware::__construct`, `ControllerMiddlewareOptions` and `ControllerMiddlewareOptions::except`; Laravel's `Route::gatherMiddleware` appends the controller's middleware to the route's and removes the excluded ones.
+Status: Agreed 2026-10-09
+
+[PAR-115] A request whose path matches no route of its method but a route
+of another method MUST answer `405` with an `Allow` header listing those
+methods (`HEAD` beside `GET`) and Laravel's message, `The DELETE method is
+not supported for route posts/1. Supported methods: GET, HEAD.`, and an
+`OPTIONS` request to such a path MUST answer `200` with an empty body and
+an `Allow` header joined without spaces, as Laravel's `getRouteForMethods`
+does; both answers run through the global middleware as the `404` does, a
+route's constraints count as they do for a match, and a path no route
+matches keeps the `404` or the fallback. `route_has(names)` MUST return
+true only when every name is registered, as Laravel's `Route::has` does.
+Falsifier: `DELETE /posts/1` on a router holding only `GET /posts/{id}` answers 404, or 405 without `Allow: GET, HEAD` or with another message; `OPTIONS /posts/1` there answers other than 200 with an empty body and `Allow: GET,HEAD`; a CORS preflight to that path loses the CORS middleware's answer; a path no route matches, or one every route's constraints refuse, answers 405; or `route_has(&["home", "missing"])` is true while `missing` is unregistered.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `RouteCollectionInterface::match` and `RouteCollectionInterface::hasNamedRoute`; Laravel's `AbstractRouteCollection::handleMatchedRoute` checks the other verbs before its 404, and `Router::has` takes one name or several.
+Status: Agreed 2026-10-09
+
+[PAR-116] A `ValidateSignature` middleware MUST let a request with a valid
+signature through and answer every other one, a missing, wrong or expired
+signature alike, with `403` and the message `Invalid signature.`, as
+Laravel's `InvalidSignatureException` does;
+`ValidateSignature::relative(ignore)` and
+`ValidateSignature::from_alias_args`, which reads `relative` and then the
+parameters to ignore (`signed:relative,utm_source`), MUST build it, every
+form verifying the path and query Suprnova signs. The parameters it is
+told to ignore, by `ignore(names)`, by the alias arguments or for the
+whole application with `ValidateSignature::except(names)`, MUST be left
+out of the verified text, and
+`url::has_valid_signature_ignoring(request, names)` MUST leave them out the
+same way. `signature_verdict` keeps telling `Expired` from `Invalid`, and
+the key-sorted signed text and the refusal of a repeated `signature` or
+`expires` stay.
+Falsifier: a route behind `ValidateSignature::new()` runs its handler for a signed URL with a changed query, an expired `temporary_signed_route` URL or no signature, or answers one of them with anything but 403 `Invalid signature.`; a valid signed URL is refused; `ValidateSignature::new().ignore(["utm_source"])` or the alias `signed:relative,utm_source` refuses a valid signed URL with `&utm_source=mail` appended; `has_valid_signature_ignoring(&request, &["utm_source"])` is false for it; or a repeated `signature` passes.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `ValidateSignature::relative`, `InvalidSignatureException::__construct` and `UrlGenerator::hasValidRelativeSignature`; the signed text stays the sorted path and query, as Laravel's `signedRoute` sorts parameters before it signs.
+Status: Agreed 2026-10-09
+
+[PAR-117] `url::current(request)` MUST return the absolute URL of the
+request without its query, as Laravel's `current()` does: the `APP_URL`
+origin, the public root and the path, while `url::full`, the signature
+check and the redirects that send a request back keep the path and the
+query. `url::previous_path(fallback)` MUST return the path of the
+session's previous URL without its query, the public root or a trailing
+slash, `/` when nothing is left, and the fallback's path when no previous
+URL is recorded. `url::secure_with(path, segments)` MUST append each
+segment percent-encoded as a path segment, as Laravel's
+`secure($path, $parameters)` does, keeping the `APP_URL` base and the
+https upgrade. `Redirect::guest` MUST store the request's own path and
+query as the intended URL only for a `GET` request that does not expect
+JSON, and the session's previous URL for any other request, never the
+`Referer`, with the same-site check kept.
+Falsifier: `url::current` for `GET /invoices?page=2` with `APP_URL=https://example.com` is anything but `https://example.com/invoices`; `url::full` there loses `?page=2`; `url::previous_path("/")` after a recorded previous URL `/billing/invoices/?page=2` under the root `/billing` is anything but `/invoices`, or with no previous URL anything but `/`; `url::secure_with("users", &["a b", "7"])` is anything but `https://<APP_URL host>/users/a%20b/7`; a `POST` or a JSON `GET` behind `Redirect::guest` stores its own URL as the intended URL, or does not store a recorded previous URL; a plain `GET` stores anything but its own path and query; or a `Referer` header becomes the intended URL.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `UrlGenerator::current`, `UrlGenerator::previousPath`, `UrlGenerator::secure`, `Redirector::guest` and `Response::redirectGuest`; the `APP_URL` base, which a forged `Host` header cannot change, the https upgrade and the refusal to read `Referer` stay.
+Status: Agreed 2026-10-09
+
+[PAR-118] `Request::ajax()` MUST be true only for
+`X-Requested-With: XMLHttpRequest` exactly, as Symfony's
+`isXmlHttpRequest` compares it. `Request::host()` MUST lowercase the host,
+strip only a numeric port, and return `None` for a host holding anything
+but letters, digits, `-`, `_`, `.`, `:` and the brackets of an IPv6
+literal, so `http_host` and `scheme_and_http_host` never carry one. A
+`TrustHosts` middleware, `TrustHosts::at(patterns, subdomains)`, MUST
+answer `400` with the message `Bad request.` for a request whose host is
+invalid or matches none of the trusted patterns, matched without regard
+to case as Laravel's are, `subdomains` adding the `APP_URL` host and its
+subdomains, which are also the default; it trusts every host in the local
+environment, as Laravel's does. `Cookie::forget` MUST take its path,
+domain and SameSite from the session configuration (`SESSION_PATH` or the
+public root, `SESSION_DOMAIN`, `SESSION_SAME_SITE`), so the deletion
+cookie matches the cookie it deletes; `Secure` stays forced and
+`forget_with` still overrides the path and the domain.
+Falsifier: `ajax()` is true for `X-Requested-With: xmlhttprequest`; `host()` for `Host: Example.COM:8080` is anything but `example.com`, or for `Host: example.com:abc` drops `:abc`; `host()` for `Host: bad<host>` is not `None`, or `scheme_and_http_host` carries it; a request for `evil.test` behind `TrustHosts::at([r"^example\.com$"], false)` reaches its handler, or one for `api.example.com` behind `TrustHosts::new()` with `APP_URL=https://example.com` is refused; or `Cookie::forget("prefs")` under `SESSION_PATH=/app`, `SESSION_DOMAIN=.example.com` and `SESSION_SAME_SITE=strict` lacks `Path=/app`, `Domain=.example.com`, `SameSite=Strict` or `Secure`.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `Request::isXmlHttpRequest`, `Request::schemeAndHttpHost`, `CookieJar::forget` and `Cookie::forget`; Laravel's cookie jar takes its defaults from `session.path`, `session.domain` and `session.same_site`, and an untrusted host answers 400 through `RequestExceptionInterface`.
+Status: Agreed 2026-10-09
+
+[PAR-119] The English catalog MUST carry `validation-ip`, `The { $field }
+field must be a valid IP address.`, so `#[validate(ip)]` no longer shows
+the generic message, and the numeric `max` message (`validation-range`
+with `$kind` `max`) MUST read `must not be greater than { $max }`.
+`RequiredIf::when(condition)` MUST build Laravel's `Rule::requiredIf`: a
+rule taking a boolean or a closure answering one, that requires the field
+with `validation-required`'s message when the condition holds and passes
+it otherwise. `ImageFile` MUST accept only the types Laravel's `image`
+rule does, JPEG, PNG, GIF, BMP, WebP, AVIF, HEIC and HEIF, and refuse
+TIFF, PSD, ICO and JPEG XL, SVG staying reachable only through an
+explicit `MimeType` allowlist; a `Dimensions` upload validator MUST check
+Laravel's `dimensions` constraints (`min_width`, `max_width`,
+`min_height`, `max_height`, `width`, `height`, `ratio`), refusing with
+`validation-dimensions`, `The { $field } field has invalid image
+dimensions.`
+Falsifier: `#[validate(ip)]` on a field `address` holding `999.1.1.1` reports anything but `The address field must be a valid IP address.`; `#[validate(range(max = 10))]` on 11 reports `must be at most 10`; `RequiredIf::when(true)` passes an empty value, or `when(false)` or a closure answering false refuses one; `ImageFile` passes a TIFF, PSD, ICO or JPEG XL file, or refuses a JPEG, WebP, AVIF or HEIC one; or `Dimensions` with a `max_width` of 100 passes a PNG 101 pixels wide, or refuses one 100 pixels wide.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `ValidatesAttributes::validateIp`, `Rule::requiredIf`, `File::image` and `Numeric::max`; the bounds already match, and the field type already supplies the numeric check.
+Status: Agreed 2026-10-09
+
+[PAR-120] `make:middleware` MUST write a middleware whose `handle` passes
+the request to `next` and returns its response, printing nothing, as
+Laravel's stub does; it MUST accept a nested name (`Admin/EnsureRole`
+writes `src/middleware/admin/ensure_role.rs` and declares the modules on
+the way), and `--test` MUST also write a test that runs the middleware.
+`make:view` MUST scaffold a checked view: the template under `templates/`
+(`admin.dashboard` and `admin/dashboard` both write
+`templates/admin/dashboard.html`) and a `#[view]` struct naming it,
+refusing to overwrite an existing file unless `--force` is given, with
+`--test` writing a test that renders it. `make:inertia` MUST accept a
+nested name, `--force` and `--test` the same way.
+Falsifier: the file `make:middleware Audit` writes contains `println!` or does anything but return `next(request).await`; `make:middleware Admin/EnsureRole` fails or writes outside `src/middleware/admin/`; `--test` writes no test file; `make:view admin.dashboard` writes no template or no `#[view]` struct naming `admin/dashboard.html`, overwrites an existing file without `--force`, or refuses with it; or `make:inertia Admin/Users --force --test` is refused.
+Mechanism: `par-laravel-gaps-http`.
+Rationale: Rows `artisan make:middleware` and `artisan make:view`; the `Middleware` suffix and the `src/middleware` path follow Rust layout and stay.
+Status: Agreed 2026-10-09
+
+[PAR-121] The existence filters on the model builder MUST read a
+polymorphic owner relation (a `MorphTo`) the way Laravel's `has` does:
+`has`, `or_has`, `has_count`, `doesnt_have` and `or_doesnt_have` on such a
+relation MUST go through the morph existence query over every registered
+owner type, so a row whose type column names a registered type whose table
+holds the id counts as having its owner, and a row whose owner is missing,
+soft-deleted under the owner's scopes, or of an unregistered type does
+not; `where_has` and `where_doesnt_have` with a typed predicate on such a
+relation MUST apply the predicate to the owners of the predicate's model
+type, as `where_has_morph` with that one type does.
+Falsifier: `MorphComment::query().has("commentable").get()` returns no comment while a comment points at an existing registered post; `doesnt_have("commentable")` leaves out a comment whose post row was deleted or whose type is unregistered; `has_count("commentable", "=", 1)` matches no comment with an owner; or `where_has::<MorphPost, _>("commentable", |q| q.filter("title", "kept"))` returns a comment whose post has another title.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: Laravel's `Builder::has` routes a `MorphTo` relation to `hasMorph($relation, ['*'])` (`Eloquent/Concerns/QueriesRelationships.php`); found on 2026-10-09 while fixing finding 4 of report 7a904d31 (item has-on-a-morph-to-relation-matches-nothing), where the generic probe rendered a constant false; the typed predicate narrows to one owner type because a Rust closure over one model cannot run against every owner table.
 Status: Agreed 2026-10-09
