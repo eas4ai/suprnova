@@ -878,6 +878,15 @@ inside the subquery's body. Placeholder numbering is monotonic across
 the whole statement, so the engine works correctly with `$1`-style
 Postgres parameters.
 
+When a relation points back at its own table, such as a category's
+`children` through `parent_id` or a self-referential `BelongsToMany`, the
+engine aliases the inner tables inside the subquery
+(`FROM categories AS __suprnova_related`), so your filter compares each row
+with its related rows and not with itself. Your outer query keeps its table
+name, so a qualified column such as `categories.name` in a `where_has`
+closure still refers to the parent row. A relation that points at another
+table renders without the alias.
+
 `where_belongs_to` is the one exception that doesn't render an
 EXISTS. The belongs-to FK lives on the parent's *own* row, so a
 direct `WHERE child.<fk> = ?` is exactly the right SQL - no subquery
