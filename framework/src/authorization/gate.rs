@@ -43,12 +43,14 @@ use crate::events::EventFacade;
 /// Every check dispatches one [`GateEvaluated`] event per action it
 /// evaluates, after the before-hooks, the gate and the after-hooks ran, as
 /// Laravel's `Gate::raw` does. An async check waits for the listeners. A
-/// synchronous check cannot wait and must not block, so it polls the
-/// dispatch once in place, which completes it when no listener has to wait
-/// on anything, and leaves the rest to a task spawned on the current Tokio
-/// runtime. Outside a Tokio runtime a synchronous check dispatches nothing,
-/// so it never panics there. A listener's error is logged and never changes
-/// the decision.
+/// synchronous check inside a Tokio runtime must not block that runtime's
+/// thread, so it polls the dispatch once in place, which completes it when
+/// no listener has to wait on anything, and leaves the rest to a task
+/// spawned on that runtime. Outside a Tokio runtime there is no thread to
+/// stall and no runtime to spawn on, so a synchronous check runs the
+/// dispatch to completion on a current-thread runtime built for it, and its
+/// listeners have run when it returns. A listener's error is logged and
+/// never changes the decision.
 pub struct Gate;
 
 impl Gate {
@@ -235,7 +237,8 @@ impl Gate {
     /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) installs,
     /// answers [`Self::inspect_async`].
     ///
-    /// Dispatches [`GateEvaluated`] without waiting for its listeners; see
+    /// Dispatches [`GateEvaluated`]. Inside a Tokio runtime it does not wait
+    /// for the listeners, outside one it does; see
     /// [the type's notes](Self#the-gateevaluated-event).
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
         Self::evaluate(action, user, resource).unwrap_or_else(registry::default_denial)
@@ -266,16 +269,25 @@ impl Gate {
     /// [`Self::inspect_async`] for a user the check resolved itself, from a
     /// guard. The user is checked as its concrete type, through
     /// [`Self::inspect_erased_async`], and the [`GateEvaluated`] event
-    /// carries its identifier.
+    /// carries its identifier and the name of its type, both read here,
+    /// before the erasure to `dyn Any` leaves no name to read.
     pub(crate) async fn inspect_authenticatable<R: 'static>(
         action: &str,
         user: Arc<dyn Authenticatable>,
         resource: &R,
     ) -> Response {
-        let id = user.get_auth_identifier();
+        let resolved = ResolvedUser {
+            id: user.get_auth_identifier(),
+            type_name: user.auth_type_name(),
+        };
         let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();
-        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, &*user, resource, Some(id))
-            .await
+        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(
+            action,
+            &*user,
+            resource,
+            Some(resolved),
+        )
+        .await
     }
 
     /// Consult a nullable policy for a guest, as `#[authorize]` and
@@ -299,16 +311,16 @@ impl Gate {
         action: &str,
         user: &U,
         resource: &R,
-        user_id: Option<String>,
+        resolved: Option<ResolvedUser>,
     ) -> Response {
-        Self::evaluate_async(action, user, resource, user_id)
+        Self::evaluate_async(action, user, resource, resolved)
             .await
             .unwrap_or_else(registry::default_denial)
     }
 
     // The evaluation every synchronous form shares: the before-hooks, the
     // gate and the after-hooks, inside the render cache's decision window,
-    // then the `GateEvaluated` event, dispatched without waiting.
+    // then the `GateEvaluated` event, dispatched without blocking a runtime.
     fn evaluate<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
         let window = crate::render_cache::collector::begin_authorization_decision();
         let response = global().raw::<U, R>(action, user, resource);
@@ -321,18 +333,23 @@ impl Gate {
     }
 
     // The evaluation every async form shares, the sibling of `evaluate`: it
-    // waits for the `GateEvaluated` listeners. `user_id` is the identifier
-    // of a user the check resolved itself, `None` for a user it was given.
+    // waits for the `GateEvaluated` listeners. `resolved` names a user the
+    // check resolved itself, `None` for a user it was given, which names
+    // itself or is named from the registrations of its type.
     async fn evaluate_async<U: GateUser + ?Sized, R: 'static>(
         action: &str,
         user: &U,
         resource: &R,
-        user_id: Option<String>,
+        resolved: Option<ResolvedUser>,
     ) -> Option<Response> {
         let window = crate::render_cache::collector::begin_authorization_decision();
         let response = global().raw_async::<U, R>(action, user, resource).await;
         crate::render_cache::collector::end_authorization_decision(window);
-        let user_type = || Some(global().user_type_name(user));
+        let (resolved_type, user_id) = match resolved {
+            Some(resolved) => (Some(resolved.type_name), Some(resolved.id)),
+            None => (None, None),
+        };
+        let user_type = || Some(resolved_type.unwrap_or_else(|| global().user_type_name(user)));
         if let Some(event) = evaluated_event::<R>(action, user_type, user_id, response.as_ref()) {
             dispatch_evaluated(event).await;
         }
@@ -435,7 +452,8 @@ impl Gate {
     /// [`Self::raw_async`] for them.
     ///
     /// Dispatches [`GateEvaluated`], with `decision: None` when nothing
-    /// decided, without waiting for its listeners; see
+    /// decided. Inside a Tokio runtime it does not wait for the listeners,
+    /// outside one it does; see
     /// [the type's notes](Self#the-gateevaluated-event).
     pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
         Self::evaluate(action, user, resource)
@@ -733,6 +751,15 @@ impl Gate {
     }
 }
 
+// A user a check resolved itself, from a guard, as the `GateEvaluated` event
+// names it. Both fields are read while the user is still a
+// `dyn Authenticatable`: the gate's lookup erases it to `dyn Any`, which
+// carries a `TypeId` but no name.
+struct ResolvedUser {
+    id: String,
+    type_name: &'static str,
+}
+
 // Build the `GateEvaluated` event of one evaluation, or `None` when nothing
 // would see it. A check is a hot path and most applications listen to no
 // gate event, so the user's type is named and the action copied only when
@@ -767,18 +794,44 @@ async fn dispatch_evaluated(event: GateEvaluated) {
     }
 }
 
-// Deliver the event of a synchronous evaluation without blocking: poll the
-// dispatch once in place, which completes it when no listener has to wait
-// (a fake records it there, and a deferral scope of the calling task sees
-// it), and hand what is still pending to a task on the current runtime.
-// Outside a Tokio runtime nothing is dispatched: a listener could need the
-// runtime, and the check must not panic.
+// Deliver the event of a synchronous evaluation. Inside a Tokio runtime the
+// check must not block the runtime's thread: poll the dispatch once in
+// place, which completes it when no listener has to wait (a fake records it
+// there, and a deferral scope of the calling task sees it), and hand what
+// is still pending to a task on that runtime. Outside one, see
+// `dispatch_evaluated_outside_a_runtime`.
 fn dispatch_evaluated_without_waiting(event: GateEvaluated) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        dispatch_evaluated_outside_a_runtime(event);
         return;
     };
     let mut pending = Box::pin(dispatch_evaluated(event));
     if (&mut pending).now_or_never().is_none() {
         handle.spawn(pending);
+    }
+}
+
+// Deliver the event of a synchronous evaluation made outside any Tokio
+// runtime, waiting for its listeners on a current-thread runtime built for
+// this dispatch. The events facade has no synchronous dispatch: its
+// dispatch is async throughout, and a listener may use Tokio's timers, I/O
+// or `spawn`, which panic with no runtime. Blocking is safe here because no
+// runtime thread is current to stall, and `block_on` runs on this thread,
+// so an events fake this thread installed records the event. The runtime
+// is built only when something observes the event, since `evaluated_event`
+// builds none otherwise. Tasks a listener spawns end with the runtime.
+// When the OS refuses the runtime its resources, the failure is logged and
+// the decision stands: the event reports a check, it does not take part.
+fn dispatch_evaluated_outside_a_runtime(event: GateEvaluated) {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(dispatch_evaluated(event)),
+        Err(error) => tracing::error!(
+            %error,
+            "could not build a runtime to dispatch GateEvaluated outside one; \
+             the event was not dispatched and the gate decision stands"
+        ),
     }
 }
