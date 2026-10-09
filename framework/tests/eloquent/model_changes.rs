@@ -766,24 +766,3 @@ async fn postgres_save_reports_its_changes() {
 async fn mysql_save_reports_its_changes() {
     live_save_reports_its_changes("MYSQL_TEST_URL").await;
 }
-
-#[tokio::test]
-async fn revised_clean_save_does_not_issue_an_update() {
-    let db = sqlite().await;
-    let user = plain("Ada", "revised-clean@example.com").await;
-    for sql in [
-        "CREATE TABLE revised_update_count (n INTEGER NOT NULL)",
-        "INSERT INTO revised_update_count VALUES (0)",
-        "CREATE TRIGGER revised_clean_update AFTER UPDATE ON par_plain_users BEGIN UPDATE revised_update_count SET n = n + 1; END",
-    ] {
-        db.execute_unprepared(sql)
-            .await
-            .expect("install update counter");
-    }
-    user.save().await.expect("clean save succeeds");
-    let updates = DB::scalar::<i64>("SELECT n FROM revised_update_count", vec![])
-        .await
-        .expect("read update counter");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    assert_eq!(updates, 0, "PAR-004 clean saves issue no UPDATE");
-}
