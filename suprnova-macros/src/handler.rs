@@ -1842,6 +1842,43 @@ mod tests {
     }
 
     #[test]
+    fn authorize_bare_identifier_ability_names_the_string_form() {
+        // `update` here would resolve to the handler function itself.
+        let out = expansion(quote! {
+            #[authorize(update, post)]
+            pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+        });
+        assert!(out.contains("compile_error"), "got:\n{out}");
+        assert!(!out.contains("__authorize_handler"), "got:\n{out}");
+        assert!(
+            out.contains("the ability `update` is") && out.contains("target)]"),
+            "the message must name the ability and the expected shape; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn authorize_accepts_an_enum_variant_ability() {
+        for (attr, check) in [
+            (
+                quote! { #[authorize(Ability::Update, post)] },
+                "__authorize_handler (Ability :: Update ,",
+            ),
+            // A variant imported into scope.
+            (
+                quote! { #[authorize(Update, post)] },
+                "__authorize_handler (Update ,",
+            ),
+        ] {
+            let out = expansion(quote! {
+                #attr
+                pub async fn update(post: RouteParam<Post>) -> Response { todo!() }
+            });
+            assert!(!out.contains("compile_error"), "`{attr}`; got:\n{out}");
+            assert!(out.contains(check), "`{attr}`; got:\n{out}");
+        }
+    }
+
+    #[test]
     fn authorize_param_form_checks_after_binding_and_before_body_and_form() {
         // The form comes first in the signature, yet it must be read after
         // the check: a denied user never sees what the form would reject.
