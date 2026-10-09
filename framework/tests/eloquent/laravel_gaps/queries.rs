@@ -274,3 +274,71 @@ async fn random_order_without_a_seed_emits_plain_engine_sql_and_returns_each_row
     ids.sort_unstable();
     assert_eq!(ids, vec![1, 2, 3]);
 }
+
+#[tokio::test]
+async fn seeded_random_order_repeats_for_the_same_seed_on_sqlite() {
+    let fx = Fixture::sqlite().await;
+    fx.exec("CREATE TABLE qh_items (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, label TEXT, code TEXT, description TEXT, deleted_at TEXT)").await;
+    let rows: Vec<String> = (1..=12)
+        .map(|id| format!("({id}, {id}, 1, 1, 'x', 'code{id}', '', NULL)"))
+        .collect();
+    fx.exec(&format!("INSERT INTO qh_items VALUES {}", rows.join(", ")))
+        .await;
+    let seeded_ids = || async {
+        QhItem::query()
+            .in_random_order_seeded(42)
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+    let first = seeded_ids().await;
+    assert_eq!(first, seeded_ids().await);
+    let mut sorted = first;
+    sorted.sort_unstable();
+    assert_eq!(sorted, (1..=12).collect::<Vec<_>>());
+    let mut other = QhItem::query()
+        .in_random_order_seeded(7)
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    other.sort_unstable();
+    assert_eq!(other, (1..=12).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn seeded_random_order_over_a_join_on_sqlite_repeats_each_row_once() {
+    let fx = Fixture::sqlite().await;
+    fx.exec("CREATE TABLE qh_items (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, label TEXT, code TEXT, description TEXT, deleted_at TEXT)").await;
+    let rows: Vec<String> = (1..=12)
+        .map(|id| format!("({id}, {id}, 1, 1, 'x', 'code{id}', '', NULL)"))
+        .collect();
+    fx.exec(&format!("INSERT INTO qh_items VALUES {}", rows.join(", ")))
+        .await;
+    fx.exec("CREATE TABLE qh_links (a_id INTEGER, note TEXT)")
+        .await;
+    let links: Vec<String> = (1..=12).map(|id| format!("({id}, 'n{id}')")).collect();
+    fx.exec(&format!("INSERT INTO qh_links VALUES {}", links.join(", ")))
+        .await;
+    let joined_ids = || async {
+        QhItem::query()
+            .join("qh_links", "qh_items.id", "=", "qh_links.a_id")
+            .in_random_order_seeded(42)
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+    let first = joined_ids().await;
+    assert_eq!(first, joined_ids().await);
+    let mut sorted = first;
+    sorted.sort_unstable();
+    assert_eq!(sorted, (1..=12).collect::<Vec<_>>());
+}

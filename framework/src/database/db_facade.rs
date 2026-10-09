@@ -240,6 +240,7 @@ impl TableOrder {
     fn render(
         &self,
         backend: DbBackend,
+        table: &str,
         values: &mut Vec<SeaValue>,
         counter: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -258,7 +259,7 @@ impl TableOrder {
             Self::Raw(sql, bindings) => {
                 render_bound_fragment(backend, sql, bindings, values, counter)
             }
-            Self::Random(seed) => Ok(random_order(backend, *seed)),
+            Self::Random(seed) => Ok(random_order(backend, *seed, table)),
         }
     }
 }
@@ -1765,7 +1766,8 @@ impl DbTableBuilder {
             sql.push_str(&items.join(", "));
         }
         sql.push_str(" FROM ");
-        sql.push_str(&quote_identifier(backend, &self.table));
+        let quoted_table = quote_identifier(backend, &self.table);
+        sql.push_str(&quoted_table);
 
         for join in &self.joins {
             sql.push_str(&render_join(join, backend, values, counter)?);
@@ -1792,7 +1794,7 @@ impl DbTableBuilder {
             let order = self
                 .order
                 .iter()
-                .map(|order| order.render(backend, values, counter))
+                .map(|order| order.render(backend, &quoted_table, values, counter))
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
             sql.push_str(&order.join(", "));
         }
