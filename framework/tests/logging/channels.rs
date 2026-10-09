@@ -22,12 +22,14 @@ use crate::env_snapshot::{EnvSnapshot, set_env};
 
 const VARIABLES: &[&str] = &[
     "LOG_CHANNEL",
+    "LOG_CHANNEL_DRIVER",
     "LOG_STACK",
     "LOG_DAILY_DAYS",
     "LOG_SYSLOG_SOCKET",
     "LOG_SYSLOG_FACILITY",
     "MAIL_LOG_CHANNEL",
     "APP_BASE_PATH",
+    "APP_NAME",
 ];
 
 /// A name no other test uses, so the process-wide channel registry never
@@ -182,6 +184,141 @@ fn log_channel_single_writes_the_storage_file_and_not_stdout() {
 }
 
 #[test]
+fn log_channel_stderr_and_errorlog_write_to_stderr_only() {
+    for channel in ["stderr", "errorlog"] {
+        let base = tempfile::tempdir().unwrap();
+        let marker = unique("stderr-marker");
+        let output = run_child(
+            "channels::child_writes_one_event",
+            &[
+                ("SUPRNOVA_LOG_MARKER", &marker),
+                ("LOG_CHANNEL", channel),
+                ("APP_BASE_PATH", base.path().to_str().unwrap()),
+            ],
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains(&marker));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&marker));
+        assert!(!base.path().join("storage/logs/suprnova.log").exists());
+    }
+}
+
+#[test]
+fn log_channel_null_writes_to_no_output() {
+    let base = tempfile::tempdir().unwrap();
+    let marker = unique("null-marker");
+    let output = run_child(
+        "channels::child_writes_one_event",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "null"),
+            ("APP_BASE_PATH", base.path().to_str().unwrap()),
+        ],
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&marker));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&marker));
+    assert!(!base.path().join("storage/logs/suprnova.log").exists());
+}
+
+#[test]
+fn log_channel_stack_writes_to_single_and_stderr() {
+    let base = tempfile::tempdir().unwrap();
+    let marker = unique("stack-marker");
+    let output = run_child(
+        "channels::child_writes_one_event",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "stack"),
+            ("LOG_STACK", "single,stderr"),
+            ("APP_BASE_PATH", base.path().to_str().unwrap()),
+        ],
+    );
+    assert!(read(&base.path().join("storage/logs/suprnova.log")).contains(&marker));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&marker));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&marker));
+}
+
+#[test]
+fn log_channel_stack_defaults_to_single() {
+    let base = tempfile::tempdir().unwrap();
+    let marker = unique("default-stack-marker");
+    let output = run_child(
+        "channels::child_writes_one_event",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "stack"),
+            ("APP_BASE_PATH", base.path().to_str().unwrap()),
+        ],
+    );
+    assert!(read(&base.path().join("storage/logs/suprnova.log")).contains(&marker));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&marker));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&marker));
+}
+
+/// In a child: the bootstrap adds the driver the `custom` channel uses.
+#[test]
+fn child_writes_to_the_custom_channel() {
+    if !is_child() {
+        return;
+    }
+    let sink = Arc::new(MemorySink::default());
+    let shared = Arc::clone(&sink);
+    Log::extend("custom-memory", move |_| {
+        Ok(shared.clone() as Arc<dyn LogSink>)
+    });
+    let subscriber = default_subscriber();
+    tracing::subscriber::with_default(subscriber, || tracing::warn!(user = 7, "custom-event"));
+    let records = sink.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].message, "custom-event");
+    assert_eq!(records[0].level, LogLevel::Warning);
+    assert!(records[0].context.contains(&("user".into(), "7".into())));
+}
+
+#[test]
+fn log_channel_custom_routes_events_to_log_channel_driver() {
+    let output = run_child(
+        "channels::child_writes_to_the_custom_channel",
+        &[
+            ("LOG_CHANNEL", "custom"),
+            ("LOG_CHANNEL_DRIVER", "custom-memory"),
+        ],
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("custom-event"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("custom-event"));
+}
+
+/// In a child: invalid custom configuration refuses the boot check.
+#[test]
+fn child_rejects_an_invalid_custom_channel() {
+    if !is_child() {
+        return;
+    }
+    let error = suprnova::logging::check_channels().unwrap_err();
+    let expected = std::env::var("SUPRNOVA_LOG_ERROR").unwrap();
+    assert!(error.to_string().contains(&expected), "{error}");
+    assert!(error.to_string().contains("custom"), "{error}");
+}
+
+#[test]
+fn log_channel_custom_requires_an_extended_driver() {
+    run_child(
+        "channels::child_rejects_an_invalid_custom_channel",
+        &[
+            ("LOG_CHANNEL", "custom"),
+            ("SUPRNOVA_LOG_ERROR", "LOG_CHANNEL_DRIVER"),
+        ],
+    );
+    run_child(
+        "channels::child_rejects_an_invalid_custom_channel",
+        &[
+            ("LOG_CHANNEL", "custom"),
+            ("LOG_CHANNEL_DRIVER", "unregistered-driver"),
+            ("SUPRNOVA_LOG_ERROR", "unregistered-driver"),
+        ],
+    );
+}
+
+#[test]
 #[serial]
 fn a_defined_channel_receives_the_default_events() {
     let _env = lock_env();
@@ -331,6 +468,74 @@ fn the_built_in_daily_channel_reads_log_daily_days() {
             "suprnova-2026-09-05.log",
             "suprnova-2026-09-10.log"
         ]
+    );
+}
+
+#[test]
+fn the_built_in_daily_channel_keeps_the_newest_fourteen_of_twenty_files() {
+    let base = tempfile::tempdir().unwrap();
+    let logs = base.path().join("storage/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    for day in 1..=20 {
+        std::fs::write(logs.join(format!("suprnova-2026-09-{day:02}.log")), "old\n").unwrap();
+    }
+    run_child(
+        "channels::child_writes_to_the_built_in_daily_channel",
+        &[
+            ("APP_BASE_PATH", base.path().to_str().unwrap()),
+            ("LOG_DAILY_DAYS", "14"),
+        ],
+    );
+    assert_eq!(
+        files_in(&logs),
+        (7..=20)
+            .map(|day| format!("suprnova-2026-09-{day:02}.log"))
+            .collect::<Vec<_>>()
+    );
+    assert!(read(&logs.join("suprnova-2026-09-10.log")).contains("today"));
+}
+
+#[test]
+fn the_built_in_daily_channel_keeps_seven_files_when_log_daily_days_is_unset() {
+    let base = tempfile::tempdir().unwrap();
+    let logs = base.path().join("storage/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    for day in 1..=10 {
+        std::fs::write(logs.join(format!("suprnova-2026-09-{day:02}.log")), "old\n").unwrap();
+    }
+    run_child(
+        "channels::child_writes_to_the_built_in_daily_channel",
+        &[("APP_BASE_PATH", base.path().to_str().unwrap())],
+    );
+    assert_eq!(
+        files_in(&logs),
+        (4..=10)
+            .map(|day| format!("suprnova-2026-09-{day:02}.log"))
+            .collect::<Vec<_>>()
+    );
+    assert!(read(&logs.join("suprnova-2026-09-10.log")).contains("today"));
+}
+
+#[test]
+fn a_built_daily_channel_keeps_seven_files_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    for day in 1..=10 {
+        std::fs::write(
+            dir.path().join(format!("app-2026-09-{day:02}.log")),
+            "old\n",
+        )
+        .unwrap();
+    }
+    let _clock = TestClock::travel_to(at("2026-09-10T08:00:00Z"));
+    Log::build(LogChannel::daily(dir.path().join("app.log")))
+        .unwrap()
+        .info("today");
+    Log::flush();
+    assert_eq!(
+        files_in(dir.path()),
+        (4..=10)
+            .map(|day| format!("app-2026-09-{day:02}.log"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -590,9 +795,14 @@ fn a_record_written_before_a_clean_shutdown_is_in_the_file() {
 
 #[cfg(unix)]
 #[test]
+#[serial]
 fn syslog_sends_rfc3164_datagrams_with_the_priority() {
     use std::os::unix::net::UnixDatagram;
 
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    set_env("APP_NAME", None);
+    let _clock = TestClock::travel_to(at("2026-10-02T08:00:00Z"));
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("log.sock");
     let socket = UnixDatagram::bind(&socket_path).unwrap();
@@ -607,19 +817,82 @@ fn syslog_sends_rfc3164_datagrams_with_the_priority() {
             .level(LogLevel::Debug),
     )
     .unwrap();
-    logger.warning("syslog-warning");
     let mut buffer = [0u8; 2048];
-    let read = socket.recv(&mut buffer).unwrap();
-    let datagram = String::from_utf8_lossy(&buffer[..read]).into_owned();
-    // local3 is facility 19, warning severity 4: 19 * 8 + 4.
-    assert!(datagram.starts_with("<156>"), "{datagram}");
-    assert!(datagram.contains("syslog-warning"), "{datagram}");
+    for (severity, level) in [
+        LogLevel::Emergency,
+        LogLevel::Alert,
+        LogLevel::Critical,
+        LogLevel::Error,
+        LogLevel::Warning,
+        LogLevel::Notice,
+        LogLevel::Info,
+        LogLevel::Debug,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        logger.log(level, "syslog-record", serde_json::Value::Null);
+        let read = socket.recv(&mut buffer).unwrap();
+        let datagram = String::from_utf8_lossy(&buffer[..read]).into_owned();
+        // local3 is facility 19; severities are 0 through 7 in this order.
+        let priority = 19 * 8 + severity;
+        assert!(
+            datagram.starts_with(&format!("<{priority}>Oct  2 08:00:00 suprnova[")),
+            "{datagram}"
+        );
+        assert!(datagram.ends_with("]: syslog-record"), "{datagram}");
+    }
 
     let default = Log::build(LogChannel::syslog().socket(&socket_path)).unwrap();
     default.error("syslog-error");
     let read = socket.recv(&mut buffer).unwrap();
     // user is facility 1, error severity 3.
     assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("<11>"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_built_in_syslog_channel_uses_app_name_and_the_configured_socket_and_facility() {
+    use std::os::unix::net::UnixDatagram;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("log.sock");
+    let socket = UnixDatagram::bind(&socket_path).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let marker = unique("named-syslog-marker");
+    let output = run_child(
+        "channels::child_writes_one_event",
+        &[
+            ("SUPRNOVA_LOG_MARKER", &marker),
+            ("LOG_CHANNEL", "syslog"),
+            ("LOG_SYSLOG_SOCKET", socket_path.to_str().unwrap()),
+            ("LOG_SYSLOG_FACILITY", "local0"),
+            ("APP_NAME", "Shop"),
+        ],
+    );
+    let mut buffer = [0u8; 2048];
+    let read = socket.recv(&mut buffer).unwrap();
+    let datagram = String::from_utf8_lossy(&buffer[..read]);
+    // local0 is facility 16, info severity 6.
+    assert!(datagram.starts_with("<134>"), "{datagram}");
+    assert!(datagram.contains(" Shop["), "{datagram}");
+    assert!(datagram.ends_with(&format!("]: {marker}")), "{datagram}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&marker));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&marker));
+}
+
+#[cfg(not(unix))]
+#[test]
+#[serial]
+fn syslog_fails_boot_on_a_non_unix_system() {
+    let _env = lock_env();
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    set_env("LOG_CHANNEL", Some("syslog"));
+    set_env("LOG_SYSLOG_FACILITY", None);
+    let error = suprnova::logging::check_channels().unwrap_err();
+    assert!(error.to_string().contains("Unix"), "{error}");
 }
 
 #[test]

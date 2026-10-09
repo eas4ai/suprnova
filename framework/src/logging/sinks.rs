@@ -463,16 +463,18 @@ impl LogSink for StreamSink {
 pub(crate) struct SyslogSink {
     socket: PathBuf,
     facility: u8,
+    ident: String,
     connection: std::os::unix::net::UnixDatagram,
     reported: AtomicBool,
 }
 
 #[cfg(unix)]
 impl SyslogSink {
-    pub(crate) fn new(socket: PathBuf, facility: u8) -> std::io::Result<Self> {
+    pub(crate) fn new(socket: PathBuf, facility: u8, ident: String) -> std::io::Result<Self> {
         Ok(Self {
             socket,
             facility,
+            ident,
             connection: std::os::unix::net::UnixDatagram::unbound()?,
             reported: AtomicBool::new(false),
         })
@@ -503,8 +505,9 @@ impl LogSink for SyslogSink {
             message.push_str(&serde_json::Value::Object(context).to_string());
         }
         let datagram = format!(
-            "<{priority}>{} suprnova[{}]: {message}",
+            "<{priority}>{} {}[{}]: {message}",
             record.time.format("%b %e %H:%M:%S"),
+            self.ident,
             std::process::id()
         );
         let sent = self

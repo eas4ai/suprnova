@@ -16,7 +16,7 @@
 use super::locale::Locale;
 use crate::error::FrameworkError;
 use chrono::{Datelike, NaiveDateTime, Timelike};
-use fixed_decimal::{Decimal, FloatPrecision, Sign};
+use fixed_decimal::{Decimal, FloatPrecision, Sign, SignedRoundingMode, UnsignedRoundingMode};
 use icu_calendar::{Date, Iso};
 use icu_datetime::fieldsets::{T, YMD, YMDE};
 use icu_datetime::input::{DateTime, Time};
@@ -146,10 +146,19 @@ pub(crate) fn try_number(locale: &Locale, n: f64) -> Result<String, FrameworkErr
 /// to that many. A value that rounds to zero loses its sign, as Laravel's
 /// `Number` helpers drop it, so `-0.4` is never written `-0`.
 fn fixed(n: f64, precision: usize) -> Result<Decimal, FrameworkError> {
+    rounded_decimal(n, precision, UnsignedRoundingMode::HalfEven)
+}
+
+/// Keep each helper's rounding policy while sharing decimal conversion and padding.
+fn rounded_decimal(
+    n: f64,
+    precision: usize,
+    mode: UnsignedRoundingMode,
+) -> Result<Decimal, FrameworkError> {
     let mut decimal = Decimal::try_from_f64(n, FloatPrecision::RoundTrip)
         .map_err(|e| FrameworkError::internal(format!("`{n}` is not a formattable number: {e}")))?;
     let position = -(precision.min(i16::MAX as usize) as i16);
-    decimal.round(position);
+    decimal.round_with_mode(position, SignedRoundingMode::Unsigned(mode));
     decimal.absolute.pad_end(position);
     if decimal.absolute.is_zero() {
         decimal.set_sign(Sign::None);
@@ -164,17 +173,81 @@ fn decimal_formatter(locale: &Locale) -> Result<DecimalFormatter, FrameworkError
         .map_err(|e| FrameworkError::internal(format!("DecimalFormatter: {e}")))
 }
 
-/// `n` as a percentage, `10` being ten percent, with `precision` fraction
-/// digits, as the locale writes one.
+/// The ICU spellings for values that have no finite decimal representation.
+fn special_number(n: f64) -> Option<&'static str> {
+    if n.is_nan() {
+        Some("NaN")
+    } else if n == f64::INFINITY {
+        Some("∞")
+    } else if n == f64::NEG_INFINITY {
+        Some("-∞")
+    } else {
+        None
+    }
+}
+
+/// Round on decimal digits, optionally dropping trailing fractional zeros.
+fn precision_decimal(
+    n: f64,
+    precision: usize,
+    max_precision: Option<usize>,
+    rounding: UnsignedRoundingMode,
+) -> Result<Decimal, FrameworkError> {
+    let mut decimal = rounded_decimal(n, max_precision.unwrap_or(precision), rounding)?;
+    if max_precision.is_some() {
+        decimal.absolute.trim_end();
+        decimal.absolute.pad_end(0);
+    }
+    Ok(decimal)
+}
+
+/// Format an integer without losing digits through a floating-point conversion.
+pub(crate) fn try_integer(locale: &Locale, n: i64) -> Result<String, FrameworkError> {
+    write_decimal(locale, &Decimal::from(n))
+}
+
+/// Apply precision controls without losing the locale's grouping or digits.
+pub(crate) fn try_format(
+    locale: &Locale,
+    n: f64,
+    precision: usize,
+    max_precision: Option<usize>,
+) -> Result<String, FrameworkError> {
+    if let Some(special) = special_number(n) {
+        return Ok(special.to_owned());
+    }
+    write_decimal(
+        locale,
+        &precision_decimal(n, precision, max_precision, UnsignedRoundingMode::HalfEven)?,
+    )
+}
+
+/// `n` as a percentage, `10` being ten percent, with decimal half-up rounding.
 pub(crate) fn try_percentage(
     locale: &Locale,
     n: f64,
     precision: usize,
+    max_precision: Option<usize>,
 ) -> Result<String, FrameworkError> {
     let prefs: PercentFormatterPreferences = icu_locale(locale)?.into();
     let formatter = PercentFormatter::try_new(prefs, Default::default())
         .map_err(|e| FrameworkError::internal(format!("PercentFormatter: {e}")))?;
-    Ok(formatter.format(&fixed(n, precision)?).to_string())
+    if let Some(special) = special_number(n) {
+        // Keep the locale's percent sign placement and spacing for special values.
+        return Ok(formatter.format(&Decimal::from(0)).to_string().replacen(
+            &write_decimal(locale, &Decimal::from(0))?,
+            special,
+            1,
+        ));
+    }
+    Ok(formatter
+        .format(&precision_decimal(
+            n,
+            precision,
+            max_precision,
+            UnsignedRoundingMode::HalfExpand,
+        )?)
+        .to_string())
 }
 
 /// Laravel's `Number::abbreviate`, which its `summarize` implements: `n`
@@ -188,9 +261,7 @@ pub(crate) fn try_abbreviate(
 ) -> Result<String, FrameworkError> {
     const UNITS: [(i32, &str); 5] = [(3, "K"), (6, "M"), (9, "B"), (12, "T"), (15, "Q")];
     if !n.is_finite() {
-        return Err(FrameworkError::internal(format!(
-            "`{n}` cannot be abbreviated"
-        )));
+        return try_format(locale, n, precision, None);
     }
     if n == 0.0 {
         return if precision > 0 {

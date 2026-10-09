@@ -32,6 +32,15 @@ pub fn unique(label: &str) -> String {
     )
 }
 
+/// A typed key as sent on the wire. Raw commands and direct clients use this form.
+pub fn wire_key(key: &str) -> String {
+    let prefix = std::env::var("REDIS_PREFIX").unwrap_or_else(|_| {
+        let app = std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".to_owned());
+        format!("{}-database-", suprnova::Str::slug(&app, "-"))
+    });
+    format!("{prefix}{key}")
+}
+
 /// A connection to the test database under a name of its own.
 pub fn connection(label: &str) -> RedisConnection {
     let name = unique(label);
@@ -194,6 +203,11 @@ impl CuttingProxy {
 }
 
 pub async fn cutting_proxy(marker: &str) -> CuttingProxy {
+    cutting_proxy_times(marker, 1).await
+}
+
+/// Drop the first `drops` replies, for retry-budget tests.
+pub async fn cutting_proxy_times(marker: &str, drops: u64) -> CuttingProxy {
     let target = url()
         .trim_start_matches("redis://")
         .split('/')
@@ -203,7 +217,7 @@ pub async fn cutting_proxy(marker: &str) -> CuttingProxy {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let sent = Arc::new(AtomicU64::new(0));
-    let cut = Arc::new(AtomicBool::new(false));
+    let cut = Arc::new(AtomicU64::new(drops));
     let (counter, marker) = (sent.clone(), marker.to_owned());
     tokio::spawn(async move {
         loop {
@@ -230,7 +244,7 @@ async fn cut_relay(
     client: TcpStream,
     server: TcpStream,
     marker: String,
-    cut: Arc<AtomicBool>,
+    cut: Arc<AtomicU64>,
     sent: Arc<AtomicU64>,
 ) {
     let (mut client_read, mut client_write) = client.into_split();
@@ -250,7 +264,12 @@ async fn cut_relay(
                 .count() as u64;
             if count > 0 {
                 sent.fetch_add(count, Ordering::SeqCst);
-                if !cut.swap(true, Ordering::SeqCst) {
+                if cut
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
                     arm.store(true, Ordering::SeqCst);
                 }
             }

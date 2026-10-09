@@ -1,5 +1,6 @@
 //! The command events: what `Redis::listen` and
-//! `Redis::listen_for_failures` hear while events are enabled.
+//! `Redis::listen_for_failures` hear while events are enabled, also sent
+//! through the application's event dispatcher.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -14,7 +15,7 @@ pub struct RedisCommandExecuted {
     pub connection: String,
     /// The command, in upper case: `SET`, `LRANGE`.
     pub command: String,
-    /// Its arguments, each as text (bytes that are not UTF-8 are replaced).
+    /// Its wire arguments, each as text (bytes that are not UTF-8 are replaced).
     pub arguments: Vec<String>,
     /// How long the server took to answer, retries included.
     pub duration: Duration,
@@ -29,12 +30,24 @@ pub struct RedisCommandFailed {
     pub connection: String,
     /// The command, in upper case.
     pub command: String,
-    /// Its arguments, each as text.
+    /// Its wire arguments, each as text.
     pub arguments: Vec<String>,
     /// The error, as the server or the connection gave it.
     pub error: String,
     /// How long the command ran before it failed.
     pub duration: Duration,
+}
+
+impl crate::events::Event for RedisCommandExecuted {
+    fn event_name() -> &'static str {
+        "RedisCommandExecuted"
+    }
+}
+
+impl crate::events::Event for RedisCommandFailed {
+    fn event_name() -> &'static str {
+        "RedisCommandFailed"
+    }
 }
 
 type Listener<E> = Arc<dyn Fn(&E) + Send + Sync>;
@@ -68,7 +81,7 @@ pub(crate) fn listen_for_failures(listener: Listener<RedisCommandFailed>) {
 // The listeners are cloned out of the lock before they run, so a listener
 // may add another without deadlocking.
 
-pub(crate) fn executed(event: &RedisCommandExecuted) {
+pub(crate) async fn executed(event: &RedisCommandExecuted) {
     let listeners = EXECUTED
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -76,14 +89,20 @@ pub(crate) fn executed(event: &RedisCommandExecuted) {
     for listener in listeners {
         listener(event);
     }
+    if let Err(error) = crate::events::EventFacade::dispatch_best_effort(event.clone()).await {
+        tracing::error!(error = %error, "Redis command event listener failed");
+    }
 }
 
-pub(crate) fn failed(event: &RedisCommandFailed) {
+pub(crate) async fn failed(event: &RedisCommandFailed) {
     let listeners = FAILED
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
     for listener in listeners {
         listener(event);
+    }
+    if let Err(error) = crate::events::EventFacade::dispatch_best_effort(event.clone()).await {
+        tracing::error!(error = %error, "Redis command event listener failed");
     }
 }

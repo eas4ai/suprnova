@@ -1,7 +1,9 @@
 //! PAR-031: named connections, opened on their first command, opened again
 //! after they are lost, forgotten by `purge`.
 
-use crate::support::{client_id, client_open, connection, database, kill_client, unique, url};
+use crate::support::{
+    client_id, client_open, connection, database, kill_client, unique, url, wire_key,
+};
 use serial_test::serial;
 use std::process::{Command, Stdio};
 use suprnova::{Redis, RedisValue};
@@ -26,6 +28,12 @@ fn run_child(name: &str, redis_url: Option<&str>, extra: &[(&str, &str)]) {
         ])
         .env(CHILD, "1")
         .env_remove("REDIS_URL")
+        .env_remove("REDIS_HOST")
+        .env_remove("REDIS_PORT")
+        .env_remove("REDIS_PASSWORD")
+        .env_remove("REDIS_USERNAME")
+        .env_remove("REDIS_DB")
+        .env_remove("REDIS_CACHE_DB")
         .env_remove("REDIS_COMMAND_RETRIES")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -75,7 +83,7 @@ async fn a_defined_connection_reaches_its_urls_database() {
     let client = suprnova::redis::Client::open(url()).unwrap();
     let mut direct = client.get_multiplexed_async_connection().await.unwrap();
     let value: Option<String> = suprnova::redis::cmd("GET")
-        .arg(&key)
+        .arg(wire_key(&key))
         .query_async(&mut direct)
         .await
         .unwrap();
@@ -150,6 +158,11 @@ async fn without_redis_url_the_default_connection_reaches_the_local_server() {
         "connections::child_reads_the_default_connections_address",
         None,
         &[],
+    );
+    run_child(
+        "connections::child_reads_the_default_connections_address",
+        None,
+        &[("REDIS_PASSWORD", ""), ("REDIS_USERNAME", "")],
     );
 }
 
@@ -331,4 +344,224 @@ async fn a_resolved_name_stays_listed_when_it_is_defined_again() {
         Redis::connections().contains(&name),
         "the name was resolved and never purged"
     );
+}
+
+/// A standalone server proves host, port and authentication without inherited settings.
+struct ConfigServer {
+    port: u16,
+    child: std::process::Child,
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for ConfigServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn config_server() -> ConfigServer {
+    let dir = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let child = Command::new("redis-server")
+        .args([
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--requirepass",
+            "test:@/#password",
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+        ])
+        .current_dir(dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server = ConfigServer {
+        port,
+        child,
+        _dir: dir,
+    };
+    let start = std::time::Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    server
+}
+
+#[test]
+#[ignore = "needs Redis: runs redis-server"]
+#[serial]
+fn environment_tuple_and_cache_database_reach_the_configured_server() {
+    let server = config_server();
+    run_child(
+        "connections::child_checks_environment_connections",
+        None,
+        &[
+            ("REDIS_HOST", "localhost"),
+            ("REDIS_PORT", &server.port.to_string()),
+            ("REDIS_PASSWORD", "test:@/#password"),
+            ("REDIS_DB", "6"),
+            ("REDIS_CACHE_DB", "7"),
+            ("SUPRNOVA_EXPECT_DEFAULT_DB", "6"),
+            ("SUPRNOVA_EXPECT_CACHE_DB", "7"),
+            ("SUPRNOVA_EXPECT_PORT", &server.port.to_string()),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+fn redis_url_takes_precedence_and_cache_uses_its_own_database() {
+    let parsed = url::Url::parse(&url()).unwrap();
+    run_child(
+        "connections::child_checks_environment_connections",
+        Some(&url()),
+        &[
+            ("REDIS_HOST", "unreachable.invalid"),
+            ("REDIS_PORT", "1"),
+            ("REDIS_PASSWORD", "wrong"),
+            ("REDIS_DB", "14"),
+            ("REDIS_CACHE_DB", "7"),
+            ("SUPRNOVA_EXPECT_DEFAULT_DB", &database().to_string()),
+            ("SUPRNOVA_EXPECT_CACHE_DB", "7"),
+            (
+                "SUPRNOVA_EXPECT_PORT",
+                &parsed.port().unwrap_or(6379).to_string(),
+            ),
+        ],
+    );
+    run_child(
+        "connections::child_checks_environment_connections",
+        Some(&url()),
+        &[
+            ("SUPRNOVA_EXPECT_DEFAULT_DB", &database().to_string()),
+            ("SUPRNOVA_EXPECT_CACHE_DB", "1"),
+            (
+                "SUPRNOVA_EXPECT_PORT",
+                &parsed.port().unwrap_or(6379).to_string(),
+            ),
+        ],
+    );
+}
+
+#[tokio::test]
+#[ignore = "child process for environment configuration"]
+async fn child_checks_environment_connections() {
+    if !is_child() {
+        return;
+    }
+    let port = std::env::var("SUPRNOVA_EXPECT_PORT").unwrap();
+    for (name, expected) in [
+        ("default", "SUPRNOVA_EXPECT_DEFAULT_DB"),
+        ("cache", "SUPRNOVA_EXPECT_CACHE_DB"),
+    ] {
+        let connection = Redis::connection(name).unwrap();
+        let info = client_info(&connection).await;
+        let db = std::env::var(expected).unwrap();
+        assert!(info.contains(&format!(" db={db} ")), "{info}");
+        assert!(info.contains(&format!(":{port} ")), "{info}");
+        let key = unique("env-key");
+        connection.set(&key, "configured").await.unwrap();
+        assert_eq!(
+            connection.get(&key).await.unwrap().as_deref(),
+            Some("configured")
+        );
+        connection.del(&[key.as_str()]).await.unwrap();
+    }
+}
+
+#[test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+fn explicit_empty_and_app_name_prefixes_are_used_on_the_wire() {
+    for prefix in ["shop-", "shop[*?]\\-", ""] {
+        run_child(
+            "connections::child_checks_key_prefix",
+            Some(&url()),
+            &[("REDIS_PREFIX", prefix), ("APP_NAME", "My Shop")],
+        );
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "connections::child_checks_key_prefix",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("REDIS_URL", url())
+        .env("APP_NAME", "My Shop")
+        .env_remove("REDIS_PREFIX")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
+#[ignore = "child process for key prefixes"]
+async fn child_checks_key_prefix() {
+    if !is_child() {
+        return;
+    }
+    let redis = Redis::connection("default").unwrap();
+    let key = unique("prefix-key");
+    let prefix = std::env::var("REDIS_PREFIX").unwrap_or_else(|_| "my-shop-database-".to_owned());
+    let wire = format!("{prefix}{key}");
+    redis.set(&key, "typed").await.unwrap();
+    assert_eq!(
+        redis.command("GET", &[wire.as_str()]).await.unwrap(),
+        RedisValue::Bytes(b"typed".to_vec())
+    );
+    if !prefix.is_empty() {
+        assert_eq!(
+            redis.command("GET", &[key.as_str()]).await.unwrap(),
+            RedisValue::Nil
+        );
+        redis.command("SET", &[key.as_str(), "raw"]).await.unwrap();
+        assert_eq!(
+            redis.execute_raw(&["GET", key.as_str()]).await.unwrap(),
+            RedisValue::Bytes(b"raw".to_vec())
+        );
+        assert_eq!(redis.get(&key).await.unwrap().as_deref(), Some("typed"));
+        redis.command("DEL", &[key.as_str()]).await.unwrap();
+    }
+    assert_eq!(redis.scan(&key).await.unwrap(), vec![wire.clone()]);
+    redis
+        .eval(
+            "return redis.call('set', KEYS[1], ARGV[1])",
+            &[key.as_str()],
+            &["script"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        redis.command("GET", &[wire.as_str()]).await.unwrap(),
+        RedisValue::Bytes(b"script".to_vec())
+    );
+    redis
+        .pipeline(|pipe| {
+            pipe.set(&key, "pipeline");
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        redis.command("GET", &[wire.as_str()]).await.unwrap(),
+        RedisValue::Bytes(b"pipeline".to_vec())
+    );
+    redis.del(&[key.as_str()]).await.unwrap();
 }
