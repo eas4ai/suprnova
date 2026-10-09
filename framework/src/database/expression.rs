@@ -172,17 +172,19 @@ impl DB {
 /// SQLite's `random()` cannot be seeded, so a seeded SQLite order is a fixed
 /// function of the seed and each row's `key` instead, followed by `key`
 /// itself: two terms, which both callers splice into an ORDER BY list. `key`
-/// is a column that identifies the row, written as the ORDER BY can reach
-/// it: the model builder passes its primary key and `DB::table` passes the
-/// main table's `rowid`, each qualified where a join could make it
-/// ambiguous. MySQL and Postgres seed their own random functions and ignore
-/// `key`.
+/// is the row's `rowid`, written as the ORDER BY can reach it: both builders
+/// pass the main table's `rowid`, qualified with the table, and the model
+/// builder passes the alias its union operands project the rowid under when
+/// the order applies to a whole union. MySQL and Postgres seed their own
+/// random functions and ignore `key`.
 ///
 /// The same seed on the same rows always gives the same order, whatever
-/// plan reads them. SQLite's `%` casts its operands to INTEGER, so a text
-/// key reads as the integer its text starts with, or 0, and many text keys
-/// share one value of the first term; the second term then orders those
-/// rows by the key.
+/// plan reads them. The key is the rowid and not a primary key because
+/// SQLite's `%` casts its operands to INTEGER: a text key reads as the
+/// integer its text starts with, or 0, so most UUID or ULID keys would share
+/// one value of the first term and the order would fall back to key order.
+/// Every table a migration creates has a rowid; a view or a `WITHOUT ROWID`
+/// table has none, and the engine returns its error.
 pub(crate) fn random_order(backend: DbBackend, seed: Option<u64>, key: &str) -> String {
     match (backend, seed) {
         (DbBackend::MySql, Some(seed)) => format!("RAND({seed})"),

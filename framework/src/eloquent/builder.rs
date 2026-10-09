@@ -511,6 +511,12 @@ const UNION_ARM_ALIAS: &str = "__suprnova_union_arm";
 /// ordering, limit and offset apply to its rows.
 const UNION_ALIAS: &str = "__suprnova_union";
 
+/// The alias each operand of a union projects its SQLite rowid under when
+/// a seeded order reads the rowid over the whole union. Outside an
+/// operand's own SELECT only the projected columns are in scope, and
+/// `rowid` is not one of them. See [`Builder::projects_row`].
+const UNION_ROW_ALIAS: &str = "__suprnova_row";
+
 /// Row-locking hint applied to a SELECT.
 ///
 /// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`] and
@@ -2718,10 +2724,13 @@ impl<M> Builder<M> {
     /// `inRandomOrder($seed)`. MySQL uses `RAND(seed)`, and Postgres sets
     /// the connection seed in the same statement before `random()`.
     /// SQLite cannot seed `RANDOM()`, so it orders by a fixed function of
-    /// the seed and the model's primary key, then by the key itself: the
-    /// same seed on the same rows gives the same order, a union included.
-    /// A union is ordered by its selected columns, so there the key must
-    /// be one of them, as it is when you select every column.
+    /// the seed and each row's `rowid`, then by the `rowid`, as
+    /// `DB::table` does: the same seed on the same rows gives the same
+    /// order whatever the type of the primary key, a union included. Over
+    /// a union, each query adds the rowid to its selected columns, so
+    /// `UNION` removes only copies of the same row. Every table a
+    /// migration creates has a rowid; a view or a `WITHOUT ROWID` table
+    /// has none, and the engine returns its error.
     pub fn in_random_order_seeded(mut self, seed: u64) -> Self {
         self.orders.push(OrderTerm::Random(Some(seed)));
         self
@@ -4001,18 +4010,47 @@ impl<M> Builder<M> {
         }
     }
 
-    /// Name the model's primary key `key` for an ORDER BY inside this
-    /// query's own SELECT: qualified with the table its FROM writes, so a
-    /// joined table's column of the same name cannot stand in for it.
-    /// Outside that SELECT, over a union or a ranked union written as a
-    /// derived table, only the projected columns are in scope, and the
-    /// renderer names the key bare instead.
-    fn own_key(&self, backend: DbBackend, table: &str, key: &str) -> String {
-        format!(
-            "{}.{}",
-            self.own_table(backend, table),
-            quote_identifier(backend, key)
-        )
+    /// Name the row's SQLite rowid, the number a seeded SQLite order
+    /// shuffles, for use inside this query's own SELECT: qualified with
+    /// the table its FROM writes, so a joined table's rowid cannot stand
+    /// in for it.
+    ///
+    /// The order reads the rowid rather than the primary key because
+    /// SQLite's `%` reads a text key as the integer its leading digits
+    /// spell, or 0, so a UUID or ULID key would give most rows one value.
+    /// `DB::table` reads the rowid for the same reason. Every table a
+    /// migration creates has one; a view or a `WITHOUT ROWID` table has
+    /// none, the renderer cannot tell at render time, and the engine
+    /// returns its error. Over a union the operands project the rowid as
+    /// [`UNION_ROW_ALIAS`] instead (see [`Self::projects_row`]). MySQL and
+    /// Postgres seed their own random functions and never read it.
+    fn own_row(&self, backend: DbBackend, table: &str) -> String {
+        format!("{}.rowid", self.own_table(backend, table))
+    }
+
+    /// Whether every SELECT of this query projects its rowid as
+    /// [`UNION_ROW_ALIAS`], so a seeded order can read the rowid over a
+    /// union, where only projected columns are in scope.
+    ///
+    /// True on SQLite when a seeded order applies to a whole union: this
+    /// query's, or one of its operands' that is a union itself. Every
+    /// operand of the union then projects the rowid, so their column
+    /// counts agree. An operand's own seeded order, and the first query's
+    /// before `union`, run inside that query's SELECT and need no alias.
+    /// Any other union keeps its projection, so `UNION` removes the same
+    /// duplicates as before; with the alias, it removes only copies of
+    /// the same row.
+    fn projects_row(&self, backend: DbBackend) -> bool {
+        backend == DbBackend::Sqlite
+            && !self.unions.is_empty()
+            && (self
+                .orders
+                .iter()
+                .any(|order| matches!(order, OrderTerm::Random(Some(_))))
+                || self
+                    .unions
+                    .iter()
+                    .any(|(arm, _)| arm.effective().projects_row(backend)))
     }
 
     /// The model's table as [`JoinedTable`] when this query joins another,
@@ -4248,17 +4286,17 @@ impl<M> Builder<M> {
     /// pushing here keeps Postgres `$N` numbering monotonic with the
     /// SQL text - see the union comment in `render_select_into`.
     ///
-    /// `key` is the model's primary key written as this ORDER BY can
+    /// `row` is the row's SQLite rowid written as this ORDER BY can
     /// reach it, which a seeded SQLite order reads: see
-    /// [`Self::own_key`].
+    /// [`Self::own_row`].
     fn render_orders(
         &self,
         backend: DbBackend,
-        key: &str,
+        row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
-        self.render_order_terms(&self.orders, backend, key, values, n)
+        self.render_order_terms(&self.orders, backend, row, values, n)
     }
 
     /// Render `orders` as an ORDER BY list, the shared body of
@@ -4268,7 +4306,7 @@ impl<M> Builder<M> {
         &self,
         orders: &[OrderTerm],
         backend: DbBackend,
-        key: &str,
+        row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4281,7 +4319,7 @@ impl<M> Builder<M> {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
-                OrderTerm::Random(seed) => random_order(backend, *seed, key),
+                OrderTerm::Random(seed) => random_order(backend, *seed, row),
                 OrderTerm::BoundRaw(sql, bindings) => {
                     let sql = rewrite_raw_placeholders(backend, sql, bindings, *n)?;
                     *n += bindings.len();
@@ -4337,11 +4375,16 @@ impl<M> Builder<M> {
         Ok(format!(" HAVING {}", parts.join(" AND ")))
     }
 
+    /// Render this query's SELECT for `backend`, with the values it binds.
+    ///
+    /// `_key` is the model's primary key name, which every caller passes.
+    /// The renderer does not read it: a seeded SQLite order reads each
+    /// row's rowid instead (see [`Self::own_row`]).
     pub(crate) fn render_select_for(
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
+        _key: &str,
         column_expr: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         match backend {
@@ -4359,8 +4402,15 @@ impl<M> Builder<M> {
         this.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
-        let mut sql =
-            this.render_select_into(backend, table, key, column_expr, &mut values, &mut n)?;
+        let project_row = this.projects_row(backend);
+        let mut sql = this.render_select_into(
+            backend,
+            table,
+            column_expr,
+            project_row,
+            &mut values,
+            &mut n,
+        )?;
         // Phase 10C T9 - row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
@@ -4441,7 +4491,6 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         // Audit HIGH `eloquent` #1 - same identifier validation as
         // `render_select_for`. Count uses the same WHERE / GROUP BY /
@@ -4458,12 +4507,16 @@ impl<M> Builder<M> {
             // whole union under the projection the page uses, so `UNION`
             // removes the same duplicates from both, without the ordering,
             // limit and offset the page adds after it. A constant
-            // projection would collapse every arm to one row.
+            // projection would collapse every arm to one row. The page's
+            // ordering decides whether the operands project their rowid,
+            // so the count projects it too and removes the same rows.
+            let project_row = this.projects_row(backend);
             let mut whole = this.clone();
             whole.orders.clear();
             whole.limit = None;
             whole.offset = None;
-            let inner = whole.render_select_into(backend, table, key, "*", &mut values, &mut n)?;
+            let inner =
+                whole.render_select_into(backend, table, "*", project_row, &mut values, &mut n)?;
             sql.push_str("SELECT COUNT(*) AS count FROM (");
             sql.push_str(&inner);
             sql.push_str(") AS __suprnova_paginate_subquery");
@@ -4548,16 +4601,18 @@ impl<M> Builder<M> {
     /// so an ordering may be any expression over its columns, which a bare
     /// compound refuses on Postgres and SQLite.
     ///
-    /// `key` is the model's primary key column, which a seeded SQLite
-    /// order reads. Inside a SELECT it is qualified with the model's
-    /// table; over the whole union only the projected columns are in
-    /// scope, so it is named bare there.
+    /// A seeded SQLite order reads each row's rowid. Inside a SELECT it
+    /// is qualified with the model's table (see [`Self::own_row`]); over
+    /// the whole union only the projected columns are in scope, so every
+    /// SELECT projects it as [`UNION_ROW_ALIAS`] when `project_row` is
+    /// set, which [`Self::projects_row`] decides once for the whole
+    /// statement.
     fn render_select_into(
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
         column_expr: &str,
+        project_row: bool,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4565,19 +4620,20 @@ impl<M> Builder<M> {
         let this = self.effective();
         let this = &*this;
         if this.eager_partition.is_some() && this.limit.is_some() {
-            return this.render_group_limit(backend, table, key, column_expr, values, n);
+            return this.render_group_limit(backend, table, column_expr, project_row, values, n);
         }
-        let mut sql = this.render_select_core(backend, table, column_expr, values, n)?;
-        let own_key = this.own_key(backend, table, key);
+        let mut sql =
+            this.render_select_core(backend, table, column_expr, project_row, values, n)?;
+        let own_row = this.own_row(backend, table);
         if this.unions.is_empty() {
-            sql.push_str(&this.render_orders(backend, &own_key, values, n)?);
+            sql.push_str(&this.render_orders(backend, &own_row, values, n)?);
             sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
             return Ok(sql);
         }
 
         let head = &this.union_head;
         if head.is_bounded() {
-            sql.push_str(&this.render_order_terms(&head.orders, backend, &own_key, values, n)?);
+            sql.push_str(&this.render_order_terms(&head.orders, backend, &own_row, values, n)?);
             sql.push_str(&render_limit_offset(backend, head.limit, head.offset));
             sql = format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}");
         }
@@ -4594,7 +4650,14 @@ impl<M> Builder<M> {
         for (other, all) in &this.unions {
             let connector = if *all { " UNION ALL " } else { " UNION " };
             sql.push_str(connector);
-            sql.push_str(&other.render_union_arm(backend, table, key, column_expr, values, n)?);
+            sql.push_str(&other.render_union_arm(
+                backend,
+                table,
+                column_expr,
+                project_row,
+                values,
+                n,
+            )?);
         }
 
         if this.orders.is_empty()
@@ -4614,7 +4677,7 @@ impl<M> Builder<M> {
             whole.push_str(" WHERE ");
             whole.push_str(&parts.join(" AND "));
         }
-        whole.push_str(&this.render_orders(backend, &quote_identifier(backend, key), values, n)?);
+        whole.push_str(&this.render_orders(backend, UNION_ROW_ALIAS, values, n)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
     }
@@ -4624,8 +4687,8 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
         column_expr: &str,
+        project_row: bool,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4643,13 +4706,13 @@ impl<M> Builder<M> {
         // Window order binds precede the FROM and WHERE binds in the statement.
         // Without a union the window sits in the model's own SELECT; over
         // a union it reads the union's derived table, where only the
-        // projected columns, the key among them, are in scope.
-        let window_key = if self.unions.is_empty() {
-            self.own_key(backend, table, key)
+        // projected columns, the rowid's alias among them, are in scope.
+        let window_row = if self.unions.is_empty() {
+            self.own_row(backend, table)
         } else {
-            quote_identifier(backend, key)
+            UNION_ROW_ALIAS.to_owned()
         };
-        let orders = self.render_orders(backend, &window_key, values, n)?;
+        let orders = self.render_orders(backend, &window_row, values, n)?;
         let mut inner = self.clone();
         inner.eager_partition = None;
         inner.limit = None;
@@ -4686,10 +4749,11 @@ impl<M> Builder<M> {
         let sql = if inner.unions.is_empty() {
             inner.select_cols = None;
             inner.select_raw = Some(format!("{projection}, {row_number}"));
-            inner.render_select_into(backend, table, key, column_expr, values, n)?
+            inner.render_select_into(backend, table, column_expr, project_row, values, n)?
         } else {
             // Rank the combined rows, not each union operand's separate sequence.
-            let source = inner.render_select_into(backend, table, key, column_expr, values, n)?;
+            let source =
+                inner.render_select_into(backend, table, column_expr, project_row, values, n)?;
             let alias = quote_identifier(backend, window_table);
             format!("SELECT {alias}.*, {row_number} FROM ({source}) AS {alias}")
         };
@@ -4706,13 +4770,13 @@ impl<M> Builder<M> {
         &self,
         backend: DbBackend,
         table: &str,
-        key: &str,
         column_expr: &str,
+        project_row: bool,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
         let arm = self.effective();
-        let sql = arm.render_select_into(backend, table, key, column_expr, values, n)?;
+        let sql = arm.render_select_into(backend, table, column_expr, project_row, values, n)?;
         let bare = arm.unions.is_empty()
             && arm.orders.is_empty()
             && arm.limit.is_none()
@@ -4727,12 +4791,15 @@ impl<M> Builder<M> {
     /// The part of a SELECT every shape shares: the projection, `FROM`,
     /// the joins, `WHERE`, `GROUP BY` and `HAVING`. What follows it - the
     /// ordering, the limit, the union arms - depends on the shape, so
-    /// [`Self::render_select_into`] adds it.
+    /// [`Self::render_select_into`] adds it. With `project_row`, the
+    /// projection ends with the row's rowid as [`UNION_ROW_ALIAS`], for a
+    /// seeded order over a union (see [`Self::projects_row`]).
     fn render_select_core(
         &self,
         backend: DbBackend,
         table: &str,
         column_expr: &str,
+        project_row: bool,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -4768,6 +4835,12 @@ impl<M> Builder<M> {
             sql.push_str(".*");
         } else {
             sql.push_str(column_expr);
+        }
+        if project_row {
+            sql.push_str(&format!(
+                ", {} AS {UNION_ROW_ALIAS}",
+                self.own_row(backend, table)
+            ));
         }
         sql.push_str(" FROM ");
         sql.push_str(&from);
@@ -5948,12 +6021,16 @@ where
             query.select_cols = None;
             query.select_raw = None;
             let column = quote_identifier(backend, &format!("{}.{identity}", M::TABLE));
-            let select =
-                query.render_select_into(backend, M::TABLE, identity, &column, values, n)?;
-            return Ok(format!(
-                " WHERE {} IN ({select})",
-                quote_identifier(backend, identity)
-            ));
+            let project_row = query.projects_row(backend);
+            let mut select =
+                query.render_select_into(backend, M::TABLE, &column, project_row, values, n)?;
+            let identity = quote_identifier(backend, identity);
+            if project_row {
+                // A seeded order over a union adds the rowid to the
+                // projection, and `IN` compares one column: keep the key.
+                select = format!("SELECT {identity} FROM ({select}) AS __suprnova_write_keys");
+            }
+            return Ok(format!(" WHERE {identity} IN ({select})"));
         }
         if self.where_terms.is_empty() {
             return Ok(String::new());
@@ -6486,8 +6563,7 @@ where
         // executor as the page query.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
-        let (count_sql, count_vals) =
-            self.render_count_select_for(backend, M::TABLE, M::primary_key_name())?;
+        let (count_sql, count_vals) = self.render_count_select_for(backend, M::TABLE)?;
         let count_stmt = Statement::from_sql_and_values(backend, &count_sql, count_vals);
         let count_row = exec
             .query_one(count_stmt)
