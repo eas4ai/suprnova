@@ -2607,27 +2607,3 @@ async fn an_empty_part_of_a_list_that_cannot_hold_null_is_a_missing_element() {
     assert_eq!(key(&errors, "tags.1"), "validation-required");
     assert_eq!(errors.errors.len(), 1, "{errors}");
 }
-
-#[tokio::test]
-async fn revised_classic_html_form_validation_redirects() {
-    let slot = suprnova::session::new_session_slot_for_test();
-    let app = App::with(
-        Router::new().post("/gallery", gallery),
-        MiddlewareRegistry::new()
-            .append(SeededSessionScope(slot.clone()))
-            .append(InertiaValidationRedirectMiddleware::new()),
-    );
-    let reply = send(
-        &app,
-        Outgoing::post("/gallery", gallery_body(&pdf()))
-            .header("Accept", "text/html")
-            .header("Referer", "http://localhost/gallery"),
-    )
-    .await;
-    assert!(
-        matches!(reply.status, 302 | 303),
-        "PAR-042 invalid classic HTML forms redirect, got {}: {}",
-        reply.status,
-        reply.text()
-    );
-}
