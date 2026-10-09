@@ -131,7 +131,7 @@ pub trait IntoDynCast {
 pub use encrypted::{
     AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsHashed,
 };
-pub use enum_cast::AsEnum;
+pub use enum_cast::{AsEnum, AsEnumCollection};
 pub use primitive::{AsBool, AsDecimal, AsFloat, AsInt, AsString};
 pub use structured::{
     AsArray, AsArrayObject, AsCollection, AsJson, AsNativeJson, AsObject, AsOptionalArray,

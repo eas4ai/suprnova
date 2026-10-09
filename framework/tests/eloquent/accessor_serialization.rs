@@ -16,14 +16,8 @@
 //!    nested object) all serialise into `to_json`. Pins that the
 //!    `serde_json::to_value(&self.#method())` emission works across
 //!    `Serialize` return types, not only `String`.
-//! 3. `hidden = ["full_name"]` + `appends = ["full_name"]` → the
-//!    accessor STILL appears in `to_json`. `append_inserts` runs after
-//!    `filter_apply`, matching Laravel's "$appends always serialises"
-//!    semantics. The doc comment on the macro emits this claim - this
-//!    test pins it.
-//! 4. `visible = ["id"]` + `appends = ["full_name"]` → the accessor
-//!    appears even though it isn't in the visible allowlist. Same
-//!    bypass mechanism, mirrored for the allowlist path.
+//! 3. A hidden appended name stays absent from every conversion.
+//! 4. A visible list also filters appended names.
 
 use suprnova::{Model, accessor, model};
 
@@ -87,10 +81,7 @@ impl P8MultiTypes {
     }
 }
 
-/// `hidden` and `appends` collide on the same key. Per the macro doc
-/// comment ("$appends always serialises"), the accessor wins - the
-/// hidden filter is applied to the base struct map, then accessor
-/// inserts happen afterwards. Pins this resolution.
+/// A hidden appended name stays absent from the serialized map.
 #[model(
     table = "p8_hidden_collide",
     timestamps = false,
@@ -110,9 +101,7 @@ impl P8HiddenCollide {
     }
 }
 
-/// `visible` allowlist that doesn't list the accessor. The accessor
-/// still appears in `to_json` because `append_inserts` runs after the
-/// allowlist filter. Pins the allowlist-bypass behaviour.
+/// An appended name outside the visible list stays absent.
 #[model(
     table = "p8_visible_bypass",
     timestamps = false,
@@ -174,10 +163,7 @@ async fn multiple_accessors_with_mixed_return_types_all_serialise() {
 }
 
 #[tokio::test]
-async fn hidden_does_not_suppress_an_appended_accessor() {
-    // Per macro doc: "$appends always serialises". `hidden` filter
-    // is applied to the base struct map; appended accessors are
-    // inserted afterwards, so the accessor wins the collision.
+async fn hidden_suppresses_an_appended_accessor() {
     let u = P8HiddenCollide {
         id: 1,
         first_name: "Alice".into(),
@@ -187,18 +173,11 @@ async fn hidden_does_not_suppress_an_appended_accessor() {
     let v = u.to_array();
     assert_eq!(v["first_name"], "Alice");
     assert_eq!(v["last_name"], "Smith");
-    assert_eq!(
-        v["full_name"], "Alice Smith",
-        "appended accessor must appear even when its name is in `hidden`",
-    );
+    assert!(v.get("full_name").is_none());
 }
 
 #[tokio::test]
-async fn visible_does_not_suppress_an_appended_accessor() {
-    // Same bypass mechanism mirrored for the allowlist path:
-    // `visible = ["id"]` drops `first_name` and `last_name` from the
-    // base map, but the `full_name` accessor still appears because
-    // `append_inserts` runs after the allowlist filter.
+async fn visible_suppresses_an_appended_accessor() {
     let u = P8VisibleBypass {
         id: 7,
         first_name: "Alice".into(),
@@ -215,8 +194,5 @@ async fn visible_does_not_suppress_an_appended_accessor() {
         v.get("last_name").is_none(),
         "last_name should be dropped by the visible allowlist",
     );
-    assert_eq!(
-        v["full_name"], "Alice Smith",
-        "appended accessor must appear even when not listed in `visible`",
-    );
+    assert!(v.get("full_name").is_none());
 }

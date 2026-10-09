@@ -590,21 +590,22 @@ pub use features::{Evaluator, EvaluatorRef, Feature};
 // `eloquent` module. The `ModelEntry` registry is populated at compile
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
 // (Admin), `model:prune`, and future tooling.
+pub use eloquent::model::AttributeNames;
 pub use eloquent::relations::belongs_to_many::{SyncChanges, SyncRecord};
 pub use eloquent::{
     AggregateKind, AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal,
-    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat,
-    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime,
-    AsNativeDateTime, AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject,
-    AsOptionalCollection, AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime,
-    AsOptionalNativeDateTime, AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString,
-    AsTimestamp, AsU64, Attrs, BelongsTo, BelongsToMany, Builder, Cast, Collection, Direction,
-    DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable, FirstOrCreate,
-    GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn, IntoDynCast,
-    IntoMorphTypes, IntoVal, LazyCollection, LazyLoadingViolation, MassPrunable, Model, ModelEntry,
-    MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany, Prunable,
-    PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, ScopeRegistry, SoftDeletes,
-    StoredU64, Touchable, clear_lazy_loading_violation_handler, find_model_by_table,
+    AsEncrypted, AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum,
+    AsEnumCollection, AsFloat, AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson,
+    AsNaiveDateTime, AsNativeDateTime, AsNativeJson, AsObject, AsOptionalArray,
+    AsOptionalArrayObject, AsOptionalCollection, AsOptionalDateTime, AsOptionalJson,
+    AsOptionalNaiveDateTime, AsOptionalNativeDateTime, AsOptionalNativeJson, AsOptionalObject,
+    AsOptionalU64, AsString, AsTimestamp, AsU64, Attrs, BelongsTo, BelongsToMany, Builder, Cast,
+    Collection, Direction, DynCast, EagerLoadCache, EagerLoadDispatch, EloquentModel, Fillable,
+    FirstOrCreate, GlobalScope, HasMany, HasManyThrough, HasOne, HasOneThrough, IntoColumn,
+    IntoDynCast, IntoMorphTypes, IntoVal, LazyCollection, LazyLoadingViolation, MassPrunable,
+    Model, ModelEntry, MorphMany, MorphOne, MorphTo, MorphToMany, MorphTypeEntry, MorphedByMany,
+    Prunable, PrunerEntry, Relation, RelationEntry, RelationKind, ReplicateExt, ScopeRegistry,
+    SoftDeletes, StoredU64, Touchable, clear_lazy_loading_violation_handler, find_model_by_table,
     find_morph_type, find_morph_type_by_id, find_relation, handle_lazy_loading_violation, models,
     morph_types, prevent_lazy_loading, prevent_silently_discarding_attributes,
     preventing_lazy_loading, preventing_silently_discarding_attributes, prune_all, prune_all_dry,
