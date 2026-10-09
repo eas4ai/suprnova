@@ -411,3 +411,112 @@ async fn zero_stop_grace_kills_immediately() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(all_gone(&[pid], Duration::from_secs(3)).await);
 }
+
+/// Keep failed cleanup regressions from leaving their sleeps running.
+#[cfg(target_os = "linux")]
+struct EscapedSleeps(Vec<u32>);
+
+#[cfg(target_os = "linux")]
+impl Drop for EscapedSleeps {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            let pid = nix::unistd::Pid::from_raw(i32::try_from(*pid).unwrap());
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn escaped_sleeps(process: &suprnova::InvokedProcess) -> EscapedSleeps {
+    let root = process.id().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let children = std::fs::read_to_string(format!("/proc/{root}/task/{root}/children"))
+                .unwrap_or_default();
+            let pids: Vec<u32> = children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect();
+            let ready: Vec<_> = pids
+                .iter()
+                .filter_map(|pid| {
+                    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                    let (_, fields) = stat.rsplit_once(") ")?;
+                    let session = fields.split_whitespace().nth(3)?.parse::<u32>().ok()?;
+                    Some((*pid, stat.contains("(sleep)"), session))
+                })
+                .collect();
+            if ready.len() == 2
+                && ready.iter().all(|(_, sleep, _)| *sleep)
+                && ready.iter().any(|(pid, _, session)| pid == session)
+            {
+                let mut all = vec![root];
+                all.extend(pids);
+                return EscapedSleeps(all);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both sleeps start and one leaves the process group")
+}
+
+#[cfg(target_os = "linux")]
+async fn escaped_sleeps_stopped(pids: &[u32]) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let running = pids.iter().any(|pid| {
+                std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        stat.rsplit_once(") ")
+                            .map(|(_, fields)| !fields.starts_with('Z'))
+                    })
+                    .unwrap_or(false)
+            });
+            if !running {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn a_timeout_kills_descendants_that_leave_the_process_group() {
+    let started = Instant::now();
+    let process = Process::shell("setsid sleep 30 & sleep 30")
+        .timeout(Duration::from_secs(1))
+        .start()
+        .unwrap();
+    let sleeps = escaped_sleeps(&process).await;
+    let error = process.wait().await.expect_err("one-second timeout");
+    assert!(matches!(error, ProcessError::TimedOut { .. }), "{error:?}");
+    assert!(error.to_string().contains("setsid sleep 30"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        escaped_sleeps_stopped(&sleeps.0).await,
+        "escaped sleeps still running: {:?}",
+        sleeps.0
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn dropping_a_process_kills_descendants_that_leave_the_process_group() {
+    let process = Process::shell("setsid sleep 30 & sleep 30")
+        .start()
+        .unwrap();
+    let sleeps = escaped_sleeps(&process).await;
+    drop(process);
+    assert!(
+        escaped_sleeps_stopped(&sleeps.0).await,
+        "escaped sleeps still running: {:?}",
+        sleeps.0
+    );
+}

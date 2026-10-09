@@ -33,6 +33,10 @@
 //! sent with 15 minutes, and a receive before its time sends it on with what
 //! is left and deletes the copy that came too early. Waiting out a delay that
 //! way is not an attempt: the new copy starts its receive count again.
+//! FIFO queues take no per-message delay, so every early receive sends the
+//! job on. Each intentional resend derives a new FIFO deduplication id from
+//! the job's id or digest and that receive's unique receipt handle, so SQS
+//! delivers the copy even within its five-minute deduplication window.
 //!
 //! # The window a copy opens
 //!
@@ -949,8 +953,26 @@ impl SqsQueueDriver {
     /// Send `envelope` to `queue_url`, delayed until its `available_at` or
     /// by at most 15 minutes, writing it to the overflow disk when it is too
     /// large for one message.
-    async fn send(&self, queue_url: &str, envelope: &Envelope) -> Result<(), FrameworkError> {
-        let mut message = [self.encode(queue_url, envelope).await?];
+    /// A resend uses its receive's unique receipt handle to derive a new
+    /// FIFO deduplication id. The first send keeps the job's id or digest,
+    /// and transport retries keep the derived id, so a lost reply cannot
+    /// create another delivery within SQS's deduplication window.
+    async fn send(
+        &self,
+        queue_url: &str,
+        envelope: &Envelope,
+        resend_receipt: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        let mut outgoing = self.encode(queue_url, envelope).await?;
+        if let (Some(id), Some(receipt)) = (&outgoing.deduplication_id, resend_receipt) {
+            let mut hasher = Sha256::new();
+            for part in [id.as_str(), receipt] {
+                hasher.update((part.len() as u64).to_be_bytes());
+                hasher.update(part.as_bytes());
+            }
+            outgoing.deduplication_id = Some(hex::encode(hasher.finalize()));
+        }
+        let mut message = [outgoing];
         let attempted = self
             .send_with_own_payloads("SendMessage", queue_url, &mut message, send_message_request)
             .await;
@@ -1297,9 +1319,10 @@ impl SqsQueueDriver {
         };
 
         if envelope.available_at > crate::clock::now() {
-            // Received before its time, which only a delay over 15 minutes
-            // allows: send it on with what is left and drop this copy.
-            self.send(queue_url, &envelope).await?;
+            // Standard queues show delays over 15 minutes early; FIFO
+            // queues have no per-message delay. Send it on until its time
+            // and delete this copy without counting an attempt.
+            self.send(queue_url, &envelope, Some(&held.receipt)).await?;
             self.delete_held(&held, true).await?;
             return Ok(None);
         }
@@ -1359,7 +1382,7 @@ impl SqsQueueDriver {
 impl QueueDriver for SqsQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let url = self.queue_url(env.queue.as_deref())?;
-        self.send(&url, &env).await
+        self.send(&url, &env, None).await
     }
 
     /// Each queue's envelopes go in `SendMessageBatch` requests, in the
@@ -1459,7 +1482,8 @@ impl QueueDriver for SqsQueueDriver {
             let (mut copy, _) = self.decode(&held.body).await?;
             copy.attempts = held.attempts.saturating_add(1);
             copy.available_at = available_at;
-            self.send(&held.queue_url, &copy).await?;
+            self.send(&held.queue_url, &copy, Some(&held.receipt))
+                .await?;
             return self.delete_held(&held, true).await;
         }
         self.call_on_receipt(
@@ -1489,7 +1513,8 @@ impl QueueDriver for SqsQueueDriver {
         let mut copy = env.clone();
         copy.attempts = held.attempts;
         copy.available_at = available_at;
-        self.send(&held.queue_url, &copy).await?;
+        self.send(&held.queue_url, &copy, Some(&held.receipt))
+            .await?;
         self.delete_held(&held, true).await
     }
 
