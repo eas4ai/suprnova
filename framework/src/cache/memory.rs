@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use super::config::CacheConfig;
-use super::store::CacheStore;
+use super::store::{CacheStore, ConditionalIncrement};
 use crate::error::FrameworkError;
 
 /// In-memory cache entry with optional expiration and current tag set.
@@ -57,6 +57,64 @@ fn is_canonical_counter_value(value: &str) -> bool {
         [first, rest @ ..] => (b'1'..=b'9').contains(first) && rest.iter().all(u8::is_ascii_digit),
         [] => false,
     }
+}
+
+/// The live counter stored under the prefixed `key`, with the expiry and
+/// tags a write of it keeps. A missing or expired entry reads as 0 with
+/// neither.
+///
+/// Redis INCRBY/DECRBY reject a live non-integer and preserve its value and
+/// TTL. Parsing before any insertion gives the memory driver the same
+/// observable behavior and leaves the entry untouched on error.
+fn live_counter(
+    store: &HashMap<String, CacheEntry>,
+    key: &str,
+    operation: CounterOperation,
+) -> Result<(i64, Option<Instant>, HashSet<String>), FrameworkError> {
+    let Some(entry) = store.get(key).filter(|entry| !entry.is_expired()) else {
+        return Ok((0, None, HashSet::new()));
+    };
+    let current = if is_canonical_counter_value(&entry.value) {
+        entry.value.parse::<i64>().ok()
+    } else {
+        None
+    }
+    .ok_or_else(|| {
+        FrameworkError::internal(format!(
+            "Cache {} error: stored value is not a signed 64-bit integer",
+            operation.name()
+        ))
+    })?;
+    Ok((current, entry.expires_at, entry.tags.clone()))
+}
+
+/// Store `operation` applied to a counter [`live_counter`] read, keeping
+/// its expiry and tags, and return the new value. An overflow is an error
+/// that leaves the entry untouched.
+fn write_counter(
+    store: &mut HashMap<String, CacheEntry>,
+    key: String,
+    (current, expires_at, tags): (i64, Option<Instant>, HashSet<String>),
+    amount: i64,
+    operation: CounterOperation,
+) -> Result<i64, FrameworkError> {
+    let new_value = operation.apply(current, amount).ok_or_else(|| {
+        FrameworkError::internal(format!(
+            "Cache {} error: signed 64-bit integer overflow",
+            operation.name()
+        ))
+    })?;
+
+    store.insert(
+        key,
+        CacheEntry {
+            value: new_value.to_string(),
+            expires_at,
+            tags,
+        },
+    );
+
+    Ok(new_value)
 }
 
 fn namespaced_key(prefix: &str, namespace: &str, key: &str) -> String {
@@ -212,45 +270,33 @@ impl InMemoryCache {
             .write()
             .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
 
-        // Redis INCRBY/DECRBY reject a live non-integer and preserve its
-        // value and TTL. Parse before insertion so the memory driver has the
-        // same observable behavior and leaves the entry untouched on error.
-        let (current, expires_at, tags): (i64, Option<Instant>, HashSet<String>) =
-            match store.get(&key).filter(|entry| !entry.is_expired()) {
-                Some(entry) => {
-                    let current = if is_canonical_counter_value(&entry.value) {
-                        entry.value.parse::<i64>().ok()
-                    } else {
-                        None
-                    }
-                    .ok_or_else(|| {
-                        FrameworkError::internal(format!(
-                            "Cache {} error: stored value is not a signed 64-bit integer",
-                            operation.name()
-                        ))
-                    })?;
-                    (current, entry.expires_at, entry.tags.clone())
-                }
-                None => (0, None, HashSet::new()),
-            };
+        let counter = live_counter(&store, &key, operation)?;
+        write_counter(&mut store, key, counter, amount, operation)
+    }
 
-        let new_value = operation.apply(current, amount).ok_or_else(|| {
-            FrameworkError::internal(format!(
-                "Cache {} error: signed 64-bit integer overflow",
-                operation.name()
-            ))
-        })?;
+    /// [`CacheStore::increment_if_below`] under one write lock, so the read,
+    /// the comparison with `ceiling` and the write are one step that no
+    /// concurrent caller can split. The counter keeps its TTL and tags, as it
+    /// does in [`Self::update_counter`].
+    fn increment_counter_if_below(
+        &self,
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        let key = self.prefixed_key(key);
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
 
-        store.insert(
-            key,
-            CacheEntry {
-                value: new_value.to_string(),
-                expires_at,
-                tags,
-            },
-        );
-
-        Ok(new_value)
+        let operation = CounterOperation::Increment;
+        let counter = live_counter(&store, &key, operation)?;
+        if counter.0 >= ceiling {
+            return Ok(ConditionalIncrement::Unchanged(counter.0));
+        }
+        write_counter(&mut store, key, counter, amount, operation)
+            .map(ConditionalIncrement::Incremented)
     }
 
     /// Walk the value store and drop every entry whose TTL has elapsed.
@@ -543,6 +589,15 @@ impl CacheStore for InMemoryCache {
 
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
         self.update_counter(key, amount, CounterOperation::Decrement)
+    }
+
+    async fn increment_if_below(
+        &self,
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        self.increment_counter_if_below(key, amount, ceiling)
     }
 
     async fn tagged_put_raw(
@@ -915,6 +970,105 @@ mod tests {
                 .expect("read counter")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn increment_if_below_leaves_a_full_counter_and_its_ttl_alone() {
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .tagged_put_raw(&["counters"], "count", "5", Some(Duration::from_secs(60)))
+            .await
+            .expect("seed tagged counter");
+        let before = entry_snapshot(&cache, "count");
+
+        for ceiling in [5, 3, i64::MIN] {
+            assert_eq!(
+                cache
+                    .increment_if_below("count", 1, ceiling)
+                    .await
+                    .expect("a full counter is no error"),
+                ConditionalIncrement::Unchanged(5)
+            );
+            let after = entry_snapshot(&cache, "count");
+            assert_eq!(after.value, before.value);
+            assert_eq!(after.expires_at, before.expires_at);
+            assert_eq!(after.tags, before.tags);
+        }
+
+        assert_eq!(
+            cache
+                .increment_if_below("count", 2, 6)
+                .await
+                .expect("a counter below the ceiling counts"),
+            ConditionalIncrement::Incremented(7)
+        );
+        let after = entry_snapshot(&cache, "count");
+        assert_eq!(after.value, "7");
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.tags, before.tags);
+
+        assert_eq!(
+            cache
+                .increment_if_below("fresh", 1, 1)
+                .await
+                .expect("a missing counter reads as 0"),
+            ConditionalIncrement::Incremented(1)
+        );
+        assert_eq!(
+            cache
+                .increment_if_below("fresh", 1, 1)
+                .await
+                .expect("the counter is full"),
+            ConditionalIncrement::Unchanged(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn increment_if_below_rejects_a_non_integer_and_an_overflow_without_mutation() {
+        for invalid in ["not-an-integer", "+1", "01", "-0", "-01"] {
+            let cache = InMemoryCache::with_prefix("t:");
+            cache
+                .tagged_put_raw(
+                    &["counters"],
+                    "count",
+                    invalid,
+                    Some(Duration::from_secs(60)),
+                )
+                .await
+                .expect("seed tagged counter");
+            let before = entry_snapshot(&cache, "count");
+
+            for ceiling in [i64::MIN, i64::MAX] {
+                let error = cache
+                    .increment_if_below("count", 1, ceiling)
+                    .await
+                    .expect_err("a non-integer is no counter");
+                assert!(error.to_string().contains("increment"), "{error}");
+                let after = entry_snapshot(&cache, "count");
+                assert_eq!(after.value, before.value);
+                assert_eq!(after.expires_at, before.expires_at);
+                assert_eq!(after.tags, before.tags);
+            }
+        }
+
+        let cache = InMemoryCache::with_prefix("t:");
+        cache
+            .put_raw(
+                "edge",
+                &(i64::MAX - 1).to_string(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .expect("seed boundary counter");
+        let before = entry_snapshot(&cache, "edge");
+        let error = cache
+            .increment_if_below("edge", 2, i64::MAX)
+            .await
+            .expect_err("an unrepresentable step must fail");
+        assert!(error.to_string().contains("overflow"), "{error}");
+        let after = entry_snapshot(&cache, "edge");
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.expires_at, before.expires_at);
     }
 
     #[tokio::test]

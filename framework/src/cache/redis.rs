@@ -8,7 +8,7 @@ use redis::{
 use std::time::Duration;
 
 use super::config::CacheConfig;
-use super::store::CacheStore;
+use super::store::{CacheStore, ConditionalIncrement};
 use crate::error::FrameworkError;
 
 /// How many forward-index members `flush_tags` pulls per `SSCAN` round.
@@ -144,6 +144,61 @@ if result then
     return 1
 end
 return 0
+"#;
+
+/// Atomically add to a counter only while it is below a ceiling.
+///
+/// `KEYS[1]` is the counter key, `ARGV[1]` the amount and `ARGV[2]` the
+/// ceiling. A missing key reads as 0. A value `INCRBY` would refuse is
+/// refused the same way, before anything changes: Redis stores a counter as
+/// a canonical decimal, an optional `-` and no leading zero. Below the
+/// ceiling the script runs `INCRBY` and returns `{1, new}`; otherwise it
+/// returns `{0, current}` and writes nothing. `INCRBY` keeps the key's TTL,
+/// and the counter carries no tag record, as for `increment`.
+///
+/// The comparison is on the decimal strings, sign first, then length, then
+/// digits byte by byte, because a Lua number is a double: near `i64::MAX`
+/// both sides would round to 2^63 and compare equal. The values come back as
+/// the strings `GET` returns, for the same reason.
+const INCREMENT_IF_BELOW_LUA: &str = r#"
+-- suprnova_cache_increment_if_below_v1
+local function below(value, ceiling)
+    local value_negative = string.sub(value, 1, 1) == '-'
+    local ceiling_negative = string.sub(ceiling, 1, 1) == '-'
+    if value_negative ~= ceiling_negative then
+        return value_negative
+    end
+    if value == ceiling then
+        return false
+    end
+    -- Whether the magnitude of value is the smaller one, byte by byte,
+    -- so the server's collation locale plays no part.
+    local smaller = #value < #ceiling
+    if #value == #ceiling then
+        for i = 1, #value do
+            local value_byte, ceiling_byte = string.byte(value, i), string.byte(ceiling, i)
+            if value_byte ~= ceiling_byte then
+                smaller = value_byte < ceiling_byte
+                break
+            end
+        end
+    end
+    if value_negative then
+        return not smaller
+    end
+    return smaller
+end
+local current = redis.call('GET', KEYS[1])
+if not current then
+    current = '0'
+elseif current ~= '0' and not string.match(current, '^%-?[1-9]%d*$') then
+    return redis.error_reply('ERR value is not an integer or out of range')
+end
+if below(current, ARGV[2]) then
+    redis.call('INCRBY', KEYS[1], ARGV[1])
+    return {1, redis.call('GET', KEYS[1])}
+end
+return {0, current}
 "#;
 
 /// Extend a value's TTL and its tag-membership record together.
@@ -492,6 +547,38 @@ impl CacheStore for RedisCache {
             .map_err(|e| FrameworkError::internal(format!("Cache decrement error: {}", e)))?;
 
         Ok(value)
+    }
+
+    async fn increment_if_below(
+        &self,
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        let mut conn = self.conn.clone();
+        let key = self.prefixed_key(key);
+        // Not retried: a reply lost after the script ran would count twice.
+        let (incremented, value): (i64, String) = redis::cmd("EVAL")
+            .arg(INCREMENT_IF_BELOW_LUA)
+            .arg(1)
+            .arg(&key)
+            .arg(amount)
+            .arg(ceiling)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("Cache increment error: {e}")))?;
+        // `INCRBY` refuses a value outside i64 below the ceiling; one at or
+        // above it comes back unchanged and is refused here.
+        let value = value.parse::<i64>().map_err(|_| {
+            FrameworkError::internal(
+                "Cache increment error: stored value is not a signed 64-bit integer",
+            )
+        })?;
+        Ok(if incremented == 1 {
+            ConditionalIncrement::Incremented(value)
+        } else {
+            ConditionalIncrement::Unchanged(value)
+        })
     }
 
     async fn tagged_put_raw(

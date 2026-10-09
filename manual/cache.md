@@ -291,6 +291,26 @@ Atomic on both built-in backends: `InMemoryCache` uses a write-locked
 is a JSON-encoded integer, so `Cache::get::<i64>("page:visits")` round-
 trips with the same key.
 
+```rust
+use suprnova::cache::ConditionalIncrement;
+
+// Counts only while the counter is below 100; a full counter is left alone.
+match Cache::increment_if_below("seats:taken", 1, 100).await? {
+    ConditionalIncrement::Incremented(taken) => { /* seat number `taken` is yours */ }
+    ConditionalIncrement::Unchanged(_) => { /* sold out, and nothing was counted */ }
+}
+```
+
+`Cache::increment_if_below` adds to a counter only while it is below a
+ceiling, reading a missing key as 0, so a caller can be refused without
+being counted. The comparison and the write are one atomic step on both
+built-in backends, under the write lock in `InMemoryCache` and in one
+`EVAL` in `RedisCache`, so concurrent callers stepping by 1 never take the
+counter past the ceiling; the [throttle middleware](rate-limiting.md#refused-requests)
+counts with it. A custom `CacheStore` that doesn't override
+`increment_if_below` gets a default that reads and then increments, which
+isn't atomic; override it with your backend's atomic primitive.
+
 ## Tagged cache
 
 Tags let you invalidate a whole family of related entries with one

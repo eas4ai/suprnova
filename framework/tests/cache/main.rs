@@ -3,6 +3,7 @@
 
 pub mod bootstrap_driver;
 pub mod forever_default_ttl;
+pub mod increment_if_below;
 pub mod laravel_facade;
 pub mod locks;
 pub mod redis_integration;

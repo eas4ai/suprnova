@@ -7,6 +7,20 @@ use std::time::Duration;
 
 use crate::error::FrameworkError;
 
+/// What a conditional increment did.
+///
+/// [`CacheStore::increment_if_below`] answers with the count either way, so
+/// a caller that is refused still learns how full the counter is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalIncrement {
+    /// The value was below the ceiling, and the amount was added. Holds the
+    /// new value.
+    Incremented(i64),
+    /// The value had reached the ceiling, and nothing changed. Holds the
+    /// value as it stands.
+    Unchanged(i64),
+}
+
 /// Cache store trait - all cache backends must implement this
 ///
 /// This trait uses JSON strings for values to enable dynamic typing.
@@ -87,6 +101,59 @@ pub trait CacheStore: Send + Sync {
     ///
     /// Returns the new value after decrementing.
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError>;
+
+    /// Add `amount` to a numeric value only while it is below `ceiling`.
+    ///
+    /// A missing or expired key reads as 0. When the value is below
+    /// `ceiling`, `amount` is added and the answer is
+    /// [`ConditionalIncrement::Incremented`] with the new value; otherwise
+    /// nothing changes and the answer is [`ConditionalIncrement::Unchanged`]
+    /// with the value as it stands. A counter that has to refuse a caller
+    /// without counting the caller needs the comparison and the write as one
+    /// step: an increment followed by a decrement that gives the count back
+    /// can land in a later window, and a read followed by an increment lets
+    /// concurrent callers past the ceiling.
+    ///
+    /// A stored value that is no canonical signed 64-bit integer is an
+    /// error, and so is a sum that overflows, as for
+    /// [`CacheStore::increment`]; neither changes the value.
+    ///
+    /// The default implementation does a non-atomic read-then-increment for
+    /// custom stores; built-in backends (`InMemoryCache`, `RedisCache`)
+    /// override with their native atomic primitive (one write lock / one
+    /// `EVAL`).
+    async fn increment_if_below(
+        &self,
+        key: &str,
+        amount: i64,
+        ceiling: i64,
+    ) -> Result<ConditionalIncrement, FrameworkError> {
+        let current = match self.get_raw(key).await? {
+            None => 0,
+            // Canonical when it reads back as it was written, as `INCRBY`
+            // requires: no sign on a positive value, no leading zero.
+            Some(raw) => raw
+                .parse::<i64>()
+                .ok()
+                .filter(|value| value.to_string() == raw)
+                .ok_or_else(|| {
+                    FrameworkError::internal(
+                        "Cache increment error: stored value is not a signed 64-bit integer",
+                    )
+                })?,
+        };
+        if current >= ceiling {
+            return Ok(ConditionalIncrement::Unchanged(current));
+        }
+        if current.checked_add(amount).is_none() {
+            return Err(FrameworkError::internal(
+                "Cache increment error: signed 64-bit integer overflow",
+            ));
+        }
+        Ok(ConditionalIncrement::Incremented(
+            self.increment(key, amount).await?,
+        ))
+    }
 
     /// Store a tagged value. The tag index is updated on every write -
     /// flushing a tag deletes every key associated with that tag.
