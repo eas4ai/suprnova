@@ -269,7 +269,11 @@ pub async fn pivot_writes_of_a_u64_are_exact_or_refused(conn: &DatabaseConnectio
         ),
         (
             "sync",
-            owner.roles().sync(vec![1u64, u64::MAX - 1]).await,
+            owner
+                .roles()
+                .sync(vec![1u64, u64::MAX - 1])
+                .await
+                .map(|_| ()),
             "up_role_id",
         ),
         (

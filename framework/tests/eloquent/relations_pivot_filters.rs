@@ -483,16 +483,13 @@ async fn a_closure_group_stays_atomic_inside_a_disjunction() {
 }
 
 #[tokio::test]
-async fn a_disjunction_nested_inside_a_closure_group_keeps_its_parentheses() {
+async fn a_closure_group_keeps_flat_or_precedence_inside_its_boundary() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let (u, admin, _editor, viewer) = seed_roles().await;
 
-    // ((active = 1 OR note = 'keep') AND pf_role_id = admin) -> admin.
-    // Flattened, SQL precedence would read the same terms as
-    //   active = 1 OR (note = 'keep' AND pf_role_id = admin),
-    // which also returns viewer. One row is what proves the inner
-    // disjunction kept its own parentheses inside the group.
+    // (active = 1 OR note = 'keep' AND pf_role_id = admin) includes viewer.
+    // The closure supplies the outer group; its own OR chain stays flat.
     let inner = u
         .roles()
         .where_pivot_group(|q| {
@@ -504,7 +501,10 @@ async fn a_disjunction_nested_inside_a_closure_group_keeps_its_parentheses() {
         .await
         .unwrap()
         .into_vec();
-    assert_eq!(ids(&inner), vec![admin.id]);
+    let got = ids(&inner);
+    assert_eq!(got.len(), 2);
+    assert!(got.contains(&admin.id));
+    assert!(got.contains(&viewer.id));
 
     // ... and the group as a whole is still one atom for a following
     // `or_where_pivot`, so nesting does not cost atomicity.
@@ -601,19 +601,21 @@ async fn a_pivot_filter_makes_detach_fail_closed() {
 }
 
 #[tokio::test]
-async fn a_pivot_filter_makes_sync_fail_closed() {
+async fn a_filtered_sync_detaches_only_visible_rows() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
-    let (u, admin, _, _) = seed_roles().await;
-
-    let err = u
+    let (u, admin, editor, viewer) = seed_roles().await;
+    let changes = u
         .roles()
         .where_pivot("active", 1i64)
         .sync([admin.id])
         .await
-        .expect_err("a filtered sync must refuse");
-    assert!(format!("{err}").contains("reads only"), "got: {err}");
-    assert_eq!(u.roles().count().await.unwrap(), 3);
+        .expect("filtered sync");
+    assert_eq!(changes.detached, vec![serde_json::Value::from(viewer.id)]);
+    assert!(changes.attached.is_empty());
+    let held = u.roles().get().await.unwrap();
+    assert_eq!(held.len(), 2);
+    assert!(ids(&held).contains(&editor.id));
 }
 
 #[tokio::test]

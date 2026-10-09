@@ -236,8 +236,7 @@ async fn correlated_exists(_fx: &Fixture) {
 }
 
 /// The closure form combines `on`, `or_on`, `where` and `or_where`. An
-/// `or_*` condition folds into the condition before it, so it widens that
-/// one condition and never the whole `ON` clause.
+/// `or_*` condition stays flat, so SQL precedence governs the ON clause.
 async fn join_closure_combines_on_and_where(_fx: &Fixture) {
     let built = DB::table("pj_posts")
         .join_with("pj_users", |join| {
@@ -253,12 +252,21 @@ async fn join_closure_combines_on_and_where(_fx: &Fixture) {
         .into_vec();
     let expected = raw("SELECT pj_posts.title, pj_users.name FROM pj_posts \
          INNER JOIN pj_users ON pj_users.id = pj_posts.author_id \
-         AND (pj_posts.views > 40 OR pj_users.name = 'Ada') \
+         AND pj_posts.views > 40 OR pj_users.name = 'Ada' \
          ORDER BY pj_posts.id ASC")
     .await;
     let built = json_rows(built);
     assert_eq!(built, expected, "the builder and raw SQL disagree");
-    assert_eq!(column(&built, "title"), vec![json!("Beta"), json!("Gamma")]);
+    assert_eq!(
+        column(&built, "title"),
+        vec![
+            json!("Alpha"),
+            json!("Beta"),
+            json!("Beta"),
+            json!("Gamma"),
+            json!("Delta")
+        ]
+    );
 
     let either_key = DB::table("pj_posts")
         .join_with("pj_categories", |join| {
@@ -700,29 +708,77 @@ async fn a_join_without_an_on_condition_is_refused() {
 }
 
 #[tokio::test]
-async fn update_and_delete_refuse_a_join() {
+async fn update_and_delete_match_only_joined_rows() {
     let _fx = seeded_sqlite().await;
-    let updated = DB::table("pj_posts")
-        .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
-        .filter("pj_users.name", "Ada")
-        .update(suprnova::attrs! { title: "changed" })
-        .await;
-    assert!(updated.is_err(), "an UPDATE would ignore the join");
+    DB::enable_query_log().expect("log");
+    let joined = || {
+        DB::table("pj_posts")
+            .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
+            .filter("pj_users.name", "Ada")
+    };
+    assert_eq!(
+        joined()
+            .update(suprnova::attrs! { title: "changed" })
+            .await
+            .expect("joined update"),
+        1
+    );
+    assert_eq!(
+        DB::table("pj_posts")
+            .filter("id", 3)
+            .first()
+            .await
+            .expect("read")
+            .expect("row")
+            .get_string("title")
+            .expect("title"),
+        "changed"
+    );
+    assert_eq!(joined().delete().await.expect("joined delete"), 1);
+    assert_eq!(DB::table("pj_posts").count().await.expect("count"), 3);
+    let log = DB::get_query_log().expect("log");
+    let selector = r#" WHERE "rowid" IN (SELECT "pj_posts"."rowid" FROM "pj_posts" INNER JOIN "pj_users" ON "pj_users"."id" = "pj_posts"."author_id" WHERE "pj_users"."name" = ?)"#;
+    let update = log
+        .iter()
+        .find(|query| query.sql.starts_with("UPDATE"))
+        .expect("logged update");
+    assert_eq!(
+        update.sql,
+        format!(r#"UPDATE "pj_posts" SET "title" = ?{selector}"#)
+    );
+    assert_eq!(
+        update.bindings,
+        vec![
+            r#"String(Some("changed"))"#.to_string(),
+            r#"String(Some("Ada"))"#.to_string()
+        ]
+    );
+    let delete = log
+        .iter()
+        .find(|query| query.sql.starts_with("DELETE"))
+        .expect("logged delete");
+    assert_eq!(delete.sql, format!(r#"DELETE FROM "pj_posts"{selector}"#));
+    assert_eq!(delete.bindings, vec![r#"String(Some("Ada"))"#.to_string()]);
+}
 
-    let deleted = DB::table("pj_posts")
-        .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
-        .filter("pj_users.name", "Ada")
-        .delete()
-        .await;
-    assert!(deleted.is_err(), "a DELETE would ignore the join");
-
-    let untouched = DB::table("pj_posts")
-        .filter("title", "changed")
-        .count()
+#[tokio::test]
+async fn or_is_flat_and_keeps_sql_precedence() {
+    let _fx = seeded_sqlite().await;
+    DB::enable_query_log().expect("log");
+    let rows = DB::table("pj_posts")
+        .filter("id", 1)
+        .or_where_raw("id = ?", vec![2.into()])
+        .filter("views", 50)
+        .order_by_asc("id")
+        .get()
         .await
-        .expect("count");
-    assert_eq!(untouched, 0);
-    assert_eq!(DB::table("pj_posts").count().await.expect("count"), 4);
+        .expect("query");
+    assert_eq!(
+        column(&json_rows(rows.into_vec()), "id"),
+        vec![json!(1), json!(2)]
+    );
+    let log = DB::get_query_log().expect("log");
+    assert!(log.iter().any(|q| q.sql == "SELECT * FROM \"pj_posts\" WHERE \"id\" = ? OR id = ? AND \"views\" = ? ORDER BY \"id\" ASC"));
 }
 
 #[tokio::test]
@@ -764,4 +820,43 @@ async fn mysql_every_join_shape_matches_raw_sql() {
     seed(&fx).await;
     run_every_scenario(&fx).await;
     fx.close().await;
+}
+
+#[tokio::test]
+async fn explicit_column_operator_and_cross_join_closure_keep_conditions() {
+    let _fx = seeded_sqlite().await;
+    DB::enable_query_log().expect("log");
+    let rows = DB::table("pj_posts")
+        .cross_join_with("pj_users", |j| {
+            j.on("pj_users.id", "=", "pj_posts.author_id")
+                .db_where("pj_users.name", "Linus")
+        })
+        .where_column_op("pj_posts.views", ">", "pj_users.id")
+        .select(["pj_posts.id"])
+        .order_by_asc("pj_posts.id")
+        .get()
+        .await
+        .expect("cross with ON");
+    assert_eq!(
+        column(&json_rows(rows.into_vec()), "id"),
+        vec![json!(1), json!(2)]
+    );
+    assert_eq!(
+        DB::get_query_log().expect("log")[0].sql,
+        "SELECT \"pj_posts\".\"id\" FROM \"pj_posts\" CROSS JOIN \"pj_users\" ON \"pj_users\".\"id\" = \"pj_posts\".\"author_id\" AND \"pj_users\".\"name\" = ? WHERE \"pj_posts\".\"views\" > \"pj_users\".\"id\" ORDER BY \"pj_posts\".\"id\" ASC"
+    );
+    assert!(
+        DB::table("pj_posts")
+            .where_column_op("views", "=;", "id")
+            .get()
+            .await
+            .is_err()
+    );
+    assert!(
+        DB::table("pj_posts")
+            .where_column_op("a; drop", ">", "id")
+            .get()
+            .await
+            .is_err()
+    );
 }

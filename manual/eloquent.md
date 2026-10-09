@@ -390,10 +390,15 @@ user.save().await?;
 user.update(attrs! { name: "Alice B" }).await?;
 ```
 
-`save()` walks every non-PK field, sets them on the ActiveModel via
-`Set(...)`, calls SeaORM's `update()`, and returns the canonical row.
-`update(attrs)` is the same flow but applies a partial attribute
-map first (running the Fillable filter and any declared mutators).
+You call `save()` after changing a loaded model. It compares your values
+with the original values kept in memory, without re-reading the row. A
+clean save issues no `UPDATE` and fires neither `Updating` nor `Updated`;
+`Saving` and `Saved` still fire. A `Saving` listener can make the model
+dirty by changing its attributes. A dirty save writes changed columns and
+updates its timestamp.
+
+You use `update(attrs)` to apply a partial attribute map, with the
+Fillable filter and declared mutators, before writing.
 
 ### Changes after a save
 
@@ -426,6 +431,7 @@ user.was_changed_any(&[]);                // true: the save changed something
 user.get_changes();                       // Attrs { "is_admin": 1 }
 user.get_original("is_admin")?;           // Some(true): the saved value
 user.get_raw_original("is_admin");        // Some(1), as stored
+user.get_previous("is_admin");            // Some(0): before the change
 ```
 
 An observer reads the value from before the save, which is how an audit
@@ -460,6 +466,9 @@ The rules follow Laravel's `save`:
   `updated_at`. An encrypted column stores a new ciphertext on every save,
   so it is compared by its decrypted value instead: it counts as changed
   only when that value changed.
+- `get_previous(attribute)` returns the stored value before the last
+  change for that attribute. You get `None` for an unchanged or unknown
+  attribute. A clean or failed save keeps this record.
 - `get_changes` and `get_raw_original` return stored values, before casts,
   as Laravel does. `get_original` reads the value through the model's casts
   and returns an error only when the stored value no longer decodes.
@@ -755,9 +764,14 @@ so rustdoc search finds either.
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
 | `->orWhereRaw(sql, bindings)` | `.or_filter_raw(sql, bindings)` | `.or_where_raw(sql, bindings)` | |
 
-Every `or_*` method folds its condition into the one before it, so an
-`OR` widens that one condition and never the whole `WHERE` clause. The
-grouped helpers keep their comparisons in parentheses: this query never
+Every `or_*` method adds a flat `OR` condition, so
+`r#where(a).or_where(b).r#where(c)` means `a OR b AND c`. You use
+`r#where(column, value)` or `db_where(column, value)` for equality, and
+`filter_op` or `or_where_op` for an explicit operator. A null equality
+value compiles to `IS NULL`. Global scopes keep your complete condition
+list in a group when it contains an `OR`.
+
+The grouped helpers keep their comparisons in parentheses: this query never
 returns a user whose `active` is false, and the model's soft-delete
 filter still applies:
 
@@ -1041,7 +1055,7 @@ discarded - the caller asked for keys.
 
 `join`, `left_join`, `right_join`, and `cross_join` work as they do on
 the `DB::table` builder, along with the closure forms (`join_with`,
-`left_join_with`, `right_join_with`) and the subquery joins (`join_sub`,
+`left_join_with`, `right_join_with`, `cross_join_with`) and the subquery joins (`join_sub`,
 `left_join_sub`, `join_sub_with`, `left_join_sub_with`). See
 [Query Builder - Joins](queries.md#joins) for the conditions a join
 takes.
@@ -1070,11 +1084,14 @@ table once the query joins another, so a joined table with its own
 `deleted_at` doesn't make the column ambiguous. The joined table's own
 soft-delete filter isn't applied, as in Laravel.
 
-`count` and `paginate` count the joined rows. `update_all`,
-`delete_all`, `force_delete_all`, and `increment_each` return an error
-on a query with a join, because the statement they render would ignore
-it. Narrow the rows with `where_in` or `where_exists` on a subquery
-instead.
+`count` and `paginate` count the joined rows. You use `update` or
+`update_all` to update matching base rows, and `delete` or `delete_all`
+to delete them. On a soft-delete model, deletion writes its tombstone;
+`force_delete_all` removes the rows. Every join and predicate still
+constrains these writes. `increment_each` still refuses joins.
+
+You compare two columns with `where_column(a, b)` for equality or
+`where_column_op(a, op, b)` for another allowed operator.
 
 ### Unions
 
@@ -1872,10 +1889,19 @@ for r in &roles {
   columns. Stamps timestamps when `with_timestamps` is on.
 - `.detach(id)` - DELETE the pivot row(s) linking parent → id.
 - `.sync([ids...])` - diff-and-apply: attach what's new, detach what's
-  missing, leave the intersection alone. Wrapped in a transaction.
-- `.sync_without_detaching([ids...])` - attach what's new and leave every
-  existing pivot row untouched, extra columns and timestamps included.
-  Wrapped in a transaction. Laravel's `syncWithoutDetaching`.
+  missing, update supplied pivot columns on existing rows. You receive
+  `SyncChanges` with `attached`, `detached` and `updated` id lists.
+- `.sync_without_detaching([ids...])` - attach what's new and keep every
+  existing row. You can supply `(id, attrs! { ... })` records to update
+  existing pivot columns. Unchanged rows keep their timestamps, and the
+  returned `SyncChanges.detached` is empty.
+
+You pass ids alone or `(id, Attrs)` records to either sync method.
+Only rows whose supplied columns change appear under `updated`. Pivot
+filters constrain the current set, updates and detachments; rows outside
+that set remain unchanged. All changes run in one transaction. You call
+`.touch_parent()` to update the parent's timestamp when sync changes the
+relation; the touch commits or rolls back with the pivot writes.
 
 Each id and extra column binds by the type its column has: the pivot
 model's field, or else the key the column holds. On Postgres and SQLite,
@@ -3211,18 +3237,18 @@ fact-of-rotation plus an actionable re-encrypt hint.
 3. Deploy. New writes use the new key; existing rows continue to
    decrypt via the previous-key fallback. Warnings in logs identify
    columns that still depend on `APP_KEY_PREVIOUS`.
-4. Run a re-encrypt pass. For each model with encrypted casts:
+4. Run a re-encrypt pass. You explicitly update each encrypted attribute:
    ```rust
-   for chunk in User::query().chunk(500).await? {
-       for user in chunk {
-           // Touch + save rewrites every cast column under the
-           // current key. `Cast::to_storage` always reaches for
-           // the current ring entry.
-           user.save().await?;
+   User::query().chunk(500, |batch| async move {
+       for user in batch {
+           let token = user.api_token.clone();
+           user.update(attrs! { api_token: token }).await?;
        }
-   }
+       Ok::<(), suprnova::FrameworkError>(())
+   }).await?;
    ```
-   This is idempotent - rows already on the new key just no-op.
+   You use an explicit update because a clean save writes no columns.
+   The cast encrypts the supplied attribute under the current key.
 5. Once logs show no more `APP_KEY_PREVIOUS` warnings (give the
    batch + any soft-deleted / archived data a generous window),
    remove `APP_KEY_PREVIOUS` from the environment and redeploy.
@@ -3419,7 +3445,8 @@ When both `created_at` and `updated_at` columns exist, the macro
 auto-detects them and enables timestamp tracking:
 
 - `created_at` is set to `Utc::now()` on `save()` for new rows.
-- `updated_at` is set to `Utc::now()` on every `save()`.
+- `updated_at` is set to `Utc::now()` when a dirty `save()` writes. A clean
+  save leaves the timestamp unchanged.
 
 The auto-detect is conservative: if the struct has only one of the
 two columns, the macro errors out so a typo

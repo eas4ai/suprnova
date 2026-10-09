@@ -267,14 +267,9 @@ async fn model_round_trips_row_written_under_previous_key() {
 }
 
 #[tokio::test]
-async fn model_save_re_encrypts_under_current_key() {
-    // Re-encryption job semantics: loading a legacy row and saving
-    // it back must rewrite the column under the current key. The
-    // operator's "rotation completion" pass is literally `for each
-    // row: load + save`. We pin that behaviour here so a regression
-    // in the cast-to-storage path (e.g. accidentally caching the
-    // origin and re-using the previous key on save) shows up as a
-    // failing test.
+async fn explicit_model_update_re_encrypts_under_current_key() {
+    // A clean save preserves the original ciphertext. An explicit update
+    // writes the encrypted attribute under the current key.
     let keys = rotation_keys();
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared(
@@ -292,13 +287,23 @@ async fn model_save_re_encrypts_under_current_key() {
     .await
     .unwrap();
 
-    // Read + save - the cast layer rewrites the column under current.
-    let mut row = RotationEnc::find(1).await.unwrap().unwrap();
-    // Touch the field so the active model definitely registers a
-    // change (some ORMs no-op on a value-identity save; force a
-    // round-trip by reassigning the same plaintext).
-    row.secret = row.secret.clone();
+    let row = RotationEnc::find(1).await.unwrap().unwrap();
     row.save().await.unwrap();
+    let raw = db
+        .fetch_one(
+            "SELECT secret FROM rotation_enc WHERE id = ?",
+            vec![sea_orm::Value::from(1i64)],
+        )
+        .await
+        .expect("read after clean save");
+    assert_eq!(
+        raw.try_get::<String>("", "secret").expect("ciphertext"),
+        legacy_wire
+    );
+    let secret = row.secret.clone();
+    row.update(suprnova::attrs! { secret: secret })
+        .await
+        .expect("explicit update rotates the key");
 
     // Read the raw column back: it should now decrypt under the
     // current key (origin Current), not the previous key.
@@ -317,7 +322,7 @@ async fn model_save_re_encrypts_under_current_key() {
     assert_eq!(
         origin.key,
         KeyOrigin::Current,
-        "save() must re-encrypt under current key; got {origin:?}"
+        "an explicit update must re-encrypt under current key; got {origin:?}"
     );
     assert_eq!(origin.aad, AadVersion::Current);
 }
@@ -339,7 +344,7 @@ async fn model_save_re_encrypts_under_current_key() {
 //    - `ring_walks_full_previous_list_to_find_match`
 //    - `decrypt_t_round_trip_via_fallback`
 //    - `model_round_trips_row_written_under_previous_key`
-//    - `model_save_re_encrypts_under_current_key`
+//    - `explicit_model_update_re_encrypts_under_current_key`
 //
 // 4. Revert the mutation. All tests pass again.
 //

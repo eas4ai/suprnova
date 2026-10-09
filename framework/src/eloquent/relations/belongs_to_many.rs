@@ -27,11 +27,11 @@
 //!   columns (and timestamps if `with_timestamps()` is set).
 //! - [`detach`](BelongsToMany::detach) - DELETE a single pivot row.
 //! - [`sync`](BelongsToMany::sync) - diff-and-apply against the current pivot
-//!   set; runs attach + detach inside a `DatabaseTransaction` so a
-//!   partial failure rolls back.
+//!   set; applies inserts, updates, detachments and parent touches in
+//!   one transaction so a partial failure rolls back.
 //! - [`sync_without_detaching`](BelongsToMany::sync_without_detaching) -
-//!   the attach half of `sync`: adds the missing rows and leaves every
-//!   existing one untouched.
+//!   adds missing rows and updates supplied pivot columns without
+//!   detaching existing rows. Both sync methods return [`SyncChanges`].
 //!
 //! Readers:
 //!
@@ -43,9 +43,8 @@
 //!   pivot_foreign_key = ?`.
 //! - [`where_pivot`](BelongsToMany::where_pivot) and family - constrain
 //!   the pivot side of a read. Applies to `get` / `first` / `count`;
-//!   the mutators refuse to run while a filter is set, because Suprnova
-//!   builds its pivot DELETE by hand and a read predicate silently not
-//!   narrowing a write is a difference the caller cannot see. Eager
+//!   both sync methods honor the same filters. Attach and detach refuse
+//!   to run while a filter is set. Eager
 //!   loading (`User::with(["roles"])`) goes through the macro-emitted
 //!   `__eager_load` arm, which never constructs a `BelongsToMany` and
 //!   therefore carries no pivot filter - use the relation accessor for
@@ -73,12 +72,69 @@ use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_metho
 use crate::eloquent::relations::{ColumnBinder, Relation, RelationKind};
 use crate::error::FrameworkError;
 
+/// The changed id lists let you audit one atomic pivot reconciliation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SyncChanges {
+    /// Ids inserted by this call, in input order.
+    pub attached: Vec<serde_json::Value>,
+    /// Ids removed from the filtered relation, in key order.
+    pub detached: Vec<serde_json::Value>,
+    /// Ids whose supplied pivot columns changed, in input order.
+    pub updated: Vec<serde_json::Value>,
+}
+
+/// An id and its optional pivot columns let one sync mix inserts and updates.
+#[derive(Debug, Clone)]
+pub struct SyncRecord {
+    id: serde_json::Value,
+    attributes: Attrs,
+}
+
+impl SyncRecord {
+    /// Associate pivot columns with an id instead of applying one map to every id.
+    pub fn new(id: impl Into<serde_json::Value>, attributes: Attrs) -> Self {
+        Self {
+            id: id.into(),
+            attributes,
+        }
+    }
+}
+
+impl<V: Into<serde_json::Value>> From<(V, Attrs)> for SyncRecord {
+    fn from((id, attributes): (V, Attrs)) -> Self {
+        Self::new(id, attributes)
+    }
+}
+
+macro_rules! sync_id_conversions {
+    ($($id:ty),* $(,)?) => { $(
+        impl From<$id> for SyncRecord {
+            fn from(id: $id) -> Self { Self::new(id, Attrs::new()) }
+        }
+    )* };
+}
+sync_id_conversions!(
+    i8,
+    i16,
+    i32,
+    i64,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    usize,
+    String,
+    &str,
+    serde_json::Value
+);
+
 /// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
 /// [`BelongsToMany::only_trashed`]. Aliased so the field declaration
 /// satisfies clippy's `type_complexity` lint and reads as one type.
 /// Same shape as [`super::belongs_to::ScopeRewrite`][crate::eloquent::relations::belongs_to] -
 /// the soft-delete bound is captured at closure construction time.
-type ScopeRewrite<R> = Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send>;
+type ScopeRewrite<R> = Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync>;
 
 /// Many-to-many relation from parent `L` to related `R` through pivot
 /// `P`. Constructed by the macro-emitted relation method
@@ -151,6 +207,7 @@ where
     /// on the pivot row and the loader surfaces both columns in the
     /// pivot context.
     with_timestamps: bool,
+    touch_parent: bool,
     /// Deferred soft-delete scope rewrite applied to the related-row
     /// query at [`Self::get`] / [`Self::first`] time. Only ever set
     /// by [`Self::with_trashed`] / [`Self::only_trashed`], both gated
@@ -232,6 +289,7 @@ where
             related_key: R::PRIMARY_KEY.into(),
             pivot_columns: Vec::new(),
             with_timestamps: false,
+            touch_parent: false,
             scope_rewrite: None,
             pivot_filters: PivotFilters::default(),
             lazy_load: LazyLoadGuard::default(),
@@ -270,6 +328,13 @@ where
     /// `->withTimestamps()`.
     pub fn with_timestamps(mut self) -> Self {
         self.with_timestamps = true;
+        self
+    }
+
+    /// Touch the parent's timestamp after a sync changes its pivot rows.
+    /// The touch shares the reconciliation's transaction, including rollback.
+    pub fn touch_parent(mut self) -> Self {
+        self.touch_parent = true;
         self
     }
 
@@ -481,214 +546,331 @@ where
         crate::render_cache::orm::after_bulk_write(&self.pivot_table).await
     }
 
-    /// Replace the parent's full set of attached relations with the
-    /// given IDs. Mirrors Laravel's `->sync([...])`.
-    ///
-    /// 1. SELECT current pivot rows for this parent.
-    /// 2. Compute `attach_set = ids - current` and
-    ///    `detach_set = current - ids`.
-    /// 3. Execute the attaches + detaches inside a single
-    ///    `DatabaseTransaction` so a partial failure rolls back.
-    ///
-    /// IDs in `ids` are normalised by their JSON string form (matching
-    /// the framework-wide FK-key-as-string convention), so duplicates
-    /// in the input set collapse to one attach.
-    pub async fn sync<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    /// Reconcile ids or `(id, Attrs)` records and report what changed.
+    /// Pivot filters bound the rows read, detached and updated. Missing ids attach
+    /// with their supplied columns. All reads and writes share one transaction.
+    pub async fn sync<I, V>(self, ids: I) -> Result<SyncChanges, FrameworkError>
     where
         I: IntoIterator<Item = V>,
-        V: Into<serde_json::Value>,
+        V: Into<SyncRecord>,
     {
-        self.sync_ids(unique_pivot_ids(ids), true).await
+        self.sync_records(ids, true).await
     }
 
-    /// Attach each of `ids` the relation does not hold yet, and leave
-    /// every pivot row it already has as it is. Mirrors Laravel's
-    /// `->syncWithoutDetaching([...])`.
-    ///
-    /// It is [`Self::sync`] without the detach half: an id already
-    /// attached is skipped, not rewritten, so that row's extra pivot
-    /// columns and its `created_at` / `updated_at` stay as they were. The
-    /// inserts run in one transaction, so one that fails rolls back the
-    /// others, and duplicate ids collapse to one attach as in `sync`.
-    /// Returns `()` like `sync`, not Laravel's attached / detached /
-    /// updated report.
-    pub async fn sync_without_detaching<I, V>(self, ids: I) -> Result<(), FrameworkError>
+    /// Attach missing ids and update supplied pivot columns without removing other rows.
+    /// Return the changed id lists so a caller can distinguish inserts from updates.
+    pub async fn sync_without_detaching<I, V>(self, ids: I) -> Result<SyncChanges, FrameworkError>
     where
         I: IntoIterator<Item = V>,
-        V: Into<serde_json::Value>,
+        V: Into<SyncRecord>,
     {
-        self.sync_ids(unique_pivot_ids(ids), false).await
+        self.sync_records(ids, false).await
     }
 
-    /// The checks and the atomic wrapper shared by [`Self::sync`] and
-    /// [`Self::sync_without_detaching`]. `detaching` says whether rows
-    /// missing from `target_ids` are deleted.
-    async fn sync_ids(
+    /// Validate ids before executing and collapse duplicate records to their last columns.
+    async fn sync_records<I, V>(
         self,
-        target_ids: Vec<serde_json::Value>,
+        ids: I,
         detaching: bool,
-    ) -> Result<(), FrameworkError> {
-        self.pivot_filters.reject_mutation()?;
+    ) -> Result<SyncChanges, FrameworkError>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<SyncRecord>,
+    {
         self.validate_meta()?;
-        crate::render_cache::orm::atomic(L::default_connection_name(), || {
-            self.sync_inner(target_ids, detaching)
+        self.pivot_filters.validate()?;
+        let mut records = indexmap::IndexMap::new();
+        for record in ids {
+            let record = record.into();
+            serde_json::from_value::<R::Key>(record.id.clone()).map_err(|error| {
+                FrameworkError::param(format!("sync: invalid related id: {error}"))
+            })?;
+            for column in record.attributes.keys() {
+                crate::database::validate_identifier(column)?;
+            }
+            records.insert(record.id.to_string(), record);
+        }
+        crate::render_cache::orm::atomic(L::default_connection_name(), || async move {
+            let exec =
+                ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
+            let transaction = match &exec {
+                ExecutorChoice::Tx(tx, _) => tx.begin().await,
+                ExecutorChoice::Pool(pool, _) => pool.inner().begin().await,
+            }
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+            let changes = match self.sync_on(&transaction, records, detaching).await {
+                Ok(changes) => {
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(|error| FrameworkError::database(error.to_string()))?;
+                    changes
+                }
+                Err(error) => {
+                    transaction.rollback().await.map_err(|rollback| {
+                        FrameworkError::database(format!(
+                            "sync failed: {error}; rollback failed: {rollback}"
+                        ))
+                    })?;
+                    return Err(error);
+                }
+            };
+            if !changes.attached.is_empty()
+                || !changes.detached.is_empty()
+                || !changes.updated.is_empty()
+            {
+                crate::render_cache::orm::after_bulk_write(&self.pivot_table).await?;
+                if self.touches_parent() {
+                    crate::render_cache::orm::after_row_write(L::TABLE, &self.parent_key_value)
+                        .await?;
+                }
+            }
+            Ok(changes)
         })
         .await
     }
 
-    /// The pivot reconciliation and its advance, run under [`Self::sync`]'s
-    /// atomic wrapper (CACHE-009): inside the ambient transaction the
-    /// writes route through it and the advance joins it. Without
-    /// `detaching` nothing is deleted.
-    async fn sync_inner(
-        self,
-        target_ids: Vec<serde_json::Value>,
+    /// Read and reconcile through the same connection or transaction handle.
+    async fn sync_on<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        records: indexmap::IndexMap<String, SyncRecord>,
         detaching: bool,
-    ) -> Result<(), FrameworkError> {
-        use std::collections::{HashMap, HashSet};
-
-        // Resolve through ExecutorChoice so the SELECT + INSERTs +
-        // DELETEs all run on the ambient transaction connection when
-        // CURRENT_TX is active, and honour the parent model's
-        // `#[model(connection = "...")]` default outside a tx. Outside
-        // a tx we still open an inner SeaORM transaction (below) for
-        // atomicity of the attach/detach loop; that inner tx is
-        // unnecessary when we already inherit one from the closure
-        // form.
-        let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
-        let backend = exec.backend();
-
-        // SELECT current pivot rows: only the related-key column is
-        // needed for the diff. Backend-aware placeholder for the
-        // single parent-key bind.
+    ) -> Result<SyncChanges, FrameworkError> {
+        use sea_orm::FromQueryResult;
+        let backend = conn.get_database_backend();
         let target = self.pivot_target();
-        let parent = bind_pivot_comparison(
-            backend,
-            target.typed(
+        let mut values = Vec::new();
+        let predicate = self.sync_predicate(backend, None, &mut values)?;
+        let rows = conn
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "SELECT * FROM {} WHERE {predicate} ORDER BY {}",
+                    self.pivot_table, self.pivot_related_key
+                ),
+                values,
+            ))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        let mut current = indexmap::IndexMap::new();
+        for row in rows {
+            let id = pivot_key_json(&row, &self.pivot_related_key).ok_or_else(|| {
+                FrameworkError::database("sync: pivot id is not an integer or string")
+            })?;
+            let stored = <P::Entity as sea_orm::EntityTrait>::Model::from_query_result(&row, "")
+                .map_err(|error| FrameworkError::database(error.to_string()))?;
+            let model = P::try_from_storage(stored)?;
+            let raw = serde_json::Value::from_query_result(&row, "")
+                .map_err(|error| FrameworkError::database(error.to_string()))?;
+            current.insert(id.to_string(), (id, model, raw));
+        }
+        let mut changes = SyncChanges::default();
+        if detaching {
+            changes.detached = current
+                .iter()
+                .filter(|(key, _)| !records.contains_key(*key))
+                .map(|(_, (id, _, _))| id.clone())
+                .collect();
+            if !changes.detached.is_empty() {
+                let mut values = Vec::new();
+                let predicate = self.sync_predicate(backend, None, &mut values)?;
+                let mut placeholders = Vec::new();
+                for id in &changes.detached {
+                    let typed = target.typed(target.related_key, Some(target.related), id);
+                    let bound = bind_pivot_comparison(backend, typed, id).ok_or_else(|| {
+                        FrameworkError::database(
+                            "sync: a stored pivot id cannot bind to its column",
+                        )
+                    })?;
+                    placeholders.push(crate::database::placeholder::typed_placeholder(
+                        backend,
+                        values.len() + 1,
+                        &bound,
+                    )?);
+                    values.push(bound);
+                }
+                conn.execute_raw(Statement::from_sql_and_values(
+                    backend,
+                    format!(
+                        "DELETE FROM {} WHERE {predicate} AND {} IN ({})",
+                        self.pivot_table,
+                        self.pivot_related_key,
+                        placeholders.join(", ")
+                    ),
+                    values,
+                ))
+                .await
+                .map_err(|error| FrameworkError::database(error.to_string()))?;
+            }
+        }
+        for (key, record) in records {
+            if let Some((_, model, raw)) = current.get(&key) {
+                let mut changed = Attrs::new();
+                for (column, value) in record.attributes.iter() {
+                    if column == self.pivot_foreign_key || column == self.pivot_related_key {
+                        continue;
+                    }
+                    let held = model
+                        .field_value(column)
+                        .or_else(|| raw.get(column).cloned());
+                    if held.as_ref() != Some(value) {
+                        changed.insert(column, value.clone());
+                    }
+                }
+                if changed.is_empty() {
+                    continue;
+                }
+                let extras = pivot_extras_through_casts::<P>(
+                    changed,
+                    &[&self.pivot_foreign_key, &self.pivot_related_key],
+                )?;
+                let mut values = Vec::new();
+                let mut sets = Vec::new();
+                for (column, value) in extras {
+                    let bound = bind_pivot_extra(conn, &self.pivot_table, &column, value).await?;
+                    let expression = if let Some(bound) = bound {
+                        let ph = crate::database::placeholder::typed_placeholder(
+                            backend,
+                            values.len() + 1,
+                            &bound,
+                        )?;
+                        values.push(bound);
+                        ph
+                    } else {
+                        "NULL".to_string()
+                    };
+                    sets.push(format!("{column} = {expression}"));
+                }
+                if self.with_timestamps && !sets.iter().any(|set| set.starts_with("updated_at = "))
+                {
+                    let stamp = sea_orm::Value::ChronoDateTimeUtc(Some(crate::clock::now()));
+                    let ph = crate::database::placeholder::typed_placeholder(
+                        backend,
+                        values.len() + 1,
+                        &stamp,
+                    )?;
+                    values.push(stamp);
+                    sets.push(format!("updated_at = {ph}"));
+                }
+                let predicate = self.sync_predicate(backend, Some(&record.id), &mut values)?;
+                let result = conn
+                    .execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        format!(
+                            "UPDATE {} SET {} WHERE {predicate}",
+                            self.pivot_table,
+                            sets.join(", ")
+                        ),
+                        values,
+                    ))
+                    .await
+                    .map_err(|error| FrameworkError::database(error.to_string()))?;
+                if result.rows_affected() != 0 {
+                    changes.updated.push(record.id);
+                }
+            } else {
+                let extra = pivot_extras_through_casts::<P>(
+                    record.attributes,
+                    &[&self.pivot_foreign_key, &self.pivot_related_key],
+                )?;
+                attach_one(
+                    conn,
+                    &target,
+                    &self.parent_key_value,
+                    &record.id,
+                    extra,
+                    self.with_timestamps,
+                )
+                .await?;
+                changes.attached.push(record.id);
+            }
+        }
+        if self.touches_parent()
+            && (!changes.attached.is_empty()
+                || !changes.detached.is_empty()
+                || !changes.updated.is_empty())
+        {
+            self.touch_parent_on(conn).await?;
+        }
+        Ok(changes)
+    }
+
+    /// Bind the owner and optional related id before applying every pivot filter.
+    fn sync_predicate(
+        &self,
+        backend: DatabaseBackend,
+        related: Option<&serde_json::Value>,
+        values: &mut Vec<sea_orm::Value>,
+    ) -> Result<String, FrameworkError> {
+        let target = self.pivot_target();
+        let mut predicates = Vec::new();
+        for (column, typed_key, id) in [
+            (
                 target.foreign_key,
-                Some(target.parent),
-                &self.parent_key_value,
+                target.parent,
+                Some(&self.parent_key_value),
             ),
+            (target.related_key, target.related, related),
+        ] {
+            let Some(id) = id else {
+                continue;
+            };
+            let Some(bound) =
+                bind_pivot_comparison(backend, target.typed(column, Some(typed_key), id), id)
+            else {
+                return Ok("1 = 0".to_string());
+            };
+            let ph =
+                crate::database::placeholder::typed_placeholder(backend, values.len() + 1, &bound)?;
+            values.push(bound);
+            predicates.push(format!("{column} = {ph}"));
+        }
+        let mut n = values.len();
+        let filters = self.pivot_filters.render_and(backend, values, &mut n)?;
+        Ok(format!("{}{filters}", predicates.join(" AND ")))
+    }
+
+    /// Follow explicit configuration or a related model's declared inverse owner touch.
+    fn touches_parent(&self) -> bool {
+        L::HAS_TIMESTAMPS
+            && !crate::eloquent::touches_disabled()
+            && (self.touch_parent
+                || R::TOUCHES.iter().any(|name| {
+                    crate::eloquent::find_relation::<R>(name)
+                        .is_some_and(|entry| entry.target_table == L::TABLE)
+                }))
+    }
+
+    /// Write the parent's timestamp in the pivot transaction so either both writes commit or neither does.
+    async fn touch_parent_on<C: ConnectionTrait>(&self, conn: &C) -> Result<(), FrameworkError> {
+        for identifier in [L::TABLE, L::UPDATED_AT_COLUMN, self.parent_key.as_str()] {
+            crate::database::validate_identifier(identifier)?;
+        }
+        let backend = conn.get_database_backend();
+        let timestamp = L::updated_at_storage(&crate::clock::now())?;
+        let key = bind_pivot_write(
+            conn,
+            L::TABLE,
+            &self.parent_key,
+            L::bind_column(&self.parent_key, &self.parent_key_value),
             &self.parent_key_value,
-        );
-        let rows = match parent {
-            Some(parent) => {
-                let select_ph =
-                    crate::database::placeholder::typed_placeholder(backend, 1, &parent)?;
-                let select_sql = format!(
-                    "SELECT {related_key} AS __sn_related FROM {table} WHERE {fk} = {ph}",
-                    related_key = self.pivot_related_key,
-                    table = self.pivot_table,
-                    fk = self.pivot_foreign_key,
-                    ph = select_ph,
-                );
-                let select_stmt =
-                    Statement::from_sql_and_values(backend, &select_sql, vec![parent]);
-                exec.query_all(select_stmt)
-                    .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?
-            }
-            None => Vec::new(),
-        };
-
-        // Pull each row's related-key as a JSON value so the diff
-        // matches by the same shape as the input set.
-        let mut current_map: HashMap<String, serde_json::Value> = HashMap::new();
-        for r in rows.iter() {
-            // The column may come back as i64, String, etc. - try the
-            // common shapes; falling back to the textual form covers
-            // exotic PKs. The key for the HashMap is always the JSON
-            // string form of whatever we recover.
-            if let Some(v) = pivot_key_json(r, "__sn_related") {
-                current_map.insert(v.to_string(), v);
-            }
-        }
-        let current_keys: HashSet<String> = current_map.keys().cloned().collect();
-
-        let target_keys: HashSet<String> = target_ids.iter().map(|v| v.to_string()).collect();
-
-        // attach_set = target - current
-        let mut attach_set: Vec<serde_json::Value> = Vec::new();
-        for v in target_ids.into_iter() {
-            if !current_keys.contains(&v.to_string()) {
-                attach_set.push(v);
-            }
-        }
-        // detach_set = current - target, and nothing without `detaching`
-        let detach_set: Vec<serde_json::Value> = if detaching {
-            current_map
-                .into_iter()
-                .filter_map(|(k, v)| (!target_keys.contains(&k)).then_some(v))
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        // Transactional attach + detach. Either all rows commit or
-        // none do. When we already inherit a tx via `CURRENT_TX` the
-        // ambient one provides atomicity - opening a nested SeaORM
-        // begin() inside a tx connection would silently degrade to a
-        // savepoint that the outer rollback would still discard, so we
-        // just write directly via the executor. Outside a tx we still
-        // wrap the writes in an inner SeaORM transaction so a partial
-        // failure rolls back.
-        match &exec {
-            ExecutorChoice::Tx(t, _) => {
-                for related_id in detach_set.iter() {
-                    detach_one(
-                        t.as_ref(),
-                        &self.pivot_target(),
-                        &self.parent_key_value,
-                        related_id,
-                    )
-                    .await?;
-                }
-                for related_id in attach_set.iter() {
-                    attach_one(
-                        t.as_ref(),
-                        &self.pivot_target(),
-                        &self.parent_key_value,
-                        related_id,
-                        Vec::new(),
-                        self.with_timestamps,
-                    )
-                    .await?;
-                }
-            }
-            ExecutorChoice::Pool(c, _) => {
-                let txn = c
-                    .inner()
-                    .begin()
-                    .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?;
-                for related_id in detach_set.iter() {
-                    detach_one(
-                        &txn,
-                        &self.pivot_target(),
-                        &self.parent_key_value,
-                        related_id,
-                    )
-                    .await?;
-                }
-                for related_id in attach_set.iter() {
-                    attach_one(
-                        &txn,
-                        &self.pivot_target(),
-                        &self.parent_key_value,
-                        related_id,
-                        Vec::new(),
-                        self.with_timestamps,
-                    )
-                    .await?;
-                }
-                txn.commit()
-                    .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?;
-            }
-        }
-        if !attach_set.is_empty() || !detach_set.is_empty() {
-            crate::render_cache::orm::after_bulk_write(&self.pivot_table).await?;
-        }
+        )
+        .await?;
+        let stamp_ph = crate::database::placeholder::typed_placeholder(backend, 1, &timestamp)?;
+        let key_ph = crate::database::placeholder::typed_placeholder(backend, 2, &key)?;
+        conn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!(
+                "UPDATE {} SET {} = {stamp_ph} WHERE {} = {key_ph}",
+                L::TABLE,
+                L::UPDATED_AT_COLUMN,
+                self.parent_key
+            ),
+            vec![timestamp, key],
+        ))
+        .await
+        .map_err(|error| FrameworkError::database(error.to_string()))?;
         Ok(())
     }
 

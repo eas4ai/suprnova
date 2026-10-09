@@ -109,6 +109,8 @@ struct History {
     /// The changes of the last save that changed something, or `None`
     /// before any such save.
     changes: Option<Arc<Attrs>>,
+    /// Stored values before the last save that changed each named column.
+    previous: Option<Arc<Attrs>>,
 }
 
 /// The row history of one model instance.
@@ -134,6 +136,7 @@ impl RowState {
                 synced: Some(Arc::new(row)),
                 in_progress: None,
                 changes: None,
+                previous: None,
             }),
         }
     }
@@ -193,6 +196,7 @@ pub(crate) fn record_save(
     before: Option<&RowState>,
     after: Option<&RowState>,
     decoded_equal: DecodedEqual,
+    written_columns: Option<&[String]>,
 ) -> Result<(), FrameworkError> {
     let Some(after) = after else {
         return Ok(());
@@ -207,6 +211,9 @@ pub(crate) fn record_save(
     let before_json = before_row.as_ref().map(|row| row.to_json()).transpose()?;
     let mut changes = Attrs::new();
     for (column, value) in after_json {
+        if written_columns.is_some_and(|columns| !columns.contains(&column)) {
+            continue;
+        }
         let unchanged = match (&before_row, before_json.as_ref()) {
             (Some(before_row), Some(before_json)) => match before_json.get(&column) {
                 Some(old) if *old == value => true,
@@ -224,16 +231,28 @@ pub(crate) fn record_save(
             changes.insert(column, value);
         }
     }
-    let changes = if changes.is_empty() {
-        before_history.changes
+    let (changes, previous) = if changes.is_empty() {
+        (before_history.changes, before_history.previous)
     } else {
-        Some(Arc::new(changes))
+        let previous = Attrs::from(Value::Object(
+            changes
+                .keys()
+                .filter_map(|column| {
+                    before_json
+                        .as_ref()
+                        .and_then(|original| original.get(column))
+                        .map(|value| (column.to_string(), value.clone()))
+                })
+                .collect(),
+        ));
+        (Some(Arc::new(changes)), Some(Arc::new(previous)))
     };
 
     after.write(History {
         synced: Some(after_row),
         in_progress: Some(SaveInProgress { before: before_row }),
         changes,
+        previous,
     });
     Ok(())
 }
@@ -318,6 +337,11 @@ pub(crate) fn changes(state: Option<&RowState>) -> Attrs {
         .unwrap_or_default()
 }
 
+/// The value before the last save that changed this column, in stored form.
+pub(crate) fn previous(state: Option<&RowState>, attribute: &str) -> Option<Value> {
+    state?.read().previous?.get(attribute).cloned()
+}
+
 /// The row `get_original` reads: the row a save in progress started from,
 /// otherwise the row as last read or saved. `None` when there is no such
 /// row because the instance was never read from the database.
@@ -385,7 +409,7 @@ mod tests {
     fn a_save_records_only_the_columns_whose_stored_value_differs() {
         let before = RowState::loaded(row("a", 0));
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&before), Some(&after), stored_only).unwrap();
+        record_save(Some(&before), Some(&after), stored_only, None).unwrap();
 
         assert!(was_changed_any(Some(&after), &["flag"]));
         assert!(!was_changed_any(Some(&after), &["name", "id"]));
@@ -399,7 +423,7 @@ mod tests {
     fn the_original_is_the_row_before_the_save_until_the_save_finishes() {
         let before = RowState::loaded(row("a", 0));
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&before), Some(&after), stored_only).unwrap();
+        record_save(Some(&before), Some(&after), stored_only, None).unwrap();
         assert_eq!(raw_original(Some(&after), "flag"), Some(json!(0)));
 
         finish_save(Some(&after));
@@ -414,11 +438,11 @@ mod tests {
     fn a_save_that_changes_nothing_keeps_the_previous_changes() {
         let loaded = RowState::loaded(row("a", 0));
         let first = RowState::loaded(row("a", 1));
-        record_save(Some(&loaded), Some(&first), stored_only).unwrap();
+        record_save(Some(&loaded), Some(&first), stored_only, None).unwrap();
         finish_save(Some(&first));
 
         let second = RowState::loaded(row("a", 1));
-        record_save(Some(&first), Some(&second), stored_only).unwrap();
+        record_save(Some(&first), Some(&second), stored_only, None).unwrap();
         finish_save(Some(&second));
 
         assert!(was_changed_any(Some(&second), &["flag"]));
@@ -428,7 +452,7 @@ mod tests {
     #[test]
     fn without_a_loaded_row_every_column_is_changed() {
         let after = RowState::loaded(row("a", 1));
-        record_save(Some(&RowState::default()), Some(&after), stored_only).unwrap();
+        record_save(Some(&RowState::default()), Some(&after), stored_only, None).unwrap();
 
         assert_eq!(changes(Some(&after)).len(), 3);
         assert_eq!(raw_original(Some(&after), "flag"), None);
@@ -450,7 +474,7 @@ mod tests {
         let source = RowState::loaded(row("a", 0));
         let copy = source.clone();
         let after = RowState::loaded(row("b", 0));
-        record_save(Some(&source), Some(&after), stored_only).unwrap();
+        record_save(Some(&source), Some(&after), stored_only, None).unwrap();
         source.adopt(&after);
 
         assert!(was_changed_any(Some(&source), &["name"]));

@@ -179,6 +179,10 @@ pub(crate) enum WhereTerm {
     /// `crate::database::binary_comparison_unsupported`).
     Binary(String, String, bool),
     Column(String, String),
+    /// A column comparison with an explicit, validated operator.
+    ColumnOp(String, String, String),
+    /// A flat OR connector for the following term.
+    OrNext(Box<WhereTerm>),
     Raw(String, Vec<Value>),
     JsonContains(String, Value),
     JsonLength(String, String, i64),
@@ -938,13 +942,18 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
             validate_identifier(a)?;
             validate_identifier(b)?;
         }
+        WhereTerm::ColumnOp(a, op, b) => {
+            validate_identifier(a)?;
+            validate_sql_operator(op)?;
+            validate_identifier(b)?;
+        }
         WhereTerm::Raw(sql, bindings) => {
             // Explicit raw-SQL escape hatch; caller documents the
             // trust boundary at `Builder::where_raw` /
             // `Builder::having_raw`.
             validate_raw_placeholders(sql, bindings.len())?;
         }
-        WhereTerm::Not(inner) => validate_where_term(inner)?,
+        WhereTerm::Not(inner) | WhereTerm::OrNext(inner) => validate_where_term(inner)?,
         WhereTerm::Or(terms) | WhereTerm::Group(terms) => {
             for t in terms {
                 validate_where_term(t)?;
@@ -1019,7 +1028,7 @@ fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
         WhereTerm::InQuery(_, query, _) | WhereTerm::ExistsQuery(query, _) => {
             query.collect_tables(out);
         }
-        WhereTerm::Not(inner) => where_term_tables(inner, out),
+        WhereTerm::Not(inner) | WhereTerm::OrNext(inner) => where_term_tables(inner, out),
         WhereTerm::Or(terms) | WhereTerm::Group(terms) => {
             for t in terms {
                 where_term_tables(t, out);
@@ -1048,6 +1057,7 @@ fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
         | WhereTerm::NotLike(..)
         | WhereTerm::Binary(..)
         | WhereTerm::Column(..)
+        | WhereTerm::ColumnOp(..)
         | WhereTerm::JsonContains(..)
         | WhereTerm::JsonLength(..)
         | WhereTerm::DatePart(..) => {}
@@ -1400,18 +1410,14 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Folder helper: merge a fresh [`WhereTerm`] into an OR group
-    /// with the previous WHERE term, matching the shape
-    /// [`Self::or_filter`] produces.
+    /// Append OR without introducing a group around the preceding term.
     fn merge_or_term(&mut self, new: WhereTerm) {
-        match self.where_terms.last_mut() {
-            Some(WhereTerm::Or(group)) => group.push(new),
-            Some(_) => {
-                let last = self.where_terms.pop().expect("checked Some above");
-                self.where_terms.push(WhereTerm::Or(vec![last, new]));
-            }
-            None => self.where_terms.push(new),
-        }
+        let term = if self.where_terms.is_empty() {
+            new
+        } else {
+            WhereTerm::OrNext(Box::new(new))
+        };
+        self.where_terms.push(term);
     }
 
     /// Append the `(column, value)` pairs from an `Attrs` map onto the
@@ -1442,6 +1448,11 @@ impl<M> Builder<M> {
         self.filter(col, val)
     }
 
+    /// Use the equality shortcut with Rust's escaped `where` name.
+    pub fn r#where(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+        self.filter(col, val)
+    }
+
     /// `WHERE col <op> val` for arbitrary SQL operators (`>=`, `<`,
     /// `!=`, ...). The operator is recorded as-is here and checked
     /// against the SQL-operator allowlist at execution time (in the
@@ -1465,8 +1476,8 @@ impl<M> Builder<M> {
         self.filter_op(col, op, val)
     }
 
-    /// `WHERE (... OR col = val)` - folds into the previous WHERE
-    /// clause to form a disjunction. If there is no previous clause,
+    /// Add a flat `OR col = val` so SQL precedence determines the match.
+    /// If there is no previous clause,
     /// the new equality stands alone.
     #[doc(alias = "or_where")]
     pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
@@ -1474,16 +1485,7 @@ impl<M> Builder<M> {
         self.or_push_term(new)
     }
 
-    /// Fold an already-built term into the preceding WHERE clause as a
-    /// disjunction.
-    ///
-    /// Every self-consuming `or_*` method routes through here so the three
-    /// cases stay in one place: append into a trailing `Or` group so
-    /// consecutive `or_*` calls stay flat, wrap the previous term and the new
-    /// one when the last clause is a plain term, and - with no prior clause -
-    /// push the term plain so the renderer doesn't emit a dangling `()`
-    /// wrapper around a single disjunct. Just [`Self::merge_or_term`] adapted
-    /// to the builder's consuming style; see there for the actual logic.
+    /// Append a boolean-tagged term without grouping earlier comparisons.
     fn or_push_term(mut self, new: WhereTerm) -> Self {
         self.merge_or_term(new);
         self
@@ -1493,6 +1495,15 @@ impl<M> Builder<M> {
     #[doc(alias = "or_filter")]
     pub fn or_where(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         self.or_filter(col, val)
+    }
+
+    /// Compare with an explicit operator while preserving flat OR precedence.
+    pub fn or_where_op(self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
+        self.or_push_term(WhereTerm::Op(
+            col.col_name(),
+            op.to_string(),
+            val.into_val(),
+        ))
     }
 
     /// `WHERE NOT (col = val)`.
@@ -1563,7 +1574,7 @@ impl<M> Builder<M> {
         self.filter_not_in(col, vals)
     }
 
-    /// `OR col IN (...)`, folded into the previous WHERE clause like
+    /// `OR col IN (...)`, appended with flat SQL precedence like
     /// [`Self::or_filter`]. Takes a list or a subquery; see
     /// [`Self::filter_in`].
     #[doc(alias = "or_where_in")]
@@ -1578,7 +1589,7 @@ impl<M> Builder<M> {
         self.or_filter_in(col, vals)
     }
 
-    /// `OR col NOT IN (...)`, folded into the previous WHERE clause.
+    /// `OR col NOT IN (...)`, appended with flat SQL precedence.
     /// Takes a list or a subquery; see [`Self::filter_in`].
     #[doc(alias = "or_where_not_in")]
     pub fn or_filter_not_in(self, col: impl IntoColumn, vals: impl IntoWhereIn<Value>) -> Self {
@@ -1675,7 +1686,7 @@ impl<M> Builder<M> {
         self.filter_not_null(col)
     }
 
-    /// `OR col IS NULL`, folded into the previous WHERE clause.
+    /// `OR col IS NULL`, appended with flat SQL precedence.
     #[doc(alias = "or_where_null")]
     pub fn or_filter_null(self, col: impl IntoColumn) -> Self {
         self.or_push_term(WhereTerm::Null(col.col_name()))
@@ -1687,7 +1698,7 @@ impl<M> Builder<M> {
         self.or_filter_null(col)
     }
 
-    /// `OR col IS NOT NULL`, folded into the previous WHERE clause.
+    /// `OR col IS NOT NULL`, appended with flat SQL precedence.
     #[doc(alias = "or_where_not_null")]
     pub fn or_filter_not_null(self, col: impl IntoColumn) -> Self {
         self.or_push_term(WhereTerm::NotNull(col.col_name()))
@@ -1755,7 +1766,7 @@ impl<M> Builder<M> {
     }
 
     /// `WHERE (... OR col = binary val)` - [`Self::filter_binary`]
-    /// folded into the previous clause as a disjunction. Same backend
+    /// appended with flat SQL precedence. Same backend
     /// split.
     #[doc(alias = "or_where_binary")]
     pub fn or_filter_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
@@ -1936,6 +1947,16 @@ impl<M> Builder<M> {
         self.filter_column(a, b)
     }
 
+    /// Compare two columns with a validated operator instead of binding a value.
+    pub fn where_column_op(mut self, a: impl IntoColumn, op: &str, b: impl IntoColumn) -> Self {
+        self.where_terms.push(WhereTerm::ColumnOp(
+            a.col_name(),
+            op.to_string(),
+            b.col_name(),
+        ));
+        self
+    }
+
     /// `WHERE <sql>` - raw SQL fragment with positional bindings. Use
     /// portable `?` bind markers on every backend; PostgreSQL rendering
     /// rebases them to the query's current `$N` position. Use `??` for a
@@ -1962,7 +1983,7 @@ impl<M> Builder<M> {
         self.filter_raw(sql, bindings)
     }
 
-    /// `OR <sql>` - a raw fragment folded into the previous WHERE clause
+    /// `OR <sql>` - a raw fragment appended with flat SQL precedence
     /// like [`Self::or_filter`]. Same markers and the same trust boundary
     /// as [`Self::filter_raw`]: only `bindings` is parameterised.
     #[doc(alias = "or_where_raw")]
@@ -2036,8 +2057,7 @@ impl<M> Builder<M> {
         self.filter_any(cols, op, val)
     }
 
-    /// `OR (c1 op val OR c2 op val ...)`, folded into the previous WHERE
-    /// clause; see [`Self::filter_any`].
+    /// `OR (c1 op val OR c2 op val ...)`, appended with flat SQL precedence; see [`Self::filter_any`].
     #[doc(alias = "or_where_any")]
     pub fn or_filter_any<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
     where
@@ -2081,8 +2101,7 @@ impl<M> Builder<M> {
         self.filter_all(cols, op, val)
     }
 
-    /// `OR (c1 op val AND c2 op val ...)`, folded into the previous WHERE
-    /// clause; see [`Self::filter_all`].
+    /// `OR (c1 op val AND c2 op val ...)`, appended with flat SQL precedence; see [`Self::filter_all`].
     #[doc(alias = "or_where_all")]
     pub fn or_filter_all<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
     where
@@ -2127,8 +2146,7 @@ impl<M> Builder<M> {
         self.filter_none(cols, op, val)
     }
 
-    /// `OR NOT (c1 op val OR c2 op val ...)`, folded into the previous
-    /// WHERE clause; see [`Self::filter_none`].
+    /// `OR NOT (c1 op val OR c2 op val ...)`, appended with flat SQL precedence; see [`Self::filter_none`].
     #[doc(alias = "or_where_none")]
     pub fn or_filter_none<I, C>(self, cols: I, op: &str, val: impl IntoVal) -> Self
     where
@@ -2270,6 +2288,20 @@ impl<M> Builder<M> {
         self.joins.push(JoinClause::new(
             JoinKind::Cross,
             JoinTarget::Table(table.into()),
+        ));
+        self
+    }
+
+    /// Keep closure conditions on a cross join so they constrain its row pairs.
+    pub fn cross_join_with(
+        mut self,
+        table: impl Into<String>,
+        build: impl FnOnce(JoinClause) -> JoinClause,
+    ) -> Self {
+        self.joins.push(JoinClause::built_with(
+            JoinKind::Cross,
+            JoinTarget::Table(table.into()),
+            build,
         ));
         self
     }
@@ -2970,13 +3002,6 @@ struct Compared<'a> {
     sql: &'a str,
 }
 
-impl<'a> Compared<'a> {
-    /// A column the statement names as the binder does.
-    fn bare(name: &'a str) -> Self {
-        Self { name, sql: name }
-    }
-}
-
 /// Render `column op value`. A comparison [`compared_value`] settles is
 /// rendered as its outcome; under an operator that does not order numbers
 /// (`LIKE`, `IS`) the value binds as its digits, the text those operators
@@ -2992,6 +3017,14 @@ fn render_comparison(
 ) -> Result<String, FrameworkError> {
     use crate::eloquent::casts::unsigned::Settled;
 
+    if value.is_null() {
+        let not = if matches!(op, "=" | "<=>") {
+            ""
+        } else {
+            "NOT "
+        };
+        return Ok(format!("{} IS {not}NULL", column.sql));
+    }
     let operand = operand(backend, binder, column.name, value);
     let digits = match &operand {
         Operand::BeyondInteger(beyond) => Some(beyond.to_string()),
@@ -3333,9 +3366,13 @@ fn render_exists(
     } else {
         Some(spec.target_table.as_str())
     };
-    for t in &spec.inner_terms {
-        let part = render_subquery_term(backend, inner_qualifier, t, values, n, spec.binder)?;
-        where_parts.push(part);
+    if !spec.inner_terms.is_empty() {
+        let predicate = crate::database::clauses::render_boolean_list(
+            &spec.inner_terms,
+            |term| matches!(term, WhereTerm::OrNext(_)),
+            |t| render_subquery_term(backend, inner_qualifier, t, values, n, spec.binder),
+        )?;
+        where_parts.push(format!("({predicate})"));
     }
 
     // `where_relation` shortcut: col op val constraint inline.
@@ -3511,6 +3548,10 @@ pub(crate) fn render_subquery_term(
             render_binary(backend, &q(col), *not, &ph)?
         }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
+        WhereTerm::ColumnOp(a, op, b) => format!("{} {op} {}", q(a), q(b)),
+        WhereTerm::OrNext(inner) => {
+            render_subquery_term(backend, qualifier, inner, values, n, binder)?
+        }
         WhereTerm::Raw(sql, bindings) => {
             let bound: Vec<SeaValue> = bindings.iter().map(|v| untyped_value(backend, v)).collect();
             let rendered = rewrite_raw_placeholders(backend, sql, &bound, *n)?;
@@ -3544,19 +3585,15 @@ pub(crate) fn render_subquery_term(
             format!("({})", parts.join(" OR "))
         }
         WhereTerm::Group(terms) => {
-            let parts: Vec<String> = terms
-                .iter()
-                .map(|t| render_subquery_term(backend, qualifier, t, values, n, binder))
-                .collect::<Result<Vec<_>, _>>()?;
-            if parts.is_empty() {
-                // An empty group has no way to reach here through the
-                // public surface - `PivotFilters::group_from` drops a
-                // no-op closure before it becomes a term - but `()` is
-                // a syntax error in every backend, so render the
-                // always-true identity instead of emitting one.
+            if terms.is_empty() {
                 "1 = 1".to_string()
             } else {
-                format!("({})", parts.join(" AND "))
+                let sql = crate::database::clauses::render_boolean_list(
+                    terms,
+                    |term| matches!(term, WhereTerm::OrNext(_)),
+                    |t| render_subquery_term(backend, qualifier, t, values, n, binder),
+                )?;
+                format!("({sql})")
             }
         }
         WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, None)?,
@@ -3692,16 +3729,13 @@ struct JoinedTable<'a> {
     quoted: &'a str,
 }
 
-/// `column` as the query writes it: a column of the model's table in a
-/// joined query names the table in its quoted form; any other column is
-/// written as given.
-fn joined_column(joined: Option<JoinedTable<'_>>, column: &str) -> String {
-    match joined.and_then(|table| {
-        let rest = column.strip_prefix(table.name)?.strip_prefix('.')?;
-        Some((table.quoted, rest))
-    }) {
-        Some((quoted, rest)) => format!("{quoted}.{rest}"),
-        None => column.to_owned(),
+/// Quote column identifiers in a joined query so mixed-case names resolve
+/// consistently with the joined tables. Unjoined queries keep their spelling.
+fn joined_column(backend: DbBackend, joined: Option<JoinedTable<'_>>, column: &str) -> String {
+    if joined.is_some() {
+        quote_identifier(backend, column)
+    } else {
+        column.to_owned()
     }
 }
 
@@ -3739,56 +3773,130 @@ impl<M> Builder<M> {
     ) -> Result<String, FrameworkError> {
         Ok(match term {
             WhereTerm::Eq(col, v) => {
-                render_comparison(backend, binder, Compared::bare(col), "=", v, values, n)?
+                let column = joined_column(backend, joined, col);
+                render_comparison(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    "=",
+                    v,
+                    values,
+                    n,
+                )?
             }
             WhereTerm::Op(col, op, v) => {
-                render_comparison(backend, binder, Compared::bare(col), op, v, values, n)?
+                let column = joined_column(backend, joined, col);
+                render_comparison(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    op,
+                    v,
+                    values,
+                    n,
+                )?
             }
             WhereTerm::In(col, vs) => {
-                render_in_list(backend, binder, Compared::bare(col), vs, false, values, n)?
+                let column = joined_column(backend, joined, col);
+                render_in_list(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    vs,
+                    false,
+                    values,
+                    n,
+                )?
             }
             WhereTerm::NotIn(col, vs) => {
-                render_in_list(backend, binder, Compared::bare(col), vs, true, values, n)?
+                let column = joined_column(backend, joined, col);
+                render_in_list(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    vs,
+                    true,
+                    values,
+                    n,
+                )?
             }
-            WhereTerm::Between(col, a, b) => render_between(
-                backend,
-                binder,
-                Compared::bare(col),
-                (a, b),
-                false,
-                values,
-                n,
-            )?,
-            WhereTerm::NotBetween(col, a, b) => render_between(
-                backend,
-                binder,
-                Compared::bare(col),
-                (a, b),
-                true,
-                values,
-                n,
-            )?,
-            WhereTerm::Null(col) => format!("{} IS NULL", joined_column(joined, col)),
-            WhereTerm::NotNull(col) => format!("{} IS NOT NULL", joined_column(joined, col)),
+            WhereTerm::Between(col, a, b) => {
+                let column = joined_column(backend, joined, col);
+                render_between(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    (a, b),
+                    false,
+                    values,
+                    n,
+                )?
+            }
+            WhereTerm::NotBetween(col, a, b) => {
+                let column = joined_column(backend, joined, col);
+                render_between(
+                    backend,
+                    binder,
+                    Compared {
+                        name: col,
+                        sql: &column,
+                    },
+                    (a, b),
+                    true,
+                    values,
+                    n,
+                )?
+            }
+            WhereTerm::Null(col) => format!("{} IS NULL", joined_column(backend, joined, col)),
+            WhereTerm::NotNull(col) => {
+                format!("{} IS NOT NULL", joined_column(backend, joined, col))
+            }
             WhereTerm::Like(col, pat) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
                 values.push(SeaValue::String(Some(pat.clone())));
-                format!("{col} LIKE {ph}")
+                format!("{} LIKE {ph}", joined_column(backend, joined, col))
             }
             WhereTerm::NotLike(col, pat) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
                 values.push(SeaValue::String(Some(pat.clone())));
-                format!("{col} NOT LIKE {ph}")
+                format!("{} NOT LIKE {ph}", joined_column(backend, joined, col))
             }
             WhereTerm::Binary(col, val, not) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
                 values.push(SeaValue::String(Some(val.clone())));
-                render_binary(backend, col, *not, &ph)?
+                render_binary(backend, &joined_column(backend, joined, col), *not, &ph)?
             }
-            WhereTerm::Column(a, b) => format!("{a} = {b}"),
+            WhereTerm::Column(a, b) => format!(
+                "{} = {}",
+                joined_column(backend, joined, a),
+                joined_column(backend, joined, b)
+            ),
+            WhereTerm::ColumnOp(a, op, b) => format!(
+                "{} {op} {}",
+                quote_identifier(backend, a),
+                quote_identifier(backend, b)
+            ),
+            WhereTerm::OrNext(inner) => {
+                Self::render_where_term(backend, inner, values, n, binder, joined)?
+            }
             WhereTerm::Raw(sql, bindings) => {
                 let bound: Vec<SeaValue> =
                     bindings.iter().map(|v| untyped_value(backend, v)).collect();
@@ -3801,14 +3909,16 @@ impl<M> Builder<M> {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
                 values.push(json_contains_value(backend, v));
-                render_json_contains(backend, col, &ph)?
+                render_json_contains(backend, &joined_column(backend, joined, col), &ph)?
             }
-            WhereTerm::JsonLength(col, op, len) => render_json_length(backend, col, op, *len)?,
+            WhereTerm::JsonLength(col, op, len) => {
+                render_json_length(backend, &joined_column(backend, joined, col), op, *len)?
+            }
             WhereTerm::DatePart(part, col, v) => {
                 *n += 1;
                 let ph = placeholder(backend, *n)?;
                 values.push(date_part_value(backend, *part, v));
-                let lhs = render_date_part(backend, *part, col)?;
+                let lhs = render_date_part(backend, *part, &joined_column(backend, joined, col))?;
                 format!("{lhs} = {ph}")
             }
             WhereTerm::Not(inner) => {
@@ -3823,23 +3933,26 @@ impl<M> Builder<M> {
                 format!("({})", parts.join(" OR "))
             }
             WhereTerm::Group(terms) => {
-                let parts: Vec<String> = terms
-                    .iter()
-                    .map(|t| Self::render_where_term(backend, t, values, n, binder, joined))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if parts.is_empty() {
-                    // See the matching arm in `render_subquery_term`:
-                    // `()` is invalid SQL, so an empty group renders as
-                    // the always-true identity.
+                if terms.is_empty() {
                     "1 = 1".to_string()
                 } else {
-                    format!("({})", parts.join(" AND "))
+                    let sql = crate::database::clauses::render_boolean_list(
+                        terms,
+                        |term| matches!(term, WhereTerm::OrNext(_)),
+                        |t| Self::render_where_term(backend, t, values, n, binder, joined),
+                    )?;
+                    format!("({sql})")
                 }
             }
             WhereTerm::Exists(spec) => render_exists(backend, spec, values, n, joined)?,
-            WhereTerm::InQuery(col, query, negated) => {
-                render_in_query(backend, col, query, *negated, values, n)?
-            }
+            WhereTerm::InQuery(col, query, negated) => render_in_query(
+                backend,
+                &joined_column(backend, joined, col),
+                query,
+                *negated,
+                values,
+                n,
+            )?,
             WhereTerm::ExistsQuery(query, negated) => {
                 render_exists_query(backend, query, *negated, values, n)?
             }
@@ -4114,12 +4227,12 @@ impl<M> Builder<M> {
         sql.push_str(&this.render_joins(backend, values, n)?);
         if !this.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
-                .where_terms
-                .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, self.binder, joined))
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
+            let predicate = crate::database::clauses::render_boolean_list(
+                &this.where_terms,
+                |term| matches!(term, WhereTerm::OrNext(_)),
+                |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
+            )?;
+            sql.push_str(&predicate);
         }
 
         if !this.group_by.is_empty() {
@@ -4277,12 +4390,12 @@ impl<M> Builder<M> {
         // is what `render_select_into` hands in here.
         if !self.where_terms.is_empty() {
             sql.push_str(" WHERE ");
-            let parts: Vec<String> = self
-                .where_terms
-                .iter()
-                .map(|t| Self::render_where_term(backend, t, values, n, self.binder, joined))
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
+            let predicate = crate::database::clauses::render_boolean_list(
+                &self.where_terms,
+                |term| matches!(term, WhereTerm::OrNext(_)),
+                |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
+            )?;
+            sql.push_str(&predicate);
         }
 
         if !self.group_by.is_empty() {
@@ -5015,6 +5128,58 @@ where
             .expect("to_delete_sql_with_bindings_for: builder cannot render for this backend")
     }
 
+    /// Render the write prefix and bind native MySQL join conditions first.
+    fn render_update_target(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        let table = self.own_table(backend, M::TABLE);
+        let joins = if backend == DbBackend::MySql {
+            self.render_joins(backend, values, n)?
+        } else {
+            String::new()
+        };
+        Ok(format!("UPDATE {table}{joins} SET "))
+    }
+
+    /// Preserve joined row selection when a backend cannot update through a join.
+    fn render_write_where(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        if !self.joins.is_empty() && backend != DbBackend::MySql {
+            let identity = if backend == DbBackend::Postgres {
+                "ctid"
+            } else {
+                "rowid"
+            };
+            let mut query = self.clone();
+            query.select_cols = None;
+            query.select_raw = None;
+            let column = quote_identifier(backend, &format!("{}.{identity}", M::TABLE));
+            let select = query.render_select_into(backend, M::TABLE, &column, values, n)?;
+            return Ok(format!(
+                " WHERE {} IN ({select})",
+                quote_identifier(backend, identity)
+            ));
+        }
+        if self.where_terms.is_empty() {
+            return Ok(String::new());
+        }
+        let from = self.own_table(backend, M::TABLE);
+        let joined = self.joined_table(M::TABLE, &from);
+        let predicate = crate::database::clauses::render_boolean_list(
+            &self.where_terms,
+            |term| matches!(term, WhereTerm::OrNext(_)),
+            |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
+        )?;
+        Ok(format!(" WHERE {predicate}"))
+    }
+
     fn render_model_delete_sql_with_bindings(
         &self,
         backend: DbBackend,
@@ -5023,22 +5188,16 @@ where
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
 
-        sql.push_str("DELETE FROM ");
-        sql.push_str(M::TABLE);
-
         let this = self.effective();
-        this.refuse_joins("force_delete_all")?;
-        if !this.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let parts: Vec<String> = this
-                .where_terms
-                .iter()
-                .map(|t| {
-                    Self::render_where_term(backend, t, &mut values, &mut n, self.binder, None)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sql.push_str(&parts.join(" AND "));
+        this.validate_inputs()?;
+        let table = this.own_table(backend, M::TABLE);
+        if backend == DbBackend::MySql && !this.joins.is_empty() {
+            sql.push_str(&format!("DELETE {table} FROM {table}"));
+            sql.push_str(&this.render_joins(backend, &mut values, &mut n)?);
+        } else {
+            sql.push_str(&format!("DELETE FROM {table}"));
         }
+        sql.push_str(&this.render_write_where(backend, &mut values, &mut n)?);
 
         Ok((sql, values))
     }
@@ -6401,7 +6560,7 @@ where
         let key = {
             let this = s.effective();
             let from = this.own_table(backend, M::TABLE);
-            joined_column(this.joined_table(M::TABLE, &from), &qualified)
+            joined_column(backend, this.joined_table(M::TABLE, &from), &qualified)
         };
         // Alias back to the bare column name so the result column is
         // named identically on SQLite, MySQL and Postgres.
@@ -6558,7 +6717,6 @@ where
         // A mass write is scoped like a read: the soft-delete filter and
         // the global scopes decide which rows it may touch.
         let this = self.into_effective();
-        this.refuse_joins("update_all")?;
         this.validate_inputs()?;
         let tx_override = this.tx_override.clone();
         let connection_override = this.connection_override.clone();
@@ -6572,10 +6730,7 @@ where
                 let mut values: Vec<SeaValue> = Vec::new();
                 let mut n: usize = 0;
 
-                let mut sql = String::new();
-                sql.push_str("UPDATE ");
-                sql.push_str(M::TABLE);
-                sql.push_str(" SET ");
+                let mut sql = this.render_update_target(backend, &mut values, &mut n)?;
                 let set_parts: Vec<String> = attrs
                     .iter()
                     .map(|(col, v)| {
@@ -6587,29 +6742,17 @@ where
                             &mut n,
                             M::bind_column,
                         )?;
-                        Ok(format!("{col} = {expression}"))
+                        let column = if this.joins.is_empty() {
+                            col.to_owned()
+                        } else {
+                            quote_identifier(backend, col)
+                        };
+                        Ok(format!("{column} = {expression}"))
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
                 sql.push_str(&set_parts.join(", "));
 
-                if !this.where_terms.is_empty() {
-                    sql.push_str(" WHERE ");
-                    let parts: Vec<String> = this
-                        .where_terms
-                        .iter()
-                        .map(|t| {
-                            Self::render_where_term(
-                                backend,
-                                t,
-                                &mut values,
-                                &mut n,
-                                this.binder,
-                                None,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    sql.push_str(&parts.join(" AND "));
-                }
+                sql.push_str(&this.render_write_where(backend, &mut values, &mut n)?);
 
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
                 let result = exec
@@ -6620,6 +6763,16 @@ where
             },
         )
         .await
+    }
+
+    /// Update rows selected by this builder, including its joins and scopes.
+    pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+        self.update_all(attrs).await
+    }
+
+    /// Delete rows selected by this builder, retaining the model's soft-delete behavior.
+    pub async fn delete(self) -> Result<u64, FrameworkError> {
+        self.delete_all().await
     }
 
     /// Delete every row the query matches and return how many. No
@@ -6636,7 +6789,6 @@ where
             return self.force_delete_all().await;
         };
         let this = self.into_effective();
-        this.refuse_joins("delete_all")?;
         this.validate_inputs()?;
         crate::database::validate_identifier(M::SOFT_DELETES_COLUMN)?;
         let tx_override = this.tx_override.clone();
@@ -6649,42 +6801,33 @@ where
 
                 let mut values: Vec<SeaValue> = Vec::new();
                 let mut n: usize = 0;
+                let mut sql = this.render_update_target(backend, &mut values, &mut n)?;
                 n += 1;
                 values.push(stamp.deleted_at);
-                let mut sql = format!(
-                    "UPDATE {} SET {} = {}",
-                    M::TABLE,
-                    M::SOFT_DELETES_COLUMN,
+                sql.push_str(&format!(
+                    "{} = {}",
+                    if this.joins.is_empty() {
+                        M::SOFT_DELETES_COLUMN.to_owned()
+                    } else {
+                        quote_identifier(backend, M::SOFT_DELETES_COLUMN)
+                    },
                     placeholder(backend, n)?
-                );
+                ));
                 if let Some(updated_at) = stamp.updated_at {
                     crate::database::validate_identifier(M::UPDATED_AT_COLUMN)?;
                     n += 1;
                     values.push(updated_at);
                     sql.push_str(&format!(
                         ", {} = {}",
-                        M::UPDATED_AT_COLUMN,
+                        if this.joins.is_empty() {
+                            M::UPDATED_AT_COLUMN.to_owned()
+                        } else {
+                            quote_identifier(backend, M::UPDATED_AT_COLUMN)
+                        },
                         placeholder(backend, n)?
                     ));
                 }
-                if !this.where_terms.is_empty() {
-                    sql.push_str(" WHERE ");
-                    let parts: Vec<String> = this
-                        .where_terms
-                        .iter()
-                        .map(|t| {
-                            Self::render_where_term(
-                                backend,
-                                t,
-                                &mut values,
-                                &mut n,
-                                this.binder,
-                                None,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    sql.push_str(&parts.join(" AND "));
-                }
+                sql.push_str(&this.render_write_where(backend, &mut values, &mut n)?);
 
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
                 let result = exec
@@ -6772,10 +6915,10 @@ where
                 sql.push_str(&set_parts.join(", "));
                 if !this.where_terms.is_empty() {
                     sql.push_str(" WHERE ");
-                    let parts: Vec<String> = this
-                        .where_terms
-                        .iter()
-                        .map(|t| {
+                    let predicate = crate::database::clauses::render_boolean_list(
+                        &this.where_terms,
+                        |term| matches!(term, WhereTerm::OrNext(_)),
+                        |t| {
                             Self::render_where_term(
                                 backend,
                                 t,
@@ -6784,9 +6927,9 @@ where
                                 this.binder,
                                 None,
                             )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    sql.push_str(&parts.join(" AND "));
+                        },
+                    )?;
+                    sql.push_str(&predicate);
                 }
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
                 let result = exec
