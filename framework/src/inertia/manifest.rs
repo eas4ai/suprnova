@@ -4,9 +4,8 @@
 //! that maps entry-point source paths to their hashed output files,
 //! their imported CSS, and their dependency chunks (for `modulepreload`).
 //!
-//! `framework/src/inertia/response.rs::render_prod_head` reads this
-//! manifest at first use and emits the correct asset tags in the
-//! production HTML shell. Without it the framework would serve hardcoded
+//! `framework/src/inertia/vite.rs` reads this manifest and emits the
+//! correct asset tags in the HTML shell and for `Vite::tags`. Without it the framework would serve hardcoded
 //! `/assets/main.js` paths that don't match Vite's hashed output -
 //! production deployments would 404 on every page.
 //!
@@ -70,8 +69,8 @@ pub struct ViteManifest {
     entries: HashMap<String, ManifestEntry>,
 }
 
-/// Resolution of a manifest entry into the tags `render_prod_head`
-/// needs to emit.
+/// Resolution of a manifest entry into the asset tags the HTML shell
+/// and `Vite::tags` emit.
 #[derive(Debug, Default)]
 pub struct ResolvedAssets {
     /// JavaScript files to emit as `<script type="module" src="...">`.

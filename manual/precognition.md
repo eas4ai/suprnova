@@ -195,10 +195,94 @@ Without the header, you validate all fields. An empty header validates
 no fields and answers `204` when no hook adds an error.
 
 Errors an after-validation hook adds are never filtered. Any such error
-answers `422`, even if its field is outside the list. Narrow your own
-checks with `Request::should_validate(field)` when they belong to a
-particular field. See [Validation](validation.md) for rule objects and
-cross-field hooks.
+answers `422`, even if its field is outside the list. What the list
+narrows is the checks a hook runs, as Laravel removes the rules of
+unlisted fields before its validator runs.
+
+## Database rules in hooks
+
+While the after-validation hooks of a form request, a data object or a
+multipart form run for a marked request that lists fields,
+`Precognition::should_validate(field)` answers whether the field is
+listed, by the same exact and wildcard match. Outside such a request it
+answers `true`, so a real submit runs every check.
+
+The built-in database rules ask it before they query. `check_async` (on
+`Unique`, `Exists` and `Password`), `Exists::check_value` and
+`Exists::check_each` skip a field the request did not list: no query
+runs and no error is added. `check_each` is selected under the key
+`<field>.*`, the key Laravel gives an array rule, so `tag_ids.*` in the
+list runs it and `tag_ids` alone does not:
+
+```rust
+use suprnova::{AsyncRule, Exists, FormRequest, Precognition, Unique, ValidationErrors, async_trait};
+
+#[derive(serde::Deserialize, validator::Validate, suprnova::FormRequestDerive)]
+#[form_request(custom_hooks)]
+pub struct Signup {
+    #[validate(email)]
+    pub email: String,
+    pub tag_ids: Vec<i64>,
+}
+
+#[async_trait]
+impl FormRequest for Signup {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        // Skipped when the request lists fields and `email` is not one.
+        Unique::new("users", "email")
+            .check_async(&self.email, &mut errors, "email")
+            .await;
+        // Runs for `tag_ids.*`, not for `tag_ids`.
+        Exists::new("tags", "id")
+            .check_each(&self.tag_ids, &mut errors, "tag_ids")
+            .await;
+        // Your own per-field work asks the same question.
+        if Precognition::should_validate("email") && self.email.ends_with("@example.invalid") {
+            errors.add("email", "Use a real address.");
+        }
+        errors.into_result()
+    }
+}
+```
+
+A field is matched both as you name it in Rust and under the input name
+serde renames it to. `Request::should_validate(field)` keeps its meaning
+for middleware and custom rules that hold the request. See
+[Validation](validation.md) for rule objects and cross-field hooks.
+
+## Validation outside a form request
+
+`Precognition::after_validation(&request, errors)` turns an error bag
+you built yourself into the Precognition answer, as Laravel's
+`Precognition::afterValidationHook` does for any validator. On a marked
+request an empty bag answers `204` with `Precognition-Success: true` and
+a non-empty one `422` with the bag. On another request an empty bag
+returns `Ok(())` and the request goes on, and a non-empty one is the
+ordinary validation error: a redirect back with the errors for an HTML
+form, `422` otherwise.
+
+```rust
+use suprnova::{Middleware, Next, Precognition, Request, Response, ValidationErrors, async_trait};
+
+pub struct RequireTeam;
+
+#[async_trait]
+impl Middleware for RequireTeam {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let mut errors = ValidationErrors::new();
+        if request.should_validate("team") && request.header("X-Team").is_none() {
+            errors.add("team", "Choose a team.");
+        }
+        Precognition::after_validation(&request, errors)?;
+        next(request).await
+    }
+}
+```
+
+Register it after `Precognitive`, so the request is marked. The bag is
+used as you give it: check a field only when `request.should_validate`
+answers `true` for it.
 
 ## Customizing rules for live validation
 
@@ -363,6 +447,12 @@ See [HTTP tests](http-tests.md) for the client and its other assertions.
   `Precognition-Validate-Only: email, name`. Suprnova trims each name;
   Laravel splits on commas without trimming. Spaces around a listed
   name do not change the field you asked to validate.
+- **Hooks narrow their database rules, not their errors.** Laravel
+  removes the rules of unlisted fields from the rule set before its
+  validator runs. Suprnova runs database rules from the after-validation
+  hooks, so the hooks see the selection through
+  `Precognition::should_validate` and the built-in database rules skip
+  unlisted fields there. An error a hook adds itself is never filtered.
 - **Form requests are typed.** The struct is built only for the real
   request. During live validation, the listed fields parse and validate
   without requiring values for every other field. A parse failure on an

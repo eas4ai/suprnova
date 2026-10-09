@@ -163,7 +163,10 @@ pub use context::{Context, ContextSnapshot, ContextStore};
 pub use crypto::{
     AadVersion, Crypt, CryptPurpose, DecryptOrigin, Encrypter, EncryptionKey, KeyOrigin,
 };
-pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
+pub use csrf::{
+    CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token, try_csrf_field,
+    try_csrf_token,
+};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
     current_include_set, scope_include_set, with_include_overrides,
@@ -363,6 +366,14 @@ pub use inertia::{
 // The Inertia DevTools server support (PAR-071 to PAR-075), on its own line
 // so the list above stays stable.
 pub use inertia::{DevToolsConfig, DevToolsMiddleware};
+// The Vite asset tags of PAR-159, on its own line so the lists above stay
+// stable.
+pub use inertia::Vite;
+// The view data sharing of PAR-165, on its own line so the lists above stay
+// stable.
+pub use view::View;
+// The document head of PAR-160 and PAR-161: the facade, and its builder and
+// values under `suprnova::head`.
 pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{
@@ -487,6 +498,7 @@ pub use routing::{
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
 pub use strings::Str;
+pub use view::{Head, head};
 // chrono-tz escape hatch, same principle as the opendal block above:
 // `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`
 // hands one back, so consumers need to name that type. Re-exporting `Tz` at

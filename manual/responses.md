@@ -365,6 +365,40 @@ cookie-octet per RFC 6265, including all control characters. CRLF in
 a cookie name or value gets encoded, not propagated - header injection
 through cookies is closed at the serializer.
 
+### Raw cookies
+
+Another system sometimes reads a cookie and expects its bytes unchanged:
+a token holding `:` or `/`, or a value that is already encoded.
+`Cookie::new` percent-encodes those bytes, so a reader that does not
+decode sees `%3A` where you wrote `:`. `Cookie::raw(name, value)` writes
+the value as it is, as Laravel's `Cookie::make` does with `raw: true`:
+
+```rust
+use suprnova::{Cookie, FrameworkError, HttpResponse};
+
+fn with_token() -> Result<HttpResponse, FrameworkError> {
+    let cookie = Cookie::raw("token", "a:b/c")?;
+    assert!(cookie.is_raw());
+    assert!(cookie.to_header_value().starts_with("token=a:b/c;"));
+    Ok(HttpResponse::text("ok").cookie(cookie))
+}
+```
+
+The encoding is what keeps an ordinary value from injecting a header or
+an attribute, so `Cookie::raw` checks its input instead. It returns an
+error when the name is not an RFC 6265 token, or when the value holds a
+byte outside cookie-octet: a space, `"`, `,`, `;`, `\`, a control byte
+such as a carriage return, or a byte above `0x7E`. `Cookie::raw("t",
+"x;Domain=evil")` is an error, not a second attribute. A raw cookie keeps
+the defaults of `Cookie::new` (`HttpOnly`, `Secure`, `SameSite=Lax`,
+`Path=/`), every builder call, and the `__Host-` and `__Secure-` rules.
+
+The read side cannot tell which cookies were written raw. A request
+carries only names and values, so `parse_cookies` decodes every value,
+as PHP decodes `$_COOKIE` for Laravel. A raw value that holds `%`
+followed by two hex digits reads back decoded: `Cookie::raw("t",
+"100%25")` reads back as `100%`.
+
 ### Queueing a cookie for later
 
 Sometimes code that isn't building the response still needs to set a

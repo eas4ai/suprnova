@@ -32,6 +32,7 @@ mod ssr_gateway;
 pub(crate) mod validation_redirect_middleware;
 mod version_middleware;
 pub(crate) mod visit;
+mod vite;
 
 pub use config::{Frontend, InertiaConfig, MANIFEST_VERSION_FALLBACK, SsrConfig, VersionResolver};
 pub use conversion_middleware::Inertia303Middleware;
@@ -59,8 +60,8 @@ pub use prop::{MergePaths, OnceUntil};
 pub use providers::{
     PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty, RenderContext,
 };
-pub(crate) use response::escape_html_attr;
 pub use response::{InertiaLocation, InertiaResponse, IntoInertiaData, PropEntry};
+pub(crate) use response::{contains_title_element, escape_html_attr};
 pub use root_share::RootShare;
 pub use root_template::{
     InertiaRoot, InertiaRootBody, InertiaRootHead, InertiaRootParts, InertiaRootTemplate,
@@ -75,6 +76,7 @@ pub use ssr::{
 pub use ssr_gateway::{HttpGateway, SsrGateway, gateway as ssr_gateway};
 pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;
 pub use version_middleware::InertiaVersionMiddleware;
+pub use vite::Vite;
 
 // Test helpers for setting up a flash scope outside of a real server.
 // Production code never calls these - the flash scope is set up

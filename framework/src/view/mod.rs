@@ -6,10 +6,14 @@
 
 use std::fmt;
 
+pub mod head;
 mod response;
+mod share;
 
+pub use head::Head;
 pub use http::{HeaderName, HeaderValue, StatusCode};
 pub use response::{DocumentResponseError, DocumentResponseErrorKind, document_response};
+pub use share::View;
 pub use suprnova_live::identity::ViewName;
 
 pub use suprnova_live::view::{
@@ -95,6 +99,9 @@ impl ViewRenderer {
     }
 
     /// Renders and validates one complete canonical document.
+    ///
+    /// The template reads the data shared with [`View::share`] and
+    /// [`View::share_for_request`] through Askama's `value` filter.
     pub fn render_document<T: ViewTemplate + ?Sized>(
         &self,
         view: ViewName,
@@ -103,16 +110,20 @@ impl ViewRenderer {
         assets: AssetSet,
         mounts: Vec<MountMetadata>,
     ) -> Result<DocumentRender, ViewError> {
-        self.engine.render_document(
+        self.engine.render_document_with_values(
             view,
             sealed::Sealed::engine_template(template),
             response,
             assets,
             mounts,
+            &share::RenderValues::current(),
         )
     }
 
     /// Renders and validates one independently owned Live island.
+    ///
+    /// The template reads shared data as
+    /// [`render_document`](Self::render_document) does.
     pub fn render_island<T: ViewTemplate + ?Sized>(
         &self,
         view: ViewName,
@@ -120,11 +131,12 @@ impl ViewRenderer {
         assets: AssetSet,
         children: Vec<ChildMount>,
     ) -> Result<IslandRender, ViewError> {
-        self.engine.render_island(
+        self.engine.render_island_with_values(
             view,
             sealed::Sealed::engine_template(template),
             assets,
             children,
+            &share::RenderValues::current(),
         )
     }
 

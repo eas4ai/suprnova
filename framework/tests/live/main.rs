@@ -18,6 +18,8 @@ mod live_dogfood_support;
 mod magnetar_auth;
 #[path = "../support/own_process.rs"]
 mod own_process;
+#[path = "../support/own_process_async.rs"]
+mod own_process_async;
 
 pub mod async_routes;
 pub mod async_security;
@@ -27,6 +29,7 @@ pub mod external_authoring;
 pub mod facade_contract;
 pub mod hardening;
 pub mod hostile_adapter;
+pub mod laravel_infra_gaps;
 pub mod library_namespace;
 pub mod macro_expansion;
 pub mod multi_stream_root;

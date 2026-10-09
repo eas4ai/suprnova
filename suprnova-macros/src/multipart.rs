@@ -555,14 +555,24 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     ::suprnova::http::upload::hook_error_key(__key, &[ #(#hook_name_pairs),* ])
                 }
 
-                if let ::core::result::Result::Err(errs) = <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed) {
+                // The hooks run with the request's selection installed, so
+                // their database rules skip the fields it did not list.
+                if let ::core::result::Result::Err(errs) = ::suprnova::http::precognition::with_hook_selection(
+                    __only.as_deref(),
+                    __input_name,
+                    || <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed),
+                ) {
                     let errs = errs.rename_keys(__input_name);
                     if __precognitive && !errs.is_empty() {
                         return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionFailure(errs));
                     }
                     __errors.merge(errs);
                 }
-                if let ::core::result::Result::Err(errs) = <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed).await {
+                if let ::core::result::Result::Err(errs) = ::suprnova::http::precognition::with_hook_selection_async(
+                    __only.as_deref(),
+                    __input_name,
+                    <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed),
+                ).await {
                     let errs = errs.rename_keys(__input_name);
                     if __precognitive && !errs.is_empty() {
                         return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionFailure(errs));

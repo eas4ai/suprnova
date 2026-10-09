@@ -119,12 +119,14 @@ impl fmt::Debug for InertiaRootTemplate {
 pub struct InertiaRootParts<'a> {
     /// The `<title>` element, from the response's title or
     /// [`InertiaConfig::default_title`](crate::InertiaConfig::default_title).
-    /// Empty when the SSR head carries a title of its own, since a document
-    /// shows its first title only. A template that writes its own
-    /// `<title>` leaves this out.
+    /// Empty when the SSR head or the document head [`Head`](crate::Head)
+    /// resolved carries a title of its own, since a document shows its
+    /// first title only. A template that writes its own `<title>` leaves
+    /// this out.
     pub title: InertiaRootTitle<'a>,
-    /// The `csrf-token` meta tag, the SSR head when the SSR server rendered
-    /// the page, and the Vite tags, in that order.
+    /// The `csrf-token` meta tag, the document head [`Head`](crate::Head)
+    /// resolved, the SSR head when the SSR server rendered the page, and
+    /// the Vite tags, in that order.
     pub head: InertiaRootHead<'a>,
     /// The page data element and the mount element, or the SSR body.
     pub body: InertiaRootBody<'a>,
@@ -190,6 +192,7 @@ pub(super) struct RootInputs<'a> {
     pub(super) page: &'a Value,
     pub(super) title: Option<&'a str>,
     pub(super) csrf_token: &'a str,
+    pub(super) head_tags: &'a str,
     pub(super) ssr_head: &'a str,
     pub(super) ssr_body: Option<&'a str>,
     pub(super) assets: &'a str,
@@ -213,6 +216,7 @@ pub(super) fn render(
         },
         head: InertiaRootHead {
             csrf_token: inputs.csrf_token,
+            head_tags: inputs.head_tags,
             ssr_head: inputs.ssr_head,
             assets: inputs.assets,
         },
@@ -260,10 +264,11 @@ impl fmt::Display for InertiaRootTitle<'_> {
     }
 }
 
-/// The head part: the `csrf-token` meta tag, the SSR head and the Vite
-/// tags.
+/// The head part: the `csrf-token` meta tag, the document head `Head`
+/// resolved, the SSR head and the Vite tags.
 pub struct InertiaRootHead<'a> {
     csrf_token: &'a str,
+    head_tags: &'a str,
     ssr_head: &'a str,
     assets: &'a str,
 }
@@ -273,6 +278,7 @@ impl fmt::Display for InertiaRootHead<'_> {
         f.write_str("<meta name=\"csrf-token\" content=\"")?;
         write_escaped(f, self.csrf_token, true)?;
         f.write_str("\">\n")?;
+        f.write_str(self.head_tags)?;
         if !self.ssr_head.is_empty() {
             f.write_str(self.ssr_head)?;
             f.write_str("\n")?;

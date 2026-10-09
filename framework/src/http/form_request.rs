@@ -342,16 +342,27 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             if !bag.is_empty() {
                 return Err(precognition_outcome(bag));
             }
-            if let Err(errors) = data.after_validation() {
-                let bag = errors.rename_keys(crate::data::input_names::input_key::<Self>);
+            // The hooks run with the selection installed, so their database
+            // rules skip the fields the request did not list. Their errors
+            // are never narrowed.
+            let only = validate_only.as_deref();
+            let input_key = crate::data::input_names::input_key::<Self>;
+            if let Err(errors) = super::precognition::with_hook_selection(only, input_key, || {
+                data.after_validation()
+            }) {
+                let bag = errors.rename_keys(input_key);
                 if !bag.is_empty() {
                     return Err(precognition_outcome(bag));
                 }
             }
-            if let Err(errors) = data.after_validation_async().await {
-                return Err(precognition_outcome(
-                    errors.rename_keys(crate::data::input_names::input_key::<Self>),
-                ));
+            if let Err(errors) = super::precognition::with_hook_selection_async(
+                only,
+                input_key,
+                data.after_validation_async(),
+            )
+            .await
+            {
+                return Err(precognition_outcome(errors.rename_keys(input_key)));
             }
             return Err(FrameworkError::PrecognitionSuccess);
         }
@@ -363,11 +374,22 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             ),
             Ok(()) => ValidationErrors::new(),
         };
-        if let Err(hook_errors) = data.after_validation() {
-            errors.merge(hook_errors.rename_keys(crate::data::input_names::input_key::<Self>));
+        // An ordinary request selects every field, also when it is
+        // extracted inside another request's hook.
+        let input_key = crate::data::input_names::input_key::<Self>;
+        if let Err(hook_errors) =
+            super::precognition::with_hook_selection(None, input_key, || data.after_validation())
+        {
+            errors.merge(hook_errors.rename_keys(input_key));
         }
-        if let Err(hook_errors) = data.after_validation_async().await {
-            errors.merge(hook_errors.rename_keys(crate::data::input_names::input_key::<Self>));
+        if let Err(hook_errors) = super::precognition::with_hook_selection_async(
+            None,
+            input_key,
+            data.after_validation_async(),
+        )
+        .await
+        {
+            errors.merge(hook_errors.rename_keys(input_key));
         }
         if !errors.is_empty() {
             return Err(Request::validation_failure(errors, target, old_input));
