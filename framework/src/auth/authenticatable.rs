@@ -114,6 +114,23 @@ pub trait Authenticatable: Send + Sync + 'static {
         None
     }
 
+    /// The `std::any::type_name` of the implementing type.
+    ///
+    /// A guard hands the framework its user as `dyn Authenticatable`, and
+    /// once that is erased to `dyn Any` for the gate's lookup no name is
+    /// left to read. A default method is compiled once per implementing
+    /// type, so this one names the concrete user even when it is called
+    /// through the trait object. The
+    /// [`GateEvaluated`](crate::GateEvaluated) event of a check that
+    /// resolved its own user, such as
+    /// [`Gate::inspect_current`](crate::Gate::inspect_current) or
+    /// `#[authorize]`, names the user with it, whether or not the type
+    /// registered a gate. The default is the right answer for every type;
+    /// an override only mislabels those events.
+    fn auth_type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Allow downcasting to concrete type
     ///
     /// This is used by `Auth::user_as::<T>()` to cast the trait object

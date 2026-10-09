@@ -742,13 +742,20 @@ impl Listener<GateEvaluated> for AuditGate {
 EventFacade::listen::<GateEvaluated, _>(Arc::new(AuditGate)).await;
 ```
 
-An async check waits for the listeners. A sync check can't wait and must
-not block, so it runs the dispatch once in place. A listener that finishes
-without waiting on anything has run when the check returns, and the rest
-continues on a task spawned on the current Tokio runtime. Outside a Tokio
-runtime, a sync check dispatches nothing. A listener's error is logged and
-never changes the decision. When nothing listens and no fake is installed,
-the check builds no event at all.
+An async check waits for the listeners. A sync check inside a Tokio
+runtime must not block the runtime's thread, so it runs the dispatch once in
+place. A listener that finishes without waiting on anything has run when the
+check returns, and the rest continues on a task spawned on that runtime.
+Outside a Tokio runtime, a sync check runs the dispatch to completion on a
+single-threaded runtime built for it, so every listener has run when the
+check returns. A listener's error is logged and never changes the decision.
+When nothing listens and no fake is installed, the check builds no event at
+all.
+
+A check that finds the user itself names the user's type through
+`Authenticatable::auth_type_name`, which every implementation inherits, so
+the event names a signed-in user's own type even when that type registered
+no gate, policy, or hook.
 
 In a test, assert on the events through the events fake:
 

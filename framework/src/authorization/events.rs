@@ -22,7 +22,10 @@ use crate::events::Event;
 /// has to be cloned into the event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateEvaluated {
-    /// The `std::any::type_name` of the user the gate was asked about.
+    /// The `std::any::type_name` of the user the gate was asked about. A
+    /// check that resolved the user itself reads it from
+    /// [`Authenticatable::auth_type_name`](crate::Authenticatable::auth_type_name),
+    /// so the user's own type is named even when it registered no gate.
     /// `None` when the check had no user: a guest check through
     /// [`Gate::inspect_current`](crate::Gate::inspect_current) or
     /// `#[authorize]`.
