@@ -65,7 +65,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Forget several disks.** `Storage::forget` accepts one name or a list and
   reports whether any registered disk was removed.
 - **Purge one disk or every disk.** `Storage::purge(name)` drops one named disk
-  and `purge_all` drops every disk. Existing `purge()` calls keep working.
+  and `purge_all` drops every disk.
 - **Store a ready-made disk.** `Storage::set` registers an operator under a
   name and replaces the previous disk and its public URL.
 
@@ -854,6 +854,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
+  dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports
+  whether it was registered.
 - **Excerpts trim invisible characters.** Cut ends now remove Laravel's
   invisible character set, including zero-width spaces, while preserving
   characters inside the excerpt.
