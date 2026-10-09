@@ -1136,6 +1136,54 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a batch in one request, end a user's connections and send any other
   signed `GET`, with channel names through the registry's wire mapping and
   errors that never quote the secret or a signature.
+- **Marked console lines.** `console::error`, `console::warn` and
+  `console::info` print one line marked `ERROR`, `WARN` or `INFO`, on the
+  standard error for the first two and the output for the third, styled on a
+  terminal unless `NO_COLOR` is set and plain text in a test.
+- **Console verbosity flags.** Every command accepts `-q` or `--quiet` and
+  `-v` to `-vvv` before its name, and after it unless it takes raw arguments
+  or declares a flag of that name itself. `console::verbosity()` reports the
+  level, `console::line_at` and `console::error_at` write only at or above a
+  level, and `--quiet` silences a command's lines while the error of a failed
+  command still prints.
+- **Console prompts.** `console::ask_with_default`, `console::secret`,
+  `console::select`, `console::select_keyed` and `console::multiselect` read
+  one line each, from a terminal or a pipe; `secret` does not echo on a
+  terminal and is never captured, and a menu refuses an answer that is no
+  option by naming the options.
+- **Answers for menus in tests.** `ConsoleTest::expects_choice(question,
+  answer, options)` answers a menu and fails the command when the menu offers
+  other options.
+- **Progress bars.** `console::Progress` and `console::progress(label, items,
+  f)` redraw a terminal line, and write one plain line such as `Sync 3/3`
+  where the output is not a terminal.
+- **Console forms.** `console::form()` chains `text`, `secret`, `confirm` and
+  `select` steps and returns every answer by name from `submit()`.
+- **`MaintenanceModeEnabled`.** `down` dispatches the event after it records
+  maintenance mode, on a first `down` and on an update alike.
+- **Prerendered maintenance pages.** `down --render <view>` renders the Tera
+  template at `resources/views/<view>` with `retry_after` and serves the
+  result; a template that cannot be read or rendered fails `down` before
+  maintenance mode starts.
+- **Retry dates.** `down --retry` takes a date as well as seconds and sends it
+  as `Retry-After` in the RFC 7231 form; a value that is neither is refused.
+- **Tasks limited to environments.** `TaskBuilder::environments` keeps a task
+  to the named environments at every tick.
+- **Tasks in maintenance mode.** While the application is down, `schedule:run`
+  and `schedule:work` skip every task that does not ask
+  `TaskBuilder::even_in_maintenance_mode`; a maintenance state that cannot be
+  read counts as down.
+- **Day splicing on expressions.** `CronExpression::with_days_of_week`
+  replaces the day-of-week field and keeps the others.
+- **Loaded migrations.** `Application::load_migrations_from(list)` adds a list
+  that `migrate`, `migrate:status`, `migrate:rollback`, `migrate:fresh`,
+  `schema:dump` and the migration on boot run after the application's
+  migrator, each migration name once.
+- **Registered migrations.** A crate registers its own list with
+  `suprnova::register_migrations!(owner, list)`, and every application that
+  links the crate runs it.
+- **One list for two-factor migrations.** `auth_flows::two_factor::migrations()`
+  returns the four two-factor migrations in order.
 
 ### Changed
 
@@ -1981,6 +2029,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `after_commit_choice`, the connection's setting and `QUEUE_AFTER_COMMIT`,
   for `push`, `push_unique` and `bulk` alike, instead of the job's
   `after_commit` or `QUEUE_AFTER_COMMIT`.
+- **`down` prints Laravel's lines.** It prints `Maintenance mode options
+  updated.` when the application was already down, the bypass address as
+  `You may bypass maintenance mode via [<APP_URL>/<secret>].`, and
+  `Failed to enter maintenance mode: <error>.` on a failure.
+- **Single-server tasks need a cache store.** A schedule with an
+  `on_one_server()` task and no cache store bound refuses to start in every
+  environment, and a tick with no store skips the task with an error log
+  instead of running it on every server.
+- **Day helpers keep the schedule.** `days`, `weekdays`, `weekends` and
+  `sundays` to `saturdays` replace only the day-of-week field after a
+  frequency, time or `cron` call, so `.hourly().mondays()` is `0 * * * 1`;
+  alone they still run at midnight.
+- **Hour-only and seconds times.** `at`, `try_at`, `daily_at` and
+  `try_daily_at` read `9` as 09:00 and `09:30:00` as 09:30.
+- **`migrate:status` prints its list.** It writes one line per migration with
+  `Applied` or `Pending` to the standard output, where it wrote them to the
+  log.
 
 ### Fixed
 

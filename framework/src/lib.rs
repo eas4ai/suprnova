@@ -132,7 +132,7 @@ pub use app::Application;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use app::maintenance::{
     CacheMaintenanceMode, FileMaintenanceMode, MaintenanceMiddleware, MaintenanceMode,
-    MaintenancePayload, maintenance_mode,
+    MaintenanceModeEnabled, MaintenancePayload, maintenance_mode,
 };
 pub use app::paths::{
     base_path, config_path, database_path, lang_path, public_path, resource_path, set_base_path,
@@ -168,6 +168,7 @@ pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
     current_include_set, scope_include_set, with_include_overrides,
 };
+pub use database::migration_registry::{MigrationList, RegisteredMigrations};
 pub use database::{
     AutoRouteBinding, AvgValue, BoundChild, ChildBindings, ColumnValue, ConnectionCount,
     ConnectionEstablished, ConnectionRegistry, DB, Database, DatabaseBusy, DatabaseConfig,

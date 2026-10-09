@@ -7655,6 +7655,8 @@ version = "3.2.1"
 dependencies = [
  "aes-gcm",
  "ammonia",
+ "anstream",
+ "anstyle",
  "argon2",
  "askama",
  "async-stream",
@@ -7674,6 +7676,7 @@ dependencies = [
  "dashmap 6.2.1",
  "deunicode",
  "dhat",
+ "dialoguer",
  "digest 0.11.3",
  "dotenvy",
  "envy",

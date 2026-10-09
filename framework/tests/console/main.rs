@@ -5,6 +5,7 @@ pub mod command_macro;
 pub mod console;
 pub mod db_seed;
 pub mod harness;
+pub mod laravel_infra_gaps;
 pub mod process_boot;
 pub mod ssr;
 pub mod typed;
