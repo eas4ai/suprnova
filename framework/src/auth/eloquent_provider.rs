@@ -269,9 +269,10 @@ where
 
     async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = M::query().filter("email", email).first().await?;
-        // This is the lookup BY email: the caller already supplied the target
-        // address, so echo the queried `email` back into the carrier - it IS
-        // the verify/reset target the user typed.
+        // The carrier echoes the address the user was looked up by. That is
+        // the `email` column, which need not be the model's
+        // `MustVerifyEmail::email()`, so `EmailVerification::resend` takes
+        // only the id and binds its link to `verification_email`.
         Ok(user.map(|u| AuthFlowUser {
             id: u.get_auth_identifier(),
             email: email.to_string(),

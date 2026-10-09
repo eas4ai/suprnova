@@ -164,6 +164,42 @@ impl CanResetPassword for HookedUser {
     }
 }
 
+/// The same table, verifying a contact address apart from the sign-in
+/// address: `MustVerifyEmail::email` is `verification_email` when one is
+/// set, while `EloquentUserProvider::retrieve_by_email` still looks the user
+/// up by `email`. It keeps every default hook.
+#[model(table = "users", fillable = ["email", "password"])]
+pub struct ContactUser {
+    pub id: i64,
+    pub email: String,
+    pub password: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub verification_email: Option<String>,
+}
+
+auth_user!(ContactUser);
+
+impl MustVerifyEmail for ContactUser {
+    fn email(&self) -> &str {
+        self.verification_email.as_deref().unwrap_or(&self.email)
+    }
+    fn email_verified_at(&self) -> Option<DateTime<Utc>> {
+        self.email_verified_at
+    }
+    fn set_email_verified_at(&mut self, value: Option<DateTime<Utc>>) {
+        self.email_verified_at = value;
+    }
+}
+
+impl CanResetPassword for ContactUser {
+    fn email_for_reset(&self) -> &str {
+        &self.email
+    }
+    fn set_password_hash(&mut self, hash: &str) {
+        self.password = hash.to_owned();
+    }
+}
+
 // ── Providers without a model ───────────────────────────────────────────
 
 /// A provider whose users live in code: `grace@example.com` (id 9) can
@@ -959,6 +995,155 @@ async fn verify_of_a_verified_account_consumes_the_token_and_keeps_its_timestamp
     assert_eq!(
         load::<GapUser>("1").await.email_verified_at,
         Some(verified_at)
+    );
+    suprnova::events::testing::assert_not_dispatched::<EmailVerified>(|_| true);
+    assert!(
+        !EmailVerification::check(&token).await.expect("check"),
+        "the token is consumed"
+    );
+}
+
+/// A harness with `EloquentUserProvider::<ContactUser>` as the provider and
+/// the `verification_email` column a [`ContactUser`] reads.
+async fn contact_harness() -> Harness {
+    let h = harness(Arc::new(EloquentUserProvider::<ContactUser>::new())).await;
+    h.db.conn()
+        .execute_unprepared("ALTER TABLE users ADD COLUMN verification_email TEXT")
+        .await
+        .expect("add the verification_email column");
+    h
+}
+
+impl Harness {
+    /// Insert user `id`, signing in as `sign_in`, with `contact` as its
+    /// verification address and an optional verification time (RFC 3339).
+    async fn seed_contact(&self, id: i64, sign_in: &str, contact: &str, verified_at: Option<&str>) {
+        self.seed(id, sign_in, "x", verified_at, None).await;
+        self.db
+            .conn()
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE users SET verification_email = ? WHERE id = ?",
+                [contact.into(), id.into()],
+            ))
+            .await
+            .expect("set the verification address");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn resend_binds_its_link_to_the_models_verification_address_as_send_link_does() {
+    let _lock = crate::env_lock::lock_env_async().await;
+    let h = contact_harness().await;
+    h.seed_contact(21, "sign-in-21@example.com", "contact-21@example.com", None)
+        .await;
+    h.seed_contact(22, "sign-in-22@example.com", "contact-22@example.com", None)
+        .await;
+
+    // `resend` looks the user up by the sign-in address and delivers to the
+    // model's `email()`; the link must prove that address.
+    let notify = Notify::fake();
+    EmailVerification::resend("sign-in-21@example.com", "https://app.test/verify")
+        .await
+        .expect("resend");
+    let resent = notified_link(&notify, "contact-21@example.com");
+    notify.assert_not_sent_to::<VerifyEmailNotification>("sign-in-21@example.com");
+    EmailVerification::send_link(&load::<ContactUser>("22").await, "https://app.test/verify")
+        .await
+        .expect("send_link");
+    let sent = notified_link(&notify, "contact-22@example.com");
+    notify.assert_not_sent_to::<VerifyEmailNotification>("sign-in-22@example.com");
+    drop(notify);
+
+    let _events = EventFacade::fake();
+    assert_eq!(
+        verify_as("21", &token_of(&resent))
+            .await
+            .expect("the resent link verifies"),
+        "21"
+    );
+    assert!(load::<ContactUser>("21").await.is_email_verified());
+    suprnova::events::testing::assert_dispatched::<EmailVerified>(|event| event.user_id == "21");
+    assert_eq!(
+        verify_as("22", &token_of(&sent))
+            .await
+            .expect("the sent link verifies"),
+        "22"
+    );
+    assert!(load::<ContactUser>("22").await.is_email_verified());
+}
+
+#[tokio::test]
+#[serial]
+async fn resend_by_a_left_address_sends_nothing_and_a_moved_verification_address_refuses_the_link()
+{
+    let _lock = crate::env_lock::lock_env_async().await;
+    let h = contact_harness().await;
+    h.seed_contact(23, "sign-in-23@example.com", "contact-23@example.com", None)
+        .await;
+    h.db.conn()
+        .execute_unprepared("UPDATE users SET email = 'moved-23@example.com' WHERE id = 23")
+        .await
+        .expect("change the sign-in address");
+
+    // The sign-in address the account left finds nobody: `Ok`, no token,
+    // nothing sent, as before.
+    let notify = Notify::fake();
+    EmailVerification::resend("sign-in-23@example.com", "https://app.test/verify")
+        .await
+        .expect("an address the account left answers Ok");
+    suprnova::notifications::assert_nothing_sent();
+    assert_eq!(h.token_rows().await, 0, "no token is minted");
+
+    EmailVerification::resend("moved-23@example.com", "https://app.test/verify")
+        .await
+        .expect("resend");
+    let token = token_of(&notified_link(&notify, "contact-23@example.com"));
+    drop(notify);
+    h.db.conn()
+        .execute_unprepared(
+            "UPDATE users SET verification_email = 'contact-new@example.com' WHERE id = 23",
+        )
+        .await
+        .expect("change the verification address");
+
+    let error = verify_as("23", &token)
+        .await
+        .expect_err("the link proves the old verification address only");
+    assert_eq!(error.status_code(), 403);
+    assert_eq!(error.to_string(), "This action is unauthorized.");
+    assert!(EmailVerification::check(&token).await.expect("check"));
+    assert!(!load::<ContactUser>("23").await.is_email_verified());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_resent_link_for_a_verified_account_with_its_own_verification_address_keeps_its_timestamp()
+ {
+    let _lock = crate::env_lock::lock_env_async().await;
+    let h = contact_harness().await;
+    h.seed_contact(
+        24,
+        "sign-in-24@example.com",
+        "contact-24@example.com",
+        Some("2026-10-01T10:00:00Z"),
+    )
+    .await;
+
+    let notify = Notify::fake();
+    EmailVerification::resend("sign-in-24@example.com", "https://app.test/verify")
+        .await
+        .expect("resend");
+    let token = token_of(&notified_link(&notify, "contact-24@example.com"));
+    drop(notify);
+
+    let _events = EventFacade::fake();
+    assert_eq!(verify_as("24", &token).await.expect("verify"), "24");
+    assert_eq!(
+        h.column(24, "email_verified_at").await.as_deref(),
+        Some("2026-10-01T10:00:00Z"),
+        "the stored timestamp is not rewritten"
     );
     suprnova::events::testing::assert_not_dispatched::<EmailVerified>(|_| true);
     assert!(
