@@ -153,7 +153,7 @@ pub(crate) async fn acquire(
                     "Internal Server Error: session blocking needs a reachable cache store",
                 )
                 .status(500)
-                .with_reported_error_from(&error));
+                .with_reported_logged_error_from(&error));
             }
         }
     }

@@ -2520,12 +2520,13 @@ async fn lead_render(
             // one failure in this module that cannot degrade to an uncached
             // render. Release the lease so the route is not left fenced, and
             // answer with a controlled 500 rather than panicking inside the
-            // request task. The 500 reports the error that lost the request.
+            // request task. The 500 reports the error that lost the request;
+            // `run_render` logged it, so the report skips its own line.
             let _ = runtime.coordinator.release(lease).await;
             LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
             return Ok(HttpResponse::text("")
                 .status(500)
-                .with_reported_error_from(&error));
+                .with_reported_logged_error_from(&error));
         }
     };
     // Test-only race seam (R72/R83): fires the instant the read view has
@@ -3601,6 +3602,13 @@ async fn run_render(
                 debug_assert!(
                     false,
                     "a DB::transaction that never opened never invoked its closure"
+                );
+                // Every `RenderRequestLost` is logged here, where it is
+                // made, and the caller's 500 skips the report's own line.
+                tracing::error!(
+                    target: "suprnova::render_cache",
+                    "the render request was gone after a transaction that never opened; \
+                     the render is not served",
                 );
                 return Err(RenderRequestLost(crate::FrameworkError::internal(
                     "render cache: the render request was gone after a transaction \

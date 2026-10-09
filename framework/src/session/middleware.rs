@@ -2094,6 +2094,7 @@ impl SessionMiddleware {
                 )
                 .await;
                 tracing::error!(
+                    %error,
                     operation = "remember_credential_retirement",
                     reason = "deferred identity transition cleanup",
                     classification = "backend_failure",
@@ -2104,7 +2105,7 @@ impl SessionMiddleware {
                     "Internal Server Error: identity transition cleanup failed",
                 )
                 .status(500)
-                .with_reported_error_from(&error));
+                .with_reported_logged_error_from(&error));
                 return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
             }
         }
@@ -2190,7 +2191,7 @@ impl SessionMiddleware {
             );
             let failure = Err(crate::http::HttpResponse::text(error.to_string())
                 .status(error.status_code())
-                .with_reported_error_from(&error));
+                .with_reported_logged_error_from(&error));
             return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
         }
 
@@ -2332,7 +2333,7 @@ impl SessionMiddleware {
                 "Internal Server Error: session state unavailable",
             )
             .status(500)
-            .with_reported_error_from(&FrameworkError::internal(
+            .with_reported_logged_error_from(&FrameworkError::internal(
                 "a closure passed to session_mut panicked and the panic was caught; \
                  the session is not stored",
             )));
@@ -2437,6 +2438,7 @@ impl SessionMiddleware {
             )
             .await;
             tracing::error!(
+                error = %read_error,
                 session_id = %session_id,
                 "session mutated after existing state could not be loaded; failing closed"
             );
@@ -2444,7 +2446,7 @@ impl SessionMiddleware {
                 "Internal Server Error: session state unavailable",
             )
             .status(500)
-            .with_reported_error_from(read_error));
+            .with_reported_logged_error_from(read_error));
             return attach_pending_cookies(failure, pending_cookies);
         }
 
@@ -2518,7 +2520,7 @@ impl SessionMiddleware {
                             "Internal Server Error: session rotation failed",
                         )
                         .status(500)
-                        .with_reported_error_from(&e));
+                        .with_reported_logged_error_from(&e));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 }
@@ -2576,6 +2578,7 @@ impl SessionMiddleware {
                         )
                         .await;
                         tracing::error!(
+                            %error,
                             operation = "two_factor_session_promotion",
                             classification = "rollback_confirmed",
                             "atomic two-factor session promotion failed; pending session remains retryable"
@@ -2584,7 +2587,7 @@ impl SessionMiddleware {
                             "Internal Server Error: two-factor session promotion failed",
                         )
                         .status(500)
-                        .with_reported_error_from(&error));
+                        .with_reported_logged_error_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                     Err(SessionMigrationError::OutcomeUnknown(error)) => {
@@ -2602,6 +2605,7 @@ impl SessionMiddleware {
                         .await;
                         let reconciliation = self.store.destroy(&session.id).await;
                         tracing::error!(
+                            %error,
                             operation = "two_factor_session_promotion",
                             classification = if reconciliation.is_ok() {
                                 "outcome_unknown_replacement_retired"
@@ -2615,7 +2619,7 @@ impl SessionMiddleware {
                             "Internal Server Error: two-factor session promotion outcome unknown",
                         )
                         .status(500)
-                        .with_reported_error_from(&error));
+                        .with_reported_logged_error_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 },
@@ -2658,7 +2662,7 @@ impl SessionMiddleware {
                         "Internal Server Error: session persistence failed",
                     )
                     .status(500)
-                    .with_reported_error_from(&e));
+                    .with_reported_logged_error_from(&e));
                     return attach_pending_cookies(failure, pending_cookies);
                 }
             };

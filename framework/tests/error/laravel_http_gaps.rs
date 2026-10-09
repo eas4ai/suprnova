@@ -15,9 +15,13 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serial_test::serial;
 use suprnova::config::Config;
+use suprnova::rate_limit::{
+    BackendErrorPolicy, RateLimitMiddleware, RateLimiterDriver, SlidingWindowConfig,
+};
 use suprnova::{Exceptions, FrameworkError, HttpResponse, Request, Response, Router, command};
 
 use crate::debug_error_page::{BROWSER, JSON_CLIENT, Reply, assert_debug_page, get};
@@ -463,6 +467,91 @@ async fn a_panicking_dont_retry_when_predicate_counts_as_false() {
     assert!(!Exceptions::should_stop_retries(&FrameworkError::internal(
         "ledger w-ray 70 overflowed"
     )));
+}
+
+/// A rate limiter whose backend is down, as an unreachable Redis is.
+struct LimiterDown;
+
+#[suprnova::async_trait]
+impl RateLimiterDriver for LimiterDown {
+    async fn try_acquire(
+        &self,
+        _key: &str,
+        _config: &SlidingWindowConfig,
+    ) -> Result<bool, FrameworkError> {
+        Err(FrameworkError::from_external(LedgerClosed(
+            "limiter backend 12",
+        )))
+    }
+
+    async fn retry_after(
+        &self,
+        _key: &str,
+        _config: &SlidingWindowConfig,
+    ) -> Result<Option<Duration>, FrameworkError> {
+        Err(FrameworkError::from_external(LedgerClosed(
+            "limiter backend 12",
+        )))
+    }
+}
+
+/// A route behind a fail-closed rate limiter whose backend is down.
+fn limited_route() -> Router {
+    Router::new()
+        .get("/limited", |_req: Request| async move {
+            HttpResponse::text("served").ok()
+        })
+        .middleware(
+            RateLimitMiddleware::new(
+                Arc::new(LimiterDown),
+                SlidingWindowConfig {
+                    max_requests: 5,
+                    window: Duration::from_secs(60),
+                },
+                |_req: &Request| "limited".to_string(),
+            )
+            .on_backend_error(BackendErrorPolicy::FailClosed),
+        )
+        .into()
+}
+
+/// A fail-closed 503 the framework builds itself writes its own log line,
+/// with fields the default line does not carry (here the limiter key). The
+/// report still reaches the callbacks, and the `framework error` line is
+/// not written beside the site's own: one outage, one line per request.
+#[tokio::test]
+#[serial]
+async fn a_fail_closed_rate_limiter_outage_is_reported_once_and_logged_once() {
+    let _mode = page_mode(false, None).await;
+    let _isolated = Isolated::new();
+    let (logs, _subscriber) = Logs::capture();
+    let seen = Seen::default();
+    let record = seen.clone();
+    Exceptions::reportable(move |error: &LedgerClosed| record.push(error.to_string()));
+
+    let reply = get(limited_route(), "/limited", JSON_CLIENT).await;
+
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(
+        seen.all(),
+        ["the ledger is closed: limiter backend 12"],
+        "the callbacks see the outage once"
+    );
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("limiter backend 12"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one outage, one log line:\n{text}");
+    assert!(
+        lines[0].contains("rate limiter backend error; failing closed with 503")
+            && lines[0].contains("key=limited"),
+        "the line is the limiter's own, with its key:\n{text}"
+    );
+    assert!(
+        !logs.has_framework_error_line("limiter backend 12"),
+        "the default line is not written beside the limiter's own:\n{text}"
+    );
 }
 
 // ---------------------------------------------------------------------

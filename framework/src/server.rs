@@ -1778,9 +1778,11 @@ async fn handle_ws_upgrade(
                 );
                 // Reported as the HTTP path reports a panic: as the
                 // `Internal` error `panic_into_response` converts (PAR-111).
-                crate::error::Exceptions::report(&crate::error::FrameworkError::internal(format!(
-                    "websocket middleware panicked: {msg}"
-                )));
+                // Logged just above, with the route, so the report skips
+                // its own line.
+                crate::error::Exceptions::report_logged(&crate::error::FrameworkError::internal(
+                    format!("websocket middleware panicked: {msg}"),
+                ));
                 return HttpResponse::text(
                     "internal error: websocket upgrade aborted (middleware panicked)",
                 )
@@ -1837,7 +1839,7 @@ async fn handle_ws_upgrade(
                     )
                     .status(500)
                     .header("X-Request-Id", request_id.as_str())
-                    .with_reported_error_from(&crate::error::FrameworkError::internal(
+                    .with_reported_logged_error_from(&crate::error::FrameworkError::internal(
                         "websocket upgrade aborted: the middleware chain answered 2xx \
                          without calling next",
                     ))
@@ -1846,6 +1848,7 @@ async fn handle_ws_upgrade(
             },
             Err(error) => {
                 tracing::error!(
+                    %error,
                     route = %pattern,
                     "websocket upgrade aborted: terminator lock poisoned"
                 );
@@ -1854,7 +1857,7 @@ async fn handle_ws_upgrade(
                 )
                 .status(500)
                 .header("X-Request-Id", request_id.as_str())
-                .with_reported_error_from(&error)
+                .with_reported_logged_error_from(&error)
                 .into_hyper();
             }
         }
@@ -2121,7 +2124,8 @@ fn handshake_owns_header(name: &hyper::header::HeaderName) -> bool {
 
 /// A Live request that cannot be prepared ends as a closed 500. The visitor
 /// learns nothing from it; the log names the route, the stage and the error,
-/// so an operator can tell a missing provider from a clock fault.
+/// so an operator can tell a missing provider from a clock fault. That line
+/// is the failure's one log line: the report skips its own (PAR-111).
 fn live_preparation_failed(
     error: &crate::error::FrameworkError,
     pattern: &str,
@@ -2135,7 +2139,7 @@ fn live_preparation_failed(
     );
     HttpResponse::text("Live request preparation failed")
         .status(500)
-        .with_reported_error_from(error)
+        .with_reported_logged_error_from(error)
         .into_hyper()
 }
 
@@ -2390,7 +2394,8 @@ fn readiness_token_matches(headers: &hyper::HeaderMap) -> bool {
 /// k8s-style `livenessProbe` / `readinessProbe` configurations against
 /// this endpoint can trigger restart on outage. The body shape (with
 /// `database` and `database_error` fields) stays the same so dashboards
-/// can parse both healthy and degraded responses uniformly.
+/// can parse both healthy and degraded responses uniformly. A failed
+/// sub-check is reported through `Exceptions` (PAR-111).
 async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Response<ServerBody> {
     use chrono::Utc;
     use serde_json::json;
@@ -2435,6 +2440,16 @@ async fn health_response(probe_db: bool, request_id: &RequestId) -> hyper::Respo
                     error = %e,
                     "health check: database probe failed"
                 );
+                // The failed probe is an error the framework answers with
+                // a 503, so it is reported (PAR-111), as Laravel's health
+                // route reports the exception its check throws. Logged just
+                // above, so the report skips its own line. The response
+                // carries no report: in debug mode a report would turn a
+                // browser's 503 into the development error page, and this
+                // JSON body is what probes and dashboards parse.
+                crate::error::Exceptions::report_logged(&crate::error::FrameworkError::Internal {
+                    message: format!("health check: database probe failed: {e}"),
+                });
                 if crate::config::Config::is_debug() {
                     response["database_error"] = json!(e);
                 }
