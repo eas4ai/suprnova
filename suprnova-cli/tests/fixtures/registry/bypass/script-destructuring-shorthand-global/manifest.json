@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-destructuring-shorthand-global",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

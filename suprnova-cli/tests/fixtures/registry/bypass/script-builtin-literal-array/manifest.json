@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-literal-array",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
