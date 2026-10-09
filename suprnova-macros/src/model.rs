@@ -47,7 +47,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     // Inject derives on the user's struct itself. Without these, the
     // user-facing API breaks:
-    //   - Serialize → required by `to_json` / `to_array` (Task 8)
+    // Serialize is emitted separately so every output uses the model policy.
     //   - Deserialize → required by `fill` / `from_attrs_unsaved` /
     //     runtime cast pipeline (Tasks 4, 7b, 8)
     //   - Clone → required by `replicate`, in-place updates, test code
@@ -59,9 +59,9 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // compiler error pointing to the user struct, which is acceptable
     // because no Suprnova model should be deriving these manually.
     let injected: syn::Attribute = syn::parse_quote! {
-        #[derive(::core::clone::Clone, ::core::fmt::Debug, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(::core::clone::Clone, ::core::fmt::Debug, ::serde::Deserialize)]
     };
-    input.item.attrs.push(injected);
+    input.item.attrs.insert(0, injected);
 
     // Phase 10B T1 - auto-inject `__eager: EagerLoadCache` and
     // `__pivot: Option<Arc<dyn Any + Send + Sync>>` on every model.
@@ -85,6 +85,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let seaorm = derive_seaorm::emit(&input)?;
     let columns = columns::emit(&input)?;
     let eloquent = derive_eloquent::emit(&input)?;
+    let serialize = serialization::emit_serialize(&input);
     let relations_tokens = relations::emit(&input)?;
     let registry = emit_registry(&input);
     let morph_registry = emit_morph_registry(&input);
@@ -141,6 +142,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #registry
         #morph_registry
         #route_binding
+        #serialize
         #events_dispatch_impl
         #observers_attestation
         #observe_shim

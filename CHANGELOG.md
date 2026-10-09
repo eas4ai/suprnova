@@ -8,6 +8,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Loaded model lookup by key.** Collections find one model, another model's
+  key, or several keys, and return a supplied fallback for a missing key.
+- **Constrained loading on model collections.** `load_with` loads a relation
+  onto existing models with a typed builder constraint.
+- **Model collection deduplication by key.** `unique_models` keeps the last
+  copy of each model while retaining the first occurrence's key order.
+- **Model collection differences by key.** `diff_models` removes matching
+  identities even when the models' other attributes differ.
+- **Enum collection casts.** `AsEnumCollection` reads and writes JSON arrays
+  of the same variant strings as `AsEnum`.
+- **Runtime appended attributes.** `append` selects registered accessors
+  for every later conversion of one model instance.
+- **Complete raw original snapshots.** `get_raw_originals` returns every
+  loaded column before casts; `get_raw_original_or` supplies absent values.
+- **Instance visibility changes.** `make_hidden`, `make_visible`, and their
+  conditional forms update the lists used by later model conversions.
+
 - **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
   elects one replica per tick for every task; `.on_every_server()` opts out.
 - **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
@@ -853,6 +870,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Model visibility applies to serde and appends.** Array, JSON, and serde
+  outputs share the hidden and visible lists, including appended accessors.
 
 - **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
   dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports

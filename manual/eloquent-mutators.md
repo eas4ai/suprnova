@@ -74,6 +74,23 @@ The macro expands each `field = CastType` entry into calls into the
 You never invoke the cast yourself - you write the runtime type,
 the cast wires the column shape.
 
+### Raw original attributes
+
+You read the database snapshot before casts with `get_raw_originals()`:
+
+```rust
+let raw = user.get_raw_originals()?;
+let original_role = user.get_raw_original("role");
+let original_note = user.get_raw_original_or("note", "missing");
+```
+
+You get every loaded column in an `Attrs` object, including hidden columns.
+You get integer boolean storage and JSON text before the casts decode them.
+Changes to the current fields do not change this snapshot. A successful save
+refreshes it. A model you have not loaded or saved has an empty snapshot.
+You use the default only for an absent attribute; a loaded null stays null.
+You keep `get_raw_original(attribute)` for a single optional stored value.
+
 ### Why Suprnova diverges
 
 Laravel declares casts as `protected $casts = ['tags' => 'array']`.
@@ -491,6 +508,28 @@ re-order would silently swap every admin in the database. Variant
 names are self-describing in a DB browser and stable across
 re-orders.
 
+### `AsEnumCollection<E>`
+
+You store `Vec<E>` in a JSON-encoded `TEXT` column. Each element uses the
+same `AsRef<str>` value as `AsEnum<E>`, rather than its serde enum name:
+
+```rust
+use suprnova::{AsEnumCollection, model};
+
+#[model(table = "users", casts = { roles = AsEnumCollection<Role> })]
+pub struct User {
+    pub id: i64,
+    pub roles: Vec<Role>,
+}
+```
+
+You read a Laravel enum collection such as `["Admin","Editor"]` into your
+variants and write only those storage strings. You preserve order and
+repeated variants. An empty vector stores `[]`. Invalid JSON, non-string
+members, and unknown variants return a validation error. You use the same
+`FromStr + AsRef<str>` bounds as `AsEnum`; runtime cast overrides also require
+`Serialize + DeserializeOwned` so the dispatcher can represent your variants.
+
 ## Encryption and hashing
 
 Five casts mediate cryptographic transforms on the storage boundary.
@@ -671,6 +710,27 @@ Each name in `appends` must match a real `#[accessor]` method by
 identifier. A typo (`appends = ["fullName"]` when the method is
 `full_name`) is caught at compile time with a pointed error message.
 
+### Runtime appends
+
+You register an accessor for runtime selection with `accessors = [...]`.
+You add it to one model instance with `append(name)`:
+
+```rust
+#[model(table = "users", accessors = ["full_name"])]
+pub struct User { /* columns */ }
+
+user.append("full_name")?;
+let body = user.to_array();
+```
+
+You keep the name on that instance for every later array, JSON, and serde
+conversion. Repeated appends add the name once. An unregistered name returns
+an error without changing the output. You register default appends through
+`appends = [...]`; those names also support `append`.
+You filter default and runtime appends through the model's hidden and visible
+lists before calling the accessor. You reveal or hide an appended name with
+`make_visible` or `make_hidden` just as you do a stored attribute.
+
 ### Returning non-`String` values
 
 Accessors can return any `Serialize` type. The macro converts the
@@ -700,9 +760,8 @@ underlying columns are noise, pair `appends` with `hidden`:
 )]
 ```
 
-`hidden` strips the named columns from the serialised output;
-`appends` then inserts the accessor's value. The order is fixed -
-filters run first, accessor injection runs after. See
+You strip the named source columns with `hidden`. You include the accessor
+when its own name passes the same hidden and visible filters. See
 [Hidden, visible, and appends](eloquent.md#mass-assignment) for the
 complete surface.
 

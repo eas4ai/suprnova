@@ -487,6 +487,42 @@ where
         load_relations::<M, I, S>(&mut self.0, relations).await
     }
 
+    /// Load a relation onto the existing models with one constrained query.
+    /// The closure takes the target model's builder, as `Builder::with_where` does.
+    /// Unknown relation names and mismatched target types return an error.
+    /// Empty collections need no connection and do not evaluate the constraint.
+    pub async fn load_with<R, F>(
+        &mut self,
+        relation: impl Into<String>,
+        constraint: F,
+    ) -> Result<(), FrameworkError>
+    where
+        R: 'static,
+        F: Fn(crate::eloquent::Builder<R>) -> crate::eloquent::Builder<R> + Send + Sync + 'static,
+    {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        let predicate: std::sync::Arc<
+            dyn Fn(crate::eloquent::Builder<R>) -> crate::eloquent::Builder<R> + Send + Sync,
+        > = std::sync::Arc::new(constraint);
+        let db = crate::eloquent::relations::eager::resolve_eager_connection(
+            None,
+            None,
+            M::default_connection_name(),
+        )
+        .await?;
+        crate::eloquent::relations::eager::apply_eager_specs::<M>(
+            &mut self.0,
+            vec![EagerSpec::WithWhere(
+                relation.into(),
+                std::sync::Arc::new(predicate),
+            )],
+            db.inner(),
+        )
+        .await
+    }
+
     /// Like [`Self::load`] but evaluate the cache per row, not per
     /// collection. Each row is partitioned independently: rows that
     /// already have the relation cached stay untouched, rows that
@@ -633,6 +669,82 @@ where
     <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
+    /// Borrow the first model with this primary key without querying again.
+    /// A missing key returns `None` and other field values do not affect identity.
+    pub fn find<K: Into<Value>>(&self, key: K) -> Option<&M> {
+        let key = key.into();
+        self.0
+            .iter()
+            .find(|model| model.primary_key_value_json() == key)
+    }
+
+    /// Find a model's key so another load of the same row matches it.
+    pub fn find_model(&self, model: &M) -> Option<&M> {
+        self.find(model.primary_key_value_json())
+    }
+
+    /// Return matching models in collection order, preserving duplicate rows.
+    /// Repeated requested keys do not repeat a row and missing keys are skipped.
+    pub fn find_many<I, K>(&self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<Value>,
+    {
+        let keys: HashSet<Value> = keys.into_iter().map(Into::into).collect();
+        Self(
+            self.0
+                .iter()
+                .filter(|m| keys.contains(&m.primary_key_value_json()))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Borrow the matching model or your default when its key is absent.
+    pub fn find_or<'a, K: Into<Value>>(&'a self, key: K, default: &'a M) -> &'a M {
+        self.find(key).unwrap_or(default)
+    }
+
+    /// Deduplicate models by primary key, retaining the last copy of each row.
+    /// Keys retain their first position, as Laravel's model dictionary does.
+    /// Generic `unique` continues to compare whole values and keep the first.
+    pub fn unique_models(self) -> Self {
+        let mut positions: HashMap<Value, usize> = HashMap::new();
+        let mut models = Vec::new();
+        for model in self.0 {
+            let key = model.primary_key_value_json();
+            if key.is_null() {
+                continue;
+            }
+            match positions.get(&key) {
+                Some(&position) => models[position] = model,
+                None => {
+                    positions.insert(key, models.len());
+                    models.push(model);
+                }
+            }
+        }
+        Self(models)
+    }
+
+    /// Keep models whose primary keys the other collection does not contain.
+    /// This compares identity even when the two loads have different fields.
+    /// Generic `diff` continues to compare whole values.
+    pub fn diff_models(self, other: &Self) -> Self {
+        let keys: HashSet<Value> = other
+            .0
+            .iter()
+            .map(|m| m.primary_key_value_json())
+            .filter(|key| !key.is_null())
+            .collect();
+        Self(
+            self.0
+                .into_iter()
+                .filter(|m| !keys.contains(&m.primary_key_value_json()))
+                .collect(),
+        )
+    }
+
     /// Project every row's value for `field` into a typed
     /// `Collection<U>`. Rows whose `field_value` returns `None`, or
     /// whose JSON value doesn't deserialise into `U`, are silently

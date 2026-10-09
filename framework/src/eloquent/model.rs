@@ -364,8 +364,9 @@ where
             }
         }
     }
-    let serialized =
-        serde_json::to_value(model).map_err(|error| FrameworkError::internal(error.to_string()))?;
+    let serialized = model
+        .__attributes_to_value()
+        .map_err(|error| FrameworkError::internal(error.to_string()))?;
     Ok(attrs
         .iter()
         .any(|(column, value)| serialized.get(column) != Some(value)))
@@ -408,8 +409,9 @@ where
     };
     let old = original_row.clone().into_active_model();
     let current = model.clone().try_into_storage()?;
-    let serialized =
-        serde_json::to_value(model).map_err(|error| FrameworkError::internal(error.to_string()))?;
+    let serialized = model
+        .__attributes_to_value()
+        .map_err(|error| FrameworkError::internal(error.to_string()))?;
     for column in <M::Entity as EntityTrait>::Column::iter() {
         if <M::Entity as EntityTrait>::PrimaryKey::iter()
             .any(|key| key.into_column().as_str() == column.as_str())
@@ -430,6 +432,52 @@ where
         }
     }
     Ok(written(am))
+}
+
+/// Accept one attribute name or a list so instance visibility methods stay ergonomic.
+pub trait AttributeNames {
+    /// Own the names so the model can keep them after this call returns.
+    fn into_attribute_names(self) -> Vec<String>;
+}
+
+impl AttributeNames for &str {
+    fn into_attribute_names(self) -> Vec<String> {
+        vec![self.to_owned()]
+    }
+}
+
+impl AttributeNames for String {
+    fn into_attribute_names(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl<S: AsRef<str>, const N: usize> AttributeNames for [S; N] {
+    fn into_attribute_names(self) -> Vec<String> {
+        self.into_iter()
+            .map(|name| name.as_ref().to_owned())
+            .collect()
+    }
+}
+
+impl<S: AsRef<str>> AttributeNames for Vec<S> {
+    fn into_attribute_names(self) -> Vec<String> {
+        self.into_iter()
+            .map(|name| name.as_ref().to_owned())
+            .collect()
+    }
+}
+
+impl<S: AsRef<str>> AttributeNames for &[S] {
+    fn into_attribute_names(self) -> Vec<String> {
+        self.iter().map(|name| name.as_ref().to_owned()).collect()
+    }
+}
+
+impl<S: AsRef<str>, const N: usize> AttributeNames for &[S; N] {
+    fn into_attribute_names(self) -> Vec<String> {
+        self.as_slice().into_attribute_names()
+    }
 }
 
 /// The Eloquent CRUD lifecycle. Auto-implemented for every
@@ -558,48 +606,177 @@ where
         ::core::option::Option::None
     }
 
-    /// Phase 10C T6 - serialise this row to a JSON object.
-    ///
-    /// Default implementation serialises the whole struct via
-    /// `serde_json::to_value(self)` and explicitly removes the
-    /// macro-injected `__eager` / `__pivot` scratch fields. Both
-    /// fields carry `#[serde(skip)]` on the struct definition, so the
-    /// removal is belt-and-braces - it pins the [Phase 10B P6
-    /// contract](../../docs/superpowers/specs/phase-10/phase-10b.md)
-    /// (eager-load cache stays out of serialisation) even against a
-    /// hypothetical future model with a hand-rolled `Serialize` impl.
-    ///
-    /// The macro overrides this when the model declares
-    /// `hidden = [...]`, `visible = [...]`, or `appends = [...]` on
-    /// `#[suprnova::model]`. The override applies those filters in
-    /// Laravel order: visible (whitelist) → hidden (denylist) →
-    /// appends (accessor injection, runs after filters so appends
-    /// always show up even if they share a name with a hidden field).
+    /// Serialize this model with its declared and instance visibility lists.
+    /// Appended accessors use the same filters as stored attributes.
     fn to_array(&self) -> serde_json::Value {
-        let mut v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
-        if let Some(m) = v.as_object_mut() {
-            m.remove("__eager");
-            m.remove("__pivot");
-        }
-        v
+        self.__serialization_value()
+            .unwrap_or(serde_json::Value::Null)
     }
 
-    /// Phase 10C T6 - serialise this row to a JSON string. Delegates
-    /// to [`Self::to_array`] so the same hidden/visible/appends
-    /// filters apply when callers reach for the string shape directly.
+    /// Produce JSON with the same policy that `to_array` and serde apply.
     fn to_json(&self) -> String {
         serde_json::to_string(&self.to_array()).unwrap_or_default()
     }
 
-    /// Phase 10C T6 - append-accessor dispatcher. The macro overrides
-    /// this with a `match` block when `appends = [...]` is non-empty,
-    /// dispatching each declared name to the user's
-    /// `#[suprnova::accessor]`-tagged method. The default returns
-    /// `None` for every name, which keeps the [`Self::to_array`]
-    /// override branch a no-op for models that don't declare appends.
+    /// The declared denylist, so instance overrides start from your model policy.
     #[doc(hidden)]
-    fn __append_accessor(&self, _name: &str) -> ::core::option::Option<serde_json::Value> {
-        ::core::option::Option::None
+    const HIDDEN: &'static [&'static str] = &[];
+
+    /// The declared allowlist, so making one attribute visible preserves other names.
+    #[doc(hidden)]
+    const VISIBLE: &'static [&'static str] = &[];
+
+    /// The declared appended accessors, extended by `append` on an instance.
+    #[doc(hidden)]
+    const APPENDS: &'static [&'static str] = &[];
+
+    /// Read unfiltered runtime attributes for persistence and event payloads.
+    /// The model macro overrides this without calling its filtered serializer.
+    #[doc(hidden)]
+    fn __attributes_to_value(&self) -> Result<serde_json::Value, FrameworkError> {
+        serde_json::to_value(self).map_err(|error| FrameworkError::internal(error.to_string()))
+    }
+
+    /// Apply one visibility policy to every model serializer without recursion.
+    #[doc(hidden)]
+    fn __serialization_value(&self) -> Result<serde_json::Value, FrameworkError> {
+        let mut value = self.__attributes_to_value()?;
+        let Some(map) = value.as_object_mut() else {
+            return Ok(value);
+        };
+        let state = self.__eager_cache().map(|cache| &cache.serialization);
+        let hidden: Vec<&str> = match state.and_then(|state| state.hidden.as_ref()) {
+            Some(names) => names.iter().map(String::as_str).collect(),
+            None => Self::HIDDEN.to_vec(),
+        };
+        let visible: Vec<&str> = match state.and_then(|state| state.visible.as_ref()) {
+            Some(names) => names.iter().map(String::as_str).collect(),
+            None => Self::VISIBLE.to_vec(),
+        };
+        let allowed = |name: &str| {
+            name != "__eager"
+                && name != "__pivot"
+                && !hidden.contains(&name)
+                && (visible.is_empty() || visible.contains(&name))
+        };
+        map.retain(|name, _| allowed(name));
+        let mut appends = Self::APPENDS.to_vec();
+        if let Some(state) = state {
+            for name in &state.appends {
+                if !appends.contains(&name.as_str()) {
+                    appends.push(name);
+                }
+            }
+        }
+        for name in appends.into_iter().filter(|name| allowed(name)) {
+            if let Some(value) = self.__try_append_accessor(name)? {
+                map.insert(name.to_owned(), value);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Let legacy callers read declared accessors while keeping conversion failures fallible.
+    #[doc(hidden)]
+    fn __append_accessor(&self, name: &str) -> Option<serde_json::Value> {
+        self.__try_append_accessor(name).ok().flatten()
+    }
+
+    /// Serialize a registered accessor and preserve its conversion error.
+    #[doc(hidden)]
+    fn __try_append_accessor(
+        &self,
+        _name: &str,
+    ) -> Result<Option<serde_json::Value>, FrameworkError> {
+        Ok(None)
+    }
+
+    /// Check accessor registration without evaluating a value that may need eager relations.
+    #[doc(hidden)]
+    fn __has_append_accessor(name: &str) -> bool {
+        Self::APPENDS.contains(&name)
+    }
+
+    /// Add a registered accessor to every later array and JSON conversion of this instance.
+    /// Register runtime-only accessors with `accessors = ["name"]` on your model.
+    /// Unknown accessor names return an error without changing the instance.
+    fn append(&mut self, name: impl Into<String>) -> Result<&mut Self, FrameworkError> {
+        let name = name.into();
+        if !Self::__has_append_accessor(&name) {
+            return Err(FrameworkError::validation(
+                &name,
+                "unknown appended accessor",
+            ));
+        }
+        let cache = self
+            .__eager_cache_mut()
+            .ok_or_else(|| FrameworkError::internal("append requires per-instance model state"))?;
+        if !cache.serialization.appends.contains(&name) {
+            cache.serialization.appends.push(name);
+        }
+        Ok(self)
+    }
+
+    /// Hide these names on this instance, including appended accessors and nested serde output.
+    fn make_hidden(&mut self, names: impl AttributeNames) -> &mut Self {
+        if let Some(cache) = self.__eager_cache_mut() {
+            let hidden = cache.serialization.hidden.get_or_insert_with(|| {
+                Self::HIDDEN.iter().map(|name| (*name).to_owned()).collect()
+            });
+            for name in names.into_attribute_names() {
+                if !hidden.contains(&name) {
+                    hidden.push(name);
+                }
+            }
+        }
+        self
+    }
+
+    /// Hide names only when your condition is true, leaving all lists unchanged otherwise.
+    fn make_hidden_if(&mut self, condition: bool, names: impl AttributeNames) -> &mut Self {
+        if condition {
+            self.make_hidden(names);
+        }
+        self
+    }
+
+    /// Reveal names by removing them from hidden and extending a nonempty visible list.
+    fn make_visible(&mut self, names: impl AttributeNames) -> &mut Self {
+        if let Some(cache) = self.__eager_cache_mut() {
+            let names = names.into_attribute_names();
+            let hidden = cache.serialization.hidden.get_or_insert_with(|| {
+                Self::HIDDEN.iter().map(|name| (*name).to_owned()).collect()
+            });
+            hidden.retain(|name| !names.contains(name));
+            let visible = cache.serialization.visible.get_or_insert_with(|| {
+                Self::VISIBLE
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect()
+            });
+            if !visible.is_empty() {
+                for name in names {
+                    if !visible.contains(&name) {
+                        visible.push(name);
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Reveal names only when your condition is true, leaving all lists unchanged otherwise.
+    fn make_visible_if(&mut self, condition: bool, names: impl AttributeNames) -> &mut Self {
+        if condition {
+            self.make_visible(names);
+        }
+        self
+    }
+
+    /// Mutate instance policy through the cache the macro already puts on each model.
+    #[doc(hidden)]
+    fn __eager_cache_mut(&mut self) -> Option<&mut crate::eloquent::relations::EagerLoadCache> {
+        None
     }
 
     /// Record that this row came out of a query that returned more than
@@ -1020,7 +1197,7 @@ where
     async fn __insert_built(self, database_assigns_key: bool) -> Result<Self, FrameworkError> {
         use sea_orm::{ActiveModelTrait, Iterable, PrimaryKeyToColumn};
 
-        let built = serde_json::to_value(&self).map_err(|e| {
+        let built = self.__attributes_to_value().map_err(|e| {
             FrameworkError::internal(format!("factory insert: serialize the built row: {e}"))
         })?;
         let built = Attrs::from(built);
@@ -1105,7 +1282,7 @@ where
         // Serialize the in-memory model to an Attrs map so listeners
         // see the "what's about to be written" payload through the
         // same Arc<Mutex<Attrs>> shape they see on create.
-        let attrs_value = serde_json::to_value(self).map_err(|e| {
+        let attrs_value = self.__attributes_to_value().map_err(|e| {
             FrameworkError::internal(format!("save: serialize self for Saving event: {e}"))
         })?;
         let attrs = Attrs::from(attrs_value);
@@ -1325,6 +1502,26 @@ where
     /// insert, and for an attribute the model does not have.
     fn get_raw_original(&self, attribute: &str) -> Option<serde_json::Value> {
         crate::eloquent::changes::raw_original(row_state(self.__eager_cache()), attribute)
+    }
+
+    /// Read every original stored attribute before casts or visibility filtering.
+    /// A model never loaded from the database has an empty object.
+    fn get_raw_originals(&self) -> Result<Attrs, FrameworkError> {
+        match crate::eloquent::changes::original_row(row_state(self.__eager_cache())) {
+            Some(row) => Ok(Attrs::from(serde_json::Value::Object(row.to_json()?))),
+            None => Ok(Attrs::new()),
+        }
+    }
+
+    /// Read an original stored attribute or your default when it was not loaded.
+    /// A loaded JSON null is a value and does not use the default.
+    fn get_raw_original_or(
+        &self,
+        attribute: &str,
+        default: impl Into<serde_json::Value>,
+    ) -> serde_json::Value {
+        self.get_raw_original(attribute)
+            .unwrap_or_else(|| default.into())
     }
 
     /// Delete this row. The trait default performs a hard DELETE.
@@ -1694,7 +1891,7 @@ where
     /// model that was never inserted, as [`Self::save`] does.
     async fn save_with_tx(&self, tx: &crate::database::Transaction) -> Result<(), FrameworkError> {
         refuse_unsaved(self, "save_with_tx")?;
-        let attrs_value = serde_json::to_value(self).map_err(|e| {
+        let attrs_value = self.__attributes_to_value().map_err(|e| {
             FrameworkError::internal(format!(
                 "save_with_tx: serialize self for Saving event: {e}"
             ))
@@ -2078,7 +2275,7 @@ where
     ///
     /// ## Field-shape contract
     ///
-    /// `T` must accept every field `Self` serialises. Concretely:
+    /// `T` must accept every unfiltered runtime field on `Self`. Concretely:
     /// fields present on `T` but absent from `Self` must be
     /// `Option<_>` or annotated `#[serde(default)]`; otherwise serde
     /// will fail the round-trip with a "missing field" error. Fields
@@ -2109,7 +2306,8 @@ where
         <<T::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
             Send + Into<sea_orm::Value>,
     {
-        let json = serde_json::to_value(self)
+        let json = self
+            .__attributes_to_value()
             .map_err(|e| FrameworkError::internal(format!("replicate_into serialize: {e}")))?;
         // The PK from `self` will land in `T`'s same-named PK field
         // during deserialisation. We don't strip it from the JSON

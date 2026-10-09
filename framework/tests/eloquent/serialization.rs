@@ -21,9 +21,9 @@
 //! Plus two contract pins beyond the plan that capture invariants
 //! easy to regress when someone touches the macro:
 //!
-//! 7. [`appends_win_over_hidden_when_names_collide`] - when a name
-//!    appears in both `hidden` and `appends`, the append wins (it
-//!    runs after the hidden strip). Laravel parity.
+//! 7. [`hidden_suppresses_appends_when_names_collide`] - when a name
+//!    appears in both `hidden` and `appends`, the hidden list
+//!    suppresses the accessor.
 //! 8. [`collection_to_array_applies_per_row_filters`] - a
 //!    `Collection<M>` serialises through each row's `to_array`, so
 //!    hidden columns are dropped on every row of the array output
@@ -95,8 +95,7 @@ impl T6AppendUser {
 }
 
 /// Collision: `secret` appears in BOTH `hidden` and `appends`. The
-/// hidden strip runs first, then the append injects - so the append
-/// wins. Matches Laravel.
+/// hidden list suppresses both the column and the accessor.
 #[model(
     table = "t6_collide",
     hidden = ["secret"],
@@ -366,11 +365,9 @@ async fn eager_cache_stays_out_of_serialization() {
 }
 
 #[tokio::test]
-async fn appends_win_over_hidden_when_names_collide() {
+async fn hidden_suppresses_appends_when_names_collide() {
     // Both `hidden = ["secret"]` AND `appends = ["secret"]` are
-    // declared. The hidden strip runs first (removes the raw column),
-    // then the append re-injects with the accessor's transformed
-    // value. Laravel parity: `$appends` always serialises.
+    // declared. The hidden list suppresses the raw column and accessor.
     let _db = collide_fixture().await;
     let u = T6Collide::create(attrs! { name: "alice", secret: "raw-value" })
         .await
@@ -379,17 +376,12 @@ async fn appends_win_over_hidden_when_names_collide() {
     let arr = u.to_array();
     let m = arr.as_object().unwrap();
 
-    // The append wins - the value is the accessor's output, not the
-    // raw column value.
-    assert_eq!(m.get("secret").and_then(|v| v.as_str()), Some("[redacted]"));
+    assert!(!m.contains_key("secret"));
 }
 
 #[tokio::test]
 async fn collection_to_array_applies_per_row_filters() {
-    // Regression guard for collection.rs:to_array. The naive shape
-    // (`serde_json::to_value(&self.0)`) bypasses the per-model
-    // override and would surface `password_hash` in the array
-    // output. The fix routes per-row through Model::to_array.
+    // Every collection row uses the same model serialization policy.
     let _db = hidden_fixture().await;
 
     T6HiddenUser::create(attrs! {

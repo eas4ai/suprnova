@@ -12,7 +12,7 @@ the lot.
 This chapter is the standalone reference for the collection surface.
 The parent [Eloquent API](eloquent.md) summarises it; this chapter
 goes through every method, the borrow-vs-consume contract, the
-serialization rule that bites if you skip it, and when to drop down
+shared serialization policy, and when to drop down
 to `Vec<T>` instead.
 
 ## Table of contents
@@ -217,6 +217,35 @@ model. They route per-row reads through the macro-emitted
 doesn't deserialise into the target type are silently skipped -
 matching Laravel's missing-key behaviour.
 
+### Lookup and identity
+
+You find loaded models by their primary key without issuing a query:
+
+```rust
+let user: Option<&User> = users.find(7);
+let same: Option<&User> = users.find_model(&another_user);
+let selected: Collection<User> = users.find_many([7, 9]);
+let chosen: &User = users.find_or(7, &fallback_user);
+```
+
+You get the first matching model from `find` and `find_model`. You get
+matching rows in collection order from `find_many`. Repeated requested
+keys do not add rows. A missing key returns `None`, an empty selection,
+or your fallback. You can use a text key on a model with a custom key.
+
+You compare model identity with `unique_models` and `diff_models`:
+
+```rust
+let unique = users.clone().unique_models();
+let remaining = users.clone().diff_models(&other_users);
+```
+
+You keep the last model for each key with `unique_models`, in the order
+of each key's first appearance. Models with null keys are omitted.
+You remove rows whose keys occur in `other_users` with `diff_models`,
+even when their other attributes differ. You retain the generic
+`unique` and `diff` methods for whole-value comparisons.
+
 ### Projection
 
 ```rust
@@ -371,46 +400,38 @@ only where missing on those `a`s, etc.
 Both methods honour `#[model(connection = "...")]` routing - they
 resolve the same connection the row was originally loaded from.
 
-## Serialization - `to_array` vs serde
-
-This is the one footgun in the collection surface. Read it carefully.
-
-`Collection<T>` derives `Serialize`. So this works:
+You constrain a relation on the models you already loaded with `load_with`:
 
 ```rust
-let json: String = serde_json::to_string(&users)?;
+use suprnova::Builder;
+
+users.load_with("posts", |query: Builder<Post>| {
+    query.filter("published", true)
+}).await?;
 ```
 
-But - serde's blanket `Serialize for Vec<T>` implementation calls
-`T::serialize` directly on every element. That **bypasses** the
-`Model::to_array()` override the `#[suprnova::model]` macro emits.
-Which means it bypasses your `hidden = ["password"]`,
-`visible = [...]`, and `appends = [...]` model attributes.
+You replace any cached value for that relation with the constrained result.
+You use the relation's target model as the closure's builder type. An
+unknown relation or a mismatched target returns an error. You use a flat
+relation name, as you do with the builder's constrained eager loading.
+With an empty collection, you skip connection resolution and the constraint.
 
-If your model has hidden fields, **do not** serialise the
-collection through serde. Use `to_array()` or `to_json()`:
+## Serialization - `to_array` vs serde
+
+You get the same model visibility and appends policy through `to_array`,
+`to_json`, and serde:
 
 ```rust
 let value: serde_json::Value = users.to_array();
-let body:  String            = users.to_json();
+let body: String = users.to_json();
+let serde_body: String = serde_json::to_string(&users)?;
 ```
 
-Both methods route through `Model::to_array()` for every row, so
-the per-model filter pipeline applies - hidden fields stay hidden,
-visible-allowlists are enforced, accessor-driven `appends` show up.
-
-The same caveat applies to anything that calls
-`serde_json::to_value(&collection)` under the hood: `Inertia::render`
-when you stuff a collection into props, `JsonApi`/`Resource` if you
-hand them raw models instead of resource structs, log shippers that
-serde-encode their payloads. The safe pattern is to convert through
-a resource type ([JSON:API resources](eloquent-resources.md)) or
-through `to_array()` before the value hits any serde codepath.
-
-For collections of non-model types (`Collection<MyDto>`,
-`Collection<String>`) the serde path is fine - the issue only
-applies when `T` is a `#[suprnova::model]` struct with declared
-hidden/visible/appends.
+You keep hidden fields out of every row, including rows nested in Inertia
+props or another serde container. You include an appended accessor only
+when the model's hidden and visible lists permit its name. Instance changes
+made with `make_hidden`, `make_visible`, or `append` apply to later outputs.
+For non-model elements, you use their ordinary serde serialization.
 
 ## Borrow vs consume
 
@@ -418,9 +439,9 @@ The methods split cleanly into two contracts:
 
 | Takes | Methods |
 |---|---|
-| `&self` (borrow) | `len`, `is_empty`, `is_not_empty`, `first`, `last`, `first_where`, `last_where`, `contains_where`, `random`, `as_slice`, `pluck_by`, `pluck`, `pluck_keyed`, `group_by`, `key_by`, `sum`, `avg`, `min`, `max`, `to_array`, `to_json` |
-| `self` (consume) | `map`, `filter`, `reject`, `each`, `reduce`, `chunk`, `take`, `skip`, `slice`, `reverse`, `shuffle`, `random_n`, `unique`, `unique_by`, `sort_with`, `sort_by`, `sort_by_desc`, `where_eq`, `where_in`, `where_not_in`, `concat`, `merge`, `diff`, `intersect`, `group_by_with`, `key_by_with`, `map_to_map` |
-| `&mut self` | `load`, `load_missing` |
+| `&self` (borrow) | `len`, `is_empty`, `is_not_empty`, `first`, `last`, `first_where`, `last_where`, `contains_where`, `random`, `find`, `find_model`, `find_many`, `find_or`, `as_slice`, `pluck_by`, `pluck`, `pluck_keyed`, `group_by`, `key_by`, `sum`, `avg`, `min`, `max`, `to_array`, `to_json` |
+| `self` (consume) | `map`, `filter`, `reject`, `each`, `reduce`, `chunk`, `take`, `skip`, `slice`, `reverse`, `shuffle`, `random_n`, `unique`, `unique_models`, `diff_models`, `unique_by`, `sort_with`, `sort_by`, `sort_by_desc`, `where_eq`, `where_in`, `where_not_in`, `concat`, `merge`, `diff`, `intersect`, `group_by_with`, `key_by_with`, `map_to_map` |
+| `&mut self` | `load`, `load_missing`, `load_with` |
 
 If you want to keep the collection after a consuming call, `.clone()`
 before the call. `Collection<T>: Clone` when `T: Clone`.
@@ -514,7 +535,7 @@ Reach for `into_vec()` when:
   Laravel surface buys you nothing.
 
 For everything else - handler returns, transformations, Inertia
-props (as long as you respect the [serialization rule](#serialization--to_array-vs-serde)) -
+props -
 keep the `Collection<T>`.
 
 ## `LazyCollection<M>` - streaming results
@@ -591,13 +612,10 @@ That choice cascades through the rest of the surface:
   want `push`/`pop`, `into_vec()` gives you the raw `Vec` and
   removes any pretence.
 
-- **Serialisation diverges in service of correctness.** `to_array`
-  and `to_json` route through `Model::to_array()` so per-model
-  hidden/visible/appends apply; serde's blanket `Serialize for Vec`
-  bypass is documented as the [footgun](#serialization--to_array-vs-serde)
-  it is. Laravel's `toArray()` does the same routing; we just have
-  to name the gap explicitly because Rust users will reach for
-  `serde_json::to_string` by reflex.
+- **Separate identity methods.** You use `unique_models` and
+  `diff_models` for primary-key comparisons. You keep the generic
+  `unique` and `diff` methods for whole-value comparisons because Rust
+  does not overload inherent methods by trait bounds.
 
 The trade-off is exactly the one Suprnova makes everywhere: Laravel's
 surface shape, Rust's value semantics.
@@ -611,8 +629,7 @@ surface shape, Rust's value semantics.
   fieldsets and `?include=` chains; the right shape for any
   collection that leaves your API.
 - [Frontend - Inertia responses](frontend-inertia-responses.md) -
-  the rules for handing collections to Inertia props without
-  tripping the serialisation footgun.
+  how you hand collections to typed Inertia props.
 - [Validation](validation.md) - request payloads frequently produce
   vectors that you wrap into `Collection` for downstream
   processing.

@@ -33,12 +33,12 @@ pub use attrs::Attrs;
 pub use builder::{Builder, Direction, IntoColumn, IntoVal};
 pub use casts::{
     AsArray, AsArrayObject, AsBool, AsCollection, AsDate, AsDateTime, AsDecimal, AsEncrypted,
-    AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsFloat, AsHashed,
-    AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime, AsNativeDateTime,
-    AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject, AsOptionalCollection,
-    AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime, AsOptionalNativeDateTime,
-    AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString, AsTimestamp, AsU64, Cast,
-    DynCast, IntoDynCast, StoredU64,
+    AsEncryptedArray, AsEncryptedCollection, AsEncryptedObject, AsEnum, AsEnumCollection, AsFloat,
+    AsHashed, AsImmutableDate, AsImmutableDateTime, AsInt, AsJson, AsNaiveDateTime,
+    AsNativeDateTime, AsNativeJson, AsObject, AsOptionalArray, AsOptionalArrayObject,
+    AsOptionalCollection, AsOptionalDateTime, AsOptionalJson, AsOptionalNaiveDateTime,
+    AsOptionalNativeDateTime, AsOptionalNativeJson, AsOptionalObject, AsOptionalU64, AsString,
+    AsTimestamp, AsU64, Cast, DynCast, IntoDynCast, StoredU64,
 };
 pub use collection::Collection;
 pub use fillable::{
@@ -50,7 +50,7 @@ pub use lazy_loading::{
     LazyLoadingViolation, clear_lazy_loading_violation_handler, handle_lazy_loading_violation,
     prevent_lazy_loading, preventing_lazy_loading,
 };
-pub use model::{FirstOrCreate, Model, ReplicateExt};
+pub use model::{AttributeNames, FirstOrCreate, Model, ReplicateExt};
 pub use prunable::{
     MassPrunable, Prunable, PrunerEntry, PrunerFn, prune_all, prune_all_dry, prune_one, pruners,
 };

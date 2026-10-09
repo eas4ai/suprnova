@@ -70,6 +70,16 @@ pub struct EagerLoadCache {
     from_multi_row_query: bool,
     /// The row the model was read from and the record of its last save.
     row: RowState,
+    /// Serialization overrides belong to this model, never to another clone.
+    pub(crate) serialization: SerializationState,
+}
+
+/// Instance lists are initialized only when a caller overrides the model policy.
+#[derive(Clone, Default)]
+pub(crate) struct SerializationState {
+    pub(crate) hidden: Option<Vec<String>>,
+    pub(crate) visible: Option<Vec<String>>,
+    pub(crate) appends: Vec<String>,
 }
 
 /// Internal storage variant. One per relation kind plus a generic
@@ -96,6 +106,7 @@ impl EagerLoadCache {
             counts: HashMap::new(),
             from_multi_row_query: false,
             row: RowState::default(),
+            serialization: SerializationState::default(),
         }
     }
 
@@ -114,6 +125,7 @@ impl EagerLoadCache {
             counts: HashMap::new(),
             from_multi_row_query: false,
             row: RowState::loaded(row),
+            serialization: SerializationState::default(),
         }
     }
 
@@ -171,6 +183,7 @@ impl EagerLoadCache {
             counts: self.counts.clone(),
             from_multi_row_query: false,
             row: RowState::default(),
+            serialization: self.serialization.clone(),
         }
     }
 
@@ -354,6 +367,7 @@ impl Clone for EagerLoadCache {
             counts: self.counts.clone(),
             from_multi_row_query: self.from_multi_row_query,
             row: self.row.clone(),
+            serialization: self.serialization.clone(),
         }
     }
 }

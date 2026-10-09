@@ -463,21 +463,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
     };
 
-    // Phase 10C T6 - emit the `to_array` + `__append_accessor`
-    // overrides on the `Model` trait when the model declares any of
-    // `hidden = [...]` / `visible = [...]` / `appends = [...]`. When
-    // none of those attributes are declared, the emitters return empty
-    // token streams and the trait defaults win (which strip the
-    // auto-injected `__eager` / `__pivot` keys but apply no filtering).
-    //
-    // Moving filter emission to the trait (instead of an inherent
-    // `to_json` on the user struct) means `Collection<M>::to_array`,
-    // resource responses, and any other generic Model consumer routes
-    // through the same hidden/visible/appends pipeline.
+    // Give serde and Model conversions one policy while persistence keeps
+    // an unfiltered runtime view. Register accessors without evaluating them.
     let visible_slice_opt: Option<&[String]> = input.visible.as_deref();
     let to_array_override =
         serialization::emit_to_array_override(&input.hidden, visible_slice_opt, &input.appends);
-    let append_accessor_dispatch = serialization::emit_append_accessor_dispatch(&input.appends);
+    let mut accessor_names = input.appends.clone();
+    for name in &input.accessors {
+        if !accessor_names.contains(name) {
+            accessor_names.push(name.clone());
+        }
+    }
+    let append_accessor_dispatch = serialization::emit_append_accessor_dispatch(&accessor_names);
 
     // T8 - `fill` body arms. Mutator-routed fields call
     // `self.set_<field>(value.clone())?`; non-mutator fields
@@ -1492,6 +1489,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 &self,
             ) -> ::core::option::Option<&::suprnova::EagerLoadCache> {
                 ::core::option::Option::Some(&self.__eager)
+            }
+
+            fn __eager_cache_mut(
+                &mut self,
+            ) -> ::core::option::Option<&mut ::suprnova::EagerLoadCache> {
+                ::core::option::Option::Some(&mut self.__eager)
             }
 
             // `Model::get_original` reads a value through the casts, so it
