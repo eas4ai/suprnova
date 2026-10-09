@@ -75,7 +75,9 @@ use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
-use crate::eloquent::relations::{ColumnBinder, no_column_binder};
+use crate::eloquent::relations::{
+    ColumnBinder, MorphToTarget, RelationEntry, RelationKind, no_column_binder,
+};
 use crate::error::FrameworkError;
 
 const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
@@ -385,6 +387,7 @@ pub(crate) struct ExistsSpec {
 
 /// Which rows an existence clause keeps. Stands in for a bare `bool` so
 /// every `has*` / `doesnt_have*` method names the polarity it builds.
+#[derive(Clone, Copy)]
 enum Existence {
     /// Rows whose relation has at least one match: `EXISTS (...)`.
     Has,
@@ -3671,6 +3674,21 @@ fn render_exists(
     })
 }
 
+/// Whether an owner count of `owners` satisfies `owners <op> count`, for
+/// `has_count` on a `MorphTo` relation, where the count is 0 or 1. `None`
+/// when `op` does not compare numbers.
+fn owner_count_matches(op: &str, owners: i64, count: i64) -> Option<bool> {
+    Some(match op.trim() {
+        "=" => owners == count,
+        "<>" | "!=" => owners != count,
+        "<" => owners < count,
+        "<=" => owners <= count,
+        ">" => owners > count,
+        ">=" => owners >= count,
+        _ => return None,
+    })
+}
+
 /// Render a single [`WhereTerm`] inside the EXISTS subquery body.
 /// Mirrors `Builder::render_where_term`'s arms but free-standing so the
 /// renderer doesn't require a `Builder<M>` receiver - the inner terms
@@ -5026,12 +5044,8 @@ where
     where
         F: FnMut(Builder<R>, &str) -> Builder<R>,
     {
-        use crate::eloquent::relations::{
-            MorphToTarget, RelationKind, find_morph_type, morph_types,
-        };
-        let Some(relation_entry) = crate::eloquent::relations::find_relation::<M>(relation)
-            .filter(|entry| entry.kind == RelationKind::MorphTo)
-        else {
+        use crate::eloquent::relations::{find_morph_type, morph_types};
+        let Some(relation_entry) = Self::morph_to_relation(relation) else {
             self.relationship_error = Some(format!("`{relation}` is not a MorphTo relation"));
             return self;
         };
@@ -5079,49 +5093,248 @@ where
             return self;
         }
         let type_column = format!("{}.{}", M::TABLE, relation_entry.morph_type_column);
+        let existence = if positive {
+            Existence::Has
+        } else {
+            Existence::DoesntHave
+        };
         let mut branches = Vec::new();
         for entry in entries {
-            let constraints = (entry.query_constraints)();
             let inner = predicate(Builder::<R>::new(), entry.morph_type());
             if let Some(error) = inner.relationship_error {
                 self.relationship_error = Some(error);
                 return self;
             }
-            let mut terms = constraints.where_terms;
-            if !inner.where_terms.is_empty() {
-                terms.push(WhereTerm::Group(inner.where_terms));
-            }
-            let mut spec = self.build_exists_spec_for(
+            branches.push(self.morph_owner_branch(
                 relation,
-                if positive {
-                    Existence::Has
-                } else {
-                    Existence::DoesntHave
-                },
-                None,
-                terms,
-                None,
-            );
-            spec.target_table = entry.table.to_owned();
-            spec.parent_key = entry.primary_key.to_owned();
-            spec.belongs_to = true;
-            spec.morph_type_column.clear();
-            spec.binder = constraints.binder;
-            let names = entry
-                .morph_type_names()
-                .into_iter()
-                .map(Value::String)
-                .collect();
-            branches.push(WhereTerm::Group(vec![
-                WhereTerm::In(type_column.clone(), names),
-                WhereTerm::Exists(Box::new(spec)),
-            ]));
+                &type_column,
+                &entry,
+                existence,
+                inner.where_terms,
+            ));
         }
         if wildcard && !positive {
             branches.push(WhereTerm::Null(type_column.clone()));
         }
         self.where_terms.push(WhereTerm::Or(branches));
         self
+    }
+
+    /// The `MorphTo` relation `relation` names on `M`, if it is one. Its
+    /// rows name their owner's table in a type column, so the generic
+    /// `EXISTS` spec has no table to read; the existence family asks the
+    /// morph engine for such a relation instead.
+    fn morph_to_relation(relation: &str) -> Option<&'static RelationEntry> {
+        crate::eloquent::relations::find_relation::<M>(relation)
+            .filter(|entry| entry.kind == RelationKind::MorphTo)
+    }
+
+    /// One owner type's branch of a `MorphTo` existence query: the row's
+    /// type column names `owner`, and `owner`'s table holds the row's key
+    /// under the owner's own scopes and `inner` (`Has`), or does not
+    /// (`DoesntHave`).
+    fn morph_owner_branch(
+        &self,
+        relation: &str,
+        type_column: &str,
+        owner: &MorphToTarget,
+        existence: Existence,
+        inner: Vec<WhereTerm>,
+    ) -> WhereTerm {
+        let constraints = (owner.query_constraints)();
+        let mut terms = constraints.where_terms;
+        if !inner.is_empty() {
+            terms.push(WhereTerm::Group(inner));
+        }
+        let mut spec = self.build_exists_spec_for(relation, existence, None, terms, None);
+        spec.target_table = owner.table.to_owned();
+        spec.parent_key = owner.primary_key.to_owned();
+        spec.belongs_to = true;
+        spec.morph_type_column.clear();
+        spec.binder = constraints.binder;
+        let names = owner
+            .morph_type_names()
+            .into_iter()
+            .map(Value::String)
+            .collect();
+        WhereTerm::Group(vec![
+            WhereTerm::In(type_column.to_owned(), names),
+            WhereTerm::Exists(Box::new(spec)),
+        ])
+    }
+
+    /// The clause `has` and its kin add on the `MorphTo` relation
+    /// `relation_entry`, asked of `owners`. `Has` keeps the rows whose type
+    /// names one of `owners` and whose owner row exists under the owner's
+    /// scopes and `inner`; over the declared targets with no `inner` that
+    /// is the clause `has_morph(relation, "*")` renders. `DoesntHave` keeps
+    /// every other row, so the two split the table: a null type, a type no
+    /// owner answers to, and an owner that is missing or fails `inner`.
+    fn morph_presence(
+        &self,
+        relation: &str,
+        relation_entry: &RelationEntry,
+        owners: &[MorphToTarget],
+        existence: Existence,
+        inner: Vec<WhereTerm>,
+    ) -> WhereTerm {
+        if owners.is_empty() {
+            return match existence {
+                Existence::Has => WhereTerm::In(M::PRIMARY_KEY.to_owned(), Vec::new()),
+                Existence::DoesntHave => WhereTerm::NotIn(M::PRIMARY_KEY.to_owned(), Vec::new()),
+            };
+        }
+        let type_column = format!("{}.{}", M::TABLE, relation_entry.morph_type_column);
+        let present = WhereTerm::Or(
+            owners
+                .iter()
+                .map(|owner| {
+                    self.morph_owner_branch(
+                        relation,
+                        &type_column,
+                        owner,
+                        Existence::Has,
+                        inner.clone(),
+                    )
+                })
+                .collect(),
+        );
+        match existence {
+            Existence::Has => present,
+            Existence::DoesntHave => {
+                let names = owners
+                    .iter()
+                    .flat_map(MorphToTarget::morph_type_names)
+                    .map(Value::String)
+                    .collect();
+                // A null type makes `IN` unknown rather than false, and `NOT`
+                // of unknown drops the row. The first two branches take every
+                // row whose type names no owner, so `NOT` decides only rows
+                // whose branches are all true or false.
+                WhereTerm::Or(vec![
+                    WhereTerm::Null(type_column.clone()),
+                    WhereTerm::NotIn(type_column, names),
+                    WhereTerm::Not(Box::new(present)),
+                ])
+            }
+        }
+    }
+
+    /// `has_count` on the `MorphTo` relation `relation_entry`. A row has at
+    /// most one owner, so its owner count is 0 or 1 and the comparison
+    /// reduces to one of four clauses: no row, the rows `has` keeps, the
+    /// rows `doesnt_have` keeps, or every row. Laravel's `hasMorph` keeps
+    /// rows with a null type for the same comparisons. An operator that
+    /// does not compare numbers is refused.
+    fn morph_owner_count(
+        &self,
+        relation: &str,
+        relation_entry: &RelationEntry,
+        op: &str,
+        count: i64,
+    ) -> Result<WhereTerm, String> {
+        let (Some(zero), Some(one)) = (
+            owner_count_matches(op, 0, count),
+            owner_count_matches(op, 1, count),
+        ) else {
+            return Err(format!(
+                "`has_count` on the MorphTo relation `{relation}` compares the owner count with =, <>, !=, <, <=, > or >=, not `{op}`"
+            ));
+        };
+        let owners = relation_entry.morph_targets;
+        Ok(match (zero, one) {
+            (false, true) => {
+                self.morph_presence(relation, relation_entry, owners, Existence::Has, Vec::new())
+            }
+            (true, false) => self.morph_presence(
+                relation,
+                relation_entry,
+                owners,
+                Existence::DoesntHave,
+                Vec::new(),
+            ),
+            (true, true) => WhereTerm::NotIn(M::PRIMARY_KEY.to_owned(), Vec::new()),
+            (false, false) => WhereTerm::In(M::PRIMARY_KEY.to_owned(), Vec::new()),
+        })
+    }
+
+    /// `R` as an owner of the `MorphTo` relation `relation_entry`: a target
+    /// it declares, or any model registered with a `morph_type`, the owners
+    /// `where_has_morph` accepts by name.
+    fn morph_owner_of<R: 'static>(
+        relation: &str,
+        relation_entry: &RelationEntry,
+    ) -> Result<MorphToTarget, String> {
+        let want = std::any::TypeId::of::<R>();
+        relation_entry
+            .morph_targets
+            .iter()
+            .find(|target| (target.type_id)() == want)
+            .copied()
+            .or_else(|| {
+                crate::eloquent::relations::find_morph_type_by_id(want)
+                    .map(MorphToTarget::from_entry)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "`{}` is no owner type of the MorphTo relation `{relation}`: the relation does not declare it and it registers no `morph_type`",
+                    std::any::type_name::<R>()
+                )
+            })
+    }
+
+    /// The clause `has`, `doesnt_have` and their `or_` forms add for
+    /// `relation`: on a `MorphTo`, the morph engine's over every owner type
+    /// the relation declares, as Laravel's `has` routes a `MorphTo` to
+    /// `hasMorph($relation, ['*'])`; on every other kind, the correlated
+    /// `EXISTS`.
+    fn existence_term(&self, relation: &str, existence: Existence) -> WhereTerm {
+        match Self::morph_to_relation(relation) {
+            Some(relation_entry) => self.morph_presence(
+                relation,
+                relation_entry,
+                relation_entry.morph_targets,
+                existence,
+                Vec::new(),
+            ),
+            None => WhereTerm::Exists(Box::new(self.build_exists_spec_for(
+                relation,
+                existence,
+                None,
+                Vec::new(),
+                None,
+            ))),
+        }
+    }
+
+    /// The clause `where_has`, `where_doesnt_have` and their `or_` forms add
+    /// for `relation`, `inner` being the predicate's builder. On a `MorphTo`
+    /// the predicate is written against one model and cannot run against
+    /// every owner table, so it applies to the owners of `R`'s type alone,
+    /// as `where_has_morph` with that one type does. Every other kind takes
+    /// the correlated `EXISTS`.
+    fn typed_existence_term<R: 'static>(
+        &self,
+        relation: &str,
+        existence: Existence,
+        inner: Builder<R>,
+    ) -> Result<WhereTerm, String> {
+        let Some(relation_entry) = Self::morph_to_relation(relation) else {
+            let spec =
+                self.build_exists_spec_for(relation, existence, None, inner.where_terms, None);
+            return Ok(WhereTerm::Exists(Box::new(spec)));
+        };
+        if let Some(error) = inner.relationship_error {
+            return Err(error);
+        }
+        let owner = Self::morph_owner_of::<R>(relation, relation_entry)?;
+        Ok(self.morph_presence(
+            relation,
+            relation_entry,
+            &[owner],
+            existence,
+            inner.where_terms,
+        ))
     }
 
     /// Keep a constrained eager query's limit per parent instead of per batch.
@@ -5148,24 +5361,43 @@ where
     /// `WHERE EXISTS (SELECT 1 FROM related ...)` - restrict to rows
     /// whose `relation` returns at least one matching child.
     ///
+    /// On a `MorphTo` relation it asks every owner type the relation
+    /// declares, as Laravel's `has` does: a row matches when its type
+    /// column names a declared owner and that owner's table holds its key,
+    /// under the owner's own scopes. The clause is the one
+    /// [`Self::has_morph`] renders for `"*"`.
+    ///
     /// ```ignore
     /// // Users who have at least one post.
     /// let users = User::query().has("posts").get().await?;
     /// ```
     pub fn has(mut self, relation: &str) -> Self {
-        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        let term = self.existence_term(relation, Existence::Has);
+        self.where_terms.push(term);
         self
     }
 
     /// `WHERE (SELECT COUNT(*) FROM related ...) <op> <count>` - like
     /// [`Self::has`] but with a count comparator.
     ///
+    /// On a `MorphTo` relation a row has at most one owner, so its count is
+    /// 0 or 1: `("=", 1)` keeps the rows [`Self::has`] keeps and `("=", 0)`
+    /// the rows [`Self::doesnt_have`] keeps. `op` must compare numbers
+    /// (`=`, `<>`, `!=`, `<`, `<=`, `>` or `>=`); another operator fails
+    /// the query.
+    ///
     /// ```ignore
     /// // Users with at least 3 published posts.
     /// let prolific = User::query().has_count("posts", ">=", 3).get().await?;
     /// ```
     pub fn has_count(mut self, relation: &str, op: &str, count: i64) -> Self {
+        if let Some(relation_entry) = Self::morph_to_relation(relation) {
+            match self.morph_owner_count(relation, relation_entry, op, count) {
+                Ok(term) => self.where_terms.push(term),
+                Err(error) => self.relationship_error = Some(error),
+            }
+            return self;
+        }
         let spec = self.build_exists_spec_for(
             relation,
             Existence::Has,
@@ -5177,28 +5409,30 @@ where
         self
     }
 
-    /// `OR EXISTS (...)` - disjunction form of [`Self::has`].
+    /// `OR EXISTS (...)` - disjunction form of [`Self::has`], which it
+    /// follows on a `MorphTo` relation too.
     pub fn or_has(mut self, relation: &str) -> Self {
-        let spec = self.build_exists_spec_for(relation, Existence::Has, None, Vec::new(), None);
-        let new = WhereTerm::Exists(Box::new(spec));
+        let new = self.existence_term(relation, Existence::Has);
         self.merge_or_term(new);
         self
     }
 
     /// `WHERE NOT EXISTS (SELECT 1 FROM related ...)` - restrict to
     /// rows whose `relation` returns no matching children.
+    ///
+    /// On a `MorphTo` relation it keeps every row [`Self::has`] leaves
+    /// out: a missing or trashed owner, a null type, and a type no
+    /// declared owner answers to.
     pub fn doesnt_have(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        let term = self.existence_term(relation, Existence::DoesntHave);
+        self.where_terms.push(term);
         self
     }
 
-    /// `OR NOT EXISTS (...)` - disjunction form of [`Self::doesnt_have`].
+    /// `OR NOT EXISTS (...)` - disjunction form of [`Self::doesnt_have`],
+    /// which it follows on a `MorphTo` relation too.
     pub fn or_doesnt_have(mut self, relation: &str) -> Self {
-        let spec =
-            self.build_exists_spec_for(relation, Existence::DoesntHave, None, Vec::new(), None);
-        let new = WhereTerm::Exists(Box::new(spec));
+        let new = self.existence_term(relation, Existence::DoesntHave);
         self.merge_or_term(new);
         self
     }
@@ -5206,6 +5440,13 @@ where
     /// `WHERE EXISTS (SELECT 1 FROM related WHERE <closure>)` - take a
     /// closure constraining the inner builder; the WHERE terms it
     /// produces land in the subquery's body.
+    ///
+    /// On a `MorphTo` relation the closure is written against one model,
+    /// so it runs against the owners of `R`'s type alone, as
+    /// [`Self::where_has_morph`] with that one type does, and a row whose
+    /// owner has another type does not match. Use `where_has_morph` to
+    /// constrain several owner types. An `R` the relation does not declare
+    /// and that registers no `morph_type` fails the query.
     ///
     /// ```ignore
     /// let recent = User::query()
@@ -5219,60 +5460,58 @@ where
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec =
-            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        match self.typed_existence_term(relation, Existence::Has, inner) {
+            Ok(term) => self.where_terms.push(term),
+            Err(error) => self.relationship_error = Some(error),
+        }
         self
     }
 
-    /// `OR EXISTS (... <closure>)` - disjunction form of [`Self::where_has`].
+    /// `OR EXISTS (... <closure>)` - disjunction form of
+    /// [`Self::where_has`], which it follows on a `MorphTo` relation too.
     pub fn or_where_has<R, F>(mut self, relation: &str, predicate: F) -> Self
     where
         R: 'static,
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec =
-            self.build_exists_spec_for(relation, Existence::Has, None, inner.where_terms, None);
-        let new = WhereTerm::Exists(Box::new(spec));
-        self.merge_or_term(new);
+        match self.typed_existence_term(relation, Existence::Has, inner) {
+            Ok(term) => self.merge_or_term(term),
+            Err(error) => self.relationship_error = Some(error),
+        }
         self
     }
 
     /// `WHERE NOT EXISTS (... <closure>)`. Negated form of [`Self::where_has`].
+    ///
+    /// On a `MorphTo` relation it keeps every row `where_has` leaves out,
+    /// rows whose owner has another type included.
     pub fn where_doesnt_have<R, F>(mut self, relation: &str, predicate: F) -> Self
     where
         R: 'static,
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            Existence::DoesntHave,
-            None,
-            inner.where_terms,
-            None,
-        );
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        match self.typed_existence_term(relation, Existence::DoesntHave, inner) {
+            Ok(term) => self.where_terms.push(term),
+            Err(error) => self.relationship_error = Some(error),
+        }
         self
     }
 
-    /// `OR NOT EXISTS (... <closure>)`.
+    /// `OR NOT EXISTS (... <closure>)` - disjunction form of
+    /// [`Self::where_doesnt_have`], which it follows on a `MorphTo`
+    /// relation too.
     pub fn or_where_doesnt_have<R, F>(mut self, relation: &str, predicate: F) -> Self
     where
         R: 'static,
         F: FnOnce(Builder<R>) -> Builder<R>,
     {
         let inner = predicate(Builder::<R>::new());
-        let spec = self.build_exists_spec_for(
-            relation,
-            Existence::DoesntHave,
-            None,
-            inner.where_terms,
-            None,
-        );
-        let new = WhereTerm::Exists(Box::new(spec));
-        self.merge_or_term(new);
+        match self.typed_existence_term(relation, Existence::DoesntHave, inner) {
+            Ok(term) => self.merge_or_term(term),
+            Err(error) => self.relationship_error = Some(error),
+        }
         self
     }
 
@@ -5996,19 +6235,12 @@ where
         out: &[M],
         exec: &crate::database::transaction::ExecutorChoice,
     ) -> Result<(), FrameworkError> {
-        use crate::eloquent::relations::RelationKind;
         for relation in &self.exists_relations {
-            let Some(entry) = crate::eloquent::relations::find_relation::<M>(relation) else {
+            if crate::eloquent::relations::find_relation::<M>(relation).is_none() {
                 return Err(FrameworkError::bad_request(format!(
                     "Unknown relation `{relation}`"
                 )));
-            };
-            // A `MorphTo` row names its owner's table in its type column, so
-            // its entry carries no target table and the generic `has` would
-            // render a probe that is always false. The morph engine asks the
-            // owner types the relation declares instead. Every other kind,
-            // through relations included, has the correlation `has` renders.
-            let morph_owner = entry.kind == RelationKind::MorphTo;
+            }
             if out.is_empty() {
                 continue;
             }
@@ -6024,16 +6256,13 @@ where
                         })
                 })
                 .collect();
-            let probe = Self::new().filter_in(M::primary_key_name(), keys);
-            let mut probe = if morph_owner {
-                // `has_morph(relation, "*")`: true when the type column names
-                // one of the relation's declared owners and that owner's table
-                // holds the id, under the owner's own scopes; a type string no
-                // declared owner answers to matches no branch.
-                probe.has_morph(relation, "*")
-            } else {
-                probe.has(relation)
-            };
+            // `has` reads a `MorphTo` through the morph engine: true when the
+            // type column names one of the relation's declared owners and that
+            // owner's table holds the id, under the owner's own scopes. Every
+            // other kind, through relations included, takes its correlation.
+            let mut probe = Self::new()
+                .filter_in(M::primary_key_name(), keys)
+                .has(relation);
             probe.tx_override = self.tx_override.clone();
             probe.connection_override = self.connection_override.clone();
             probe.binder = self.binder;
