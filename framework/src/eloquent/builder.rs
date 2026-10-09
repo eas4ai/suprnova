@@ -5152,11 +5152,7 @@ where
         n: &mut usize,
     ) -> Result<String, FrameworkError> {
         if !self.joins.is_empty() && backend != DbBackend::MySql {
-            let identity = if backend == DbBackend::Postgres {
-                "ctid"
-            } else {
-                "rowid"
-            };
+            let identity = M::primary_key_name();
             let mut query = self.clone();
             query.select_cols = None;
             query.select_raw = None;

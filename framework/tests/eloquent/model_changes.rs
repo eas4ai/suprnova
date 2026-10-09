@@ -886,3 +886,71 @@ async fn clean_timestamped_and_encrypted_models_run_no_update_after_time_advance
     assert!(post.get_changes().is_empty());
     assert!(secret.get_changes().is_empty());
 }
+
+#[tokio::test]
+async fn dirty_save_syncs_memory_so_a_second_save_preserves_other_writers() {
+    let db = sqlite().await;
+    ChangeUser::observe(AuditObserver).await;
+    let email = "second-clean@example.com";
+    let created = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: false })
+        .await
+        .expect("create");
+    let mut user = ChangeUser::find_or_fail(created.id).await.expect("load");
+    db.execute_unprepared("UPDATE par_change_users SET name = 'Other writer'")
+        .await
+        .expect("external write");
+    user.is_admin = true;
+    user.save().await.expect("dirty save");
+    let original = user.get_original("name").expect("original");
+    db.execute_unprepared("CREATE TRIGGER refuse_second_save BEFORE UPDATE ON par_change_users BEGIN SELECT RAISE(ABORT, 'unexpected second update'); END").await.expect("guard second save");
+    let updating = seen_for("updating", email).len();
+    let updated = seen_for("updated", email).len();
+    let saving = seen_for("saving", email).len();
+    let saved = seen_for("saved", email).len();
+    DB::enable_query_log().expect("log");
+    DB::flush_query_log().expect("clear log");
+    user.save().await.expect("second clean save");
+    let log = DB::get_query_log().expect("log");
+    DB::disable_query_log().expect("disable log");
+    assert!(log.is_empty(), "a clean save runs no SQL: {log:?}");
+    assert_eq!(original, Some(json!("Ada")));
+    assert_eq!(user.name, "Ada");
+    assert_eq!(seen_for("updating", email).len(), updating);
+    assert_eq!(seen_for("updated", email).len(), updated);
+    assert_eq!(seen_for("saving", email).len(), saving + 1);
+    assert_eq!(seen_for("saved", email).len(), saved + 1);
+    assert_eq!(user.get_previous("is_admin"), Some(json!(0)));
+    assert!(user.was_changed("is_admin"));
+    assert!(!user.was_changed("name"));
+    let stored = ChangeUser::find_or_fail(user.id).await.expect("stored row");
+    assert_eq!(stored.name, "Other writer");
+    assert!(stored.is_admin);
+}
+
+#[tokio::test]
+async fn dirty_save_with_tx_syncs_memory_for_the_next_transaction() {
+    let db = sqlite().await;
+    let created = plain("Ada", "tx-second-clean@example.com").await;
+    let mut user = PlainUser::find_or_fail(created.id).await.expect("load");
+    db.execute_unprepared("UPDATE par_plain_users SET name = 'Other writer'")
+        .await
+        .expect("external write");
+    let tx = DB::begin_transaction().await.expect("transaction");
+    user.is_admin = true;
+    user.save_with_tx(&tx).await.expect("dirty save");
+    tx.commit().await.expect("commit");
+    db.execute_unprepared("CREATE TRIGGER refuse_second_tx_save BEFORE UPDATE ON par_plain_users BEGIN SELECT RAISE(ABORT, 'unexpected second update'); END").await.expect("guard second save");
+    let tx = DB::begin_transaction().await.expect("second transaction");
+    user.save_with_tx(&tx).await.expect("second clean save");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        user.get_original("name").expect("original"),
+        Some(json!("Ada"))
+    );
+    assert_eq!(user.get_previous("is_admin"), Some(json!(0)));
+    assert!(user.was_changed("is_admin"));
+    assert!(!user.was_changed("name"));
+    let stored = PlainUser::find_or_fail(user.id).await.expect("stored row");
+    assert_eq!(stored.name, "Other writer");
+    assert!(stored.is_admin);
+}
