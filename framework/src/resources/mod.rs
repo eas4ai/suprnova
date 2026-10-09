@@ -56,8 +56,11 @@ pub use include_tree::{
     DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeTree, current_max_relationship_depth,
     max_relationship_depth,
 };
-pub use jsonapi_info::JsonApiInfo;
-pub use maybe::{Maybe, MissingValue, insert_maybe, strip_missing_values};
+pub use jsonapi_info::{JsonApiInfo, jsonapi_default};
+pub use maybe::{
+    Maybe, MergeValue, MissingValue, insert_maybe, merge_when, strip_missing_values,
+    when_exists_loaded,
+};
 pub use response::{JsonApi, JsonApiResponse, Resource};
 pub use trait_def::{
     IncludeResolutionError, IntoJsonResource, RelationshipValue, ResourceIdentifier,

@@ -8,11 +8,11 @@ pub mod length_aware;
 pub mod links;
 pub mod simple;
 
-pub use cursor::{CursorDirection, CursorPaginator};
+pub use cursor::{Cursor, CursorDirection, CursorPaginator};
 // Internal keyset-scan helpers shared with `eloquent::Builder::cursor_paginate`.
 // Imported by function name so the `cursor` parameter in `Pagination::cursor`
 // doesn't shadow the module path.
-use cursor::{finalize_page, plan_scan};
+use cursor::{finalize_page, plan_direction};
 pub use inertia::IntoInertiaScroll;
 pub use length_aware::LengthAwarePaginator;
 pub use links::PageLink;
@@ -143,9 +143,9 @@ impl Pagination {
     ///   points at this page's last row (back toward the caller's
     ///   origin).
     ///
-    /// The keyset alone orders the pages: an `ORDER BY` already on
-    /// `query` is dropped, because it would sort ahead of `order_col`
-    /// and make the boundary skip and repeat rows. An `OFFSET` on
+    /// Multiple ordered entity columns keep their directions and each
+    /// contributes a named cursor boundary. Include a unique column to break ties.
+    /// Zero or one explicit order uses `order_col` ascending. An `OFFSET` on
     /// `query` positions the first page only, the one requested without
     /// a cursor; every later page starts at its cursor.
     ///
@@ -210,11 +210,9 @@ impl Pagination {
         E::Model: Send + Sync,
         C: ColumnTrait + Copy,
     {
-        let decoded = match cursor {
-            Some(c) => Some(CursorPaginator::<E::Model>::decode_value(c)?),
-            None => None,
-        };
+        let decoded = cursor.map(Cursor::decode).transpose()?;
         let mut query = query;
+        let orders = cursor_columns::<E, C>(&mut query, order_col)?;
         {
             let statement = sea_orm::QueryTrait::query(&mut query);
             statement.clear_order_by();
@@ -222,50 +220,44 @@ impl Pagination {
                 statement.reset_offset();
             }
         }
-        let plan = plan_scan(decoded);
-
-        // Apply the plan to the SeaORM query: order in the plan's
-        // direction, then the typed keyset filter.
-        let mut q = if plan.order_asc {
-            query.order_by_asc(order_col)
-        } else {
-            query.order_by_desc(order_col)
-        };
-        if let Some((op, boundary)) = &plan.filter {
-            q = if *op == ">" {
-                q.filter(order_col.gt(boundary.clone()))
+        let plan = plan_direction(decoded.as_ref().map(Cursor::direction));
+        for (column, order) in &orders {
+            query = if *order == plan.order_asc {
+                query.order_by_asc(*column)
             } else {
-                q.filter(order_col.lt(boundary.clone()))
+                query.order_by_desc(*column)
             };
         }
-        let mut rows = exec.select_all(q.limit(per_page + 1)).await?;
-        // Normalize a backward (DESC) scan back to ASC so finalize_page
-        // sees the overflow row at the start.
+        if let Some(cursor) = &decoded {
+            query = query.filter(cursor_condition(cursor, &orders, plan.order_asc)?);
+        }
+        let mut rows = exec
+            .select_all(query.limit(per_page.saturating_add(1)))
+            .await?;
         if !plan.order_asc {
             rows.reverse();
         }
         let (rows, flags) = finalize_page(rows, per_page, &plan);
-
-        // next_cursor: a forward cursor pinned at this page's last row.
-        let next_cursor = if flags.has_next && !rows.is_empty() {
-            let v = rows.last().unwrap().get(order_col);
-            Some(CursorPaginator::<E::Model>::encode_value(
-                &v,
-                CursorDirection::Next,
-            )?)
-        } else {
-            None
+        let encode = |row: &E::Model, direction| {
+            Cursor::new(
+                orders
+                    .iter()
+                    .map(|(column, _)| (column.to_string(), row.get(*column)))
+                    .collect(),
+                direction,
+            )
+            .encode()
         };
-        // prev_cursor: a backward cursor pinned at this page's first row.
-        let prev_cursor = if flags.has_prev && !rows.is_empty() {
-            let v = rows.first().unwrap().get(order_col);
-            Some(CursorPaginator::<E::Model>::encode_value(
-                &v,
-                CursorDirection::Prev,
-            )?)
-        } else {
-            None
-        };
+        let next_cursor = rows
+            .last()
+            .filter(|_| flags.has_next)
+            .map(|row| encode(row, CursorDirection::Next))
+            .transpose()?;
+        let prev_cursor = rows
+            .first()
+            .filter(|_| flags.has_prev)
+            .map(|row| encode(row, CursorDirection::Prev))
+            .transpose()?;
 
         let paginator = CursorPaginator::new(rows, per_page, next_cursor, prev_cursor);
         // The cursor this page was fetched with is its current page in the
@@ -274,6 +266,207 @@ impl Pagination {
             Some(cursor) => paginator.with_current_cursor(cursor),
             None => paginator,
         })
+    }
+}
+
+fn cursor_condition<C: ColumnTrait>(
+    cursor: &Cursor,
+    orders: &[(C, bool)],
+    forward: bool,
+) -> Result<sea_orm::sea_query::Condition, FrameworkError> {
+    let names = orders
+        .iter()
+        .map(|(column, ascending)| (column.to_string(), *ascending))
+        .collect::<Vec<_>>();
+    let mut boundary = sea_orm::sea_query::Condition::any();
+    for group in cursor.comparisons(&names, forward)? {
+        let mut prefix = sea_orm::sea_query::Condition::all();
+        for comparison in group {
+            let column = comparison
+                .column
+                .parse::<C>()
+                .map_err(|_| FrameworkError::bad_request("Cursor column is not in the entity"))?;
+            prefix = prefix.add(match comparison.operator {
+                "=" => column.eq(comparison.value),
+                ">" => column.gt(comparison.value),
+                _ => column.lt(comparison.value),
+            });
+        }
+        boundary = boundary.add(prefix);
+    }
+    Ok(boundary)
+}
+
+fn cursor_columns<E, C>(
+    query: &mut Select<E>,
+    order_col: C,
+) -> Result<Vec<(C, bool)>, FrameworkError>
+where
+    E: EntityTrait<Column = C>,
+    C: ColumnTrait + Copy,
+{
+    // SeaQuery exposes orders through its renderer, rather than a getter.
+    let inspector = OrderInspector::default();
+    sea_orm::QueryTrait::query(query).build_any(&inspector);
+    let recorded = inspector.orders.into_inner();
+    let orders: Vec<(C, bool)> = if recorded.len() > 1 {
+        recorded
+            .into_iter()
+            .map(|order| {
+                let (name, ascending) = parse_cursor_order(&order)?;
+                let column = name.parse::<C>().map_err(|_| {
+                    FrameworkError::bad_request("Cursor column is not in the entity")
+                })?;
+                Ok((column, ascending))
+            })
+            .collect::<Result<_, FrameworkError>>()?
+    } else {
+        vec![(order_col, true)]
+    };
+    Ok(orders)
+}
+
+fn parse_cursor_order(order: &str) -> Result<(String, bool), FrameworkError> {
+    let invalid =
+        || FrameworkError::bad_request("Cursor pagination needs ascending or descending columns");
+    let (expression, ascending) = order
+        .strip_suffix(" ASC")
+        .map(|expr| (expr, true))
+        .or_else(|| order.strip_suffix(" DESC").map(|expr| (expr, false)))
+        .ok_or_else(invalid)?;
+    // The inspector uses SQLite's quoted identifiers. Accept only a column,
+    // with optional table qualification, rather than interpreting SQL expressions.
+    let mut remainder = expression;
+    let mut column = String::new();
+    loop {
+        remainder = remainder.strip_prefix('"').ok_or_else(invalid)?;
+        let mut identifier = String::new();
+        loop {
+            let end = remainder.find('"').ok_or_else(invalid)?;
+            identifier.push_str(&remainder[..end]);
+            remainder = &remainder[end + 1..];
+            if let Some(rest) = remainder.strip_prefix('"') {
+                identifier.push('"');
+                remainder = rest;
+            } else {
+                break;
+            }
+        }
+        column.clear();
+        column.push_str(&identifier);
+        if remainder.is_empty() {
+            break;
+        }
+        remainder = remainder.strip_prefix('.').ok_or_else(invalid)?;
+    }
+    Ok((column, ascending))
+}
+
+// Record only the outer SELECT's orders. Nested expressions, FROM queries,
+// CTEs, windows and union arms render without visiting this hook.
+#[derive(Default)]
+struct OrderInspector {
+    orders: std::cell::RefCell<Vec<String>>,
+}
+
+impl sea_orm::sea_query::QuotedBuilder for OrderInspector {
+    fn quote(&self) -> sea_orm::sea_query::Quote {
+        sea_orm::sea_query::QuotedBuilder::quote(&sea_orm::sea_query::SqliteQueryBuilder)
+    }
+}
+impl sea_orm::sea_query::EscapeBuilder for OrderInspector {}
+impl sea_orm::sea_query::TableRefBuilder for OrderInspector {}
+impl sea_orm::sea_query::OperLeftAssocDecider for OrderInspector {
+    fn well_known_left_associative(&self, op: &sea_orm::sea_query::BinOper) -> bool {
+        sea_orm::sea_query::OperLeftAssocDecider::well_known_left_associative(
+            &sea_orm::sea_query::SqliteQueryBuilder,
+            op,
+        )
+    }
+}
+impl sea_orm::sea_query::PrecedenceDecider for OrderInspector {
+    fn inner_expr_well_known_greater_precedence(
+        &self,
+        inner: &sea_orm::sea_query::Expr,
+        outer: &sea_orm::sea_query::Oper,
+    ) -> bool {
+        sea_orm::sea_query::PrecedenceDecider::inner_expr_well_known_greater_precedence(
+            &sea_orm::sea_query::SqliteQueryBuilder,
+            inner,
+            outer,
+        )
+    }
+}
+impl sea_orm::sea_query::QueryBuilder for OrderInspector {
+    fn prepare_query_statement(
+        &self,
+        query: &sea_orm::sea_query::SubQueryStatement,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_query_statement(query, sql);
+    }
+    fn prepare_select_into(
+        &self,
+        into: &sea_orm::sea_query::SelectInto,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_select_into(into, sql);
+    }
+    fn prepare_explain_statement(
+        &self,
+        explain: &sea_orm::sea_query::ExplainStatement,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_explain_statement(explain, sql);
+    }
+    fn prepare_value(&self, value: sea_orm::Value, sql: &mut impl sea_orm::sea_query::SqlWriter) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_value(value, sql);
+    }
+    fn prepare_order_expr(
+        &self,
+        order: &sea_orm::sea_query::OrderExpr,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        let mut rendered = String::new();
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_order_expr(order, &mut rendered);
+        self.orders.borrow_mut().push(rendered);
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_order_expr(order, sql);
+    }
+    fn prepare_expr(
+        &self,
+        expr: &sea_orm::sea_query::Expr,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_expr(expr, sql);
+    }
+    fn prepare_table_ref(
+        &self,
+        table: &sea_orm::sea_query::TableRef,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_table_ref(table, sql);
+    }
+    fn prepare_with_clause(
+        &self,
+        clause: &sea_orm::sea_query::WithClause,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_with_clause(clause, sql);
+    }
+    fn prepare_window_statement(
+        &self,
+        window: &sea_orm::sea_query::WindowStatement,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_window_statement(window, sql);
+    }
+    fn prepare_union_statement(
+        &self,
+        kind: sea_orm::sea_query::UnionType,
+        select: &sea_orm::sea_query::SelectStatement,
+        sql: &mut impl sea_orm::sea_query::SqlWriter,
+    ) {
+        sea_orm::sea_query::SqliteQueryBuilder.prepare_union_statement(kind, select, sql);
     }
 }
 

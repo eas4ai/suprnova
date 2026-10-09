@@ -83,8 +83,8 @@ pub trait IntoJsonResource: Send + Sync {
 
     /// Optional top-level `meta` member contributed by this resource
     /// during rendering (spec §5.1.2). Empty by default. Used when a
-    /// resource itself wants to attach top-level metadata regardless
-    /// of how the response is constructed.
+    /// single resource wants to attach document metadata. Collections
+    /// attach their own metadata through `JsonApiResponse::with_meta_map`.
     ///
     /// Mirrors Laravel's `JsonResource::with(Request)`.
     fn resource_top_level_meta(&self) -> Map<String, Value> {

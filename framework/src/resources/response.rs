@@ -210,17 +210,6 @@ impl Resource {
                 let mut builder = JsonApiBuilder::collection(data);
                 builder.include_requested(!include_tree.is_empty());
                 builder.absorb_included_sink(sink);
-                // Collections take their top-level meta from the first
-                // item, mirroring Laravel's `with($request)` semantics -
-                // every item in an `AnonymousResourceCollection` is
-                // the same class, so calling `resource_top_level_meta`
-                // on item 0 is a faithful single-source representative.
-                if let Some(first) = dtos.first() {
-                    let m = first.resource_top_level_meta();
-                    if !m.is_empty() {
-                        builder = builder.with_meta_map(m);
-                    }
-                }
                 Ok(builder)
             }
         };
@@ -264,12 +253,6 @@ impl Resource {
                 }
                 builder.include_requested(!include_tree.is_empty());
                 builder.absorb_included_sink(sink);
-                if let Some(first) = items.first() {
-                    let m = first.resource_top_level_meta();
-                    if !m.is_empty() {
-                        builder = builder.with_meta_map(m);
-                    }
-                }
                 Ok(builder)
             }
         };

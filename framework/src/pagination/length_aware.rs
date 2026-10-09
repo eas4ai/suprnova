@@ -55,11 +55,8 @@ use serde::ser::SerializeMap;
 /// of a request is what its `Host` header says, which is the client's
 /// to choose.
 ///
-/// A paginator with no rows is where the JSON is not Laravel's:
-/// `last_page` is `0` and `links` has the link to the page before and
-/// the link to the page behind and no page between them, where Laravel
-/// has a `last_page` of `1` and a link to page 1. `last_page_url` is
-/// the URL of page 1 then, as Laravel's is.
+/// An empty paginator has `last_page` 1 and a link to page 1, so a
+/// page selector still has a current page when there are no matches.
 /// [`Inertia::paginate`](crate::inertia::Inertia::paginate) and
 /// [`Resource::paginated`](crate::resources::Resource::paginated) have
 /// shapes of their own.
@@ -69,8 +66,7 @@ pub struct LengthAwarePaginator<T> {
     pub data: Vec<T>,
     /// 1-based current page index.
     pub current_page: u64,
-    /// 1-based last page index. `0` when `total == 0` (no rows means
-    /// no last page); `1` when `total > 0` but fits on a single page.
+    /// 1-based last page index. An empty result has one page so links stay valid.
     pub last_page: u64,
     /// Page size used to slice `total`.
     pub per_page: u64,
@@ -120,20 +116,43 @@ impl<T: Serialize> Serialize for LengthAwarePaginator<T> {
 }
 
 impl<T> LengthAwarePaginator<T> {
+    /// Transform items into another type so you can keep all pagination metadata.
+    pub fn through<U>(self, transform: impl FnMut(T) -> U) -> LengthAwarePaginator<U> {
+        let Self {
+            data,
+            current_page,
+            last_page,
+            per_page,
+            total,
+            from,
+            to,
+            path,
+            page_name,
+        } = self;
+        LengthAwarePaginator {
+            data: data.into_iter().map(transform).collect(),
+            current_page,
+            last_page,
+            per_page,
+            total,
+            from,
+            to,
+            path,
+            page_name,
+        }
+    }
+
     /// Build a new paginator from raw counts. Computes `last_page`,
     /// `from`, and `to` from the supplied `data` length, `total`,
     /// `per_page`, and `current_page`.
     ///
-    /// When `total == 0` (or `per_page == 0`), `last_page` is `0` and
+    /// When `total == 0`, `last_page` is `1` and
     /// both `from`/`to` are `None`. When `total > 0` and `data` is
     /// empty (e.g., the requested page is past the last page),
     /// `from`/`to` are still `None`.
     pub fn new(data: Vec<T>, total: u64, per_page: u64, current_page: u64) -> Self {
-        let last_page = if total == 0 || per_page == 0 {
-            0
-        } else {
-            total.div_ceil(per_page)
-        };
+        let last_page = total.div_ceil(per_page.max(1)).max(1);
+        let current_page = current_page.max(1);
         let (from, to) = if data.is_empty() || per_page == 0 {
             (None, None)
         } else {
@@ -166,11 +185,8 @@ impl<T> LengthAwarePaginator<T> {
         from: Option<u64>,
         to: Option<u64>,
     ) -> Self {
-        let last_page = if total == 0 || per_page == 0 {
-            0
-        } else {
-            total.div_ceil(per_page)
-        };
+        let last_page = total.div_ceil(per_page.max(1)).max(1);
+        let current_page = current_page.max(1);
         Self {
             data,
             total,
@@ -342,7 +358,7 @@ mod tests {
     #[test]
     fn total_zero_yields_empty_data() {
         let p: LengthAwarePaginator<i32> = LengthAwarePaginator::new(vec![], 0, 10, 1);
-        assert_eq!(p.last_page, 0);
+        assert_eq!(p.last_page, 1);
         assert!(!p.has_more_pages());
         assert!(p.data.is_empty());
         assert_eq!(p.from, None);

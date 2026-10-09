@@ -81,6 +81,26 @@ impl<T: Serialize> Serialize for Paginator<T> {
 }
 
 impl<T> Paginator<T> {
+    /// Transform items into another type so you can keep all pagination metadata.
+    pub fn through<U>(self, transform: impl FnMut(T) -> U) -> Paginator<U> {
+        let Self {
+            data,
+            current_page,
+            per_page,
+            has_more,
+            path,
+            page_name,
+        } = self;
+        Paginator {
+            data: data.into_iter().map(transform).collect(),
+            current_page,
+            per_page,
+            has_more,
+            path,
+            page_name,
+        }
+    }
+
     /// Build a new simple paginator from its parts.
     pub fn new(data: Vec<T>, current_page: u64, per_page: u64, has_more: bool) -> Self {
         Self {

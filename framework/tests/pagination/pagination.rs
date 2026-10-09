@@ -66,7 +66,7 @@ fn last_page_no_more() {
 #[test]
 fn total_zero_yields_empty_data() {
     let p: LengthAwarePaginator<i32> = LengthAwarePaginator::new(vec![], 0, 10, 1);
-    assert_eq!(p.last_page, 0);
+    assert_eq!(p.last_page, 1);
     assert!(p.data.is_empty());
 }
 

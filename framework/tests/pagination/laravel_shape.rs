@@ -120,11 +120,11 @@ fn a_paginator_with_no_rows_has_the_urls_of_page_one() {
     assert_eq!(json["last_page_url"], "?page=1");
     assert_eq!(json["from"], Value::Null);
     assert_eq!(json["to"], Value::Null);
-    assert_eq!(json["last_page"], 0);
+    assert_eq!(json["last_page"], 1);
     assert_eq!(
         json["links"].as_array().map(Vec::len),
-        Some(2),
-        "the link before and the link behind, and no page between them"
+        Some(3),
+        "the links before and after page one surround its active link"
     );
     assert!(
         json.get("path").is_none(),
