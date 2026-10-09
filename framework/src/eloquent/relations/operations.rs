@@ -47,11 +47,12 @@ where
             if let Some(tx) = &savepoint {
                 tx.rollback_to("relation_create").await?;
             }
-            match lookup
-                .on(M::default_connection_name().unwrap_or("__primary__"))
-                .first()
-                .await?
-            {
+            let lookup = if let Some(name) = M::default_connection_name() {
+                lookup.on(name)
+            } else {
+                lookup
+            };
+            match lookup.first().await? {
                 Some(row) => Ok((row, false)),
                 None => Err(error),
             }
@@ -135,8 +136,13 @@ where
         crate::render_cache::orm::after_model_write(&row).await
     })
     .await?;
-    Builder::<M>::new()
-        .on(M::default_connection_name().unwrap_or("__primary__"))
+    let query = Builder::<M>::new();
+    let query = if let Some(name) = M::default_connection_name() {
+        query.on(name)
+    } else {
+        query
+    };
+    query
         .where_key(key)
         .first()
         .await?
