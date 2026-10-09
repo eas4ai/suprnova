@@ -915,11 +915,11 @@ impl Request {
     /// Convenience: returns `true` when this is an XHR / AJAX request -
     /// the standard `X-Requested-With: XMLHttpRequest` header set by
     /// every browser XHR library. Mirrors Laravel's `Request::ajax()` /
-    /// `Symfony Request::isXmlHttpRequest()`.
+    /// `Symfony Request::isXmlHttpRequest()`, which compare the value
+    /// exactly: `xmlhttprequest` is not that header, so a client that
+    /// sends it gets the answer Laravel gives it.
     pub fn ajax(&self) -> bool {
-        self.header("X-Requested-With")
-            .map(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
-            .unwrap_or(false)
+        self.header("X-Requested-With") == Some("XMLHttpRequest")
     }
 
     /// Returns `true` when the `X-PJAX` header is set to a truthy
@@ -1193,24 +1193,32 @@ impl Request {
         self.header("User-Agent")
     }
 
-    /// The host name (no port, no scheme). Resolution:
+    /// The host name (no port, no scheme), lowercased. Resolution:
     /// `X-Forwarded-Host` first (only when the TCP peer is in the
     /// trusted-proxy allowlist), then `Host` header, then URI
-    /// authority host. Mirrors Symfony's `getHost()`. See
-    /// [`Request::ip`] for the trusted-proxy security rationale.
+    /// authority host. See [`Request::ip`] for the trusted-proxy
+    /// security rationale.
+    ///
+    /// Mirrors Symfony's `getHost()`: a numeric port is stripped
+    /// (`Example.COM:8080` is `example.com`, while `example.com:abc`
+    /// keeps its suffix), and a host that holds anything but letters,
+    /// digits, `-`, `_`, `.`, `:` and the brackets of an IPv6 literal is
+    /// `None`. The `Host` header is written by the client, so a value
+    /// such as `bad<host>` never reaches a URL, a redirect or a cache key
+    /// built from this accessor, [`Request::http_host`] and
+    /// [`Request::scheme_and_http_host`] included.
     pub fn host(&self) -> Option<String> {
-        if self.peer_is_trusted_proxy()
-            && let Some(fhost) = self.header("X-Forwarded-Host")
-        {
-            let first = fhost.split(',').next().unwrap_or("").trim();
-            if !first.is_empty() {
-                return Some(strip_port(first).to_string());
-            }
-        }
-        if let Some(h) = self.header("Host") {
-            return Some(strip_port(h).to_string());
-        }
-        self.parts.uri.host().map(|s| s.to_string())
+        let forwarded = if self.peer_is_trusted_proxy() {
+            self.header("X-Forwarded-Host")
+                .map(|value| value.split(',').next().unwrap_or("").trim())
+                .filter(|first| !first.is_empty())
+        } else {
+            None
+        };
+        let raw = forwarded
+            .or_else(|| self.header("Host"))
+            .or_else(|| self.parts.uri.host())?;
+        normalize_host(raw)
     }
 
     /// The HTTP host being requested - host plus port when the port is
@@ -2034,22 +2042,59 @@ pub struct RequestParts {
     pub content_type: Option<String>,
 }
 
-/// Strip a `:port` suffix from a host string, handling IPv6 brackets
-/// (`[::1]:8080` → `[::1]`). Mirrors the host-only resolution Laravel
-/// gets from Symfony's `HeaderUtils::parseAuthority`.
+/// The host [`Request::host`] returns for a raw `Host` value: the numeric
+/// port stripped, lowercased (host names are case-insensitive, RFC 952
+/// and RFC 2181), and `None` when it is empty or fails
+/// [`is_valid_host`].
+fn normalize_host(raw: &str) -> Option<String> {
+    let host = strip_port(raw).to_ascii_lowercase();
+    (!host.is_empty() && is_valid_host(&host)).then_some(host)
+}
+
+/// Strip a numeric `:port` suffix from a host string, as Symfony's
+/// `getHost` does with `/:\d+$/`: `example.com:8080` is `example.com` and
+/// `[::1]:8080` is `[::1]`. A suffix that is not all digits, as in
+/// `example.com:abc`, stays and is judged as part of the host.
 fn strip_port(host: &str) -> &str {
     let host = host.trim();
-    if let Some(rest) = host.strip_prefix('[') {
-        // IPv6: take through the closing `]`, drop anything after.
-        if let Some(end) = rest.find(']') {
-            return &host[..end + 2];
-        }
-        return host;
-    }
     match host.rfind(':') {
-        Some(i) => &host[..i],
-        None => host,
+        Some(i)
+            if i + 1 < host.len() && host[i + 1..].bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            &host[..i]
+        }
+        _ => host,
     }
+}
+
+/// Whether `host` passes Symfony's `getHost` check, which removes every
+/// match of `(?:^\[)?[a-zA-Z0-9-:\]_]+\.?` and refuses a host with
+/// anything left. A host is therefore runs of letters, digits, `-`, `_`,
+/// `:` and `]`, each run followed by at most one `.`, with one `[` allowed
+/// at the start for an IPv6 literal. The scan reads each byte once, so a
+/// long forged host costs no more than its length.
+fn is_valid_host(host: &str) -> bool {
+    let bytes = host.as_bytes();
+    let in_run =
+        |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b']' | b'_');
+    let mut i = 0;
+    while i < bytes.len() {
+        if i == 0 && bytes[0] == b'[' {
+            i = 1;
+        }
+        let run = i;
+        while i < bytes.len() && in_run(bytes[i]) {
+            i += 1;
+        }
+        if i == run {
+            // A byte no run covers: Symfony's replacement leaves it.
+            return false;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+        }
+    }
+    true
 }
 
 /// Parse a `:port` from a host string. None when absent or unparseable.
@@ -2293,6 +2338,54 @@ mod url_helper_tests {
         assert_eq!(strip_port("[::1]"), "[::1]");
         assert_eq!(strip_port("[::1]:8080"), "[::1]");
         assert_eq!(strip_port("[2001:db8::1]:443"), "[2001:db8::1]");
+    }
+
+    /// Symfony strips `/:\d+$/` and nothing else: a suffix that is not
+    /// all digits, or an empty one, stays on the host.
+    #[test]
+    fn strip_port_strips_only_a_numeric_port() {
+        assert_eq!(strip_port("example.com:abc"), "example.com:abc");
+        assert_eq!(strip_port("example.com:"), "example.com:");
+        assert_eq!(strip_port("example.com:80a"), "example.com:80a");
+    }
+
+    /// The hosts Symfony's `getHost` check accepts and refuses.
+    #[test]
+    fn is_valid_host_follows_the_symfony_check() {
+        for valid in [
+            "example.com",
+            "example.com.",
+            "api-v2.example_internal.test",
+            "[::1]",
+            "[2001:db8::1]",
+            "example.com:abc",
+            "127.0.0.1",
+        ] {
+            assert!(is_valid_host(valid), "{valid} is a valid host");
+        }
+        for invalid in [
+            "bad<host>",
+            "example.com/path",
+            "a..b",
+            ".example.com",
+            "ex ample.com",
+            "a[b",
+            "[",
+            "user@example.com",
+        ] {
+            assert!(!is_valid_host(invalid), "{invalid} is not a valid host");
+        }
+    }
+
+    #[test]
+    fn normalize_host_lowercases_and_refuses_an_empty_or_invalid_host() {
+        assert_eq!(
+            normalize_host("Example.COM:8080").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(normalize_host("[::1]:8080").as_deref(), Some("[::1]"));
+        assert_eq!(normalize_host(""), None);
+        assert_eq!(normalize_host("bad<host>"), None);
     }
 
     #[test]

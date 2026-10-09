@@ -15,6 +15,7 @@ mod input;
 pub mod precognition;
 mod request;
 mod response;
+mod trusted_hosts;
 mod trusted_proxies;
 pub mod upload;
 
@@ -28,6 +29,7 @@ pub(crate) use request::BodyRead;
 pub use request::{BodyState, Request, RequestParts};
 pub(crate) use response::{ErrorResponseDecided, NOT_FOUND_BODY};
 pub use response::{HttpResponse, Redirect, RedirectRouteBuilder, Response, ResponseExt};
+pub use trusted_hosts::TrustHosts;
 pub use trusted_proxies::{ProxyNetwork, TrustedProxiesConfig};
 
 /// Error type for missing route parameters

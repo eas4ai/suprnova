@@ -926,6 +926,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `errors` and `processing` from its slot, and keep the sign-in page's
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
+- **Trusted hosts.** The `TrustHosts` middleware answers `400 Bad request.`
+  to a request whose host is invalid or matches none of your patterns.
+  `TrustHosts::new()` trusts the `APP_URL` host and its subdomains,
+  `TrustHosts::at(patterns, subdomains)` trusts the regular expressions you
+  list, matched without regard to case, and the local environment trusts
+  every host.
+- **CSRF tokens in JSON bodies.** `CsrfMiddleware` reads a top-level string
+  `_token` from a JSON body as it reads one from a form, ahead of the
+  `X-CSRF-TOKEN` and `X-XSRF-TOKEN` headers, with `""` and `"0"` counting
+  as no value.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -1641,6 +1652,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
   `<script data-page="app" type="application/json">`, failed with "no
   Inertia page object" (TS-01).
+
+- **CSRF checks every method but GET, HEAD and OPTIONS.** `CsrfMiddleware`
+  now checks `QUERY` and extension methods such as `PROPFIND` as it checks
+  `POST`; a `QUERY` request without a token gets `419`.
+- **Regenerating the session issues a new CSRF token.**
+  `regenerate_session_id()` sets a new CSRF token beside the new id, so a
+  token read before the regeneration gets `419` after it.
+- **`Request::ajax()` compares exactly.** It is true only for
+  `X-Requested-With: XMLHttpRequest`, not for another spelling.
+- **`Request::host()` reads the host as Symfony does.** It lowercases the
+  host, strips only a numeric port, and returns `None` for a host with a
+  character no host has, so `http_host()`, `scheme_and_http_host()` and
+  `url()` never carry such a host.
+- **Deletion cookies follow the session configuration.** `Cookie::forget`,
+  `without_cookie` and `without_cookies` take `Path`, `Domain` and
+  `SameSite` from `SESSION_PATH`, `SESSION_DOMAIN` and `SESSION_SAME_SITE`,
+  so the deletion cookie matches the cookie it deletes; an explicit path or
+  domain given to `Cookie::forget_with` still wins.
 
 ### Fixed
 

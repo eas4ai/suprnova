@@ -846,11 +846,12 @@ impl SessionMiddleware {
     }
 
     fn create_forget_session_cookie(&self) -> Cookie {
-        let mut cookie = Cookie::forget(self.config.cookie_prefix.apply(&self.config.cookie_name))
-            .http_only(self.config.cookie_http_only)
-            .secure(self.config.cookie_secure)
-            .path(self.config.response_cookie_path())
-            .partitioned(self.config.cookie_partitioned);
+        let mut cookie =
+            Cookie::deletion(self.config.cookie_prefix.apply(&self.config.cookie_name))
+                .http_only(self.config.cookie_http_only)
+                .secure(self.config.cookie_secure)
+                .path(self.config.response_cookie_path())
+                .partitioned(self.config.cookie_partitioned);
 
         if let Some(ref domain) = self.config.cookie_domain {
             cookie = cookie.domain(domain);
@@ -1082,7 +1083,7 @@ pub fn create_remember_cookie(
 /// "clear cookie" shape, but consumers should not depend on it.
 #[doc(hidden)]
 pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
-    let mut cookie = Cookie::forget(
+    let mut cookie = Cookie::deletion(
         config
             .cookie_prefix
             .apply(super::super::auth::remember::COOKIE_NAME),
@@ -2740,10 +2741,16 @@ impl Middleware for SessionMiddleware {
 /// Regenerate the session ID (for security after login)
 ///
 /// This creates a new session ID while preserving session data,
-/// which helps prevent session fixation attacks.
+/// which helps prevent session fixation attacks. It also issues a new
+/// CSRF token, as Laravel's `Session::regenerate` calls
+/// `regenerateToken`: a token read before the regeneration, by a page
+/// that could have been planted with the old session, is refused after
+/// it. The regeneration-aware persistence step in [`SessionMiddleware`]
+/// destroys the old store row.
 pub fn regenerate_session_id() {
     session_mut(|session| {
         session.rotate_id(generate_session_id());
+        session.csrf_token = generate_csrf_token();
     });
 }
 
