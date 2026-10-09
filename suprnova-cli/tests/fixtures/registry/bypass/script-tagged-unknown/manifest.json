@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-tagged-unknown",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
