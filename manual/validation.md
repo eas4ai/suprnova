@@ -526,10 +526,12 @@ for async rules use the [hook](#async-rules-in-requests) below.
 
 ## Cross-field hooks
 
-`FormRequest` runs two cross-field hooks after the derived per-field rules,
-both in the normal and Precognition flows. `extract()` runs the stages in
-order - derived `validate()`, then `after_validation`, then
-`after_validation_async` - and **bails at the first failing stage**.
+`FormRequest` runs two cross-field hooks after the derived per-field rules.
+On a real request, `extract()` runs derived `validate()`, then
+`after_validation`, then `after_validation_async`, and bails at the first
+failing stage. On a marked request, [Precognition](precognition.md) narrows
+the rules before every stage. An unlisted field's failure does not block
+a listed field's asynchronous check. Errors a hook adds are never filtered.
 
 ```rust
 use suprnova::{FormRequest, ValidationErrors};
@@ -589,9 +591,10 @@ impl FormRequest for CreateUser {
 }
 ```
 
-Because the async stage runs only after the synchronous stages pass, a
-malformed value (a syntactically invalid email) never reaches the database
-`Unique` query.
+On a real request, the async stage runs only after the synchronous stages
+pass, so a syntactically invalid email never reaches the database `Unique`
+query. On a marked request, an unlisted malformed field does not prevent
+the listed fields' asynchronous rules from running.
 
 A Data Object's derive writes its `FormRequest` impl, so it names its
 hooks instead of overriding them: `#[data(after_validation = "fn")]` and
@@ -758,10 +761,11 @@ for error bags, `with_all_errors`, and where the redirect points.
 
 ## Design notes
 
-- **Partial validation.** A `FormRequest` deserializes into a typed struct
-  before validation runs, so the struct *is* the schema: a field that may
-  be absent must be `Option<T>`. This is also what lets Precognition
-  validate a partial payload - make the fields a draft can omit optional.
+- **Partial validation.** A real request builds the typed `FormRequest`,
+  so a field that may be absent on submit must be `Option<T>`.
+  [Precognition](precognition.md) parses and validates only the listed
+  fields before every stage. An unlisted malformed field does not block
+  the answer. The struct is built only for the real request.
 - **Rule messages.** Built-in rules return keyed messages
   (`validation-min` plus its arguments and an English fallback), resolved
   through the catalog at the serialization boundary. Translate or reword

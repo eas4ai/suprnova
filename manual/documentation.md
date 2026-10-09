@@ -33,6 +33,7 @@
     - [URL Generation](urls.md)
     - [Session](session.md)
     - [Validation](validation.md)
+    - [Precognition](precognition.md)
     - [Error Handling](errors.md)
     - [Logging](logging.md)
     - [Context](context.md)
