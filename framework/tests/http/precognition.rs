@@ -350,12 +350,7 @@ async fn precognition_selection_and_should_validate_share_exact_wildcard_match()
         ("tags.3", true),
         ("tags.3.*", false),
     ] {
-        let request = Request::for_test_with_headers(
-            "POST",
-            "/indexed",
-            [("Precognition-Validate-Only", only)],
-        );
-        assert_eq!(request.should_validate("tags.3"), matches);
+        assert_marked_selection(only, Some(vec![only.into()]), &[("tags.3", matches)]).await;
         let response = send(
             data_routes::register(),
             "/indexed",
@@ -376,28 +371,71 @@ async fn precognition_selection_and_should_validate_share_exact_wildcard_match()
     let absent = Request::for_test("POST", "/indexed");
     assert_eq!(absent.validate_only(), None);
     assert!(absent.should_validate("tags.3"));
+    assert_marked_selection(
+        " tags.* , , email ",
+        Some(vec!["tags.*".into(), "email".into()]),
+        &[
+            ("tags", false),
+            ("tags.3", true),
+            ("tags.", false),
+            ("tags.3.name", false),
+            ("email", true),
+        ],
+    )
+    .await;
+    assert_marked_selection("", Some(vec![]), &[("email", false)]).await;
+}
+
+async fn assert_marked_selection(
+    only: &str,
+    expected: Option<Vec<String>>,
+    checks: &[(&'static str, bool)],
+) {
     let request = Request::for_test_with_headers(
         "POST",
         "/indexed",
-        [("Precognition-Validate-Only", " tags.* , , email ")],
+        [
+            ("Precognition", "true"),
+            ("Precognition-Validate-Only", only),
+        ],
     );
-    assert_eq!(
-        request.validate_only(),
-        Some(vec!["tags.*".into(), "email".into()])
-    );
-    for (field, expected) in [
-        ("tags", false),
-        ("tags.3", true),
-        ("tags.", false),
-        ("tags.3.name", false),
-        ("email", true),
-    ] {
-        assert_eq!(request.should_validate(field), expected, "{field}");
+    let checks = checks.to_vec();
+    let next: Next = Arc::new(move |request| {
+        let expected = expected.clone();
+        let checks = checks.clone();
+        Box::pin(async move {
+            assert!(request.is_precognitive());
+            assert_eq!(request.validate_only(), expected);
+            for (field, expected) in checks {
+                assert_eq!(request.should_validate(field), expected, "{field}");
+            }
+            suprnova::text("checked")
+        })
+    });
+    let response = Precognitive
+        .handle(request, next)
+        .await
+        .unwrap_or_else(|response| {
+            panic!("selection middleware returned {}", response.status_code())
+        });
+    assert_eq!(response.body(), b"checked");
+}
+
+#[test]
+fn precognition_unmarked_selection_includes_every_field() {
+    for only in ["email", ""] {
+        for attempting in [false, true] {
+            let mut headers = vec![("Precognition-Validate-Only", only)];
+            if attempting {
+                headers.push(("Precognition", "true"));
+            }
+            let request = Request::for_test_with_headers("POST", "/real", headers);
+            assert!(!request.is_precognitive());
+            assert_eq!(request.validate_only(), None);
+            assert!(request.should_validate("avatar"));
+            assert!(request.should_validate("email"));
+        }
     }
-    let empty =
-        Request::for_test_with_headers("POST", "/indexed", [("Precognition-Validate-Only", "")]);
-    assert_eq!(empty.validate_only(), Some(vec![]));
-    assert!(!empty.should_validate("email"));
 }
 
 #[tokio::test]
@@ -973,6 +1011,13 @@ enum Category {
     Known,
 }
 
+/// A database model proves missing bindings beat a passing draft form.
+#[suprnova::model(table = "precognition_members")]
+pub struct PrecognitionMember {
+    /// The key resolved from the route.
+    pub id: i64,
+}
+
 #[derive(suprnova::Data, Validate)]
 struct BoundForm {
     #[data(from_route_param("id"))]
@@ -1036,6 +1081,22 @@ mod protocol_routes {
         Ok(HttpResponse::text(input.email))
     }
     #[handler]
+    async fn form_then_path(input: SignupRequest, id: i64, page: Option<u32>) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {id} {page:?}", input.email))
+    }
+    #[handler]
+    async fn generic_form_then_path<T: FromRequest>(input: T, id: i64) -> Response {
+        let _ = input;
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(id.to_string())
+    }
+    #[handler]
+    async fn form_then_model(input: SignupRequest, member: PrecognitionMember) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!("{} {}", input.email, member.id))
+    }
+    #[handler]
     async fn bound(input: BoundForm) -> Response {
         BODY_CALLS.fetch_add(1, Ordering::SeqCst);
         Ok(HttpResponse::json(
@@ -1073,6 +1134,9 @@ mod protocol_routes {
         post!("/lookup/{_category}", lookup).middleware(Precognitive),
         post!("/generic", generic::<Checked>).middleware(Precognitive),
         post!("/form", form).middleware(Precognitive),
+        post!("/form-path/{id}/{page?}", form_then_path).middleware(Precognitive),
+        post!("/generic-form-path/{id}", generic_form_then_path::<SignupRequest>).middleware(Precognitive),
+        post!("/form-model/{member}", form_then_model).middleware(Precognitive),
         post!("/bound/{id}", bound).middleware(Precognitive),
         post!("/real-bound/{id}", bound),
         post!("/upload/{id}", upload).middleware(Precognitive),
@@ -1103,6 +1167,126 @@ fn assert_success(response: &hyper::Response<Bytes>) {
     );
     assert_eq!(response.headers().get("Vary").unwrap(), "Precognition");
     assert!(response.body().is_empty());
+}
+
+#[tokio::test]
+async fn precognition_passing_form_runs_later_path_extractors_before_success() {
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    for (path, status) in [
+        ("/form-path/not-an-integer", 400),
+        ("/form-path/7/not-an-integer", 400),
+        ("/form-path/7", 204),
+        ("/form-path/7/2", 204),
+        ("/generic-form-path/not-an-integer", 400),
+        ("/generic-form-path/7", 204),
+    ] {
+        let response = send(
+            protocol_routes::register(),
+            path,
+            &[
+                ("Precognition", "true"),
+                ("Content-Type", "application/json"),
+            ],
+            r#"{"email":"ada@example.com","password":"longenough"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), status, "{path}");
+        assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+        if status == 204 {
+            assert_success(&response);
+        } else {
+            assert!(response.headers().get("Precognition-Success").is_none());
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn precognition_form_then_path_real_requests_keep_values_and_error_order() {
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    let valid = r#"{"email":"ada@example.com","password":"longenough"}"#;
+    let invalid = r#"{"email":"bad","password":"longenough"}"#;
+    for (path, body, status, expected) in [
+        ("/form-path/not-an-integer", valid, 400, None),
+        ("/form-path/7/not-an-integer", valid, 400, None),
+        ("/form-path/not-an-integer", invalid, 422, None),
+        ("/form-path/7", valid, 200, Some("ada@example.com 7 None")),
+        (
+            "/form-path/7/2",
+            valid,
+            200,
+            Some("ada@example.com 7 Some(2)"),
+        ),
+        ("/generic-form-path/not-an-integer", valid, 400, None),
+        ("/generic-form-path/not-an-integer", invalid, 422, None),
+        ("/generic-form-path/7", valid, 200, Some("7")),
+    ] {
+        let response = send(
+            protocol_routes::register(),
+            path,
+            &[("Content-Type", "application/json")],
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), status, "{path}: {body}");
+        assert!(response.headers().get("Precognition").is_none());
+        if let Some(expected) = expected {
+            assert_eq!(response.body(), expected);
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn precognition_form_then_model_missing_binding_wins_in_both_modes() {
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+    let _counter_guard = COUNTERS.lock().await;
+    BODY_CALLS.store(0, Ordering::SeqCst);
+    let _guard = suprnova::testing::TestContainer::fake();
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    for sql in [
+        "CREATE TABLE precognition_members (id INTEGER PRIMARY KEY)",
+        "INSERT INTO precognition_members (id) VALUES (7)",
+    ] {
+        database
+            .execute_raw(Statement::from_string(DbBackend::Sqlite, sql))
+            .await
+            .unwrap();
+    }
+    suprnova::testing::TestContainer::singleton(suprnova::DbConnection::from_raw(database));
+    for (marked, key, status) in [
+        (true, "99", 404),
+        (true, "7", 204),
+        (false, "99", 404),
+        (false, "7", 200),
+    ] {
+        let mut headers = vec![("Content-Type", "application/json")];
+        if marked {
+            headers.push(("Precognition", "true"));
+        }
+        let response = send(
+            protocol_routes::register(),
+            &format!("/form-model/{key}"),
+            &headers,
+            r#"{"email":"ada@example.com","password":"longenough"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers().get("Precognition").is_some(), marked);
+        if marked {
+            assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+        }
+        if status == 204 {
+            assert_success(&response);
+        } else if status == 200 {
+            assert_eq!(response.body(), "ada@example.com 7");
+        } else {
+            assert!(response.headers().get("Precognition-Success").is_none());
+        }
+    }
+    assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

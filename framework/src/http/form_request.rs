@@ -387,9 +387,14 @@ fn precognition_outcome(bag: ValidationErrors) -> FrameworkError {
 impl Request {
     /// Read the selected input names so rules can use the extractor's selection.
     ///
-    /// An absent header returns `None`. A present empty header returns an
-    /// empty list. Names are comma-separated, trimmed, and empty names are dropped.
+    /// An unmarked request or an absent header returns `None`, so real
+    /// requests validate every field. On a marked request, a present empty
+    /// header returns an empty list. Names are comma-separated, trimmed,
+    /// and empty names are dropped.
     pub fn validate_only(&self) -> Option<Vec<String>> {
+        if !self.is_precognitive() {
+            return None;
+        }
         self.header("Precognition-Validate-Only").map(|raw| {
             raw.split(',')
                 .map(str::trim)
@@ -401,8 +406,9 @@ impl Request {
 
     /// Match an input key so your own checks agree with Precognition's rules.
     ///
-    /// An absent selection includes every key. Each `*` matches one non-empty
-    /// dotted segment. `tags.*` includes `tags.3`; `tags` includes only `tags`.
+    /// An unmarked request or an absent selection includes every key, so
+    /// real requests keep every check. Each `*` matches one non-empty dotted
+    /// segment. `tags.*` includes `tags.3`; `tags` includes only `tags`.
     pub fn should_validate(&self, field: &str) -> bool {
         self.validate_only().is_none_or(|only| {
             only.iter()
