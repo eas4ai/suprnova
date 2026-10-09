@@ -389,6 +389,66 @@ fn cookie_forget_without_session_overrides_keeps_the_defaults_child() {
     assert!(header.contains("Secure"), "{header}");
 }
 
+/// Under a `__Host-` session cookie prefix an ordinary deletion cookie
+/// takes the public root, the path the cookie it deletes was set with.
+/// Only a `__Host-` name takes `Path=/` (PFX-007).
+#[test]
+fn cookie_forget_under_a_host_prefix_follows_the_name_not_the_prefix() {
+    run_child(
+        "laravel_http_gaps::requests::cookie_forget_under_a_host_prefix_follows_the_name_not_the_prefix_child",
+        &[
+            ("APP_URL", Some("https://example.test/billing")),
+            ("SESSION_PATH", None),
+            ("SESSION_DOMAIN", None),
+            ("SESSION_SAME_SITE", None),
+            ("SESSION_COOKIE_PREFIX", Some("host")),
+        ],
+    );
+}
+
+#[test]
+fn cookie_forget_under_a_host_prefix_follows_the_name_not_the_prefix_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let header = Cookie::forget("prefs").to_header_value();
+    assert!(header.contains("Path=/billing;"), "{header}");
+    assert!(!header.contains("Domain="), "{header}");
+
+    let header = Cookie::forget("__Host-session").to_header_value();
+    assert!(header.contains("Path=/;"), "{header}");
+    assert!(!header.contains("Domain="), "{header}");
+
+    let header = Cookie::forget_with("prefs", Some("/admin"), None).to_header_value();
+    assert!(header.contains("Path=/admin;"), "{header}");
+}
+
+/// `SESSION_PATH` sets the deletion path of an ordinary cookie under a
+/// `__Host-` session prefix too.
+#[test]
+fn cookie_forget_under_a_host_prefix_takes_session_path() {
+    run_child(
+        "laravel_http_gaps::requests::cookie_forget_under_a_host_prefix_takes_session_path_child",
+        &[
+            ("APP_URL", Some("https://example.test/billing")),
+            ("SESSION_PATH", Some("/app")),
+            ("SESSION_DOMAIN", None),
+            ("SESSION_SAME_SITE", None),
+            ("SESSION_COOKIE_PREFIX", Some("host")),
+        ],
+    );
+}
+
+#[test]
+fn cookie_forget_under_a_host_prefix_takes_session_path_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let header = Cookie::forget("prefs").to_header_value();
+    assert!(header.contains("Path=/app;"), "{header}");
+    assert!(!header.contains("Path=/billing"), "{header}");
+}
+
 /// Inside a request `SessionMiddleware` serves, its configuration is the
 /// one the deletion cookie follows, so a response's `without_cookie`
 /// clears a cookie the application set with the session's scope.

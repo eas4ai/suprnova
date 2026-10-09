@@ -330,7 +330,7 @@ the session's scope:
 
 | Attribute | Value |
 |---|---|
-| `Path` | `SESSION_PATH`, or the public root of the request (`/` at the host root), or `/` under a `__Host-` session cookie prefix |
+| `Path` | `SESSION_PATH`, or the public root of the request (`/` at the host root), or `/` for a cookie whose name starts with `__Host-` |
 | `Domain` | `SESSION_DOMAIN`, or none |
 | `SameSite` | `SESSION_SAME_SITE`, read as the session cookie reads it (`strict`, `none`, anything else `Lax`) |
 | `Secure`, `HttpOnly` | Always set |

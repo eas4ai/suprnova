@@ -139,6 +139,23 @@ impl SessionConfig {
         }
     }
 
+    /// The `Path` a deletion cookie for `cookie_name` takes when the
+    /// caller gives none: `/` for a `__Host-` name, which the browser
+    /// requires, otherwise the configured [`Self::cookie_path`] or the
+    /// public root. Chosen by the name, not the session prefix, so an
+    /// ordinary cookie under a `__Host-` session prefix still deletes at
+    /// the path it was set with (PAR-118). [`Self::response_cookie_path`]
+    /// stays the rule for the session cookie itself.
+    pub(crate) fn deletion_cookie_path(&self, cookie_name: &str) -> String {
+        if cookie_name.starts_with("__Host-") {
+            "/".to_owned()
+        } else if !self.cookie_path.is_empty() {
+            self.cookie_path.clone()
+        } else {
+            crate::routing::root::cookie_path()
+        }
+    }
+
     /// The `SameSite` attribute [`Self::cookie_same_site`] names, read
     /// without regard to case as the session middleware reads it:
     /// `strict` is `Strict`, `none` is `None`, and anything else is `Lax`,
