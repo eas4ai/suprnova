@@ -1,0 +1,5 @@
+error: an event type may be delivered by only one stream
+  --> tests/ui/live/fail/stream_duplicate_event.rs:17:60
+   |
+17 |         stream(name = "archive", topics("archive"), events(OrdersUpdated)),
+   |                                                            ^^^^^^^^^^^^^

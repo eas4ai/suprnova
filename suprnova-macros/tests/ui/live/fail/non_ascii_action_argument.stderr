@@ -1,0 +1,5 @@
+error: Live action argument names must use ASCII letters, digits and `_`, at most 128 bytes
+  --> tests/ui/live/fail/non_ascii_action_argument.rs:12:30
+   |
+12 |     pub fn rename(&mut self, café: String) {
+   |                              ^^^^

@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.tabs",
+  "files": [
+    "tabs.html",
+    "tabs.css",
+    "tabs.js"
+  ],
+  "elements": [
+    "sn-tabs"
+  ]
+}
