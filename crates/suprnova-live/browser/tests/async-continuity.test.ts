@@ -1,0 +1,430 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { canonicalize, type JsonValue } from "../src/canonical.js";
+import type { AsyncEnvelopeDispatcher } from "../src/async-updates/dispatch.js";
+import { AsyncDocumentQueueBudget, AsyncSubscription } from "../src/async-updates/subscription.js";
+import type { LiveLimitBreach } from "../src/limits.js";
+import type {
+  AsyncPayload,
+  AuthorizedLogicalSubscription,
+  StreamPosition,
+  ValidatedAsyncEnvelope,
+} from "../src/async-updates/types.js";
+
+const SUBSCRIPTION_ID = "c3Vic2NyaXB0aW9uLTAwMQ";
+
+function position(epoch: bigint, sequence: bigint): StreamPosition {
+  return Object.freeze({ epoch, sequence });
+}
+
+function authorized(baseline: StreamPosition = position(4n, 40n)): AuthorizedLogicalSubscription {
+  return Object.freeze({
+    authorization: Object.freeze({ kind: "session_cookie" as const }),
+    baseline,
+    descriptorBinding: "descriptor-binding-001",
+    document: Object.freeze({
+      authorizationScope: "document-scope-001",
+      origin: "https://app.example.test",
+      transport: "sse" as const,
+    }),
+    events: Object.freeze([
+      Object.freeze({
+        cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
+        maximum_fanout: 8,
+        name: "orders.updated",
+        order: "per_source_sequence" as const,
+        payload_contract: "orders.updated.v1",
+        schema: "json" as const,
+        source: "stream" as const,
+        targets: Object.freeze(["self"]),
+        version: 1,
+      }),
+    ]),
+    expiresAt: 10_000,
+    fallbackPoll: Object.freeze({
+      initial: "wait" as const,
+      intervalMs: 30_000,
+      jitterRatio: 0.2,
+      visibility: "visible" as const,
+    }),
+    heartbeatTimeoutMs: 30_000,
+    presentationSignals: Object.freeze([
+      Object.freeze({ name: "completion_percent", schema: "u64" as const, scope: "root-scope" }),
+    ]),
+    reconnect: Object.freeze({
+      kind: "resume_or_refresh" as const,
+      maximumAttempts: 4,
+      maximumDelayMs: 30_000,
+      minimumDelayMs: 250,
+    }),
+    stream: "orders",
+    subscriptionId: SUBSCRIPTION_ID,
+  });
+}
+
+function envelope(at: StreamPosition, payload: AsyncPayload): string {
+  return canonicalize({
+    payload: payload as unknown as JsonValue,
+    position: { epoch: String(at.epoch), sequence: String(at.sequence) },
+    protocol_version: 1,
+    stream: "orders",
+    subscription: SUBSCRIPTION_ID,
+  });
+}
+
+function fixture() {
+  const applied: AsyncPayload[] = [];
+  const browserEvent = vi.fn((event: Extract<AsyncPayload, { kind: "browser_event" }>) => {
+    applied.push(event);
+    return true;
+  });
+  const dispatch: AsyncEnvelopeDispatcher = {
+    dispatch: vi.fn<AsyncEnvelopeDispatcher["dispatch"]>(
+      ({ payload }: ValidatedAsyncEnvelope, completion) => {
+        switch (payload.kind) {
+          case "browser_event":
+            browserEvent(payload);
+            return "dispatched";
+          case "presentation_signal":
+            applied.push(payload);
+            return "signal_updated";
+          case "refresh":
+            applied.push(payload);
+            completion?.("succeeded");
+            return "queued";
+          case "heartbeat":
+            return "observed";
+          case "complete":
+            return `closed:${payload.reason}`;
+          case "error":
+            return `degraded:${payload.code}`;
+        }
+        throw new Error("unreachable_async_payload");
+      },
+    ),
+  };
+  const subscription = new AsyncSubscription(authorized(), dispatch, { now: () => 1_000 });
+  return { applied, browserEvent, dispatch, subscription };
+}
+
+describe("browser asynchronous subscription continuity", () => {
+  it("cannot claim current on initial connect without an exact successor proof", () => {
+    const { applied, subscription } = fixture();
+
+    subscription.connected();
+    expect(subscription.state()).toBe("connecting");
+    expect(
+      subscription.receive(
+        envelope(position(4n, 41n), Object.freeze({ kind: "refresh", name: "refresh" })),
+      ),
+    ).toBe("pending");
+    expect(subscription.state()).toBe("current");
+
+    expect(
+      subscription.receive(
+        envelope(
+          position(4n, 43n),
+          Object.freeze({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: 50,
+          }),
+        ),
+      ),
+    ).toBe("gap");
+    expect(subscription.state()).toBe("degraded");
+    expect(applied).toEqual([Object.freeze({ kind: "refresh", name: "refresh" })]);
+  });
+
+  it("ignores duplicate and stale positions without redispatching them", () => {
+    const { applied, subscription } = fixture();
+    const first = envelope(
+      position(4n, 41n),
+      Object.freeze({
+        kind: "presentation_signal",
+        name: "completion_percent",
+        scope: "root-scope",
+        value: 50,
+      }),
+    );
+
+    expect(subscription.receive(first)).toBe("applied");
+    expect(subscription.receive(first)).toBe("duplicate");
+    expect(
+      subscription.receive(envelope(position(3n, 999n), Object.freeze({ kind: "heartbeat" }))),
+    ).toBe("stale");
+    expect(applied).toHaveLength(1);
+  });
+
+  it("prevalidates a complete replay transcript before dispatching any member", () => {
+    const { applied, subscription } = fixture();
+    expect(
+      subscription.receive(envelope(position(4n, 43n), Object.freeze({ kind: "heartbeat" }))),
+    ).toBe("gap");
+
+    const malformedSecond = canonicalize({
+      payload: { kind: "html", html: "<p>not authority</p>" },
+      position: { epoch: "4", sequence: "43" },
+      protocol_version: 1,
+      stream: "orders",
+      subscription: SUBSCRIPTION_ID,
+    });
+    expect(() =>
+      subscription.receiveReplay([
+        envelope(position(4n, 41n), Object.freeze({ kind: "heartbeat" })),
+        envelope(position(4n, 42n), Object.freeze({ kind: "heartbeat" })),
+        malformedSecond,
+      ]),
+    ).toThrow("async_payload_unsupported");
+    expect(subscription.position()).toEqual(position(4n, 40n));
+    expect(applied).toEqual([]);
+  });
+
+  it("applies a replay transcript larger than the old 256 KiB browser bound", () => {
+    // The server bounds what it holds in flight (LIVE_ASYNC_MAX_BUFFER_BYTES);
+    // the browser applies the transcript it is sent.
+    const membership = {
+      ...authorized(),
+      presentationSignals: Object.freeze([
+        Object.freeze({ name: "message", schema: "string" as const, scope: "root-scope" }),
+      ]),
+    };
+    const subscription = new AsyncSubscription(
+      membership,
+      { dispatch: () => "observed" },
+      { now: () => 1_000 },
+    );
+    const transcript = Array.from({ length: 9 }, (_, index) =>
+      canonicalize({
+        payload: {
+          kind: "presentation_signal",
+          name: "message",
+          scope: "root-scope",
+          value: "x".repeat(30_000),
+        },
+        position: { epoch: "4", sequence: String(41 + index) },
+        protocol_version: 1,
+        stream: "orders",
+        subscription: SUBSCRIPTION_ID,
+      }),
+    );
+
+    expect(() => subscription.receiveReplay(transcript)).not.toThrow();
+    expect(subscription.position()).toEqual(position(4n, 49n));
+  });
+
+  it("claims current after a complete validated reconnect replay and not socket open", () => {
+    const { subscription } = fixture();
+    subscription.receive(envelope(position(4n, 41n), Object.freeze({ kind: "heartbeat" })));
+    subscription.transportLost();
+    expect(subscription.state()).toBe("reconnecting");
+    subscription.connected();
+    expect(subscription.state()).toBe("connecting");
+
+    expect(
+      subscription.receiveReplay([
+        envelope(position(4n, 42n), Object.freeze({ kind: "heartbeat" })),
+        envelope(position(4n, 43n), Object.freeze({ kind: "heartbeat" })),
+      ]),
+    ).toEqual({ applied: 2, through: position(4n, 43n) });
+    expect(subscription.state()).toBe("current");
+  });
+
+  it("degrades on heartbeat loss or authorization uncertainty without applying late data", () => {
+    const { applied, subscription } = fixture();
+    subscription.receive(envelope(position(4n, 41n), Object.freeze({ kind: "heartbeat" })));
+    subscription.heartbeatLost();
+    expect(subscription.state()).toBe("degraded");
+    expect(
+      subscription.receive(
+        envelope(
+          position(4n, 42n),
+          Object.freeze({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: 51,
+          }),
+        ),
+      ),
+    ).toBe("continuity_required");
+    subscription.authorizationUncertain();
+    expect(subscription.state()).toBe("degraded");
+    expect(applied).toEqual([]);
+  });
+
+  it("validates registered event, signal, and exact membership before dispatch", () => {
+    const { browserEvent, subscription } = fixture();
+    const event = envelope(
+      position(4n, 41n),
+      Object.freeze({
+        event: "orders.updated",
+        kind: "browser_event",
+        payload: Object.freeze({ count: 1 }),
+        schema_version: 1,
+        target: "self",
+      }),
+    );
+
+    expect(subscription.receive(event)).toBe("applied");
+    expect(browserEvent).toHaveBeenCalledOnce();
+    expect(() =>
+      subscription.receive(
+        canonicalize({
+          payload: { kind: "heartbeat" },
+          position: { epoch: "4", sequence: "42" },
+          protocol_version: 1,
+          stream: "other-stream",
+          subscription: SUBSCRIPTION_ID,
+        }),
+      ),
+    ).toThrow("async_stream_mismatch");
+    expect(() =>
+      subscription.receive(
+        envelope(
+          position(4n, 42n),
+          Object.freeze({
+            event: "orders.deleted",
+            kind: "browser_event",
+            payload: Object.freeze({ count: 1 }),
+            schema_version: 1,
+            target: "self",
+          }),
+        ),
+      ),
+    ).toThrow("async_payload_unregistered");
+    expect(browserEvent).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a multibyte payload past the old 32 KiB browser bound", () => {
+    // The server encodes each payload under LIVE_ASYNC_MAX_PAYLOAD_BYTES; the
+    // browser has no payload cap of its own.
+    const { subscription } = fixture();
+    const astralPayload = Array.from({ length: 9 }, () => "💥".repeat(1_000));
+
+    expect(
+      subscription.receive(
+        envelope(
+          position(4n, 41n),
+          Object.freeze({
+            event: "orders.updated",
+            kind: "browser_event",
+            payload: Object.freeze(astralPayload),
+            schema_version: 1,
+            target: "self",
+          }),
+        ),
+      ),
+    ).toBe("applied");
+  });
+
+  it("accepts the old 32 KiB boundary and the first multibyte past it", () => {
+    const fields = {
+      event: "orders.updated",
+      kind: "browser_event",
+      payload: {
+        chunks: Array.from({ length: 8 }, () => "💥".repeat(900)),
+        tail: "",
+      },
+      schema_version: 1,
+      target: "self",
+    };
+    const currentBytes = new TextEncoder().encode(canonicalize(fields)).byteLength;
+    const remaining = 32 * 1_024 - currentBytes;
+    fields.payload.tail = `${"💥".repeat(Math.floor(remaining / 4))}${"x".repeat(remaining % 4)}`;
+    expect(new TextEncoder().encode(canonicalize(fields)).byteLength).toBe(32 * 1_024);
+
+    const { subscription } = fixture();
+    expect(
+      subscription.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload)),
+    ).toBe("applied");
+
+    fields.payload.tail += "é";
+    const overflow = new AsyncSubscription(
+      authorized(),
+      { dispatch: () => "observed" },
+      { now: () => 1_000 },
+    );
+    expect(overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload))).toBe(
+      "applied",
+    );
+  });
+
+  it("retains the applied position but requires proof after restored authorization", () => {
+    const { subscription } = fixture();
+    subscription.receive(envelope(position(4n, 41n), Object.freeze({ kind: "heartbeat" })));
+    const restored = {
+      ...authorized(),
+      baseline: position(4n, 41n),
+      descriptorBinding: "descriptor-binding-restored",
+      expiresAt: 20_000,
+    };
+
+    subscription.reauthorize(restored);
+
+    expect(subscription.position()).toEqual(position(4n, 41n));
+    expect(subscription.state()).toBe("connecting");
+    expect(
+      subscription.receive(envelope(position(4n, 42n), Object.freeze({ kind: "heartbeat" }))),
+    ).toBe("continuity_required");
+    expect(
+      subscription.receiveReplay([
+        envelope(position(4n, 42n), Object.freeze({ kind: "heartbeat" })),
+      ]),
+    ).toEqual({ applied: 1, through: position(4n, 42n) });
+    expect(subscription.state()).toBe("current");
+  });
+});
+
+describe("the asynchronous queue and replay limits the server configured", () => {
+  function heartbeats(count: number): string[] {
+    return Array.from({ length: count }, (_, index) =>
+      envelope(position(4n, 41n + BigInt(index)), Object.freeze({ kind: "heartbeat" })),
+    );
+  }
+
+  it("applies a 2,000-event replay, past the old 1,024-event and 64-event bounds", () => {
+    const { subscription } = fixture();
+    expect(subscription.receiveReplay(heartbeats(2_000))).toEqual({
+      applied: 2_000,
+      through: position(4n, 2_040n),
+    });
+  });
+
+  it("refuses a replay over the configured count and names the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const subscription = new AsyncSubscription(
+      authorized(),
+      { dispatch: () => "observed" },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      undefined,
+      new AsyncDocumentQueueBudget(100, 10, (breach) => breaches.push(breach)),
+    );
+    expect(() => subscription.receiveReplay(heartbeats(11))).toThrow(
+      "Raise LIVE_ASYNC_MAX_REPLAY_EVENTS",
+    );
+    expect(breaches.map(({ message }) => message)).toEqual([
+      "Suprnova Live async replay event count limit exceeded: measured 11 events, configured " +
+        "10 events. Raise LIVE_ASYNC_MAX_REPLAY_EVENTS in the application's .env file to allow it.",
+    ]);
+    expect(subscription.receiveReplay(heartbeats(10))).toEqual({
+      applied: 10,
+      through: position(4n, 50n),
+    });
+  });
+
+  it("queues past 64 events and refuses past the configured depth, naming the key", () => {
+    const breaches: LiveLimitBreach[] = [];
+    const budget = new AsyncDocumentQueueBudget(100, 100, (breach) => breaches.push(breach));
+    expect(budget.reserve(65, 1)).toBe(true);
+    expect(budget.reserve(36, 1)).toBe(false);
+    expect(breaches.map(({ key }) => key)).toEqual(["LIVE_ASYNC_MAX_QUEUED_EVENTS"]);
+    expect(breaches[0]?.message).toContain("measured 101 events, configured 100 events");
+    expect(() => new AsyncDocumentQueueBudget(10, 11)).toThrow(
+      "async_document_queue_limits_invalid",
+    );
+  });
+});
