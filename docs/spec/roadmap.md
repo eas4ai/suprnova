@@ -755,7 +755,7 @@ Requirements: PAR-099, PAR-100, PAR-101, PAR-102, PAR-103, PAR-104, PAR-105, PAR
 
 ## laravel-gaps-http
 
-Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR-118, PAR-119, PAR-120, PAR-121
+Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR-118, PAR-119, PAR-120, PAR-121, PAR-122
 
 45. laravel-gaps-http - the tenth of the parity rounds the developer
    ordered on 2026-10-07 (17:35), ruled build by the parity default: the
@@ -763,7 +763,8 @@ Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR
    URL, middleware, CSRF, validation, error, view and session areas where
    Suprnova lacks or differs from Laravel 13.35.0, grouped into PAR-111 to
    PAR-120, with PAR-121, the polymorphic owner relation under the
-   existence filters, surfaced from the ninth round's review; `TrustProxies::at`, which the log keeps, and `View::with`,
+   existence filters, and PAR-122, the seeded SQLite order on a
+   text-keyed model, both surfaced from the ninth round's reviews; `TrustProxies::at`, which the log keeps, and `View::with`,
    which chained `with` and `prop` calls already cover, stay as they are.
    Delivery: reportable callbacks, `Exceptions::report`, the stopped
    retries, the error's type name and the editor links in
@@ -780,14 +781,15 @@ Requirements: PAR-111, PAR-112, PAR-113, PAR-114, PAR-115, PAR-116, PAR-117, PAR
    catalog and the upload validators; `make:middleware`, `make:view` and
    `make:inertia` in `suprnova-cli`; the `MorphTo` dispatch of `has`,
    `doesnt_have`, `has_count` and `where_has` in
-   `framework/src/eloquent/builder.rs` with its tests in the eloquent
-   suite's `laravel_gaps` module; a `laravel_http_gaps` test module in
+   `framework/src/eloquent/builder.rs` and the rowid carried through a
+   union's projection for the seeded SQLite order, with their tests in
+   the eloquent suite's `laravel_gaps` module; a `laravel_http_gaps` test module in
    each of the error, queue, session, routing, http and validation suites
    and in the CLI's `make_scaffolds` test; the manual chapters each area
    owns and the changelog.
    Mechanisms: `par-laravel-gaps-http` (the `laravel_http_gaps` modules of
    the six suites and the CLI test) and `par-laravel-gaps-data` (the
-   `laravel_gaps` modules of the data suites, for PAR-121).
+   `laravel_gaps` modules of the data suites, for PAR-121 and PAR-122).
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 

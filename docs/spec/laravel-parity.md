@@ -2098,3 +2098,13 @@ Falsifier: `MorphComment::query().has("commentable").get()` returns no comment w
 Mechanism: `par-laravel-gaps-data`.
 Rationale: Laravel's `Builder::has` routes a `MorphTo` relation to `hasMorph($relation, ['*'])` (`Eloquent/Concerns/QueriesRelationships.php`); found on 2026-10-09 while fixing finding 4 of report 7a904d31 (item has-on-a-morph-to-relation-matches-nothing), where the generic probe rendered a constant false; the typed predicate narrows to one owner type because a Rust closure over one model cannot run against every owner table.
 Status: Agreed 2026-10-09
+
+[PAR-122] On SQLite, the model builder's seeded random order MUST shuffle
+rows whatever the type of the model's primary key: a text-keyed model
+ordered with two different seeds MUST return two different orders over
+the same rows, and the same seed MUST repeat its order, in a plain query
+and over a union of two queries, with every row returned once.
+Falsifier: a model with a text primary key and eight rows whose keys start with letters returns the same order for `in_random_order_seeded(1)` and `in_random_order_seeded(2)` on SQLite; the same seed returns two different orders; or a union of two such queries fails or returns the same order for the two seeds.
+Mechanism: `par-laravel-gaps-data`.
+Rationale: The seeded order over the primary key reads a text key as its leading digits, so a UUID or ULID model collapses toward key order for every seed (noted 2026-10-09 by a side review of the ninth round's fixes); the rowid every SQLite table has is the row number to shuffle, carried through a union's projection so the outer query can reach it; `DB::table` keeps its rowid form.
+Status: Agreed 2026-10-09
