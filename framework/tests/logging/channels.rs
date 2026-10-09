@@ -1300,3 +1300,26 @@ fn building_a_subscriber_keeps_the_live_default_channel() {
         "the event went to the default it was moved to: {moved}"
     );
 }
+
+#[test]
+fn revised_daily_default_keeps_seven_files() {
+    let base = tempfile::tempdir().expect("log directory");
+    let logs = base.path().join("storage/logs");
+    std::fs::create_dir_all(&logs).expect("create logs");
+    for day in 1..=9 {
+        std::fs::write(logs.join(format!("suprnova-2026-09-{day:02}.log")), "old\n")
+            .expect("seed old log");
+    }
+    run_child(
+        "channels::child_writes_to_the_built_in_daily_channel",
+        &[(
+            "APP_BASE_PATH",
+            base.path().to_str().expect("directory path"),
+        )],
+    );
+    assert_eq!(
+        files_in(&logs).len(),
+        7,
+        "PAR-027 daily default retention is seven files"
+    );
+}

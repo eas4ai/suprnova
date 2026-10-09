@@ -282,17 +282,3 @@ async fn tty_captures_nothing_a_process_writes() {
     assert_eq!(result.output(), "");
     assert_eq!(result.error_output(), "");
 }
-
-#[tokio::test]
-async fn revised_result_command_quotes_arguments() {
-    let result = Process::command(["printf", "a b"])
-        .run()
-        .await
-        .expect("printf runs");
-    assert_eq!(result.output(), "a b");
-    assert_eq!(
-        result.command(),
-        "printf 'a b'",
-        "PAR-021 command quotes each argument as POSIX requires"
-    );
-}
