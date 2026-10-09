@@ -101,6 +101,8 @@ async fn skip_middleware_drops_job_without_running_handler() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -132,6 +134,8 @@ async fn middleware_runs_outermost_first() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -195,8 +199,8 @@ async fn without_overlapping_releases_without_burning_attempt() {
     // After the worker exits via max_jobs, the released job should be back
     // on the driver (delayed by release_after), and its attempts must be 0 -
     // never bumped, because release isn't a failure.
-    let delayed = driver.delayed_size().await.unwrap();
-    let pending = driver.pending_size().await.unwrap();
+    let delayed = driver.delayed_size(None).await.unwrap();
+    let pending = driver.pending_size(None).await.unwrap();
     assert!(
         delayed + pending >= 1,
         "released job should be re-enqueued (delayed={delayed}, pending={pending})"
@@ -260,6 +264,8 @@ async fn fail_on_exception_dead_letters_without_retries() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,

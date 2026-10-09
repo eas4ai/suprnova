@@ -115,5 +115,5 @@ async fn a_delay_too_long_for_a_date_is_an_error() {
             "{call} with a million-year delay must return an error, got {outcome:?}"
         );
     }
-    assert_eq!(driver.size().await.unwrap(), 0, "nothing was queued");
+    assert_eq!(driver.size(None).await.unwrap(), 0, "nothing was queued");
 }

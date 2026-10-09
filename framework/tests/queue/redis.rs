@@ -56,6 +56,8 @@ fn env(name: &str) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -99,16 +101,16 @@ async fn redis_driver_ack_removes_the_exact_pending_entry() {
 
     d.push(env("ack-fence")).await.unwrap();
     let reservation = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
 
     d.ack(&reservation.token).await.unwrap();
 
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         0,
         "ack must execute XACK rather than only queueing local bookkeeping"
     );
-    d.clear().await.unwrap();
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -134,11 +136,11 @@ async fn redis_driver_concurrent_pops_claim_one_distinct_entry_each() {
 
     assert_ne!(first.envelope.id, second.envelope.id);
     assert_ne!(first.token, second.token);
-    assert_eq!(d.reserved_size().await.unwrap(), 2);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 2);
     d.ack(&first.token).await.unwrap();
     d.ack(&second.token).await.unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
-    d.clear().await.unwrap();
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -163,8 +165,8 @@ async fn redis_driver_settle_publishes_follow_up_and_acks_atomically() {
         .unwrap();
 
     assert_eq!(result, Settled::Atomically);
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
-    assert_eq!(d.delayed_size().await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
+    assert_eq!(d.delayed_size(None).await.unwrap(), 1);
 
     let follow_up = d
         .pop(Duration::from_secs(5))
@@ -173,7 +175,7 @@ async fn redis_driver_settle_publishes_follow_up_and_acks_atomically() {
         .expect("the staged follow-up must be promoted by pop");
     assert_eq!(follow_up.envelope.job_name, "follow-up");
     d.ack(&follow_up.token).await.unwrap();
-    d.clear().await.unwrap();
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -202,7 +204,7 @@ async fn redis_driver_settle_preserves_duplicate_follow_ups() {
 
     assert_eq!(result, Settled::Atomically);
     assert_eq!(
-        d.delayed_size().await.unwrap(),
+        d.delayed_size(None).await.unwrap(),
         2,
         "ZSET member identity must not collapse equal envelope payloads"
     );
@@ -214,7 +216,7 @@ async fn redis_driver_settle_preserves_duplicate_follow_ups() {
     assert_ne!(first.token, second.token);
     d.ack(&first.token).await.unwrap();
     d.ack(&second.token).await.unwrap();
-    d.clear().await.unwrap();
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -255,15 +257,15 @@ async fn redis_driver_stale_settlement_cannot_publish_follow_ups() {
         .unwrap();
 
     assert_eq!(result, Settled::Stale);
-    assert_eq!(d.delayed_size().await.unwrap(), 0);
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
+    assert_eq!(d.delayed_size(None).await.unwrap(), 0);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
     let length: i64 = redis::cmd("XLEN")
         .arg(&stream)
         .query_async(&mut conn)
         .await
         .unwrap();
     assert_eq!(length, 1, "stale settlement must not XADD a successor");
-    d.clear().await.unwrap();
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -289,10 +291,10 @@ async fn redis_driver_reclaims_its_own_expired_delivery_with_a_new_generation() 
     assert_eq!(reclaimed.envelope.attempts, first.envelope.attempts + 1);
     assert_ne!(reclaimed.token, first.token);
     d.ack(&first.token).await.unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
     d.ack(&reclaimed.token).await.unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
-    d.clear().await.unwrap();
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
+    d.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -335,10 +337,10 @@ async fn redis_driver_reclaims_another_consumers_expired_delivery_to_itself() {
     assert_eq!(reclaimed.envelope.id, first.envelope.id);
     assert_eq!(reclaimed.envelope.attempts, first.envelope.attempts + 1);
     first_driver.ack(&first.token).await.unwrap();
-    assert_eq!(second_driver.reserved_size().await.unwrap(), 1);
+    assert_eq!(second_driver.reserved_size(None).await.unwrap(), 1);
     second_driver.ack(&reclaimed.token).await.unwrap();
-    assert_eq!(second_driver.reserved_size().await.unwrap(), 0);
-    second_driver.clear().await.unwrap();
+    assert_eq!(second_driver.reserved_size(None).await.unwrap(), 0);
+    second_driver.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -386,7 +388,7 @@ async fn redis_driver_does_not_immediately_replay_a_fresh_claim() {
     );
 
     second_driver.ack(&reclaimed.token).await.unwrap();
-    second_driver.clear().await.unwrap();
+    second_driver.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -433,7 +435,7 @@ async fn redis_driver_one_pop_registers_exactly_one_pel_delivery() {
         .expect("second delivery");
     assert_ne!(first.envelope.id, second.envelope.id);
     driver.ack(&second.token).await.unwrap();
-    driver.clear().await.unwrap();
+    driver.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -512,7 +514,7 @@ async fn redis_driver_reclaim_cursor_advances_past_an_empty_scan_page() {
         reclaimed.envelope.job_name == "cursor-10" || reclaimed.envelope.job_name == "cursor-11"
     );
     driver.ack(&reclaimed.token).await.unwrap();
-    driver.clear().await.unwrap();
+    driver.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -557,7 +559,7 @@ async fn redis_driver_clear_epoch_fences_an_identical_recreated_delivery() {
     )
     .await
     .unwrap();
-    clearing_driver.clear().await.unwrap();
+    clearing_driver.clear(None).await.unwrap();
 
     let replacement = env("after-clear");
     let replacement_json = replacement.to_json().unwrap();
@@ -590,13 +592,13 @@ async fn redis_driver_clear_epoch_fences_an_identical_recreated_delivery() {
         .await
         .unwrap();
     assert_eq!(stale, Settled::Stale);
-    assert_eq!(replacement_driver.reserved_size().await.unwrap(), 1);
-    assert_eq!(replacement_driver.delayed_size().await.unwrap(), 0);
+    assert_eq!(replacement_driver.reserved_size(None).await.unwrap(), 1);
+    assert_eq!(replacement_driver.delayed_size(None).await.unwrap(), 0);
     replacement_driver
         .ack(&replacement_reservation.token)
         .await
         .unwrap();
-    replacement_driver.clear().await.unwrap();
+    replacement_driver.clear(None).await.unwrap();
 }
 
 #[ignore = "requires a real Redis"]
@@ -649,10 +651,10 @@ async fn redis_driver_release_redelivers_without_bumping_attempts() {
     assert_eq!(redelivered.envelope.attempts, 2);
     assert_ne!(redelivered.token, first.token);
     d.ack(&first.token).await.unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
     d.ack(&redelivered.token).await.unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
-    d.clear().await.unwrap();
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
+    d.clear(None).await.unwrap();
 }
 
 /// `Queue::later` / `push` with a future `available_at` MUST not be visible
@@ -723,7 +725,7 @@ async fn redis_driver_promotes_legacy_unprefixed_delayed_members() {
         .expect("legacy delayed member should be promoted");
     assert_eq!(reservation.envelope.id, legacy.id);
     d.ack(&reservation.token).await.unwrap();
-    d.clear().await.unwrap();
+    d.clear(None).await.unwrap();
 }
 
 /// `nack` with a non-zero `requeue_delay` MUST also route via the ZSET; an
@@ -805,10 +807,10 @@ async fn redis_driver_size_introspection_round_trip() {
     let _ = d.pop(Duration::from_millis(50)).await.unwrap();
 
     // Empty state.
-    assert_eq!(d.size().await.unwrap(), 0);
-    assert_eq!(d.pending_size().await.unwrap(), 0);
-    assert_eq!(d.delayed_size().await.unwrap(), 0);
-    assert_eq!(d.reserved_size().await.unwrap(), 0);
+    assert_eq!(d.size(None).await.unwrap(), 0);
+    assert_eq!(d.pending_size(None).await.unwrap(), 0);
+    assert_eq!(d.delayed_size(None).await.unwrap(), 0);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 0);
 
     // Push 2 immediate + 1 delayed.
     d.push(env("s1")).await.unwrap();
@@ -818,39 +820,39 @@ async fn redis_driver_size_introspection_round_trip() {
     d.push(delayed).await.unwrap();
 
     assert_eq!(
-        d.size().await.unwrap(),
+        d.size(None).await.unwrap(),
         3,
         "size = XLEN(stream) + ZCARD(delayed) = 2 + 1"
     );
     assert_eq!(
-        d.delayed_size().await.unwrap(),
+        d.delayed_size(None).await.unwrap(),
         1,
         "one envelope parked on the delayed ZSET"
     );
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         0,
         "direct new-delivery reads must not reserve work before pop"
     );
     let r1 = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         1,
         "COUNT 1 must reserve exactly the returned delivery"
     );
 
     d.ack(&r1.token).await.unwrap();
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         0,
         "ack must remove the only PEL entry"
     );
 
     // clear() returns an approximate count and drains everything.
-    let cleared = d.clear().await.unwrap();
+    let cleared = d.clear(None).await.unwrap();
     assert!(cleared >= 1, "clear must report dropped envelopes");
     assert_eq!(
-        d.delayed_size().await.unwrap(),
+        d.delayed_size(None).await.unwrap(),
         0,
         "delayed key must be empty after clear"
     );

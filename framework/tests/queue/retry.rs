@@ -190,7 +190,7 @@ async fn the_worker_releases_a_throttled_job_for_as_long_as_the_service_asked() 
         "the 90 second hint, not the job's 5 second backoff"
     );
     assert_eq!(
-        Queue::delayed_size().await.unwrap(),
+        Queue::delayed_size(None).await.unwrap(),
         1,
         "the job waits on the queue for its next attempt"
     );

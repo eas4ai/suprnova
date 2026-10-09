@@ -111,7 +111,7 @@ async fn stop_kills_a_process_that_ignores_the_terminate_signal() {
 
     let started = Instant::now();
     let result = process
-        .stop(Duration::from_millis(300))
+        .stop(Duration::from_millis(300), None)
         .await
         .expect("stopped");
     assert!(started.elapsed() < Duration::from_secs(3));
@@ -189,6 +189,9 @@ async fn a_process_that_keeps_writing_runs_past_the_idle_timeout() {
 #[tokio::test]
 #[serial]
 async fn a_tty_process_is_killed_with_everything_it_started() {
+    if !Process::supports_tty() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("pids");
     let error = Process::command(sh(&parent_and_child(&file)))
@@ -205,6 +208,9 @@ async fn a_tty_process_is_killed_with_everything_it_started() {
 #[tokio::test]
 #[serial]
 async fn dropping_a_started_tty_process_kills_its_children() {
+    if !Process::supports_tty() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("pids");
     let process = Process::command(sh(&parent_and_child(&file)))
@@ -247,7 +253,7 @@ async fn stop_kills_a_child_that_outlives_its_parent_and_ignores_the_terminate_s
 
     let started = Instant::now();
     process
-        .stop(Duration::from_millis(300))
+        .stop(Duration::from_millis(300), None)
         .await
         .expect("stopped");
     assert!(
@@ -351,4 +357,57 @@ async fn the_program_stays_unreaped_while_an_escaped_process_holds_its_output() 
          its id and its group id were free for reuse"
     );
     drop(process);
+}
+
+#[tokio::test]
+#[serial]
+async fn stop_uses_the_requested_signal_and_can_end_before_grace() {
+    let mut process = Process::shell(
+        "trap 'printf interrupted; exit 7' INT; printf ready; while :; do sleep 0.1; done",
+    )
+    .start()
+    .unwrap();
+    assert!(
+        process
+            .wait_until(|_, chunk| chunk.contains("ready"))
+            .await
+            .unwrap()
+    );
+    let started = Instant::now();
+    let result = process
+        .stop(Duration::from_secs(1), Signal::Interrupt)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(result.exit_code(), Some(7));
+    assert!(result.output().contains("interrupted"));
+}
+
+#[tokio::test]
+#[serial]
+async fn default_stop_waits_ten_seconds_before_killing_a_term_ignoring_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let process = Process::command(sh(&format!("trap '' TERM; {}", parent_and_child(&file))))
+        .forever()
+        .start()
+        .unwrap();
+    let pids = pids_in(&file, 2).await;
+    let started = Instant::now();
+    let result = process.stop(None, None).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(14));
+    assert!(result.failed());
+    assert!(all_gone(&pids, Duration::from_secs(3)).await);
+}
+
+#[tokio::test]
+#[serial]
+async fn zero_stop_grace_kills_immediately() {
+    let process = Process::command(["sleep", "30"]).start().unwrap();
+    let pid = process.id().unwrap();
+    let started = Instant::now();
+    assert!(process.stop(Duration::ZERO, None).await.unwrap().failed());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(all_gone(&[pid], Duration::from_secs(3)).await);
 }

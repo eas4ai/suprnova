@@ -735,6 +735,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Queue assertions filter unchained jobs.** `assert_pushed_without_chain`
+  takes a closure, so a matching job must also carry no chain.
+- **Queue counts and clearing accept a queue name.** You can select one queue
+  on every driver; SQS uses `SQS_QUEUE` when you pass none.
+- **SQS accepts FIFO queues.** Jobs carry a message group and deduplication
+  ID, with `default` and a payload digest as defaults, and sends omit delays.
+- **SQS overflow supports named cache stores.** `SQS_OVERFLOW_STORE` takes
+  precedence over the disk, and clearing keeps other queues' payloads.
+- **Processes remove inherited environment variables.** Passing `None` to
+  `env` removes the variable before starting the program.
+- **TTY processes require terminal input and output.** An error names the
+  redirected stream; a terminal process captures no output.
+- **Process diagnostics quote command arguments.** Results and errors use
+  POSIX shell quoting while fake patterns keep the arguments joined by spaces.
+- **Stopping a process accepts a signal.** The default sends terminate and
+  waits 10 seconds before killing the process and its descendants.
+- **Process fake handlers accept closures.** You can inspect the pending
+  command, path, environment and input before returning a result.
+- **Described process fakes replay mixed streams in order.** Each described
+  output or error output line ends with one newline.
+- **Process run-count assertions default to once.** `assert_ran_times` checks
+  one run; `assert_ran_count` accepts an explicit count.
+
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request
   answered the header; a route without the middleware now handles it as

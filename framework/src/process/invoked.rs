@@ -285,7 +285,7 @@ impl InvokedProcess {
         pending: PendingProcess,
         callback: Option<OutputCallback>,
     ) -> Result<Self, ProcessError> {
-        let command = pending.command.line();
+        let command = pending.command.quoted_line();
         if pending.tty && pending.idle_timeout.is_some() {
             // A terminal process writes to the terminal, so there is no
             // output to watch, and every idle timeout would pass.
@@ -309,12 +309,36 @@ impl InvokedProcess {
             });
         }
 
+        if pending.tty {
+            use std::io::IsTerminal;
+            let redirected = if !std::io::stdin().is_terminal() {
+                Some("stdin")
+            } else if !std::io::stdout().is_terminal() {
+                Some("stdout")
+            } else {
+                None
+            };
+            if let Some(stream) = redirected {
+                return Err(ProcessError::Unsupported {
+                    command,
+                    reason: format!("tty requires a terminal on {stream}; {stream} is redirected"),
+                });
+            }
+        }
+
         let mut tokio_command = pending.command.to_tokio();
         if let Some(path) = &pending.path {
             tokio_command.current_dir(path);
         }
         for (key, value) in &pending.env {
-            tokio_command.env(key, value);
+            match value {
+                Some(value) => {
+                    tokio_command.env(key, value);
+                }
+                None => {
+                    tokio_command.env_remove(key);
+                }
+            }
         }
         if pending.tty {
             tokio_command
@@ -352,6 +376,7 @@ impl InvokedProcess {
         let mut child = tokio_command
             .spawn()
             .map_err(|source| ProcessError::NotStarted {
+                command: command.clone(),
                 program: pending.command.program(),
                 source,
             })?;
@@ -644,18 +669,26 @@ impl InvokedProcess {
         }
     }
 
-    /// Stop the process: a terminate signal to it and everything it started,
-    /// then, after `grace`, a kill to whatever is left. Returns its result.
+    /// Send `signal` to the process and everything it started, then kill
+    /// whatever remains after `grace`. `None` uses a terminate signal and
+    /// ten seconds of grace, so the process can finish cleanup.
     ///
     /// # Errors
     ///
     /// [`ProcessError::Io`] when waiting fails.
-    pub async fn stop(mut self, grace: Duration) -> Result<ProcessResult, ProcessError> {
+    pub async fn stop(
+        mut self,
+        grace: impl Into<Option<Duration>>,
+        signal: impl Into<Option<Signal>>,
+    ) -> Result<ProcessResult, ProcessError> {
+        let grace = grace.into().unwrap_or(super::DEFAULT_STOP_GRACE);
+        let signal = signal.into().unwrap_or(Signal::Term);
         let command = self.command.clone();
         let real = match &mut self.inner {
             Inner::Real(real) => real,
             #[cfg(any(test, feature = "testing"))]
             Inner::Fake(fake) => {
+                fake.signal(signal);
                 fake.stop();
                 return Ok(fake.result(&command));
             }
@@ -663,7 +696,7 @@ impl InvokedProcess {
         if let Some(watchdog) = real.watchdog.take() {
             watchdog.abort();
         }
-        real.signal_all(Signal::Term);
+        real.signal_all(signal);
         let ended = tokio::time::timeout(grace, real.wait_for_end(&command)).await;
         if !matches!(ended, Ok(Ok(()))) {
             real.signal_all(Signal::Kill);
@@ -1057,7 +1090,7 @@ fn nix_signal(signal: Signal) -> nix::sys::signal::Signal {
     match signal {
         Signal::Term => Nix::SIGTERM,
         Signal::Kill => Nix::SIGKILL,
-        Signal::Int => Nix::SIGINT,
+        Signal::Int | Signal::Interrupt => Nix::SIGINT,
         Signal::Hup => Nix::SIGHUP,
         Signal::Quit => Nix::SIGQUIT,
         Signal::Usr1 => Nix::SIGUSR1,

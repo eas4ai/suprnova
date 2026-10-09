@@ -51,7 +51,11 @@ use crate::config::Config;
 use crate::container::App;
 use crate::error::FrameworkError;
 use serde::{Serialize, de::DeserializeOwned};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
+
+static NAMED_STORES: LazyLock<RwLock<HashMap<String, Arc<dyn CacheStore>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 use std::time::Duration;
 
 /// Cache facade - main entry point for cache operations
@@ -149,6 +153,32 @@ impl Cache {
     /// Get the underlying cache store
     pub fn store() -> Result<Arc<dyn CacheStore>, FrameworkError> {
         App::resolve_make::<dyn CacheStore>()
+    }
+
+    /// Register a named store so subsystems can keep their data in a separate cache.
+    /// Registering the same name replaces the store. Empty names are refused.
+    pub fn register_store(
+        name: impl Into<String>,
+        store: Arc<dyn CacheStore>,
+    ) -> Result<(), FrameworkError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(FrameworkError::internal(
+                "a cache store name must not be empty",
+            ));
+        }
+        crate::lock::write(&NAMED_STORES, "named cache stores")?.insert(name, store);
+        Ok(())
+    }
+
+    /// Resolve a registered store so an explicit name never falls back to the default.
+    pub fn store_named(name: &str) -> Result<Arc<dyn CacheStore>, FrameworkError> {
+        crate::lock::read(&NAMED_STORES, "named cache stores")?
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                FrameworkError::internal(format!("cache store '{name}' is not registered"))
+            })
     }
 
     /// Check if the cache is initialized

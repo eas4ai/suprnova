@@ -55,7 +55,7 @@ async fn null_driver_discards_pushes_without_running() {
     Queue::push(NullDriverJob).await.unwrap();
     Queue::push(NullDriverJob).await.unwrap();
     // Null driver reports size 0 always.
-    assert_eq!(Queue::size().await.unwrap(), 0);
+    assert_eq!(Queue::size(None).await.unwrap(), 0);
 }
 
 /// The default `release`, which the null and sync drivers and any custom
@@ -82,6 +82,8 @@ async fn the_default_release_refuses_a_delay_too_long_for_a_date() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,

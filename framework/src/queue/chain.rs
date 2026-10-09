@@ -43,6 +43,12 @@ pub struct ChainLink {
     /// behave exactly as they did: a registered route or the driver default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// Captured FIFO group so a later link retains the job's ordering group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_group: Option<String>,
+    /// Captured FIFO deduplication id so reified links retain the job's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduplication_id: Option<String>,
     /// Delay the job declared for itself via [`Job::delay`], in seconds,
     /// captured at chain-build time for the same reason as `queue`. The
     /// link becomes available this long after it is reified, which for a
@@ -68,6 +74,8 @@ impl ChainLink {
             fail_on_timeout: J::fail_on_timeout(),
             backoff: J::backoff(),
             queue: J::queue().map(str::to_owned),
+            message_group: job.message_group(),
+            deduplication_id: job.deduplication_id(),
             delay_secs: J::delay().map(|delay| delay.as_secs()),
         })
     }
@@ -197,6 +205,8 @@ impl ChainLink {
             timeout_secs: self.timeout_secs,
             fail_on_timeout: self.fail_on_timeout,
             idempotency_key: None,
+            message_group: self.message_group.clone(),
+            deduplication_id: self.deduplication_id.clone(),
             unique_lock_owner: None,
             debounce_id: None,
             debounce_owner: None,

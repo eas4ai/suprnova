@@ -11,6 +11,7 @@
 //! test also checks the signing.
 
 use serial_test::serial;
+use sha2::Digest;
 use std::time::Duration;
 use suprnova::Storage;
 use suprnova::filesystem::testing::StorageFakeGuard;
@@ -50,6 +51,7 @@ const VARIABLES: &[&str] = &[
     "SQS_OVERFLOW_ENABLED",
     "SQS_OVERFLOW_ALWAYS",
     "SQS_OVERFLOW_DISK",
+    "SQS_OVERFLOW_STORE",
     "SQS_OVERFLOW_DELETE_AFTER_PROCESSING",
     "SQS_OVERFLOW_FLUSH_ON_CLEAR",
     "FILESYSTEM_DISK",
@@ -90,6 +92,8 @@ fn envelope(queue: Option<&str>) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -402,13 +406,13 @@ async fn size_reports_the_counts_sqs_keeps_and_clear_purges_the_queue() {
     driver.push(later).await.unwrap();
     let _held = driver.pop(VISIBILITY).await.unwrap().unwrap();
 
-    assert_eq!(driver.size().await.unwrap(), 3);
-    assert_eq!(driver.pending_size().await.unwrap(), 1);
-    assert_eq!(driver.reserved_size().await.unwrap(), 1);
-    assert_eq!(driver.delayed_size().await.unwrap(), 1);
+    assert_eq!(driver.size(None).await.unwrap(), 3);
+    assert_eq!(driver.pending_size(None).await.unwrap(), 1);
+    assert_eq!(driver.reserved_size(None).await.unwrap(), 1);
+    assert_eq!(driver.delayed_size(None).await.unwrap(), 1);
 
     assert_eq!(
-        driver.clear().await.unwrap(),
+        driver.clear(None).await.unwrap(),
         3,
         "clear returns the count it held"
     );
@@ -567,17 +571,22 @@ async fn a_queue_url_needs_no_prefix() {
 
 #[tokio::test]
 #[serial]
-async fn boot_fails_for_a_fifo_queue() {
-    let (_env, _restore, _fake) = setup!("default");
+async fn boot_accepts_a_fifo_queue_and_sends_default_attributes() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
     set_env("QUEUE_DRIVER", Some("sqs"));
     set_env("SQS_QUEUE", Some("jobs.fifo"));
-
-    let error = bootstrap_from_env()
-        .await
-        .expect_err("a FIFO queue is a boot error");
-    let text = error.to_string();
-    assert!(text.contains("FIFO"), "{text}");
-    assert!(text.contains("SQS_QUEUE"), "{text}");
+    bootstrap_from_env().await.unwrap();
+    let mut sent = envelope(None);
+    sent.available_at += chrono::Duration::seconds(60);
+    let digest = hex::encode(sha2::Sha256::digest(sent.to_json().unwrap().as_bytes()));
+    Queue::driver().unwrap().push(sent).await.unwrap();
+    let request = fake.last("AmazonSQS.SendMessage").unwrap();
+    assert_eq!(request["MessageGroupId"], "default");
+    assert_eq!(request["MessageDeduplicationId"], digest);
+    assert!(request.get("DelaySeconds").is_none());
+    let message = fake.messages(&url("jobs.fifo")).remove(0);
+    assert_eq!(message.group.as_deref(), Some("default"));
+    assert_eq!(message.deduplication_id.as_deref(), Some(digest.as_str()));
 }
 
 #[tokio::test]
@@ -704,7 +713,7 @@ async fn flush_on_clear_deletes_the_stored_payloads() {
     driver.push(large_envelope()).await.unwrap();
     driver.push(large_envelope()).await.unwrap();
     assert_eq!(stored_payloads().await, 2);
-    driver.clear().await.unwrap();
+    driver.clear(None).await.unwrap();
     assert_eq!(
         stored_payloads().await,
         0,
@@ -736,7 +745,7 @@ async fn flush_on_clear_keeps_the_payloads_of_a_same_named_queue_elsewhere() {
     other.push(sent.clone()).await.unwrap();
     assert_eq!(stored_payloads().await, 2);
 
-    cleared.clear().await.unwrap();
+    cleared.clear(None).await.unwrap();
     assert_eq!(
         stored_payloads().await,
         1,
@@ -772,7 +781,7 @@ async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_at_another_endp
     other.push(sent.clone()).await.unwrap();
     assert_eq!(stored_payloads().await, 2);
 
-    cleared.clear().await.unwrap();
+    cleared.clear(None).await.unwrap();
     assert_eq!(
         stored_payloads().await,
         1,
@@ -801,7 +810,7 @@ async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_in_another_regi
     other.push(large_envelope()).await.unwrap();
     assert_eq!(stored_payloads().await, 2);
 
-    cleared.clear().await.unwrap();
+    cleared.clear(None).await.unwrap();
     assert_eq!(
         stored_payloads().await,
         1,
@@ -816,7 +825,7 @@ async fn clear_keeps_the_stored_payloads_without_flush_on_clear() {
     let driver = driver();
 
     driver.push(large_envelope()).await.unwrap();
-    driver.clear().await.unwrap();
+    driver.clear(None).await.unwrap();
     assert_eq!(stored_payloads().await, 1);
 }
 
@@ -1268,7 +1277,7 @@ async fn a_size_with_no_counts_in_the_reply_is_an_error() {
     fake.script("AmazonSQS.GetQueueAttributes", 200, "{}");
 
     assert!(
-        driver.size().await.is_err(),
+        driver.size(None).await.is_err(),
         "a reply without the counts is not an empty queue"
     );
 }
@@ -1380,7 +1389,7 @@ async fn live_round_trip_against_an_sqs_endpoint() {
     set_env("AWS_ACCESS_KEY_ID", Some("AKIDSUPRNOVALIVE"));
     set_env("AWS_SECRET_ACCESS_KEY", Some("suprnova-live-secret"));
     let driver = driver();
-    driver.clear().await.expect("PurgeQueue");
+    driver.clear(None).await.expect("PurgeQueue");
 
     let sent = envelope(None);
     driver.push(sent.clone()).await.expect("SendMessage");
@@ -1433,17 +1442,17 @@ async fn live_round_trip_against_an_sqs_endpoint() {
     later.available_at = suprnova::clock::now() + chrono::Duration::seconds(2);
     driver.push(later.clone()).await.unwrap();
     driver.push(envelope(None)).await.unwrap();
-    assert_eq!(driver.size().await.expect("GetQueueAttributes"), 2);
-    assert_eq!(driver.delayed_size().await.unwrap(), 1);
-    assert_eq!(driver.clear().await.unwrap(), 2);
-    assert_eq!(driver.size().await.unwrap(), 0);
+    assert_eq!(driver.size(None).await.expect("GetQueueAttributes"), 2);
+    assert_eq!(driver.delayed_size(None).await.unwrap(), 1);
+    assert_eq!(driver.clear(None).await.unwrap(), 2);
+    assert_eq!(driver.size(None).await.unwrap(), 0);
 
     driver
         .bulk_push((0..12).map(|_| envelope(None)).collect())
         .await
         .expect("SendMessageBatch");
-    assert_eq!(driver.size().await.unwrap(), 12);
-    assert_eq!(driver.clear().await.unwrap(), 12);
+    assert_eq!(driver.size(None).await.unwrap(), 12);
+    assert_eq!(driver.clear(None).await.unwrap(), 12);
 
     driver.push(later.clone()).await.unwrap();
     assert!(
@@ -1495,6 +1504,8 @@ mod fake {
     pub struct Message {
         pub id: String,
         pub body: String,
+        pub group: Option<String>,
+        pub deduplication_id: Option<String>,
         pub visible_at: u64,
         pub receive_count: u32,
         received_at: u64,
@@ -1803,12 +1814,16 @@ mod fake {
             return error("QueueDoesNotExist", "The specified queue does not exist.");
         }
         let now = state.now;
-        let send = |state: &mut State, text: &str, delay: u64| {
+        let send = |state: &mut State, text: &str, delay: u64, attributes: &Value| {
             state.next += 1;
             let id = format!("message-{}", state.next);
             state.queues.get_mut(&url).unwrap().push(Message {
                 id: id.clone(),
                 body: text.to_owned(),
+                group: attributes["MessageGroupId"].as_str().map(str::to_owned),
+                deduplication_id: attributes["MessageDeduplicationId"]
+                    .as_str()
+                    .map(str::to_owned),
                 visible_at: now + delay,
                 receive_count: 0,
                 received_at: 0,
@@ -1828,7 +1843,19 @@ mod fake {
                 if delay > 900 {
                     return error("InvalidParameterValue", "DelaySeconds over 900");
                 }
-                let id = send(state, text, delay);
+                if url.ends_with(".fifo")
+                    && (body.get("DelaySeconds").is_some()
+                        || body["MessageGroupId"].as_str().is_none_or(str::is_empty)
+                        || body["MessageDeduplicationId"]
+                            .as_str()
+                            .is_none_or(str::is_empty))
+                {
+                    return error(
+                        "InvalidParameterValue",
+                        "FIFO attributes missing or per-message delay set",
+                    );
+                }
+                let id = send(state, text, delay, body);
                 (200, json!({ "MessageId": id, "MD5OfMessageBody": "" }))
             }
             "AmazonSQS.SendMessageBatch" => {
@@ -1850,7 +1877,19 @@ mod fake {
                         return error("InvalidParameterValue", "DelaySeconds over 900");
                     }
                     let text = entry["MessageBody"].as_str().unwrap_or_default();
-                    let id = send(state, text, delay);
+                    if url.ends_with(".fifo")
+                        && (entry.get("DelaySeconds").is_some()
+                            || entry["MessageGroupId"].as_str().is_none_or(str::is_empty)
+                            || entry["MessageDeduplicationId"]
+                                .as_str()
+                                .is_none_or(str::is_empty))
+                    {
+                        return error(
+                            "InvalidParameterValue",
+                            "FIFO batch attributes missing or delay set",
+                        );
+                    }
+                    let id = send(state, text, delay, &entry);
                     successful.push(json!({ "Id": entry["Id"], "MessageId": id }));
                 }
                 (200, json!({ "Successful": successful, "Failed": [] }))
@@ -1935,4 +1974,465 @@ mod fake {
             other => error("InvalidAction", &format!("unknown action {other}")),
         }
     }
+}
+
+#[tokio::test]
+async fn named_counts_and_clear_use_only_the_selected_sqs_queue() {
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let mut delayed = envelope(Some("reports"));
+    delayed.available_at += chrono::Duration::seconds(60);
+    driver.push(delayed).await.unwrap();
+    let held = driver
+        .pop_from(VISIBILITY, &["reports".into()])
+        .await
+        .unwrap()
+        .unwrap();
+    let default = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(driver.size(Some("reports")).await.unwrap(), 2);
+    assert_eq!(driver.pending_size(Some("reports")).await.unwrap(), 0);
+    assert_eq!(driver.delayed_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(driver.reserved_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(driver.size(None).await.unwrap(), 1);
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 2);
+    assert!(fake.messages(&url("reports")).is_empty());
+    assert_eq!(driver.size(None).await.unwrap(), 1);
+    driver
+        .release(&held.token, &held.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(driver.size(Some("reports")).await.unwrap(), 0);
+    driver
+        .release(&default.token, &default.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(driver.pending_size(None).await.unwrap(), 1);
+    driver.ack(&held.token).await.unwrap();
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 0);
+    let error = driver.size(Some("missing")).await.unwrap_err();
+    assert!(error.to_string().contains("QueueDoesNotExist"));
+    assert!(driver.clear(Some("missing")).await.is_err());
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct FifoJob {
+    group: String,
+    id: String,
+}
+#[suprnova::async_trait]
+impl suprnova::Job for FifoJob {
+    fn job_name() -> &'static str {
+        "fifo-job"
+    }
+    fn message_group(&self) -> Option<String> {
+        Some(self.group.clone())
+    }
+    fn deduplication_id(&self) -> Option<String> {
+        Some(self.id.clone())
+    }
+    async fn handle(self) -> Result<(), suprnova::FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn fifo_metadata_survives_typed_and_chained_and_bulk_dispatch() {
+    let (_env, _restore, fake) = setup!("jobs-test.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    set_env("SQS_SUFFIX", Some("-test"));
+    Queue::set_driver(std::sync::Arc::new(driver()));
+    let job = FifoJob {
+        group: "orders".into(),
+        id: "order-42".into(),
+    };
+    Queue::push(job.clone()).await.unwrap();
+    Queue::chain()
+        .add(job.clone())
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    Queue::bulk(vec![job]).await.unwrap();
+    let messages = fake.messages(&url("jobs-test.fifo"));
+    assert_eq!(messages.len(), 3);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.group.as_deref() == Some("orders")
+                && message.deduplication_id.as_deref() == Some("order-42"))
+    );
+    let batch = fake.last("AmazonSQS.SendMessageBatch").unwrap();
+    assert!(batch["Entries"][0].get("DelaySeconds").is_none());
+}
+
+fn cache_overflow_on() -> std::sync::Arc<suprnova::cache::InMemoryCache> {
+    let store = std::sync::Arc::new(suprnova::cache::InMemoryCache::new());
+    suprnova::Cache::register_store("redis", store.clone()).unwrap();
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_STORE", Some("redis"));
+    set_env("SQS_OVERFLOW_DISK", Some("unregistered-disk"));
+    store
+}
+
+fn pointer(message: &fake::Message) -> String {
+    serde_json::from_str::<serde_json::Value>(&message.body).unwrap()["@pointer"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn cache_overflow_round_trips_large_jobs_and_ack_deletes_the_payload() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    let driver = driver();
+    let sent = large_envelope();
+    driver.push(sent.clone()).await.unwrap();
+    let path = pointer(&fake.messages(&url("default"))[0]);
+    assert!(store.get_raw(&path).await.unwrap().is_some());
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(held.envelope.payload, sent.payload);
+    driver.ack(&held.token).await.unwrap();
+    assert!(store.get_raw(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cache_clear_flushes_only_the_selected_queues_tag() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    store.put_raw("unrelated", "value", None).await.unwrap();
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let default_path = pointer(&fake.messages(&url("default"))[0]);
+    let reports_path = pointer(&fake.messages(&url("reports"))[0]);
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 1);
+    assert!(store.get_raw(&reports_path).await.unwrap().is_none());
+    assert!(store.get_raw(&default_path).await.unwrap().is_some());
+    assert_eq!(
+        store.get_raw("unrelated").await.unwrap().as_deref(),
+        Some("value")
+    );
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&held.token).await.unwrap();
+}
+
+#[tokio::test]
+async fn cache_overflow_retention_flags_and_missing_payloads_are_observable() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_DELETE_AFTER_PROCESSING", Some("false"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let path = pointer(&fake.messages(&url("default"))[0]);
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&held.token).await.unwrap();
+    assert!(store.get_raw(&path).await.unwrap().is_some());
+    driver.push(envelope(None)).await.unwrap();
+    let path2 = pointer(&fake.messages(&url("default"))[0]);
+    driver.clear(None).await.unwrap();
+    assert!(store.get_raw(&path2).await.unwrap().is_some());
+    driver.push(envelope(None)).await.unwrap();
+    let missing = pointer(&fake.messages(&url("default"))[0]);
+    store.forget(&missing).await.unwrap();
+    assert!(
+        driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("missing from cache")
+    );
+}
+
+#[tokio::test]
+async fn an_unregistered_cache_store_is_a_boot_error_and_empty_names_are_refused() {
+    let (_env, _restore, _fake) = setup!("default");
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_STORE", Some("sqs-no-such-store"));
+    let error = SqsQueueDriver::from_env().err().unwrap();
+    assert!(error.to_string().contains("SQS_OVERFLOW_STORE"));
+    assert!(error.to_string().contains("sqs-no-such-store"));
+    assert!(
+        suprnova::Cache::register_store(
+            "",
+            std::sync::Arc::new(suprnova::cache::InMemoryCache::new())
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cache_send_retries_keep_independent_overflow_payloads() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let messages = fake.messages(&url("default"));
+    assert_eq!(messages.len(), 2);
+    let paths: Vec<_> = messages.iter().map(pointer).collect();
+    assert_ne!(paths[0], paths[1]);
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&first.token).await.unwrap();
+    assert!(store.get_raw(&paths[0]).await.unwrap().is_none());
+    assert!(store.get_raw(&paths[1]).await.unwrap().is_some());
+    let second = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&second.token).await.unwrap();
+    assert!(store.get_raw(&paths[1]).await.unwrap().is_none());
+}
+
+async fn named_driver_contract(driver: &dyn QueueDriver) {
+    for queue in [None, Some("reports")] {
+        driver.push(envelope(queue)).await.unwrap();
+        driver.push(envelope(queue)).await.unwrap();
+        let mut delayed = envelope(queue);
+        delayed.available_at += chrono::Duration::minutes(1);
+        driver.push(delayed).await.unwrap();
+        driver
+            .pop_from(VISIBILITY, &[queue.unwrap_or("default").into()])
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for queue in ["default", "reports"] {
+        assert_eq!(driver.size(Some(queue)).await.unwrap(), 3);
+        assert_eq!(driver.pending_size(Some(queue)).await.unwrap(), 1);
+        assert_eq!(driver.reserved_size(Some(queue)).await.unwrap(), 1);
+        assert_eq!(driver.delayed_size(Some(queue)).await.unwrap(), 1);
+    }
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 3);
+    assert_eq!(driver.size(Some("default")).await.unwrap(), 3);
+    assert_eq!(driver.clear(Some("missing")).await.unwrap(), 0);
+    assert_eq!(driver.clear(None).await.unwrap(), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn memory_database_failover_sync_and_null_accept_named_statistics_and_clear() {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+    use std::sync::Arc;
+    use suprnova::queue::{
+        DatabaseQueueDriver, FailoverQueueDriver, MemoryQueueDriver, NullQueueDriver,
+        SyncQueueDriver,
+    };
+    named_driver_contract(&MemoryQueueDriver::new()).await;
+    let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    suprnova::queue::migrations::CreateJobsTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
+    named_driver_contract(&DatabaseQueueDriver::new(db, "jobs".into()).unwrap()).await;
+    named_driver_contract(
+        &FailoverQueueDriver::new(vec![("memory".into(), Arc::new(MemoryQueueDriver::new()))])
+            .unwrap(),
+    )
+    .await;
+    for driver in [
+        Arc::new(SyncQueueDriver::new()) as Arc<dyn QueueDriver>,
+        Arc::new(NullQueueDriver::new()),
+    ] {
+        assert_eq!(driver.size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.pending_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.delayed_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.reserved_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.clear(Some("reports")).await.unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn disk_overflow_clear_of_another_queue_keeps_the_default_payload() {
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let disk = Storage::disk("overflow").unwrap();
+    let default = pointer(&fake.messages(&url("default"))[0]);
+    let reports = pointer(&fake.messages(&url("reports"))[0]);
+    driver.clear(Some("reports")).await.unwrap();
+    assert!(disk.exists(&default).await.unwrap());
+    assert!(!disk.exists(&reports).await.unwrap());
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn named_redis_counts_cover_other_consumers_and_clear_preserves_their_queue() {
+    use suprnova::queue::RedisQueueDriver;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let server = suprnova::Process::command([
+        "redis-server",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--dir",
+        dir.path().to_str().unwrap(),
+    ])
+    .start()
+    .unwrap();
+    let address = format!("redis://127.0.0.1:{port}");
+    let started = std::time::Instant::now();
+    let first = loop {
+        match RedisQueueDriver::connect(
+            &address,
+            "named-test",
+            "workers",
+            "first",
+            Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(driver) => break driver,
+            Err(error) => {
+                assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+    };
+    let second = RedisQueueDriver::connect(
+        &address,
+        "named-test",
+        "workers",
+        "second",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let foreign = RedisQueueDriver::connect(
+        &address,
+        "named-test",
+        "other-workers",
+        "foreign",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    first.push(envelope(None)).await.unwrap();
+    let default = second.pop(VISIBILITY).await.unwrap().unwrap();
+    first.push(envelope(Some("reports"))).await.unwrap();
+    let reports = first.pop(VISIBILITY).await.unwrap().unwrap();
+    let foreign_default = foreign.pop(VISIBILITY).await.unwrap().unwrap();
+    let foreign_reports = foreign.pop(VISIBILITY).await.unwrap().unwrap();
+    // Cross a scan page with jobs for another queue and delayed entries.
+    for _ in 0..129 {
+        first.push(envelope(None)).await.unwrap();
+        let mut delayed = envelope(Some("reports"));
+        delayed.available_at += chrono::Duration::minutes(1);
+        first.push(delayed).await.unwrap();
+    }
+    assert_eq!(first.reserved_size(Some("default")).await.unwrap(), 1);
+    assert_eq!(second.reserved_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(first.pending_size(Some("default")).await.unwrap(), 129);
+    assert_eq!(first.delayed_size(Some("reports")).await.unwrap(), 129);
+    assert_eq!(first.size(Some("reports")).await.unwrap(), 130);
+    assert_eq!(second.clear(Some("reports")).await.unwrap(), 130);
+    assert_eq!(first.size(Some("default")).await.unwrap(), 130);
+    first.nack(&reports.token, Duration::ZERO).await.unwrap();
+    foreign
+        .nack(&foreign_reports.token, Duration::ZERO)
+        .await
+        .unwrap();
+    foreign.ack(&foreign_default.token).await.unwrap();
+    assert_eq!(first.size(Some("reports")).await.unwrap(), 0);
+    second.ack(&default.token).await.unwrap();
+    assert_eq!(first.reserved_size(Some("default")).await.unwrap(), 0);
+    assert_eq!(first.clear(Some("missing")).await.unwrap(), 0);
+    first.clear(None).await.unwrap();
+    server.stop(Duration::from_secs(1), None).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_a_named_memory_queue_removes_its_delayed_timer_before_id_reuse() {
+    let driver = suprnova::queue::MemoryQueueDriver::new();
+    let mut removed = envelope(Some("reports"));
+    removed.available_at += chrono::Duration::seconds(10);
+    driver.push(removed.clone()).await.unwrap();
+    let mut survivor = envelope(None);
+    survivor.available_at += chrono::Duration::seconds(10);
+    driver.push(survivor).await.unwrap();
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 1);
+    removed.available_at += chrono::Duration::seconds(20);
+    driver.push(removed).await.unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["reports".into()])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["default".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::time::advance(Duration::from_secs(20)).await;
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["reports".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn fifo_refused_metadata_returns_an_error_and_standard_queues_omit_fifo_attributes() {
+    let (_env, _restore, fake) = setup!("default", "jobs.fifo");
+    let driver = driver();
+    for (group, id) in [("", "order-42"), ("orders", "")] {
+        let mut job = envelope(Some("jobs.fifo"));
+        job.message_group = Some(group.into());
+        job.deduplication_id = Some(id.into());
+        let error = driver.push(job).await.unwrap_err();
+        assert!(error.to_string().contains("InvalidParameterValue"));
+        assert!(fake.messages(&url("jobs.fifo")).is_empty());
+    }
+    let link = suprnova::ChainLink::from_job(FifoJob {
+        group: "orders".into(),
+        id: "order-42".into(),
+    })
+    .unwrap();
+    let encoded = serde_json::to_string(&link).unwrap();
+    let decoded: suprnova::ChainLink = serde_json::from_str(&encoded).unwrap();
+    let reified = decoded.to_envelope();
+    assert_eq!(reified.message_group.as_deref(), Some("orders"));
+    assert_eq!(reified.deduplication_id.as_deref(), Some("order-42"));
+    let mut job = envelope(None);
+    job.message_group = Some("orders".into());
+    job.deduplication_id = Some("order-42".into());
+    job.available_at += chrono::Duration::seconds(60);
+    driver.push(job).await.unwrap();
+    let request = fake.last("AmazonSQS.SendMessage").unwrap();
+    assert!(request.get("MessageGroupId").is_none());
+    assert!(request.get("MessageDeduplicationId").is_none());
+    assert!(
+        request["DelaySeconds"]
+            .as_u64()
+            .is_some_and(|delay| delay > 0)
+    );
 }

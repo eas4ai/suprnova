@@ -34,6 +34,8 @@ fn env(name: &str) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -127,7 +129,7 @@ async fn positive_subsecond_visibility_persists_deadline_and_preserves_fencing()
         .expect("nack makes the job visible again");
     assert_eq!(third.envelope.attempts, 2, "nack consumes one attempt");
     d.ack(&third.token).await.unwrap();
-    assert_eq!(d.size().await.unwrap(), 0);
+    assert_eq!(d.size(None).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -367,7 +369,7 @@ async fn release_does_not_collide_with_the_live_reservation() {
         .expect("release must not fail - this is the primary-key collision");
 
     assert_eq!(
-        d.size().await.unwrap(),
+        d.size(None).await.unwrap(),
         1,
         "exactly one copy survives: the release requeues in place rather than \
          adding a second row"
@@ -392,7 +394,7 @@ async fn release_applies_the_requested_delay() {
         "a job released for an hour must not be immediately poppable"
     );
     assert_eq!(
-        d.delayed_size().await.unwrap(),
+        d.delayed_size(None).await.unwrap(),
         1,
         "it is delayed, not gone"
     );
@@ -484,7 +486,7 @@ async fn release_is_idempotent_on_an_unknown_token() {
     d.release(&stray, &env("gone"), Duration::from_secs(5))
         .await
         .expect("an unknown token settles silently");
-    assert_eq!(d.size().await.unwrap(), 0, "and enqueues nothing");
+    assert_eq!(d.size(None).await.unwrap(), 0, "and enqueues nothing");
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +515,7 @@ async fn settle_commits_the_successor_and_the_ack_together() {
         .unwrap();
 
     assert_eq!(outcome, Settled::Atomically);
-    assert_eq!(d.size().await.unwrap(), 1, "the predecessor is gone");
+    assert_eq!(d.size(None).await.unwrap(), 1, "the predecessor is gone");
     let got = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
     assert_eq!(got.envelope.id, next_id, "and the successor is queued");
 }
@@ -543,7 +545,7 @@ async fn settle_on_a_reclaimed_reservation_commits_nothing() {
 
     assert_eq!(outcome, Settled::Stale);
     assert_eq!(
-        d.size().await.unwrap(),
+        d.size(None).await.unwrap(),
         1,
         "A enqueued nothing and dropped nothing - B still holds the one message"
     );
@@ -559,7 +561,11 @@ async fn settle_on_a_reclaimed_reservation_commits_nothing() {
     );
     let got = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
     assert_eq!(got.envelope.id, real_id, "the chain did not fork");
-    assert_eq!(d.size().await.unwrap(), 1, "exactly one successor exists");
+    assert_eq!(
+        d.size(None).await.unwrap(),
+        1,
+        "exactly one successor exists"
+    );
 }
 
 /// A settlement that cannot write its follow-up must not have dropped the
@@ -590,12 +596,12 @@ async fn a_failed_follow_up_rolls_back_the_ack_too() {
     assert!(err.is_err(), "the follow-up write failed");
 
     assert_eq!(
-        d.size().await.unwrap(),
+        d.size(None).await.unwrap(),
         1,
         "the original row survives: the failed settlement dropped nothing"
     );
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         1,
         "and it is still reserved by the worker that failed to settle it"
     );
@@ -615,7 +621,7 @@ async fn settle_without_follow_ups_still_fences() {
         d.settle(&res.token, &[]).await.unwrap(),
         Settled::Atomically
     );
-    assert_eq!(d.size().await.unwrap(), 0);
+    assert_eq!(d.size(None).await.unwrap(), 0);
 
     assert_eq!(
         d.settle(&res.token, &[]).await.unwrap(),

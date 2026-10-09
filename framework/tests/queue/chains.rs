@@ -128,9 +128,9 @@ async fn chain_stops_after_a_failing_link() {
         2,
         "chain must stop at the failing link"
     );
-    let pending = driver.pending_size().await.unwrap();
-    let reserved = driver.reserved_size().await.unwrap();
-    let delayed = driver.delayed_size().await.unwrap();
+    let pending = driver.pending_size(None).await.unwrap();
+    let reserved = driver.reserved_size(None).await.unwrap();
+    let delayed = driver.delayed_size(None).await.unwrap();
     assert_eq!(
         pending + reserved + delayed,
         0,
@@ -310,7 +310,7 @@ async fn chain_dispatch_uses_bound_driver_not_global() {
          link landed on `bound` (where the worker polls), not on `global`"
     );
     assert_eq!(
-        global.size().await.unwrap(),
+        global.size(None).await.unwrap(),
         0,
         "the global driver must remain empty - no stray chain links should \
          have leaked onto it"

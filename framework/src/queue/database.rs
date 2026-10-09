@@ -390,88 +390,103 @@ impl QueueDriver for DatabaseQueueDriver {
             .await
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let (own, own_value) = self.own_rows_clause("payload", 1)?;
+        let (selected, queue_params) = self.queue_filter_clause(queue, &self.table, 2)?;
+        let mut params = vec![own_value];
+        params.extend(queue_params);
         self.count(
-            format!("SELECT COUNT(*) FROM {} WHERE {own}", self.table),
-            vec![own_value],
+            format!("SELECT COUNT(*) FROM {} WHERE {own}{selected}", self.table),
+            params,
             "size",
         )
         .await
     }
 
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let now = crate::clock::now().timestamp();
         let (own, own_value) = self.own_rows_clause("j.payload", 3)?;
+        let (selected, queue_params) = self.queue_filter_clause(queue, "j", 4)?;
+        let mut params = vec![
+            sea_orm::Value::from(now),
+            sea_orm::Value::from(now),
+            own_value,
+        ];
+        params.extend(queue_params);
         self.count(
             format!(
-                "SELECT COUNT(*) FROM {} j WHERE j.available_at <= {} AND {} AND {own}",
+                "SELECT COUNT(*) FROM {} j WHERE j.available_at <= {} AND {} AND {own}{selected}",
                 self.table,
                 placeholder(self.backend(), 1)?,
                 self.free_clause("j", 2)?,
             ),
-            vec![
-                sea_orm::Value::from(now),
-                sea_orm::Value::from(now),
-                own_value,
-            ],
+            params,
             "pending_size",
         )
         .await
     }
 
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let now = crate::clock::now().timestamp();
         let (own, own_value) = self.own_rows_clause("payload", 2)?;
+        let (selected, queue_params) = self.queue_filter_clause(queue, &self.table, 3)?;
+        let mut params = vec![sea_orm::Value::from(now), own_value];
+        params.extend(queue_params);
         self.count(
             format!(
-                "SELECT COUNT(*) FROM {} WHERE available_at > {} AND {own}",
+                "SELECT COUNT(*) FROM {} WHERE available_at > {} AND {own}{selected}",
                 self.table,
                 placeholder(self.backend(), 1)?
             ),
-            vec![sea_orm::Value::from(now), own_value],
+            params,
             "delayed_size",
         )
         .await
     }
 
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let now = crate::clock::now().timestamp();
         let (own, own_value) = self.own_rows_clause("j.payload", 2)?;
+        let (selected, queue_params) = self.queue_filter_clause(queue, "j", 3)?;
+        let mut params = vec![sea_orm::Value::from(now), own_value];
+        params.extend(queue_params);
         self.count(
             format!(
-                "SELECT COUNT(*) FROM {} j WHERE NOT {} AND {own}",
+                "SELECT COUNT(*) FROM {} j WHERE NOT {} AND {own}{selected}",
                 self.table,
                 self.free_clause("j", 1)?,
             ),
-            vec![sea_orm::Value::from(now), own_value],
+            params,
             "reserved_size",
         )
         .await
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
         let txn = self
             .db
             .begin()
             .await
             .map_err(|e| FrameworkError::internal(format!("queue clear txn: {e}")))?;
         let (own, own_value) = self.own_rows_clause("payload", 1)?;
+        let (selected, queue_params) = self.queue_filter_clause(queue, &self.table, 2)?;
+        let mut params = vec![own_value];
+        params.extend(queue_params);
         txn.execute_raw(Statement::from_sql_and_values(
             self.backend(),
             format!(
-                "DELETE FROM {} WHERE job_id IN (SELECT id FROM {} WHERE {own})",
+                "DELETE FROM {} WHERE job_id IN (SELECT id FROM {} WHERE {own}{selected})",
                 self.reservations, self.table
             ),
-            vec![own_value.clone()],
+            params.clone(),
         ))
         .await
         .map_err(|e| FrameworkError::internal(format!("queue clear reservations: {e}")))?;
         let r = txn
             .execute_raw(Statement::from_sql_and_values(
                 self.backend(),
-                format!("DELETE FROM {} WHERE {own}", self.table),
-                vec![own_value],
+                format!("DELETE FROM {} WHERE {own}{selected}", self.table),
+                params,
             ))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue clear: {e}")))?;

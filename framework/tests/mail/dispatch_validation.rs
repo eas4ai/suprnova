@@ -132,7 +132,11 @@ async fn mail_queue_refuses_an_invalid_message_when_it_queues() {
         .await
         .expect_err("Mail::later must validate at push time");
     assert!(format!("{err}").contains("builder"), "{err}");
-    assert_eq!(driver.size().await.unwrap(), 0, "nothing reached the queue");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        0,
+        "nothing reached the queue"
+    );
 
     let fake = Mail::fake();
     assert!(

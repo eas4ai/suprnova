@@ -143,8 +143,8 @@ impl TwoConnections {
 
     async fn sizes(&self) -> (u64, u64) {
         (
-            self.default.size().await.unwrap(),
-            self.durable.size().await.unwrap(),
+            self.default.size(None).await.unwrap(),
+            self.durable.size(None).await.unwrap(),
         )
     }
 }
@@ -265,7 +265,7 @@ async fn with_no_connection_registered_a_name_is_only_a_label() {
     // as it could before a name selected a driver. Nothing changes for it.
     Queue::push(StrayJob).await.unwrap();
 
-    assert_eq!(default.size().await.unwrap(), 1);
+    assert_eq!(default.size(None).await.unwrap(), 1);
     let queued = dispatched::<JobQueued>(|_| true);
     assert_eq!(queued.len(), 1);
     assert_eq!(
@@ -618,10 +618,10 @@ async fn the_defaults_own_name_always_means_the_default_driver() {
 
     assert_eq!(connections.sizes().await, (1, 0));
     assert_eq!(
-        shadow.size().await.unwrap(),
+        shadow.size(None).await.unwrap(),
         0,
         "a connection registered under the default's name must not shadow it: \
-         Queue::driver() and Queue::size() would then read another queue than pushes write"
+         Queue::driver() and Queue::size(None) would then read another queue than pushes write"
     );
 }
 
@@ -667,7 +667,7 @@ async fn a_unique_push_to_no_connection_gives_its_lock_back() {
         Queue::push_unique(UniqueLaterJob).await.unwrap(),
         "the refused push must not block the next one"
     );
-    assert_eq!(later.size().await.unwrap(), 1);
+    assert_eq!(later.size(None).await.unwrap(), 1);
 }
 
 #[tokio::test]

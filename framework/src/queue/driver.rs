@@ -288,9 +288,13 @@ pub trait QueueDriver: Send + Sync {
     /// (pending + delayed + reserved). Mirrors Laravel's
     /// `Queue::size($queue)`.
     ///
+    /// `Some(name)` selects one queue. `None` uses the driver default: SQS
+    /// uses its configured queue; shared database, Redis and memory drivers
+    /// inspect all queues. This lets you inspect and clear a queue independently.
+    ///
     /// Default implementation returns `Err` describing the unsupported
     /// operation - drivers that can answer the count cheaply override.
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Err(FrameworkError::internal(format!(
             "queue driver '{}' does not implement size()",
             self.name()
@@ -300,22 +304,22 @@ pub trait QueueDriver: Send + Sync {
     /// Count of envelopes whose `available_at <= now` and which are not
     /// currently reserved. Mirrors Laravel's `pendingSize($queue)`.
     /// Defaults to [`size`](Self::size) minus the reserved/delayed counts.
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        let total = self.size().await?;
-        let reserved = self.reserved_size().await.unwrap_or(0);
-        let delayed = self.delayed_size().await.unwrap_or(0);
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let total = self.size(queue).await?;
+        let reserved = self.reserved_size(queue).await.unwrap_or(0);
+        let delayed = self.delayed_size(queue).await.unwrap_or(0);
         Ok(total.saturating_sub(reserved).saturating_sub(delayed))
     }
 
     /// Count of envelopes whose `available_at > now`. Mirrors
     /// `delayedSize($queue)`.
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
+    async fn delayed_size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
     /// Count of currently-reserved envelopes (popped, not yet acked).
     /// Mirrors `reservedSize($queue)`.
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
+    async fn reserved_size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
@@ -373,7 +377,7 @@ pub trait QueueDriver: Send + Sync {
 
     /// Drop every envelope, returning the number removed. Mirrors
     /// `Queue::clear($queue)` and the `ClearableQueue` contract.
-    async fn clear(&self) -> Result<u64, FrameworkError> {
+    async fn clear(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Err(FrameworkError::internal(format!(
             "queue driver '{}' does not implement clear()",
             self.name()

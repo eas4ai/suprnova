@@ -33,9 +33,9 @@ async fn bulk_pushes_every_job() {
     Queue::bulk(vec![Marker { x: 1 }, Marker { x: 2 }, Marker { x: 3 }])
         .await
         .unwrap();
-    assert_eq!(driver.pending_size().await.unwrap(), 3);
-    assert_eq!(Queue::pending_size().await.unwrap(), 3);
-    assert_eq!(Queue::size().await.unwrap(), 3);
+    assert_eq!(driver.pending_size(None).await.unwrap(), 3);
+    assert_eq!(Queue::pending_size(None).await.unwrap(), 3);
+    assert_eq!(Queue::size(None).await.unwrap(), 3);
 }
 
 #[tokio::test]
@@ -46,9 +46,9 @@ async fn clear_removes_every_envelope() {
     Queue::bulk(vec![Marker { x: 1 }, Marker { x: 2 }])
         .await
         .unwrap();
-    let removed = Queue::clear().await.unwrap();
+    let removed = Queue::clear(None).await.unwrap();
     assert_eq!(removed, 2);
-    assert_eq!(Queue::size().await.unwrap(), 0);
+    assert_eq!(Queue::size(None).await.unwrap(), 0);
 }
 
 // ---- Job::delay() (Laravel 13.25 #60916) ---------------------------------
@@ -113,12 +113,12 @@ async fn bulk_delayed_job_is_not_pending_undelayed_sibling_is() {
     Queue::bulk(vec![Marker { x: 1 }]).await.unwrap();
 
     assert_eq!(
-        driver.pending_size().await.unwrap(),
+        driver.pending_size(None).await.unwrap(),
         1,
         "only the undelayed sibling is pending"
     );
     assert_eq!(
-        driver.delayed_size().await.unwrap(),
+        driver.delayed_size(None).await.unwrap(),
         1,
         "the declared-delay job is held back"
     );

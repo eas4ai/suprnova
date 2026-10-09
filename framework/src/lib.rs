@@ -375,13 +375,16 @@ pub use pagination::{
     Pagination, Paginator,
 };
 pub use process::{
-    DEFAULT_TIMEOUT as DEFAULT_PROCESS_TIMEOUT, InvokedPool, InvokedProcess, OutputKind,
-    PendingProcess, Pipe, Pool, PoolResults, Process, ProcessError, ProcessResult, Signal,
+    DEFAULT_STOP_GRACE as DEFAULT_PROCESS_STOP_GRACE, DEFAULT_TIMEOUT as DEFAULT_PROCESS_TIMEOUT,
+    InvokedPool, InvokedProcess, OutputKind, PendingProcess, Pipe, Pool, PoolResults, Process,
+    ProcessEnvValue, ProcessError, ProcessResult, Signal,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use process::{
     FakeDescription, FakeHandler, FakeResult, FakeSequence, ProcessFake, RecordedProcess,
 };
+/// Queue fake assertion exported here so application tests can filter unchained jobs.
+pub use queue::testing::assert_pushed_without_chain;
 pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
     DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
