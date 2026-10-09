@@ -177,6 +177,19 @@ impl EmailVerification {
     /// [`MustVerifyEmail::send_email_verification_notification`], so a model
     /// that sends its own message does so here as well.
     ///
+    /// The token is bound to the account's verification address, which the
+    /// provider's
+    /// [`verification_email`](crate::auth::UserProvider::verification_email)
+    /// reports, not to the address `email` looked the account up by. For
+    /// `EloquentUserProvider` that is the model's [`MustVerifyEmail::email`]:
+    /// the address the default notification is delivered to, the one
+    /// [`send_link`](Self::send_link) binds, and the one [`verify`](Self::verify)
+    /// checks the link against. A model whose `email()` is not its lookup
+    /// column would otherwise receive a link that `verify` refuses with
+    /// `403`. A provider that reports no verification address keeps the
+    /// lookup address, and its `send_email_verification_notification`
+    /// decides what happens: the default returns its error.
+    ///
     /// `base_url` is the verification landing URL; the same `{base_url}?token=…`
     /// shape and `MAIL_FROM` / `APP_NAME` rules as [`send_link`](Self::send_link)
     /// apply.
@@ -192,7 +205,14 @@ impl EmailVerification {
             return Ok(());
         };
 
-        let link = Self::issue_link(&user.id, &user.email, base_url).await?;
+        // The link must prove the mailbox it is delivered to, which `verify`
+        // reads through `verification_email`; the lookup address is only how
+        // the account was found.
+        let mailbox = provider
+            .verification_email(&user.id)
+            .await?
+            .unwrap_or(user.email);
+        let link = Self::issue_link(&user.id, &mailbox, base_url).await?;
         provider
             .send_email_verification_notification(&user.id, &link)
             .await

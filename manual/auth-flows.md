@@ -347,6 +347,14 @@ notification to `verification_email(id)`, greeting the name of
 `flow_user_by_id(id)`, and returns an error when the provider reports no
 verification address.
 
+`resend` binds the link to the provider's `verification_email(id)`, not to the
+address it looked the account up by. For `EloquentUserProvider` that is your
+model's `email()`, the address `send_link` binds and `verify` checks. A model
+whose `email()` reads a column other than the `email` column `resend` looks up
+by therefore gets a link that `verify` accepts. A provider that reports no
+verification address keeps the lookup address, and its
+`send_email_verification_notification` decides the outcome.
+
 ### The resend endpoint (anti-enumeration)
 
 `resend` takes only the email and looks up the user through the active

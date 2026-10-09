@@ -167,6 +167,11 @@ pub trait UserProvider: Send + Sync + 'static {
 
     /// Look up a user by email for the auth-flow facades. Default: not
     /// supported (token-only providers return None).
+    ///
+    /// [`crate::auth_flows::EmailVerification::resend`] takes only the id
+    /// from the result: it binds its link to
+    /// [`verification_email`](Self::verification_email), because the address
+    /// a user is looked up by need not be the one its verification is for.
     async fn retrieve_by_email(
         &self,
         _email: &str,
@@ -210,7 +215,9 @@ pub trait UserProvider: Send + Sync + 'static {
     ///
     /// [`crate::auth_flows::EmailVerification::verify`] compares it with
     /// the address a link was sent to, so a link never verifies an address
-    /// it was not sent to. Default: the email of
+    /// it was not sent to, and
+    /// [`EmailVerification::resend`](crate::auth_flows::EmailVerification::resend)
+    /// binds the link it mints to it, so the two agree. Default: the email of
     /// [`flow_user_by_id`](Self::flow_user_by_id). Override it when the
     /// verification address is not that one.
     async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
