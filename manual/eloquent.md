@@ -4525,7 +4525,8 @@ typo never leaks a full-table scan.
 
 You use `has_morph` or `doesnt_have_morph` with your `MorphTo` relation's
 name and registered morph names. You also use a model's registered alias
-or Rust type name. You pass `"*"` to query every registered morph type.
+or Rust type name. You pass `"*"` to query every owner type the relation
+declares in its `targets` list, an owner without a `morph_type` included.
 The wildcard absence form includes rows whose type column is null.
 Explicit type lists match only those types, including their aliases.
 
