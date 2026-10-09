@@ -247,15 +247,20 @@ async fn options_route_dispatches_end_to_end() {
     assert_eq!(body, "GET, POST, PATCH");
 }
 
-/// HEAD against a path that has neither HEAD nor GET registered falls
-/// through to the 404 chain (RequestId + global middleware still runs
-/// per the no-route policy, terminating in a fixed 404).
+/// HEAD against a path that has neither HEAD nor GET registered, but a
+/// POST route, answers the 405 that names POST, as Laravel's
+/// alternate-verb check does (RequestId + global middleware still run, as
+/// for the fixed 404).
 #[tokio::test]
-async fn head_against_unrouted_path_returns_404() {
+async fn head_against_a_post_only_path_answers_405() {
     let router = Router::new().post("/submit", |_req| async { text("created") });
     let addr = spawn_server(router, 1).await;
-    let (status, _, body) = send_request(addr, "HEAD", "/submit").await;
-    assert_eq!(status.as_u16(), 404);
+    let (status, headers, body) = send_request(addr, "HEAD", "/submit").await;
+    assert_eq!(status.as_u16(), 405);
+    assert_eq!(
+        headers.get("allow").and_then(|v| v.to_str().ok()),
+        Some("POST")
+    );
     assert!(body.is_empty(), "HEAD bodies are always empty");
 }
 

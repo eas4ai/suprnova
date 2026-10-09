@@ -30,8 +30,16 @@
 //! A box an alias produced also carries the alias and its arguments
 //! ([`name_as`]). A route reads it to keep each named middleware once,
 //! whichever group or call brought it ([`alias_of`]).
+//!
+//! # The middleware a route leaves out
+//!
+//! A route that leaves out a middleware its group gives it, Laravel's
+//! `withoutMiddleware`, names it by type or by alias. Both are read back
+//! from the table: [`MiddlewareExclusion::matches`] compares the type
+//! [`boxed_as`] remembered or the alias [`name_as`] remembered.
 
 use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next, into_boxed};
+use crate::FrameworkError;
 use crate::http::Request;
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -131,6 +139,50 @@ pub(crate) fn type_of(boxed: &BoxedMiddleware) -> Option<TypeId> {
         return None;
     }
     known.type_id
+}
+
+/// A middleware a route leaves out: Laravel's `withoutMiddleware`.
+///
+/// The router keeps the exclusions of each route and drops a matching
+/// middleware whether it was added before or after the exclusion, so the
+/// order of the builder calls does not matter. The router holds route
+/// middleware only, so the global middleware always stays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MiddlewareExclusion {
+    /// Every middleware boxed as this type, by type or through an alias.
+    Type(TypeId),
+    /// Every middleware resolved from this alias and its arguments, as
+    /// [`alias_of`] reads it: `"auth"` or `"throttle:60,1"`.
+    Alias(String),
+}
+
+impl MiddlewareExclusion {
+    /// Leave out every middleware of type `M`.
+    pub(crate) fn of_type<M: Middleware + 'static>() -> Self {
+        Self::Type(TypeId::of::<M>())
+    }
+
+    /// The exclusions `name` stands for: the alias it resolves to, or each
+    /// alias of the group it names.
+    ///
+    /// The name is resolved the way `middleware_named` resolves it, so an
+    /// alias with arguments is normalised as the route's own is, and a name
+    /// that is not registered is an error at registration, as it is there.
+    pub(crate) fn named(name: &str) -> Result<Vec<Self>, FrameworkError> {
+        Ok(super::resolve_named_middleware(name)?
+            .iter()
+            .filter_map(alias_of)
+            .map(Self::Alias)
+            .collect())
+    }
+
+    /// Whether `boxed` is a middleware this exclusion leaves out.
+    pub(crate) fn matches(&self, boxed: &BoxedMiddleware) -> bool {
+        match self {
+            Self::Type(type_id) => type_of(boxed) == Some(*type_id),
+            Self::Alias(alias) => alias_of(boxed).as_deref() == Some(alias.as_str()),
+        }
+    }
 }
 
 /// Whether `known` was written for `boxed` itself, and not for a dropped

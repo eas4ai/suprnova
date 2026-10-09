@@ -10,6 +10,15 @@
 //! The expansion names `<module>::<action>` for every selected action, so
 //! a selected action the module does not define fails to compile, and an
 //! action `only` or `except` leaves out is never named.
+//!
+//! A module may declare `pub fn middleware() -> Vec<ControllerMiddleware>`,
+//! Laravel's `HasMiddleware::middleware`. A proc macro cannot see whether a
+//! module defines a function, so the expansion lets name resolution find
+//! out: it glob-imports the framework's support module, whose `middleware`
+//! returns nothing, and inside that the controller module, whose own
+//! `middleware` shadows it when there is one. One action is named through
+//! the inner glob too, so that import is used when the module declares no
+//! `middleware` and the expansion adds no warning to the application.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -141,13 +150,34 @@ pub fn expand(input: TokenStream, api: bool) -> syn::Result<TokenStream> {
             quote! { ::suprnova::routing::ResourceAction::#variant }
         })
         .collect();
-    let functions = selected.iter().zip(&variants).map(|(action, variant)| {
-        let function = Ident::new(action, name.span());
-        quote! { .__action(#variant, #module::#function) }
-    });
+    let functions: Vec<TokenStream> = selected
+        .iter()
+        .zip(&variants)
+        .map(|(action, variant)| {
+            let function = Ident::new(action, name.span());
+            quote! { .__action(#variant, #module::#function) }
+        })
+        .collect();
+    // With no action there is no route for a middleware to run on, and no
+    // action to keep the controller module's glob import used.
+    let Some(first) = selected.first() else {
+        return Ok(quote! {
+            ::suprnova::routing::ResourceDef::__new(#name, &[#(#variants),*])
+                #(#functions)*
+        });
+    };
+    let first = Ident::new(first, name.span());
     Ok(quote! {
-        ::suprnova::routing::ResourceDef::__new(#name, &[#(#variants),*])
-            #(#functions)*
+        {
+            use ::suprnova::routing::__resource_support::*;
+            {
+                use #module::*;
+                let _ = #first;
+                __resource_def(#name, &[#(#variants),*])
+                    #(#functions)*
+                    .__controller_middleware(middleware())
+            }
+        }
     })
 }
 
@@ -189,6 +219,34 @@ mod tests {
             "an API resource has no create; got:\n{out}"
         );
         assert!(out.contains("posts :: update"), "got:\n{out}");
+    }
+
+    #[test]
+    fn par_114_the_expansion_asks_the_module_for_its_middleware() {
+        let out = expand_str(quote! { "posts", controllers::posts, only = [show] }, false);
+        assert!(
+            out.contains("use :: suprnova :: routing :: __resource_support :: * ;"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("use controllers :: posts :: * ;"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("let _ = show ;"),
+            "an action keeps the module's glob import used; got:\n{out}"
+        );
+        assert!(
+            out.contains(". __controller_middleware (middleware ())"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn par_114_a_resource_with_no_action_asks_for_no_middleware() {
+        let out = expand_str(quote! { "posts", posts, only = [] }, false);
+        assert!(!out.contains("__controller_middleware"), "got:\n{out}");
+        assert!(!out.contains("use posts :: *"), "got:\n{out}");
     }
 
     #[test]

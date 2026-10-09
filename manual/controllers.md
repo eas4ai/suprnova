@@ -441,6 +441,70 @@ routes! {
 
 The route placeholder `{user}` matches the argument name `user: User`, which is how the framework knows which path segment loads the model.
 
+## Controller middleware
+
+A resource controller can declare the middleware its actions run, as
+Laravel's `HasMiddleware` does. Each entry is a `ControllerMiddleware`:
+a middleware value, or the name of an alias or group, scoped to some
+actions with `only` or `except`.
+
+For a module you register with `resource!`, declare a
+`pub fn middleware()`:
+
+```rust
+// src/controllers/posts.rs
+use suprnova::routing::{ControllerMiddleware, ResourceAction};
+use crate::middleware::AuditMiddleware;
+
+pub fn middleware() -> Vec<ControllerMiddleware> {
+    vec![
+        // Every action but index and show requires a signed-in user.
+        ControllerMiddleware::named("auth")
+            .except(&[ResourceAction::Index, ResourceAction::Show]),
+        // An alias with arguments, on store only.
+        ControllerMiddleware::named("throttle:10,1").only(&[ResourceAction::Store]),
+        // A middleware value, on destroy only.
+        ControllerMiddleware::new(AuditMiddleware).only(&[ResourceAction::Destroy]),
+    ]
+}
+
+// index, create, store, show, edit, update and destroy follow, as
+// #[handler] functions.
+```
+
+`resource!("posts", controllers::posts)` finds the function and runs each
+middleware on the actions it is scoped to. A module without the function
+runs none. For a `ResourceController`, override its `middleware` method:
+
+```rust
+use suprnova::routing::{ControllerMiddleware, ResourceAction, ResourceController};
+
+impl ResourceController for PostsController {
+    fn middleware(&self) -> Vec<ControllerMiddleware> {
+        vec![ControllerMiddleware::named("auth").only(&[ResourceAction::Store])]
+    }
+    // the actions...
+}
+```
+
+The scoping rules are Laravel's:
+
+- An action runs the middleware when `only` lists it, or `only` was never
+  called, and `except` does not list it. `only(&[])` therefore runs it on
+  no action.
+- `update` covers `PUT` and `PATCH` alike.
+- The middleware runs after the middleware of the group around the
+  resource and after the middleware you give the resource when you
+  register it, as Laravel's `gatherMiddleware` appends the controller's
+  middleware last. A name a group already gave the route runs once, in
+  the group's place.
+
+Suprnova resolves each name when the resource registers, which is at
+boot. A name that no alias or group carries fails the registration:
+`try_register` returns the error, and `register` panics. To scope
+middleware to some actions at the registration site instead, see
+[Resource routing](routing.md#controller-middleware).
+
 ## The `Request` API
 
 The methods you'll reach for most often when taking `Request` directly:
@@ -518,6 +582,17 @@ function, and "dependencies" are either container resolutions
 The handler stays a pure function from request to response, which
 makes it trivial to test in isolation: build a `Request`, call the
 function, assert on the result.
+
+Controller middleware follows from that. Laravel reads
+`HasMiddleware::middleware()` from the class of the route's action. A
+Suprnova controller is a module, so a resource reads the module's
+`pub fn middleware()`, or the `middleware` method of a
+`ResourceController`. Only a resource reads it: a function you route by
+itself with `get!` or inside `group!(..., controller = ...)` takes the
+middleware its route and group give it. Suprnova also resolves every
+named middleware at boot, where Laravel resolves it on the request, so a
+misspelt name stops the server from starting instead of failing a
+request.
 
 ## Next
 

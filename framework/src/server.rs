@@ -1219,8 +1219,13 @@ async fn handle_request_inner(
             into_hyper_in_scope(http_response)
         }
         None => {
-            // Check for fallback handler
-            if let Some((fallback_handler, fallback_middleware)) = router.get_fallback() {
+            // A route of another method on this path turns the 404 into
+            // Laravel's 405, or answers an OPTIONS request with the methods
+            // it may use. The fallback is for paths no route matches.
+            let allowed = router.methods_allowing(&method, path);
+            if allowed.is_empty()
+                && let Some((fallback_handler, fallback_middleware)) = router.get_fallback()
+            {
                 let request =
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
@@ -1250,15 +1255,16 @@ async fn handle_request_inner(
                 // `RequestIdMiddleware` (outermost), where the span is live.
                 into_hyper_in_scope(http_response)
             } else {
-                // No fallback handler registered. Still run the global
-                // middleware chain (RequestId + global) terminating in a
-                // fixed 404, so cross-cutting concerns act on unrouted
-                // requests too: CORS preflight (OPTIONS never matches a
-                // route, so it lands here) can short-circuit with its 204,
-                // logging sees 404 traffic, and the response carries a
-                // request id. This mirrors the fallback branch above - the
-                // only difference is the terminal handler is a static 404
-                // rather than a user-supplied fallback.
+                // No route of this method, and no fallback or another
+                // method's route. Still run the global middleware chain
+                // (RequestId + global) terminating in a fixed answer, so
+                // cross-cutting concerns act on unrouted requests too: CORS
+                // preflight (OPTIONS rarely matches a route, so it lands
+                // here) can short-circuit with its 204, logging sees the
+                // traffic, and the response carries a request id. This
+                // mirrors the fallback branch above - the only difference is
+                // the terminal handler: the 405, the OPTIONS answer or the
+                // fixed 404.
                 let request =
                     stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
@@ -1269,18 +1275,10 @@ async fn handle_request_inner(
                 chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
                 chain.extend(global_mw.iter().cloned());
 
-                let not_found: Arc<crate::routing::BoxedHandler> =
-                    Arc::new(Box::new(|_req: Request| {
-                        Box::pin(async {
-                            Ok(HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404))
-                        })
-                            as std::pin::Pin<
-                                Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
-                            >
-                    }));
+                let terminal = unrouted_answer(&method, path, allowed);
 
                 let http_response =
-                    dispatch_chain(chain, request, not_found, &method, path, request_id).await;
+                    dispatch_chain(chain, request, terminal, &method, path, request_id).await;
 
                 #[cfg(feature = "otel")]
                 if http_response.status_code() >= 500 {
@@ -1290,6 +1288,77 @@ async fn handle_request_inner(
             }
         }
     }
+}
+
+/// The handler that ends the chain of a request no route of its method
+/// matched and no fallback answers: Laravel's `handleMatchedRoute` after
+/// the match failed.
+///
+/// `allowed` lists the other methods whose routes match the path, in the
+/// order of Laravel's `Router::$verbs`. When it is empty the path is
+/// unknown and the answer is the fixed 404. Otherwise an `OPTIONS` request
+/// gets `200` with an empty body and `Allow` joined by `,`, as Laravel's
+/// `getRouteForMethods` answers it, and any other method gets `405` with
+/// `Allow` joined by `, ` and Laravel's message in the usual error body.
+fn unrouted_answer(
+    method: &hyper::Method,
+    path: &str,
+    allowed: Vec<hyper::Method>,
+) -> Arc<crate::routing::BoxedHandler> {
+    let allow: Vec<&str> = allowed.iter().map(hyper::Method::as_str).collect();
+    // What the answer needs is worked out here, once; the response itself
+    // is built when the chain reaches the handler, inside the request's
+    // scope, so the error body carries the request id.
+    let answer = if allowed.is_empty() {
+        Unrouted::NotFound
+    } else if *method == hyper::Method::OPTIONS {
+        Unrouted::Options {
+            allow: allow.join(","),
+        }
+    } else {
+        let allow = allow.join(", ");
+        // Laravel's `$request->path()`: the path without its outer slashes,
+        // `/` for the root.
+        let trimmed = path.trim_matches('/');
+        let route = if trimmed.is_empty() { "/" } else { trimmed };
+        Unrouted::NotAllowed {
+            message: format!(
+                "The {method} method is not supported for route {route}. \
+                 Supported methods: {allow}."
+            ),
+            allow,
+        }
+    };
+    Arc::new(Box::new(move |_req: Request| {
+        let response: crate::http::Response = match &answer {
+            Unrouted::NotFound => Ok(HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404)),
+            Unrouted::Options { allow } => Ok(HttpResponse::new().header("Allow", allow.clone())),
+            Unrouted::NotAllowed { message, allow } => Err(HttpResponse::from(
+                crate::error::FrameworkError::domain(message.clone(), 405),
+            )
+            .header("Allow", allow.clone())),
+        };
+        Box::pin(async move { response })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = crate::http::Response> + Send>>
+    }))
+}
+
+/// What [`unrouted_answer`] answers.
+enum Unrouted {
+    /// No route of any method matches the path.
+    NotFound,
+    /// An `OPTIONS` request to a path other methods' routes match.
+    Options {
+        /// The methods, joined by `,`.
+        allow: String,
+    },
+    /// Any other method on a path other methods' routes match.
+    NotAllowed {
+        /// Laravel's `requestMethodNotAllowed` message.
+        message: String,
+        /// The methods, joined by `, `.
+        allow: String,
+    },
 }
 
 /// Convert the response of the middleware chain for hyper.
