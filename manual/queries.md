@@ -394,13 +394,14 @@ shuffled list, you call `in_random_order_seeded(seed)` instead. On
 MySQL, you get `RAND(seed)`. On Postgres, you set the connection seed in
 the same statement before ordering by `random()`. Repeating the seed on
 the same rows and connection repeats the order on those engines. On
-SQLite, `RANDOM()` cannot be seeded. A model query orders by an expression
-derived from the seed and each row's primary key, then by the key itself,
-so the same seed repeats the order on the same rows, a union and its pages
-included. A union is ordered by its selected columns, so the key must be
-one of them. `DB::table` knows no primary key, so it orders by each row's
-`rowid` the same way. Every table a migration creates has a rowid. A view
-or a `WITHOUT ROWID` table has none, and a seeded order on it returns the
+SQLite, `RANDOM()` cannot be seeded. Both builders order by an expression
+derived from the seed and each row's `rowid`, then by the `rowid` itself,
+so the same seed repeats the order on the same rows, whatever type your
+primary key has. A model query carries the rowid through a union: each
+query of the union adds it to its selected columns, so the union and its
+pages repeat the order too, and `UNION` removes only copies of the same
+row. Every table a migration creates has a rowid. A view or a
+`WITHOUT ROWID` table has none, and a seeded order on it returns the
 engine's error. You still receive each matching row once.
 
 ```rust

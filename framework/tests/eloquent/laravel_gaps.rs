@@ -10,3 +10,4 @@ pub mod morph_owners;
 pub mod queries;
 pub mod relations;
 pub mod scopes;
+pub mod text_keys;
