@@ -86,3 +86,84 @@ where
         Box::new(AsEnumDyn::<E>(PhantomData))
     }
 }
+
+/// Store enum lists as JSON strings using each variant's `AsRef<str>` value.
+/// You can read Laravel enum collection columns without relying on serde's enum names.
+pub struct AsEnumCollection<E>(PhantomData<E>);
+
+impl<E> Cast for AsEnumCollection<E>
+where
+    E: FromStr + AsRef<str> + Send + Sync,
+    E::Err: std::fmt::Display,
+{
+    type Runtime = Vec<E>;
+    type Storage = String;
+
+    fn to_storage(value: &Vec<E>) -> Result<String, FrameworkError> {
+        let strings: Vec<&str> = value.iter().map(AsRef::as_ref).collect();
+        serde_json::to_string(&strings)
+            .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))
+    }
+
+    fn from_storage(stored: &String) -> Result<Vec<E>, FrameworkError> {
+        let strings: Vec<String> = serde_json::from_str(stored)
+            .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))?;
+        strings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                AsEnum::<E>::from_storage(value).map_err(|error| {
+                    FrameworkError::validation(
+                        "AsEnumCollection",
+                        format!("element {index}: {error}"),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+struct AsEnumCollectionDyn<E>(PhantomData<E>);
+
+impl<E> DynCast for AsEnumCollectionDyn<E>
+where
+    E: FromStr + AsRef<str> + serde::Serialize + serde::de::DeserializeOwned + Send + Sync,
+    E::Err: std::fmt::Display,
+{
+    fn from_storage_json(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let stored = value.as_str().ok_or_else(|| {
+            FrameworkError::validation("AsEnumCollection", "expected JSON-encoded text")
+        })?;
+        let runtime = AsEnumCollection::<E>::from_storage(&stored.to_owned())?;
+        serde_json::to_value(runtime)
+            .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))
+    }
+
+    fn to_storage_json(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let runtime: Vec<E> = serde_json::from_value(value.clone())
+            .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))?;
+        AsEnumCollection::<E>::to_storage(&runtime).map(serde_json::Value::String)
+    }
+}
+
+impl<E> IntoDynCast for AsEnumCollection<E>
+where
+    E: FromStr
+        + AsRef<str>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+    E::Err: std::fmt::Display,
+{
+    fn into_dyn() -> Box<dyn DynCast> {
+        Box::new(AsEnumCollectionDyn::<E>(PhantomData))
+    }
+}

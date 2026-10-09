@@ -1,17 +1,10 @@
 # Eloquent Serialization
 
-How Eloquent models turn into JSON. The chapter covers `to_array()` and
-`to_json()`, the `hidden` / `visible` / `appends` filter pipeline, the
-two terminal helpers `to_array_except` / `to_array_only`, the way
-appends bridge accessors into the output, and the two divergences from
-Laravel that catch people out: the serde-bypass footgun, and the fact
-that eager-loaded relations do not auto-fold into the JSON body.
-
-If you've read [Eloquent API](eloquent.md), most names here are
-familiar - the attribute reference is in that chapter. This page is
-where the *serialization contract* lives: which fields appear, in what
-order the filters apply, and what produces a leak if you forget about
-it.
+You convert Eloquent models to arrays, JSON, and serde output with one
+visibility policy. You declare hidden fields, visible fields, and default
+appends on the model. You can change visibility or add an append on one
+instance. You include eager-loaded relations through explicit accessors
+or resources.
 
 ## Table of contents
 
@@ -23,7 +16,7 @@ it.
 - [The filter pipeline order](#the-filter-pipeline-order)
 - [Per-call filtering - `to_array_except` / `to_array_only`](#per-call-filtering--to_array_except--to_array_only)
 - [Conditional hiding by viewer](#conditional-hiding-by-viewer)
-- [The serde-bypass footgun](#the-serde-bypass-footgun)
+- [Serde serialization](#serde-serialization)
 - [Serializing collections](#serializing-collections)
 - [Eager-loaded relations and serialization](#eager-loaded-relations-and-serialization)
 - [What about JSON:API?](#what-about-jsonapi)
@@ -53,12 +46,10 @@ declared on `#[model(...)]`:
 - `visible = [...]` - column whitelist (mutually exclusive with `hidden`)
 - `appends = [...]` - accessor methods to inject under named keys
 
-When the model declares none of these, the trait default body runs:
-serialize `self` via `serde_json::to_value(self)`, strip two
-framework-internal scratch fields (`__eager` and `__pivot` - see
-[eager-loaded relations](#eager-loaded-relations-and-serialization)),
-return the result. When the model declares any of them, the macro
-emits an override that runs the [pipeline](#the-filter-pipeline-order).
+You use the same policy through the model's `Serialize` implementation.
+You exclude the framework's `__eager` and `__pivot` state on every path.
+You keep persistence separate from this output policy, so hidden fields
+still participate in saves.
 
 ## `to_array` and `to_json`
 
@@ -89,10 +80,9 @@ pub async fn show(req: Request) -> Response {
 produces one. The string-shaped equivalent is `user.to_json()` -
 identical body, identical filters, just one extra `to_string`.
 
-You can also reach for `serde_json::to_value(&user)` directly. **Don't
-do that for anything user-facing.** It bypasses the filter pipeline
-entirely - see [the serde-bypass footgun](#the-serde-bypass-footgun)
-later in the chapter for why.
+You can also use `serde_json::to_value(&user)` or
+`serde_json::to_string(&user)`. You get the same visibility and appends
+policy, including changes you make on that instance.
 
 ## Hiding fields - `hidden = [...]`
 
@@ -230,33 +220,27 @@ Calling `user.full_name()` directly from Rust works exactly like any
 other method - `appends` only controls the **JSON dispatch table**.
 Accessors stay regular methods.
 
+You select a runtime append with `append(name)?`. You register that name
+in `accessors = [...]` when you do not want it in the default `appends`.
+You add a name once, and an unknown name returns an error. You keep the
+append on the instance for every subsequent output.
+
 ## The filter pipeline order
 
-When a model declares any of `hidden`, `visible`, or `appends`, the
-macro emits a `to_array` override that runs four steps in this order:
+You get the same steps for serde, `to_array`, and `to_json`:
 
-1. Serialise `self` to a `serde_json::Map` via `serde_json::to_value`.
-2. Strip the framework-internal `__eager` and `__pivot` keys
-   unconditionally (more on these in
-   [the relations section](#eager-loaded-relations-and-serialization)).
-3. Apply `visible` as a **whitelist** when non-empty: every key NOT in
-   the list is removed.
-4. Apply `hidden` as a **denylist**: every listed key that survived
-   the whitelist is removed.
-5. Inject `appends`: for each entry, call the registered accessor and
-   insert its result under the entry's name.
+1. You serialize the model's runtime attributes, preserving serde field options.
+2. You exclude `__eager` and `__pivot`.
+3. You retain only visible names when the visible list is non-empty.
+4. You remove hidden names.
+5. You apply those lists to default and runtime appended names before calling
+   their accessors. You insert only permitted accessor values.
 
-### Why Suprnova diverges
-
-Laravel runs the same `hidden` → `visible` → `appends` ordering. The
-divergence is in step 5: in Suprnova, appends run **after** the hidden
-denylist, and they always show up - even if their name is also listed
-in `hidden`. The reasoning is the same as Laravel's: if you both
-declare `$appends = ['full_name']` and `$hidden = ['full_name']`, the
-intent is "compute it and ship it" - `appends` is the more specific
-signal. The order matters when an accessor's key collides with a
-column name (e.g. an accessor that overrides the stored `display_name`
-column's value); the accessor wins on the wire.
+You suppress an appended name when it is hidden or outside a non-empty
+visible list. You do not evaluate a suppressed accessor. An allowed accessor
+with the same name as a stored column replaces that column in the output.
+Serde returns accessor serialization errors. The existing infallible
+`to_array` and `to_json` helpers represent serialization failure as JSON null.
 
 ## Per-call filtering - `to_array_except` / `to_array_only`
 
@@ -272,14 +256,14 @@ pub async fn admin_show(user: User) -> suprnova::Response {
     // of the row but not these:
     json_response!(
         user.to_array_except(&["password_hash", "remember_token", "internal_notes"])
-    ))
+    )
 }
 
 pub async fn directory_show(user: User) -> suprnova::Response {
     // public directory - only the columns we want to publish:
     json_response!(
         user.to_array_only(&["id", "name", "avatar_url"])
-    ))
+    )
 }
 ```
 
@@ -290,22 +274,24 @@ own trim on top. `to_array_only` returns a *fresh* JSON object
 containing only the named keys; `to_array_except` returns the full
 object minus the named keys.
 
-### Why Suprnova diverges
+### Instance visibility
 
-Laravel's `$user->makeHidden(['x'])` and `$user->makeVisible(['x'])`
-**mutate** the model instance - every subsequent `toArray()` call,
-including ones that happen when the model is nested inside a parent's
-serialisation, sees the changed state. Suprnova's helpers are
-**terminal**. They produce a `Value` and stop. If you need the change
-to propagate, declare it on `#[model(hidden = [...])]` /
-`#[model(visible = [...])]` so the *type* expresses the policy, not a
-hidden mutation on the instance.
+You change every later conversion of one instance with these methods:
 
-The Rust-shaped reason: an Eloquent struct in Suprnova is a plain Rust
-struct with no runtime attribute bag. There's no place for an
-instance-side visibility flag to live without adding ambient hidden
-state, which is the kind of footgun the framework intentionally
-avoids.
+```rust
+user.make_hidden(["email", "phone"]);
+user.make_hidden_if(!is_admin, "internal_notes");
+user.make_visible("email");
+user.make_visible_if(is_admin, ["internal_notes", "full_name"]);
+```
+
+You pass one name, an array, a vector, or a slice. Each method returns
+`&mut Self` so you can chain changes. A false condition leaves the lists
+unchanged. You remove a name from hidden with `make_visible`. When you
+already have a non-empty visible list, you also add that name to visible.
+You keep the changes on the instance and its clones. You do not change
+other instances or the model's declared defaults.
+You still cannot declare both `hidden` and `visible` on one model.
 
 ## Conditional hiding by viewer
 
@@ -338,76 +324,19 @@ layer** with `Maybe<T>` / `MissingValue<T>` fields. See
 [JSON:API resources](eloquent-resources.md#conditional-attributes--maybet--missingvaluet)
 for the declarative form.
 
-## The serde-bypass footgun
+## Serde serialization
 
-This is the single most important thing to know about Eloquent
-serialization in Suprnova.
-
-**The `hidden` / `visible` / `appends` filters only run through
-`to_array()` and `to_json()`.** They are *not* enforced by the derived
-`Serialize` impl. Returning the struct through any other serde path
-bypasses the filters entirely.
-
-That means **all of these leak `password`**:
+You use direct serde serialization for model values and nested model values:
 
 ```rust
-// Direct serde - bypasses to_array, hidden has no effect:
-let raw = serde_json::to_value(&user).unwrap();
-
-// json_response! with a struct field - same:
-json_response!({ "user": user }))
-
-// Nested inside another serializable container - same:
-#[derive(Serialize)]
-struct EnvelopeWithUser { ok: bool, user: User }
-let env = EnvelopeWithUser { ok: true, user };
-json_response!(env))
-
-// Returning a Vec<User> through serde - same:
-json_response!(users))   // where users: Vec<User>
+let value = serde_json::to_value(&user)?;
+let body = serde_json::to_string(&user)?;
+let nested = serde_json::to_value(vec![user])?;
 ```
 
-Only these go through the filter pipeline:
-
-```rust
-json_response!(user.to_array()))
-json_response!(users_collection.to_array()))  // Collection<User>
-json_response!(user.to_array_except(&["secret"])))
-json_response!(user.to_array_only(&["id", "name"])))
-```
-
-### Why this happens
-
-Serde's blanket `Serialize for Vec<T>` (and any other container) calls
-`T::serialize` directly. Suprnova's filter pipeline lives in the
-`Model::to_array` trait method, not in `Serialize`. The trait method
-doesn't get invoked unless you call it.
-
-The framework guards against the *internal* footgun (`__eager` /
-`__pivot` scratch fields are marked `#[serde(skip)]` so they don't
-leak through either path), but the macro deliberately does **not**
-emit `#[serde(skip_serializing)]` on hidden fields - doing so would
-break legitimate uses of serde with the inner SeaORM model where a
-caller wants the full row (e.g. internal RPC, persistence layers,
-diagnostics, tests).
-
-### The rule
-
-For any value that crosses the trust boundary back to a client, walk
-through `to_array()` or one of its filtered cousins. The four-line
-contract that buys you the safety:
-
-| Want | Use | Result |
-|---|---|---|
-| Serialise one model | `user.to_array()` | Filtered JSON object |
-| Serialise a collection | `collection.to_array()` | Filtered JSON array |
-| Subtract a few fields | `user.to_array_except(&["x"])` | Filtered + subtracted |
-| Keep only a few fields | `user.to_array_only(&["x"])` | Only listed keys |
-
-A linter or PR-time review for `json_response!\({.*: [a-z_]+ ?})` and
-`serde_json::to_value\(&\w+\)` on model values is a cheap way to keep
-the rule. The framework's own tests for `Model` serialisation cover
-both paths.
+You get the same filtered attributes and appends on each path. You retain
+serde renames and field serialization options. You can still trim one output
+with `to_array_except` or `to_array_only`, without changing the instance.
 
 ## Serializing collections
 
@@ -425,23 +354,10 @@ pub async fn list() -> suprnova::Response {
 }
 ```
 
-This is the only place to get the per-row filter on a multi-row
-result. `serde_json::to_value(&users)` would emit a Vec via serde's
-blanket impl and bypass the filters on every row at once - the
-collection-level helper exists exactly to close that gap.
-
-```rust
-// The Collection<M> override:
-pub fn to_array(&self) -> Value {
-    Value::Array(self.0.iter().map(|m| m.to_array()).collect())
-}
-```
-
-For a paginator, the wrapped data lives in `LengthAwarePaginator::data
-/ CursorPaginator::data` and is a `Vec<M>` - call `.to_array()` on
-each item before assembling the paginator response, or use the
-[JSON:API paginated form](eloquent-resources.md#pagination) which
-handles per-row filtering as part of the resource pipeline.
+You get the same per-model policy from `serde_json::to_value(&users)`.
+You also get it when models appear in a paginator's data vector or another
+serde container. You can use the [JSON:API paginated form](eloquent-resources.md#pagination)
+when you need its resource envelope, links, and metadata.
 
 ## Eager-loaded relations and serialization
 
@@ -564,11 +480,9 @@ The JSON:API layer composes on top: it doesn't replace `to_array`, it
 adds an envelope around per-resource attribute / relationship logic
 that's too rich to live on the model itself.
 
-For typed Inertia props you almost always want the resource layer or a
-dedicated `#[derive(Serialize)]` DTO with explicit fields rather than
-piping the model through serde directly. Inertia returns get the same
-serde-bypass treatment as everything else - the safe path is "build a
-DTO, fill it from `to_array()`, return the DTO".
+You can pass models through serde into typed Inertia props with their
+visibility policy intact. You use a resource or a dedicated DTO when you
+need a different response shape.
 
 ## Where each piece lives
 
@@ -577,7 +491,7 @@ DTO, fill it from `to_array()`, return the DTO".
 | `Model::to_array` / `to_json` trait defaults | `framework/src/eloquent/model.rs` |
 | `Model::to_array_except` / `to_array_only` | `framework/src/eloquent/model.rs` |
 | `appends` accessor dispatch, trait default | `framework/src/eloquent/model.rs` |
-| Macro-emitted `to_array` override (filter pipeline) | `suprnova-macros/src/model/serialization.rs` |
+| Macro-emitted `Serialize` and unfiltered attribute view | `suprnova-macros/src/model/serialization.rs` |
 | `appends` accessor dispatch, macro-emitted | `suprnova-macros/src/model/serialization.rs` |
 | `Collection<M>::to_array` / `to_json` | `framework/src/eloquent/collection.rs` |
 | `EagerLoadCache` (the `__eager` field) | `framework/src/eloquent/relations/eager_cache.rs` |

@@ -225,6 +225,8 @@ pub struct ModelInput {
     pub soft_deletes: bool,
     pub soft_deletes_column: String,
     pub appends: Vec<String>,
+    /// Accessors available to runtime append without appearing by default.
+    pub accessors: Vec<String>,
     pub hidden: Vec<String>,
     pub visible: Option<Vec<String>>,
     pub mutators: Vec<String>,
@@ -396,6 +398,15 @@ impl ModelInput {
                         ),
                     ));
                 }
+            }
+        }
+
+        for name in attrs.accessors.iter().flatten() {
+            if syn::parse_str::<Ident>(name).is_err() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("accessor `{name}` must be a Rust identifier",),
+                ));
             }
         }
 
@@ -673,6 +684,7 @@ impl ModelInput {
             soft_deletes,
             soft_deletes_column,
             appends: attrs.appends.unwrap_or_default(),
+            accessors: attrs.accessors.unwrap_or_default(),
             hidden: attrs.hidden.unwrap_or_default(),
             visible: attrs.visible,
             mutators: attrs.mutators.unwrap_or_default(),
@@ -981,6 +993,7 @@ struct ModelAttrs {
     soft_deletes: Option<bool>,
     soft_deletes_column: Option<String>,
     appends: Option<Vec<String>>,
+    accessors: Option<Vec<String>>,
     hidden: Option<Vec<String>>,
     visible: Option<Vec<String>>,
     mutators: Option<Vec<String>>,
@@ -1051,6 +1064,7 @@ impl Parse for ModelAttrs {
                         out.soft_deletes_column = Some(input.parse::<LitStr>()?.value())
                     }
                     "appends" => out.appends = Some(parse_str_array(input)?),
+                    "accessors" => out.accessors = Some(parse_str_array(input)?),
                     "hidden" => out.hidden = Some(parse_str_array(input)?),
                     "visible" => out.visible = Some(parse_str_array(input)?),
                     "mutators" => out.mutators = Some(parse_str_array(input)?),
