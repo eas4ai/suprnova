@@ -533,12 +533,16 @@ explicit value always wins.
 |---|---|---|---|
 | `LOG_LEVEL` | `"info"` | `String` (`error`, `warn`, `info`, `debug`, `trace` - case-insensitive) | Tracing-subscriber filter level. |
 | `LOG_FORMAT` | env-aware (`json` in production, `pretty` elsewhere) | `String` (`json`, `pretty`) | Tracing-subscriber output format. |
-| `LOG_CHANNEL` | `stdout` | `String` | The default log channel: `stdout`, `stderr`, `errorlog`, `single`, `daily`, `monthly`, `syslog`, `null`, `stack`, or one the bootstrap defines with `Log::define`. A name that is no channel fails boot. See [Logging](logging.md#channels). |
+| `LOG_CHANNEL` | `stdout` | `String` | The default log channel: `stdout`, `stderr`, `errorlog`, `single`, `daily`, `monthly`, `syslog`, `null`, `stack`, `custom`, or one the bootstrap defines with `Log::define`. A name that is no channel fails boot. See [Logging](logging.md#channels). |
+| `LOG_CHANNEL_DRIVER` | none - required for `custom` | `String` | The driver the built-in `custom` channel uses. Register it with `Log::extend` in the bootstrap. Missing or unregistered drivers fail boot when the `custom` channel is selected. |
 | `LOG_STACK` | `single` | `String` (comma-separated) | The channels the `stack` channel writes to. |
-| `LOG_DAILY_DAYS` | `14` | `u32` | How many files the `daily` channel keeps, counting the one it writes to; `0` keeps every file. A value that is not a number fails boot. |
+| `LOG_DAILY_DAYS` | `7` | `u32` | How many files the `daily` channel keeps, counting the one it writes to; `0` keeps every file. A value that is not a number fails boot. |
 | `LOG_SYSLOG_FACILITY` | `user` | `String` (`user`, `daemon`, `local0` to `local7`, another facility name, or 0 to 23) | The facility the `syslog` channel sends with. An unknown one fails boot. |
 | `LOG_SYSLOG_SOCKET` | `/dev/log` (`/var/run/syslog` on macOS) | `String` | The socket the `syslog` channel sends to. |
 | `MAIL_LOG_CHANNEL` | unset (the default channel) | `String` | The log channel the `log` mail transport writes to. |
+
+You set the `syslog` channel's ident with `APP_NAME`. If you leave it unset
+or empty, the ident is `suprnova`.
 
 ## Observability (OpenTelemetry)
 

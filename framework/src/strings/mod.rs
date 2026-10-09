@@ -4,8 +4,10 @@
 //! Every count is in characters, never bytes, so a multibyte value is never
 //! cut inside a character.
 
+mod ascii_languages;
 mod ascii_map;
 mod inflector;
+mod inflector_additional_rules;
 mod inflector_rules;
 
 use inflector::{Tongue, upper_first};
@@ -31,11 +33,22 @@ impl Str {
     /// `oeuvre-dart`. A character Laravel's ASCII map does not know, such
     /// as a Han character or an emoji, is dropped.
     pub fn slug(title: &str, separator: &str) -> String {
+        Self::slug_in(title, separator, "en")
+    }
+
+    /// A slug using the named language's ASCII spelling. For example,
+    /// German `Ärger` becomes `aerger`. An empty language keeps Unicode.
+    pub fn slug_in(title: &str, separator: &str, language: &str) -> String {
         let separators: Vec<char> = separator.chars().collect();
         let flip = if separator == "-" { '_' } else { '-' };
         let mut text = String::new();
         let mut in_flip = false;
-        for c in ascii(title).chars() {
+        let title = if language.is_empty() {
+            title.to_owned()
+        } else {
+            ascii(title, language)
+        };
+        for c in title.chars() {
             if c == flip && !separators.contains(&flip) {
                 if !in_flip {
                     text.push_str(separator);
@@ -96,6 +109,29 @@ impl Str {
         format!("{}{end}", kept.trim_end_matches(PHP_TRIM))
     }
 
+    /// Keep the first `words` runs of non-space characters, including HTML
+    /// markup, and append `end` when cut. Whitespace between words stays.
+    /// A zero limit leaves the value unchanged, as Laravel does.
+    pub fn words(value: &str, words: usize, end: &str) -> String {
+        if words == 0 {
+            return value.to_owned();
+        }
+        let mut count = 0;
+        let mut in_word = false;
+        for (at, c) in value.char_indices() {
+            if c.is_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                if count == words {
+                    return format!("{}{end}", value[..at].trim_end_matches(PHP_TRIM));
+                }
+                count += 1;
+                in_word = true;
+            }
+        }
+        value.to_owned()
+    }
+
     /// As [`limit`](Self::limit), but the cut falls at the last ASCII
     /// whitespace within the limit, so no word is broken; a no-break space
     /// is not a place to break. Each run of line breaks counts as one
@@ -127,15 +163,21 @@ impl Str {
     pub fn excerpt(text: &str, phrase: &str, radius: usize, omission: &str) -> Option<String> {
         let pattern = format!("(?is)^(.*?)({})(.*)$", regex::escape(phrase));
         let captures = regex::Regex::new(&pattern).ok()?.captures(text)?;
-        let before = captures.get(1).map_or("", |m| m.as_str()).trim_start();
+        let before = captures
+            .get(1)
+            .map_or("", |m| m.as_str())
+            .trim_start_matches(PHP_TRIM);
         let found = captures.get(2).map_or("", |m| m.as_str());
-        let after = captures.get(3).map_or("", |m| m.as_str()).trim_end();
+        let after = captures
+            .get(3)
+            .map_or("", |m| m.as_str())
+            .trim_end_matches(PHP_TRIM);
 
         let before_chars: Vec<char> = before.chars().collect();
         let start: String = before_chars[before_chars.len().saturating_sub(radius)..]
             .iter()
             .collect();
-        let start = start.trim_start();
+        let start = start.trim_start_matches(invisible);
         let start = if start == before {
             start.to_owned()
         } else {
@@ -143,7 +185,7 @@ impl Str {
         };
 
         let end: String = after.chars().take(radius).collect();
-        let end = end.trim_end();
+        let end = end.trim_end_matches(invisible);
         let end = if end == after {
             end.to_owned()
         } else {
@@ -153,8 +195,9 @@ impl Str {
     }
 
     /// The plural of `word` for `count`, by the rules of the language of the
-    /// current `Lang` locale: English, French, Norwegian Bokmål, Portuguese,
-    /// Spanish or Turkish, and English for any other. A count of 1 or -1
+    /// current `Lang` locale: English, Esperanto, French, Italian,
+    /// Norwegian Bokmål, Portuguese, Spanish or Turkish, and English for
+    /// any other. A count of 1 or -1
     /// leaves the word, and the result keeps the word's case.
     pub fn plural(word: &str, count: i64) -> String {
         let ends_in_a_word_character = word
@@ -167,13 +210,55 @@ impl Str {
         {
             return word.to_owned();
         }
-        match_case(&current_tongue().pluralize(word), word)
+        let inflected = if word.to_uppercase() == word {
+            current_tongue().pluralize(&word.to_lowercase())
+        } else {
+            current_tongue().pluralize(word)
+        };
+        match_case(&inflected, word)
+    }
+
+    /// The plural form with its count before it, as Laravel's
+    /// `prependCount` option. The current locale formats the integer.
+    pub fn plural_with_count(word: &str, count: i64) -> String {
+        #[cfg(feature = "localization")]
+        let prefix = crate::localization::format_integer(count);
+        #[cfg(not(feature = "localization"))]
+        let prefix = count.to_string();
+        format!("{prefix} {}", Self::plural(word, count))
+    }
+
+    /// Inflect the last word of a studly-cased value, keeping its prefix.
+    /// `VerifiedHuman` becomes `VerifiedHumans` for a count of two.
+    pub fn plural_studly(value: &str, count: i64) -> String {
+        let start = value
+            .char_indices()
+            .filter(|(at, c)| *at > 0 && c.is_ascii_uppercase())
+            .map(|(at, _)| at)
+            .next_back()
+            .unwrap_or(0);
+        format!(
+            "{}{}",
+            &value[..start],
+            Self::plural(&value[start..], count)
+        )
+    }
+
+    /// Inflect the last word of a Pascal-cased value, as
+    /// [`plural_studly`](Self::plural_studly) does.
+    pub fn plural_pascal(value: &str, count: i64) -> String {
+        Self::plural_studly(value, count)
     }
 
     /// The singular of `word`, by the rules of the current locale's language
     /// as [`plural`](Self::plural) chooses them, keeping the word's case.
     pub fn singular(word: &str) -> String {
-        match_case(&current_tongue().singularize(word), word)
+        let inflected = if word.to_uppercase() == word {
+            current_tongue().singularize(&word.to_lowercase())
+        } else {
+            current_tongue().singularize(word)
+        };
+        match_case(&inflected, word)
     }
 }
 
@@ -181,19 +266,44 @@ impl Str {
 /// trims with.
 const PHP_TRIM: &[char] = &[' ', '\t', '\n', '\r', '\0', '\x0B'];
 
+/// Laravel's `INVISIBLE_CHARACTERS`, plus its default trim whitespace.
+fn invisible(c: char) -> bool {
+    c.is_whitespace()
+        || c == '\0'
+        || matches!(c,
+            '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}' | '\u{1160}'
+            | '\u{17b4}' | '\u{17b5}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+            | '\u{2060}'..='\u{2065}' | '\u{206a}'..='\u{206f}' | '\u{2800}'
+            | '\u{3164}' | '\u{feff}' | '\u{ffa0}' | '\u{1d159}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0020}'
+        )
+}
+
 /// The longest key in [`ascii_map::MAP`], in characters.
 const LONGEST_KEY: usize = 5;
 
 /// `value` spelled in ASCII as Laravel's `Str::ascii` spells it, which is
-/// voku/portable-ascii's `to_ascii` with the language `en`: each sequence
+/// voku/portable-ascii's `to_ascii` with the named language: each sequence
 /// its map knows is replaced, the longest first, as PHP's `strtr` does,
 /// and every character still outside printable ASCII is dropped, a tab or
 /// line break becoming a space.
-fn ascii(value: &str) -> String {
+fn ascii(value: &str, language: &str) -> String {
     let printable = |c: char| (' '..='~').contains(&c);
     if value.chars().all(printable) {
         return value.to_owned();
     }
+    let language = language.to_ascii_lowercase().replace('-', "_");
+    let mut parts = language.splitn(2, '_');
+    let first = parts.next().unwrap_or("");
+    let language = if parts.next().is_some_and(|rest| rest.starts_with(first)) {
+        language.replacen(&format!("{first}_{first}"), first, 1)
+    } else {
+        language
+    };
+    let overrides = ascii_languages::MAPS
+        .binary_search_by(|(key, _)| key.cmp(&language.as_str()))
+        .ok()
+        .map_or(&[][..], |found| ascii_languages::MAPS[found].1);
     let mut replaced = String::with_capacity(value.len());
     let mut rest = value;
     'next: while let Some(first) = rest.chars().next() {
@@ -203,6 +313,11 @@ fn ascii(value: &str) -> String {
             .map(|(at, c)| at + c.len_utf8())
             .collect();
         for &end in ends.iter().rev() {
+            if let Ok(found) = overrides.binary_search_by(|(key, _)| (*key).cmp(&rest[..end])) {
+                replaced.push_str(overrides[found].1);
+                rest = &rest[end..];
+                continue 'next;
+            }
             if let Ok(found) = ascii_map::MAP.binary_search_by(|(key, _)| (*key).cmp(&rest[..end]))
             {
                 replaced.push_str(ascii_map::MAP[found].1);
@@ -283,10 +398,10 @@ fn match_case(value: &str, comparison: &str) -> String {
         value.to_lowercase()
     } else if comparison.to_uppercase() == comparison {
         value.to_uppercase()
-    } else if upper_first(comparison) == comparison {
-        upper_first(value)
     } else if upper_words(comparison) == comparison {
         upper_words(value)
+    } else if upper_first(comparison) == comparison {
+        upper_first(value)
     } else {
         value.to_owned()
     }
@@ -332,6 +447,18 @@ mod tests {
                 .all(|(key, _)| (1..=LONGEST_KEY).contains(&key.chars().count()))
         );
         assert!(
+            ascii_languages::MAPS
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
+        for (_, map) in ascii_languages::MAPS {
+            assert!(map.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(map.iter().all(|(key, replacement)| {
+                (1..=LONGEST_KEY).contains(&key.chars().count())
+                    && replacement.chars().all(|c| (' '..='~').contains(&c))
+            }));
+        }
+        assert!(
             ascii_map::MAP
                 .iter()
                 .all(|(_, ascii)| ascii.chars().all(|c| (' '..='~').contains(&c)))
@@ -342,7 +469,7 @@ mod tests {
     fn case_matches_the_comparison() {
         assert_eq!(match_case("people", "Person"), "People");
         assert_eq!(match_case("cars", "CAR"), "CARS");
-        assert_eq!(match_case("new cars", "New Car"), "New cars");
+        assert_eq!(match_case("new cars", "New Car"), "New Cars");
         assert_eq!(match_case("iphones", "iPhone"), "iphones");
     }
 }

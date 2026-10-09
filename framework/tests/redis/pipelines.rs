@@ -1,7 +1,7 @@
 //! PAR-033: pipelines send everything before reading; transactions are
 //! all or none when Redis rejects a queued command.
 
-use crate::support::{connection, proxy, unique};
+use crate::support::{connection, proxy, unique, wire_key};
 use serial_test::serial;
 use suprnova::{Redis, RedisValue};
 
@@ -50,7 +50,7 @@ async fn a_pipeline_returns_its_replies_in_order() {
         .pipeline(|pipe| {
             pipe.set(&key, "1");
             pipe.incr(&key, 1);
-            pipe.command("INCRBY", &[key.as_str(), "10"]);
+            pipe.command("INCRBY", &[wire_key(&key).as_str(), "10"]);
             pipe.get(&key);
         })
         .await

@@ -1,7 +1,7 @@
 //! PAR-034: subscriptions and blocking commands on connections of their
 //! own.
 
-use crate::support::{connection, kill_client, unique};
+use crate::support::{connection, kill_client, unique, wire_key};
 use serial_test::serial;
 use std::time::{Duration, Instant};
 use suprnova::{RedisSide, RedisValue};
@@ -162,7 +162,7 @@ async fn a_blpop_returns_an_element_pushed_while_it_waits() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(popped, Some((list.clone(), "pushed".to_owned())));
+    assert_eq!(popped, Some((wire_key(&list), "pushed".to_owned())));
 }
 
 #[tokio::test]
@@ -176,7 +176,7 @@ async fn blocking_commands_return_what_is_there() {
 
     assert_eq!(
         redis.brpop(&[list.as_str()], second).await.unwrap(),
-        Some((list.clone(), "d".to_owned()))
+        Some((wire_key(&list), "d".to_owned()))
     );
     assert_eq!(
         redis
@@ -200,11 +200,11 @@ async fn blocking_commands_return_what_is_there() {
     redis.zadd(&zset, "high", 9.0).await.unwrap();
     assert_eq!(
         redis.bzpopmin(&[zset.as_str()], second).await.unwrap(),
-        Some((zset.clone(), "low".to_owned(), 1.0))
+        Some((wire_key(&zset), "low".to_owned(), 1.0))
     );
     assert_eq!(
         redis.bzpopmax(&[zset.as_str()], second).await.unwrap(),
-        Some((zset.clone(), "high".to_owned(), 9.0))
+        Some((wire_key(&zset), "high".to_owned(), 9.0))
     );
     redis.del(&[list.as_str(), other.as_str()]).await.unwrap();
 }

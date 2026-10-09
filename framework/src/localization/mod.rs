@@ -238,6 +238,14 @@ impl Localization {
     }
 }
 
+/// Format an exact count for string helpers in the current locale.
+pub(crate) fn format_integer(count: i64) -> String {
+    format::try_integer(&Lang::locale(), count).unwrap_or_else(|error| {
+        tracing::warn!(%error, "integer formatting failed, falling back to plain rendering");
+        count.to_string()
+    })
+}
+
 /// Laravel-style translation facade. `Lang::get(key)` (or the `__!`
 /// macro) resolves a Fluent message key against the current locale,
 /// falls back to the configured fallback locale on a miss, and finally
@@ -287,6 +295,25 @@ impl Lang {
         if scoped.is_err() {
             set_global_locale(locale);
         }
+    }
+
+    /// Set the default locale for calls outside a request locale scope.
+    ///
+    /// # Errors
+    /// Returns an error when `locale` is not a BCP-47 identifier.
+    pub fn use_locale(locale: &str) -> Result<(), FrameworkError> {
+        set_global_locale(Locale::parse(locale)?);
+        Ok(())
+    }
+
+    /// Run a synchronous closure in a locale without changing other requests.
+    /// The previous locale is restored on return and during unwinding.
+    ///
+    /// # Errors
+    /// Returns an error without running the closure when the locale is invalid.
+    pub fn with_locale<R>(locale: &str, f: impl FnOnce() -> R) -> Result<R, FrameworkError> {
+        let locale = Locale::parse(locale)?;
+        Ok(CURRENT_LOCALE.sync_scope(Arc::new(RwLock::new(locale)), f))
     }
 
     /// Translate `key` for the current locale, walking its fallback
@@ -440,6 +467,34 @@ impl Lang {
         format::try_number(&Self::locale(), n)
     }
 
+    /// Format a number with fixed precision in the current locale.
+    /// Infinite values use `∞`; values that are not numbers use `NaN`.
+    pub fn format(value: f64, precision: usize) -> String {
+        Self::format_with_max_precision(value, precision, None)
+    }
+
+    /// Format with Laravel's maximum precision control, which drops trailing zeros.
+    /// `Some(max)` takes precedence over `precision`; `None` keeps fixed precision.
+    pub fn format_with_max_precision(
+        value: f64,
+        precision: usize,
+        max_precision: Option<usize>,
+    ) -> String {
+        Self::try_format(value, precision, max_precision).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Lang::format: ICU formatting failed, falling back to plain rendering");
+            value.to_string()
+        })
+    }
+
+    /// Format with precision controls while exposing ICU formatting failures.
+    pub fn try_format(
+        value: f64,
+        precision: usize,
+        max_precision: Option<usize>,
+    ) -> Result<String, FrameworkError> {
+        format::try_format(&Self::locale(), value, precision, max_precision)
+    }
+
     /// `value` as a percentage in the current locale, `10.0` being ten
     /// percent, with `precision` fraction digits: `10%` in `en`, `10 %` in
     /// `de`. Laravel's `Number::percentage`. Never panics - an ICU failure
@@ -453,7 +508,41 @@ impl Lang {
 
     /// [`Lang::percentage`], but `Err` on an ICU formatting failure.
     pub fn try_percentage(value: f64, precision: usize) -> Result<String, FrameworkError> {
-        format::try_percentage(&Self::locale(), value, precision)
+        format::try_percentage(&Self::locale(), value, precision, None)
+    }
+
+    /// Format a percentage in a named locale without changing the current locale.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid locale or an ICU formatting failure.
+    pub fn percentage_in(
+        value: f64,
+        precision: usize,
+        locale: &str,
+    ) -> Result<String, FrameworkError> {
+        format::try_percentage(&Locale::parse(locale)?, value, precision, None)
+    }
+
+    /// Format a percentage with at most `max_precision` fractional digits.
+    /// `Some(max)` takes precedence over `precision` and drops trailing zeros.
+    pub fn percentage_with_max_precision(
+        value: f64,
+        precision: usize,
+        max_precision: Option<usize>,
+    ) -> String {
+        Self::try_percentage_with_max_precision(value, precision, max_precision).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Lang::percentage: ICU formatting failed, falling back to plain rendering");
+            format!("{value}%")
+        })
+    }
+
+    /// Format a percentage with precision controls while exposing ICU failures.
+    pub fn try_percentage_with_max_precision(
+        value: f64,
+        precision: usize,
+        max_precision: Option<usize>,
+    ) -> Result<String, FrameworkError> {
+        format::try_percentage(&Self::locale(), value, precision, max_precision)
     }
 
     /// `value` shortened as Laravel's `Number::abbreviate` does it, with
@@ -475,7 +564,7 @@ impl Lang {
     }
 
     /// [`Lang::abbreviate`], but `Err` on an ICU formatting failure or a
-    /// value that is not finite.
+    /// value that cannot be formatted.
     pub fn try_abbreviate(value: f64, precision: usize) -> Result<String, FrameworkError> {
         format::try_abbreviate(&Self::locale(), value, precision)
     }

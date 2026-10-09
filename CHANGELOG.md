@@ -8,6 +8,39 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Language-specific slugs.** `Str::slug_in` applies the named language's
+  ASCII spelling, including German `ä` as `ae`.
+- **Word limits keep markup.** `Str::words` limits space-separated runs
+  while retaining markup and whitespace between words.
+- **Esperanto and Italian word forms.** Plural and singular helpers now
+  use all eight languages from doctrine/inflector, selected by the current
+  locale.
+- **Plurals for class names.** `Str::plural_studly` and `Str::plural_pascal`
+  inflect the last word of a class name.
+- **Counted labels use exact integers.** `Str::plural_with_count` adds
+  the count in the current locale's number format, preserving every digit.
+- **Redis environment connections.** With `REDIS_URL` unset, the default
+  connection reads `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_DB`.
+- **A cache connection for Redis.** The `cache` connection uses the same
+  server and credentials with `REDIS_CACHE_DB`, defaulting to 1.
+- **Redis scripts by SHA.** `RedisConnection::evalsha` runs a loaded script
+  with prefixed keys and unchanged script arguments.
+- **Raw Redis command lines.** `RedisConnection::execute_raw` sends a command
+  line with the existing read retry policy and shared-connection guards.
+
+- **The built-in custom log channel.** Set `LOG_CHANNEL=custom` and
+  `LOG_CHANNEL_DRIVER` to a driver registered with `Log::extend` in the
+  bootstrap. A missing or unregistered driver fails boot.
+- **Percentages in a named locale.** `Lang::percentage_in` formats in the
+  named locale without changing the current one.
+- **Precision controls for numbers.** `Lang::format_with_max_precision` and
+  `Lang::percentage_with_max_precision` cap fraction digits and drop trailing
+  zeros. `Lang::format` keeps fixed precision.
+- **Default number locales.** `Lang::use_locale` sets the default outside
+  request scopes.
+- **Temporary number locales.** `Lang::with_locale` restores the previous
+  locale when its closure returns or panics.
+
 - **Precognition with per-route opt-in.** Add `Precognitive` to a route
   or group to validate a draft without running the handler body. A passing
   request answers `204` with `Precognition-Success: true`; every marked
@@ -734,6 +767,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Excerpts trim invisible characters.** Cut ends now remove Laravel's
+  invisible character set, including zero-width spaces, while preserving
+  characters inside the excerpt.
+- **Redis prefixes typed keys.** Typed methods, scripts, blocking commands,
+  and typed pipeline methods apply `REDIS_PREFIX`, defaulting to the app
+  name's slug followed by `-database-`. Raw commands retain their arguments.
+- **Redis events reach application listeners.** Enabled command and failure
+  events now dispatch through `EventFacade`, alongside the existing Redis
+  listeners. Pipeline and transaction commands stay outside these events.
+
+- **Daily logs keep seven files by default.** The `daily` channel and
+  `LogChannel::daily` keep 7 files unless `LOG_DAILY_DAYS` or `.days(...)`
+  sets another count; 0 keeps every file.
+- **Syslog names the application.** Datagrams use `APP_NAME` as the ident,
+  with `suprnova` when unset, and keep each record's facility and severity.
+- **Percentages round decimal ties half up.** Percentages now round
+  `0.12345` at four fraction digits to `0.1235%`.
+- **Special number spellings.** Number formats use `∞` and `NaN` for values
+  without a finite decimal representation.
 
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request

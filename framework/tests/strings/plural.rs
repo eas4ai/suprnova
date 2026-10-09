@@ -39,6 +39,36 @@ fn english_follows_the_inflector_laravel_installs() {
     assert_eq!(Str::singular("stadiums"), "stadium");
 }
 
+#[test]
+fn plural_supports_studly_pascal_and_count_prefixes() {
+    assert_eq!(Str::plural_studly("VerifiedHuman", 2), "VerifiedHumans");
+    assert_eq!(Str::plural_pascal("VerifiedHuman", 2), "VerifiedHumans");
+    assert_eq!(Str::plural_studly("UserPerson", 2), "UserPeople");
+    assert_eq!(Str::plural_pascal("APIChild", 2), "APIChildren");
+    assert_eq!(Str::plural_studly("VerifiedHuman", -1), "VerifiedHuman");
+    assert_eq!(Str::plural_studly("car", 2), "cars");
+    assert_eq!(Str::plural_pascal("", 2), "");
+    assert_eq!(Str::plural_with_count("car", 3), "3 cars");
+    assert_eq!(Str::plural_with_count("cars", 1), "1 cars");
+    assert_eq!(Str::plural_with_count("car", -1), "-1 car");
+    assert_eq!(Str::plural_with_count("car", 0), "0 cars");
+}
+
+#[test]
+fn plural_preserves_word_cases_and_leaves_non_words() {
+    assert_eq!(Str::plural("iPhone", 2), "iPhones");
+    assert_eq!(Str::singular("iPhones"), "iPhone");
+    assert_eq!(Str::plural("New Car", 2), "New Cars");
+    assert_eq!(Str::singular("New Cars"), "New Car");
+    assert_eq!(Str::plural("car!", 2), "car!");
+    assert_eq!(Str::plural("recommended", 2), "recommended");
+    assert_eq!(Str::plural("RELATED", 2), "RELATED");
+    assert_eq!(Str::plural("", 2), "");
+    assert_eq!(Str::singular(""), "");
+    assert_eq!(Str::plural("car", i64::MIN), "cars");
+    assert_eq!(Str::plural("car", i64::MAX), "cars");
+}
+
 #[cfg(feature = "localization")]
 mod languages {
     use suprnova::{Lang, Locale, Str, scope_locale};
@@ -62,6 +92,8 @@ mod languages {
         assert_eq!(in_locale("nb", "bil").await, "biler");
         assert_eq!(in_locale("tr", "kitap").await, "kitaplar");
         assert_eq!(in_locale("tr", "ev").await, "evler");
+        assert_eq!(in_locale("it", "gatto").await, "gatti");
+        assert_eq!(in_locale("eo", "hundo").await, "hundoj");
         assert_eq!(in_locale("en-GB", "child").await, "children");
         assert_eq!(
             in_locale("de", "car").await,
@@ -88,5 +120,72 @@ mod languages {
         .await;
         assert_eq!(singulars, ["local", "bois", "mas"]);
         assert_eq!(in_locale("fr", "bois").await, "bois");
+        assert_eq!(in_locale("fr", "CHEVAL").await, "CHEVAUX");
+    }
+
+    #[tokio::test]
+    async fn italian_uses_irregular_uninflected_and_ordered_transformation_rules() {
+        scope_locale(Locale::parse("it").unwrap(), async {
+            for (singular, plural) in [
+                ("uomo", "uomini"),
+                ("uovo", "uova"),
+                ("bue", "buoi"),
+                ("amico", "amici"),
+                ("braccio", "braccia"),
+                ("valigia", "valigie"),
+                ("mille", "mila"),
+                ("studio", "studi"),
+                ("auto", "auto"),
+                ("crisi", "crisi"),
+                ("virtù", "virtù"),
+                ("film", "film"),
+            ] {
+                assert_eq!(Str::plural(singular, 2), plural, "{singular}");
+                assert_eq!(Str::singular(plural), singular, "{plural}");
+            }
+            assert_eq!(Str::plural("fascia", 2), "fasce");
+            assert_eq!(Str::singular("fasce"), "fascia");
+            assert_eq!(Str::plural("lago", 2), "laghi");
+            assert_eq!(Str::singular("laghi"), "lago");
+            assert_eq!(Str::plural("GATTO", 2), "GATTI");
+            assert_eq!(Str::plural("Gatto", 2), "Gatti");
+            assert_eq!(Str::plural_studly("VerifiedGatto", 2), "VerifiedGatti");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn esperanto_inflects_only_the_doctrine_noun_ending() {
+        scope_locale(Locale::parse("eo").unwrap(), async {
+            assert_eq!(Str::plural("Hundo", 2), "Hundoj");
+            assert_eq!(Str::plural("HUNDO", 2), "HUNDOJ");
+            assert_eq!(Str::singular("HUNDOJ"), "HUNDO");
+            assert_eq!(Str::plural("hundoj", 2), "hundoj");
+            assert_eq!(Str::plural("bela", 2), "bela");
+            assert_eq!(Str::singular("hundo"), "hundo");
+            assert_eq!(Str::plural("hundo", -1), "hundo");
+            assert_eq!(Str::plural_pascal("VerifiedHundo", 2), "VerifiedHundoj");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn count_prefix_formats_the_exact_integer_in_the_current_locale() {
+        scope_locale(Locale::parse("de").unwrap(), async {
+            assert_eq!(Str::plural_with_count("car", 1234), "1.234 cars");
+            assert_eq!(
+                Str::plural_with_count("car", i64::MAX),
+                "9.223.372.036.854.775.807 cars"
+            );
+            assert_eq!(
+                Str::plural_with_count("car", i64::MIN),
+                "-9.223.372.036.854.775.808 cars"
+            );
+        })
+        .await;
+        scope_locale(Locale::parse("it").unwrap(), async {
+            assert_eq!(Str::plural_with_count("gatto", 3), "3 gatti");
+        })
+        .await;
     }
 }
