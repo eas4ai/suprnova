@@ -53,8 +53,12 @@ type GuardResult = Result<Arc<dyn Guard>, FrameworkError>;
 /// name and the provider its configuration names.
 type GuardFactory = dyn Fn(&str, Arc<dyn UserProvider>) -> GuardResult + Send + Sync;
 
-/// Resolves the user of one request for a guard registered with `via_request`.
-type RequestResolver = dyn for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Send + Sync;
+/// Resolves the user of one request for a guard registered with
+/// `via_request_with_provider` (or `via_request`, which ignores the
+/// provider), from the request and the provider the guard's configuration
+/// names.
+type RequestResolver =
+    dyn for<'r> Fn(&'r Request, Arc<dyn UserProvider>) -> RequestUserFuture<'r> + Send + Sync;
 
 /// The prefix of every driver name `via_request` derives. `extend` refuses
 /// driver names that start with it, so the two can never collide.
@@ -188,7 +192,13 @@ impl AuthManager {
     /// fails the request, under `AuthMiddleware::optional()` too: it is never
     /// read as a guest. The guard's `validate` goes through the provider its
     /// configuration names, as the token guard's does. Registering a name
-    /// twice keeps the last resolver.
+    /// twice keeps the last resolver, whichever of the two forms registered
+    /// it.
+    ///
+    /// The resolver receives the request alone. A resolver that looks the
+    /// user up through the guard's provider is registered with
+    /// [`via_request_with_provider`](Self::via_request_with_provider), which
+    /// this form is built on.
     ///
     /// See [`crate::Auth::via_request`] for a worked example.
     ///
@@ -200,6 +210,43 @@ impl AuthManager {
     pub fn via_request<F>(&self, name: impl Into<String>, resolver: F) -> Result<(), FrameworkError>
     where
         F: for<'r> Fn(&'r Request) -> RequestUserFuture<'r> + Send + Sync + 'static,
+    {
+        self.via_request_with_provider(name, move |request, _provider| resolver(request))
+    }
+
+    /// Register `resolver` as the way the guard `name` authenticates a
+    /// request, handing it the request and the guard's user provider, as
+    /// Laravel's `Auth::viaRequest` callback receives `$request` and
+    /// `$provider`.
+    ///
+    /// The provider is the one the guard's configuration names, the one the
+    /// guard's `validate` uses. It is looked up each time the resolver runs,
+    /// so a provider registered after the resolver is the one it receives.
+    /// Every other rule is the one [`via_request`](Self::via_request) states: the
+    /// middleware runs the resolver at most once per guard name in one
+    /// request, a resolver error fails the request, and the guard is
+    /// declared under the driver
+    /// [`via_request_driver`](Self::via_request_driver) derives. A provider
+    /// the configuration names but nobody registered fails the request
+    /// before the resolver runs, with the error the guard's own resolution
+    /// returns.
+    ///
+    /// See [`crate::Auth::via_request_with_provider`] for a worked example.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a guard name that is empty or contains `:`, and registers
+    /// nothing, as [`via_request`](Self::via_request) does.
+    pub fn via_request_with_provider<F>(
+        &self,
+        name: impl Into<String>,
+        resolver: F,
+    ) -> Result<(), FrameworkError>
+    where
+        F: for<'r> Fn(&'r Request, Arc<dyn UserProvider>) -> RequestUserFuture<'r>
+            + Send
+            + Sync
+            + 'static,
     {
         let name = name.into();
         if !qualifies_a_principal(&name) {
@@ -241,7 +288,8 @@ impl AuthManager {
     ///
     /// Every middleware that takes a guard name calls this before it asks
     /// the guard. The resolver is cloned out of the registry, so no lock is
-    /// held while it runs.
+    /// held while it runs. It receives the provider the guard's
+    /// configuration names, the one the guard itself holds.
     pub(crate) async fn resolve_request_guard(
         &self,
         name: &str,
@@ -253,7 +301,8 @@ impl AuthManager {
         if request_state::request_guard_resolved(name) {
             return Ok(());
         }
-        let user = resolver(request).await?;
+        let provider = self.guard_provider(name)?;
+        let user = resolver(request, provider).await?;
         request_state::set_request_guard_user(name, user);
         Ok(())
     }
@@ -536,14 +585,16 @@ impl Guard for ObservedGuard {
     }
 }
 
-/// The guard [`AuthManager::via_request`] registers.
+/// The guard [`AuthManager::via_request`] and
+/// [`AuthManager::via_request_with_provider`] register.
 ///
 /// Reads only the user its resolver bound for its own name in this request,
 /// the way the token guard reads only what `BearerTokenMiddleware` bound.
 struct RequestGuard {
     /// The guard's name, which keys its request-scoped binding.
     name: String,
-    /// The provider of the guard's configuration, for `validate`.
+    /// The provider of the guard's configuration, for `validate`: the one
+    /// its resolver receives.
     provider: Arc<dyn UserProvider>,
 }
 

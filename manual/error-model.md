@@ -101,6 +101,7 @@ pub enum FrameworkError {
     Domain { message: String, status_code: u16 },        // *
     Validation(ValidationErrors),                        // 422
     Unauthorized,                                        // 403
+    Denial { message: String, status_code: u16, code: String }, // the denial's status, 403 by default
     ModelNotFound { model_name: String },                // 404
     ParamParse { param: String, expected_type: &'static str }, // 400
     UnsupportedMediaType,                                // 415
@@ -176,7 +177,7 @@ db.insert(user).await
 
 The message becomes `"creating new user: <original>"`. The variant is
 preserved where it matters - `Validation`, `ValidationError`,
-`PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`,
+`PrecognitionFailure`, `PrecognitionSuccess`, `Unauthorized`, `Denial`,
 `ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
 `AlreadyReported`, `RateLimited`, `Timeout`, and `External` keep their structure
 so the response renderer still emits the correct shape (and, for

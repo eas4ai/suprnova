@@ -71,10 +71,58 @@ independently - `Gate::has::<User, Post>("publish")` and
 | `Gate::any(&[...], &user, &resource)` | `bool` | True if any allow |
 | `Gate::none(&[...], &user, &resource)` | `bool` | True if none allow |
 | `Gate::check(&[...], &user, &resource)` | `bool` | True if all allow |
+| `Gate::inspect_current(action, &resource).await` | `Result<Response, FrameworkError>` | `inspect_async` for the user of the route's guard (see [Check the route's user](#check-the-routes-user)) |
+| `Gate::none_current(&[...], &resource).await` | `Result<bool, FrameworkError>` | `none_async` for the user of the route's guard |
 
-Every method has an `_async` sibling that works for both sync- and
-async-registered gates, so handlers don't need to know which kind of
-closure backs the action.
+Every method in the first eight rows has an `_async` sibling that works for
+both sync- and async-registered gates, so handlers don't need to know which
+kind of closure backs the action. The last two are async only.
+
+### Check the route's user
+
+`Gate::inspect_current` and `Gate::none_current` find the user themselves,
+as Laravel's `Gate::inspect` and `Gate::none` do. They ask the route's
+guard, the guard `#[authorize]` asks (see [Authorize a
+handler](#authorize-a-handler)), so you don't pass a user:
+
+```rust
+use suprnova::http::text;
+use suprnova::{Gate, Request, Response};
+
+async fn edit_form(req: Request) -> Response {
+    let post = load_post(&req).await?;
+    let decision = Gate::inspect_current("update", &post).await?;
+    if decision.denied() {
+        return text(decision.message().unwrap_or("You cannot edit this post."));
+    }
+    // ... render the form
+    text("edit form")
+}
+
+async fn read_only_banner(req: Request) -> Response {
+    let post = load_post(&req).await?;
+    let read_only = Gate::none_current(&["update", "delete"], &post).await?;
+    text(if read_only { "read only" } else { "editable" })
+}
+```
+
+The checks follow these rules:
+
+- The user is checked as its concrete type. The gates, policies, and hooks
+  you registered for that type answer, async ones included, and
+  `inspect_current` answers what `Gate::inspect_async` answers for the same
+  user.
+- With no user signed in, a gate defined with `Gate::define_optional` or
+  `Gate::define_optional_with`, or a policy method that takes
+  `Option<&User>`, receives `None`. Every other ability answers the
+  default denial (see [Default denial response](#default-denial-response)).
+  A guest is not an error: you get a denied `Response`, never the `401`
+  that `#[authorize]` answers.
+- `none_current` stops at the first action that allows. An empty list
+  answers `true`.
+- Both return the error the route's guard returns when it cannot resolve
+  the user, such as a user provider that cannot reach its database. They
+  don't guess an answer for a user they could not resolve.
 
 ### Introspection
 
@@ -508,13 +556,31 @@ plus `with_message` / `with_code` / `with_status` / `as_not_found` builders.
 |---|---|
 | allowed | `Ok(())` |
 | bare `deny()` (no message/code/status) - what an unconfigured default denial response falls back to | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
-| rich denial (message and/or status set) - including a configured default denial response that carries one | `FrameworkError::Domain { message, status_code }` |
+| denial with a code (`with_code`) | `FrameworkError::Denial { message, status_code, code }` |
+| any other rich denial (message and/or status set) - including a configured default denial response that carries one | `FrameworkError::Domain { message, status_code }` |
 
 So `deny_as_not_found()` surfaces as a 404, `deny_with_status(422, "…")` as a
-422, and `deny_with("…")` as a 403 carrying your message. The `code` is
-readable on the inspected `Response` but does **not** travel through
-`authorize` - `FrameworkError` has no code field; read it from `inspect()` if
-you need it.
+422, and `deny_with("…")` as a 403 carrying your message. A denial's code
+travels through `authorize`, as Laravel's `AuthorizationException` keeps
+it. Read it with `FrameworkError::code()` after `?`:
+
+```rust
+use suprnova::{FrameworkError, Gate};
+
+async fn publish(user: &User, post: &Post) -> Result<(), FrameworkError> {
+    match Gate::authorize_async("publish", user, post).await {
+        Err(error) if error.code() == Some("over-limit") => {
+            // Offer an upgrade instead of a bare refusal.
+            Err(error)
+        }
+        other => other,
+    }
+}
+```
+
+The denial's status and message reach the client as they do for any other
+denial. The code stays on the server: the response body carries the
+message only, as Laravel renders a denial.
 
 Whichever status a denial lands on, it reaches the client as the
 framework's JSON error body. An Inertia app should also name an
@@ -595,6 +661,20 @@ hook is a synchronous predicate and applies to the async evaluation path too;
 for async authorization logic in a gate, use `define_async` /
 `define_async_with`.
 
+An after hook that needs the resource, as Laravel's after callbacks receive
+`$arguments`, is registered with `Gate::after_with_arguments::<U, R>`. It
+receives the resource as a fourth argument and runs only for checks whose
+resource is an `R`. Otherwise it follows the rules of `Gate::after`: it runs
+on every such check and can only fill in an undecided result. It answers
+`Option<bool>`, never a `Response`:
+
+```rust
+// When no gate decides, an author may act on their own post.
+Gate::after_with_arguments::<User, Post>(|user, _action, decided, post| {
+    decided.is_none().then(|| post.author_id == user.id)
+});
+```
+
 ### Async `before` hooks
 
 A hook that has to wait on I/O, such as a database read, cannot be a
@@ -626,14 +706,84 @@ gate that allows still allows there. These forms are `Gate::allows`,
 that must deny belongs in `Gate::before`. Otherwise every check your
 application makes has to use an async form.
 
+## The `GateEvaluated` event
+
+Every check dispatches one `GateEvaluated` event for each action it
+evaluates, after the `before` hooks, the gate, and the `after` hooks run, as
+Laravel's `Gate::raw` does. That covers `inspect`, `raw`, their async
+siblings, and every check built on them: `allows`, `denies`, `authorize`,
+`any`, `none`, `check`, the `Authorizable` methods, `#[authorize]`,
+`inspect_current`, and `none_current`. The event carries these fields:
+
+| Field | Value |
+|---|---|
+| `user_type` | `std::any::type_name` of the user, `None` for a guest |
+| `user_id` | The user's identifier when the check found the user itself (`inspect_current`, `none_current`, `#[authorize]`), else `None` |
+| `action` | The action |
+| `resource_type` | `std::any::type_name` of the resource |
+| `decision` | `Some(true)`, `Some(false)`, or `None` when nothing decided |
+
+Listen for it to keep an audit trail of every decision:
+
+```rust
+use std::sync::Arc;
+use suprnova::{EventFacade, FrameworkError, GateEvaluated, Listener};
+
+struct AuditGate;
+
+#[suprnova::async_trait]
+impl Listener<GateEvaluated> for AuditGate {
+    async fn handle(&self, event: &GateEvaluated) -> Result<(), FrameworkError> {
+        audit_log(&event.action, event.user_id.as_deref(), event.decision);
+        Ok(())
+    }
+}
+
+EventFacade::listen::<GateEvaluated, _>(Arc::new(AuditGate)).await;
+```
+
+An async check waits for the listeners. A sync check can't wait and must
+not block, so it runs the dispatch once in place. A listener that finishes
+without waiting on anything has run when the check returns, and the rest
+continues on a task spawned on the current Tokio runtime. Outside a Tokio
+runtime, a sync check dispatches nothing. A listener's error is logged and
+never changes the decision. When nothing listens and no fake is installed,
+the check builds no event at all.
+
+In a test, assert on the events through the events fake:
+
+```rust
+use suprnova::events::testing::dispatched;
+use suprnova::{EventFacade, Gate, GateEvaluated};
+
+let _events = EventFacade::fake();
+assert!(Gate::allows("update", &author, &post));
+let events = dispatched::<GateEvaluated>(|event| event.action == "update");
+assert_eq!(events.len(), 1);
+assert_eq!(events[0].decision, Some(true));
+```
+
 ### Why Suprnova diverges
 
 Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
 current-user resolver so the next check evaluates as that user. Suprnova's
 gate takes the user **explicitly** on every call, so "check as a different
-user" is just `Gate::allows(action, &other_user, &resource)`. There is no
-implicit resolver to rebind - the explicit API is strictly more general,
-which makes `forUser` redundant rather than missing.
+user" is just `Gate::allows(action, &other_user, &resource)`. Only
+`inspect_current` and `none_current` find the user themselves, from the
+route's guard, so there is no resolver to rebind and `forUser` has nothing
+to do.
+
+`inspect_current` and `none_current` return a `Result`. Laravel's
+`Gate::inspect` throws when its user resolver throws; Suprnova returns that
+error instead of an answer.
+
+Laravel's `GateEvaluated` holds the user object and the check's arguments.
+A Suprnova gate is generic over the user and the resource, so the event
+names their types and carries the user's identifier only when the check
+found the user itself. One listener then serves every gate, and no user or
+resource is cloned into the event. For the same reason,
+`after_with_arguments` takes the resource's type and runs only for checks
+about that type.
 
 The same reasoning applies to Laravel's policy auto-discovery by class name.
 Suprnova ties policy methods to the type-erased `(action, U, R)` key at
@@ -814,5 +964,5 @@ decides.
   authorization
 - [Error Model](error-model.md) - how a gate denial collapses into a 403, a
   404, or a custom-status `FrameworkError::Domain`
-- [Events](events.md) - listening on policy outcomes via `Gate::after` for
-  audit logging
+- [Events](events.md) - listening for `GateEvaluated` to audit every
+  decision, and the events fake that asserts on it

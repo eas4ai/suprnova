@@ -41,11 +41,13 @@ enum BeforeHook {
     Async(Arc<BeforeAsyncFn>),
 }
 
-// An after-hook: receives the user, the action name, and the running decision
-// (`None` while still undecided). Mirrors Laravel's `??=` semantic - an after
+// An after-hook: receives the user, the action name, the running decision
+// (`None` while still undecided) and the resource, as Laravel's after
+// callbacks receive `$arguments`. Mirrors Laravel's `??=` semantic - an after
 // hook can only *fill in* an undecided result, never override an existing one.
-// All after hooks still run (so they can log) regardless of the result.
-type AfterFn = dyn Fn(&dyn Any, &str, Option<bool>) -> Option<bool> + Send + Sync;
+// All after hooks still run (so they can log) regardless of the result. A
+// hook registered without the resource ignores the last argument.
+type AfterFn = dyn Fn(&dyn Any, &str, Option<bool>, &dyn Any) -> Option<bool> + Send + Sync;
 
 #[derive(Clone)]
 enum GateEntry {
@@ -72,6 +74,10 @@ pub(crate) trait GateUser {
     fn gate_type_id(&self) -> TypeId;
     /// The user as the gate closures receive it, to downcast to their type.
     fn as_gate_any(&self) -> &dyn Any;
+    /// The user's type name, when the user knows it. A type-erased user
+    /// does not: [`GateRegistry::user_type_name`] names it from the
+    /// registrations of its type.
+    fn gate_type_name(&self) -> Option<&'static str>;
 }
 
 impl<U: 'static> GateUser for U {
@@ -81,6 +87,10 @@ impl<U: 'static> GateUser for U {
 
     fn as_gate_any(&self) -> &dyn Any {
         self
+    }
+
+    fn gate_type_name(&self) -> Option<&'static str> {
+        Some(std::any::type_name::<U>())
     }
 }
 
@@ -95,6 +105,11 @@ impl GateUser for dyn Any + Send + Sync {
 
     fn as_gate_any(&self) -> &dyn Any {
         self
+    }
+
+    fn gate_type_name(&self) -> Option<&'static str> {
+        // `Any` carries no name, only the `TypeId` above.
+        None
     }
 }
 
@@ -206,6 +221,10 @@ pub(crate) struct GateRegistry {
     // lets an async before hook's future be awaited with no lock held.
     before: RwLock<HashMap<TypeId, Vec<BeforeHook>>>,
     after: RwLock<HashMap<TypeId, Vec<Arc<AfterFn>>>>,
+    // The type name of every user type a gate or hook is registered under,
+    // so the `GateEvaluated` event can name a user the check holds only as a
+    // type-erased value (`#[authorize]`, `Gate::inspect_current`).
+    user_types: RwLock<HashMap<TypeId, &'static str>>,
 }
 
 impl GateRegistry {
@@ -214,7 +233,39 @@ impl GateRegistry {
             gates: RwLock::new(HashMap::new()),
             before: RwLock::new(HashMap::new()),
             after: RwLock::new(HashMap::new()),
+            user_types: RwLock::new(HashMap::new()),
         }
+    }
+
+    // Remember the name of the user type `U`. Poison skips it with a log
+    // line: the name only labels an event, it never decides a check.
+    fn remember_user_type<U: 'static>(&self) {
+        match self.user_types.write() {
+            Ok(mut names) => {
+                names.insert(TypeId::of::<U>(), std::any::type_name::<U>());
+            }
+            Err(_) => tracing::error!(
+                user_type = std::any::type_name::<U>(),
+                "Gate user-type registry poisoned; skipping the type name."
+            ),
+        }
+    }
+
+    /// The `std::any::type_name` of `user`'s concrete type, for the
+    /// `GateEvaluated` event.
+    ///
+    /// A concrete user names itself. A type-erased user is named from the
+    /// registrations of its type; when nothing is registered for it, no gate
+    /// or hook can answer for it either, and it is named by its erased type.
+    pub(crate) fn user_type_name<U: GateUser + ?Sized>(&self, user: &U) -> &'static str {
+        if let Some(name) = user.gate_type_name() {
+            return name;
+        }
+        let known = match self.user_types.read() {
+            Ok(names) => names.get(&user.gate_type_id()).copied(),
+            Err(_) => None,
+        };
+        known.unwrap_or_else(std::any::type_name::<U>)
     }
 
     // ── Gate registration ────────────────────────────────────────────────────
@@ -367,6 +418,7 @@ impl GateRegistry {
     // `tracing::warn!` whenever a registration overwrites an existing entry
     // so the conflict is visible in logs without breaking the semantic.
     fn insert_gate<U: 'static, R: 'static>(&self, action: &str, entry: GateEntry, kind: &str) {
+        self.remember_user_type::<U>();
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
         match self.gates.write() {
             Ok(mut gates) => {
@@ -450,6 +502,7 @@ impl GateRegistry {
     // Append a before-hook to the user type's ordered list. Poison skips the
     // registration with a log line, like every other registration here.
     fn insert_before<U: 'static>(&self, hook: BeforeHook) {
+        self.remember_user_type::<U>();
         match self.before.write() {
             Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(hook),
             Err(_) => tracing::error!(
@@ -465,8 +518,8 @@ impl GateRegistry {
         &self,
         f: impl Fn(&U, &str, Option<bool>) -> Option<bool> + Send + Sync + 'static,
     ) {
-        let erased: Arc<AfterFn> =
-            Arc::new(move |u: &dyn Any, action: &str, current: Option<bool>| {
+        let erased: Arc<AfterFn> = Arc::new(
+            move |u: &dyn Any, action: &str, current: Option<bool>, _resource: &dyn Any| {
                 // Type-erased downcast mismatch is unreachable in normal
                 // dispatch (hooks are keyed by `TypeId::of::<U>()`). Fail
                 // safe by abstaining - an after hook can only *fill* an
@@ -475,9 +528,39 @@ impl GateRegistry {
                     Some(u) => f(u, action, current),
                     None => None,
                 }
-            });
+            },
+        );
+        self.insert_after::<U>(erased);
+    }
+
+    /// Register an after-hook keyed by the user type `U` that also receives
+    /// the resource. It runs only for checks whose resource is an `R`: for
+    /// any other resource it answers nothing and leaves the decision as it
+    /// is. Like every after-hook, it can only fill an undecided result.
+    pub(crate) fn register_after_with_arguments<U: 'static, R: 'static>(
+        &self,
+        f: impl Fn(&U, &str, Option<bool>, &R) -> Option<bool> + Send + Sync + 'static,
+    ) {
+        let erased: Arc<AfterFn> = Arc::new(
+            move |u: &dyn Any, action: &str, current: Option<bool>, resource: &dyn Any| {
+                // The user side mismatches only in a corrupted dispatch, the
+                // resource side whenever the check is about another type.
+                // Both abstain, which leaves the decision untouched.
+                match downcast_pair::<U, R>(u, resource) {
+                    Some((u, resource)) => f(u, action, current, resource),
+                    None => None,
+                }
+            },
+        );
+        self.insert_after::<U>(erased);
+    }
+
+    // Append an after-hook to the user type's ordered list. Poison skips the
+    // registration with a log line, like every other registration here.
+    fn insert_after<U: 'static>(&self, hook: Arc<AfterFn>) {
+        self.remember_user_type::<U>();
         match self.after.write() {
-            Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(erased),
+            Ok(mut map) => map.entry(TypeId::of::<U>()).or_default().push(hook),
             Err(_) => tracing::error!(
                 user_type = std::any::type_name::<U>(),
                 "after-hook registry poisoned; skipping registration."
@@ -633,7 +716,7 @@ impl GateRegistry {
         if result.is_none() {
             result = self.invoke::<U, R>(action, user, resource);
         }
-        self.run_after(tid, user as &dyn Any, action, result)
+        self.run_after(tid, user as &dyn Any, action, resource as &dyn Any, result)
     }
 
     /// Async sibling of [`raw`](Self::raw). The before hooks run in the same
@@ -653,7 +736,13 @@ impl GateRegistry {
         if result.is_none() {
             result = self.invoke_async::<U, R>(action, user, resource).await;
         }
-        self.run_after(tid, user.as_gate_any(), action, result)
+        self.run_after(
+            tid,
+            user.as_gate_any(),
+            action,
+            resource as &dyn Any,
+            result,
+        )
     }
 
     // Run before hooks; first `Some` short-circuits. An async hook is skipped:
@@ -697,17 +786,20 @@ impl GateRegistry {
     }
 
     // Run all after hooks (so they can log), filling the result only while it
-    // is still undecided - Laravel's `$result ??= $afterResult`.
+    // is still undecided - Laravel's `$result ??= $afterResult`. The resource
+    // reaches the hooks registered with it, as `$arguments` reaches
+    // Laravel's.
     fn run_after(
         &self,
         tid: TypeId,
         user: &dyn Any,
         action: &str,
+        resource: &dyn Any,
         mut result: Option<Response>,
     ) -> Option<Response> {
         for hook in self.after_hooks(tid) {
             let current = result.as_ref().map(Response::allowed);
-            let filled = hook(user, action, current);
+            let filled = hook(user, action, current, resource);
             // Fill-only: an after hook can decide an undecided result, never
             // override one already produced by a before hook or gate.
             if result.is_none() {
