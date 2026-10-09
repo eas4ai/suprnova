@@ -32,6 +32,8 @@ pub mod fillable;
 pub mod has;
 pub mod joins_model;
 mod key_ring;
+/// Contract tests observe the Laravel relation delta.
+pub mod laravel_delta;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;

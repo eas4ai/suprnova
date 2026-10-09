@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Related records map in chunks.** `chunk_map` on belongs-to-many and
+  through relations maps each record in bounded batches and returns values
+  in order, with pivot context on many-to-many records.
+- **Related records are found or created with their keys.** `first_or_create`
+  on has-one, has-many and belongs-to-many sets the relation's foreign key
+  or attaches the pivot row, including custom relation keys.
+- **Relation counters create or increment.** `increment_or_create` on
+  has-one, has-many and belongs-to-many uses the default for a new record
+  or adds the supplied step and extra columns to an existing record.
+- **Through relations return an unsaved fallback.** `find_or_new` searches
+  the relation's reachable records and returns a new instance when none match.
+- **Has-one-through compares in one query.** `is` asks the database whether
+  the relation reaches a model without loading the target.
+
 - **Language-specific slugs.** `Str::slug_in` applies the named language's
   ASCII spelling, including German `ä` as `ae`.
 - **Word limits keep markup.** `Str::words` limits space-separated runs

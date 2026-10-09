@@ -222,6 +222,50 @@ where
         self.limit(n)
     }
 
+    /// Return a matching child or create one with this relation's key.
+    /// Caller values keep the model's mass-assignment guard; the relation key wins.
+    pub async fn first_or_create(
+        self,
+        attributes: crate::eloquent::Attrs,
+        extra: crate::eloquent::Attrs,
+    ) -> Result<R, FrameworkError> {
+        let (row, _) = super::operations::first_or_create(
+            self.inner,
+            attributes,
+            extra,
+            Some((&self.foreign_key, self.parent_key_value)),
+        )
+        .await?;
+        Ok(row)
+    }
+
+    /// Create a keyed counter with `default`, or atomically add `step` and `extra`.
+    /// Return the stored record so callers see the counter after the write.
+    pub async fn increment_or_create(
+        self,
+        attributes: crate::eloquent::Attrs,
+        column: &str,
+        default: i64,
+        step: i64,
+        extra: crate::eloquent::Attrs,
+    ) -> Result<R, FrameworkError> {
+        crate::database::validate_identifier(column)?;
+        let mut values = extra.clone();
+        values.insert(column, default);
+        let (row, created) = super::operations::first_or_create(
+            self.inner,
+            attributes,
+            values,
+            Some((&self.foreign_key, self.parent_key_value)),
+        )
+        .await?;
+        if created {
+            Ok(row)
+        } else {
+            super::operations::increment(row, column, step, extra).await
+        }
+    }
+
     /// Execute the inner builder and return the first matching row.
     /// Returns `None` when the child table has no row pointing at
     /// this parent. Equivalent to `self.get().await?.first().cloned()`
