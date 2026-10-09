@@ -1,0 +1,16 @@
+{#
+  suprnova.breadcrumbs - the path to the current document (NAV-001):
+  ancestors are anchors with canonical URLs, the current item is text
+  with aria-current and no self link.
+#}
+{% macro breadcrumbs(id, label="Breadcrumb") %}
+<nav class="sn-breadcrumbs" id="{{ id }}" aria-label="{{ label }}"><ol class="sn-breadcrumbs-list">{{ caller() }}</ol></nav>
+{% endmacro %}
+
+{% macro crumb(href, text) %}
+<li class="sn-breadcrumb"><a class="sn-breadcrumb-link" href="{{ href }}">{{ text }}</a></li>
+{% endmacro %}
+
+{% macro crumb_current(text) %}
+<li class="sn-breadcrumb" aria-current="page">{{ text }}</li>
+{% endmacro %}
