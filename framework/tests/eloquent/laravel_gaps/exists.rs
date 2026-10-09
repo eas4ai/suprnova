@@ -1,4 +1,6 @@
 use crate::eager::{EgPost, EgUser};
+use crate::relations_morph::{MorphComment, MorphPost};
+use crate::relations_through::ThCountry;
 use suprnova::testing::TestDatabase;
 use suprnova::{Model, attrs, when_exists_loaded};
 
@@ -125,6 +127,139 @@ async fn existence_resources_emit_loaded_false_and_omit_unloaded_flags() {
                 .get("posts_exists")
                 .and_then(serde_json::Value::as_bool),
             expected
+        );
+    }
+}
+
+/// The `MorphTo` probe asks every registered owner type, so the schema has a
+/// table for each, as a complete application schema does.
+async fn morph_fixture() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory().await.expect("database");
+    for sql in [
+        "CREATE TABLE morph_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+        "CREATE TABLE morph_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, commentable_id INTEGER NOT NULL, commentable_type TEXT NOT NULL, body TEXT NOT NULL)",
+    ] {
+        db.execute_unprepared(sql).await.expect("schema");
+    }
+    for entry in suprnova::morph_types() {
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} ({} INTEGER PRIMARY KEY, deleted_at TEXT, removed_at TEXT)",
+            entry.table, entry.primary_key
+        );
+        db.execute_unprepared(&sql).await.expect("registered table");
+    }
+    db
+}
+
+/// Save one comment pointing at `kind` and `key`, then reload it through
+/// `with_exists("commentable")` so the flag comes from the probe.
+async fn commentable_flag(kind: &str, key: i64) -> MorphComment {
+    let comment = MorphComment::create(attrs! {
+        commentable_id: key,
+        commentable_type: kind,
+        body: "comment",
+    })
+    .await
+    .expect("comment");
+    MorphComment::query()
+        .filter("id", comment.id)
+        .with_exists("commentable")
+        .first()
+        .await
+        .expect("existence flag")
+        .expect("the comment")
+}
+
+#[tokio::test]
+async fn morph_to_existence_flag_is_true_for_an_existing_owner() {
+    let _db = morph_fixture().await;
+    let post = MorphPost::create(attrs! { title: "kept" })
+        .await
+        .expect("post");
+    let comment = commentable_flag("post", post.id).await;
+    assert_eq!(comment.__eager.get_exists("commentable"), Some(true));
+    assert!(
+        !comment.__eager.has("commentable"),
+        "the flag leaves the relation unloaded"
+    );
+}
+
+#[tokio::test]
+async fn morph_to_existence_flag_is_false_for_a_deleted_owner() {
+    let _db = morph_fixture().await;
+    let post = MorphPost::create(attrs! { title: "removed" })
+        .await
+        .expect("post");
+    let key = post.id;
+    post.delete().await.expect("delete owner");
+    let comment = commentable_flag("post", key).await;
+    assert_eq!(comment.__eager.get_exists("commentable"), Some(false));
+}
+
+#[tokio::test]
+async fn morph_to_existence_flag_is_false_for_an_unregistered_type() {
+    let _db = morph_fixture().await;
+    let post = MorphPost::create(attrs! { title: "kept" })
+        .await
+        .expect("post");
+    let comment = commentable_flag("unregistered_owner", post.id).await;
+    assert_eq!(comment.__eager.get_exists("commentable"), Some(false));
+}
+
+#[derive(Debug, Clone, suprnova::Data, suprnova::Validate)]
+#[json_resource("comments")]
+struct CommentResource {
+    id: i64,
+    commentable_exists: suprnova::Maybe<bool>,
+}
+
+#[tokio::test]
+async fn when_exists_loaded_reads_a_morph_to_flag_as_loaded_true() {
+    let _db = morph_fixture().await;
+    let post = MorphPost::create(attrs! { title: "kept" })
+        .await
+        .expect("post");
+    let comment = commentable_flag("post", post.id).await;
+    let flag = when_exists_loaded(&comment, "commentable", |exists| exists);
+    assert_eq!(flag.clone().into_option(), Some(true));
+    let resource = CommentResource {
+        id: comment.id,
+        commentable_exists: flag,
+    };
+    let response = suprnova::Resource::single(resource)
+        .render()
+        .await
+        .expect("render");
+    let body: serde_json::Value = serde_json::from_slice(response.body()).expect("json body");
+    assert_eq!(
+        body["data"]["attributes"]["commentable_exists"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[tokio::test]
+async fn existence_flags_refuse_a_relation_kind_the_probe_cannot_read() {
+    let db = TestDatabase::sqlite_memory().await.expect("database");
+    db.execute_unprepared(
+        "CREATE TABLE th_countries (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    )
+    .await
+    .expect("schema");
+    for rows in [0, 1] {
+        if rows == 1 {
+            ThCountry::create(attrs! { name: "one" })
+                .await
+                .expect("country");
+        }
+        let error = ThCountry::query()
+            .with_exists("posts")
+            .get()
+            .await
+            .expect_err("a through relation has no existence probe");
+        let message = error.to_string();
+        assert!(
+            message.contains("`posts`") && message.contains("HasManyThrough"),
+            "{message}"
         );
     }
 }
