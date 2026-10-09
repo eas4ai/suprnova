@@ -65,6 +65,40 @@ fn classify_return(output: &ReturnType) -> Option<PolicyReturn> {
     }
 }
 
+/// Select the shim types and registration together so guest handling matches
+/// the policy method's user argument and denial type.
+fn gate_signature(
+    signature: &syn::Signature,
+    user_ty: &syn::Path,
+) -> Option<(
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+)> {
+    let result = classify_return(&signature.output)?;
+    let optional = matches!(signature.inputs.first(), Some(syn::FnArg::Typed(arg))
+        if matches!(arg.ty.as_ref(), Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "Option")));
+    let shim_user = if optional {
+        quote!(Option<&#user_ty>)
+    } else {
+        quote!(&#user_ty)
+    };
+    let (shim_ret, gate_method) = match (result, optional) {
+        (PolicyReturn::Bool, false) => (quote!(bool), quote!(define)),
+        (PolicyReturn::Bool, true) => (quote!(bool), quote!(define_optional)),
+        (PolicyReturn::Response, false) => (
+            quote!(::suprnova::authorization::Response),
+            quote!(define_with),
+        ),
+        (PolicyReturn::Response, true) => (
+            quote!(::suprnova::authorization::Response),
+            quote!(define_optional_with),
+        ),
+    };
+    Some((shim_ret, gate_method, shim_user))
+}
+
 pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
     let item = parse_macro_input!(item as ItemImpl);
@@ -150,23 +184,16 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
             // The method's return type picks the shim return type and the
             // `Gate` registration: `bool` → `define`, `Response` →
             // `define_with`. Anything else is a spanned compile error.
-            let (shim_ret, gate_method) = match classify_return(&m.sig.output) {
-                Some(PolicyReturn::Bool) => (quote!(bool), quote!(define)),
-                Some(PolicyReturn::Response) => (
-                    quote!(::suprnova::authorization::Response),
-                    quote!(define_with),
-                ),
-                None => {
-                    return syn::Error::new_spanned(
-                        method_ident,
-                        format!(
-                            "#[policy] method `{fn_name}` must return `bool` or \
-                             `suprnova::authorization::Response`"
-                        ),
-                    )
-                    .to_compile_error()
-                    .into();
-                }
+            let Some((shim_ret, gate_method, shim_user)) = gate_signature(&m.sig, &user_ty) else {
+                return syn::Error::new_spanned(
+                    method_ident,
+                    format!(
+                        "#[policy] method `{fn_name}` must return `bool` or \
+                         `suprnova::authorization::Response`"
+                    ),
+                )
+                .to_compile_error()
+                .into();
             };
 
             // Build a unique shim name: __policy_<SelfType>_<method>
@@ -179,8 +206,7 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             // The shim delegates to the concrete policy method.
             shims.push(quote! {
-                #[allow(non_snake_case)]
-                fn #shim_ident(user: &#user_ty, resource: &#resource_ty) -> #shim_ret {
+                fn #shim_ident(user: #shim_user, resource: &#resource_ty) -> #shim_ret {
                     #self_ty::#method_ident(user, resource)
                 }
             });

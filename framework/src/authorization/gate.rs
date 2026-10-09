@@ -41,6 +41,31 @@ impl Gate {
         global().register::<U, R>(action, f);
     }
 
+    /// Define a nullable-user gate so a handler can authorize guests with `None`.
+    /// Authenticated checks pass `Some(user)` through the usual hook pipeline.
+    pub fn define_optional<U: 'static, R: 'static>(
+        action: &str,
+        f: impl Fn(Option<&U>, &R) -> bool + Send + Sync + 'static,
+    ) {
+        global().register_optional::<U, R>(action, f);
+    }
+
+    /// Define a nullable-user gate whose denial carries its own message and status.
+    pub fn define_optional_with<U: 'static, R: 'static>(
+        action: &str,
+        f: impl Fn(Option<&U>, &R) -> Response + Send + Sync + 'static,
+    ) {
+        global().register_optional_with::<U, R>(action, f);
+    }
+
+    /// Consult a nullable policy while recording the guest authorization decision.
+    pub(crate) fn inspect_guest<R: 'static>(action: &str, resource: &R) -> Option<Response> {
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().invoke_guest(action, resource);
+        crate::render_cache::collector::end_authorization_decision(window);
+        response
+    }
+
     /// Define a synchronous gate whose closure returns a rich [`Response`]
     /// rather than a bare `bool` - so a denial can carry a message, code, and
     /// HTTP status that [`inspect`](Self::inspect) and [`Self::authorize`](Self::authorize)

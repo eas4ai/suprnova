@@ -358,28 +358,31 @@ selected; an unknown driver value logs a `warn!` and falls back to
 
 ## Filesystem
 
-When `S3_BUCKET` is set, the server registers an S3 disk named `s3` as it boots,
+You set `S3_BUCKET` or `AWS_BUCKET` to register an S3 disk named `s3` at boot,
 beside the queue, the rate limiter and the mail transport. The variables work for
-AWS S3 and for S3-compatible services (MinIO, RustFS, R2, B2). With `S3_BUCKET`
-unset, nothing is registered. A disk that your `bootstrap()` registered under the
-name `s3` is kept as it is, and the variables are not read then.
+AWS S3 and for S3-compatible services (MinIO, RustFS, R2, B2). With both bucket names
+unset, you register no environment disk. A disk that your `bootstrap()`
+registered under the name `s3` is kept as it is, and the variables are not read then.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `S3_BUCKET` | unset (no disk) | `String` | The bucket. Setting it registers the `s3` disk. |
-| `S3_REGION` | none - see `AWS_REGION` | `String` | The region. The driver needs one, and the server does not boot when none is set. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
-| `AWS_REGION`, `AWS_DEFAULT_REGION` | unset | `String` | Read, in this order, when `S3_REGION` is not set. |
-| `S3_ENDPOINT` | unset (AWS) | `String` | The endpoint of a service that is not AWS. |
-| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | unset | `String` | The access key and the secret. Set both or neither. One without the other fails boot. With neither, the driver uses the default credential chain of AWS: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the profile, and the role of the instance. |
+| `S3_BUCKET`, `AWS_BUCKET` | unset (no disk) | `String` | The bucket. Setting it registers the `s3` disk. |
+| `S3_REGION` | none - see `AWS_DEFAULT_REGION` | `String` | The region. The driver needs one, and the server does not boot when none is set. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
+| `AWS_DEFAULT_REGION`, `AWS_REGION` | unset | `String` | Read, in this order, when `S3_REGION` is not set. |
+| `S3_ENDPOINT`, `AWS_ENDPOINT` | unset (AWS) | `String` | The endpoint of a service that is not AWS. |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | unset | `String` | The access key and the secret. Set both or neither. One without the other fails boot. You use `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for each missing S3 value. With neither effective key, you use the profile or instance role. |
 | `S3_ROOT` | unset | `String` | A prefix inside the bucket that every path is under. |
-| `FILESYSTEM_DISK` | unset (no default disk) | `String` | The name of the default disk that `Storage::default_disk()` returns. `Storage::set_default_disk` in code wins over it. A name with no registered disk fails boot. |
-| `S3_PUBLIC_URL` | unset | `String` | The public base URL of the `s3` disk, which `Storage::url("s3", path)` joins with the path. It is an absolute `http` or `https` URL (`https://cdn.example.com/files`) or a path of your own host (`/storage`). A value with a user or a password, a query or a fragment, a backslash, or a `.` or `..` segment fails boot. With it unset, `Storage::url` on the `s3` disk returns an error. |
+| `FILESYSTEM_DISK` | `local` | `String` | The name of the default disk that `Storage::default_disk()` returns. `Storage::set_default_disk` in code wins over it. A name with no registered disk fails boot. |
+| `S3_PUBLIC_URL`, `AWS_URL` | unset | `String` | The public base URL of the `s3` disk, which `Storage::url("s3", path)` joins with the path. It is an absolute `http` or `https` URL (`https://cdn.example.com/files`) or a path of your own host (`/storage`). A value with a user or a password, a query or a fragment, a backslash, or a `.` or `..` segment fails boot. With it unset, `Storage::url` on the `s3` disk returns an error. |
+| `S3_USE_PATH_STYLE_ENDPOINT`, `AWS_USE_PATH_STYLE_ENDPOINT` | unset (path-style URLs) | `bool` (`true`/`false`/`1`/`0`) | You select endpoint/bucket paths with `true` or bucket hostnames with `false`. An invalid value fails boot. Each S3 name wins over its AWS alias. |
 
 Blank values count as unset. No error repeats the value of a variable, except
 the disk name `FILESYSTEM_DISK` gives.
 
 `FILESYSTEM_DISK` names the default disk that `Storage::default_disk()` returns;
-`Storage::set_default_disk` in code wins over it. When it names a disk that is
+`Storage::set_default_disk` in code wins over it. With neither setting, you
+use the registered `local` disk, or get an error naming `local` and
+`FILESYSTEM_DISK`. When it names a disk that is
 not registered once the bootstrap has run, boot fails. The console binary boots
 no driver of the environment. A command that uses the `s3` disk calls
 `suprnova::filesystem::bootstrap_from_env()` at the end of its own bootstrap,

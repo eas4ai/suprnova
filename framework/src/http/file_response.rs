@@ -23,7 +23,186 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+/// Range headers of the active request, shared by local and disk responses.
+pub(crate) struct FileRequest {
+    range: Option<String>,
+    if_range: Option<String>,
+}
+
+tokio::task_local! {
+    static FILE_REQUEST: FileRequest;
+}
+
+impl FileRequest {
+    /// Capture GET range headers before middleware owns the request.
+    pub(crate) fn capture<B>(request: &hyper::Request<B>) -> Self {
+        let headers = request.headers();
+        let range = (request.method() == hyper::Method::GET)
+            .then(|| {
+                let mut values = headers.get_all(hyper::header::RANGE).iter();
+                let first = values.next()?.to_str().ok()?;
+                values.next().is_none().then(|| first.to_owned())
+            })
+            .flatten();
+        Self {
+            range,
+            if_range: headers
+                .get(hyper::header::IF_RANGE)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned()),
+        }
+    }
+
+    /// Scope headers to this request without retaining its body or credentials.
+    pub(crate) async fn serve<F: std::future::Future>(self, request: F) -> F::Output {
+        FILE_REQUEST.scope(self, request).await
+    }
+}
+
+/// A selected byte range, or a full response when Range can be ignored.
+#[derive(Clone, Copy)]
+pub(crate) enum FileRange {
+    Full,
+    Partial { start: u64, length: u64 },
+    Unsatisfiable,
+}
+
+impl FileRange {
+    /// Resolve one byte range per RFC 9110 with overflow-safe decimal offsets.
+    pub(crate) fn current(size: u64, modified: Option<&str>) -> Self {
+        FILE_REQUEST
+            .try_with(|request| {
+                if request
+                    .if_range
+                    .as_deref()
+                    .is_some_and(|validator| Some(validator) != modified)
+                {
+                    return Self::Full;
+                }
+                request
+                    .range
+                    .as_deref()
+                    .map_or(Self::Full, |range| Self::parse(range, size))
+            })
+            .unwrap_or(Self::Full)
+    }
+
+    fn parse(range: &str, size: u64) -> Self {
+        // Empty representations and multipart ranges may use the full response.
+        let Some(range) = range
+            .strip_prefix("bytes=")
+            .filter(|range| !range.contains(','))
+        else {
+            return Self::Full;
+        };
+        if size == 0 {
+            return Self::Full;
+        }
+        let Some((first, last)) = range.trim().split_once('-') else {
+            return Self::Full;
+        };
+        let decimal = |value: &str| {
+            (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).then(|| {
+                value.bytes().fold(0u64, |number, byte| {
+                    number
+                        .saturating_mul(10)
+                        .saturating_add(u64::from(byte - b'0'))
+                })
+            })
+        };
+        if first.is_empty() {
+            let Some(suffix) = decimal(last) else {
+                return Self::Full;
+            };
+            if suffix == 0 {
+                return Self::Unsatisfiable;
+            }
+            let length = suffix.min(size);
+            return Self::Partial {
+                start: size - length,
+                length,
+            };
+        }
+        let Some(start) = decimal(first) else {
+            return Self::Full;
+        };
+        let end = if last.is_empty() {
+            size - 1
+        } else {
+            let Some(end) = decimal(last) else {
+                return Self::Full;
+            };
+            if end < start {
+                return Self::Full;
+            }
+            end.min(size - 1)
+        };
+        if start >= size {
+            return Self::Unsatisfiable;
+        }
+        Self::Partial {
+            start,
+            length: end - start + 1,
+        }
+    }
+
+    /// Bound the read interval, including an empty body for unsatisfiable ranges.
+    pub(crate) fn bounds(self, size: u64) -> (u64, u64) {
+        match self {
+            Self::Full => (0, size),
+            Self::Partial { start, length } => (start, length),
+            Self::Unsatisfiable => (0, 0),
+        }
+    }
+
+    /// Attach metadata and the selected range's status and Content-Range.
+    pub(crate) fn finish(
+        self,
+        response: HttpResponse,
+        size: u64,
+        modified: Option<String>,
+    ) -> HttpResponse {
+        let mut response = response.header("Accept-Ranges", "bytes");
+        if let Some(modified) = modified {
+            response = response.header("Last-Modified", modified);
+        }
+        match self {
+            Self::Full => response,
+            Self::Partial { start, length } => response.status(206).header(
+                "Content-Range",
+                format!("bytes {start}-{}/{size}", start + length - 1),
+            ),
+            Self::Unsatisfiable => response
+                .status(416)
+                .header("Content-Range", format!("bytes */{size}")),
+        }
+    }
+}
+
+/// Apply caller headers while preserving the file's framing and selected metadata.
+pub(crate) fn file_headers<I, K, V>(mut response: HttpResponse, headers: I) -> HttpResponse
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    for (name, value) in headers {
+        let name = name.into();
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-length"
+                | "content-range"
+                | "accept-ranges"
+                | "last-modified"
+                | "transfer-encoding"
+                | "content-disposition"
+        ) {
+            response = response.replace_header(name, value);
+        }
+    }
+    response
+}
 
 /// Size of each chunk a streamed file body reads and sends: a few reads
 /// per megabyte, while the read-ahead [`FILE_CHUNKS_QUEUED`] bounds stays
@@ -259,9 +438,61 @@ impl HttpResponse {
         path_response(path.as_ref(), name, ContentDisposition::Attachment).await
     }
 
+    /// Serve a file with caller headers and a disposition for cache and download control.
+    /// Range handling, metadata and errors are the same as [`Self::file`].
+    pub async fn file_with<I, K, V>(
+        path: impl AsRef<Path>,
+        name: Option<&str>,
+        headers: I,
+        disposition: ContentDisposition,
+    ) -> Result<HttpResponse, FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        path_response(path.as_ref(), name, disposition)
+            .await
+            .map(|response| file_headers(response, headers))
+    }
+
+    /// Download a file with caller headers and a disposition, including an inline download.
+    /// Range handling, metadata and errors are the same as [`Self::download`].
+    pub async fn download_with<I, K, V>(
+        path: impl AsRef<Path>,
+        name: Option<&str>,
+        headers: I,
+        disposition: ContentDisposition,
+    ) -> Result<HttpResponse, FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        Self::file_with(path, name, headers, disposition).await
+    }
+
+    /// Download generated chunks as they arrive without buffering the whole export.
+    /// The body has no declared length. A dropped producer ends the stream.
+    pub fn stream_download<S>(
+        stream: S,
+        name: &str,
+        content_type: impl Into<String>,
+    ) -> HttpResponse
+    where
+        S: Stream<Item = Result<Bytes, Infallible>> + Send + Sync + 'static,
+    {
+        HttpResponse::stream_bytes(stream)
+            .header("Content-Type", content_type)
+            .header(
+                "Content-Disposition",
+                ContentDisposition::Attachment.header_value(name),
+            )
+    }
+
     /// Send bytes generated in memory as a download named `name`, with
-    /// the given `content_type`: the case Laravel covers with
-    /// `streamDownload` (an export built on the fly, say).
+    /// the given `content_type`. Use [`Self::stream_download`] when the export
+    /// produces chunks over time.
     ///
     /// Nothing is read from disk, so this cannot fail. The name is written
     /// per RFC 6266 by [`ContentDisposition::header_value`].
@@ -292,7 +523,7 @@ async fn path_response(
     name: Option<&str>,
     disposition: ContentDisposition,
 ) -> Result<HttpResponse, FrameworkError> {
-    let file = tokio::fs::File::open(path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| io_error(path, error))?;
     let metadata = file
@@ -309,10 +540,23 @@ async fn path_response(
         .unwrap_or_default();
     let filename = name.unwrap_or(&own_name);
 
-    let response = file_body(file, metadata.len(), content_type_from_extension(path))
+    let size = metadata.len();
+    let modified = Some(httpdate::fmt_http_date(
+        metadata.modified().map_err(|error| io_error(path, error))?,
+    ));
+    let range = FileRange::current(size, modified.as_deref());
+    let (start, length) = range.bounds(size);
+    if start != 0 {
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|error| io_error(path, error))?;
+    }
+    let response = file_body(file, length, content_type_from_extension(path))
         .await
         .map_err(|error| io_error(path, error))?;
-    Ok(response.header("Content-Disposition", disposition.header_value(filename)))
+    Ok(range
+        .finish(response, size, modified)
+        .header("Content-Disposition", disposition.header_value(filename)))
 }
 
 /// The 404 error every file response answers for a file that is not

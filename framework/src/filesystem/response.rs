@@ -11,7 +11,7 @@
 use super::Storage;
 use crate::FrameworkError;
 use crate::http::file_response::{
-    BUFFERED_BODY_LIMIT, content_type_from_extension, file_not_found,
+    BUFFERED_BODY_LIMIT, FileRange, content_type_from_extension, file_headers, file_not_found,
 };
 use crate::http::{ContentDisposition, HttpResponse};
 use bytes::Bytes;
@@ -81,6 +81,41 @@ impl Storage {
     ) -> Result<HttpResponse, FrameworkError> {
         disk_response(disk, path, name, ContentDisposition::Inline).await
     }
+    /// Download a guarded disk path with caller headers and a selected disposition.
+    /// Errors and range handling are the same as [`Self::download`].
+    pub async fn download_with<I, K, V>(
+        disk: &str,
+        path: &str,
+        name: Option<&str>,
+        headers: I,
+        disposition: ContentDisposition,
+    ) -> Result<HttpResponse, FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        disk_response(disk, path, name, disposition)
+            .await
+            .map(|response| file_headers(response, headers))
+    }
+
+    /// Show a guarded disk path with caller headers and a selected disposition.
+    /// Errors and range handling are the same as [`Self::response`].
+    pub async fn response_with<I, K, V>(
+        disk: &str,
+        path: &str,
+        name: Option<&str>,
+        headers: I,
+        disposition: ContentDisposition,
+    ) -> Result<HttpResponse, FrameworkError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        Self::download_with(disk, path, name, headers, disposition).await
+    }
 }
 
 /// The response `download` and `response` share; only the disposition
@@ -102,7 +137,13 @@ async fn disk_response(
 
     let length = meta.content_length();
     let content_type = content_type_from_extension(Path::new(path));
-    let response = disk_body(&disk, disk_name, path, length, content_type).await?;
+    let modified = meta
+        .last_modified()
+        .map(|timestamp| httpdate::fmt_http_date(timestamp.into()));
+    let range = FileRange::current(length, modified.as_deref());
+    let (start, selected) = range.bounds(length);
+    let response = disk_body(&disk, disk_name, path, start, selected, content_type).await?;
+    let response = range.finish(response, length, modified);
 
     let own_name = path.rsplit('/').next().unwrap_or_default();
     let filename = name.unwrap_or(own_name);
@@ -117,6 +158,7 @@ async fn disk_body(
     disk: &Operator,
     disk_name: &str,
     path: &str,
+    start: u64,
     length: u64,
     content_type: String,
 ) -> Result<HttpResponse, FrameworkError> {
@@ -133,7 +175,7 @@ async fn disk_body(
 
     if length <= BUFFERED_BODY_LIMIT {
         let bytes = reader
-            .read(0..length)
+            .read(start..start + length)
             .await
             .map_err(|error| disk_error(disk_name, path, error))?
             .to_bytes();
@@ -144,7 +186,7 @@ async fn disk_body(
         )
     } else {
         let stream = reader
-            .into_bytes_stream(0..length)
+            .into_bytes_stream(start..start + length)
             .await
             .map_err(|error| disk_error(disk_name, path, error))?;
         Ok(HttpResponse::stream_bytes(EndOnError::new(stream))
