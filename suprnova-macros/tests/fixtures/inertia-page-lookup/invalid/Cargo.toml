@@ -1,0 +1,13 @@
+[package]
+name = "inertia-lookup-invalid"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova.workspace = true
+
+# `upper` is not one of the filters, so every `inertia_response!` in the
+# crate fails to compile and names the key.
+[package.metadata.suprnova.inertia]
+page_file = "{dir}/{name|upper}.svelte"

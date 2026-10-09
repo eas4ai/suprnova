@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-compound",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

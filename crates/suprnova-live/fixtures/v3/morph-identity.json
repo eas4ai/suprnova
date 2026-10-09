@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "identity_order": ["live_key", "id", "stable_unkeyed_position"],
+  "controls": ["preserve", "ignore", "replace", "persist", "teleport"],
+  "preflight_failures": ["duplicate_key", "nested_owner_escape", "invalid_teleport_target", "island_root_mismatch", "snapshot_root_mismatch"],
+  "commit_rule": "accepted_snapshot_after_successful_morph",
+  "failure_rule": "fresh_render_without_replay"
+}

@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-std-crate-alias",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

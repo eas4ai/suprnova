@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-anchor-href",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

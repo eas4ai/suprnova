@@ -1,0 +1,10 @@
+{
+  "name": "evil.view-check-undefined-action",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
