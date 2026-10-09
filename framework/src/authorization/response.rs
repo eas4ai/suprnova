@@ -126,9 +126,9 @@ impl Response {
 
     /// Attach (or replace) the machine-readable reason code.
     ///
-    /// Note: `code` is reachable via [`code`](Self::code) on the inspected
-    /// `Response` but does **not** round-trip through
-    /// [`authorize`](Self::authorize) - `FrameworkError` has no code field.
+    /// The code survives [`authorize`](Self::authorize): a denial with a code
+    /// becomes [`FrameworkError::Denial`], and
+    /// [`FrameworkError::code`] reads it back after `?`.
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
         self
@@ -165,8 +165,8 @@ impl Response {
 
     /// The machine-readable reason code, if any.
     ///
-    /// Available on the inspected `Response` only - it does not survive
-    /// [`authorize`](Self::authorize) (`FrameworkError` carries no code).
+    /// [`authorize`](Self::authorize) keeps it in the error it returns, where
+    /// [`FrameworkError::code`] reads it.
     pub fn code(&self) -> Option<&str> {
         self.code.as_deref()
     }
@@ -183,27 +183,31 @@ impl Response {
     /// - Allowed → `Ok(self)` (so the response can be chained, as in Laravel).
     /// - Bare denial (no message / code / status) → `FrameworkError::Unauthorized`
     ///   (403, `"This action is unauthorized."`) - the canonical denial.
-    /// - Rich denial → `FrameworkError::Domain { message, status_code }` carrying
-    ///   the custom message (or the default) and the custom status (or 403).
-    ///
-    /// `code` is **not** represented in the resulting error - it has no field
-    /// on `FrameworkError`. Inspect the `Response` directly if you need it.
+    /// - Denial with a code → `FrameworkError::Denial { message, status_code, code }`
+    ///   carrying the message (or the default), the status (or 403) and the
+    ///   code, as Laravel's `AuthorizationException` keeps the response's
+    ///   code. [`FrameworkError::code`] reads it.
+    /// - Any other rich denial → `FrameworkError::Domain { message, status_code }`
+    ///   carrying the custom message (or the default) and the custom status
+    ///   (or 403).
     pub fn authorize(self) -> Result<Response, FrameworkError> {
         if self.allowed {
-            Ok(self)
-        } else if self.message.is_none() && self.code.is_none() && self.status.is_none() {
-            Err(FrameworkError::Unauthorized)
-        } else {
-            // The constructor, not a struct literal: a policy may pick a
-            // 5xx status, and a 5xx records its frames for the development
-            // error page.
-            Err(FrameworkError::domain(
-                self.message
-                    .clone()
-                    .unwrap_or_else(|| "This action is unauthorized.".to_string()),
-                self.status.unwrap_or(403),
-            ))
+            return Ok(self);
         }
+        if self.message.is_none() && self.code.is_none() && self.status.is_none() {
+            return Err(FrameworkError::Unauthorized);
+        }
+        let message = self
+            .message
+            .unwrap_or_else(|| "This action is unauthorized.".to_string());
+        let status = self.status.unwrap_or(403);
+        // The constructors, not struct literals: a policy may pick a 5xx
+        // status, and a 5xx records its frames for the development error
+        // page.
+        Err(match self.code {
+            Some(code) => FrameworkError::denial(message, status, code),
+            None => FrameworkError::domain(message, status),
+        })
     }
 }
 

@@ -3,3 +3,5 @@
 
 pub mod authorization;
 pub mod handler_authorize;
+/// The Laravel authorization gaps, observed by the `par-laravel-gaps-auth` mechanism.
+pub mod laravel_auth_gaps;

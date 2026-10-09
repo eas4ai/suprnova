@@ -1,9 +1,15 @@
 use std::any::Any;
 use std::future::Future;
+use std::sync::Arc;
+
+use futures::FutureExt;
 
 use super::Response;
+use super::events::GateEvaluated;
 use super::registry::{self, GateUser, global};
 use crate::FrameworkError;
+use crate::auth::{Auth, Authenticatable};
+use crate::events::EventFacade;
 
 /// Authorization gate facade.
 ///
@@ -25,9 +31,24 @@ use crate::FrameworkError;
 /// Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
 /// current-user resolver to a different user. Suprnova's gate takes the user
 /// **explicitly** on every call - `Gate::allows(action, &user, &resource)` -
-/// so "check as a different user" is just passing that user. There is no
-/// implicit resolver to rebind, which makes `forUser` redundant rather than
-/// missing: the explicit API is strictly more general.
+/// so "check as a different user" is just passing that user. The two
+/// checks that resolve the user themselves,
+/// [`inspect_current`](Self::inspect_current) and
+/// [`none_current`](Self::none_current), ask the route's guard, the way
+/// `#[authorize]` does; with the explicit API beside them, `forUser` has
+/// nothing left to do.
+///
+/// # The `GateEvaluated` event
+///
+/// Every check dispatches one [`GateEvaluated`] event per action it
+/// evaluates, after the before-hooks, the gate and the after-hooks ran, as
+/// Laravel's `Gate::raw` does. An async check waits for the listeners. A
+/// synchronous check cannot wait and must not block, so it polls the
+/// dispatch once in place, which completes it when no listener has to wait
+/// on anything, and leaves the rest to a task spawned on the current Tokio
+/// runtime. Outside a Tokio runtime a synchronous check dispatches nothing,
+/// so it never panics there. A listener's error is logged and never changes
+/// the decision.
 pub struct Gate;
 
 impl Gate {
@@ -56,14 +77,6 @@ impl Gate {
         f: impl Fn(Option<&U>, &R) -> Response + Send + Sync + 'static,
     ) {
         global().register_optional_with::<U, R>(action, f);
-    }
-
-    /// Consult a nullable policy while recording the guest authorization decision.
-    pub(crate) fn inspect_guest<R: 'static>(action: &str, resource: &R) -> Option<Response> {
-        let window = crate::render_cache::collector::begin_authorization_decision();
-        let response = global().invoke_guest(action, resource);
-        crate::render_cache::collector::end_authorization_decision(window);
-        response
     }
 
     /// Define a synchronous gate whose closure returns a rich [`Response`]
@@ -221,13 +234,11 @@ impl Gate {
     /// synchronous before-hooks only; an async one, such as the hook
     /// [`register_gate_bridge`](crate::rbac::register_gate_bridge) installs,
     /// answers [`Self::inspect_async`].
+    ///
+    /// Dispatches [`GateEvaluated`] without waiting for its listeners; see
+    /// [the type's notes](Self#the-gateevaluated-event).
     pub fn inspect<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Response {
-        let window = crate::render_cache::collector::begin_authorization_decision();
-        let response = global()
-            .raw::<U, R>(action, user, resource)
-            .unwrap_or_else(registry::default_denial);
-        crate::render_cache::collector::end_authorization_decision(window);
-        response
+        Self::evaluate(action, user, resource).unwrap_or_else(registry::default_denial)
     }
 
     /// Async sibling of [`inspect`](Self::inspect).
@@ -236,7 +247,7 @@ impl Gate {
         user: &U,
         resource: &R,
     ) -> Response {
-        Self::inspect_async_keyed::<U, R>(action, user, resource).await
+        Self::inspect_async_keyed::<U, R>(action, user, resource, None).await
     }
 
     /// [`Self::inspect_async`] for a user held only as a type-erased value,
@@ -249,7 +260,37 @@ impl Gate {
         user: &(dyn Any + Send + Sync),
         resource: &R,
     ) -> Response {
-        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, user, resource).await
+        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, user, resource, None).await
+    }
+
+    /// [`Self::inspect_async`] for a user the check resolved itself, from a
+    /// guard. The user is checked as its concrete type, through
+    /// [`Self::inspect_erased_async`], and the [`GateEvaluated`] event
+    /// carries its identifier.
+    pub(crate) async fn inspect_authenticatable<R: 'static>(
+        action: &str,
+        user: Arc<dyn Authenticatable>,
+        resource: &R,
+    ) -> Response {
+        let id = user.get_auth_identifier();
+        let user: Arc<dyn Any + Send + Sync> = user.into_arc_any();
+        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, &*user, resource, Some(id))
+            .await
+    }
+
+    /// Consult a nullable policy for a guest, as `#[authorize]` and
+    /// [`Self::inspect_current`] do when the route's guard has no user.
+    /// `None` when no gate defined with [`Self::define_optional`] or
+    /// [`Self::define_optional_with`] answers for the action and resource.
+    /// Dispatches a [`GateEvaluated`] event with no user and waits for it.
+    pub(crate) async fn inspect_guest<R: 'static>(action: &str, resource: &R) -> Option<Response> {
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().invoke_guest(action, resource);
+        crate::render_cache::collector::end_authorization_decision(window);
+        if let Some(event) = evaluated_event::<R>(action, || None, None, response.as_ref()) {
+            dispatch_evaluated(event).await;
+        }
+        response
     }
 
     // The evaluation both async inspect forms share, so a concrete and a
@@ -258,14 +299,129 @@ impl Gate {
         action: &str,
         user: &U,
         resource: &R,
+        user_id: Option<String>,
     ) -> Response {
-        let window = crate::render_cache::collector::begin_authorization_decision();
-        let response = global()
-            .raw_async::<U, R>(action, user, resource)
+        Self::evaluate_async(action, user, resource, user_id)
             .await
-            .unwrap_or_else(registry::default_denial);
+            .unwrap_or_else(registry::default_denial)
+    }
+
+    // The evaluation every synchronous form shares: the before-hooks, the
+    // gate and the after-hooks, inside the render cache's decision window,
+    // then the `GateEvaluated` event, dispatched without waiting.
+    fn evaluate<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().raw::<U, R>(action, user, resource);
         crate::render_cache::collector::end_authorization_decision(window);
+        let user_type = || Some(std::any::type_name::<U>());
+        if let Some(event) = evaluated_event::<R>(action, user_type, None, response.as_ref()) {
+            dispatch_evaluated_without_waiting(event);
+        }
         response
+    }
+
+    // The evaluation every async form shares, the sibling of `evaluate`: it
+    // waits for the `GateEvaluated` listeners. `user_id` is the identifier
+    // of a user the check resolved itself, `None` for a user it was given.
+    async fn evaluate_async<U: GateUser + ?Sized, R: 'static>(
+        action: &str,
+        user: &U,
+        resource: &R,
+        user_id: Option<String>,
+    ) -> Option<Response> {
+        let window = crate::render_cache::collector::begin_authorization_decision();
+        let response = global().raw_async::<U, R>(action, user, resource).await;
+        crate::render_cache::collector::end_authorization_decision(window);
+        let user_type = || Some(global().user_type_name(user));
+        if let Some(event) = evaluated_event::<R>(action, user_type, user_id, response.as_ref()) {
+            dispatch_evaluated(event).await;
+        }
+        response
+    }
+
+    /// [`Self::inspect_async`] for the user of the route's guard, the user
+    /// `#[authorize]` checks, as Laravel's `Gate::inspect` resolves the user
+    /// itself.
+    ///
+    /// The route's guard is the one the last
+    /// [`AuthMiddleware`](crate::AuthMiddleware) that passed the request on
+    /// checked, or the default guard when it names none or none ran. The
+    /// user is checked as its concrete type, so the gates, policies and
+    /// hooks registered for that type answer, async ones included, and the
+    /// [`GateEvaluated`] event carries the user's identifier.
+    ///
+    /// With no user signed in, a gate defined with
+    /// [`Self::define_optional`] or [`Self::define_optional_with`] receives
+    /// `None`, and every other ability answers the default denial (see
+    /// [`Self::default_denial_response`]), as Laravel's gate denies a guest a
+    /// callback that does not accept one. A guest is never an error here:
+    /// the answer is a [`Response`], not the 401 `#[authorize]` returns.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{FrameworkError, Gate};
+    /// # struct Post;
+    /// # async fn ex(post: Post) -> Result<(), FrameworkError> {
+    /// let decision = Gate::inspect_current("update", &post).await?;
+    /// if decision.denied() {
+    ///     println!("{}", decision.message().unwrap_or("Not allowed."));
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error the route's guard returns when it cannot resolve the user,
+    /// such as a provider that cannot reach its database. The check does not
+    /// guess an answer for a user it could not resolve.
+    pub async fn inspect_current<R: 'static>(
+        action: &str,
+        resource: &R,
+    ) -> Result<Response, FrameworkError> {
+        let user = Auth::route_user().await?;
+        Ok(Self::inspect_route_user(action, user, resource).await)
+    }
+
+    /// `true` when **none** of `actions` allows the user of the route's
+    /// guard on `resource`: [`Self::none_async`] for the user
+    /// [`Self::inspect_current`] checks, as Laravel's `Gate::none` resolves
+    /// the user itself. Stops at the first action that allows.
+    ///
+    /// A guest is checked as [`Self::inspect_current`] checks one: only a
+    /// gate defined with [`Self::define_optional`] or
+    /// [`Self::define_optional_with`] can allow it. An empty `actions` is
+    /// `true`.
+    ///
+    /// # Errors
+    ///
+    /// The error the route's guard returns when it cannot resolve the user.
+    pub async fn none_current<R: 'static>(
+        actions: &[&str],
+        resource: &R,
+    ) -> Result<bool, FrameworkError> {
+        let user = Auth::route_user().await?;
+        for action in actions {
+            let decision = Self::inspect_route_user(action, user.clone(), resource).await;
+            if decision.allowed() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    // Inspect `action` for the user the route's guard resolved, or for a
+    // guest through the nullable policies, with the default denial when no
+    // nullable policy answers.
+    async fn inspect_route_user<R: 'static>(
+        action: &str,
+        user: Option<Arc<dyn Authenticatable>>,
+        resource: &R,
+    ) -> Response {
+        match user {
+            Some(user) => Self::inspect_authenticatable(action, user, resource).await,
+            None => Self::inspect_guest(action, resource)
+                .await
+                .unwrap_or_else(registry::default_denial),
+        }
     }
 
     /// The raw evaluation result, preserving the *undefined* case as `None`.
@@ -277,23 +433,22 @@ impl Gate {
     /// defined", mirroring Laravel's `Gate::raw`. As in
     /// [`inspect`](Self::inspect), async before-hooks do not run here; use
     /// [`Self::raw_async`] for them.
+    ///
+    /// Dispatches [`GateEvaluated`], with `decision: None` when nothing
+    /// decided, without waiting for its listeners; see
+    /// [the type's notes](Self#the-gateevaluated-event).
     pub fn raw<U: 'static, R: 'static>(action: &str, user: &U, resource: &R) -> Option<Response> {
-        let window = crate::render_cache::collector::begin_authorization_decision();
-        let response = global().raw::<U, R>(action, user, resource);
-        crate::render_cache::collector::end_authorization_decision(window);
-        response
+        Self::evaluate(action, user, resource)
     }
 
-    /// Async sibling of [`raw`](Self::raw).
+    /// Async sibling of [`raw`](Self::raw). Waits for the listeners of the
+    /// [`GateEvaluated`] event it dispatches.
     pub async fn raw_async<U: 'static, R: 'static>(
         action: &str,
         user: &U,
         resource: &R,
     ) -> Option<Response> {
-        let window = crate::render_cache::collector::begin_authorization_decision();
-        let response = global().raw_async::<U, R>(action, user, resource).await;
-        crate::render_cache::collector::end_authorization_decision(window);
-        response
+        Self::evaluate_async(action, user, resource, None).await
     }
 
     /// Register a hook that runs **before** any gate for the user type `U`.
@@ -387,10 +542,40 @@ impl Gate {
     ///     decided.is_none().then(|| user.is_superuser)
     /// });
     /// ```
+    ///
+    /// The hook does not see the resource; register it with
+    /// [`Self::after_with_arguments`] when it needs it.
     pub fn after<U: 'static>(
         f: impl Fn(&U, &str, Option<bool>) -> Option<bool> + Send + Sync + 'static,
     ) {
         global().register_after::<U>(f);
+    }
+
+    /// Register a hook that runs **after** the gate for the user type `U`
+    /// and also receives the resource, as Laravel's after-callbacks receive
+    /// `$arguments`.
+    ///
+    /// It follows the rules of [`Self::after`]: it runs on every check of a
+    /// `U` (in registration order with the hooks `after` registers), it
+    /// receives the running decision as `Option<bool>`, and it can only
+    /// **fill in** an undecided result, never override an allow or a deny.
+    /// It runs only for checks whose resource is an `R`; a check about
+    /// another type skips it. It answers `bool` or nothing, never a
+    /// [`Response`], as Laravel declares its after-callbacks `bool|null`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Gate;
+    /// # struct User { id: u64 }
+    /// # struct Post { author_id: u64 }
+    /// // When no gate decides, an author may act on their own post.
+    /// Gate::after_with_arguments::<User, Post>(|user, _action, decided, post| {
+    ///     decided.is_none().then(|| post.author_id == user.id)
+    /// });
+    /// ```
+    pub fn after_with_arguments<U: 'static, R: 'static>(
+        f: impl Fn(&U, &str, Option<bool>, &R) -> Option<bool> + Send + Sync + 'static,
+    ) {
+        global().register_after_with_arguments::<U, R>(f);
     }
 
     /// Set the process-global default response for a bare `false` denial.
@@ -545,5 +730,55 @@ impl Gate {
             }
         }
         true
+    }
+}
+
+// Build the `GateEvaluated` event of one evaluation, or `None` when nothing
+// would see it. A check is a hot path and most applications listen to no
+// gate event, so the user's type is named and the action copied only when
+// the event would be delivered.
+fn evaluated_event<R: 'static>(
+    action: &str,
+    user_type: impl FnOnce() -> Option<&'static str>,
+    user_id: Option<String>,
+    response: Option<&Response>,
+) -> Option<GateEvaluated> {
+    if !EventFacade::is_observed::<GateEvaluated>() {
+        return None;
+    }
+    Some(GateEvaluated {
+        user_type: user_type(),
+        user_id,
+        action: action.to_owned(),
+        resource_type: std::any::type_name::<R>(),
+        decision: response.map(Response::allowed),
+    })
+}
+
+// Deliver the event of an evaluation and wait for its listeners. A
+// listener's error is logged and never changes the decision: the event
+// reports a check, it does not take part in it.
+async fn dispatch_evaluated(event: GateEvaluated) {
+    if let Err(error) = EventFacade::dispatch(event).await {
+        tracing::warn!(
+            %error,
+            "a GateEvaluated listener failed; the gate decision stands"
+        );
+    }
+}
+
+// Deliver the event of a synchronous evaluation without blocking: poll the
+// dispatch once in place, which completes it when no listener has to wait
+// (a fake records it there, and a deferral scope of the calling task sees
+// it), and hand what is still pending to a task on the current runtime.
+// Outside a Tokio runtime nothing is dispatched: a listener could need the
+// runtime, and the check must not panic.
+fn dispatch_evaluated_without_waiting(event: GateEvaluated) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut pending = Box::pin(dispatch_evaluated(event));
+    if (&mut pending).now_or_never().is_none() {
+        handle.spawn(pending);
     }
 }
