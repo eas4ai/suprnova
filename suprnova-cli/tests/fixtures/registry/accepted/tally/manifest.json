@@ -1,5 +1,0 @@
-{
-  "name": "acme.tally",
-  "files": ["tally.html", "tally.rs"],
-  "register": ["tally::Tally"]
-}
