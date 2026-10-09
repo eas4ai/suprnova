@@ -1195,6 +1195,9 @@ struct PreviousUrlCandidate {
     is_inertia: bool,
     /// The request is a prefetch, fetched for later and maybe never shown.
     is_prefetch: bool,
+    /// Route middleware can mark the request after the session is loaded.
+    /// Keep its shared mark so live validation cannot save state or navigation.
+    is_precognitive: Arc<std::sync::atomic::AtomicBool>,
     /// The request accepts JSON and not HTML.
     wants_json: bool,
     /// The request path, with its query string when it has one.
@@ -1351,8 +1354,11 @@ impl SessionMiddleware {
                 .and_then(serde_json::Value::as_str)
                 .is_some();
 
-        // Age flash data from previous request
-        session.age_flash_data();
+        // Age only this request's copy. A mark set later by route middleware
+        // prevents this copy, including consumed flash, from reaching the store.
+        if !request.is_precognitive() {
+            session.age_flash_data();
+        }
 
         // Per-request bag of cookies handlers want attached. Populated
         // by `push_pending_cookie` (called from `Auth::login_remember`
@@ -1413,7 +1419,7 @@ impl SessionMiddleware {
         // the Inertia middleware records an Inertia visit itself
         // (`InertiaConfig::store_previous_url`). It is what
         // [`Redirect::back`] reads.
-        let mut previous_url = Self::capture_previous_url_candidate(&request);
+        let mut previous_url = Self::capture_previous_url_candidate(&mut request);
         let previous_url_exempt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let host_session_metadata = magnetar_session_metadata(&request);
         let identity_transition: Arc<Mutex<IdentityTransition>> =
@@ -2040,7 +2046,7 @@ impl SessionMiddleware {
 
     /// Reads the facts of `request` that decide, after the handler, whether
     /// its URL becomes `_previous.url`.
-    fn capture_previous_url_candidate(request: &Request) -> PreviousUrlCandidate {
+    fn capture_previous_url_candidate(request: &mut Request) -> PreviousUrlCandidate {
         let is_get = *request.method() == hyper::Method::GET;
         let is_inertia = request.is_inertia();
         let is_prefetch = crate::inertia::InertiaRequestExt::is_prefetch(request);
@@ -2058,6 +2064,7 @@ impl SessionMiddleware {
             is_get,
             is_inertia,
             is_prefetch,
+            is_precognitive: request.precognition_state(),
             wants_json,
             current_url,
             exempt: false,
@@ -2285,6 +2292,7 @@ impl SessionMiddleware {
             is_get,
             is_inertia,
             is_prefetch,
+            is_precognitive,
             wants_json,
             current_url,
             exempt,
@@ -2328,6 +2336,28 @@ impl SessionMiddleware {
                  the session is not stored",
             )));
             return attach_pending_cookies(failure, pending_cookies);
+        }
+
+        // Live validation reads the session, but never commits its private
+        // copy, rotates a stored id, refreshes expiry or records navigation.
+        // Read the shared mark after route middleware has had its turn.
+        if is_precognitive.load(Ordering::Relaxed) {
+            retire_unpersisted_opaque_session(
+                magnetar_session_authority.as_ref(),
+                &pending_opaque_session,
+                "precognitive request does not persist its session",
+            )
+            .await;
+            let mut pending_cookies = std::mem::take(&mut *crate::lock::recover(&pending));
+            if let Some(session) = session.as_ref() {
+                suppress_and_retire_uncommitted_remember(
+                    session,
+                    &self.config,
+                    &mut pending_cookies,
+                )
+                .await;
+            }
+            return attach_pending_cookies(response, pending_cookies);
         }
 
         // Record the current URL as `_previous.url` if this turned out
