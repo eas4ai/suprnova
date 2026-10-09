@@ -152,7 +152,7 @@ pub(crate) struct DebugRequest {
 
 /// Select a production browser request without recording request details or frames.
 pub(crate) fn production_browser<B>(request: &hyper::Request<B>) -> bool {
-    false && !request
+    !request
         .headers()
         .get("x-inertia")
         .is_some_and(|value| crate::inertia::header_is_truthy(value.as_bytes()))

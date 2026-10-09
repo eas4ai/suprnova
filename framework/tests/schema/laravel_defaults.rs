@@ -965,3 +965,26 @@ async fn postgres_nothing_changes_without_the_settings() {
 async fn mysql_nothing_changes_without_the_settings() {
     nothing_changes_without_the_settings(&connect_mysql().await).await;
 }
+
+#[tokio::test]
+async fn revised_default_timestamps_are_nullable() {
+    let conn = connect_sqlite().await;
+    let manager = SchemaManager::new(&conn);
+    Schema::create(&manager, "revised_nullable_stamps", |table| {
+        table.id();
+        table.timestamps();
+    })
+    .await
+    .expect("create timestamps table");
+    let columns = catalog::columns(&conn, "revised_nullable_stamps").await;
+    for name in ["created_at", "updated_at"] {
+        let column = columns
+            .iter()
+            .find(|column| column.name == name)
+            .expect("timestamp column exists");
+        assert!(
+            column.nullable,
+            "PAR-045 timestamps are nullable without metadata: {name}"
+        );
+    }
+}
