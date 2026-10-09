@@ -243,7 +243,8 @@ impl<M: Persistable + 'static> FactoryBuilder<M> {
     }
 
     /// Persists a count or per-record attribute maps over the factory definition.
-    /// Attributes require a model that implements serde serialization and deserialization.
+    /// Each map merges over every definition field, hidden ones included, and the
+    /// model is rebuilt with serde deserialization, so attributes need `Deserialize`.
     /// Inserts run in order and stop on error. Use a transaction for atomicity.
     pub async fn create_many<R: FactoryRecords<M>>(
         self,
@@ -290,7 +291,9 @@ impl<M: Persistable + 'static> FactoryBuilder<M, true> {
 }
 
 /// Supplies a count or attribute maps so one factory can create different records.
-/// A count works for every model. Attribute maps need serde to overlay typed fields.
+/// A count works for every model. Attribute maps merge over
+/// [`Persistable::definition_fields`], the unfiltered field map, so a field the
+/// model hides from its output can still be overridden and is never lost.
 pub trait FactoryRecords<M> {
     /// Builds all records before persistence so invalid attributes insert no rows.
     fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError>;
@@ -302,22 +305,19 @@ impl<M> FactoryRecords<M> for usize {
     }
 }
 
+// Merges over `definition_fields`, never the model's `Serialize` output: a
+// `#[suprnova::model]` serializes through its hidden and visible lists, and a
+// hidden field missing from the map could neither be overridden nor survive
+// the rebuild. `Persistable` is the bound because only `create_many` consumes
+// these records, and it already needs `Persistable` to insert them.
 impl<M> FactoryRecords<M> for Vec<crate::Attrs>
 where
-    M: serde::Serialize + serde::de::DeserializeOwned,
+    M: Persistable + serde::Serialize + serde::de::DeserializeOwned,
 {
     fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
         self.into_iter()
             .map(|attrs| {
-                let model = builder.build_record();
-                let mut value = serde_json::to_value(model).map_err(|error| {
-                    crate::FrameworkError::internal(format!(
-                        "factory definition serialization: {error}"
-                    ))
-                })?;
-                let fields = value.as_object_mut().ok_or_else(|| {
-                    crate::FrameworkError::bad_request("factory attributes require an object model")
-                })?;
+                let mut fields = builder.build_record().definition_fields()?;
                 for (name, value) in attrs.0 {
                     if !fields.contains_key(&name) {
                         return Err(crate::FrameworkError::bad_request(format!(
@@ -326,7 +326,7 @@ where
                     }
                     fields.insert(name, value);
                 }
-                serde_json::from_value(value).map_err(|error| {
+                serde_json::from_value(serde_json::Value::Object(fields)).map_err(|error| {
                     crate::FrameworkError::bad_request(format!("factory attributes: {error}"))
                 })
             })
@@ -336,7 +336,7 @@ where
 
 impl<M, const N: usize> FactoryRecords<M> for [crate::Attrs; N]
 where
-    M: serde::Serialize + serde::de::DeserializeOwned,
+    M: Persistable + serde::Serialize + serde::de::DeserializeOwned,
 {
     fn into_models(self, builder: FactoryBuilder<M>) -> Result<Vec<M>, crate::FrameworkError> {
         Vec::from(self).into_models(builder)

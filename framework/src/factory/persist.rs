@@ -42,6 +42,8 @@ use sea_orm::{
     ActiveModelTrait, ConnectionTrait, EntityTrait, IntoActiveModel, Iterable, ModelTrait,
     PrimaryKeyToColumn,
 };
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 /// A model that can persist itself. The async method consumes `self`
 /// and returns the canonicalized post-insert version (assigned id,
@@ -53,6 +55,36 @@ pub trait Persistable: Sized + Send {
     /// canonicalized post-insert version with assigned id, default
     /// columns resolved, and timestamps populated.
     async fn persist(self) -> Result<Self, FrameworkError>;
+
+    /// Every field of this model, keyed by its serialized name, so a
+    /// factory's per-record attribute sets merge over the whole
+    /// definition and the merged map can be deserialized back into the
+    /// model.
+    ///
+    /// A field hidden from the model's array and JSON output is still a
+    /// column the insert writes, so this map must not apply the hidden or
+    /// visible lists. The default serializes the model, which is the
+    /// whole row for a plain SeaORM model. The `#[suprnova::model]` macro
+    /// overrides it with the unfiltered attributes, because that model's
+    /// `Serialize` honours its hidden and visible lists.
+    ///
+    /// The `Self: Serialize` bound sits on the method, not the trait, so
+    /// a custom `Persistable` that is not serializable still compiles; it
+    /// only cannot take attribute sets in `create_many`.
+    fn definition_fields(&self) -> Result<Map<String, Value>, FrameworkError>
+    where
+        Self: Serialize,
+    {
+        let value = serde_json::to_value(self).map_err(|error| {
+            FrameworkError::internal(format!("factory definition serialization: {error}"))
+        })?;
+        match value {
+            Value::Object(fields) => Ok(fields),
+            _ => Err(FrameworkError::bad_request(
+                "factory attributes require an object model",
+            )),
+        }
+    }
 }
 
 /// SeaORM-backed persist against a specific connection. Useful when a

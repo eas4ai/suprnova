@@ -1614,6 +1614,25 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 // application's rows reach.
                 <Self as ::suprnova::eloquent::Model>::__insert_built(self, #auto_increment).await
             }
+
+            // A factory's attribute sets merge over this map. The model's
+            // `Serialize` applies the hidden and visible lists, so the
+            // default would drop a hidden column the insert still needs.
+            fn definition_fields(
+                &self,
+            ) -> ::core::result::Result<
+                ::suprnova::serde_json::Map<::std::string::String, ::suprnova::serde_json::Value>,
+                ::suprnova::FrameworkError,
+            > {
+                match <Self as ::suprnova::eloquent::Model>::__attributes_to_value(self)? {
+                    ::suprnova::serde_json::Value::Object(fields) => {
+                        ::core::result::Result::Ok(fields)
+                    }
+                    _ => ::core::result::Result::Err(::suprnova::FrameworkError::internal(
+                        "factory definition: the model's attributes are not an object",
+                    )),
+                }
+            }
         }
 
         impl ::suprnova::eloquent::ReplicateExt for #struct_ident {

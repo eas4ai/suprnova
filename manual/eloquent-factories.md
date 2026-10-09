@@ -339,6 +339,9 @@ attributes then win on overlap. You keep definition fields that you omit.
 Attribute lists require `M: serde::Serialize + serde::de::DeserializeOwned`.
 You name serialized fields; an unknown field or a value of the wrong type
 returns an error before any record is inserted. An empty list creates no rows.
+A field in your model's `hidden` list still takes an attribute and keeps its
+definition value, because the merge reads `Persistable::definition_fields`,
+every field of the model, rather than its filtered output.
 `FactoryRecords<M>` accepts `usize`, `Vec<Attrs>` and `[Attrs; N]`.
 You pass the same records to `create_many_quietly(records)` to mute events.
 
