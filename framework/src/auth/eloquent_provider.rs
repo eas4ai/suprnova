@@ -1,0 +1,438 @@
+//! Model-backed user provider - Laravel's `EloquentUserProvider`.
+//!
+//! Resolves users through a typed [`Model`] that
+//! also implements [`Authenticatable`]. The typed half of the
+//! transparency lever: an app whose `User` is a `#[suprnova::model]`
+//! registers `EloquentUserProvider::<User>::new()` and needs no
+//! hand-written [`UserProvider`].
+//!
+//! ```rust,ignore
+//! // In bootstrap.rs (User: Model + Authenticatable):
+//! Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))?;
+//! ```
+//!
+//! Shares the [`DatabaseUserProvider`](super::database_provider::DatabaseUserProvider)
+//! security posture: `retrieve_by_credentials` filters only on the
+//! configured credential-column allowlist, never on arbitrary keys in
+//! the credential map.
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use sea_orm::{EntityTrait, FromQueryResult, IntoActiveModel, PrimaryKeyTrait};
+use serde::Serialize;
+use serde_json::Value;
+
+use super::authenticatable::Authenticatable;
+use super::must_verify_email::{AuthFlowUser, CanResetPassword, MustVerifyEmail};
+use super::provider::UserProvider;
+use crate::eloquent::{EagerLoadDispatch, Model};
+use crate::error::FrameworkError;
+use crate::hashing;
+
+/// The default id binder: numeric ids bind as integers (matching integer
+/// primary keys), everything else binds as a string. See
+/// [`DatabaseUserProvider::with_id_parser`](super::database_provider::DatabaseUserProvider::with_id_parser)
+/// for the zero-padded-string-PK caveat.
+///
+/// An id above `i64::MAX` binds as the `u64` it is: Laravel's
+/// `BIGINT UNSIGNED` `users.id` reaches it on MySQL, and as text MySQL did
+/// not match it while Postgres refused the comparison. On Postgres and
+/// SQLite no row holds such an id, so the lookup finds no user.
+fn default_id_parser(id: &str) -> Value {
+    if let Ok(n) = id.parse::<i64>() {
+        return Value::from(n);
+    }
+    match id.parse::<u64>() {
+        Ok(n) => Value::from(n),
+        Err(_) => Value::from(id),
+    }
+}
+
+/// A [`UserProvider`] that resolves users from a typed model `M`.
+///
+/// `M` must be both a [`Model`] (for querying)
+/// and [`Authenticatable`] (for the id / password contract).
+pub struct EloquentUserProvider<M> {
+    /// The lookup column for `retrieve_by_id`. `None` uses the model's
+    /// primary key.
+    identifier_column: Option<String>,
+    /// The credential-lookup allowlist (default `["email"]`).
+    credential_columns: Vec<String>,
+    id_parser: fn(&str) -> Value,
+    // `fn() -> M` so the marker is Send + Sync + covariant regardless of
+    // M, and does not imply ownership of an M.
+    _marker: PhantomData<fn() -> M>,
+}
+
+impl<M> EloquentUserProvider<M> {
+    /// A provider for model `M`, looking up by primary key for ids and by
+    /// `email` for credentials.
+    pub fn new() -> Self {
+        Self {
+            identifier_column: None,
+            credential_columns: vec!["email".to_string()],
+            id_parser: default_id_parser,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Override the `retrieve_by_id` lookup column (defaults to the model's
+    /// primary key).
+    pub fn identifier_column(mut self, column: impl Into<String>) -> Self {
+        self.identifier_column = Some(column.into());
+        self
+    }
+
+    /// Set the credential-lookup allowlist (default `["email"]`). Only
+    /// these columns can become `WHERE` predicates in
+    /// `retrieve_by_credentials`.
+    pub fn credential_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.credential_columns = columns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Override how a string id is bound into the SQL lookup.
+    pub fn with_id_parser(mut self, parser: fn(&str) -> Value) -> Self {
+        self.id_parser = parser;
+        self
+    }
+}
+
+impl<M> Default for EloquentUserProvider<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> EloquentUserProvider<M>
+where
+    M: Model + Authenticatable + From<<M::Entity as EntityTrait>::Model> + EagerLoadDispatch,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + FromQueryResult
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    /// Load the typed model `M` by id, using the same lookup column and
+    /// id-binding as [`retrieve_by_id`](UserProvider::retrieve_by_id). Shared
+    /// by the auth-flow methods that need the concrete `M` (not a trait
+    /// object) so they can read [`MustVerifyEmail`] fields and `save()`.
+    async fn find_by_identifier(&self, id: &str) -> Result<Option<M>, FrameworkError> {
+        let column = self
+            .identifier_column
+            .clone()
+            .unwrap_or_else(|| M::primary_key_name().to_string());
+        M::query()
+            .filter(column, (self.id_parser)(id))
+            .first()
+            .await
+    }
+}
+
+#[async_trait]
+impl<M> UserProvider for EloquentUserProvider<M>
+where
+    // The Model trait's where-clause does not auto-propagate to an
+    // `M: Model` bound, and `Builder::first` adds `EagerLoadDispatch` +
+    // `FromQueryResult`. Restated here to match `Builder`'s terminal
+    // impl block (`Self` → `M`).
+    M: Model
+        + Authenticatable
+        + MustVerifyEmail
+        + CanResetPassword
+        + From<<M::Entity as EntityTrait>::Model>
+        + EagerLoadDispatch,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + FromQueryResult
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let user = self.find_by_identifier(id).await?;
+        Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
+    }
+
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let object = match credentials.as_object() {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+
+        let mut query = M::query();
+        let mut matched_any = false;
+        for column in &self.credential_columns {
+            // The password is verified separately and never used as a lookup
+            // filter.
+            if column == "password" {
+                continue;
+            }
+            if let Some(value) = object.get(column) {
+                query = query.filter(column.clone(), value.clone());
+                matched_any = true;
+            }
+        }
+
+        if !matched_any {
+            return Ok(None);
+        }
+
+        let user = query.first().await?;
+        Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
+    }
+
+    async fn validate_credentials(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+    ) -> Result<bool, FrameworkError> {
+        let password = credentials.get("password").and_then(|v| v.as_str());
+        match (password, user.get_auth_password()) {
+            (Some(plaintext), Some(hash)) => {
+                let valid = hashing::verify_async(plaintext, hash).await?;
+                // While the application shares its database with Laravel,
+                // a valid sign-in rewrites a hash Laravel's hasher would
+                // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
+                // as Laravel itself rehashes on login, keeping a stored
+                // bcrypt cost above the configured one. If the rewrite
+                // cannot be minted or stored, the sign-in fails with that
+                // error: signing in on a hash Laravel refuses would leave a
+                // user Laravel cannot sign in (LDB-004). The stored hash is
+                // left as it was, and the next sign-in tries again.
+                if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
+                    let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
+                        Ok(rehashed) => {
+                            self.set_password(&user.get_auth_identifier(), &rehashed)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = rewritten {
+                        tracing::warn!(
+                            error = %error,
+                            "the password hash could not be rewritten for Laravel after a \
+                             valid password; the sign-in fails"
+                        );
+                        return Err(error);
+                    }
+                }
+                Ok(valid)
+            }
+            // A password was supplied but the matched account is
+            // passwordless. Returning `Ok(false)` here with no hash work
+            // would fingerprint "account exists but is passwordless": the
+            // unknown-identifier and wrong-password paths both run a
+            // fixed-cost verify (the latter the real one, the former via
+            // `dummy_verify`), while this branch would short-circuit. Run
+            // the same dummy verify so all three paths cost the same.
+            (Some(_), None) => {
+                self.dummy_verify().await?;
+                Ok(false)
+            }
+            // No password supplied at all - nothing to equalise against a
+            // real verify, so no dummy work is warranted.
+            (None, _) => Ok(false),
+        }
+    }
+
+    async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = M::query().filter("email", email).first().await?;
+        // This is the lookup BY email: the caller already supplied the target
+        // address, so echo the queried `email` back into the carrier - it IS
+        // the verify/reset target the user typed.
+        Ok(user.map(|u| AuthFlowUser {
+            id: u.get_auth_identifier(),
+            email: email.to_string(),
+            name: u.name().map(str::to_string),
+        }))
+    }
+
+    fn supports_password_reset(&self) -> bool {
+        true
+    }
+
+    async fn retrieve_verified_user_for_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = M::query().filter("email", email).first().await?;
+        Ok(user
+            .filter(MustVerifyEmail::is_email_verified)
+            .map(|user| AuthFlowUser {
+                id: user.get_auth_identifier(),
+                email: user.email_for_reset().to_owned(),
+                name: user.name().map(str::to_owned),
+            }))
+    }
+
+    async fn flow_user_by_id(&self, id: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = self.find_by_identifier(id).await?;
+        // This path exists only to address the password-changed mail in the
+        // reset flow, so source the address from `email_for_reset()` (the
+        // `CanResetPassword` contract) rather than the verification email.
+        Ok(user.map(|u| AuthFlowUser {
+            id: u.get_auth_identifier(),
+            email: u.email_for_reset().to_string(),
+            name: u.name().map(str::to_string),
+        }))
+    }
+
+    async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
+        // The `MustVerifyEmail` address, the one `send_link` mails, not the
+        // reset address `flow_user_by_id` reports.
+        Ok(self
+            .find_by_identifier(id)
+            .await?
+            .map(|user| MustVerifyEmail::email(&user).to_owned()))
+    }
+
+    async fn mark_email_verified(&self, id: &str) -> Result<(), FrameworkError> {
+        // Absent id → no-op.
+        if let Some(user) = self.find_by_identifier(id).await? {
+            write_changed_columns(user, |user| {
+                user.set_email_verified_at(Some(crate::clock::now()));
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn mark_email_verified_for(&self, id: &str, email: &str) -> Result<bool, FrameworkError> {
+        let column = self
+            .identifier_column
+            .clone()
+            .unwrap_or_else(|| M::primary_key_name().to_string());
+        let id = (self.id_parser)(id);
+        let email = email.to_owned();
+        // One transaction, so the reread and the write see one row state; an
+        // ambient one already gives that, and `DB::transaction` refuses to
+        // nest.
+        if crate::database::after_commit::in_transaction() {
+            return mark_verified_while_address_is::<M>(column, id, email).await;
+        }
+        crate::database::DB::transaction(move |_transaction| {
+            Box::pin(mark_verified_while_address_is::<M>(column, id, email))
+        })
+        .await
+    }
+
+    async fn set_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
+        // Absent id → no-op. Only the password column is written: the
+        // user's `remember_token`, which a Laravel application on the same
+        // database owns, is left as it was.
+        if let Some(user) = self.find_by_identifier(id).await? {
+            // `hashed` arrives ALREADY HASHED - store it verbatim: the write
+            // bypasses mutators and fillable/guarded alike.
+            write_changed_columns(user, |user| user.set_password_hash(hashed)).await?;
+        }
+        Ok(())
+    }
+
+    async fn is_email_verified(&self, id: &str) -> Result<bool, FrameworkError> {
+        Ok(self
+            .find_by_identifier(id)
+            .await?
+            .map(|u| u.is_email_verified())
+            .unwrap_or(false))
+    }
+}
+
+/// Stamps the verification of the user whose `column` holds `id`, only while
+/// its `MustVerifyEmail` address is still `email`. Runs inside a transaction.
+///
+/// The user is reread with `FOR UPDATE`, so on Postgres and MySQL an address
+/// change waits for this transaction or is already visible to it, and the
+/// stamp never lands on an address the link was not mailed to. SQLite has no
+/// row locks; its transaction refuses a write over a change committed after
+/// the reread, which fails the verification instead.
+async fn mark_verified_while_address_is<M>(
+    column: String,
+    id: Value,
+    email: String,
+) -> Result<bool, FrameworkError>
+where
+    M: Model + MustVerifyEmail + From<<M::Entity as EntityTrait>::Model> + EagerLoadDispatch,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + FromQueryResult
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(user) = M::query()
+        .filter(column, id)
+        .lock_for_update()
+        .first()
+        .await?
+    else {
+        return Ok(false);
+    };
+    if MustVerifyEmail::email(&user) != email {
+        return Ok(false);
+    }
+    write_changed_columns(user, |user| {
+        user.set_email_verified_at(Some(crate::clock::now()));
+    })
+    .await?;
+    Ok(true)
+}
+
+/// Persist the columns `change` alters on a loaded `user`, and no others.
+///
+/// The verification and password flows each own one column. Saving the
+/// whole loaded row would write every other column back as it was read, so
+/// a flow racing another on the same account could undo it: email
+/// verification restoring a password hash that a concurrent reset just
+/// replaced, or a reset clearing a verification made meanwhile. Token
+/// admission does not serialize writes to one user, so the write itself
+/// must be narrow.
+///
+/// The value is written exactly as `change` sets it - a finished password
+/// hash must not pass through a hashing mutator again - and whatever the
+/// model's serde attributes say; see
+/// [`crate::eloquent::model::save_changed_columns`]. The model lifecycle
+/// events still fire for observers and audit.
+async fn write_changed_columns<M>(
+    user: M,
+    change: impl FnOnce(&mut M),
+) -> Result<(), FrameworkError>
+where
+    // `Model`'s where-clause does not propagate to an `M: Model` bound.
+    M: Model,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let mut changed = user.clone();
+    change(&mut changed);
+    crate::eloquent::model::save_changed_columns(&user, changed).await?;
+    Ok(())
+}
