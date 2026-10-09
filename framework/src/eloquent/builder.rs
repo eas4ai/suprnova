@@ -59,7 +59,11 @@ use chrono::{NaiveDate, NaiveTime};
 use sea_orm::{DbBackend, FromQueryResult, Statement, Value as SeaValue};
 
 use crate::database::ColumnValue;
+use crate::database::clauses::{Condition, condition_tables, render_condition, validate_condition};
 use crate::database::column_value::{read_aggregate, unless_null};
+use crate::database::expression::{
+    QueryExpression, RawExpression, UpdateAttrs, UpdateValue, random_order,
+};
 use serde_json::Value;
 
 use crate::database::clauses::{
@@ -102,6 +106,14 @@ pub trait IntoColumn {
     /// the typed-enum impl materialises a new string from a
     /// `&'static str` accessor.
     fn col_name(self) -> String;
+
+    /// Preserve expression identity where a clause accepts SQL or a scalar subquery.
+    fn into_expression(self) -> QueryExpression
+    where
+        Self: Sized,
+    {
+        QueryExpression::Column(self.col_name())
+    }
 }
 
 impl IntoColumn for &str {
@@ -119,6 +131,23 @@ impl IntoColumn for String {
 impl IntoColumn for &String {
     fn col_name(self) -> String {
         self.clone()
+    }
+}
+
+impl IntoColumn for RawExpression {
+    fn col_name(self) -> String {
+        self.0
+    }
+    fn into_expression(self) -> QueryExpression {
+        self.into()
+    }
+}
+impl IntoColumn for DbTableBuilder {
+    fn col_name(self) -> String {
+        "(scalar subquery)".into()
+    }
+    fn into_expression(self) -> QueryExpression {
+        self.into()
     }
 }
 
@@ -162,6 +191,7 @@ impl Direction {
 /// the renderer walks them to emit per-backend SQL.
 #[derive(Debug, Clone)]
 pub(crate) enum WhereTerm {
+    Expression(Condition),
     Eq(String, Value),
     Op(String, String, Value),
     In(String, Vec<Value>),
@@ -328,7 +358,8 @@ pub(crate) enum DatePart {
 pub(crate) enum OrderTerm {
     Col(String, Direction),
     Raw(String),
-    Random,
+    Random(Option<u64>),
+    BoundRaw(String, Vec<SeaValue>),
     /// `ORDER BY CASE WHEN col = ? THEN 0 ... ELSE <len> END` from
     /// [`Builder::in_order_of`]. The values are bound, not inlined, so
     /// the sequence can come from request data; the column is an
@@ -532,7 +563,9 @@ pub struct Builder<M> {
     pub(crate) orders: Vec<OrderTerm>,
     pub(crate) select_cols: Option<Vec<String>>,
     pub(crate) select_raw: Option<String>,
-    pub(crate) group_by: Vec<String>,
+    select_bindings: Vec<SeaValue>,
+    maximum_expression: Option<QueryExpression>,
+    pub(crate) group_by: Vec<QueryExpression>,
     pub(crate) having_terms: Vec<WhereTerm>,
     pub(crate) limit: Option<u64>,
     pub(crate) offset: Option<u64>,
@@ -641,6 +674,8 @@ impl<M> Clone for Builder<M> {
             orders: self.orders.clone(),
             select_cols: self.select_cols.clone(),
             select_raw: self.select_raw.clone(),
+            select_bindings: self.select_bindings.clone(),
+            maximum_expression: self.maximum_expression.clone(),
             group_by: self.group_by.clone(),
             having_terms: self.having_terms.clone(),
             limit: self.limit,
@@ -920,6 +955,7 @@ pub(crate) fn validate_raw_placeholders(
 pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
     use crate::database::{validate_identifier, validate_sql_operator};
     match term {
+        WhereTerm::Expression(condition) => validate_condition(condition)?,
         WhereTerm::Eq(c, _)
         | WhereTerm::In(c, _)
         | WhereTerm::NotIn(c, _)
@@ -1025,6 +1061,7 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
 /// SQL may read a table none of these name; see [`ReadSet`].
 fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
     match term {
+        WhereTerm::Expression(condition) => condition_tables(condition, out),
         WhereTerm::InQuery(_, query, _) | WhereTerm::ExistsQuery(query, _) => {
             query.collect_tables(out);
         }
@@ -1116,11 +1153,17 @@ impl<M> Builder<M> {
                 validate_select_column(c)?;
             }
         }
+        if let Some(raw) = &self.select_raw {
+            validate_raw_placeholders(raw, self.select_bindings.len())?;
+        }
+        if let Some(column) = &self.maximum_expression {
+            column.validate()?;
+        }
         for join in &self.joins {
             validate_join(join)?;
         }
         for c in &self.group_by {
-            validate_identifier(c)?;
+            c.validate()?;
         }
         for term in self
             .where_terms
@@ -1138,7 +1181,10 @@ impl<M> Builder<M> {
                 OrderTerm::InOrderOf(c, _) => {
                     validate_identifier(c)?;
                 }
-                OrderTerm::Raw(_) | OrderTerm::Random => {
+                OrderTerm::BoundRaw(sql, bindings) => {
+                    validate_raw_placeholders(sql, bindings.len())?
+                }
+                OrderTerm::Raw(_) | OrderTerm::Random(_) => {
                     // Explicit escape hatch / framework literal.
                 }
             }
@@ -1159,6 +1205,8 @@ impl<M> Builder<M> {
             orders: Vec::new(),
             select_cols: None,
             select_raw: None,
+            select_bindings: Vec::new(),
+            maximum_expression: None,
             group_by: Vec::new(),
             having_terms: Vec::new(),
             limit: None,
@@ -1617,8 +1665,16 @@ impl<M> Builder<M> {
             range.start().clone().into_val(),
             range.end().clone().into_val(),
         );
-        self.where_terms
-            .push(WhereTerm::Between(col.col_name(), a, b));
+        let term = match col.into_expression() {
+            QueryExpression::Column(column) => WhereTerm::Between(column, a, b),
+            column => WhereTerm::Expression(Condition::Between {
+                column,
+                low: json_value_to_sea_value(&a),
+                high: json_value_to_sea_value(&b),
+                negated: false,
+            }),
+        };
+        self.where_terms.push(term);
         self
     }
 
@@ -1643,8 +1699,16 @@ impl<M> Builder<M> {
             range.start().clone().into_val(),
             range.end().clone().into_val(),
         );
-        self.where_terms
-            .push(WhereTerm::NotBetween(col.col_name(), a, b));
+        let term = match col.into_expression() {
+            QueryExpression::Column(column) => WhereTerm::NotBetween(column, a, b),
+            column => WhereTerm::Expression(Condition::Between {
+                column,
+                low: json_value_to_sea_value(&a),
+                high: json_value_to_sea_value(&b),
+                negated: true,
+            }),
+        };
+        self.where_terms.push(term);
         self
     }
 
@@ -2440,9 +2504,15 @@ impl<M> Builder<M> {
                 .orders
                 .iter()
                 .chain(&self.union_head.orders)
-                .any(|order| matches!(order, OrderTerm::Raw(_)))
+                .any(|order| matches!(order, OrderTerm::Raw(_) | OrderTerm::BoundRaw(_, _)))
         {
             out.raw_fragment = true;
+        }
+        for column in &self.group_by {
+            column.collect_tables(out);
+        }
+        if let Some(column) = &self.maximum_expression {
+            column.collect_tables(out);
         }
         for join in &self.joins {
             join_tables(join, out);
@@ -2523,10 +2593,11 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Order the rows randomly - useful for sampling. Postgres and
-    /// SQLite order by `RANDOM()`, MySQL by `RAND()`.
-    pub fn in_random_order(mut self) -> Self {
-        self.orders.push(OrderTerm::Random);
+    /// Randomize rows with an optional seed for repeatable sampling.
+    /// MySQL uses RAND(seed), and Postgres sets its seed before random().
+    /// SQLite accepts your seed but RANDOM() does not support seeded ordering.
+    pub fn in_random_order(mut self, seed: impl Into<Option<u64>>) -> Self {
+        self.orders.push(OrderTerm::Random(seed.into()));
         self
     }
 
@@ -2570,25 +2641,48 @@ impl<M> Builder<M> {
 
     /// `GROUP BY col` - append to the GROUP BY list.
     pub fn group_by(mut self, col: impl IntoColumn) -> Self {
-        self.group_by.push(col.col_name());
+        self.group_by.push(col.into_expression());
         self
     }
 
     /// `HAVING col = val` - equality filter on a grouped result.
-    pub fn having(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
-        self.having_terms
-            .push(WhereTerm::Eq(col.col_name(), val.into_val()));
+    pub fn having(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+        self.having_op(col, "=", val)
+    }
+
+    /// Compare an aggregate expression while binding its comparison value.
+    pub fn having_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
+        let value = val.into_val();
+        let term = match col.into_expression() {
+            QueryExpression::Column(column) => WhereTerm::Op(column, op.into(), value),
+            column => WhereTerm::Expression(Condition::ExpressionCompare {
+                column,
+                op: op.into(),
+                value: json_value_to_sea_value(&value),
+            }),
+        };
+        self.having_terms.push(term);
         self
     }
 
-    /// `HAVING col <op> val` - arbitrary-operator filter on a grouped
-    /// result.
-    pub fn having_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
-        self.having_terms.push(WhereTerm::Op(
-            col.col_name(),
-            op.to_string(),
-            val.into_val(),
-        ));
+    /// Bind data in a trusted projection instead of interpolating values.
+    pub fn select_raw_with_bindings(
+        mut self,
+        sql: impl Into<String>,
+        bindings: Vec<SeaValue>,
+    ) -> Self {
+        self.select_raw = Some(sql.into());
+        self.select_bindings = bindings;
+        self
+    }
+
+    /// Bind data in a trusted ordering expression.
+    pub fn order_by_raw_with_bindings(
+        mut self,
+        sql: impl Into<String>,
+        bindings: Vec<SeaValue>,
+    ) -> Self {
+        self.orders.push(OrderTerm::BoundRaw(sql.into(), bindings));
         self
     }
 
@@ -2652,6 +2746,7 @@ impl<M> Builder<M> {
     /// Hardcode the expression or build it from a known allowlist.
     pub fn select_raw(mut self, raw: impl Into<String>) -> Self {
         self.select_raw = Some(raw.into());
+        self.select_bindings.clear();
         self
     }
 
@@ -3479,6 +3574,7 @@ pub(crate) fn render_subquery_term(
         }
     };
     Ok(match term {
+        WhereTerm::Expression(condition) => render_condition(condition, backend, values, n)?,
         WhereTerm::Eq(col, v) => {
             let sql = q(col);
             let column = Compared {
@@ -3772,6 +3868,7 @@ impl<M> Builder<M> {
         joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
         Ok(match term {
+            WhereTerm::Expression(condition) => render_condition(condition, backend, values, n)?,
             WhereTerm::Eq(col, v) => {
                 let column = joined_column(backend, joined, col);
                 render_comparison(
@@ -4010,8 +4107,13 @@ impl<M> Builder<M> {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
-                OrderTerm::Random if backend == DbBackend::MySql => "RAND()".to_string(),
-                OrderTerm::Random => "RANDOM()".to_string(),
+                OrderTerm::Random(seed) => random_order(backend, *seed),
+                OrderTerm::BoundRaw(sql, bindings) => {
+                    let sql = rewrite_raw_placeholders(backend, sql, bindings, *n)?;
+                    *n += bindings.len();
+                    values.extend(bindings.clone());
+                    sql
+                }
                 OrderTerm::InOrderOf(col, vs) => {
                     let mut cases = String::new();
                     for (idx, v) in vs.iter().enumerate() {
@@ -4237,7 +4339,14 @@ impl<M> Builder<M> {
 
         if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&this.group_by.join(", "));
+            sql.push_str(
+                &this
+                    .group_by
+                    .iter()
+                    .map(|column| column.render(backend, values, n))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", "),
+            );
         }
 
         sql.push_str(&this.render_having(backend, values, n, joined)?);
@@ -4367,8 +4476,20 @@ impl<M> Builder<M> {
         if self.distinct {
             sql.push_str("DISTINCT ");
         }
-        if let Some(raw) = &self.select_raw {
-            sql.push_str(raw);
+        if let Some(column) = &self.maximum_expression {
+            sql.push_str(&format!(
+                "MAX({}) AS {AGGREGATE_RESULT_ALIAS}",
+                column.render(backend, values, n)?
+            ));
+        } else if let Some(raw) = &self.select_raw {
+            sql.push_str(&rewrite_raw_placeholders(
+                backend,
+                raw,
+                &self.select_bindings,
+                *n,
+            )?);
+            *n += self.select_bindings.len();
+            values.extend(self.select_bindings.clone());
         } else if let Some(cols) = &self.select_cols {
             sql.push_str(&cols.join(", "));
         } else if column_expr == "*" && joined.is_some() {
@@ -4400,7 +4521,14 @@ impl<M> Builder<M> {
 
         if !self.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
-            sql.push_str(&self.group_by.join(", "));
+            sql.push_str(
+                &self
+                    .group_by
+                    .iter()
+                    .map(|column| column.render(backend, values, n))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", "),
+            );
         }
 
         sql.push_str(&self.render_having(backend, values, n, joined)?);
@@ -4874,9 +5002,9 @@ where
     }
 
     /// Laravel-shape `latest()` - `ORDER BY <col> DESC`. Defaults to
-    /// `"created_at"`; pass an explicit column to override.
+    /// your model's declared creation timestamp; use the `_by` form to override.
     pub fn latest(self) -> Self {
-        self.order_by("created_at", Direction::Desc)
+        self.order_by(M::CREATED_AT_COLUMN, Direction::Desc)
     }
 
     /// Like [`Self::latest`] but uses the named column.
@@ -4885,9 +5013,9 @@ where
     }
 
     /// Laravel-shape `oldest()` - `ORDER BY <col> ASC`. Defaults to
-    /// `"created_at"`; pass an explicit column to override.
+    /// your model's declared creation timestamp; use the `_by` form to override.
     pub fn oldest(self) -> Self {
-        self.order_by("created_at", Direction::Asc)
+        self.order_by(M::CREATED_AT_COLUMN, Direction::Asc)
     }
 
     /// Like [`Self::oldest`] but uses the named column.
@@ -5454,9 +5582,19 @@ where
     /// `FrameworkError::ModelNotFound` (HTTP 404) if no row matches.
     /// Event-dispatch contract identical to [`Self::first`].
     pub async fn first_or_fail(self) -> Result<M, FrameworkError> {
+        self.first_or_fail_with(format!(
+            "No rows found for model {}",
+            std::any::type_name::<M>()
+        ))
+        .await
+    }
+
+    /// Return your message with a 404 when the model query matches no row.
+    pub async fn first_or_fail_with(self, message: impl Into<String>) -> Result<M, FrameworkError> {
+        let message = message.into();
         self.first()
             .await?
-            .ok_or_else(|| FrameworkError::not_found("no rows matched"))
+            .ok_or_else(|| FrameworkError::not_found(message))
     }
 
     /// Laravel-shape `sole()` - succeed only when the query matches
@@ -6424,10 +6562,32 @@ where
         self,
         col: impl IntoColumn,
     ) -> Result<Option<T>, FrameworkError> {
-        let col_name = col.col_name();
-        crate::database::validate_identifier(&col_name)?;
-        self.aggregate_optional::<T>(&format!("MAX({col_name})"))
-            .await
+        let expression = col.into_expression();
+        expression.validate()?;
+        if let QueryExpression::Column(column) = &expression {
+            return self
+                .aggregate_optional::<T>(&format!("MAX({column})"))
+                .await;
+        }
+        self.observe_reads();
+        let mut reads = ReadSet::default();
+        expression.collect_tables(&mut reads);
+        reads.observe();
+        let exec = self.resolve_read_executor().await?;
+        let backend = exec.backend();
+        let mut query = self;
+        query.maximum_expression = Some(expression);
+        query.select_raw = None;
+        query.select_bindings.clear();
+        query.orders.clear();
+        let (sql, values) = query.render_select_for(backend, M::TABLE, "*")?;
+        let row = exec
+            .query_one(Statement::from_sql_and_values(backend, sql, values))
+            .await?;
+        match row {
+            Some(row) => Ok(unless_null::<T>(&row, AGGREGATE_RESULT_ALIAS)?),
+            None => Ok(None),
+        }
     }
 
     /// Fetch a single value from the first matching row: `None` when no
@@ -6704,7 +6864,8 @@ where
     /// through [`crate::database::validate_identifier`]. Non-null values are
     /// bound as parameters; explicit nulls are emitted as the constant SQL
     /// literal `NULL` so PostgreSQL can infer the target column type.
-    pub async fn update_all(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    pub async fn update_all(self, attrs: impl Into<UpdateAttrs>) -> Result<u64, FrameworkError> {
+        let attrs = attrs.into();
         if attrs.is_empty() {
             return Ok(0);
         }
@@ -6724,7 +6885,8 @@ where
             connection_override.as_deref(),
             move |exec| async move {
                 let backend = exec.backend();
-                refuse_rounded_writes(&exec, M::TABLE, M::bind_column, attrs.iter()).await?;
+                refuse_rounded_writes(&exec, M::TABLE, M::bind_column, attrs.bound().iter())
+                    .await?;
 
                 let mut values: Vec<SeaValue> = Vec::new();
                 let mut n: usize = 0;
@@ -6733,14 +6895,17 @@ where
                 let set_parts: Vec<String> = attrs
                     .iter()
                     .map(|(col, v)| {
-                        let expression = write_value_expression(
-                            backend,
-                            col,
-                            v,
-                            &mut values,
-                            &mut n,
-                            M::bind_column,
-                        )?;
+                        let expression = match v {
+                            UpdateValue::Bound(value) => write_value_expression(
+                                backend,
+                                col,
+                                value,
+                                &mut values,
+                                &mut n,
+                                M::bind_column,
+                            )?,
+                            UpdateValue::Raw(raw) => raw.0.clone(),
+                        };
                         let column = if this.joins.is_empty() {
                             col.to_owned()
                         } else {
@@ -6765,7 +6930,7 @@ where
     }
 
     /// Update rows selected by this builder, including its joins and scopes.
-    pub async fn update(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    pub async fn update(self, attrs: impl Into<UpdateAttrs>) -> Result<u64, FrameworkError> {
         self.update_all(attrs).await
     }
 

@@ -316,9 +316,16 @@ would apply them twice.
 
 Operations inside the closure automatically pick up the active
 transaction via a `tokio::task_local` - you do NOT have to thread a
-`&tx` handle through every model call. Nested `DB::transaction`
-returns a database error; use `tx.savepoint(...)` for nested-rollback
-behaviour.
+`&tx` handle through every model call. You can nest `DB::transaction`:
+your inner call opens a SeaORM savepoint on the same connection. An
+inner error rolls back that savepoint alone, so you can handle the error
+and continue your outer transaction. A successful inner call releases
+its savepoint; an outer rollback still undoes its rows.
+
+You read your ambient depth with `DB::transaction_level()`: 0 outside
+a closure transaction, 1 in its outer closure and 2 in a nested closure.
+Manual handles do not install an ambient transaction, so they do not
+change this depth.
 
 The closure form is also the only form that can defer work to the commit. A
 job whose type declares `Job::after_commit()` (or a dispatch made with
@@ -484,8 +491,8 @@ cache, or HTTP work. It runs as follows:
   that [Closure form](#closure-form) describes. The other callbacks still
   run, and the commit stands.
 
-Nested `DB::transaction` calls are refused, so the transaction a callback
-waits for is always the outermost one.
+You keep a successful inner transaction's after-commit callbacks until
+the outermost commit. An inner rollback discards only its callbacks.
 
 Inside a transaction you started with `DB::begin_transaction`, register on
 the handle. That transaction is not ambient: code that doesn't name the
@@ -521,6 +528,38 @@ so the after-commit work that waits for it names it too:
 you port `DB::beginTransaction()` code, change each `DB::afterCommit` in it
 to `tx.after_commit`: a `DB::after_commit` there runs at once, before the
 commit, even when the transaction then rolls back.
+
+### Rollback callbacks
+
+You register compensation with `DB::after_rollback(callback).await?`.
+You use the same async closure returning `Result<(), FrameworkError>`
+as `after_commit`. Your callback runs when its enclosing transaction
+rolls back and never when it commits. An inner rollback runs only that
+scope's callbacks; after a successful inner scope, your callback also
+runs if the outer transaction later rolls back. With no ambient
+transaction, you discard the callback because no rollback occurs.
+
+You can query the still open outer transaction from an inner rollback
+callback. For an outer rollback, you run outside the rolled back
+transaction. Callback failures are logged and do not replace the
+original transaction error.
+
+### Before starting a transaction
+
+You register a synchronous guard before opening transactions:
+
+```rust
+DB::before_starting_transaction(|| {
+    check_database_write_policy()?;
+    Ok::<(), suprnova::FrameworkError>(())
+});
+```
+
+You run each listener in registration order before `BEGIN`, including
+`begin_transaction`, and before each nested savepoint. Returning an
+error prevents that transaction from starting and gives the caller the
+same error. Your listeners belong to the active test container in tests,
+and otherwise to the application.
 
 ## Observability
 
@@ -869,6 +908,8 @@ callbacks and the query log aren't process-wide inside a test: see
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
 | `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
+| `DB::transaction_level()` / `DB::before_starting_transaction(listener)` | `transactionLevel` / `beforeStartingTransaction` |
+| `DB::after_rollback(callback)` | `afterRollBack` |
 | `DB::after_commit(callback)` / `Transaction::after_commit(callback)` | `DB::afterCommit` |
 | `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
 | `DB::listen(callback)` | `DB::listen` |

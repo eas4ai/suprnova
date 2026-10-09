@@ -64,6 +64,7 @@ pub mod connection_registry;
 pub mod db_facade;
 pub mod dynamic_row;
 pub mod events;
+pub mod expression;
 pub mod identifier;
 // Internal: the framework's own migrations create their indexes through
 // here, so `up` can run over a schema that already exists on every backend.
@@ -140,6 +141,7 @@ pub use events::{
     ConnectionEstablished, DatabaseBusy, QueryExecuted, QueryListener, ReadWriteType,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack,
 };
+pub use expression::{QueryExpression, RawExpression, UpdateAttrs, UpdateValue};
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use monitor::ConnectionCount;

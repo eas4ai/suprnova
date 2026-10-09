@@ -376,9 +376,19 @@ where
     /// # Ok(()) }
     /// ```
     pub async fn first_or_fail(self) -> Result<E::Model, FrameworkError> {
-        self.first().await?.ok_or_else(|| {
-            FrameworkError::database(format!("{} not found", std::any::type_name::<E::Model>()))
-        })
+        self.first_or_fail_with(format!("{} not found", std::any::type_name::<E::Model>()))
+            .await
+    }
+
+    /// Preserve a caller's 404 message when no entity row matches.
+    pub async fn first_or_fail_with(
+        self,
+        message: impl Into<String>,
+    ) -> Result<E::Model, FrameworkError> {
+        let message = message.into();
+        self.first()
+            .await?
+            .ok_or_else(|| FrameworkError::not_found(message))
     }
 
     /// Count matching records

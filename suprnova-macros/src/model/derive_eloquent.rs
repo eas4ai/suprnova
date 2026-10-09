@@ -549,6 +549,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   is real, not a no-op.
     let timestamps_enabled = input.timestamps;
     let updated_at_col = &input.updated_at;
+    let created_at_col = &input.created_at;
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
     // The key of a touch's `UPDATE ... WHERE`, stored through its cast
@@ -1364,6 +1365,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // column that is. A relation entry pointing here collapses
             // the pair via `touch_column`.
             const HAS_TIMESTAMPS: bool = #timestamps_enabled;
+            /// Preserve your declared creation timestamp for default chronological ordering.
+            const CREATED_AT_COLUMN: &'static str = #created_at_col;
             const UPDATED_AT_COLUMN: &'static str = #updated_at_col;
             #updated_at_storage_impl
             #bind_column_impl
@@ -1853,16 +1856,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::query().where_like(col, pattern)
             }
 
-            /// Static-style `latest` - `ORDER BY created_at DESC`. Models
-            /// without a `created_at` column will fail at the SQL layer;
-            /// timestamp surface lands in T9.
+            /// Order by your declared creation timestamp descending.
             pub fn latest() -> ::suprnova::Builder<Self> {
-                <Self as ::suprnova::eloquent::Model>::query().order_by_desc("created_at")
+                <Self as ::suprnova::eloquent::Model>::query().latest()
             }
 
-            /// Static-style `oldest` - `ORDER BY created_at ASC`.
+            /// Order by your declared creation timestamp ascending.
             pub fn oldest() -> ::suprnova::Builder<Self> {
-                <Self as ::suprnova::eloquent::Model>::query().order_by_asc("created_at")
+                <Self as ::suprnova::eloquent::Model>::query().oldest()
             }
         }
     })
