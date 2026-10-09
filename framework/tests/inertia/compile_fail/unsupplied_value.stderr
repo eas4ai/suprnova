@@ -1,0 +1,7 @@
+error[E0609]: no field `author` on type `&__SuprnovaInertiaRootAppDocument<'parts, 'page>`
+ --> tests/inertia/compile_fail/unsupplied_value.rs:4:1
+  |
+4 | #[suprnova::inertia_root(path = "inertia/unsupplied_value.html")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+  |
+  = note: this error originates in the derive macro `::suprnova::live::__private::askama::Template` (in Nightly builds, run with -Z macro-backtrace for more info)
