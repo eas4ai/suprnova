@@ -111,6 +111,122 @@ pub fn emit_serialize(input: &ModelInput) -> TokenStream {
     }
 }
 
+/// The deserializer serde's derive calls for `field`: its `deserialize_with`
+/// path, or `<module>::deserialize` for `with = "module"`. A factory attribute
+/// is written in the field's serialized form, so it must be read back the way
+/// serde reads the field, not through the field type's own `Deserialize`.
+fn field_deserializer(field: &syn::Field) -> Option<syn::LitStr> {
+    let mut found = None;
+    for attr in field
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("serde"))
+    {
+        let Ok(items) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        for item in items {
+            let syn::Meta::NameValue(pair) = item else {
+                continue;
+            };
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(path),
+                ..
+            }) = &pair.value
+            else {
+                continue;
+            };
+            if pair.path.is_ident("deserialize_with") {
+                found = Some(path.clone());
+            } else if pair.path.is_ident("with") {
+                found = Some(syn::LitStr::new(
+                    &format!("{}::deserialize", path.value()),
+                    path.span(),
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Emit `Persistable::with_definition_attributes`, which sets each field a
+/// factory attribute set names on a model the definition already built.
+///
+/// Every column is a candidate, a field serde skips on output included, so
+/// such a field can take an attribute and keeps its built value when the set
+/// names other fields. Rebuilding the whole model through serde would lose it:
+/// the model's output leaves it out. A field is named as serde names it on
+/// output (its `rename`, else the container's `rename_all`, else the field
+/// name), the keys the model's own JSON carries.
+pub fn emit_definition_attributes(input: &ModelInput) -> syn::Result<TokenStream> {
+    let struct_ident = &input.item.ident;
+    let container = crate::serde_attrs::parse_container_lenient(&input.item.attrs)?;
+    let mut arms: Vec<(String, TokenStream)> = Vec::new();
+    for field in &input.item.fields {
+        let Some(ident) = field.ident.as_ref() else {
+            continue;
+        };
+        if ident == "__eager" || ident == "__pivot" {
+            continue;
+        }
+        let name = crate::serde_attrs::field_names_lenient(field, &container)?.serialize;
+        let ty = &field.ty;
+        let decode = match field_deserializer(field) {
+            Some(path) => quote! {{
+                #[derive(::suprnova::serde::Deserialize)]
+                #[serde(crate = "::suprnova::serde")]
+                struct __SuprnovaFieldValue(#[serde(deserialize_with = #path)] #ty);
+                ::suprnova::serde_json::from_value::<__SuprnovaFieldValue>(__suprnova_value)
+                    .map(|__SuprnovaFieldValue(__suprnova_inner)| __suprnova_inner)
+            }},
+            None => quote! { ::suprnova::serde_json::from_value::<#ty>(__suprnova_value) },
+        };
+        let arm = quote! {
+            #name => {
+                self.#ident = #decode.map_err(|__suprnova_error| {
+                    ::suprnova::FrameworkError::bad_request(::std::format!(
+                        "factory attribute `{}`: {}",
+                        #name,
+                        __suprnova_error,
+                    ))
+                })?;
+            }
+        };
+        // Two fields serialized under one name would emit an unreachable arm.
+        // The later field takes the name, as its value is the one the model's
+        // JSON keeps under that key.
+        match arms.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, existing)) => *existing = arm,
+            None => arms.push((name, arm)),
+        }
+    }
+    let arms = arms.into_iter().map(|(_, arm)| arm);
+    Ok(quote! {
+        fn with_definition_attributes(
+            mut self,
+            attributes: ::suprnova::eloquent::Attrs,
+        ) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
+            for (__suprnova_name, __suprnova_value) in attributes.0 {
+                match __suprnova_name.as_str() {
+                    #(#arms)*
+                    _ => {
+                        return ::core::result::Result::Err(
+                            ::suprnova::FrameworkError::bad_request(::std::format!(
+                                "factory attribute `{}` is not a serialized field of {}",
+                                __suprnova_name,
+                                ::core::stringify!(#struct_ident),
+                            )),
+                        );
+                    }
+                }
+            }
+            ::core::result::Result::Ok(self)
+        }
+    })
+}
+
 /// Emit declared policies and unfiltered runtime fields for shared model serialization.
 pub fn emit_to_array_override(
     hidden: &[String],
@@ -153,5 +269,71 @@ pub fn emit_append_accessor_dispatch(appends: &[String]) -> TokenStream {
         > {
             match name { #(#arms)* _ => ::core::result::Result::Ok(::core::option::Option::None) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::parse::ModelInput;
+    use super::emit_definition_attributes;
+    use quote::quote;
+
+    fn emitted(item: proc_macro2::TokenStream) -> String {
+        let input = ModelInput::parse(quote! {}, item).expect("a model");
+        emit_definition_attributes(&input)
+            .expect("the method")
+            .to_string()
+    }
+
+    #[test]
+    fn each_column_answers_to_its_serialized_name() {
+        let emitted = emitted(quote! {
+            #[serde(rename_all = "camelCase")]
+            pub struct Row {
+                pub id: i64,
+                pub display_name: String,
+                #[serde(skip)]
+                pub note: String,
+                #[serde(skip_serializing, rename = "secretToken")]
+                pub token: String,
+                #[serde(deserialize_with = "read_count")]
+                pub visits: i64,
+                #[serde(with = "stamp")]
+                pub seen: i64,
+                pub __eager: Cache,
+                pub __pivot: Option<Pivot>,
+            }
+        });
+        for (name, field) in [
+            ("id", "id"),
+            ("displayName", "display_name"),
+            ("note", "note"),
+            ("secretToken", "token"),
+            ("visits", "visits"),
+            ("seen", "seen"),
+        ] {
+            assert!(
+                emitted.contains(&format!("\"{name}\" => {{ self . {field} =")),
+                "`{name}` sets `{field}`: {emitted}"
+            );
+        }
+        assert!(!emitted.contains("__eager") && !emitted.contains("__pivot"));
+        assert!(emitted.contains("deserialize_with = \"read_count\""));
+        assert!(emitted.contains("deserialize_with = \"stamp::deserialize\""));
+    }
+
+    #[test]
+    fn a_shared_serialized_name_goes_to_the_later_field() {
+        let emitted = emitted(quote! {
+            pub struct Row {
+                pub id: i64,
+                pub label: String,
+                #[serde(rename = "label")]
+                pub caption: String,
+            }
+        });
+        assert_eq!(emitted.matches("\"label\" =>").count(), 1, "{emitted}");
+        assert!(emitted.contains("self . caption ="), "{emitted}");
+        assert!(!emitted.contains("self . label ="), "{emitted}");
     }
 }
