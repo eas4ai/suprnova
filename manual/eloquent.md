@@ -104,6 +104,7 @@ configuration.
 | `connection` | string | `"default"` | Multi-connection apps name a non-default connection |
 | `fillable` | list of strings | (default = `guarded = ["id"]`) | Mass-assignment allowlist |
 | `guarded` | list of strings | `["id"]` when neither set | Mass-assignment denylist (mutually exclusive with `fillable`) |
+| `defaults(field = value, ...)` | field expressions | none | Set the values you read on a new instance and save when a create omits them |
 | `casts` | map of `field = CastType` | `{}` | Per-column casts |
 | `hidden` | list of strings | `[]` | Excluded from `to_json` / `to_array` |
 | `visible` | list of strings | (all) | Inclusive variant of `hidden` (mutually exclusive) |
@@ -371,6 +372,43 @@ map). Pure JSON also works -
 `User::create(serde_json::json!({"name": "Alice", "email": "..."}))`.
 The `Fillable` filter runs inside `create`; non-fillable fields are
 silently dropped, matching Laravel's behaviour.
+
+### Declared defaults
+
+Declare `defaults(field = value, ...)` to give new instances initial values:
+
+```rust
+use suprnova::{Model, attrs, model};
+
+#[model(
+    table = "posts",
+    fillable = ["title", "status", "votes"],
+    defaults(status = "draft", votes = 0),
+)]
+pub struct Post {
+    pub id: i64,
+    pub title: String,
+    pub status: String,
+    pub votes: i64,
+}
+
+let draft = Post::new();
+assert_eq!(draft.status, "draft");
+let draft = Post::create(attrs! { title: "First" }).await?;
+let live = Post::create(attrs! { title: "Second", status: "live" }).await?;
+```
+
+You read declared defaults before saving a new instance. A partial `create`
+uses every declared default that your filtered attributes omit, before
+creation events and the insert. Your supplied attributes win. The same
+rules apply to `create_with_tx` and unsaved instances from `first_or_new`.
+
+You supply values convertible into the declared field types, so `"draft"`
+works for a `String`. You name each column at most once. An unknown column
+or a value of the wrong type fails the build. Your defaults are trusted
+model values; your caller's attributes still pass through the fillable
+filter. A model without the declaration keeps its existing construction
+and insert behavior.
 
 ### Save / update
 

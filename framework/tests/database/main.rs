@@ -27,3 +27,5 @@ pub mod time_column_types;
 pub mod transactions;
 pub mod tx_leak_diagnostic;
 pub mod url_prod_validation;
+
+pub mod laravel_delta;

@@ -217,6 +217,8 @@ pub struct ModelInput {
     pub fillable: Option<Vec<String>>,
     pub guarded: Option<Vec<String>>,
     pub casts: Vec<(Ident, Type)>,
+    /// Typed initial values so new models can fill omitted attributes.
+    pub defaults: Vec<(Ident, Expr)>,
     pub timestamps: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -505,6 +507,16 @@ impl ModelInput {
                 .collect(),
             _ => std::collections::HashSet::new(),
         };
+        if let Some(defaults) = &attrs.defaults {
+            for (field, _) in defaults {
+                if !field_names.contains(&field.to_string()) {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "default names no model column",
+                    ));
+                }
+            }
+        }
         let has_created = field_names.contains(&created_at);
         let has_updated = field_names.contains(&updated_at);
         let timestamps = if !timestamps_default {
@@ -654,6 +666,7 @@ impl ModelInput {
             fillable: attrs.fillable,
             guarded: attrs.guarded,
             casts,
+            defaults: attrs.defaults.unwrap_or_default(),
             timestamps,
             created_at,
             updated_at,
@@ -961,6 +974,7 @@ struct ModelAttrs {
     fillable: Option<Vec<String>>,
     guarded: Option<Vec<String>>,
     casts: Option<Vec<(Ident, Type)>>,
+    defaults: Option<Vec<(Ident, Expr)>>,
     timestamps: Option<bool>,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -988,8 +1002,17 @@ impl Parse for ModelAttrs {
         }
         loop {
             let key: Ident = input.parse()?;
+            // Defaults use a parenthesized list of field expressions.
+            if key == "defaults" {
+                if out.defaults.is_some() {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "defaults is declared more than once",
+                    ));
+                }
+                out.defaults = Some(parse_default_attributes(input)?);
             // Flag-style attributes (no `=`):
-            if matches!(
+            } else if matches!(
                 key.to_string().as_str(),
                 "soft_deletes" | "timestamps" | "custom_route_binding"
             ) && (input.is_empty() || input.peek(Token![,]))
@@ -1090,6 +1113,25 @@ impl Parse for ModelAttrs {
         }
         Ok(out)
     }
+}
+
+/// Parse declared values separately so model options share their usual grammar.
+fn parse_default_attributes(input: ParseStream) -> Result<Vec<(Ident, Expr)>> {
+    let content;
+    syn::parenthesized!(content in input);
+    let mut entries: Vec<(Ident, Expr)> = Vec::new();
+    while !content.is_empty() {
+        let field: Ident = content.parse()?;
+        if entries.iter().any(|(name, _)| name == &field) {
+            return Err(syn::Error::new(field.span(), "duplicate default field"));
+        }
+        content.parse::<Token![=]>()?;
+        entries.push((field, content.parse()?));
+        if !content.is_empty() {
+            content.parse::<Token![,]>()?;
+        }
+    }
+    Ok(entries)
 }
 
 fn parse_str_array(input: ParseStream) -> Result<Vec<String>> {

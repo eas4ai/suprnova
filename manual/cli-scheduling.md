@@ -1,6 +1,6 @@
 # Scheduling Commands
 
-CLI surface for the per-minute task scheduler. The three `schedule:*`
+CLI surface for the per-minute task scheduler. The `schedule:*`
 subcommands all delegate into your application binary's `Application::run()`
 dispatch, so they see the same config, services, observers, and listeners
 that a request handler does. The full scheduler model - `Task` trait, fluent
@@ -218,6 +218,20 @@ No scheduled tasks registered.
 Define tasks in src/schedule.rs and wire it with `Application::schedule(schedule::register)`.
 ```
 
+## schedule:interrupt
+
+Run your application binary with `schedule:interrupt` to write a mark in
+its cache:
+
+```bash
+./target/release/app schedule:interrupt
+```
+
+You use the same shared cache as the schedulers you interrupt. The active
+run finishes its current task and checks the mark before it starts another.
+You do not cancel background tasks that already started. The next run
+clears the mark. You receive a non-zero exit status if the cache write fails.
+
 ## Generating a task
 
 The framework ships a generator that creates the task, wires it into the
@@ -270,6 +284,7 @@ The fluent builder API (`.daily()`, `.cron(...)`, `.without_overlapping()`,
 |---|---|---|
 | `schedule:run` | every due task returned `Ok(())`, or no tasks were due | at least one task returned `Err(_)` or panicked |
 | `schedule:work` | clean shutdown via `SIGINT` / `SIGTERM` (the wrapper treats exit code 130 as clean Ctrl-C) | bootstrap failure, or the daemon process aborted |
+| `schedule:interrupt` | interrupt mark saved in the cache | cache write or application boot failed |
 | `schedule:list` | listing succeeded (including the "no tasks registered" message) | application failed to boot |
 
 Background-task failures inside `schedule:work` are logged to stderr but

@@ -180,6 +180,9 @@ enum Commands {
     /// Run all due scheduled tasks once
     #[command(name = "schedule:run")]
     ScheduleRun,
+    /// Interrupt the current schedule run through the shared cache
+    #[command(name = "schedule:interrupt")]
+    ScheduleInterrupt,
     /// List all registered scheduled tasks
     #[command(name = "schedule:list")]
     ScheduleList {
@@ -342,6 +345,7 @@ impl Commands {
             | Commands::MigrateFresh { .. }
             | Commands::SchemaDump { .. } => ProcessBoot::Migrations,
             Commands::ScheduleList { .. }
+            | Commands::ScheduleInterrupt
             | Commands::SsrStart { .. }
             | Commands::SsrStop { .. }
             | Commands::SsrCheck => ProcessBoot::Core,
@@ -1322,6 +1326,13 @@ where
             }
             Some(Commands::ScheduleRun) => {
                 Self::run_scheduled_tasks_internal(boot, bootstrap_fn, schedule_fn).await
+            }
+            Some(Commands::ScheduleInterrupt) => {
+                async {
+                    Self::boot_or_fail("schedule:interrupt", boot, bootstrap_fn).await?;
+                    Schedule::interrupt().await
+                }
+                .await
             }
             Some(Commands::ScheduleList { timezone }) => {
                 Self::list_scheduled_tasks(boot, bootstrap_fn, schedule_fn, timezone).await

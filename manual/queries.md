@@ -705,6 +705,38 @@ absolutely - `on(name)` is silently ignored to preserve atomicity. See
 [Database - Named connections](database.md) for the full precedence
 chain.
 
+### A default for one task
+
+Use `DB::with_default_connection(name, future)` when several queries need
+one named pool without repeating `.on(name)`:
+
+```rust
+let rows = DB::with_default_connection("reporting", async {
+    assert_eq!(DB::default_connection(), "reporting");
+    DB::table("audit_log").get().await
+}).await?;
+```
+
+You route default `DB` calls, direct `DB::connection()` access, and model
+queries to that pool. Explicit query or model connections keep their
+precedence. You start new transactions on that pool; an already active
+transaction stays on its original pool. Your scoped default takes
+precedence over an automatic read replica.
+
+You keep each concurrent task's default isolated. Nested scopes restore
+your outer default on return, error, panic or cancellation. A task you
+spawn starts with its own default. Outside a scope,
+`DB::default_connection()` returns `PRIMARY_CONNECTION_NAME` (`"__primary__"`).
+An unknown connection fails before your future runs.
+
+### Stored keys for chunk cursors
+
+When you call a model query's `chunk_by_id(size, closure)`, you advance
+from the key as the database stores it. A model cast can change the key's
+value in the model you receive, but it does not change the next chunk's
+cursor. You see every matching stored row once, in stored-key order.
+You receive an error for a zero chunk size or a failing closure.
+
 ### Why Suprnova diverges
 
 Laravel's `DB::table(...)` is its model-less query builder; under the

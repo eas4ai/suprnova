@@ -557,7 +557,7 @@ impl ExecutorChoice {
         }
         Ok(ExecutorChoice::Pool(
             DB::connection()?,
-            crate::database::PRIMARY_CONNECTION_NAME.into(),
+            DB::default_connection().into(),
         ))
     }
 
@@ -578,7 +578,7 @@ impl ExecutorChoice {
     }
 
     /// Phase 10C T12 - pick the executor for a READ-shape operation.
-    /// Five-step precedence:
+    /// Routing precedence:
     ///
     /// 1. **Builder-level transaction override** (`Builder::with_tx`).
     ///    Explicit beats every other consideration. A read an eager load
@@ -590,10 +590,11 @@ impl ExecutorChoice {
     ///    routing is silently ignored.
     /// 3. **Per-builder `connection_override`** (`Builder::on(name)`).
     ///    The `__primary__` sentinel short-circuits to
-    ///    [`DB::connection`] without consulting the registry.
+    ///    the original primary pool without consulting the registry.
     /// 4. **Per-model default** (`#[model(connection = "...")]`).
-    /// 5. **`__read_replica__`** if registered.
-    /// 6. **Default pool** (`DB::connection`).
+    /// 5. **Task-local default** (`DB::with_default_connection`).
+    /// 6. **`__read_replica__`** if registered.
+    /// 7. **Default pool** (`DB::connection`).
     ///
     /// Step 1 fires when the closure form's task-local is `Some(_)`;
     /// step 2 is the same lookup but with a builder-attached
@@ -648,7 +649,7 @@ impl ExecutorChoice {
         if let Some(name) = connection_override {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
@@ -658,11 +659,18 @@ impl ExecutorChoice {
         if let Some(name) = model_default_conn {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
             return Ok(ExecutorChoice::Pool(DB::named(name).await?, name.into()));
+        }
+        // A task-local default takes precedence over the automatic read replica.
+        if DB::default_connection_is_scoped() {
+            return Ok(ExecutorChoice::Pool(
+                DB::connection()?,
+                DB::default_connection().into(),
+            ));
         }
         // Step 5: read replica if registered.
         if crate::database::ConnectionRegistry::has(crate::database::READ_REPLICA_CONNECTION_NAME)
@@ -676,7 +684,7 @@ impl ExecutorChoice {
         // Step 6: default pool.
         Ok(ExecutorChoice::Pool(
             DB::connection()?,
-            crate::database::PRIMARY_CONNECTION_NAME.into(),
+            DB::default_connection().into(),
         ))
     }
 
@@ -736,7 +744,7 @@ impl ExecutorChoice {
         if let Some(name) = connection_override {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
@@ -745,7 +753,7 @@ impl ExecutorChoice {
         if let Some(name) = model_default_conn {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
@@ -753,7 +761,7 @@ impl ExecutorChoice {
         }
         Ok(ExecutorChoice::Pool(
             DB::connection()?,
-            crate::database::PRIMARY_CONNECTION_NAME.into(),
+            DB::default_connection().into(),
         ))
     }
 
@@ -787,7 +795,7 @@ impl ExecutorChoice {
         if let Some(name) = connection_override {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
@@ -796,7 +804,7 @@ impl ExecutorChoice {
         if let Some(name) = model_default_conn {
             if name == crate::database::PRIMARY_CONNECTION_NAME {
                 return Ok(ExecutorChoice::Pool(
-                    DB::connection()?,
+                    DB::primary_connection()?,
                     crate::database::PRIMARY_CONNECTION_NAME.into(),
                 ));
             }
@@ -805,7 +813,7 @@ impl ExecutorChoice {
         // No read-replica auto-routing on writes.
         Ok(ExecutorChoice::Pool(
             DB::connection()?,
-            crate::database::PRIMARY_CONNECTION_NAME.into(),
+            DB::default_connection().into(),
         ))
     }
 
@@ -1853,10 +1861,7 @@ impl DB {
         }
 
         let conn = DB::connection()?;
-        // DB::transaction always opens against the default pool today
-        // (no `transaction_on(name)` surface yet); when that lands, the
-        // `conn_name` Arc<str> is the only thing that needs to grow.
-        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
+        let conn_name: Arc<str> = DB::default_connection().into();
         // `begin_with_config(None, None)` is what SeaORM's own `begin()`
         // delegates to, so a caller that asked for no isolation level gets
         // exactly the backend default `DB::transaction` has always opened
@@ -1933,7 +1938,7 @@ impl DB {
     /// single shared connection is checked out for the tx duration).
     pub async fn begin_transaction() -> Result<Transaction, FrameworkError> {
         let conn = DB::connection()?;
-        let conn_name: Arc<str> = super::PRIMARY_CONNECTION_NAME.into();
+        let conn_name: Arc<str> = DB::default_connection().into();
         let tx = conn
             .inner()
             .begin()

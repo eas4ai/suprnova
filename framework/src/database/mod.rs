@@ -232,6 +232,11 @@ pub(crate) fn binary_comparison_unsupported(backend: sea_orm::DatabaseBackend) -
 /// ```
 pub struct DB;
 
+tokio::task_local! {
+    /// The default pool of this task, so one request cannot reroute another.
+    static DEFAULT_CONNECTION: (String, DbConnection);
+}
+
 impl DB {
     /// Initialize the database connection
     ///
@@ -331,6 +336,47 @@ impl DB {
     /// # Ok(()) }
     /// ```
     pub fn connection() -> Result<DbConnection, FrameworkError> {
+        DEFAULT_CONNECTION
+            .try_with(|(_, connection)| connection.clone())
+            .or_else(|_| Self::primary_connection())
+    }
+
+    /// Name the default pool so you can inspect the connection in this task.
+    /// Outside a scope this returns [`PRIMARY_CONNECTION_NAME`].
+    pub fn default_connection() -> String {
+        DEFAULT_CONNECTION
+            .try_with(|(name, _)| name.clone())
+            .unwrap_or_else(|_| PRIMARY_CONNECTION_NAME.to_string())
+    }
+
+    /// Run `future` with a default pool so request-local routing stays isolated.
+    /// Nested scopes restore the enclosing default on return, panic or cancellation.
+    /// Explicit query and model connections retain their precedence. Spawned tasks
+    /// start with their own default. Existing transactions stay on their pool.
+    /// An unknown connection returns an error before `future` is polled.
+    pub async fn with_default_connection<F, T>(
+        name: impl Into<String>,
+        future: F,
+    ) -> Result<T, FrameworkError>
+    where
+        F: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        let name = name.into();
+        let connection = if name == PRIMARY_CONNECTION_NAME {
+            Self::primary_connection()?
+        } else {
+            Self::named(&name).await?
+        };
+        DEFAULT_CONNECTION.scope((name, connection), future).await
+    }
+
+    /// Distinguish an explicit primary scope from automatic replica routing.
+    pub(crate) fn default_connection_is_scoped() -> bool {
+        DEFAULT_CONNECTION.try_with(|_| ()).is_ok()
+    }
+
+    /// Resolve the original pool for an explicit primary-connection override.
+    pub(crate) fn primary_connection() -> Result<DbConnection, FrameworkError> {
         App::resolve::<DbConnection>()
     }
 
