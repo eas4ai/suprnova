@@ -293,6 +293,27 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     // `#[authorize]`, every remaining argument in declaration order.
     let mut path_pass = Vec::new();
     let mut body_pass = Vec::new();
+    // Defer a draft's success until all extractors finish. Real errors
+    // still return in the existing extraction order.
+    let mut values = Vec::new();
+    let mut extract_value = |arg: &Arg<'_>, result: TokenStream2| {
+        let pat = arg.pat;
+        let ty = arg.ty;
+        let value = quote::format_ident!("__suprnova_value_{}", arg.index);
+        values.push(quote! { let #pat: #ty = #value?; });
+        quote! {
+            let #value: ::core::result::Result<#ty, ::suprnova::FrameworkError> = match #result {
+                ::core::result::Result::Ok(value) => ::core::result::Result::Ok(value),
+                ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionSuccess)
+                    if __suprnova_precognitive => {
+                        ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionSuccess)
+                    }
+                ::core::result::Result::Err(error) => {
+                    return ::core::result::Result::Err(error.into());
+                }
+            };
+        }
+    };
     // Whether the passes call a probe, and so need its trait in scope, and
     // whether they change the input, and so need it `mut`: the body never
     // declares what it does not use.
@@ -326,16 +347,19 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
                             .__bind(&mut __suprnova_input, #index, #name)
                             .await?;
                 });
-                let take = quote! {
-                    let #pat: #ty = match #slot {
-                        ::core::option::Option::Some(bound) => bound,
-                        ::core::option::Option::None => {
-                            (&&::suprnova::routing::__ArgProbe::<#ty>::new())
-                                .__read_body(&mut __suprnova_input)
-                                .await?
+                let take = extract_value(
+                    arg,
+                    quote! {
+                        match #slot {
+                            ::core::option::Option::Some(bound) => ::core::result::Result::Ok(bound),
+                            ::core::option::Option::None => {
+                                (&&::suprnova::routing::__ArgProbe::<#ty>::new())
+                                    .__read_body(&mut __suprnova_input)
+                                    .await
+                            }
                         }
-                    };
-                };
+                    },
+                );
                 if checks.is_empty() {
                     path_pass.push(take);
                 } else {
@@ -349,16 +373,19 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
                             .__bind(&mut __suprnova_input, #index, #name)
                             .await?;
                 });
-                let take = quote! {
-                    let #pat: #ty = match #slot {
-                        ::core::option::Option::Some(bound) => bound,
-                        ::core::option::Option::None => {
-                            (&&::suprnova::routing::__OptionalArgProbe::<#inner>::new())
-                                .__read_body(&mut __suprnova_input)
-                                .await?
+                let take = extract_value(
+                    arg,
+                    quote! {
+                        match #slot {
+                            ::core::option::Option::Some(bound) => ::core::result::Result::Ok(bound),
+                            ::core::option::Option::None => {
+                                (&&::suprnova::routing::__OptionalArgProbe::<#inner>::new())
+                                    .__read_body(&mut __suprnova_input)
+                                    .await
+                            }
                         }
-                    };
-                };
+                    },
+                );
                 if checks.is_empty() {
                     path_pass.push(take);
                 } else {
@@ -382,12 +409,15 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
                 }
             }
             ArgKind::Generic => {
-                let take = quote! {
-                    let #pat: #ty = <#ty as ::suprnova::FromRequest>::from_request(
-                        __suprnova_input.request()?,
-                    )
-                    .await?;
-                };
+                let take = extract_value(
+                    arg,
+                    quote! {
+                        <#ty as ::suprnova::FromRequest>::from_request(
+                            __suprnova_input.request()?,
+                        )
+                        .await
+                    },
+                );
                 if checks.is_empty() {
                     path_pass.push(take);
                 } else {
@@ -431,6 +461,7 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
                     ::suprnova::FrameworkError::PrecognitionSuccess.into(),
                 );
             }
+            #(#values)*
             #fn_block
         }
 

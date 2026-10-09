@@ -208,7 +208,8 @@ the header alone requests Precognition. On a route without `Precognitive`,
 the second can be true while the first is false. Use the marked state
 when you decide whether to skip a rule or a side effect.
 
-`Request::validate_only()` exposes the parsed list.
+`Request::validate_only()` exposes the parsed list on a marked request.
+Outside a marked request, the selection is absent and every field is included.
 `Request::should_validate(field)` applies the same exact and wildcard
 match as the validator. Use it in middleware or a custom rule before
 you run a field's own check. A handler can use it on the real request;
@@ -226,7 +227,7 @@ fn require_avatar(
     avatar: Option<&UploadedFile<ImageFile>>,
 ) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::new();
-    if !req.is_precognitive() && req.should_validate("avatar") && avatar.is_none() {
+    if !req.is_precognitive() && avatar.is_none() {
         errors.add("avatar", "Choose an avatar.");
     }
     errors.into_result()
