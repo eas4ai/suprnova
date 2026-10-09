@@ -37,6 +37,7 @@ builder you can chain `.name(...)` and `.middleware(...)` onto.
 | `patch!`   | PATCH   | Partial updates (RFC 5789) |
 | `delete!`  | DELETE  | Destroy |
 | `head!`    | HEAD    | Headers-only probes (HEAD falls back to the GET registry per RFC 9110 § 9.3.2 when not explicitly registered) |
+| `query!`   | QUERY   | Send a read query in the request body |
 | `options!` | OPTIONS | Capability discovery, `Accept-Patch`. CORS preflight is answered by `CorsMiddleware` before the router, so you usually don't need this one |
 
 ```rust
@@ -55,9 +56,13 @@ a missing leading slash fails the build, not a request.
 
 ### Multi-method and `any!`
 
-`any!` registers one handler against all seven common verbs. Use it for
-webhook receivers and other endpoints that need to accept whatever HTTP
-sends.
+You register `QUERY` with `query!(path, handler)` or `Router::query`.
+You use `Router::try_query` when route registration can fail.
+You also use `query` inside fluent groups and `query!` inside `group!`.
+You read its body with the same request accessors you use for other methods.
+
+You use `any!` to register one handler for GET, POST, PUT, PATCH, DELETE,
+HEAD, OPTIONS and QUERY. You use it for endpoints that accept every supported method.
 
 ```rust
 use suprnova::{routes, any};

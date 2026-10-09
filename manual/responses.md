@@ -31,6 +31,9 @@ pub async fn examples() -> Response {
     // text/html; charset=utf-8
     let _ = HttpResponse::html("<h1>Hello</h1>");
 
+    // text/markdown; charset=utf-8
+    let _ = HttpResponse::markdown("# Hello");
+
     // Raw bytes with an explicit content type - used by JSON:API
     // serialization and any other non-JSON byte body.
     let _ = HttpResponse::bytes_body(b"PNG...".to_vec(), "image/png");
@@ -38,6 +41,12 @@ pub async fn examples() -> Response {
     Ok(HttpResponse::text("done"))
 }
 ```
+
+You send Markdown source with `HttpResponse::markdown(body)` or the
+`markdown(body)` helper exported from `suprnova` and `suprnova::http`.
+You receive a `200` response with `Content-Type: text/markdown; charset=utf-8`.
+You keep the body exactly as supplied, including whitespace and an empty body.
+You return `markdown("# Hi")` directly from a handler.
 
 Two streaming constructors exist for long-lived responses:
 

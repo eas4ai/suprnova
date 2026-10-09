@@ -2,7 +2,7 @@
 
 use super::binding::{HandlerRef, RouteBindingOptions, boxed_missing, handler_ref};
 use super::macros::{convert_route_params, join_paths};
-use super::router::ANY_METHODS;
+use super::router::{ANY_METHODS, query_method};
 use super::{BoxedHandler, RouteBuilder, Router};
 use crate::FrameworkError;
 use crate::http::{Request, Response};
@@ -69,6 +69,7 @@ enum GroupMethod {
     Delete,
     Head,
     Options,
+    Query,
 }
 
 impl GroupBuilder {
@@ -233,6 +234,11 @@ impl GroupBuilder {
                         .try_insert_options(&full_path, route.handler)?;
                     Method::OPTIONS
                 }
+                GroupMethod::Query => {
+                    self.outer_router
+                        .try_insert_query(&full_path, route.handler)?;
+                    query_method()
+                }
             };
 
             // Apply group middleware to each route under its own
@@ -393,11 +399,27 @@ impl GroupRouter {
         self
     }
 
+    /// Register a QUERY route in the group so it inherits the prefix and middleware.
+    pub fn query<H, Fut>(mut self, path: &str, handler: H) -> Self
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let boxed: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.routes.push(GroupRoute {
+            method: GroupMethod::Query,
+            path: path.to_string(),
+            handler: Arc::new(boxed),
+            record: handler_ref::<H>(),
+        });
+        self
+    }
+
     /// Register one handler against every common HTTP method
-    /// (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).
+    /// (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS / QUERY).
     ///
     /// The same boxed handler is shared (cloned `Arc`) across all
-    /// seven method-routes within the group. Group middleware applied
+    /// eight method-routes within the group. Group middleware applied
     /// via [`GroupBuilder::middleware`] fans across every method at
     /// finalize time, matching the fluent `Router::any` fan-out
     /// semantics. The verbs come from the list [`Router::any`] uses, so
@@ -407,7 +429,7 @@ impl GroupRouter {
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        self.methods(ANY_METHODS, path, handler)
+        self.methods(ANY_METHODS.as_slice(), path, handler)
     }
 
     /// Register one handler against an explicit list of HTTP methods -
@@ -416,7 +438,7 @@ impl GroupRouter {
     /// # Panics
     ///
     /// Panics if `methods` is empty or contains a verb other than
-    /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS. Use
+    /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS / QUERY. Use
     /// [`GroupRouter::try_methods`] for a fallible sibling that
     /// returns `Err(FrameworkError)` instead - the right choice when
     /// the method list comes from a config file or other runtime
@@ -459,10 +481,11 @@ impl GroupRouter {
                 Method::DELETE => GroupMethod::Delete,
                 Method::HEAD => GroupMethod::Head,
                 Method::OPTIONS => GroupMethod::Options,
+                ref method if method.as_str() == "QUERY" => GroupMethod::Query,
                 ref other => {
                     return Err(FrameworkError::internal(format!(
                         "GroupBuilder::methods() got unsupported HTTP method '{other}'; only \
-                         GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted",
+                         GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/QUERY are accepted",
                     )));
                 }
             };
@@ -609,7 +632,7 @@ mod tests {
         );
     }
 
-    /// Fluent `r.any(...)` fans the handler across all seven common
+    /// Fluent `r.any(...)` fans the handler across the supported
     /// HTTP methods. Pins per-method matching at finalize time after
     /// prefix concatenation.
     #[test]

@@ -70,6 +70,11 @@ pub fn text(body: impl Into<String>) -> Response {
     Ok(HttpResponse::text(body))
 }
 
+/// Return Markdown source from a handler with its UTF-8 content type.
+pub fn markdown(body: impl Into<String>) -> Response {
+    Ok(HttpResponse::markdown(body))
+}
+
 /// Create a JSON response from a serde_json::Value
 pub fn json(body: serde_json::Value) -> Response {
     Ok(HttpResponse::json(body))

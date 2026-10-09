@@ -268,6 +268,8 @@ pub use broadcasting::{
     ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherConfig,
     PusherScheme, pusher_channel_auth, pusher_user_auth,
 };
+pub use bus::testing::{dispatched, dispatched_after_response, dispatched_sync};
+pub use bus::{AfterResponseIo, after_response_connection};
 pub use bus::{Bus, Dispatched};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
 pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
@@ -312,7 +314,7 @@ pub use http::upload::{
 pub use http::{
     ContentDisposition, Cookie, CookieOptions, CookiePrefix, FormRequest, FromParam, FromRequest,
     HttpResponse, Redirect, RedirectRouteBuilder, Request, Response, ResponseExt, SameSite,
-    abort_if, abort_unless, abort_with, json, text,
+    abort_if, abort_unless, abort_with, json, markdown, text,
 };
 pub use http_client::{
     ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, RetryContext,
@@ -383,8 +385,9 @@ pub use process::{
 pub use process::{
     FakeDescription, FakeHandler, FakeResult, FakeSequence, ProcessFake, RecordedProcess,
 };
-/// Queue fake assertion exported here so application tests can filter unchained jobs.
-pub use queue::testing::assert_pushed_without_chain;
+/// Queue fake assertions exported here so application tests can inspect captured jobs.
+pub use queue::testing::{assert_not_pushed, assert_pushed_on_queue, assert_pushed_without_chain};
+pub use queue::worker::{WorkerControls, run_worker_on_with_controls, run_worker_with_controls};
 pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
     DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
@@ -428,6 +431,7 @@ pub use routing::{
     __patch_impl,
     __post_impl,
     __put_impl,
+    __query_impl,
     __ws_impl,
     FallbackDefBuilder,
     GroupBuilder,
@@ -435,6 +439,7 @@ pub use routing::{
     GroupItem,
     GroupRoute,
     GroupRouter,
+    HttpMethod,
     IntoGroupItem,
     MatchedRoute,
     NamedRouteValue,
