@@ -2326,3 +2326,869 @@ Falsifier: with the shared-Laravel-database setting on and a user holding a `$2b
 Mechanism: `par-laravel-gaps-auth`.
 Rationale: Row `EloquentUserProvider::validateCredentials`; Laravel's `validateCredentials` never writes and `SessionGuard::attempt` rehashes before `login` (`SessionGuard.php:443`), so a failed `save()` fails the sign-in there too and the row's premise does not hold, which leaves the write inside `validate` as the one difference.
 Status: Agreed 2026-10-09
+
+## Laravel API gaps: infrastructure
+
+The members of Laravel 13.35.0's cache, configuration, logging, console,
+scheduling, migration, mail, notification, event, queue, broadcasting,
+filesystem, process, image, HTTP client, Vite, document head,
+Precognition, cookie, view, string, collection, date, middleware,
+pipeline, translation and container surface that the parity review found
+missing or differing in Suprnova and ruled build, with the manual's
+chapter on coding assistants: the build rows of the log's infrastructure
+areas, grouped by area. Three rows stay with the developer: the personal
+access tokens of `docs:sanctum` and the exact `Precognition` header match
+of `CanBePrecognitive::isAttemptingPrecognition`, because each would
+weaken a property Suprnova keeps on purpose, and the support policy of
+`docs:releases`, whose window is the developer's to name. Five rows stay
+as they are, because Suprnova already answers them the way the row asks:
+`HandlePrecognitiveRequests` and `CanBePrecognitive` (PAR-081, PAR-082),
+`Str::plural` with the count (`Str::plural_with_count`, PAR-036),
+`UrlGenerator::secure` of the contracts (`url::secure_with`, PAR-117) and
+`NullQueue::totalReservedSize` (`reserved_size(Some(queue))`, PAR-018).
+
+[PAR-133] With `CACHE_DRIVER=redis`, the cache store MUST run its commands
+on the Redis facade connection `REDIS_CACHE_CONNECTION` names, `cache`
+when it is unset, and its locks on the connection
+`REDIS_CACHE_LOCK_CONNECTION` names, `default` when it is unset, as
+Laravel's `createRedisDriver` builds the store on `connection` and
+`lock_connection`; the `cache` connection keeps reading `REDIS_CACHE_DB`.
+`CacheConfigBuilder::connection(name)` and `lock_connection(name)` MUST
+set the same names in code, and `Cache::set_connection(name)` MUST move
+the bound Redis store's later commands to another named connection, as
+`RedisStore::setConnection` does, answering an error for a store that has
+no Redis connection. The store MUST send one command on its connection
+when it is built and fail the boot when the connection cannot answer, as
+`RedisCache::connect` fails it today. The cache key prefix MUST come from
+`CACHE_PREFIX`, `<Str::slug(APP_NAME)>-cache-` when it is unset, as
+Laravel's `config/cache.php` sets it, so a stored key is the connection's
+`REDIS_PREFIX`, then the cache prefix, then the key, and `Cache::flush`
+MUST delete only keys under both prefixes. A deployment that upgrades
+finds its Redis cache empty, since its keys move to the `cache`
+connection's database and the new prefix; `REDIS_CACHE_CONNECTION=default`,
+an empty `REDIS_PREFIX` and `CACHE_PREFIX` set to the old prefix keep the
+old keys, and the manual and the changelog MUST say so.
+`RedisCache::connect(&CacheConfig)` and `CacheConfigBuilder::prefix` keep
+working for code that builds a store by hand.
+Falsifier: against the local Redis, with `CACHE_DRIVER=redis` and `REDIS_CACHE_DB=13`, `Cache::put("k", &1, None)` writes outside database 13; after `Cache::set_connection("other")` with `other` defined on database 14, the next `put` lands elsewhere; `Cache::set_connection` on the memory store answers `Ok`; with `CACHE_PREFIX=acme_cache:` the prefix of `CacheConfig::from_env()` is anything but `acme_cache:`, or with `CACHE_PREFIX` unset and `APP_NAME=Shop` anything but `shop-cache-`; with `APP_NAME=Shop`, `REDIS_PREFIX=shop-` and `CACHE_PREFIX` unset the stored key for `k` is anything but `shop-shop-cache-k`; or `Cache::flush` deletes a key outside the cache prefix.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `RedisStore::setConnection` and env `CACHE_PREFIX`; Laravel's `CacheManager::createRedisDriver` builds the store on `connection` and `lock_connection` (`Cache/CacheManager.php:357-372`), `config/cache.php` names `REDIS_CACHE_CONNECTION` `cache`, `REDIS_CACHE_LOCK_CONNECTION` `default` (`:88-89`) and the prefix `CACHE_PREFIX` (`:126`), and `RedisStore::setConnection` swaps the connection (`Cache/RedisStore.php:428`), where Suprnova's store opens its own client from `REDIS_URL` and reads `REDIS_PREFIX`, Laravel's name for the connection prefix, as its cache prefix.
+Status: Agreed 2026-10-09
+
+[PAR-134] `Cache::get` MUST dispatch `CacheMissed` when the key holds
+nothing and `CacheHit` when it holds a value, and `Cache::has`,
+`Cache::missing` and every read built on them (`pull`, `remember`,
+`remember_forever`, `sear`) MUST dispatch the same, as Laravel's
+`Repository::get` fires them; each event carries the store's name and the
+key, and `CacheHit` the stored value when the read fetched it. A stored
+JSON `null` stays present and dispatches `CacheHit`. A listener's failure
+MUST NOT fail the read, and `CacheHit`'s `Debug` output MUST NOT print the
+value. `Cache::remember_with_ttl(key, ttl, default)` MUST compute the
+value on a miss and then take its lifetime from `ttl(&value)`, as
+Laravel's `remember` passes the value to a closure lifetime: `None`
+stores it for the configured default lifetime, as `remember`'s `None`
+does, and `Some(Duration::ZERO)` returns the value without storing it, as
+Laravel forgets on a lifetime that is not positive. `remember` and
+`remember_forever` keep their signatures.
+Falsifier: under the events fake, `Cache::get::<String>("absent")` followed by `Cache::missing("absent")` records anything but two `CacheMissed` events for `absent`; `Cache::put("n", &serde_json::Value::Null, None)` followed by `Cache::missing("n")` records a `CacheMissed`; a listener that fails makes `Cache::get` answer an error; the `Debug` text of a `CacheHit` contains the cached value; or `Cache::remember_with_ttl("token", |t: &Token| Some(Duration::from_secs(t.expires_in)), ...)` computing `expires_in: 120` stores the value for anything but 120 seconds, or a `Some(Duration::ZERO)` lifetime stores it.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Repository::missing` and `Repository::remember`; Laravel's `Repository::get` fires `CacheMissed` and `CacheHit` (`Cache/Repository.php:144`, `:150`), `has` and `missing` read through `get` (`:106-120`), and `rememberWithWarmth` stores with `value($ttl, $value)` (`:596`); a stored `null` counting as present is the typed form the log keeps.
+Status: Agreed 2026-10-09
+
+[PAR-135] On a `mysql://` or `mariadb://` connection, Suprnova MUST read
+`DB_CHARSET`, `utf8mb4` by default, and `DB_COLLATION`,
+`utf8mb4_unicode_ci` by default, as Laravel's `config/database.php` does;
+every connection it opens to that database, the default and each named
+one, MUST use them as its character set and collation, as Laravel's
+`MySqlConnector` sends `SET NAMES ... COLLATE ...`, and every table
+`Schema::create` makes there MUST take them as its default character set
+and collation unless its blueprint names its own through
+`Blueprint::charset(name)` and `Blueprint::collation(name)`, as Laravel's
+`MySqlGrammar::compileCreateEncoding` does. A `charset` or `collation`
+parameter in the connection URL MUST win over the variables.
+`DatabaseConfig` MUST carry the two values as `charset` and `collation`,
+`None` on a Postgres or SQLite URL, with `DatabaseConfigBuilder::charset`
+and `collation`, and `Blueprint::create_sql` on MySQL MUST show a
+blueprint's own character set and collation; Postgres and SQLite
+connections keep ignoring them. Tables
+created before the upgrade keep the server's default collation, and MySQL
+refuses to compare string columns of two collations, so the manual and the
+changelog MUST say that an application whose tables use the server's
+default keeps it by setting `DB_COLLATION` to that collation.
+Falsifier: with `DATABASE_URL=mysql://u:p@h/db` and neither variable set, `DatabaseConfig::from_env()` carries a charset other than `utf8mb4` or a collation other than `utf8mb4_unicode_ci`, or with `DB_COLLATION=utf8mb4_bin` anything but `utf8mb4_bin`; with `?collation=utf8mb4_general_ci` in the URL and `DB_COLLATION=utf8mb4_bin` it carries anything but `utf8mb4_general_ci`; a Postgres or SQLite URL carries a charset or a collation; `Blueprint::create_sql` on `DbBackend::MySql` for a blueprint that calls `collation("utf8mb4_bin")` lacks `utf8mb4_bin`; or against MySQL (`MYSQL_TEST_URL`) `SELECT @@collation_connection`, or the `TABLE_COLLATION` of a table `Schema::create` made, differs from the configured collation, or a blueprint that names `utf8mb4_bin` gets another.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row env `DB_COLLATION`; Laravel's `mysql` and `mariadb` connections read `DB_CHARSET` and `DB_COLLATION` (`config/database.php:59-60`, `:80-81`), `MySqlConnector::configureConnection` sets them on connect (`Database/Connectors/MySqlConnector.php:102`) and `MySqlGrammar::compileCreateEncoding` gives every new table the collation (`Database/Schema/Grammars/MySqlGrammar.php:264`), so a table Suprnova creates beside a Laravel one compares and sorts text the same way.
+Status: Agreed 2026-10-09
+
+[PAR-136] An unset `APP_ENV` MUST mean the production environment, as
+Laravel's `config/app.php` reads `env('APP_ENV', 'production')`:
+`Environment::detect()` and `Config::environment()` MUST return
+`Environment::Production`, the debug default MUST be off, and after the
+base `.env` loads the loader MUST load no `.env.<environment>` and no
+`.env.<environment>.local` file, as Laravel's `LoadEnvironmentVariables`
+picks an environment file only for a set `APP_ENV`; `.env.local` keeps
+loading. `Environment::detect_explicit()` MUST return `None` for an unset
+`APP_ENV` and the parsed environment otherwise. Every check the framework
+makes in production, among them the `APP_KEY` refusal, the SQLite
+fallback refusal, the one-server cache check, the Inertia manifest check,
+the refusal of a mail driver that delivers nothing, of the in-memory rate
+limiter and of an unknown queue driver, the mock payment provider's
+refusal and the `--force` check of `db:seed`, MUST therefore apply to a
+process that sets no `APP_ENV`, and the application binary's
+`migrate:fresh` and `suprnova migrate:fresh` MUST read an unset `APP_ENV`
+as production too. The framework's and the dogfood application's tests
+that relied on the old default MUST set their environment explicitly, as
+Laravel's own `phpunit.xml` sets `APP_ENV=testing`, and the changelog
+MUST say, under `### Changed`, that a deployment setting no `APP_ENV`
+now runs every production check. A set `APP_ENV` keeps its meaning, and
+the `Environment` enum stays.
+Falsifier: with `APP_ENV` and `APP_DEBUG` unset, `Environment::detect()` is anything but `Production`, `AppConfig::from_env()` has `debug` on, or a `.env.production` beside `.env` is loaded, or a `.env.local` is not; `Environment::detect_explicit()` answers `Some` for an unset `APP_ENV`; or `suprnova migrate:fresh` in a project whose `.env` sets no `APP_ENV` runs the migrator without `--force`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Application::environment`; Laravel defaults the environment to production (`config/app.php:32`) and loads an environment file only for a set `APP_ENV` (`Foundation/Bootstrap/LoadEnvironmentVariables.php:49-53`), and the developer ruled on 2026-10-07 that an unset `APP_ENV` means production, because defaulting to local turns debug on in a misconfigured deployment.
+Status: Agreed 2026-10-09
+
+[PAR-137] `Config::register_default(value)` MUST register a configuration
+value only when none of its type is registered, answering whether it did,
+and `Config::merge(defaults)` MUST merge a map-shaped value into the
+registered one, keeping every key the registered value has and adding
+the keys only the defaults have, and register the defaults when none of
+its type is registered, as Laravel's `mergeConfigFrom` merges a
+package's file under the application's keys, so a crate that registers
+after the application never overwrites the application's values; the
+check and the write MUST happen under one write of the repository.
+`Config::merge` MUST accept `HashMap<String, V>`, `BTreeMap<String, V>`
+and `serde_json::Map<String, Value>`, and any type that implements
+`MergeConfig`. `Config::register` keeps replacing the value, as the
+manual documents.
+Falsifier: after `Config::register(Probe { a: 1 })`, `Config::register_default(Probe { a: 2 })` answers `true` or leaves `Config::get::<Probe>()` with `a` other than `1`; with nothing registered it answers `false` or registers nothing; or `Config::merge` of `{"a": 2, "b": 3}` over a registered `{"a": 9}` gives anything but `{"a": 9, "b": 3}`, or with nothing registered leaves anything but `{"a": 2, "b": 3}`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `ServiceProvider::mergeConfigFrom`; Laravel sets the key to `array_merge(require $path, $config->get($key, []))` (`Support/ServiceProvider.php:163-172`), so the application's keys win, where Suprnova's `Config::register` lets the last registration win outright.
+Status: Agreed 2026-10-09
+
+[PAR-138] The `Log` facade MUST offer `Log::emergency`, `alert`,
+`critical`, `error`, `warning`, `notice`, `info` and `debug`, each taking
+a message, a `<level>_with(message, context)` form of each, and
+`Log::log(level, message, context)`, all writing to the default channel,
+as Laravel's `LogManager` level methods do; each write MUST go through
+`tracing`, so `LOG_LEVEL`'s filter and the request's span still see it,
+and MUST keep its own level in a file or stack channel's record, so
+`Log::critical` writes `CRITICAL`, not `ERROR`. `Logger` MUST offer the
+five missing `_with` forms beside `info_with`, `warning_with` and
+`error_with`. `Logger::with_context(context)` MUST return a logger whose
+later writes carry that context under each call's own, and
+`Logger::without_context(keys)` one without those keys (all of them for
+`None`), as Laravel's `Logger::withContext` and `withoutContext` do.
+`Log::share_context(context)` MUST add context to every later write of
+the current `Context` scope, which each request and each queued job runs
+in, on every channel, with `Log::shared_context()`,
+`Log::without_context(keys)` and `Log::flush_shared_context()`, as
+Laravel's `shareContext` does; shared context MUST NOT reach a write of
+another scope running at the same time, and outside a scope it shares
+nothing, as `Context::add` does. Every write that reaches a channel MUST dispatch a
+`MessageLogged` event carrying the level, the message and the context,
+and `Log::listen(callback)` MUST call the callback for each write, as
+Laravel's `Logger` dispatches `MessageLogged` and `listen` registers for
+it; the dispatcher's own logging MUST NOT dispatch `MessageLogged` again,
+and a listener's failure MUST NOT fail the write.
+Falsifier: in a child process with `LOG_CHANNEL=single`, `Log::critical("disk full")` writes a line whose level is not `CRITICAL`; `Log::warning_with("x", json!({"id": 7}))` writes a line without the context `id` of 7; of two writes through `logger.with_context(json!({"tenant": "acme"}))` one lacks the context `tenant` of `acme`; context one `Context::scope` shares shows on a write of another scope running at the same time; `Log::listen` hears nothing for `Log::channel("null")?.info("x")`, or under the events fake that write records no `MessageLogged`; or one write records two `MessageLogged` events.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `LogManager::error` and `Logger`; Laravel's `LogManager` forwards each level to the default channel (`Log/LogManager.php:745`), `Logger::withContext` carries context (`Log/Logger.php:201`), each write dispatches `MessageLogged` (`:261`), `listen` registers for it (`:233`) and `shareContext` reaches every channel (`Log/LogManager.php:535`); shared context is scoped to the request or job because one Rust process serves concurrent requests, which would otherwise put one user's context on another's log lines.
+Status: Agreed 2026-10-09
+
+[PAR-139] Each built-in channel that writes a file or a stream
+(`single`, `daily`, `monthly`, `stderr`, `errorlog` and `syslog`) MUST
+keep only records at or above the bare level `LOG_LEVEL` names (`info`
+in `info,sqlx=warn`), `debug` when it names none, as Laravel's
+`config/logging.php` passes `env('LOG_LEVEL', 'debug')` to each;
+`LogChannel::level` keeps setting it in code. `LogLevel::parse(name)` MUST
+accept the eight PSR-3 names and `warn` and `trace`, and a `LOG_LEVEL`
+whose bare level is none of them MUST fail the boot naming it, as
+Laravel's `level()` throws `Invalid log level.`; the `tracing` filter
+MUST read a PSR-3 name as its nearest `tracing` level (`warning` as
+`warn`, `notice` as `info`, `critical`, `alert` and `emergency` as
+`error`), so `LOG_LEVEL=warning` keeps errors on the default channel.
+`LogChannel::replace_placeholders(on)` MUST choose per channel whether
+`{key}` placeholders are replaced from the context, on by default as
+Laravel's shipped channels set `replace_placeholders`, and a stack MUST
+give each of its channels the form that channel chose.
+Falsifier: in a child process with `LOG_LEVEL=error`, `Log::channel("errorlog")?.debug("m")` writes `m`; with `LOG_CHANNEL=errorlog` and `LOG_LEVEL=warning`, `tracing::error!("m")` writes nothing; `LOG_LEVEL=loud` boots; or `Log::build(LogChannel::monthly(path).replace_placeholders(false))?.info_with("user {id}", json!({"id": 7}))` writes `user 7`, or a stack of a replacing and a non-replacing channel writes one form to both.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows config `logging.channels.errorlog.level` and `logging.channels.monthly.replace_placeholders`; Laravel's channels take `env('LOG_LEVEL', 'debug')` (`config/logging.php:125`), `level()` refuses an unknown name (`Log/ParsesLogConfiguration.php:41-50`) and each driver adds the placeholder processor only when the channel asks (`Log/LogManager.php:366`, `:421`).
+Status: Agreed 2026-10-09
+
+[PAR-140] The console MUST offer `console::error(text)`,
+`console::warn(text)` and `console::info(text)`, each writing one line
+marked `ERROR`, `WARN` or `INFO`, `error` and `warn` to standard error and
+`info` to standard output, styled only when that stream is a terminal and
+`NO_COLOR` is unset, as Laravel's `InteractsWithIO::error` writes a
+styled line and its output components mark it `ERROR`, `WARN` or `INFO`.
+Every command the console dispatches MUST accept `-q`/`--quiet` and `-v`,
+`-vv` and `-vvv` before the command name, and after it for a command that
+takes no raw arguments and declares no flag of that name itself, a
+command's own flag keeping its meaning; `console::verbosity()` MUST answer the run's level,
+`console::line_at(text, level)` and `console::error_at(text, level)` MUST
+write only when the run's level is at least `level`, and `--quiet` MUST
+silence every line a command writes through these calls, as Symfony's
+quiet level does, while the dispatcher's own failure message stays.
+`console::line` and `console::error_line` keep writing at the normal
+level, and captured test output stays plain text.
+Falsifier: `console::test(["-q", "harness:report"])` fails to parse or captures output; a command calling `console::error_at("detail", Verbosity::Verbose)` captures `detail` without `-v`, or nothing with it; the captured line of `console::error("boom")` lacks `ERROR` or holds an escape sequence; or `console::line("x")` captures anything but `x` and its line ending.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `InteractsWithIO::error`; Laravel's `error($string, $verbosity = null)` styles the line and writes it at the asked verbosity (`Console/Concerns/InteractsWithIO.php:357-359`), and command authors rely on both; writing errors to standard error is the Unix convention the log keeps.
+Status: Agreed 2026-10-09
+
+[PAR-141] The console MUST offer the prompts Laravel Prompts gives a
+command: `console::ask_with_default(question, default)`;
+`console::secret(question)`, which never echoes the answer on a terminal
+and never writes it to captured output, as Prompts' `password` does;
+`console::select(question, options, default)`, answering the chosen
+option's index, and `console::select_keyed(question, options, default)`,
+answering its key; `console::multiselect(question, options, defaults)`,
+answering the chosen indexes; a `Progress` bar with `new(label, total)`,
+`advance(steps)`, `label`, `hint` and `finish`, and
+`console::progress(label, items, f)`, which maps each item through `f`
+while it advances, a bar writing its label and the steps done of the
+total, `Sync 3/3` when it finishes, as plain text where the output is not
+a terminal, captured test output included; and `console::form()`, chaining `text`, `secret`,
+`confirm` and `select` steps under names and answering every value by
+name from `submit()`, as Prompts' `form` does. A prompt MUST read one
+line from standard input when it is not a terminal, MUST refuse an answer
+that is not one of its options by naming the options, and under
+`console::test` MUST take its answer from `ConsoleTest::expects_question`
+or, for a menu, from `ConsoleTest::expects_choice(question, answer,
+options)`. `console::ask` and `console::confirm` keep their signatures.
+Falsifier: under `console::test(["prompt:demo"]).expects_question("Password?", "hunter2")`, a command calling `console::secret("Password?")` receives anything but `hunter2` or captures `hunter2`; `console::select("Role?", &["Member", "Owner"], None)` answered `Admin` succeeds or fails without naming `Member` and `Owner`, or answered `Owner` returns anything but `1`; `multiselect` answered `Member,Owner` returns anything but `[0, 1]`; `console::progress("Sync", 0..3, f)` calls `f` other than three times, or the captured output lacks `Sync 3/3`; or a form of `text("name", ..)` and `secret("token", ..)` answered `Ada` and `t0k` returns other values under those names.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `docs:prompts`; Laravel's `InteractsWithIO` offers `secret` and `choice` (`Console/Concerns/InteractsWithIO.php:209`, `:228`) and Laravel Prompts documents `password`, `select`, `multiselect`, `progress` and `form` (`docs-13.x/prompts.md`), where Suprnova offers `ask` and `confirm` and its parity chapter points at outside crates with no safety or typing reason.
+Status: Agreed 2026-10-09
+
+[PAR-142] `down` MUST dispatch a `MaintenanceModeEnabled` event, which
+carries no data, after it activates maintenance mode, as Laravel's
+`DownCommand` does; MUST print `Maintenance mode options updated.` when
+maintenance mode was already active and `Application is now in
+maintenance mode.` otherwise; MUST print the bypass address as `You may
+bypass maintenance mode via [<APP_URL>/<secret>].`; and on failure MUST
+print `Failed to enter maintenance mode: <error>.` and exit with a
+failing status. `--retry` MUST take a number of seconds or a date, a
+date being sent as `Retry-After` in the RFC 7231 date form, as Laravel's
+`getRetryTime` does, and `--render <view>` MUST render the Tera template
+at `resource_path("views/<view>")` with `retry_after` in its context and
+serve the result as the maintenance page, as Laravel prerenders the
+`--render` view; a template that cannot be read or rendered MUST fail
+`down` before maintenance mode is activated. `--message` stays.
+Falsifier: under the events fake a `down` run records no `MaintenanceModeEnabled`; a second `down` prints `Application is now in maintenance mode.`; with `APP_URL=https://example.test` and `--secret abc` the output lacks `https://example.test/abc`; `down --retry "Sat, 01 Jan 2033 00:00:00 GMT"` is refused, or a request then gets another `Retry-After`; or `down --render errors/503.html` serves a page without the template's rendered `retry_after`, or activates maintenance mode when the template is missing.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Foundation\Console\DownCommand` and `artisan down`; Laravel's `DownCommand` dispatches `MaintenanceModeEnabled` (`Foundation/Console/DownCommand.php:59`), tells an update from an activation (`:48`, `:61-64`), prints the bypass URL with `app.url` (`:67`) and reads `--retry` as seconds or a date (`:27`, `:150`); listeners and operators use each of them.
+Status: Agreed 2026-10-09
+
+[PAR-143] A schedule with a task that asks `on_one_server()` MUST refuse
+to start, `validate_single_server_locking` answering an error that names
+the tasks, when no cache store is bound, in every environment, and a tick
+that finds no cache store MUST skip such a task with an error log instead
+of running it, as Laravel's one-server mutex has no path that runs a task
+on every server; the production refusal of a store whose locks stay in
+one process, the automatic name and the 60-second lock stay.
+`TaskBuilder::days(days)` and the day helpers (`weekdays`, `weekends` and
+`sundays` to `saturdays`) MUST replace only the day-of-week field of a
+schedule that a frequency, time or `cron` call set before them, keeping
+its time and its other fields, as Laravel's `days` splices the fifth
+field; on a builder no such call has set they keep the midnight their
+documentation names, so a task that asked only `.mondays()` still runs
+once that day. `at(time)`, `try_at(time)`, `daily_at(time)` and
+`try_daily_at(time)` MUST read `H` as that hour on the hour and `H:i:s`
+as its hour and minute, as Laravel's `dailyAt` does; a non-numeric
+segment stays an error for `try_at`, a warning for `at` and `0` for
+`daily_at` and `try_daily_at`.
+`TaskBuilder::environments(envs)` MUST limit a task to the named
+environments, and a task MUST NOT run while the application is in
+maintenance mode unless it asks `even_in_maintenance_mode()`, a
+maintenance state that cannot be read counting as down, as Laravel's
+`Event::isDue` checks both; `Schedule::run_due_tasks` and
+`run_due_tasks_into`, which `schedule:run` and `schedule:work` run
+through, MUST apply both, and `Schedule::due_tasks()` keeps its
+signature.
+Falsifier: under `TestContainer::fake()` with no cache store bound, a schedule with `.every_minute().on_one_server()` passes `validate_single_server_locking()`, or two such schedules both run the task in one minute; `.hourly().days(&[DayOfWeek::Monday])` reads anything but `0 * * * 1`, or `.daily().at("09:30").mondays()` anything but `30 9 * * 1`, or `.mondays()` alone anything but `0 0 * * 1`; `CronExpression::monthly_on(15).at("9")` reads anything but `0 9 15 * *`, or `.at("09:30:00")` anything but `30 9 15 * *`; `CronExpression::daily_at("9")` reads anything but `0 9 * * *`; `run_due_tasks` runs a task limited to `Environment::Production` with `APP_ENV=local`; or with maintenance mode active `run_due_tasks` runs an `every_minute` task, or does not run one that asks `even_in_maintenance_mode()`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `CallbackEvent::onOneServer`, `ManagesFrequencies::days`, `ManagesFrequencies::monthlyOn` and `Schedule::dueEvents`; Laravel's `days` splices the day-of-week field (`Console/Scheduling/ManagesFrequencies.php:664-669`), `dailyAt` reads one segment as the hour (`:360-367`), `dueEvents` keeps only events that are due (`Console/Scheduling/Schedule.php:441`) and `Event::isDue` skips maintenance mode and other environments (`Console/Scheduling/Event.php:285-293`); on the one-server fix the log rules fail closed.
+Status: Agreed 2026-10-09
+
+[PAR-144] `Application::load_migrations_from(list)` MUST register a
+function returning migrations that every migrate command the application
+binary runs (`migrate`, `migrate:status`, `migrate:rollback`,
+`migrate:fresh`, the migration on boot and `schema:dump`) runs after the
+application migrator's own list, as Laravel's `loadMigrationsFrom` hands
+the migrator paths it runs with the application's, and a crate MUST be
+able to register its own with `suprnova::register_migrations!(owner,
+list)`, which an application picks up by linking the crate. A migration
+whose name the application's migrator or an earlier registration already
+lists MUST run once. The two-factor migrations MUST be available as one
+list, `auth_flows::two_factor::migrations()`, so an application that
+registers it receives a migration added to that list without an edit;
+the framework registers none of its own migrations unless the
+application asks. `Application::migrations::<M>()` keeps its meaning.
+Falsifier: with an application migrator that lists only a `users` migration and `load_migrations_from` a list holding a `widgets` migration, `migrate` on a temporary SQLite database leaves no `widgets` table, or `migrate:status` does not list it; a migration both lists name runs twice or fails as applied; a registration made with `register_migrations!` does not run; or `auth_flows::two_factor::migrations()` lacks one of the four two-factor migrations.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `ServiceProvider::loadMigrationsFrom`; Laravel registers a package's migration paths with the migrator (`Support/ServiceProvider.php:276-283`), where the dogfood app lists each framework-owned two-factor migration by hand, so a release that adds one runs only after an application edit.
+Status: Agreed 2026-10-09
+
+[PAR-145] `Attachment::is_equivalent(other)` MUST answer whether two
+attachments have the same name, bytes and content type, and
+`Attachment::is_equivalent_with(other, name, content_type)` whether they
+do once the given name and content type stand in for the other's, as
+Laravel's `Attachment::isEquivalent` compares the data, `as` and `mime`;
+`OutgoingMessage::has_equivalent_attachment(attachment)` and
+`OutgoingMessage::has_attached_data(bytes, name, content_type)` MUST check
+a sent message with them, and `has_attachment(filename)` keeps matching by
+name. A message MUST carry one attachment for each distinct name and
+bytes, the first kept, whether the attachments came from the mailable's
+`attachments()`, from `MailBuilder::attach` or from both, on the send and
+the queued path, as Laravel's `attachData` keeps one per name and data,
+and `MailBuilder::attach_data(bytes, name, content_type)` MUST add one.
+`Attachment::new` keeps its required content type.
+Falsifier: a message carrying `Attachment::new("r.pdf", b"A".to_vec(), "application/pdf")` answers `has_equivalent_attachment` true for `Attachment::new("r.pdf", b"B".to_vec(), "application/pdf")` or for one of type `text/plain`, or false for its own attachment; `is_equivalent_with(other, "r.pdf", "application/pdf")` answers false for an `other` named `x.bin` of type `text/plain` holding `A`; `has_attached_data(b"A", "r.pdf", "application/pdf")` answers false; `Mail::to(a).attach(x.clone()).attach(x).send(m)`, or two `attach_data` calls with the same bytes and name, captures two attachments; or two attachments named `r.csv` with different bytes are captured as one.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Attachment::isEquivalent` and `Mailable::attachData`; Laravel compares an attachment's data, name and type (`Mail/Attachment.php:227`) and keeps one raw attachment per name and data (`Mail/Mailable.php:1164-1172`), where `has_attachment` passes for the wrong bytes or type.
+Status: Agreed 2026-10-09
+
+[PAR-146] `Mailable` MUST provide `to()`, `cc()`, `bcc()` and
+`reply_to()`, each a list of addresses, empty by default, that a mailable
+overrides to carry its own recipients, as Laravel's `Mailable` carries
+`$to`, `$cc` and `$bcc`; sending or queueing MUST add them to the
+builder's lists, the mailable's first and an address already present
+skipped, before `Mail::always_to` applies, so the always-to address still
+replaces every recipient. `Mail::send(mailable)`, `Mail::queue(mailable)`,
+`Mail::later(delay, mailable)`, `Mail::on_queue(queue, mailable)` and
+`Mail::queue_on(queue, mailable)` MUST send or queue a mailable to its
+own recipients, as Laravel's `Mailer::onQueue` and `queueOn` do, and MUST
+refuse with an error, before anything is sent or pushed, a mailable whose
+lists are all empty. `MailFake::has_sent(name)` and
+`MailFake::has_sent_mailable::<M>()` MUST answer whether a mailable of
+that name was sent, queued ones not counting, and
+`MailFake::has_queued(name)` whether one was queued, as Laravel's
+`MailFake::hasSent` and `hasQueued` do.
+Falsifier: a mailable whose `bcc()` returns `audit@example.org`, sent with `Mail::to("alice@example.org").send(m)` or queued, reaches the fake without that address; with `Mail::always_to` set the address is still sent; `Mail::on_queue("emails", m)` for a mailable whose `to()` returns `alice@example.org` is not queued on `emails` to her; `Mail::send` of a mailable with no recipients sends; `has_sent("Greeting")` is false after a send or true after only a queue; or `has_queued("Greeting")` is false after a queue.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Mailable::$bcc`, `Mail::onQueue` and `Mail::hasSent`; Laravel's mailable sets its own recipients (`Mail/Mailable.php:709`), `Mailer::onQueue` queues a mailable alone (`Mail/Mailer.php:493-496`) and `MailFake::hasSent` answers a boolean (`Support/Testing/Fakes/MailFake.php:385-388`), where Suprnova's sent record is private and every send starts from the builder.
+Status: Agreed 2026-10-09
+
+[PAR-147] `Mailable::delay()` MUST give a mailable a delay, `None` by
+default, that `MailBuilder::queue` and `Mail::queue` apply, an explicit
+`later` delay winning, and `Notification::delay(channel)` MUST give a
+notification a delay per channel, `None` by default, that `Notify::queue`
+applies to that channel's job, as Laravel's `Delay` attribute and
+`withDelay` delay queued mailables and notifications.
+Falsifier: a mailable whose `delay()` is 60 seconds, queued under `Mail::fake()`, records no 60-second delay, or one queued with `later` of 10 seconds records 60; or under `Queue::fake()` a notification whose `delay("mail")` is 30 seconds, queued with `Notify::queue`, pushes its mail job with an available time other than thirty seconds ahead.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Queue\Attributes\Delay`; Laravel honours `Delay` on a mailable (`Mail/Mailable.php:231`) and a notification's `withDelay` per channel (`Notifications/NotificationSender.php:259`), where Suprnova's jobs and queued listeners take a delay but mailables and notifications do not; a trait method is the Rust form of the attribute.
+Status: Agreed 2026-10-09
+
+[PAR-148] Delivering a notification on the broadcast channel MUST
+dispatch a `BroadcastNotificationCreated` event carrying the
+notification's name, the route, the data and the message's connection
+and queue, as Laravel's `BroadcastChannel` dispatches
+`BroadcastNotificationCreated`. A notification that implements
+`NotificationBroadcast::to_broadcast()` MUST supply its data as a
+`BroadcastMessage`, which `on_queue(name)` and `on_connection(name)`
+route, and a message with a queue or a connection MUST be published by a
+queued job on that queue and connection instead of at once, while one
+with neither keeps publishing at once. The channel MUST keep failing when
+no broadcast hub is bound, at delivery for a message published at once
+and in the job for a queued one, and `BroadcastChannel::new()` and the
+`data()` payload stay.
+Falsifier: a listener for `BroadcastNotificationCreated` does not run when a notification is broadcast; with `Queue::fake()`, a notification whose `to_broadcast()` is `BroadcastMessage::new(data).on_queue("broadcasts")` reaches the hub at once, or pushes nothing on `broadcasts`; or with no hub bound the delivery of a message that names no queue or connection succeeds.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `BroadcastChannel::__construct`; Laravel's channel builds `BroadcastNotificationCreated`, routes it by the message's connection and queue and dispatches it through the event dispatcher (`Notifications/Channels/BroadcastChannel.php:37-51`), so applications listen for it and route broadcasts; the failure without a hub is Suprnova's and stays, and so does publishing at once for a message that names no queue or connection, where Laravel's `ShouldBroadcast` event always goes through the queue.
+Status: Agreed 2026-10-09
+
+[PAR-149] `MailRendering` MUST offer `attach(attachment)`,
+`attach_data(bytes, name, content_type)`, `attach_path(path, options)`
+and `attach_many(files)`, the last two reading each file when the mail is
+delivered and taking an optional name and content type per file, the
+content type otherwise following the file's extension, as Laravel's
+`MailMessage::attach` and `attachMany` attach by path; a file that cannot
+be read MUST fail the delivery naming the path. A notification mail whose
+subject is empty MUST be sent with the notification's name after its
+last `::` in title case as its subject, words split at case changes and
+at `_`, `-` and `.` (`InvoicePaid` gives `Invoice Paid`), as Laravel's
+`MailChannel` falls back to the class basename in title case.
+`MailRendering` keeps `Default` and its existing fields, and any field it
+gains is public, so the `..Default::default()` literals that
+`#[derive(NotificationMailable)]` and applications write keep compiling.
+Falsifier: a notification whose `to_mail` attaches `a.txt` and `b.pdf` by path, the second named `report.pdf`, delivers a message without `a.txt` as `text/plain` or without `report.pdf` holding the file's bytes; an attachment path that does not exist delivers; or a notification named `InvoicePaid` with an empty subject is sent with any subject but `Invoice Paid`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `MailMessage::attachMany` and `SimpleMessage::$subject`; Laravel attaches each file by path with its options (`Notifications/Messages/MailMessage.php:287-299`) and falls back to `Str::title(Str::snake(class_basename($notification), ' '))` (`Notifications/Channels/MailChannel.php:178-180`), where Suprnova reads every attachment into memory first and sends an empty subject empty.
+Status: Agreed 2026-10-09
+
+[PAR-150] A queued listener whose job declares `unique_id()` MUST be
+pushed through `Queue::push_unique`, so a second dispatch while the first
+job's lock is held pushes nothing and dispatches `UniqueJobSkipped`, and a
+job that asks `unique_until_processing()` releases its lock when it
+starts, as Laravel's dispatcher takes the unique lock before it queues a
+listener. `QueuedListener::delay(duration)` MUST delay the listener's
+job, winning over the job's own `delay()`, and
+`QueuedListener::delay_until(f)` MUST delay it until the time `f`
+computes from the event, as Laravel's queued closure takes a date as well
+as seconds.
+Falsifier: dispatching an event twice to a queued listener whose job's `unique_id()` is `Some("k")` leaves two jobs queued or dispatches no `UniqueJobSkipped`; or under `Queue::fake()` a listener with `.delay_until(|e| e.send_at)` records an available time other than `send_at`, or one with `.delay(Duration::from_secs(30))` other than thirty seconds ahead.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `CallQueuedListener::$shouldBeUniqueUntilProcessing`, `CallQueuedListener::$uniqueId` and `QueuedClosure::delay`; Laravel copies the unique fields onto the listener's job (`Events/Dispatcher.php:767`), skips the push when the lock is held (`:669-672`) and takes a date, an interval or seconds as a delay (`Events/QueuedClosure.php:131-141`), where Suprnova's queued listener uses the plain push.
+Status: Agreed 2026-10-09
+
+[PAR-151] A queue connection MUST take its own after-commit setting,
+from `QUEUE_<CONNECTION>_AFTER_COMMIT` or
+`Queue::set_connection_after_commit(connection, on)`, read by
+`Queue::connection_after_commit(connection)`, as Laravel reads
+`after_commit` per connection, and `Job::after_commit_choice()` MUST let a
+job say `Some(true)`, `Some(false)` or `None`, `Some(true)` by default
+when `after_commit()` is true and `None` otherwise. A push MUST wait for
+the commit by the first of these that decides: the push's own override,
+the job's choice, the connection's setting, `QUEUE_AFTER_COMMIT`,
+otherwise not, so a job that says `Some(false)` is pushed at once even
+when its connection or `QUEUE_AFTER_COMMIT` waits, as Laravel's
+`shouldDispatchAfterCommit` lets the job's own `afterCommit` win.
+`push_unique` MUST follow the same order.
+Falsifier: with `QUEUE_AFTER_COMMIT=true`, a job whose `after_commit_choice()` is `Some(false)` pushed inside a transaction is not visible before the commit; or with `QUEUE_AUDIT_AFTER_COMMIT=true`, a push to the `audit` connection inside a transaction is visible before the commit, or a push to another connection is not.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row config `queue.connections.redis.after_commit`; Laravel's connector passes the connection's `after_commit` and `Queue::shouldDispatchAfterCommit` lets a job's explicit setting, `false` included, win over it (`Queue/Queue.php:400-411`), where Suprnova ORs one process-wide switch with the job's.
+Status: Agreed 2026-10-09
+
+[PAR-152] `PusherClient::new(config, registry)` MUST build a client for
+Pusher's HTTP API from a `PusherConfig` and the `ChannelRegistry` that
+names its channels, as `PusherBroadcastHub::new` takes them, and
+`PusherBroadcastHub::client()` MUST return the hub's own, as Laravel's `Broadcast::pusher($config)` and
+`PusherBroadcaster::getPusher` do: `channels(prefix, info)` and
+`channel(name, info)` MUST query channels, `presence_users(name)` MUST
+list a presence channel's user ids, `trigger_batch(envelopes)` MUST
+publish several events in one request, `terminate_user_connections(user_id)`
+MUST end a user's connections, and `get(path, params)` MUST send any
+other signed `GET`. Every request MUST carry Pusher's request signature,
+as the events endpoint does, with `body_md5` only for a request that has
+a body, channel names MUST go through the registry's wire mapping, and an
+error MUST NOT quote the secret or a signature. The hub's `list_members`
+keeps answering from the local hub.
+Falsifier: against a mock Pusher that answers `/apps/3/channels/presence-room/users` with users `1` and `2`, `client().presence_users("room")` of a hub whose registry holds the presence channel `room` returns anything else, or sends a request whose `auth_signature` does not verify under the app secret; `trigger_batch` of two envelopes sends other than one request to `/apps/3/batch_events`; or the error of a refused request contains the secret.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Broadcast::pusher`; Laravel returns a configured Pusher client (`Broadcasting/BroadcastManager.php:363`), and its channel and presence queries see members connected through Pusher, Soketi or Reverb, which Suprnova's local presence answer cannot; the endpoints come from Pusher's HTTP API documentation, which is not in the reference tree.
+Status: Agreed 2026-10-09
+
+[PAR-153] `DiskExt::make_directory(path)` MUST create the directory a
+path without a trailing slash names, as it does for one with the slash,
+and `DiskExt::ensure_directory_exists(path)` MUST do the same and succeed
+when the directory exists, as Laravel's `ensureDirectoryExists` does; a
+path that is empty or already ends in `/` reaches opendal's `create_dir`
+unchanged. `Storage::build_temporary_upload_urls_using(disk, callback)`
+MUST make the handle `Storage::disk(disk)` returns answer
+`temporary_upload_url` from the callback, which receives the path and the
+lifetime, ahead of the disk's own presigning, a read-through disk
+included, as Laravel's local and read-through disks put the
+`buildTemporaryUploadUrlsUsing` callback first, and
+`Storage::provides_temporary_upload_urls(disk)` MUST answer whether a
+callback is set or the disk presigns writes, as
+`ReadThroughFilesystem::providesTemporaryUploadUrls` does. A disk with no
+callback keeps presigning as it does today, and `TemporaryUploadUrl`
+keeps its redacting `Debug`.
+Falsifier: `make_directory("a/b")` on a memory disk answers an error or leaves `directories("a", false)` without `a/b`; a second `ensure_directory_exists("a/b")` fails; or on a read-through disk `rt` over two memory disks, after `Storage::build_temporary_upload_urls_using("rt", ...)` with a callback answering `https://up/<path>`, `Storage::provides_temporary_upload_urls("rt")` is false or `Storage::disk("rt")?.temporary_upload_url("x", 60 s)` returns a URL other than `https://up/x`; or a memory disk without a callback answers `true`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Filesystem::ensureDirectoryExists` and `ReadThroughFilesystem::providesTemporaryUploadUrls`; Laravel creates a bare directory path (`Filesystem/Filesystem.php:640-645`), installs an upload-URL callback per disk (`Filesystem/FilesystemAdapter.php:1176`) that its local disk asks first (`Filesystem/LocalFilesystemAdapter.php:100-105`) and answers the callback or the primary (`Filesystem/ReadThroughFilesystem.php:44-57`), where opendal's `create_dir` refuses a path without a trailing slash; the primary half is already the `presign_write` capability.
+Status: Agreed 2026-10-09
+
+[PAR-154] Under `Process::fake()`, each recorded process MUST keep its
+arguments as a list, `None` for a shell line, and its command line
+quoted per argument, as `InvokedProcess::command()` already reports it,
+and `ProcessFake::assert_ran_args(args)` and
+`ProcessFake::assert_ran_command_line(line)` MUST match them exactly, as
+Laravel's `assertRan` compares an array command as an array;
+`assert_ran` and the patterns keep matching the arguments joined by
+spaces, as PAR-025 requires. A faked process that is started MUST reveal
+its output a line at a time, as Laravel's `FakeInvokedProcess` does: each
+`output()` or `latest_output()` call reveals the next standard output
+line, `output()` answering every line revealed so far and
+`latest_output()` the line it revealed, the empty string when none is
+left, and `error_output()` and `latest_error_output()` do the same for the
+error output; the lines `running()` already showed count as revealed, and
+every line is revealed once `running()` has answered `false` or the
+process has been stopped. `wait()` and the `ProcessResult` stay complete.
+Falsifier: with `Process::command(["printf", "a b"])` and `Process::command(["printf", "a", "b"])` run under the fake, `assert_ran_args(&["printf", "a b"])` passes when only the second ran, or the first records a command line other than `printf 'a b'`; or a started fake described with the output lines `one` and `two` answers its first `output()` with `one\ntwo\n` or its second with anything but `one\ntwo\n`, or a second such fake answers its `latest_output()` calls with anything but `one\n`, `two\n` and then the empty string.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `FakeInvokedProcess::command` and `FakeInvokedProcess::output`; Laravel's fake compares array commands as arrays (`Process/Factory.php:185`) and reveals one more line per `output()` and `latestOutput()` call (`Process/FakeInvokedProcess.php:194-206`, `:234-250`), so a test of code that polls a running process sees output arrive over time.
+Status: Agreed 2026-10-09
+
+[PAR-155] `Image::resize`, `Image::cover` and the one-side resizes MUST
+record every side as at least 1, as Laravel's `Image` clamps with
+`max(1, ...)` before a driver sees the step, so every driver, custom ones
+included, receives no zero side. `Image::resize_width_only(width)` and
+`Image::resize_height_only(height)` MUST set one side and keep the other
+at its current size, as Laravel's `resize(width: ...)` and
+`resize(height: ...)` do, on the oxideav and the ImageMagick drivers
+alike and under the same decode limits; `resize`, `resize_width` and
+`resize_height` keep their meaning.
+Falsifier: a recording driver installed with `set_default_driver` receives `Resize { width: 0, height: 0 }` from `resize(0, 0)` or `Cover { width: 0, height: 0 }` from `cover(0, 0)`; or a 40 by 20 PNG through `resize_width_only(10)` measures anything but 10 by 20 on the oxideav driver, or, where the host has ImageMagick 7, on `using(ImageDriverKind::Magick)`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Image::resize` and `Transformations\Cover::__construct`; Laravel clamps both (`Image/Image.php:93-96`, `:126-136`) and hands a one-side `Resize` to Intervention's `resize` (`Image/Drivers/InterventionDriver.php:105`), which keeps the other side by Intervention's documentation, Intervention not being in the reference tree; only Suprnova's oxideav driver clamps, the ImageMagick driver writes `0x0` into its geometry, and no Suprnova call sets one side and keeps the other.
+Status: Agreed 2026-10-09
+
+[PAR-156] `register_transformation_with(name, f)` MUST register a custom
+transformation whose function receives per-call settings of a type it
+names, and `Image::transform_with(name, settings)` MUST record a step
+that hands those settings to it, the image holding the settings, as
+Laravel's handler receives the
+transformation object with its own fields; a step whose settings are not
+of the registered type MUST fail the image with an error naming the
+transformation. `Transformation` and `CustomTransformation` keep `Copy`,
+`register_transformation` and `Transformation::custom(name)` keep their
+meaning, and the settings MUST be released when the image that recorded
+them is dropped.
+Falsifier: a `pixelate` transformation registered with `Pixelate { size: u32 }` settings sees anything but `4` and then `8` for two images recorded with `transform_with("pixelate", Pixelate { size: 4 })` and `size: 8`; a step recorded with settings of another type succeeds; or a settings value is still alive after its image is dropped.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Image::transform`; Laravel's driver calls the handler with the transformation object (`Image/Drivers/InterventionDriver.php:89-93`) and its documented custom transformation carries its own fields (`docs-13.x/images.md`, Custom Transformations), where Suprnova's registered function receives the pixels only; `Copy` stays because written API is not removed, so the image, not the step, holds the settings.
+Status: Agreed 2026-10-09
+
+[PAR-157] The HTTP client MUST offer `Http::head(url)`, sending `HEAD`.
+`Http::global_request_middleware(f)` MUST register a function every later
+request passes through before it is sent, `Http::global_response_middleware(f)`
+one that sees every response, and `Http::global_options(f)` options set
+on every request before its own, as Laravel's `globalRequestMiddleware`,
+`globalResponseMiddleware` and `globalOptions` do;
+`Http::without_global_configuration(f)` MUST run `f` with none of them,
+and the requests the vendor drivers send stay outside them. A
+`RequestBuilder` MUST offer `base_url(url)`, put in front of a URL that
+does not start with `http://` or `https://`, as Laravel's `baseUrl` is;
+`query(params)`, merged into the URL's query; `url_parameters(params)`,
+expanding `{name}` in the URL with each value percent-encoded so that a
+value cannot add a path segment, a query or a host;
+`attach(name, contents, filename)`, which sends the body as
+`multipart/form-data`; and `connect_timeout(duration)` for that request
+alone, as Laravel's `attach`, `withQueryParameters`, `withUrlParameters`
+and `connectTimeout` do.
+Falsifier: a global request middleware that adds `X-App: 1` sends a request to a local echo server without it, a global response middleware does not see the echo server's response, or either applies inside `without_global_configuration`; `Http::head(url)` against the echo server arrives with another method; `Http::get("users").base_url("https://api.test/base").query(&[("page", "2")])` is recorded with any URL but `https://api.test/base/users?page=2`; `url_parameters([("id", "a/b")])` on `https://a.test/users/{id}` gives anything but `https://a.test/users/a%2Fb`; or a request with `attach("doc", b"x", Some("a.txt"))` reaches the echo server with a content type other than `multipart/form-data` or without the part.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Http\Client\Factory` and `Http\Client\PendingRequest`; Laravel's factory carries global middleware and options and runs a callback without them (`Http/Client/Factory.php:112-177`) and its pending request offers `head`, `baseUrl`, `attach`, `withQueryParameters`, `withUrlParameters` and `connectTimeout` (`Http/Client/PendingRequest.php:882`, `:292`, `:350`, `:406`, `:564`, `:656`), where Suprnova's manual sends multipart users to raw `reqwest`.
+Status: Agreed 2026-10-09
+
+[PAR-158] A request recorded under `Http::fake` MUST carry the headers it
+is sent with, among them the `Content-Type` its JSON, form or multipart
+body sets and the headers global middleware adds, as Laravel records the
+request after its middleware, and `RecordedRequest` MUST offer
+`header(name)`, `has_header(name, value)`, `is_json()`, `is_form()` and
+`is_multipart()`, names compared without regard to case.
+`Http::fake_url(pattern, response)` MUST answer every request whose URL
+matches the pattern, `*` matching any run of characters and a leading
+`*` implied, without being used up, as Laravel's `stubUrl` matches with
+`Str::is`; `Http::fake_using(callback)` MUST answer a request with the
+callback's response, `None` falling through to the other stubs; and
+`Http::fake_sequence(pattern)` MUST answer matching requests with its
+responses in turn and then with its `when_empty` response.
+`Http::prevent_stray_requests(on)` MUST switch the stray-request refusal
+on and off, the same process-wide switch that `fail_on_real_calls` and
+`allow_real_calls` move, `Http::preventing_stray_requests()` MUST answer
+it, as `is_guarded` does, and `Http::allow_stray_requests(patterns)` MUST
+send a request inside `Http::fake` that no stub answers and whose URL
+matches one of the patterns to the network while the refusal is on, as
+Laravel's `preventStrayRequests` and `allowStrayRequests` do. `fake_response`, its use-once matching,
+`fail_on_real_calls` and `allow_real_calls` keep their meaning.
+Falsifier: `Http::post(url).json(&body)` under the fake is recorded without `Content-Type: application/json`, or a header a global request middleware adds is missing from the record; `fake_url("a.test/users/*", ..)` answers `https://a.test/users/7` with the default response, or a second match without the stub; a `fake_using` callback that answers `None` keeps another stub from answering; a sequence of `201` and `202` answers a third request with anything but its `when_empty` response; or inside `Http::fake` with stray requests prevented and `allow_stray_requests(&["http://127.0.0.1:*"])`, a request to a local echo server is refused or never reaches it.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Http\Client\Request::headers`, `Http::fake` and `Http::preventStrayRequests`; Laravel's recorder sits after the middleware (`Http/Client/PendingRequest.php:1760-1770`), `Request::headers` reads the request as sent (`Http/Client/Request.php:129-131`), stubs match with `Str::is` and stay (`Http/Client/Factory.php:395-398`), and stray requests take an allowlist (`:428`, `:451`).
+Status: Agreed 2026-10-09
+
+[PAR-159] `Vite::tags(entry_points)` and
+`InertiaConfig::vite_tags(entry_points)` MUST render the script,
+stylesheet and preload tags of any number of entry points from the build
+manifest, deduplicated, stylesheets before scripts, carrying the public
+root as the Inertia shell's tags do, and
+`Vite::to_html()` those of the configured entry points, with
+`InertiaConfig::entry_points(entries)` adding entries beside
+`entry_point`, as Laravel's `Vite::__invoke` and `toHtml` do; a missing
+manifest MUST be an error naming its path, and an entry the manifest
+lacks an error naming the entry, as Laravel throws. `InertiaConfig::hot_file()`
+and `Vite::hot_file()` MUST answer the hot file's path that
+`ssr_hot_file` sets, `Vite::is_running_hot()` whether the file exists, and
+`Vite::dev_server_url()` its trimmed content, `None` without it, as
+Laravel's `hotFile`, `isRunningHot` and `devServerUrl` do. In
+development the first visit's tags and `Vite::tags` MUST point at the dev
+server only while the hot file exists, and at the manifest's files while
+it does not and a manifest exists, the configured dev server staying the
+answer when there is neither, so a frontend for which `suprnova serve`
+writes no hot file keeps the dev server until a build writes a manifest;
+production MUST never read the hot file. The Inertia shell keeps its own
+answer to a missing manifest.
+Falsifier: with a manifest holding `src/a.ts` and `src/b.ts`, `InertiaConfig::vite_tags(&["src/a.ts", "src/b.ts"])` lacks either hashed file or puts a script before a stylesheet; `vite_tags` answers `Ok` for a manifest path that does not exist or for an entry the manifest lacks; `InertiaConfig::new().ssr_hot_file("storage/vite.hot").hot_file()` is another path; in development a first visit with a manifest and no hot file points at the dev server, or with a hot file holding `http://[::1]:5174` points anywhere else; or in production a tag points at the hot file's URL.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Foundation\Vite::toHtml`, `Vite::toHtml`, `Vite::devServerUrl` and `Vite::hotFile`; Laravel renders tags for any entry points (`Foundation/Vite.php:384`, `:1245`), throws on a missing manifest or entry (`:968`, `:1056`) and goes hot only while the hot file exists (`:884-891`, `:1235-1238`, `:237-240`); the dev-server fallback without a manifest stays because `suprnova serve` writes the hot file only for a frontend that declares `@inertiajs/vite` (PAR-058).
+Status: Agreed 2026-10-09
+
+[PAR-160] A `Head` facade MUST resolve a page's document head from five
+layers, lowest first: the defaults `Head::defaults(f)` registers, a route
+group's metadata and a route's, both set with `with_head(f)` on the
+route builder, the metadata the request sets at run time through
+`Head::title`, `Head::description` and the other builder calls, and the
+metadata `Head::errors(f)` registers per error status, a higher layer
+replacing a lower one field by field, as Laravel Head resolves its
+layers. The builder MUST set the title, with a prefix or suffix that a
+higher layer's title inherits unless it is exact, the description, the
+canonical URL (the request's URL when none is given, `https` unless told
+otherwise), the robots directives, and `when(condition, f)`.
+`Head::render_html()` MUST render the resolved tags with every value
+HTML-escaped and `Head::to_array()` return them as data. An Inertia
+response MUST share them as a `head` prop of rendered tags, each with a
+stable `data-inertia` key, renamed by `Head::inertia(prop)` and left out
+of partial reloads, and MUST write them once into the first visit's
+`<head>`, deduplicated against the SSR head by that key; tags
+`Head::inertia_globals(f)` registers MUST be written into the first visit
+only, without the key, and never into the prop, as Laravel Head's
+Inertia renderer does. The title an `InertiaResponse` sets keeps working
+when no `Head` title is set, and a response for which no layer sets
+anything MUST carry no `head` prop, so the page object of an application
+that does not use `Head`, or builds its own `head` prop, stays as it is.
+Falsifier: with `Head::defaults` setting the title `Laravel` with the suffix ` - Laravel` and a handler calling `Head::title("About")`, a first visit's `<head>` lacks `About - Laravel` or holds it twice, or the `head` prop lacks it; a route's `with_head` description is lost when the request sets only the title; a title holding `<script>` renders unescaped; a partial reload carries the `head` prop; a `404` with `Head::errors` metadata renders the page's own title; `Head::canonical()` on `http://example.test/a` renders anything but `https://example.test/a`; an Inertia global appears in the `head` prop; or a response no layer sets anything for carries a `head` prop.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `docs:head`; Laravel Head resolves defaults, group, route, runtime and error layers field by field (`docs-13.x/head.md`, Resolution Precedence) and shares the page-managed head with Inertia as rendered elements with stable keys, omitted from partial reloads (`head.md`, Inertia), where Suprnova sets only the first Inertia title and its manual has applications build the `head` prop by hand.
+Status: Agreed 2026-10-09
+
+[PAR-161] The `Head` builder MUST carry the metadata Laravel Head
+documents beyond the title: Open Graph tags through `og(...)` and
+repeatable `og_image`, `og_video` and `og_audio`, a repeated URL updating
+its earlier entry, the document title and
+description filling a missing `og:title` and `og:description`; X cards
+through `twitter(...)` and `twitter_image`, filled from the title, the
+description and the first Open Graph image; `theme_color(color, media)`;
+application metadata and icons (`application_name`, `color_scheme`,
+`referrer`, `viewport`, the Apple web-app tags, `favicon`, `icon`,
+`apple_touch_icon`, `apple_touch_startup_image`, `mask_icon`, `manifest`)
+and `pwa(...)`; performance and discovery links (`preload`, `prefetch`,
+`preconnect`, `dns_prefetch`, `alternates`, `feed` and a paginator's
+previous and next links); custom `meta` and `link` tags, `meta` writing
+`property` for `og:` and `article:` names and `name` otherwise, with an
+optional media query; and JSON-LD schemas through `schema(value)` with
+breadcrumb and FAQ builders, each written as one
+`<script type="application/ld+json">` element that its content cannot
+close. Every route metadata property Laravel Head lists MUST be settable
+through `with_head`, and each kind MUST render through `render_html`,
+`to_array` and the Inertia `head` prop alike.
+Falsifier: two `og_image` calls with different URLs render one `og:image`, or two with the same URL render two; a page with a title and an `og(...)` call that sets no title renders no `og:title`; with `twitter` set in the defaults and an Open Graph image on the page, no `twitter:image` renders; `theme_color("#fff", Media::Light)` renders no `media` attribute; `meta("og:title", "x")` renders `name="og:title"`; or a schema whose name holds `</script>` ends the element early.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `docs:head`; Laravel Head documents Open Graph, X cards, theme colours, application metadata, icons, performance hints, custom tags and schemas with their route properties (`docs-13.x/head.md`, Supported Properties to Schemas), and the Inertia client reads the `head` prop for every one of them.
+Status: Agreed 2026-10-09
+
+[PAR-162] `Precognition::after_validation(request, errors)` MUST turn any
+validation error bag into the Precognition answer, as Laravel's
+`Precognition::afterValidationHook` does for any validator: on a
+precognitive request an empty bag answers `204` with
+`Precognition-Success: true` and a non-empty one `422` with
+`Precognition: true` and the bag, and on another request an empty bag
+passes and a non-empty one is the ordinary validation error. While the
+after-validation hooks of a form request (a data object included) or a
+multipart form run for a precognitive request that lists fields in
+`Precognition-Validate-Only`, `Precognition::should_validate(field)` MUST
+answer whether the field is listed, by the match
+`Request::should_validate` applies, `true` outside such a request, and a
+database rule a hook runs on a field the request did not list
+(`AsyncRule::check_async`, `Exists::check_value`, and `Exists::check_each`
+under the key `<field>.*`) MUST NOT run, so it neither queries nor fails,
+as Laravel's `filterPrecognitiveRules` removes the rules of unlisted
+fields, `unique` and `exists` among them, before the validator runs;
+errors a hook adds stay unfiltered, as PAR-083 requires, a listed field
+keeps every rule, and `Request::should_validate` keeps its meaning.
+Falsifier: with `used@example.com` stored, a precognitive request with `Precognition-Validate-Only: count` and the body `{"email":"used@example.com","count":1}` to a form request whose after-validation hook checks `Unique` on `email` answers anything but `204`, or queries the table, or a hook's `Exists::check_each` on an unlisted `tag_ids` reports an error; a route whose middleware calls `Precognition::after_validation(&request, bag)?` answers a precognitive request with an empty bag with anything but `204` and `Precognition-Success: true`, or with an `email` error anything but `422` carrying it; or the same request with `Precognition-Validate-Only: email` answers anything but `422` naming `email`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Precognition::afterValidationHook` and `CanBePrecognitive::filterPrecognitiveRules`; Laravel's hook answers the early `204` from any validator (`Foundation/Precognition.php:13-20`) and its request drops the rules of unlisted fields, a `unique` rule included, before validating (`Http/Concerns/CanBePrecognitive.php:15-26`), where Suprnova runs its database rules from the hooks, for fields the request did not ask about too, and answers `422` where Laravel answers `204`.
+Status: Agreed 2026-10-09
+
+[PAR-163] `csrf_field()` MUST render `<input type="hidden" name="_token"
+value="<token>" autocomplete="off">`, as Laravel's `csrf_field` does, so a
+browser does not restore a stale token into the field, and
+`try_csrf_token()` and `try_csrf_field()` MUST return an error naming the
+missing session when there is none, as Laravel's `csrf_token` throws
+`Application session store not set.`; `csrf_field()` and `csrf_token()`
+keep their signatures and their answers outside a session, the empty
+string and `None`.
+Falsifier: inside a session scope `csrf_field()` lacks `autocomplete="off"` or the session's token; or outside one `try_csrf_field()` or `try_csrf_token()` answers `Ok`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row helper `csrf_field`; Laravel renders the field with `autocomplete="off"` (`Foundation/helpers.php:388-391`) and its `csrf_token` throws without a session (`:400-409`); the error comes through `try_*` siblings because public code returns `Result` and does not panic.
+Status: Agreed 2026-10-09
+
+[PAR-164] `Cookie::raw(name, value)` MUST build a cookie whose value is
+written to `Set-Cookie` without percent-encoding, as Laravel's
+`CookieJar::make` does with `raw: true`, and MUST refuse a name that is
+not an RFC 6265 token and a value holding any byte outside cookie-octet
+(a space, `"`, `,`, `;`, `\`, a control byte or a byte above `0x7E`), so
+the raw form cannot inject a header or an attribute; `Cookie::is_raw()`
+MUST answer which form a cookie has. `Cookie::new`, its encoding and its
+`Secure`, `HttpOnly` and `SameSite=Lax` defaults stay, and so do the
+`__Host-` and `__Secure-` rules.
+Falsifier: `Cookie::raw("token", "a:b/c")?.to_header_value()` does not start with `token=a:b/c`; `Cookie::raw("t", "x;Domain=evil")` or a value holding a carriage return answers `Ok`; or `Cookie::new("token", "a:b/c")` stops encoding the value.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Contracts\Cookie\Factory::make`; Laravel's `make` takes `$raw` (`Cookie/CookieJar.php:64`), which skips value encoding; the fixed `Secure`, `HttpOnly` and `SameSite=Lax` defaults stay, because Laravel's session defaults leave `Secure` off when `SESSION_SECURE_COOKIE` is unset, and the octet check keeps the encoding's protection against header injection.
+Status: Agreed 2026-10-09
+
+[PAR-165] `View::share(key, value)` MUST make a value available to every
+server-rendered view the application renders afterwards, read in a
+template through Askama's runtime values, as Laravel's `View::share`
+merges shared data under each view's own, `View::share_for_request(key,
+value)` MUST do the same for the current request alone, its values
+winning over the application's, and `View::shared(key)` MUST answer the
+value a render would see. The application's shared values MUST belong
+to the application container, so `TestContainer` isolates them, and a
+value shared for one request MUST NOT reach another request's render,
+through the render cache neither. A view keeps reading its own fields by
+name, shared values only through the runtime values, and
+`App::inertia_share` keeps reaching Inertia props only.
+Falsifier: after `View::share("app_name", "Acme")`, a view whose template reads `app_name` through Askama's runtime values renders without `Acme`; a value shared with `View::share_for_request` inside one request appears in another request's render, with or without the render cache in front of the route; or a value shared under one `TestContainer::fake()` guard shows in a render under another.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Contracts\View\Factory::share`; Laravel's factory stores shared data (`View/Factory.php:352-361`) that each view merges under its own (`View/View.php:218`), where Suprnova's server-rendered views get none; the request form exists because one Rust process renders concurrent requests.
+Status: Agreed 2026-10-09
+
+[PAR-166] `MarkdownRenderer::render_inline(markdown)` and
+`Str::inline_markdown(value, renderer)` MUST convert Markdown's inline
+syntax only, with no block wrapper and block markers kept as text, as
+Laravel's `Str::inlineMarkdown` does through CommonMark's inlines-only
+extension, and `Str::markdown(value, renderer)` MUST render a whole
+document as a string. `MarkdownRenderer` MUST gain the builder calls
+`html_input(mode)` (`HtmlInput::Sanitize`, `Strip`, `Escape` or
+`Allow`), `allow_unsafe_links(on)` and `autolink(on)`, so Laravel's
+options are choices an application makes; a renderer that calls none of
+them MUST render today's output, sanitized unless
+`MarkdownOptions::unsafe_html` is on. `MarkdownOptions` keeps its three
+public fields and gains none, because applications build it as a struct
+literal. `Str::of(value)` MUST return a `Stringable` that chains every
+`Str` helper (`slug`, `slug_in`, `mask`, `limit`, `words`,
+`limit_words`, `excerpt`, `plural`, `plural_with_count`,
+`plural_studly`, `plural_pascal`, `singular`), `markdown(renderer)` and
+`inline_markdown(renderer)`, and `encrypt(purpose)`,
+`encrypt_for(purpose, context)`, `decrypt(purpose)` and
+`decrypt_for(purpose, context)` through `Crypt`'s purpose-bound strings,
+as Laravel's `Stringable::encrypt` and `markdown` wrap `encrypt` and
+`Str::markdown`; a `Stringable` MUST convert to and from `String` and
+display as its value. The `Str` functions keep their signatures.
+Falsifier: `Str::inline_markdown("**Laravel**", &MarkdownRenderer::default())` holds `<p` or lacks `<strong>Laravel</strong>`; `Str::inline_markdown("# Title", ..)` renders a heading; the default renderer lets `<script>` through; `Str::of("ssn-1").encrypt(CryptPurpose::Cast)?.decrypt(CryptPurpose::Cast)?` is anything but `ssn-1`, decrypting it under another purpose answers `Ok`, or encrypting under `CryptPurpose::Cookie` answers `Ok`; or `Str::of("Hello World").slug("-").to_string()` differs from `Str::slug("Hello World", "-")`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Str::inlineMarkdown`, `Stringable::encrypt` and `Stringable::markdown`; Laravel converts inline Markdown through CommonMark's `InlinesOnlyExtension` (`Support/Str.php:853-869`) and its `Stringable` chains `encrypt` and `markdown` (`Support/Stringable.php:1453`, `:508`), while what the inlines-only extension keeps as text and the `html_input` and `allow_unsafe_links` options rest on CommonMark, which is outside the reference tree, and on `docs-13.x/strings.md`; the sanitized default and the purpose on every encryption are Suprnova's and stay, and the fluent type chains the `Str` subset the 2026-10-01 ruling kept.
+Status: Agreed 2026-10-09
+
+[PAR-167] `Collection::sort_desc()` MUST order a collection of `Ord`
+items from greatest to least, equal items keeping their order, as
+Laravel's `sortDesc` does with PHP's stable sort, and
+`Collection::map_with_keys(f)` MUST collect the pairs `f` returns into an
+`IndexMap` in the collection's order, a repeated key keeping its first
+position and its last value, as Laravel's `mapWithKeys` writes an
+ordered array. `sort_with` and `map_to_map` keep their meaning.
+Falsifier: items ranked `1 a`, `1 b` and `2 c` under an `Ord` that compares the rank come back from `sort_desc` as anything but `c, a, b`; `map_with_keys` over `0..32` yields its keys out of order; or `[("a", 1), ("b", 2), ("a", 3)]` gives keys other than `a, b`, or `a` other than `3`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Collection::sortDesc` and `Enumerable::mapWithKeys`; Laravel sorts descending with `arsort` (`Collections/Collection.php:1584-1588`) and maps into an ordered array (`:880`), where Suprnova has only a comparator sort and collects into an unordered `HashMap`.
+Status: Agreed 2026-10-09
+
+[PAR-168] `Date::parse(text)` MUST read RFC 3339; `YYYY-MM-DD`;
+`YYYY-MM-DD HH:MM[:SS[.fraction]]` with a space or `T`; `@<unix seconds>`;
+the words `now`, `today`, `tomorrow`, `yesterday`, `midnight` and `noon`;
+`[+|-]N <unit>` and `N <unit> ago` for seconds, minutes, hours, days,
+weeks, fortnights, months and years; `next <weekday>`, `last <weekday>`
+and `<weekday>`; `first day of` and `last day of` followed by `this`,
+`next` or `last` and `month`; and any word form followed by `HH:MM`; in
+UTC, a relative form reading `clock::now()`, as Laravel's `Date::parse`
+reads free-form text through Carbon. `today`, `tomorrow`, `yesterday`,
+`midnight` and the weekday forms set the time to midnight, `noon` to
+12:00, a following `HH:MM` to that time, and the other forms keep the
+time of day. `Date::parse_in(text, tz)` MUST read the same in a time
+zone, `Date::raw_parse` MUST equal `parse`, Suprnova having no parse hook
+for it to skip, and text it does not read MUST be an error naming it.
+Falsifier: under a test clock frozen at `2026-10-09T12:00:00Z`, a Friday, `Date::parse("tomorrow")` is anything but `2026-10-10T00:00:00Z`, `"+2 days"` anything but `2026-10-11T12:00:00Z`, `"3 hours ago"` anything but `2026-10-09T09:00:00Z`, `"next monday"` anything but `2026-10-12T00:00:00Z`, `"tomorrow 09:30"` anything but `2026-10-10T09:30:00Z`, or `"first day of next month"` anything but `2026-11-01T12:00:00Z`; or `"soonish"` answers `Ok`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Date::rawParse`; Laravel's date factory forwards `parse` and `rawParse` to Carbon (`Support/DateFactory.php:72`, `:217-240`), which reads relative English text, where Suprnova has no public parser for text; Carbon and PHP's relative formats are in neither the reference tree nor `docs-13.x`, so the forms, their times of day and `rawParse` skipping only Carbon's parse hook rest on PHP's and Carbon's own documentation, and the forms are named because that grammar is large.
+Status: Agreed 2026-10-09
+
+[PAR-169] The middleware priority list MUST start as `Precognitive`,
+`SessionMiddleware`, `AuthMiddleware`, `ThrottleRequestsMiddleware`, the
+four entries of Laravel's `$middlewarePriority` that have a Suprnova
+middleware type, in its order,
+so route-listed framework middleware runs in Laravel's order with no
+application listing it; `default_middleware_priority()` MUST answer that
+list, `set_middleware_priority(types)` MUST replace the list, as
+Laravel's `priority([...])` does, and
+`add_to_middleware_priority_before::<Existing, M>()` and
+`add_to_middleware_priority_after::<Existing, M>()` MUST insert `M`
+before or after `Existing`, appending it when `Existing` is absent and
+leaving the list as it is when `M` is present, as Laravel's
+`addToMiddlewarePriorityBefore` and `After` do. `BasicAuthMiddleware`
+and `BearerTokenMiddleware`, which check a credential themselves, MUST
+NOT be in the default list, so failed guesses against them keep counting
+against a throttle an application lists first; an `AuthMiddleware` whose
+guard is an `Auth::via_request` resolver moves in front of such a
+throttle, as Laravel's `Authenticate` does with a `viaRequest` guard.
+The list orders global and route middleware together, as it does today,
+so a route-listed `Precognitive` moves in front of a global
+`SessionMiddleware`. `prepend_middleware_priority`,
+`append_middleware_priority` and `middleware_priority` keep their meaning.
+Falsifier: in a fresh process `middleware_priority()` lacks `SessionMiddleware`; a route listing `AuthMiddleware` before `SessionMiddleware` answers a request with a valid signed-in session cookie with `401`; after `set_middleware_priority` an earlier entry remains; `add_to_middleware_priority_before::<AuthMiddleware, M>()` puts `M` anywhere but just before `AuthMiddleware`; or the default list holds `BasicAuthMiddleware`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Kernel::$middlewarePriority`; Laravel's kernel ships an ordered priority list (`Foundation/Http/Kernel.php:103-115`) with relative inserts (`:460-506`) and the application's `priority` replaces it (`Foundation/Configuration/Middleware.php:411`), where Suprnova's list starts empty and cannot be replaced; Laravel's list names the `AuthenticatesRequests` contract, which `Authenticate` implements and `AuthenticateWithBasicAuth` does not (`Auth/Middleware/Authenticate.php:11`).
+Status: Agreed 2026-10-09
+
+[PAR-170] `Pipeline::of(value)` MUST return a pipeline that sends any
+value through steps, as Laravel's `Pipeline` sends any passable:
+`through(steps)` sets the steps, `pipe(step)` and `pipe_all(steps)`
+append one or several, `finally(f)` runs `f` when the pipeline ends,
+whether a step failed or not, `within_transaction()` runs the steps in
+one database transaction, `then(destination)` runs the steps in order
+around the destination and answers its result, and `then_return()`
+answers the value; a step receives the value and the rest of the
+pipeline and stops it by answering an error. The HTTP `Pipeline` MUST
+gain `pipe_all(middleware)`, which appends several where `through`
+replaces, and keeps `send`, `through`, `pipe` and `then_return`.
+Falsifier: `Pipeline::of(5).through([add_one, double]).then_return().await` is anything but `Ok(12)`; `.through([a]).pipe_all([b, c])` runs its steps in another order than `a, b, c`; a step that answers an error lets a later step run or skips `finally`; `within_transaction` keeps a write that a failed step made; or the HTTP pipeline's `pipe_all` drops a middleware `through` set.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Pipeline::pipe`; Laravel's pipeline sends any passable (`Pipeline/Pipeline.php:76`), appends several pipes at once (`:102-104`) and offers `then`, `thenReturn`, `finally` and `withinTransaction`, where Suprnova's `Pipeline` is the HTTP middleware chain and passes only a request.
+Status: Agreed 2026-10-09
+
+[PAR-171] `Lang::add_path(dir)` MUST add a catalog directory merged after
+the application's own, a later directory's message winning, as Laravel's
+`FileLoader` merges its paths in order; `Lang::add_fallback_path(dir)`
+MUST add one merged before the application's, the application's message
+winning, as Laravel merges its JSON paths before the application's; and
+`Lang::add_namespace(namespace, dir)` MUST register a package's catalogs,
+read as `namespace::key` and overridden by the application's
+`lang/vendor/<namespace>/<locale>/` files, as Laravel's
+`Translator::addNamespace` does. `Lang::loader()` MUST answer the sources
+the translator reads, as `getLoader` does, and a namespace that is empty
+or holds `/`, `\`, `..` or a NUL byte MUST be refused, the test Laravel's
+loader applies to a locale or group before it builds a path from it.
+Sources registered before the translator
+is bound MUST reach it, the catalog served to the browser MUST carry
+namespaced keys in a form its client resolves, and
+`FluentTranslator::from_dir` keeps its meaning.
+Falsifier: with `lang/en/app.ftl` holding `hello = Hi` and `pkg/en/extra.ftl` holding `bye = Bye`, `Lang::get("bye")` answers anything but `Bye` after `Lang::add_path("pkg")`; a message both define answers the application's after `add_path` or the package's after `add_fallback_path`; after `Lang::add_namespace("courier", "pkg")`, `Lang::get("courier::bye")` answers anything but `Bye`, or anything but `Ciao` once `lang/vendor/courier/en/x.ftl` holds `bye = Ciao`; or `Lang::add_namespace("../x", "pkg")` answers `Ok`.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Row `Translator::getLoader`; Laravel's translator forwards `addNamespace`, `addPath` and `addJsonPath` to its loader (`Translation/Translator.php:443-465`, `getLoader` at `:543`), whose `loadPaths` merges in order, `loadJsonPaths` puts JSON paths first and `isUnsafePathSegment` refuses an unsafe locale or group (`Translation/FileLoader.php:129`, `:149`, `:174`), where Suprnova's translator reads one directory.
+Status: Agreed 2026-10-09
+
+[PAR-172] `#[service]` MUST take `bind(Concrete, env = [...])` entries
+beside `impl`, the first entry whose environment patterns (`*` matching
+any run) match `Config::environment()` choosing the binding and `impl`
+binding when none matches, as Laravel's `#[Bind]` with `environments`
+does; an unset `APP_ENV` is production, as PAR-136 requires.
+`#[route_param("name")]` on a handler argument MUST read the route
+parameter of that name, as Laravel's `#[RouteParameter('name')]` does,
+`#[authorize]` keeping the argument's own identifier, and an argument
+spelled `r#type` MUST read the parameter `type`. `App::singleton_lazy(f)`
+and `App::singleton_lazy_if_absent(f)` MUST register a singleton that `f`
+builds on its first resolve and every resolve shares, as Laravel's
+`singleton` and `singletonIf` build on first resolve, the second
+answering whether it registered; a factory that resolves its own type
+MUST answer an error instead of deadlocking. `singleton_if_absent` and
+`#[service(impl = ...)]` keep their meaning.
+Falsifier: with `APP_ENV=testing`, `#[service(impl = Real, bind(Fake, env = ["testing"]))]` resolves `Real`, or with `APP_ENV=production` an `env = ["local"]` entry is chosen; `show(#[route_param("post")] id: i64)` on `/posts/{post}` answers `/posts/7` with anything but `7`, or the route fails its startup check; `show(r#type: String)` on `/items/{type}` is refused at startup; or a lazy singleton's factory runs before the first resolve, runs twice for two resolves, or hangs when it resolves itself.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `Container\Attributes\Bind::__construct`, `Container\Attributes\RouteParameter::__construct` and `Container::singletonIf`; Laravel picks a binding per environment (`Container/Attributes/Bind.php:36`, `Container/Container.php:1036-1069`), reads a renamed route parameter (`Container/Attributes/RouteParameter.php:16-29`) and builds `singletonIf` on first resolve (`Container/Container.php:514-519`), where Suprnova's `#[service]` takes one implementation, its arguments read the parameter their binding names, and `singleton_if_absent` takes a value already built.
+Status: Agreed 2026-10-09
+
+[PAR-173] The manual MUST have a chapter on AI-assisted development,
+linked from `manual/documentation.md`, that shows how a coding assistant
+reads the manual from suprnova.app as Markdown (each page's `.md` form,
+`llms.txt` and `llms-full.txt`), how to install and use the Suprnova
+language server, and how to point an assistant at a project, with a
+`### Why Suprnova diverges` callout that says Laravel Boost is Laravel
+tooling and names what Suprnova offers in its place, as Laravel's
+`ai.md` and `boost.md` cover the same ground.
+Falsifier: `manual/documentation.md` links no such chapter, or the chapter names no `.md` page form, no `llms.txt`, no language server, or no Boost divergence.
+Mechanism: `par-laravel-gaps-infra`.
+Rationale: Rows `docs:ai` and `docs:boost`; Laravel's manual covers assistant guidance, documentation search and Boost (`docs-13.x/ai.md`, `docs-13.x/boost.md`), and the developer asked on 2026-10-07 for a section with this guidance, Boost itself not being ported.
+Status: Agreed 2026-10-09

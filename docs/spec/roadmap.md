@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-auth
+Current: laravel-gaps-infra
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -829,6 +829,77 @@ Requirements: PAR-123, PAR-124, PAR-125, PAR-126, PAR-127, PAR-128, PAR-129, PAR
    the six suites, for PAR-123 to PAR-130 and PAR-132) and
    `par-laravel-gaps-data` (the `laravel_gaps` modules of the data suites,
    for PAR-131).
+   Done when it passes on a committed tree, the manual passages are in
+   place, and the review is recorded.
+## laravel-gaps-infra
+
+Requirements: PAR-133, PAR-134, PAR-135, PAR-136, PAR-137, PAR-138, PAR-139, PAR-140, PAR-141, PAR-142, PAR-143, PAR-144, PAR-145, PAR-146, PAR-147, PAR-148, PAR-149, PAR-150, PAR-151, PAR-152, PAR-153, PAR-154, PAR-155, PAR-156, PAR-157, PAR-158, PAR-159, PAR-160, PAR-161, PAR-162, PAR-163, PAR-164, PAR-165, PAR-166, PAR-167, PAR-168, PAR-169, PAR-170, PAR-171, PAR-172, PAR-173
+
+47. laravel-gaps-infra - the twelfth of the parity rounds the developer
+   ordered on 2026-10-07 (17:35), ruled build by the parity default: the
+   build rows of the log's cache, configuration, logging, console,
+   scheduling, migration, mail, notification, event, queue,
+   broadcasting, filesystem, process, image, HTTP client, Vite, document
+   head, Precognition, cookie, view, string, collection, date,
+   middleware, pipeline, translation, container and coding-assistant
+   areas where Suprnova lacks or differs from Laravel 13.35.0, grouped
+   into PAR-133 to PAR-173; the personal access tokens of `docs:sanctum`
+   and the exact Precognition header match stay with the developer, as
+   each would weaken a property Suprnova keeps, the support policy of
+   `docs:releases` waits for the window the developer names, and the
+   five rows Suprnova already answers the way they ask stay as they are.
+   Delivery: the Redis cache connection, the cache prefix, the cache
+   events and the computed lifetime in `framework/src/cache/` and
+   `framework/src/redis_facade/`; the MySQL character set and collation
+   in `framework/src/database/` and `framework/src/schema/`; the
+   production default for an unset `APP_ENV` and the merged
+   configuration in `framework/src/config/` and the CLI's
+   `migrate:fresh`, with an explicit environment for the framework's
+   and the dogfood application's tests that relied on the old default; the log level methods, the carried and shared
+   context, `MessageLogged`, the channel levels and the placeholder
+   switch in `framework/src/logging/`; the styled console lines, the
+   verbosity flags and the prompts in `framework/src/console/`; `down`'s
+   event, messages, retry date and rendered page and the registered
+   migrations in `framework/src/app/` and `framework/src/database/`; the
+   one-server refusal, the day and time fields and the environment and
+   maintenance filters in `framework/src/schedule/`; the attachment
+   comparison, the mailable's recipients, the one-call sends, the sent
+   check and the mail delay in `framework/src/mail/`; the broadcast
+   notification event and job, the attachments by path, the subject
+   fallback and the notification delay in `framework/src/notifications/`;
+   the unique and delayed queued listeners in `framework/src/events/`;
+   the per-connection after-commit setting in `framework/src/queue/`; the
+   Pusher client in `framework/src/broadcasting/`; the bare directory
+   path and the upload-URL callback in `framework/src/filesystem/`; the
+   fake's argument lists and gradual output in `framework/src/process/`;
+   the clamped and one-side resizes and the transformation settings in
+   `framework/src/media/`; `HEAD`, the global middleware, the request
+   builder additions and the fake's patterns, callbacks, sequences and
+   stray allowlist in `framework/src/http_client/`; the Vite tags and
+   the hot file in `framework/src/inertia/`; the `Head` facade in
+   `framework/src/view/`, `framework/src/inertia/` and the route
+   builders of `framework/src/routing/`; the Precognition hook and the rule selection in
+   `framework/src/http/` and `framework/src/validation/`; the CSRF field
+   in `framework/src/csrf/`; raw cookies in `framework/src/http/`; view
+   sharing in `framework/src/view/` and the Live view renderer;
+   `Stringable` and inline Markdown in `framework/src/strings/` and
+   `framework/src/content/`; the ordered collection helpers in
+   `framework/src/eloquent/`; `Date` in a new `framework/src/date.rs`
+   that reads `framework/src/clock.rs`; the middleware priority defaults and the
+   value pipeline in `framework/src/middleware/`; the translation
+   sources in `framework/src/localization/`; the environment bindings,
+   the renamed route parameter and lazy singletons in
+   `framework/src/container/` and `suprnova-macros`; a
+   `laravel_infra_gaps` test module in each of the broadcasting, cache,
+   config, console, container, database, eloquent, events, filesystem,
+   http, http_client, inertia, live, localization, logging, mail, media,
+   middleware, notifications, process, queue, routing, schedule, schema,
+   session, strings and testing suites and in the CLI's
+   `migrate_fresh_gate` test; the manual chapter on AI-assisted
+   development, the manual chapters each area owns and the changelog.
+   Mechanisms: `par-laravel-gaps-infra` (the `laravel_infra_gaps`
+   modules of the twenty-seven suites, the cache suite's Redis tests
+   against the local Redis, and the CLI test).
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
 Out of every commitment above, by the developer's 2026-09-12 ruling:
