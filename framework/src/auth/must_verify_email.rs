@@ -110,7 +110,12 @@ pub struct AuthFlowUser {
     /// The user's stable identifier (Laravel's `getAuthIdentifier`), carried as
     /// a `String` end-to-end like the rest of the auth surface.
     pub id: String,
-    /// The user's email address - the verification/reset target.
+    /// The user's email address. From
+    /// [`UserProvider::retrieve_by_email`](crate::auth::UserProvider::retrieve_by_email)
+    /// it can be the address the user was looked up by rather than the
+    /// verification target, which
+    /// [`UserProvider::verification_email`](crate::auth::UserProvider::verification_email)
+    /// reports.
     pub email: String,
     /// Optional display name for the email greeting.
     pub name: Option<String>,
