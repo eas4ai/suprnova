@@ -299,6 +299,27 @@ never call `secure` directly - the upgrade is for environments where
 local development runs over HTTP but a specific link must be HTTPS
 (e.g. a callback URL embedded in a payment session).
 
+`url::secure_with(path, segments)` appends each segment to the path
+before the upgrade, as Laravel's `url()->secure($path, $parameters)`
+does. Each segment is percent-encoded as one path segment, with the
+encoding `route()` uses for a parameter, so a value with a space or a
+slash stays one segment:
+
+```rust
+use suprnova::url;
+
+// In env: APP_URL=http://app.example.com
+url::secure_with("users", &["a b", "7"]);
+// "https://app.example.com/users/a%20b/7"
+
+url::secure_with("/files", &["2026/report.pdf"]);
+// "https://app.example.com/files/2026%2Freport.pdf"
+```
+
+The segments go before any query or fragment in `path`. Laravel drops
+the segments when `path` is already an absolute URL; `secure_with`
+appends them there too.
+
 ### Reading the current URL
 
 Inside a handler, the request itself is the source of truth:
@@ -306,19 +327,33 @@ Inside a handler, the request itself is the source of truth:
 ```rust
 use suprnova::url;
 
+// In env: APP_URL=https://app.test, request: GET /posts/42?expand=author
 async fn breadcrumbs(req: Request) -> Response {
-    let here = url::current(&req);       // "/posts/42?expand=author", root first
+    let here = url::current(&req);       // "https://app.test/posts/42"
     let full = url::full(&req);          // "https://app.test/posts/42?expand=author"
-    let back = url::previous("/");        // session-recorded previous URL
+    let back = url::previous("/");       // session-recorded previous URL
+    let from = url::previous_path("/");  // "/posts" after a previous "/posts/?page=2"
     // ...
 }
 ```
 
 | Helper | Returns | Source |
 |---|---|---|
-| `url::current(&req)` | public root + path + query of this request | The current `Request` |
-| `url::full(&req)` | absolute URL of this request | `APP_URL` + `current(&req)` |
+| `url::current(&req)` | absolute URL of this request, without the query | `APP_URL` origin + public root + path |
+| `url::full(&req)` | absolute URL of this request, with the query | `APP_URL` origin + public root + path + query |
 | `url::previous(fallback)` | previous URL recorded by the session middleware | `_previous.url` in the session, or `fallback` |
+| `url::previous_path(fallback)` | the path of `previous(fallback)` | `previous(fallback)` without query, root or trailing slash |
+
+`current` and `full` take the scheme, host and port from `APP_URL`, never
+from the `Host` header, so a client cannot change the origin they return.
+Both carry the public root: behind a trusted `X-Forwarded-Prefix: /billing`,
+`current` for `/invoices` returns `https://app.test/billing/invoices`.
+
+`previous_path` is the value to compare with a route's path, because a
+route's path carries neither the root nor the query. Under the root
+`/billing`, a previous URL of `/billing/invoices/?page=2` gives
+`/invoices`. When nothing is left, such as for the root itself, you get
+`/`. With no previous URL recorded, the same is done to `fallback`.
 
 `previous` is what backs `Redirect::back` - the session middleware
 records the URL of every successful HTML GET so a form `POST` can bounce
@@ -454,6 +489,77 @@ async fn reset_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 what `has_valid_signature` answers. Reach for `signature_verdict` above
 instead; a URL with no `expires` query parameter is "never expired" by
 definition, in Suprnova as in Laravel.
+
+### Protecting a route with the signature middleware
+
+`ValidateSignature` puts the check on the route, so a handler cannot
+forget it. A request with a valid signature reaches the handler. Every
+other request - a missing, wrong, or expired signature alike - gets `403`
+with the message `Invalid signature.` in the framework's usual JSON error
+body, as Laravel's `InvalidSignatureException` answers:
+
+```rust
+use suprnova::routing::ValidateSignature;
+use suprnova::Router;
+
+let router = Router::new()
+    .get("/verify/email/{user}", controllers::verify::email)
+    .middleware(ValidateSignature::new())
+    .name("verify.email");
+```
+
+To name it as Laravel does, register the `signed` alias once at boot.
+`signed:relative` reads `relative` first, then the parameters to ignore:
+
+```rust
+use suprnova::middleware::register_middleware_alias_with_args;
+use suprnova::routing::ValidateSignature;
+
+register_middleware_alias_with_args("signed", ValidateSignature::from_alias_args);
+
+// .middleware_named("signed")
+// .middleware_named("signed:relative,utm_source")
+```
+
+Suprnova signs the public root, the path and the sorted query of every
+URL, never the scheme or the host. `ValidateSignature::new()` and
+`ValidateSignature::relative(ignore)` therefore verify the same text;
+`relative` exists so a route written for Laravel's `signed:relative`
+keeps its meaning. One answer for all three failures keeps the response
+from telling a prober what failed. When you want to tell an expired link
+from a forged one, match on `signature_verdict` in the handler instead.
+
+### Ignoring parameters added after signing
+
+A mail client or a campaign tool can append a parameter, such as
+`utm_source`, to a signed link. That parameter is not part of the text the
+signature covers, so the link stops verifying. Name the parameters to
+leave out of the verified text:
+
+```rust
+use suprnova::routing::ValidateSignature;
+use suprnova::url;
+
+// On one route.
+let middleware = ValidateSignature::new().ignore(["utm_source"]);
+
+// For every ValidateSignature in the application, at boot.
+ValidateSignature::except(["utm_campaign"]);
+
+// In a handler, without the middleware.
+if url::has_valid_signature_ignoring(&req, &["utm_source"])? {
+    // act on it
+}
+```
+
+Every pair of an ignored parameter is left out, repeats included. The
+path, the root and every other parameter stay covered, so a changed
+signed value still fails. `signature` and `expires` cannot be ignored: a
+repeated `signature` or `expires` is still refused, and the expiry is
+still checked. Treat the value of an ignored parameter as unsigned client
+input. `ValidateSignature::except` applies to the middleware only, as
+Laravel's `$neverValidate` does; `has_valid_signature_ignoring` leaves out
+exactly the names you pass.
 
 ### Why Suprnova diverges
 

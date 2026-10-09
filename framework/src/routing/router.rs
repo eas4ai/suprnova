@@ -95,7 +95,10 @@ pub fn clear_route_names_for_test() {
 ///
 /// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) pass through unchanged,
 /// matching what a browser sends for a URL-safe path segment.
-const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
+///
+/// Shared with [`crate::url::secure_with`], so a segment it appends is
+/// encoded as a route parameter is.
+pub(super) const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'<')

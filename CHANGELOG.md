@@ -925,6 +925,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   five auth pages submit through `Form` in place of `useForm`, read
   `errors` and `processing` from its slot, and keep the sign-in page's
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
+- **Signed-route middleware.** `ValidateSignature` lets a request with a
+  valid signature reach the handler and answers a missing, wrong or expired
+  one with `403` and `Invalid signature.`, as Laravel's
+  `InvalidSignatureException` does. Build it with `ValidateSignature::new()`
+  or `ValidateSignature::relative(ignore)`, or register
+  `ValidateSignature::from_alias_args` as the `signed` alias, which reads
+  `signed:relative,utm_source`.
+- **Signature checks that ignore added parameters.** `ignore(names)` on the
+  middleware, the alias arguments, `ValidateSignature::except(names)` for
+  the whole application, `url::has_valid_signature_ignoring` and
+  `verify_signature_ignoring` leave the named query parameters, such as a
+  `utm_source` a mail client appends, out of the verified text. `signature`
+  and `expires` cannot be ignored.
+- **The previous path.** `url::previous_path(fallback)` returns the path of
+  the session's previous URL without its query, the public root or a
+  trailing slash, as Laravel's `url()->previousPath()` does.
+- **Secure URLs with segments.** `url::secure_with(path, segments)` appends
+  each segment percent-encoded as one path segment and upgrades the URL to
+  `https` like `url::secure`. It is Laravel's `url()->secure($path,
+  $parameters)`.
 
 ### Changed
 
@@ -1641,6 +1661,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
   `<script data-page="app" type="application/json">`, failed with "no
   Inertia page object" (TS-01).
+- **`url::current` is the absolute URL without the query.** It returned the
+  public root, the path and the query, where Laravel's `current()` returns
+  the `APP_URL` origin, the root and the path. It now does the same; use
+  `url::full` for the URL with its query. The framework's own redirects,
+  the session's previous URL and signature verification still read the
+  path and the query.
+- **`Redirect::guest` stores a page to come back to.** It stored the
+  request's own URL for every request, so a sign-in after a `POST` or a
+  JSON call sent the browser back to a form submission or an API
+  response. It now stores the request's own URL only for a `GET` that does
+  not expect JSON, and the session's previous URL for any other request.
+  It never reads the `Referer`.
 
 ### Fixed
 

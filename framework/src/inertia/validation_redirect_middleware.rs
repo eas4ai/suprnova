@@ -56,7 +56,7 @@ impl Middleware for InertiaValidationRedirectMiddleware {
             request.header("Referer"),
             host.as_deref(),
             &root,
-            &crate::routing::url::current(&request),
+            &crate::routing::url::current_path_and_query(&request),
         );
 
         let response = next(request).await;

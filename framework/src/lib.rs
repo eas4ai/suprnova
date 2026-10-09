@@ -459,6 +459,7 @@ pub use routing::{
     RouteValue,
     Router,
     SignatureVerdict,
+    ValidateSignature,
     WholeValuePattern,
     WsRouteDef,
     bound_route_value,
@@ -472,6 +473,7 @@ pub use routing::{
     url,
     validate_route_path,
     verify_signature,
+    verify_signature_ignoring,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
 pub use strings::Str;
