@@ -68,15 +68,19 @@ impl Target {
     /// `Real::may_reap`): until then, the program, even exited, keeps its id
     /// and the group's pinned to it.
     ///
-    /// The descendants a [`Reach::Tree`] kill finds in the process table are
-    /// not this process's children, so nothing pins their ids: one that ends
-    /// between the lookup and its signal can still hand its id on.
+    /// Descendants found in the process table, including Linux processes
+    /// that left the group, are not this process's children, so nothing
+    /// pins their ids: one that ends between the lookup and its signal can
+    /// still hand its id on.
     fn send_all(&self, signal: Signal) {
         let Some(pid) = self.pid else {
             return;
         };
         match self.reach {
             Reach::Group => {
+                #[cfg(target_os = "linux")]
+                signal_group(pid, signal);
+                #[cfg(not(target_os = "linux"))]
                 let _ = send_signal(pid, true, signal);
             }
             Reach::Tree => signal_tree(pid, signal),
@@ -1110,7 +1114,7 @@ fn signal_tree(pid: u32, signal: Signal) {
     if signal == Signal::Kill {
         let _ = kill(root, Nix::SIGSTOP);
     }
-    for descendant in descendants(pid) {
+    for descendant in descendants(&[pid]) {
         if let Ok(descendant) = nix_pid(descendant) {
             let _ = kill(descendant, nix_signal(signal));
         }
@@ -1118,34 +1122,127 @@ fn signal_tree(pid: u32, signal: Signal) {
     let _ = kill(root, nix_signal(signal));
 }
 
-/// Every process descended from `root`, from `ps -A -o pid= -o ppid=`.
+/// Kill a Linux group and descendants that moved to another session.
+/// Stop the group before the first snapshot, so killing its leader cannot
+/// erase the parent links before they are recorded. Keep the discovered
+/// descendants as roots after the group dies and sweep twice for forks.
+#[cfg(target_os = "linux")]
+fn signal_group(pid: u32, signal: Signal) {
+    if signal != Signal::Kill {
+        let _ = send_signal(pid, true, signal);
+        return;
+    }
+    use nix::sys::signal::{Signal as Nix, kill, killpg};
+    if let Ok(root) = nix_pid(pid) {
+        let _ = killpg(root, Nix::SIGSTOP);
+    }
+    let mut roots = vec![pid];
+    roots.extend(descendants(&roots));
+    // Freeze the escaped parents too, so their new children stay attached
+    // until the sweeps find them instead of being reparented by an early kill.
+    for descendant in roots.iter().skip(1) {
+        if let Ok(descendant) = nix_pid(*descendant) {
+            let _ = kill(descendant, Nix::SIGSTOP);
+        }
+    }
+    let _ = send_signal(pid, true, signal);
+    for _ in 0..2 {
+        roots.extend(descendants(&roots));
+        for descendant in roots.iter().skip(1) {
+            if let Ok(descendant) = nix_pid(*descendant) {
+                let _ = kill(descendant, Nix::SIGSTOP);
+            }
+        }
+    }
+    for descendant in roots.into_iter().skip(1).rev() {
+        let _ = send_signal(descendant, false, signal);
+    }
+}
+
+/// Every descendant of `roots`, without returning the roots themselves.
+/// Linux reads procfs; other Unix platforms use the process table from ps.
 #[cfg(unix)]
-fn descendants(root: u32) -> Vec<u32> {
-    let Ok(listing) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=", "-o", "ppid="])
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
+fn descendants(roots: &[u32]) -> Vec<u32> {
+    use std::collections::{HashMap, HashSet};
+    let pairs = match process_parents() {
+        Ok(pairs) => pairs,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the process tree for cleanup");
+            return Vec::new();
+        }
     };
-    let pairs: Vec<(u32, u32)> = String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
-        })
-        .collect();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, parent) in pairs {
+        children.entry(parent).or_default().push(pid);
+    }
+    let mut seen: HashSet<u32> = roots.iter().copied().collect();
     let mut found = Vec::new();
-    let mut frontier = vec![root];
+    let mut frontier = roots.to_vec();
     while let Some(parent) = frontier.pop() {
-        for (pid, ppid) in &pairs {
-            if *ppid == parent && *pid != root && !found.contains(pid) {
+        for pid in children.get(&parent).into_iter().flatten() {
+            if seen.insert(*pid) {
                 found.push(*pid);
                 frontier.push(*pid);
             }
         }
     }
     found
+}
+
+/// Read each process's parent from procfs without launching another process.
+/// The command name can contain spaces and parentheses, so fields start
+/// after the last closing parenthesis of `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+fn process_parents() -> std::io::Result<Vec<(u32, u32)>> {
+    let mut pairs = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(pid, %error, "could not read a process parent for cleanup");
+                continue;
+            }
+        };
+        if let Some(parent) = stat
+            .rsplit_once(") ")
+            .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+            .and_then(|parent| parent.parse().ok())
+        {
+            pairs.push((pid, parent));
+        }
+    }
+    Ok(pairs)
+}
+
+/// Read Unix parent ids where procfs is unavailable.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_parents() -> std::io::Result<Vec<(u32, u32)>> {
+    let listing = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid="])
+        .stderr(Stdio::null())
+        .output()?;
+    if !listing.status.success() {
+        return Err(std::io::Error::other(format!(
+            "ps exited with {}",
+            listing.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect())
 }
 
 /// On Windows, `taskkill` ends a process (`/F` forces it) and, for the

@@ -122,10 +122,14 @@ or a `select!` drops it, and when a started process is dropped. A program
 that exits by itself is waited on until its output closes, and nothing it
 left behind is killed.
 
-A process that left the program's group, with `setsid` for instance, is not
-in the group, so a kill does not reach it, even while it holds the program's
-output. Until that output closes, the exited program is not collected, so its
-group id cannot pass to an unrelated process that a later kill would then hit.
+On Linux, cleanup reads the process tree from procfs and kills descendants
+that called `setsid` or otherwise left the group. It sweeps twice to find
+children forked during cleanup.
+You cannot rely on cleanup to find a descendant that reparented to init before
+the first tree snapshot.
+When you wait for a program that exits by itself, it is not collected until
+its output closes, so its group id cannot pass to an unrelated process that
+a later kill would hit.
 
 A child in a group of its own does not get the `SIGINT` a terminal sends
 on Ctrl-C. The server and the workers end their children when they shut

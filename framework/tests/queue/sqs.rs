@@ -1526,6 +1526,7 @@ mod fake {
         next: u64,
         queues: HashMap<String, Vec<Message>>,
         requests: Vec<Request>,
+        deduplicated: HashMap<(String, String), (u64, String)>,
         /// Canned replies, by target, answered before the queue is touched.
         script: HashMap<String, VecDeque<(u16, String)>>,
     }
@@ -1815,6 +1816,18 @@ mod fake {
         }
         let now = state.now;
         let send = |state: &mut State, text: &str, delay: u64, attributes: &Value| {
+            let deduplication_id = attributes["MessageDeduplicationId"].as_str();
+            if url.ends_with(".fifo") {
+                let key = (url.clone(), deduplication_id.unwrap().to_owned());
+                if let Some((sent_at, id)) = state.deduplicated.get(&key)
+                    && now - sent_at < 300
+                {
+                    return id.clone();
+                }
+                state
+                    .deduplicated
+                    .insert(key, (now, format!("message-{}", state.next + 1)));
+            }
             state.next += 1;
             let id = format!("message-{}", state.next);
             state.queues.get_mut(&url).unwrap().push(Message {
@@ -2049,12 +2062,14 @@ async fn fifo_metadata_survives_typed_and_chained_and_bulk_dispatch() {
         id: "order-42".into(),
     };
     Queue::push(job.clone()).await.unwrap();
+    fake.advance(300);
     Queue::chain()
         .add(job.clone())
         .unwrap()
         .dispatch()
         .await
         .unwrap();
+    fake.advance(300);
     Queue::bulk(vec![job]).await.unwrap();
     let messages = fake.messages(&url("jobs-test.fifo"));
     assert_eq!(messages.len(), 3);
@@ -2435,4 +2450,197 @@ async fn fifo_refused_metadata_returns_an_error_and_standard_queues_omit_fifo_at
             .as_u64()
             .is_some_and(|delay| delay > 0)
     );
+}
+
+#[tokio::test]
+async fn fifo_delayed_jobs_survive_resends_with_default_and_explicit_ids() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    for explicit in [None, Some("order-42")] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit.map(str::to_owned);
+        job.available_at += chrono::Duration::minutes(20);
+        driver.push(job.clone()).await.unwrap();
+        for seconds in [0, 1, 1198] {
+            fake.advance(seconds);
+            clock.advance(chrono::Duration::seconds(seconds as i64));
+            assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+        }
+        fake.advance(1);
+        clock.advance(chrono::Duration::seconds(1));
+        let held = driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap()
+            .expect("delayed FIFO job survives forwarding");
+        assert_eq!(held.envelope.id, job.id);
+        assert_eq!(held.envelope.attempts, 0);
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_released_jobs_return_with_default_and_explicit_ids() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    for explicit in [None, Some("x".repeat(128))] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit;
+        driver.push(job.clone()).await.unwrap();
+        let mut held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        for delay in [10, 0, 0] {
+            driver
+                .release(&held.token, &held.envelope, Duration::from_secs(delay))
+                .await
+                .unwrap();
+            if delay > 0 {
+                fake.advance(delay - 1);
+                clock.advance(chrono::Duration::seconds((delay - 1) as i64));
+                assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+                fake.advance(1);
+                clock.advance(chrono::Duration::seconds(1));
+            }
+            held = driver
+                .pop(VISIBILITY)
+                .await
+                .unwrap()
+                .expect("released FIFO job returns");
+            assert_eq!(held.envelope.id, job.id);
+            assert_eq!(held.envelope.attempts, 0);
+        }
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_unchanged_pushes_deduplicate_even_after_deletion() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let driver = driver();
+    for explicit in [None, Some("order-42")] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit.map(str::to_owned);
+        driver.push(job.clone()).await.unwrap();
+        driver.bulk_push(vec![job.clone()]).await.unwrap();
+        let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        driver.ack(&held.token).await.unwrap();
+        driver.push(job.clone()).await.unwrap();
+        fake.advance(299);
+        assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+        fake.advance(1);
+        driver.push(job.clone()).await.unwrap();
+        let held = driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap()
+            .expect("deduplication expires after five minutes");
+        assert_eq!(held.envelope.id, job.id);
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_long_nacks_return_with_one_more_attempt() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver
+        .nack(&held.token, Duration::from_secs(43_200))
+        .await
+        .unwrap();
+    fake.advance(43_200);
+    clock.advance(chrono::Duration::seconds(43_200));
+    let held = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("long FIFO nack returns");
+    assert_eq!(held.envelope.id, job.id);
+    assert_eq!(held.envelope.attempts, 1);
+    driver.ack(&held.token).await.unwrap();
+}
+
+#[tokio::test]
+async fn fifo_transport_retries_keep_the_same_deduplication_id() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    driver
+        .release(&held.token, &held.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("the resend is delivered once");
+    assert_eq!(again.envelope.id, job.id);
+    driver.ack(&again.token).await.unwrap();
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    let sends: Vec<_> = fake
+        .requests()
+        .into_iter()
+        .filter(|request| request.target == "AmazonSQS.SendMessage")
+        .collect();
+    assert_eq!(sends.len(), 4);
+    assert_eq!(sends[0].body["MessageDeduplicationId"], "order-42");
+    assert_eq!(
+        sends[0].body["MessageDeduplicationId"],
+        sends[1].body["MessageDeduplicationId"]
+    );
+    assert_eq!(
+        sends[2].body["MessageDeduplicationId"],
+        sends[3].body["MessageDeduplicationId"]
+    );
+    assert_ne!(
+        sends[0].body["MessageDeduplicationId"],
+        sends[2].body["MessageDeduplicationId"]
+    );
+}
+
+#[tokio::test]
+async fn fifo_refused_resends_leave_the_original_job_deliverable() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#InvalidParameterValue","message":"refused"}"#,
+    );
+    assert!(
+        driver
+            .release(&held.token, &held.envelope, Duration::ZERO)
+            .await
+            .is_err()
+    );
+    fake.advance(30);
+    clock.advance(chrono::Duration::seconds(30));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("a refused resend must not delete the original");
+    assert_eq!(again.envelope.id, job.id);
+    driver.ack(&again.token).await.unwrap();
 }
