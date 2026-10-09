@@ -1494,6 +1494,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::core::option::Option::Some(&self.__eager)
             }
 
+            fn __set_pivot_identity(
+                &mut self,
+                identity: ::suprnova::eloquent::relations::belongs_to_many::PivotIdentity,
+            ) {
+                self.__eager.set_one("__suprnova_pivot_identity", ::core::option::Option::Some(identity));
+            }
+
             // `Model::get_original` reads a value through the casts, so it
             // rebuilds the model from the kept row. The row is type-erased
             // in the cache; only here is its type nameable.

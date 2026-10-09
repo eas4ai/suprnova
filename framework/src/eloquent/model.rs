@@ -629,6 +629,14 @@ where
         None
     }
 
+    /// Preserve original relation keys so an id-less pivot can delete its attachment.
+    #[doc(hidden)]
+    fn __set_pivot_identity(
+        &mut self,
+        _identity: crate::eloquent::relations::belongs_to_many::PivotIdentity,
+    ) {
+    }
+
     /// Build this model back from a row the cache kept, so
     /// [`Self::get_original`] can read a value through the model's casts.
     /// `None` when `row` is not this model's stored row.
@@ -1346,6 +1354,21 @@ where
     async fn delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, false).await?;
         let touch_plan = Self::__plan_touches(Some(&self), &Attrs::new())?;
+
+        if let Some(identity) = self
+            .__eager_cache()
+            .and_then(|cache| {
+                cache.get_one::<crate::eloquent::relations::belongs_to_many::PivotIdentity>(
+                    crate::eloquent::relations::belongs_to_many::PIVOT_IDENTITY,
+                )
+            })
+            .cloned()
+        {
+            identity.delete(Self::bind_column).await?;
+            Self::__dispatch_deleted(&self, false).await?;
+            self.__touch_planned(&touch_plan).await?;
+            return Ok(());
+        }
 
         let snapshot = self.clone();
         let row = self.try_into_storage()?;
@@ -2177,13 +2200,22 @@ where
     /// semantics - every matched row is physically removed.
     async fn force_destroy<I, K>(ids: I) -> Result<u64, FrameworkError>
     where
+        Self: crate::eloquent::EagerLoadDispatch + serde::de::DeserializeOwned,
         I: IntoIterator<Item = K> + Send,
         I::IntoIter: Send,
         K: Into<<<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType> + Send,
     {
         let mut removed: u64 = 0;
         for id in ids {
-            if let Some(row) = Self::find(id).await? {
+            let key: <<Self::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType =
+                id.into();
+            let key = sea_value_to_json_loose(&key.into());
+            if let Some(row) = Self::query()
+                .lift_soft_deletes()
+                .filter(Self::primary_key_name(), key)
+                .first()
+                .await?
+            {
                 row.force_delete().await?;
                 removed += 1;
             }

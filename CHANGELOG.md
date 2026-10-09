@@ -8,6 +8,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Inspect applied model scopes.** `apply_scopes` returns the builder with
+  its registered global scopes and soft-delete filter applied once.
+- **Polymorphic existence queries.** `has_morph`, `doesnt_have_morph` and
+  their constrained forms query registered types and aliases; wildcard
+  absence includes rows with a null type.
+- **Delete loaded pivots by their keys.** Pivots without an `id` delete
+  their original key pair; morph pivots also keep the type in the predicate.
+- **Eager limits apply per parent.** Has-one, has-many, morph-one and
+  morph-many constraints use a partitioned window for `limit` and `take`.
+- **Morph relations fill ownership on writes.** `create`, `save` and
+  `upsert` set the owner's id and type on morph-one and morph-many children.
+
 - **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
   elects one replica per tick for every task; `.on_every_server()` opts out.
 - **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
@@ -853,6 +865,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Force destruction includes trashed rows.** `force_destroy` physically
+  removes matching soft-deleted rows and counts each existing key once.
 
 - **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
   dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports

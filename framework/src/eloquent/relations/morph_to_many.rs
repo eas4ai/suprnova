@@ -730,6 +730,7 @@ where
                 ),
             ],
             &self.pivot_filters,
+            &[&id_col, &self.pivot_related_key, &type_col],
         )
         .await?;
 
@@ -1129,6 +1130,7 @@ where
                 ),
             ],
             &self.pivot_filters,
+            &[&self.pivot_foreign_key, &id_col, &type_col],
         )
         .await?;
         if pivot_rows.is_empty() {

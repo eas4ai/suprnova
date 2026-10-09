@@ -291,6 +291,7 @@ fn emit_morph_registry(input: &ModelInput) -> TokenStream {
                 table: #table,
                 primary_key: <#struct_ident as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY,
                 type_id: ::std::any::TypeId::of::<#struct_ident>,
+                query_constraints: ::suprnova::Builder::<#struct_ident>::__morph_constraints,
             }
         }
     }

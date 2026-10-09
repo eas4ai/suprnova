@@ -137,6 +137,42 @@ impl<T: Into<Value>> IntoVal for T {
     }
 }
 
+/// Accept a morph name, a wildcard or a list so existence queries share one API.
+pub trait IntoMorphTypes {
+    /// Own the requested names until the builder resolves their registered tables.
+    fn into_morph_types(self) -> Vec<String>;
+}
+
+impl IntoMorphTypes for &str {
+    fn into_morph_types(self) -> Vec<String> {
+        vec![self.to_owned()]
+    }
+}
+
+impl IntoMorphTypes for String {
+    fn into_morph_types(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl<S: AsRef<str>, const N: usize> IntoMorphTypes for [S; N] {
+    fn into_morph_types(self) -> Vec<String> {
+        self.as_slice().into_morph_types()
+    }
+}
+
+impl<S: AsRef<str>> IntoMorphTypes for Vec<S> {
+    fn into_morph_types(self) -> Vec<String> {
+        self.as_slice().into_morph_types()
+    }
+}
+
+impl<S: AsRef<str>> IntoMorphTypes for &[S] {
+    fn into_morph_types(self) -> Vec<String> {
+        self.iter().map(|name| name.as_ref().to_owned()).collect()
+    }
+}
+
 // ---- Direction + AST -----------------------------------------------------
 
 /// SQL ordering direction. Used by [`Builder::order_by`] and the
@@ -524,6 +560,10 @@ impl std::fmt::Debug for EagerSpec {
 /// the static shortcuts the `#[suprnova::model]` macro emits on the
 /// user struct (`T5User::filter(...)`, `T5User::where_in(...)`, ...).
 pub struct Builder<M> {
+    /// An invalid relation request is returned by the next terminal.
+    relationship_error: Option<String>,
+    /// A batched relation ranks children within this foreign key.
+    eager_partition: Option<String>,
     pub(crate) where_terms: Vec<WhereTerm>,
     /// Joins, in the order they were added. A model query with a join
     /// selects `<table>.*` unless it has its own select, so a joined
@@ -636,6 +676,8 @@ impl<M> Default for Builder<M> {
 impl<M> Clone for Builder<M> {
     fn clone(&self) -> Self {
         Self {
+            relationship_error: self.relationship_error.clone(),
+            eager_partition: self.eager_partition.clone(),
             where_terms: self.where_terms.clone(),
             joins: self.joins.clone(),
             orders: self.orders.clone(),
@@ -1080,6 +1122,12 @@ impl<M> Builder<M> {
         }
     }
 
+    /// Materialize the scopes before inspecting or reusing this query.
+    /// The returned builder keeps their clauses and does not apply them twice.
+    pub fn apply_scopes(self) -> Self {
+        self.into_effective()
+    }
+
     /// The owning form of [`Self::effective`], for a terminal that
     /// consumes the builder.
     pub(crate) fn into_effective(mut self) -> Self {
@@ -1111,6 +1159,12 @@ impl<M> Builder<M> {
     pub(crate) fn validate_inputs(&self) -> Result<(), FrameworkError> {
         use crate::database::validate_identifier;
 
+        if let Some(error) = &self.relationship_error {
+            return Err(FrameworkError::param(error.clone()));
+        }
+        if let Some(column) = &self.eager_partition {
+            validate_identifier(column)?;
+        }
         if let Some(cols) = &self.select_cols {
             for c in cols {
                 validate_select_column(c)?;
@@ -1154,6 +1208,8 @@ impl<M> Builder<M> {
     /// a fresh instance.
     pub fn new() -> Self {
         Self {
+            relationship_error: None,
+            eager_partition: None,
             where_terms: Vec::new(),
             joins: Vec::new(),
             orders: Vec::new(),
@@ -4271,6 +4327,9 @@ impl<M> Builder<M> {
         // A union arm arrives here directly, so it resolves its own scopes.
         let this = self.effective();
         let this = &*this;
+        if this.eager_partition.is_some() && this.limit.is_some() {
+            return this.render_group_limit(backend, table, column_expr, values, n);
+        }
         let mut sql = this.render_select_core(backend, table, column_expr, values, n)?;
         if this.unions.is_empty() {
             sql.push_str(&this.render_orders(backend, values, n)?);
@@ -4320,6 +4379,76 @@ impl<M> Builder<M> {
         whole.push_str(&this.render_orders(backend, values, n)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
+    }
+
+    /// Render an eager bound as a window before filtering each parent's row numbers.
+    fn render_group_limit(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        column_expr: &str,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        let (partition, limit) =
+            self.eager_partition
+                .as_deref()
+                .zip(self.limit)
+                .ok_or_else(|| {
+                    FrameworkError::internal("per-parent query requires a partition and limit")
+                })?;
+        let offset = self.offset.unwrap_or(0);
+        let end = offset
+            .checked_add(limit)
+            .ok_or_else(|| FrameworkError::param("per-parent limit and offset overflow"))?;
+        // Window order binds precede the FROM and WHERE binds in the statement.
+        let orders = self.render_orders(backend, values, n)?;
+        let mut inner = self.clone();
+        inner.eager_partition = None;
+        inner.limit = None;
+        inner.offset = None;
+        inner.orders.clear();
+        let projection = self
+            .select_raw
+            .clone()
+            .or_else(|| self.select_cols.as_ref().map(|cols| cols.join(", ")))
+            .unwrap_or_else(|| {
+                if column_expr == "*" {
+                    format!("{}.*", self.own_table(backend, table))
+                } else {
+                    column_expr.to_owned()
+                }
+            });
+        let window_table = if inner.unions.is_empty() {
+            table
+        } else {
+            table.rsplit('.').next().unwrap_or(table)
+        };
+        let partition = if partition.contains('.') {
+            quote_identifier(backend, partition)
+        } else {
+            format!(
+                "{}.{}",
+                quote_identifier(backend, window_table),
+                quote_identifier(backend, partition)
+            )
+        };
+        let row_number = format!(
+            "ROW_NUMBER() OVER (PARTITION BY {partition}{orders}) AS __suprnova_row_number"
+        );
+        let sql = if inner.unions.is_empty() {
+            inner.select_cols = None;
+            inner.select_raw = Some(format!("{projection}, {row_number}"));
+            inner.render_select_into(backend, table, column_expr, values, n)?
+        } else {
+            // Rank the combined rows, not each union operand's separate sequence.
+            let source = inner.render_select_into(backend, table, column_expr, values, n)?;
+            let alias = quote_identifier(backend, window_table);
+            format!("SELECT {alias}.*, {row_number} FROM ({source}) AS {alias}")
+        };
+        Ok(format!(
+            "SELECT * FROM ({sql}) AS __suprnova_eager WHERE __suprnova_row_number > {offset} AND __suprnova_row_number <= {end} ORDER BY __suprnova_row_number"
+        ))
     }
 
     /// One operand after `UNION`: as it is when it is a plain SELECT, and
@@ -4591,6 +4720,161 @@ where
                 belongs_to: false,
             },
         }
+    }
+
+    /// Keep rows whose morph owner exists for one of these registered types.
+    /// Pass `"*"` to consider every registered type and its aliases.
+    pub fn has_morph(self, relation: &str, types: impl IntoMorphTypes) -> Self {
+        self.morph_existence(relation, types, true, |q: Builder<()>, _| q)
+    }
+
+    /// Keep rows whose selected morph type has no owner.
+    /// With `"*"`, rows with a null type also qualify, as in Laravel.
+    pub fn doesnt_have_morph(self, relation: &str, types: impl IntoMorphTypes) -> Self {
+        self.morph_existence(relation, types, false, |q: Builder<()>, _| q)
+    }
+
+    /// Constrain each morph owner's existence query separately.
+    /// The closure receives the registered morph name so types can use different columns.
+    pub fn where_has_morph<R, F>(
+        self,
+        relation: &str,
+        types: impl IntoMorphTypes,
+        predicate: F,
+    ) -> Self
+    where
+        F: FnMut(Builder<R>, &str) -> Builder<R>,
+    {
+        self.morph_existence(relation, types, true, predicate)
+    }
+
+    /// Keep rows with no owner matching the per-type constraint.
+    /// The wildcard also keeps rows with a null type.
+    pub fn where_doesnt_have_morph<R, F>(
+        self,
+        relation: &str,
+        types: impl IntoMorphTypes,
+        predicate: F,
+    ) -> Self
+    where
+        F: FnMut(Builder<R>, &str) -> Builder<R>,
+    {
+        self.morph_existence(relation, types, false, predicate)
+    }
+
+    fn morph_existence<R, F>(
+        mut self,
+        relation: &str,
+        types: impl IntoMorphTypes,
+        positive: bool,
+        mut predicate: F,
+    ) -> Self
+    where
+        F: FnMut(Builder<R>, &str) -> Builder<R>,
+    {
+        use crate::eloquent::relations::{RelationKind, find_morph_type, morph_types};
+        let Some(relation_entry) = crate::eloquent::relations::find_relation::<M>(relation)
+            .filter(|entry| entry.kind == RelationKind::MorphTo)
+        else {
+            self.relationship_error = Some(format!("`{relation}` is not a MorphTo relation"));
+            return self;
+        };
+        let names = types.into_morph_types();
+        let wildcard = names.as_slice() == ["*"];
+        let mut entries: Vec<&crate::eloquent::relations::MorphTypeEntry> = Vec::new();
+        if wildcard {
+            entries.extend(morph_types());
+            entries.sort_by_key(|entry| entry.morph_type);
+        } else {
+            for name in names {
+                let entry = find_morph_type(&name)
+                    .or_else(|| morph_types().find(|entry| entry.type_name == name));
+                let Some(entry) = entry else {
+                    self.relationship_error =
+                        Some(format!("morph type `{name}` is not registered"));
+                    return self;
+                };
+                if !entries
+                    .iter()
+                    .any(|known| (known.type_id)() == (entry.type_id)())
+                {
+                    entries.push(entry);
+                }
+            }
+        }
+        if entries.is_empty() {
+            self.where_terms.push(if positive {
+                WhereTerm::In(M::PRIMARY_KEY.to_owned(), Vec::new())
+            } else {
+                WhereTerm::NotIn(M::PRIMARY_KEY.to_owned(), Vec::new())
+            });
+            return self;
+        }
+        let type_column = format!("{}.{}", M::TABLE, relation_entry.morph_type_column);
+        let mut branches = Vec::new();
+        for entry in entries {
+            let constraints = (entry.query_constraints)();
+            let inner = predicate(Builder::<R>::new(), entry.morph_type);
+            if let Some(error) = inner.relationship_error {
+                self.relationship_error = Some(error);
+                return self;
+            }
+            let mut terms = constraints.where_terms;
+            if !inner.where_terms.is_empty() {
+                terms.push(WhereTerm::Group(inner.where_terms));
+            }
+            let mut spec = self.build_exists_spec_for(
+                relation,
+                if positive {
+                    Existence::Has
+                } else {
+                    Existence::DoesntHave
+                },
+                None,
+                terms,
+                None,
+            );
+            spec.target_table = entry.table.to_owned();
+            spec.parent_key = entry.primary_key.to_owned();
+            spec.belongs_to = true;
+            spec.morph_type_column.clear();
+            spec.binder = constraints.binder;
+            let names =
+                crate::eloquent::relations::morph_registry::morph_type_names(entry.morph_type)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect();
+            branches.push(WhereTerm::Group(vec![
+                WhereTerm::In(type_column.clone(), names),
+                WhereTerm::Exists(Box::new(spec)),
+            ]));
+        }
+        if wildcard && !positive {
+            branches.push(WhereTerm::Null(type_column.clone()));
+        }
+        self.where_terms.push(WhereTerm::Or(branches));
+        self
+    }
+
+    /// Keep a constrained eager query's limit per parent instead of per batch.
+    #[doc(hidden)]
+    pub fn __eager_limit(mut self, foreign_key: &str) -> Self {
+        self.eager_partition = Some(foreign_key.to_owned());
+        if self.limit.is_some() && self.orders.is_empty() {
+            self = self.order_by(M::PRIMARY_KEY, Direction::Asc);
+        }
+        self
+    }
+
+    /// Erase only the model type so a morph query keeps its scopes and typed bindings.
+    /// Called by the registry emitted by the model macro.
+    #[doc(hidden)]
+    pub fn __morph_constraints() -> Builder<()> {
+        let scoped = Self::__scoped().apply_scopes();
+        let mut erased = Builder::new();
+        erased.where_terms = scoped.where_terms;
+        erased.binder = M::bind_column;
+        erased
     }
 
     /// `WHERE EXISTS (SELECT 1 FROM related ...)` - restrict to rows
@@ -5440,11 +5724,11 @@ where
     /// Dispatches `Retrieving` once before the SELECT and
     /// `Retrieved` once for the returned row (no dispatch when the
     /// query matches zero rows). Internally delegates to
-    /// [`Self::get`] with `limit = 1`, which is where the event
+    /// [`Self::get`] with a limit of at most one, which is where the event
     /// hooks fire - so `first` shares the same per-row dispatch
     /// contract.
     pub async fn first(mut self) -> Result<Option<M>, FrameworkError> {
-        self.limit = Some(1);
+        self.limit = Some(self.limit.unwrap_or(1).min(1));
         // `Collection<M>` derefs to `&[M]` but offers no owning `pop` -
         // unwrap to the inner `Vec` first.
         Ok(self.get().await?.into_vec().pop())
@@ -6961,7 +7245,7 @@ where
     /// columns that identify a "duplicate" (the conflict target); when
     /// `update` is `Some`, only those columns receive the conflict-side
     /// `SET` clause (defaults to every column in the first row's keyset
-    /// except the unique-by columns when `None`).
+    /// when `None`, including the conflict keys as Laravel does).
     ///
     /// Returns the affected row count. Does NOT fire per-row model
     /// events - use [`Model::create`] / [`Model::update`] from a loop
@@ -7006,11 +7290,7 @@ where
         }
         let update_cols: Vec<String> = match update {
             Some(cs) => cs.iter().map(|s| s.to_string()).collect(),
-            None => cols
-                .iter()
-                .filter(|c| !unique_by.contains(&c.as_str()))
-                .cloned()
-                .collect(),
+            None => cols.clone(),
         };
 
         let tx_override = self.tx_override.clone();
@@ -7059,27 +7339,12 @@ where
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
                 sql.push_str(&row_parts.join(", "));
 
-                match backend {
-                    DbBackend::Postgres | DbBackend::Sqlite => {
-                        sql.push_str(" ON CONFLICT (");
-                        sql.push_str(&unique_by.join(", "));
-                        sql.push_str(") DO UPDATE SET ");
-                        let set_parts: Vec<String> = update_cols
-                            .iter()
-                            .map(|c| format!("{c} = EXCLUDED.{c}"))
-                            .collect();
-                        sql.push_str(&set_parts.join(", "));
-                    }
-                    DbBackend::MySql => {
-                        sql.push_str(" ON DUPLICATE KEY UPDATE ");
-                        let set_parts: Vec<String> = update_cols
-                            .iter()
-                            .map(|c| format!("{c} = VALUES({c})"))
-                            .collect();
-                        sql.push_str(&set_parts.join(", "));
-                    }
-                    _ => return Err(crate::database::unsupported_database_backend(backend)),
-                }
+                sql.push_str(&render_upsert_conflict(
+                    backend,
+                    &unique_by,
+                    &update_cols,
+                    &cols,
+                )?);
 
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
                 let result = exec
@@ -7090,6 +7355,45 @@ where
             },
         )
         .await
+    }
+}
+
+/// Keep conflict SQL valid when a bulk write has no columns to update.
+fn render_upsert_conflict(
+    backend: DbBackend,
+    unique_by: &[&str],
+    update: &[String],
+    columns: &[String],
+) -> Result<String, FrameworkError> {
+    match backend {
+        DbBackend::Postgres | DbBackend::Sqlite => {
+            let action = if update.is_empty() {
+                "DO NOTHING".to_owned()
+            } else {
+                let assignments = update
+                    .iter()
+                    .map(|column| format!("{column} = EXCLUDED.{column}"))
+                    .collect::<Vec<_>>();
+                format!("DO UPDATE SET {}", assignments.join(", "))
+            };
+            Ok(format!(" ON CONFLICT ({}) {action}", unique_by.join(", ")))
+        }
+        DbBackend::MySql => {
+            let assignments = if update.is_empty() {
+                let column = columns
+                    .first()
+                    .ok_or_else(|| FrameworkError::param("upsert requires at least one column"))?;
+                format!("{column} = {column}")
+            } else {
+                update
+                    .iter()
+                    .map(|column| format!("{column} = VALUES({column})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Ok(format!(" ON DUPLICATE KEY UPDATE {assignments}"))
+        }
+        _ => Err(crate::database::unsupported_database_backend(backend)),
     }
 }
 

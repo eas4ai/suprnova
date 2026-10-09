@@ -178,6 +178,17 @@ where
         self.filter(col, val)
     }
 
+    /// Bound a lazy read while eager loading applies the bound to each parent.
+    pub fn limit(mut self, n: u64) -> Self {
+        self.inner = self.inner.limit(n);
+        self
+    }
+
+    /// Use Laravel's alias for the same per-parent bound.
+    pub fn take(self, n: u64) -> Self {
+        self.limit(n)
+    }
+
     /// Return a matching child or create one with this relation's key.
     /// Caller values keep the model's mass-assignment guard; the relation key wins.
     pub async fn first_or_create(
