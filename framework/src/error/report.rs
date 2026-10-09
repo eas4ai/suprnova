@@ -15,6 +15,7 @@
 
 use std::any::Any;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -84,16 +85,23 @@ impl ErrorReport {
     /// twice.
     ///
     /// The frames are the ones recorded in this request under the error's
-    /// message, when there are any.
+    /// message, when there are any. Repeated messages take successive
+    /// records, newest first, before the display text is deduplicated.
     pub(crate) fn from_error(error: &dyn std::error::Error) -> Self {
         let mut chain = vec![error.to_string()];
+        let frames = frames::recorded_for(&chain[0], 0);
+        // Errors are recorded inner first, outer last. Count every source,
+        // even when its message is omitted from the displayed chain.
+        let mut occurrences = HashMap::from([(chain[0].clone(), 1usize)]);
         let mut source_frames = Vec::new();
         let mut current = error.source();
         while let Some(source) = current {
             let link = source.to_string();
-            if let Some(recorded) = frames::recorded_for(&link) {
+            let rank = occurrences.entry(link.clone()).or_default();
+            if let Some(recorded) = frames::recorded_for(&link, *rank) {
                 source_frames.push((link.clone(), recorded));
             }
+            *rank += 1;
             let repeats_previous = chain
                 .last()
                 .is_some_and(|previous| previous.ends_with(&link));
@@ -102,7 +110,6 @@ impl ErrorReport {
             }
             current = source.source();
         }
-        let frames = frames::recorded_for(&chain[0]);
         Self {
             kind: Kind::Error { chain },
             frames,
