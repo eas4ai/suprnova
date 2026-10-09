@@ -1,0 +1,848 @@
+//! Relations - Laravel-shape one-to-one / one-to-many / many-to-many
+//! and polymorphic relations layered over SeaORM JOINs and `IN` queries.
+//!
+//! Phase 10B foundation (T1). Each concrete relation type (`HasOne`,
+//! `BelongsTo`, `HasMany`, `BelongsToMany`, `HasOneThrough`,
+//! `HasManyThrough`, `MorphTo`, `MorphOne`, `MorphMany`, `MorphToMany`,
+//! `MorphedByMany`) implements [`Relation`] and is dispatched from a
+//! per-model `__eager_load` match arm. The
+//! `#[suprnova::model(relations = { ... })]` macro emits, per declared
+//! relation:
+//!
+//! 1. A relation method (`fn posts(&self) -> HasMany<Self, Post>`) -
+//!    bodies land in T2-T7 (this task ships placeholder skeletons only
+//!    if the kind is supported).
+//! 2. A loaded-accessor (`posts_loaded() -> &[Post]`).
+//! 3. A count-accessor (`posts_count() -> u64`).
+//! 4. A `match` arm in the model's `__eager_load` dispatcher (skeleton
+//!    here; arms land in T2-T7).
+//! 5. An `inventory::submit!(RelationEntry { ... })` for Phase 8
+//!    enumeration.
+//!
+//! T1 ships:
+//! - The [`Relation`] sealed trait.
+//! - The [`RelationKind`] enum enumerating every flavour up-front.
+//! - The [`AggregateKind`] enum for `with_sum` / `with_avg` /
+//!   `with_min` / `with_max`.
+//! - The [`RelationEntry`] inventory type + helpers
+//!   ([`relations`], [`relations_of`], [`find_relation`]).
+//! - The [`EagerLoadCache`] storage type (in
+//!   [`eager_cache`]).
+//! - The macro-emitted `__eager` / `__pivot` field auto-injection, the
+//!   four dispatcher skeletons (`__eager_load`, `__recurse_eager_load`,
+//!   `__count_relation`, `__aggregate_relation`), and the
+//!   `pivot::<P>()` accessor. Those live on the user struct via
+//!   `#[suprnova::model]` and are exercised by the integration tests.
+
+pub mod belongs_to;
+pub mod belongs_to_many;
+pub(crate) mod eager;
+pub mod eager_cache;
+pub mod has_many;
+pub mod has_one;
+pub mod morph;
+pub mod morph_registry;
+pub mod morph_to_many;
+mod operations;
+// Framework plumbing, not user surface: the accumulator and the
+// `pivot_filter_methods!` macro are `pub(crate)`; the methods the macro
+// emits land on the already-public relation structs.
+pub(crate) mod pivot_filters;
+pub mod through;
+
+pub use belongs_to::BelongsTo;
+pub use belongs_to_many::BelongsToMany;
+pub use eager_cache::EagerLoadCache;
+pub use has_many::HasMany;
+pub use has_one::HasOne;
+pub use morph::{MorphMany, MorphOne, MorphTo};
+pub use morph_registry::{
+    MorphToTarget, MorphTypeEntry, find_morph_type, find_morph_type_by_id, morph_types,
+};
+pub use morph_to_many::{MorphToMany, MorphedByMany};
+pub use through::{HasManyThrough, HasOneThrough};
+
+/// One column of a row, for the keys the `#[suprnova::model]` eager
+/// loaders group related rows by. Not part of the public API.
+///
+/// `field` is what the row's
+/// [`Model::field_value`](crate::eloquent::Model::field_value) returned for
+/// `column`, the generated code's own call: it serializes that field
+/// alone. Serializing the whole row to read one key copied every row's
+/// every column on every eager load. Only when `field_value` does not know
+/// the column, on a model not built by the macro or a raw-identifier field
+/// serde names differently, is the whole row serialized, which gives what
+/// the loaders always read.
+#[doc(hidden)]
+pub fn eager_row_column<T: serde::Serialize>(
+    row: &T,
+    field: Option<serde_json::Value>,
+    column: &str,
+) -> Option<serde_json::Value> {
+    field.or_else(|| match serde_json::to_value(row) {
+        Ok(serde_json::Value::Object(mut map)) => map.remove(column),
+        _ => None,
+    })
+}
+
+// Domain 8 audit D8-A - SQL identifier contract (security).
+//
+// Every relation kind extends the same trust model as the core
+// `Builder<M>` (see `framework/src/eloquent/builder.rs` module docs §
+// "SQL identifier contract"): column names, foreign keys, pivot table
+// names, and `through` intermediate keys all interpolate raw into the
+// rendered SQL; values are parameterised binds.
+//
+// The relation-builder DSL methods that take `impl Into<String>`
+// (`BelongsToMany::foreign_pivot_key`, `Through::first_key`,
+// `morph_name` setters, etc.) all trust the caller for the identifier
+// shape. Likewise, the `Attrs` keys in `attach_with(extra)` flow
+// directly into the pivot INSERT column list with no Fillable filter.
+//
+// **Never accept these key/identifier strings from untrusted input.**
+// Hardcode them in the relation declaration / in `attrs!{}` macro
+// invocations, or pick from a known allowlist. Same Laravel semantic
+// as `$user->roles()->attach($id, ['note' => $note])` where `'note'`
+// is hardcoded and `$note` is parameterised.
+
+use std::any::{Any, TypeId};
+use std::future::Future;
+use std::pin::Pin;
+
+use sea_orm::DatabaseConnection;
+
+use crate::error::FrameworkError;
+
+/// The exhaustive list of Eloquent relation flavours Suprnova ships.
+///
+/// New flavours can NOT be added by user code - the macro pattern-
+/// matches on this enum exhaustively. v2 ask for plugin-loader-
+/// registered relation types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    /// One-to-one where the parent owns the child (parent's PK is in the child's FK column).
+    HasOne,
+    /// Child-side of a `HasOne`/`HasMany`: this row holds the FK pointing at the parent.
+    BelongsTo,
+    /// One-to-many where the parent owns many children.
+    HasMany,
+    /// Many-to-many through a pivot table holding the two FKs.
+    BelongsToMany,
+    /// One-to-one across an intermediate table.
+    HasOneThrough,
+    /// One-to-many across an intermediate table.
+    HasManyThrough,
+    /// Inverse polymorphic relation: this row points at any one of several morph types.
+    MorphTo,
+    /// Polymorphic `HasOne`: the parent owns at most one polymorphic child.
+    MorphOne,
+    /// Polymorphic `HasMany`: the parent owns many polymorphic children.
+    MorphMany,
+    /// Polymorphic many-to-many where this side owns the morph column.
+    MorphToMany,
+    /// Inverse polymorphic many-to-many: the morph column lives on the other side of the pivot.
+    MorphedByMany,
+}
+
+/// Aggregate flavour for `with_sum` / `with_avg` / `with_min` /
+/// `with_max`. Passed into the per-model `__aggregate_relation`
+/// dispatcher so a single dispatcher per model covers all four
+/// aggregates without exploding into per-kind methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateKind {
+    /// `SUM(...)` aggregate.
+    Sum,
+    /// `AVG(...)` aggregate.
+    Avg,
+    /// `MIN(...)` aggregate.
+    Min,
+    /// `MAX(...)` aggregate.
+    Max,
+}
+
+impl AggregateKind {
+    /// Lower-case spelling used inside aggregate cache keys
+    /// (`"sum"` / `"avg"` / `"min"` / `"max"`). Stable wire-style
+    /// representation - do not change without bumping the cache-key
+    /// contract.
+    pub fn as_key_str(self) -> &'static str {
+        match self {
+            AggregateKind::Sum => "sum",
+            AggregateKind::Avg => "avg",
+            AggregateKind::Min => "min",
+            AggregateKind::Max => "max",
+        }
+    }
+}
+
+/// Build the wide cache key the aggregate dispatcher arms write into
+/// `EagerLoadCache::set_aggregate`. The shape is `<rel>_<kind>_<col>` -
+/// `with_sum(("posts","id"))` lands under `"posts_sum_id"`,
+/// `with_avg(("posts","id"))` under `"posts_avg_id"`, etc. - so a
+/// single eager-load plan can stack multiple aggregates on the same
+/// relation without colliding on the cache cell.
+///
+/// Count keys keep the unadorned `<rel>` form; the cache keeps counts
+/// apart from loaded rows and aggregates, so they never collide.
+///
+/// This helper is the single source of truth for the key format. The
+/// macro's aggregate arms call it on write; the per-relation
+/// `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` accessors
+/// it emits call it on read. Don't hand-format the key elsewhere.
+pub fn aggregate_cache_key(name: &str, kind: AggregateKind, column: &str) -> String {
+    let mut s = String::with_capacity(name.len() + 5 + column.len());
+    s.push_str(name);
+    s.push('_');
+    s.push_str(kind.as_key_str());
+    s.push('_');
+    s.push_str(column);
+    s
+}
+
+/// The cache key under which `with_min` / `with_max` keep the aggregate's
+/// value as JSON, beside the `f64` cell at `key` (an
+/// [`aggregate_cache_key`]). A date or text minimum has no `f64`, and this
+/// cell is what `<rel>_min_as` / `<rel>_max_as` read. A `:` cannot appear
+/// in a relation or column name, so the key never meets another cell's.
+pub fn aggregate_value_cache_key(key: &str) -> String {
+    format!("{key}:value")
+}
+
+/// The loaded rows of one relation, taken out of every parent's cache
+/// for a nested eager load, and put back when this value drops.
+///
+/// A nested load (`posts.comments`) moves each parent's cached `posts`
+/// into one owned list, loads `comments` across that list, and returns
+/// the posts to their parents. The return used to run only after a
+/// successful load, so a load that failed, or a caller that stopped
+/// awaiting it, left every parent with an empty relation still marked
+/// loaded: rows already in hand were lost, and `load_missing` would not
+/// load them again. Putting the rows back on drop returns them on every
+/// way out - success, error, and cancellation.
+///
+/// **Not part of the public API.** It is `pub` because the
+/// `#[suprnova::model]` macro's nested-load arms use it.
+#[doc(hidden)]
+pub struct __TakenRows<'a, 'b, P, C> {
+    parents: &'a mut [&'b mut P],
+    rows: Vec<C>,
+    takes: Vec<(usize, usize)>,
+    put_back: fn(&mut P, Vec<C>),
+}
+
+impl<'a, 'b, P, C> __TakenRows<'a, 'b, P, C> {
+    /// Take every parent's rows with `take`, recording how many came
+    /// from which parent, so that `put_back` returns each parent its
+    /// own rows in their order.
+    pub fn take(
+        parents: &'a mut [&'b mut P],
+        take: fn(&mut P) -> Option<Vec<C>>,
+        put_back: fn(&mut P, Vec<C>),
+    ) -> Self {
+        let mut rows = Vec::new();
+        let mut takes = Vec::new();
+        for (index, parent) in parents.iter_mut().enumerate() {
+            if let Some(mut taken) = take(parent) {
+                takes.push((index, taken.len()));
+                rows.append(&mut taken);
+            }
+        }
+        Self {
+            parents,
+            rows,
+            takes,
+            put_back,
+        }
+    }
+
+    /// The taken rows, for the nested load to work on.
+    pub fn rows(&mut self) -> &mut Vec<C> {
+        &mut self.rows
+    }
+}
+
+impl<P, C> Drop for __TakenRows<'_, '_, P, C> {
+    fn drop(&mut self) {
+        let mut rows = std::mem::take(&mut self.rows).into_iter();
+        for &(index, count) in &self.takes {
+            let own: Vec<C> = rows.by_ref().take(count).collect();
+            if let Some(parent) = self.parents.get_mut(index) {
+                (self.put_back)(parent, own);
+            }
+        }
+    }
+}
+
+/// The key column every one of `keys` names, or `""` when they differ.
+///
+/// A `MorphTo` relation's registry entry names its owner's key column.
+/// The owner model varies by row, so the macro passes every declared
+/// target's primary key: when they agree, that is the key; when they
+/// differ, no one column covers every row and the key is resolved per
+/// row through the morph registry ([`MorphTypeEntry::primary_key`]).
+/// `const` so the registry entry stays a constant initialiser.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub const fn __shared_key(keys: &[&'static str]) -> &'static str {
+    if keys.is_empty() {
+        return "";
+    }
+    let first = keys[0];
+    let mut index = 1;
+    while index < keys.len() {
+        if !same_str(keys[index], first) {
+            return "";
+        }
+        index += 1;
+    }
+    first
+}
+
+/// `a == b`, usable in a `const fn`.
+const fn same_str(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// ` AND <alias>.<column> IS NULL` when `M` declares soft deletes, and
+/// nothing otherwise: the filter a relation statement written by the
+/// `#[suprnova::model]` macro adds for an intermediate model it joins,
+/// so a row reached through a trashed intermediate is left out, as the
+/// lazy `HasManyThrough` read leaves it out.
+///
+/// **Not part of the public API.** It is `pub` because the macro
+/// expands into user crates.
+#[doc(hidden)]
+pub fn __soft_delete_guard<M: crate::eloquent::EloquentModel>(alias: &str) -> String {
+    if M::SOFT_DELETES_COLUMN.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {alias}.{} IS NULL", M::SOFT_DELETES_COLUMN)
+    }
+}
+
+/// Collapse a target model's [`EloquentModel::HAS_TIMESTAMPS`] and
+/// [`EloquentModel::UPDATED_AT_COLUMN`] into the single string
+/// [`RelationEntry::related_updated_at_column`] stores: the column
+/// name when the model manages timestamps, `""` when it doesn't.
+///
+/// A `const fn` rather than an inline `if` in the macro's emission,
+/// because the value is computed inside an `inventory::submit!`
+/// initialiser and that macro's expansion shape isn't ours to depend
+/// on.
+///
+/// [`EloquentModel::HAS_TIMESTAMPS`]: crate::eloquent::EloquentModel::HAS_TIMESTAMPS
+/// [`EloquentModel::UPDATED_AT_COLUMN`]: crate::eloquent::EloquentModel::UPDATED_AT_COLUMN
+pub const fn touch_column(has_timestamps: bool, updated_at_column: &'static str) -> &'static str {
+    if has_timestamps {
+        updated_at_column
+    } else {
+        ""
+    }
+}
+
+/// Sealed trait every concrete relation type implements.
+///
+/// "Sealed" in the sense that all impl sites live inside the framework
+/// crate - user code never hand-writes a `Relation` impl. The macro
+/// emits all impls from `#[model(relations = { ... })]` declarations.
+///
+/// The trait carries the metadata an eager loader needs without
+/// knowing the concrete relation type - `KIND` for dispatch,
+/// `parent_key` + `foreign_key` for the `IN` query, and the associated
+/// `Parent` / `Target` types for compile-time wiring.
+pub trait Relation {
+    /// The owning model (the side that calls `self.has_many::<R>()`).
+    type Parent;
+    /// The related model.
+    type Target;
+    /// Compile-time relation kind. Drives the dispatcher's branch.
+    const KIND: RelationKind;
+    /// Column name on the parent table used as the join key: the
+    /// relation's `lk = "..."` when it declares one, else the parent
+    /// model's primary key. A `MorphTo` names the key of the model its
+    /// row points at, resolved through the morph registry.
+    fn parent_key(&self) -> &str;
+    /// Column name on the target table that points at the parent.
+    ///
+    /// For `BelongsTo`: column on the CHILD that points at the PARENT.
+    /// For polymorphic relations this is the `*_id` column (with a
+    /// sibling `*_type` discriminator handled inside the dispatcher).
+    fn foreign_key(&self) -> &str;
+}
+
+/// Compile-time entry per relation. Submitted via `inventory::submit!`
+/// by the `#[suprnova::model]` macro for every relation declared in
+/// `relations = { ... }`.
+///
+/// Phase 8 (Admin) walks this registry to enumerate every relation in
+/// the binary; the eager loader does NOT use it (each model has a
+/// typed per-relation match arm in its `__eager_load` dispatcher
+/// instead). The type-erased `fn() -> TypeId` shape keeps the entry
+/// `Copy` so `inventory::submit!` accepts it as a const initialiser.
+///
+/// ## Has/where-has join metadata
+///
+/// The `target_table` / `foreign_key` / `parent_key` /
+/// `pivot_*` / `morph_*` fields carry the runtime join metadata the
+/// existence-engine ([`Builder::has`](crate::eloquent::Builder::has), [`Builder::where_has`](crate::eloquent::Builder::where_has), etc.) and
+/// the `where_belongs_to` / `where_morphed_to` family need to render
+/// correlated `EXISTS (...)` subqueries.
+///
+/// Field semantics by [`RelationKind`]:
+///
+/// | Kind                | target_table          | foreign_key                       | parent_key                | pivot_*                                                  | target_join_key        | morph_*                                                |
+/// |---------------------|-----------------------|-----------------------------------|---------------------------|----------------------------------------------------------|------------------------|--------------------------------------------------------|
+/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                                | -                      | - / -                                                  |
+/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                                | -                      | - / -                                                  |
+/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related   | related key            | - / -                                                  |
+/// | HasOneThrough/Many  | final target table    | first key (intermediate → parent) | parent column (local key) | intermediate table / first key / intermediate local key | second key (on target) | - / -                                                  |
+/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | - / - / -                                                | -                      | `<morph>_type` / parent's morph type string            |
+/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | - / - / -                                                | -                      | child's `<morph>_type` / `""`                          |
+/// | MorphToMany         | related table         | unused                            | parent column (PK)        | pivot table / `<morph>_id` / `<related>_id`              | related key            | `<morph>_type` / parent's morph type string            |
+/// | MorphedByMany       | related table         | unused                            | parent column (PK)        | pivot table / `<related>_id` / `<morph>_id`              | related key            | `<morph>_type` / related's morph type string           |
+///
+/// A through relation's intermediate table fills the pivot slots, so the
+/// existence engine joins it as it joins a pivot:
+/// `intermediate.<second_local_key> = target.<second_key>`, correlated on
+/// `intermediate.<first_key> = parent.<local_key>`.
+///
+/// `""` (empty string) indicates "not applicable for this kind" - never
+/// `None`, because `inventory::submit!` requires every field to be
+/// const-evaluable.
+#[derive(Debug, Clone, Copy)]
+pub struct RelationEntry {
+    /// `TypeId::of::<L>` - the owning model.
+    pub parent_type: fn() -> TypeId,
+    /// `TypeId::of::<R>` - the related model. For `MorphTo` this is
+    /// `TypeId::of::<()>` because the target is a per-family enum
+    /// generated by T6, not a single concrete type.
+    pub target_type: fn() -> TypeId,
+    /// Relation name as declared (`"posts"`, `"commentable"`, ...).
+    pub name: &'static str,
+    /// Relation kind.
+    pub kind: RelationKind,
+    /// Owning model's type name (`"User"`).
+    pub parent_type_name: &'static str,
+    /// Related model's type name (`"Post"`). For `MorphTo` this is
+    /// `"<morph>"` - the per-family enum type name lives in the
+    /// generated code, not in the entry.
+    pub target_type_name: &'static str,
+    /// Target table name for the existence subquery. See the table
+    /// above for per-kind semantics.
+    pub target_table: &'static str,
+    /// FK / join column on the related side. See the table above.
+    pub foreign_key: &'static str,
+    /// PK / local key on the parent side. See the table above.
+    pub parent_key: &'static str,
+    /// Pivot table name (m2m), or the intermediate table of a through
+    /// relation. `""` otherwise.
+    pub pivot_table: &'static str,
+    /// Pivot column pointing at the parent: a through relation's first
+    /// key, on the intermediate. `""` when not a pivot or through kind.
+    pub pivot_parent_key: &'static str,
+    /// Pivot column pointing at the related / final target: a through
+    /// relation's second local key, the intermediate's column the target's
+    /// second key holds. `""` when not a pivot or through kind.
+    pub pivot_related_key: &'static str,
+    /// `<morph>_type` discriminator column (morph kinds). `""` otherwise.
+    pub morph_type_column: &'static str,
+    /// Stable string used in the `<morph>_type` column for THIS side of
+    /// the relation (Laravel morph map / FQCN). `""` when not a morph
+    /// kind, or when the discriminator value is unknown at the parent's
+    /// macro expansion site (`MorphTo` - the value lives on the child
+    /// row itself).
+    pub morph_type_value: &'static str,
+    /// Key column on the related/target side. For a many-to-many the
+    /// macro emits the relation's declared `related_key`, else the target
+    /// model's `EloquentModel::PRIMARY_KEY`, the column the relation's
+    /// reads join on; for every other kind, the target's primary key. `""`
+    /// for `MorphTo` where the target table is variable.
+    pub target_primary_key: &'static str,
+    /// The target column the existence engine joins `pivot_related_key`
+    /// to (`pivot.<pivot_related_key> = target.<target_join_key>`): a
+    /// many-to-many's related key, the same column as
+    /// `target_primary_key`, or a through relation's second key, the
+    /// target's column that holds the intermediate's key. A separate slot
+    /// because a through relation's second key is not the target's
+    /// primary key. `""` for every other kind.
+    pub target_join_key: &'static str,
+    /// `deleted_at` (or custom `soft_deletes_column`) on the related
+    /// model when it opts into `#[model(soft_deletes)]`. `""` when the
+    /// related model does not soft-delete. The existence engine appends
+    /// `target.<col> IS NULL` to has/where-has subqueries so the parent
+    /// scope agrees with the child's default soft-delete scope.
+    pub related_soft_deletes_column: &'static str,
+    /// The intermediate model's soft-delete column on a through relation
+    /// whose intermediate opts into `#[model(soft_deletes)]`; `""`
+    /// otherwise. The existence engine appends `intermediate.<col> IS
+    /// NULL`, so `has` leaves out a row reached through a trashed
+    /// intermediate, as the relation's reads and counts do.
+    pub through_soft_deletes_column: &'static str,
+    /// The parent's `updated_at` column when the parent opts into
+    /// timestamps, `""` when it doesn't. Populated by [`touch_column`]
+    /// at link time. The parent-touch cascade reads this: empty means
+    /// "this owner disclaims timestamps, skip it" - not an error and
+    /// not a write.
+    pub related_updated_at_column: &'static str,
+    /// The owner's [`EloquentModel::updated_at_storage`]: how the parent-touch
+    /// cascade turns the time into the value the owner's `updated_at` cast
+    /// stores. A `MorphTo` entry carries [`morph_to_touch_storage`], which
+    /// the cascade never calls: it reads the storage of the model a row's
+    /// `<name>_type` names instead.
+    ///
+    /// [`EloquentModel::updated_at_storage`]: crate::eloquent::EloquentModel::updated_at_storage
+    pub related_updated_at_storage: TouchStorage,
+    /// The related model's [`EloquentModel::bind_column`]: how a
+    /// `where_has` subquery binds a value compared with one of the related
+    /// model's columns. A `MorphTo` entry carries [`no_column_binder`],
+    /// which binds values as they are.
+    ///
+    /// [`EloquentModel::bind_column`]: crate::eloquent::EloquentModel::bind_column
+    pub related_bind_column: ColumnBinder,
+    /// The owner types a `MorphTo` relation declares in `targets = [...]`,
+    /// in declaration order; empty for every other kind. A `MorphTo`
+    /// existence query reads these owners, not every registered morph
+    /// type: see [`MorphToTarget`].
+    pub morph_targets: &'static [MorphToTarget],
+}
+
+/// How a model binds a value compared with one of its columns; see
+/// [`RelationEntry::related_bind_column`].
+pub type ColumnBinder = fn(&str, &serde_json::Value) -> Option<sea_orm::Value>;
+
+/// The binder of a relation whose model varies by row: it binds every
+/// value as it is.
+pub fn no_column_binder(_column: &str, _value: &serde_json::Value) -> Option<sea_orm::Value> {
+    None
+}
+
+/// How a model stores a moment in its `updated_at` column; see
+/// [`RelationEntry::related_updated_at_storage`].
+pub type TouchStorage =
+    fn(&chrono::DateTime<chrono::Utc>) -> Result<sea_orm::Value, crate::FrameworkError>;
+
+/// The [`RelationEntry::related_updated_at_storage`] of a `MorphTo`
+/// relation, whose owner model varies by row. The cascade uses the
+/// storage of the owner a row names, never this; it refuses rather than
+/// guess a column type.
+pub fn morph_to_touch_storage(
+    _now: &chrono::DateTime<chrono::Utc>,
+) -> Result<sea_orm::Value, crate::FrameworkError> {
+    Err(crate::FrameworkError::internal(
+        "a MorphTo relation has no single owner model; its touch storage comes from the owner the row names",
+    ))
+}
+
+inventory::collect!(RelationEntry);
+
+/// Iterator over every relation declared anywhere in the binary.
+///
+/// Order is link-time; do not depend on it.
+pub fn relations() -> impl Iterator<Item = &'static RelationEntry> {
+    inventory::iter::<RelationEntry>()
+}
+
+/// Find every relation declared on a specific parent type.
+pub fn relations_of<T: 'static>() -> impl Iterator<Item = &'static RelationEntry> {
+    let want = TypeId::of::<T>();
+    relations().filter(move |e| (e.parent_type)() == want)
+}
+
+/// Find one relation by parent type + relation name. Returns `None`
+/// if the model has no relation by that name registered.
+pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
+    let want = TypeId::of::<T>();
+    relations().find(|e| (e.parent_type)() == want && e.name == name)
+}
+
+/// A relation a route binding finds a scoped child through (BIND-006).
+///
+/// The child's own query, narrowed to the rows the relation returns, so
+/// the child's global scopes, soft-delete filter and connection apply. The
+/// route binding then narrows it to the one row the route names. Every
+/// relation kind with one child type implements it; `MorphTo`, whose child
+/// type varies by row, does not, and a route that would need it is refused
+/// at startup.
+///
+/// **Not part of the public API.** It is `pub` because the code
+/// `#[suprnova::model]` generates names it.
+#[doc(hidden)]
+pub trait RouteChildRelation<C> {
+    /// The child's query, narrowed to the rows this relation returns.
+    fn __route_child_query(self) -> Result<crate::eloquent::Builder<C>, FrameworkError>;
+}
+
+/// The `IN (SELECT ...)` term that narrows a child query to the rows one
+/// parent owns through a pivot or intermediate table: `child_column` of
+/// the child's table is one of `select` in `from` where every
+/// `(column, value)` of `matches` holds. Every name is checked as an
+/// identifier, since it reaches the SQL text; the values are bound.
+pub(crate) fn owned_through_table(
+    child_table: &str,
+    child_column: &str,
+    from: &str,
+    select: &str,
+    matches: &[(&str, serde_json::Value)],
+    extra: &str,
+) -> Result<(String, Vec<serde_json::Value>), FrameworkError> {
+    for name in [child_table, child_column, from, select] {
+        crate::database::validate_identifier(name)?;
+    }
+    let mut conditions = Vec::with_capacity(matches.len());
+    let mut values = Vec::with_capacity(matches.len());
+    for (column, value) in matches {
+        crate::database::validate_identifier(column)?;
+        conditions.push(format!("{from}.{column} = ?"));
+        values.push(value.clone());
+    }
+    Ok((
+        format!(
+            "{child_table}.{child_column} IN (SELECT {from}.{select} FROM {from} WHERE {}{extra})",
+            conditions.join(" AND ")
+        ),
+        values,
+    ))
+}
+
+// ---- T2: EagerLoadDispatch trait ----------------------------------------
+//
+// `Builder<M>::with([...])` records relation names; `Builder<M>::get`
+// must call `M::__eager_load(name, &mut [&mut row, ...], db, predicate)`
+// for each one. The four dispatcher methods land on the user struct
+// as inherent methods (emitted by `#[suprnova::model]`); a generic
+// `Builder<M>` can't reach them without a trait. T2 introduces this
+// sealed trait so the macro can emit a delegating impl per model.
+//
+// The trait carries one method per dispatcher kind (`eager_load`,
+// `count_relation`, `aggregate_relation`, `recurse_eager_load`); T2
+// only uses `eager_load` from `Builder::get`. T3-T7 keep adding
+// per-kind match arms inside the inherent dispatcher methods - those
+// changes never touch the trait surface, since the trait is just a
+// thin pass-through.
+
+/// Language-level seal for [`EagerLoadDispatch`].
+///
+/// The module is `pub` but doc-hidden - the macro-emitted impl in the
+/// user's crate needs a public path to reach [`Sealed`][__sealed::Sealed],
+/// but downstream code that finds it has gone out of its way to reach
+/// past the framework convention reserving leading-double-underscore
+/// names (`__eager`, `__pivot`, `__async_trait`) for framework-private
+/// machinery. The trait is empty: hand-rolling an `impl Sealed for X`
+/// alone doesn't get you a working `EagerLoadDispatch` - you'd also
+/// need to hand-roll every dispatcher method on `X`, which is exactly
+/// what `#[suprnova::model]` exists to emit.
+///
+/// To manually verify the seal blocks user impls of
+/// `EagerLoadDispatch`, attempt to implement the trait without the
+/// `Sealed` bound being satisfied:
+///
+/// ```compile_fail
+/// use std::any::Any;
+/// use std::future::Future;
+/// use std::pin::Pin;
+/// use suprnova::eloquent::{AggregateKind, EagerLoadDispatch};
+/// use suprnova::sea_orm::DatabaseConnection;
+/// use suprnova::FrameworkError;
+///
+/// struct NotAModel;
+///
+/// impl EagerLoadDispatch for NotAModel {
+///     fn eager_load<'a>(
+///         _r: &'a str,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///         _x: Option<Box<dyn Any + Send + Sync>>,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn count_relation<'a>(
+///         _r: &'a str,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn aggregate_relation<'a>(
+///         _r: &'a str,
+///         _c: &'a str,
+///         _k: AggregateKind,
+///         _p: &'a mut [&'a mut Self],
+///         _d: &'a DatabaseConnection,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn recurse_eager_load<'a>(
+///         &'a mut self,
+///         _r: &'a str,
+///         _rs: &'a str,
+///         _d: &'a DatabaseConnection,
+///         _missing_only: bool,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn recurse_eager_load_batched<'a>(
+///         _p: &'a mut [&'a mut Self],
+///         _r: &'a str,
+///         _rs: &'a str,
+///         _d: &'a DatabaseConnection,
+///         _missing_only: bool,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>> {
+///         unimplemented!()
+///     }
+///     fn set_pivot_arc(
+///         &mut self,
+///         _p: Option<std::sync::Arc<dyn Any + Send + Sync>>,
+///     ) {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+///
+/// The compiler rejects this with: *the trait bound `NotAModel:
+/// __sealed::Sealed` is not satisfied*.
+#[doc(hidden)]
+pub mod __sealed {
+    /// Sealed marker - only the `#[suprnova::model]` macro implements
+    /// this for user structs.
+    pub trait Sealed {}
+}
+
+/// Bridge from the eager-load orchestrator (`Builder<M>::get`) to the
+/// macro-emitted per-model `__eager_load` / `__count_relation` /
+/// `__aggregate_relation` / `__recurse_eager_load` inherent methods.
+///
+/// **Sealed.** Implemented automatically by `#[suprnova::model]`; user
+/// code cannot hand-write an impl - the [`__sealed::Sealed`]
+/// supertrait blocks it. Returning `Pin<Box<dyn Future>>` (rather than
+/// `async fn`) keeps the trait object-safety friendly - `async fn`
+/// trait methods would force `Builder<M>` to carry a Pin<Box<...>>
+/// state itself, complicating the type. For T2 we don't actually need
+/// `dyn EagerLoadDispatch`, but the boxed-future shape stays cleanest
+/// across the bound site.
+pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
+    /// Delegate to the per-model `__eager_load` dispatcher.
+    fn eager_load<'a>(
+        relation: &'a str,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+        predicate: Option<std::sync::Arc<dyn Any + Send + Sync>>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__count_relation`.
+    fn count_relation<'a>(
+        relation: &'a str,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__aggregate_relation`.
+    fn aggregate_relation<'a>(
+        relation: &'a str,
+        column: &'a str,
+        kind: AggregateKind,
+        parents: &'a mut [&'a mut Self],
+        db: &'a DatabaseConnection,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Delegate to `__recurse_eager_load`. Used by T9's nested-path
+    /// resolver; T2 doesn't call this from `Builder::get`.
+    ///
+    /// `missing_only` switches per-relation arm behaviour: when
+    /// `false` (the default, used by [`Builder::with`](crate::eloquent::Builder::with)) the arm
+    /// unconditionally bulk-loads the next segment on the cached
+    /// children. When `true` (used by
+    /// [`Collection::load_missing`][crate::eloquent::Collection::load_missing])
+    /// the arm first checks whether any cached child already has the
+    /// next segment loaded, and skips the bulk-load if so. The flag
+    /// propagates through the tail recursion so a dotted path like
+    /// `"posts.comments.author"` keeps the "skip already cached" rule
+    /// at every level.
+    fn recurse_eager_load<'a>(
+        &'a mut self,
+        relation: &'a str,
+        rest: &'a str,
+        db: &'a DatabaseConnection,
+        missing_only: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Collection-wide sibling of [`recurse_eager_load`](Self::recurse_eager_load):
+    /// recurse the next path segment across **every** parent at once.
+    ///
+    /// The per-parent form issues the next segment's IN query once per
+    /// parent, which is N+1 at every nested level. This form gathers all
+    /// parents' cached children of `relation` into one slice, loads the
+    /// next segment with a single IN query, and recurses the same way -
+    /// so a dotted path like `"posts.comments.author"` stays a constant
+    /// number of queries regardless of how many parents are in the set.
+    /// `missing_only` carries the same partition semantics as the
+    /// per-parent form.
+    fn recurse_eager_load_batched<'a>(
+        parents: &'a mut [&'a mut Self],
+        relation: &'a str,
+        rest: &'a str,
+        db: &'a DatabaseConnection,
+        missing_only: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send + 'a>>;
+
+    /// Stamp the per-row `__pivot` field with a type-erased pivot row.
+    /// Used by [`BelongsToMany::get`](crate::eloquent::relations::belongs_to_many::BelongsToMany::get)
+    /// to attach pivot context to each related row at load time, when
+    /// the related type is generic and can't reach `self.__pivot`
+    /// directly through field access.
+    ///
+    /// Implemented automatically by `#[suprnova::model]` as
+    /// `self.__pivot = pivot;`. Not part of the user surface; the
+    /// macro-emitted `pivot::<P>()` accessor is the read path users
+    /// call.
+    fn set_pivot_arc(&mut self, pivot: Option<std::sync::Arc<dyn Any + Send + Sync>>);
+
+    /// Whether the per-row `__eager` cache has a value for the named
+    /// relation. Used by
+    /// [`Collection<M>::load_missing`][crate::eloquent::Collection::load_missing]
+    /// to skip already-loaded relations.
+    ///
+    /// Implemented automatically by `#[suprnova::model]` as
+    /// `self.__eager.has(name)`. Not part of the user surface - the
+    /// `<rel>_loaded()` accessor is the user-side read path.
+    fn has_eager(&self, name: &str) -> bool;
+}
+
+#[cfg(test)]
+mod seal_tests {
+    //! Sanity-check the [`__sealed::Sealed`] trait is reachable from
+    //! the documented path. The strong negative ("user code cannot
+    //! impl `EagerLoadDispatch`") is pinned by the `compile_fail`
+    //! doctest on [`__sealed`]; this test only confirms the seal
+    //! module is wired and the supertrait bound holds.
+
+    use super::__sealed::Sealed;
+
+    /// A framework-side type that opts into the seal - the test
+    /// passes if this compiles, confirming `Sealed` is reachable and
+    /// implementable inside the framework crate. The type itself is
+    /// never constructed; its `impl Sealed` is the assertion.
+    #[allow(dead_code)]
+    struct InCrate;
+    impl Sealed for InCrate {}
+
+    /// Compile-time check: any `T: EagerLoadDispatch` is also
+    /// `T: Sealed`. If the supertrait gets accidentally dropped from
+    /// `EagerLoadDispatch`, this stops compiling.
+    fn _supertrait_bound_holds<T: super::EagerLoadDispatch>(_: &T) {
+        fn requires_sealed<S: Sealed>() {}
+        requires_sealed::<T>();
+    }
+}
