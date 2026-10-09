@@ -69,6 +69,7 @@ pub mod identifier;
 // Internal: the framework's own migrations create their indexes through
 // here, so `up` can run over a schema that already exists on every backend.
 pub(crate) mod migration_guard;
+pub mod migration_registry;
 pub mod model;
 // Internal: polymorphic keys (notifications, RBAC assignments) bind in the
 // type of the column Laravel's `morphs` gives them.

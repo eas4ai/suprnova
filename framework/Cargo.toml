@@ -52,6 +52,15 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
+# The `ERROR`, `WARN` and `INFO` labels of console output: `anstyle` writes
+# the style and `anstream` drops it where the stream takes none. Both are in
+# the build through clap, so the lock gains nothing.
+anstyle = "1.0.14"
+anstream = "1.0.0"
+# Hidden answers for `console::secret`. dialoguer re-exports the `console`
+# crate, whose `Term::read_secure_line` turns the terminal's echo off on Unix
+# and Windows. The CLI already depends on it, so the lock gains nothing.
+dialoguer = { version = "0.12", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "smallvec", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }

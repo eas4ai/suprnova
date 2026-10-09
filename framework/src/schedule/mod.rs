@@ -161,10 +161,28 @@ const ALLOW_MEMORY_ONE_SERVER_ENV: &str = "SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCT
 fn check_single_server_locking(
     requesting: &[&str],
     is_production: bool,
+    store_is_bound: bool,
     cache_is_shared: bool,
     allow_memory: bool,
 ) -> Result<(), FrameworkError> {
-    if requesting.is_empty() || !is_production || cache_is_shared || allow_memory {
+    if requesting.is_empty() {
+        return Ok(());
+    }
+    if !store_is_bound {
+        // No store, no lock: no environment and no acknowledgement can make
+        // an election out of nothing, and a tick would skip every one of
+        // these tasks.
+        return Err(FrameworkError::internal(format!(
+            "refusing to start the schedule: {} task(s) request single-server \
+             execution ({}) but no cache store is bound, so no server can be \
+             elected and every tick would skip them. Bind a cache store \
+             (CACHE_DRIVER=redis with REDIS_URL, or an application store) before \
+             the schedule starts, or remove on_one_server() from these tasks.",
+            requesting.len(),
+            requesting.join(", "),
+        )));
+    }
+    if !is_production || cache_is_shared || allow_memory {
         return Ok(());
     }
     Err(FrameworkError::internal(format!(
@@ -291,13 +309,20 @@ impl Schedule {
     /// scheduler, and silence everywhere else. A control that quietly does
     /// nothing is worse than one that is visibly absent.
     ///
+    /// With no cache store bound at all there is no lock to elect with, in
+    /// any environment, so a task that asks for single-server execution is
+    /// refused everywhere: Laravel's one-server mutex has no path that runs
+    /// the task on every server, and a tick would skip it.
+    ///
     /// Called by `schedule:work` and `schedule:run` before any task runs.
     ///
     /// # Errors
     ///
-    /// When `APP_ENV` is production, at least one task requests
-    /// single-server execution, the bound cache store keeps its locks in
-    /// one process (see [`CacheStore::locks_are_shared`]), and
+    /// When at least one task requests single-server execution and no cache
+    /// store is bound, in every environment. When `APP_ENV` is production,
+    /// at least one task requests single-server execution, the bound cache
+    /// store keeps its locks in one process (see
+    /// [`CacheStore::locks_are_shared`]), and
     /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION` is not truthy.
     ///
     /// [`CacheStore::locks_are_shared`]: crate::cache::CacheStore::locks_are_shared
@@ -313,6 +338,7 @@ impl Schedule {
                 .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
             crate::config::Environment::detect().is_production(),
+            crate::cache::Cache::store().is_ok(),
             cache_is_shared(std::env::var("CACHE_DRIVER").ok()),
             crate::config::env::env_flag_enabled(ALLOW_MEMORY_ONE_SERVER_ENV),
         )
@@ -523,9 +549,51 @@ impl Schedule {
         self.tasks.is_empty()
     }
 
-    /// Get tasks that are due to run now
+    /// Get tasks that are due to run now, by their cron expression alone.
+    ///
+    /// [`run_due_tasks`](Self::run_due_tasks) also leaves out a task limited
+    /// to other [`environments`](TaskBuilder::environments), and every task
+    /// that does not ask [`even_in_maintenance_mode`](TaskBuilder::even_in_maintenance_mode)
+    /// while the application is down.
     pub fn due_tasks(&self) -> Vec<&TaskEntry> {
         self.tasks.iter().filter(|t| t.is_due()).collect()
+    }
+
+    /// The due tasks that may run now: those of [`due_tasks`](Self::due_tasks)
+    /// whose environments hold the application's, and, while the
+    /// application is in maintenance mode, only those that run in it, as
+    /// Laravel's `Event::isDue` checks both. A maintenance state that cannot
+    /// be read counts as down: running every task against the services an
+    /// operator may have taken down is the worse mistake.
+    async fn runnable_tasks(&self) -> Vec<&TaskEntry> {
+        let environment = crate::config::Config::environment();
+        let due: Vec<&TaskEntry> = self
+            .due_tasks()
+            .into_iter()
+            .filter(|task| task.runs_in_environment(&environment))
+            .collect();
+        if due.iter().all(|task| task.runs_in_maintenance_mode()) {
+            return due;
+        }
+        let down = match crate::app::maintenance::maintenance_mode().active().await {
+            Ok(down) => down,
+            Err(error) => {
+                tracing::error!(
+                    target: "suprnova::schedule",
+                    error = %error,
+                    "cannot read the maintenance state; running only the tasks that run \
+                     in maintenance mode",
+                );
+                true
+            }
+        };
+        if down {
+            due.into_iter()
+                .filter(|task| task.runs_in_maintenance_mode())
+                .collect()
+        } else {
+            due
+        }
     }
 
     /// Run all due tasks once.
@@ -557,7 +625,7 @@ impl Schedule {
         &self,
         joinset: &mut JoinSet<ScheduledTaskJoin>,
     ) -> Vec<ScheduledTaskJoin> {
-        run_tasks_into(self.due_tasks(), joinset).await
+        run_tasks_into(self.runnable_tasks().await, joinset).await
     }
 
     /// Run every registered task once, regardless of schedule. Background
@@ -1134,7 +1202,7 @@ mod tests {
     /// replica would win its own election and run the task.
     #[test]
     fn production_with_a_per_process_cache_refuses_to_boot() {
-        let err = check_single_server_locking(&["billing:nightly"], true, false, false)
+        let err = check_single_server_locking(&["billing:nightly"], true, true, false, false)
             .expect_err("this must fail the boot");
         let msg = err.to_string();
         assert!(
@@ -1152,20 +1220,22 @@ mod tests {
     /// who cannot run Redis.
     #[test]
     fn the_acknowledgement_env_var_permits_a_per_process_cache() {
-        assert!(check_single_server_locking(&["billing:nightly"], true, false, true).is_ok());
+        assert!(check_single_server_locking(&["billing:nightly"], true, true, false, true).is_ok());
     }
 
     /// A shared cache is the configuration the feature is designed for.
     #[test]
     fn a_shared_cache_needs_no_acknowledgement() {
-        assert!(check_single_server_locking(&["billing:nightly"], true, true, false).is_ok());
+        assert!(check_single_server_locking(&["billing:nightly"], true, true, true, false).is_ok());
     }
 
     /// Non-production keeps the memory driver usable for a dev loop; the
     /// runtime warns once instead.
     #[test]
     fn outside_production_the_guard_does_not_fire() {
-        assert!(check_single_server_locking(&["billing:nightly"], false, false, false).is_ok());
+        assert!(
+            check_single_server_locking(&["billing:nightly"], false, true, false, false).is_ok()
+        );
     }
 
     /// No task asked for it, so nothing to guard. This is what keeps the
@@ -1173,7 +1243,28 @@ mod tests {
     /// feature.
     #[test]
     fn no_single_server_tasks_means_nothing_to_check() {
-        assert!(check_single_server_locking(&[], true, false, false).is_ok());
+        assert!(check_single_server_locking(&[], true, false, false, false).is_ok());
+    }
+
+    /// With no cache store bound there is no lock at all, so the refusal
+    /// holds in every environment and the acknowledgement does not lift it.
+    #[test]
+    fn no_bound_store_refuses_in_every_environment() {
+        for (is_production, allow_memory) in [(false, false), (true, false), (true, true)] {
+            let err = check_single_server_locking(
+                &["billing:nightly"],
+                is_production,
+                false,
+                false,
+                allow_memory,
+            )
+            .expect_err("no store, no election");
+            assert!(
+                err.to_string().contains("billing:nightly")
+                    && err.to_string().contains("no cache store is bound"),
+                "got: {err}"
+            );
+        }
     }
 
     /// A store that says its locks are shared passes, whatever

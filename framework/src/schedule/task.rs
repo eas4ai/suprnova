@@ -184,6 +184,12 @@ pub struct TaskEntry {
     pub timezone: Option<chrono_tz::Tz>,
     /// Shared runtime state - in-process overlap flag and skip counter.
     pub state: Arc<TaskState>,
+    /// The environments the task runs in; empty is every environment. See
+    /// [`super::TaskBuilder::environments`].
+    pub(crate) environments: Vec<crate::config::Environment>,
+    /// Whether the task runs in maintenance mode. See
+    /// [`super::TaskBuilder::even_in_maintenance_mode`].
+    pub(crate) even_in_maintenance_mode: bool,
 }
 
 impl TaskEntry {
@@ -239,6 +245,24 @@ impl TaskEntry {
     pub fn schedule_description(&self) -> &str {
         self.expression.expression()
     }
+
+    /// The environments this task is limited to, and empty when it runs in
+    /// every one.
+    pub fn environments(&self) -> &[crate::config::Environment] {
+        &self.environments
+    }
+
+    /// Whether this task runs in `environment`: always when it names none,
+    /// and otherwise when it names that one, as Laravel's
+    /// `runsInEnvironment` answers.
+    pub fn runs_in_environment(&self, environment: &crate::config::Environment) -> bool {
+        self.environments.is_empty() || self.environments.contains(environment)
+    }
+
+    /// Whether this task runs while the application is in maintenance mode.
+    pub fn runs_in_maintenance_mode(&self) -> bool {
+        self.even_in_maintenance_mode
+    }
 }
 
 /// Single warn-once latch for the "Cache not installed, falling back to
@@ -282,24 +306,6 @@ struct InProcessOverlapGuard<'a> {
 impl Drop for InProcessOverlapGuard<'_> {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Single warn-once latch for the "single-server election is running on a
-/// per-process cache" message, outside production where that is allowed.
-static ONE_SERVER_MEMORY_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn warn_one_server_memory_once(task: &str) {
-    if !ONE_SERVER_MEMORY_WARNED.swap(true, Ordering::SeqCst) {
-        tracing::warn!(
-            target: "suprnova::schedule",
-            task = %task,
-            "on_one_server() is holding a per-process lock - Cache is not \
-             bootstrapped, so replicas cannot see each other's elections and \
-             every replica will run this task. Bootstrap Cache with \
-             CACHE_DRIVER=redis before relying on single-server execution. \
-             (In production this is a boot failure, not a warning.)"
-        );
     }
 }
 
@@ -348,13 +354,20 @@ async fn claim_tick_for_this_server(
             false
         }
         Err(FrameworkError::ServiceNotFound { .. }) => {
-            // Cache is not bootstrapped at all. In production this never
-            // reaches here - `Schedule::validate_single_server_locking`
-            // fails the boot. Outside production, running is the useful
-            // behaviour for a single-process dev loop; warn so nobody
-            // mistakes it for the real guarantee.
-            warn_one_server_memory_once(name);
-            true
+            // No cache store is bound, so there is no lock to elect a server
+            // with. `Schedule::validate_single_server_locking` refuses such a
+            // schedule before it starts; a tick that gets here anyway (a
+            // schedule run without the check) skips the task, as Laravel's
+            // one-server mutex has no path that runs it on every server.
+            tracing::error!(
+                target: "suprnova::schedule",
+                task = %name,
+                tick = minute,
+                "skipped: on_one_server() needs a cache store to elect a server, and none \
+                 is bound; bind one (CACHE_DRIVER=redis) or drop on_one_server()",
+            );
+            state.skip_count.fetch_add(1, Ordering::SeqCst);
+            false
         }
         Err(err) => {
             // Cache is bootstrapped but the lock attempt failed - a Redis
@@ -556,6 +569,8 @@ mod tests {
             one_server_ttl: DEFAULT_ON_ONE_SERVER_TTL,
             timezone: None,
             state: TaskState::new(),
+            environments: Vec::new(),
+            even_in_maintenance_mode: false,
         };
 
         assert_eq!(entry.name, "test-task");

@@ -46,6 +46,8 @@ pub mod maintenance;
 pub mod paths;
 pub(crate) mod process_boot;
 
+use crate::database::migration_registry::WithRegistered;
+
 use process_boot::ProcessBoot;
 
 /// Boxed async bootstrap function (avoids repeating the complex trait-object type).
@@ -282,9 +284,10 @@ enum Commands {
     },
     /// Put the application into maintenance mode
     Down {
-        /// Seconds for the `Retry-After` header
-        #[arg(long)]
-        retry: Option<u64>,
+        /// Seconds, or a date such as "Sat, 01 Jan 2033 00:00:00 GMT", for the
+        /// `Retry-After` header
+        #[arg(long, value_parser = maintenance::parse_retry)]
+        retry: Option<maintenance::RetryAfter>,
         /// Seconds for the browser `Refresh` header
         #[arg(long)]
         refresh: Option<u64>,
@@ -306,6 +309,10 @@ enum Commands {
         /// Plain-text message rendered in the maintenance response body
         #[arg(long)]
         message: Option<String>,
+        /// A Tera template under resources/views, rendered now with
+        /// `retry_after` and served as the maintenance page
+        #[arg(long, conflicts_with = "message")]
+        render: Option<String>,
     },
     /// Bring the application out of maintenance mode
     Up,
@@ -383,6 +390,8 @@ where
     routes_fn: Option<RoutesFn>,
     schedule_fn: Option<ScheduleFn>,
     booted_fns: Vec<BootedFn>,
+    /// The lists [`Application::load_migrations_from`] registered.
+    loaded_migrations: Vec<crate::database::migration_registry::MigrationList>,
     _migrator: std::marker::PhantomData<M>,
 }
 
@@ -405,6 +414,7 @@ impl Application<NoMigrator> {
             routes_fn: None,
             schedule_fn: None,
             booted_fns: Vec::new(),
+            loaded_migrations: Vec::new(),
             _migrator: std::marker::PhantomData,
         }
     }
@@ -1104,8 +1114,44 @@ where
             routes_fn: self.routes_fn,
             schedule_fn: self.schedule_fn,
             booted_fns: self.booted_fns,
+            loaded_migrations: self.loaded_migrations,
             _migrator: std::marker::PhantomData,
         }
+    }
+
+    /// Run the migrations `list` returns after the migrator's own, in every
+    /// migrate command this binary runs: `migrate`, `migrate:status`,
+    /// `migrate:rollback`, `migrate:fresh`, `schema:dump` and the migration
+    /// `serve` runs on boot. Laravel's `loadMigrationsFrom` hands the
+    /// migrator paths the same way.
+    ///
+    /// The migrator's list comes first, then each loaded list in the order
+    /// it was loaded, then the lists crates registered with
+    /// [`register_migrations!`](crate::register_migrations). A migration
+    /// whose name an earlier list holds runs once, so a list that repeats
+    /// one the migrator already lists is harmless.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Application;
+    /// # mod migrations {
+    /// #     use sea_orm_migration::prelude::*;
+    /// #     pub struct Migrator;
+    /// #     impl MigratorTrait for Migrator {
+    /// #         fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }
+    /// #     }
+    /// # }
+    /// # fn ex() {
+    /// Application::new()
+    ///     .migrations::<migrations::Migrator>()
+    ///     .load_migrations_from(suprnova::auth_flows::two_factor::migrations);
+    /// # }
+    /// ```
+    pub fn load_migrations_from(
+        mut self,
+        list: crate::database::migration_registry::MigrationList,
+    ) -> Self {
+        self.loaded_migrations.push(list);
+        self
     }
 
     /// Run the application
@@ -1251,8 +1297,13 @@ where
             routes_fn,
             schedule_fn,
             booted_fns,
+            loaded_migrations,
             _migrator,
         } = self;
+        // Every migrate path reads its list through a function with no
+        // receiver, `MigratorTrait::migrations`, so the loaded lists are
+        // installed where `WithRegistered` reads them.
+        crate::database::migration_registry::install_loaded(loaded_migrations);
 
         // Run user's config registration
         if let Some(config_fn) = config_fn {
@@ -1279,7 +1330,7 @@ where
             | Some(Commands::Serve { no_migrate: false })
             | Some(Commands::WebRun { no_migrate: false }) => {
                 // Default: run server with auto-migrate
-                match Self::run_migrations_silent::<M>().await {
+                match Self::run_migrations_silent::<WithRegistered<M>>().await {
                     Ok(()) => {
                         Self::run_server_internal(
                             bootstrap_fn,
@@ -1298,10 +1349,14 @@ where
                 Self::run_server_internal(bootstrap_fn, http_bootstrap_fn, routes_fn, booted_fns)
                     .await
             }
-            Some(Commands::Migrate { schema_path }) => Self::run_migrations::<M>(schema_path).await,
-            Some(Commands::MigrateStatus) => Self::show_migration_status::<M>().await,
+            Some(Commands::Migrate { schema_path }) => {
+                Self::run_migrations::<WithRegistered<M>>(schema_path).await
+            }
+            Some(Commands::MigrateStatus) => {
+                Self::show_migration_status::<WithRegistered<M>>().await
+            }
             Some(Commands::MigrateRollback { steps }) => {
-                Self::rollback_migrations::<M>(steps).await
+                Self::rollback_migrations::<WithRegistered<M>>(steps).await
             }
             Some(Commands::MigrateFresh { force, schema_path }) => {
                 // The CLI's `suprnova migrate:fresh` gained this gate first,
@@ -1315,7 +1370,7 @@ where
                     std::io::IsTerminal::is_terminal(&std::io::stdin()),
                     &mut read_confirmation_from_stdin,
                 ) {
-                    Ok(()) => Self::fresh_migrations::<M>(schema_path).await,
+                    Ok(()) => Self::fresh_migrations::<WithRegistered<M>>(schema_path).await,
                     Err(message) => Err(FrameworkError::internal(message)),
                 }
             }
@@ -1324,7 +1379,15 @@ where
                 prune,
                 database,
                 without_migration_data,
-            }) => Self::dump_schema::<M>(path, prune, database, without_migration_data).await,
+            }) => {
+                Self::dump_schema::<WithRegistered<M>>(
+                    path,
+                    prune,
+                    database,
+                    without_migration_data,
+                )
+                .await
+            }
             Some(Commands::ScheduleWork) => {
                 Self::run_scheduler_daemon_internal(boot, bootstrap_fn, schedule_fn).await
             }
@@ -1416,7 +1479,12 @@ where
                 status,
                 except,
                 message,
+                render,
             }) => {
+                let page = match render {
+                    Some(view) => DownPage::Render(view),
+                    None => DownPage::Message(message),
+                };
                 Self::run_down(
                     boot,
                     bootstrap_fn,
@@ -1427,7 +1495,7 @@ where
                     redirect,
                     status,
                     except,
-                    message,
+                    page,
                 )
                 .await
             }
@@ -1633,12 +1701,29 @@ where
         Ok(())
     }
 
+    /// `migrate:status`: every migration of the list with `Applied` or
+    /// `Pending`, one line each on the standard output. SeaORM's own
+    /// `status` writes them to the log, which a terminal or a script
+    /// reading the output does not see.
     async fn show_migration_status<Migrator: MigratorTrait>() -> Result<(), FrameworkError> {
-        println!("Migration status:");
+        let read_failed =
+            |e: DbErr| failed(format!("suprnova: failed to read migration status: {e}"));
         let db = Self::get_database_connection().await?;
-        Migrator::status(&db)
+        Migrator::install(&db).await.map_err(read_failed)?;
+        let migrations = Migrator::get_migration_with_status(&db)
             .await
-            .map_err(|e| failed(format!("suprnova: failed to read migration status: {e}")))
+            .map_err(read_failed)?;
+        println!("Migration status:");
+        for migration in migrations {
+            println!(
+                "{}",
+                crate::console::two_column_detail(
+                    migration.name(),
+                    &migration.status().to_string()
+                )
+            );
+        }
+        Ok(())
     }
 
     async fn rollback_migrations<Migrator: MigratorTrait>(
@@ -2239,50 +2324,91 @@ where
         }
     }
 
-    /// `down`: record the maintenance payload via the configured driver.
+    /// `down`: record the maintenance payload via the configured driver,
+    /// then dispatch [`maintenance::MaintenanceModeEnabled`].
     ///
     /// Runs the application's `bootstrap` hook first, as every subcommand
     /// but the migration commands does: a storage path or a cache store the
     /// hook installs is the one the serving process reads, so `down` must
     /// write to it too.
+    ///
+    /// What it prints follows Laravel's `DownCommand`: whether the run
+    /// started maintenance mode or updated the options of a running one,
+    /// the bypass address under `APP_URL`, and on failure
+    /// `Failed to enter maintenance mode: <error>.` Everything that can fail
+    /// before the payload is recorded, the state read and a `--render`
+    /// template included, fails before maintenance mode starts.
     #[allow(clippy::too_many_arguments)]
     async fn run_down(
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
-        retry: Option<u64>,
+        retry: Option<maintenance::RetryAfter>,
         refresh: Option<u64>,
         secret: Option<String>,
         with_secret: bool,
         redirect: Option<String>,
         status: u16,
         except: Vec<String>,
-        message: Option<String>,
+        page: DownPage,
     ) -> Result<(), FrameworkError> {
         Self::boot_or_fail("down", boot, bootstrap_fn).await?;
+        let not_entered = |e: FrameworkError| {
+            failed(format!(
+                "Failed to enter maintenance mode: {}.",
+                e.message()
+            ))
+        };
 
+        let driver = maintenance::maintenance_mode();
+        let was_already_down = driver.active().await.map_err(not_entered)?;
+
+        let template = match page {
+            DownPage::Message(message) => message,
+            DownPage::Render(view) => {
+                Some(maintenance::render_view(&view, retry.as_ref()).map_err(not_entered)?)
+            }
+        };
         let secret = match (secret, with_secret) {
             (Some(s), _) => Some(s),
             (None, true) => Some(maintenance::random_secret()),
             (None, false) => None,
+        };
+        let (retry, retry_at) = match retry {
+            Some(maintenance::RetryAfter::Seconds(seconds)) => (Some(seconds), None),
+            Some(maintenance::RetryAfter::Date(date)) => (None, Some(date)),
+            None => (None, None),
         };
 
         let payload = maintenance::MaintenancePayload {
             except,
             redirect,
             retry,
+            retry_at,
             refresh,
             secret: secret.clone(),
             status,
-            template: message,
+            template,
         };
 
-        maintenance::maintenance_mode()
-            .activate(&payload)
-            .await
-            .map_err(|e| failed(format!("suprnova: failed to enter maintenance mode: {e}")))?;
-        println!("Application is now in maintenance mode.");
+        driver.activate(&payload).await.map_err(not_entered)?;
+        // Maintenance mode is on whatever a listener does: a listener that
+        // fails is logged by the dispatcher and here, and `down` still
+        // reports the state it recorded.
+        if let Err(e) =
+            crate::events::EventFacade::dispatch(maintenance::MaintenanceModeEnabled).await
+        {
+            tracing::warn!(error = %e, "a MaintenanceModeEnabled listener failed");
+        }
+        if was_already_down {
+            println!("Maintenance mode options updated.");
+        } else {
+            println!("Application is now in maintenance mode.");
+        }
         if let Some(secret) = secret {
-            println!("Bypass maintenance mode by visiting: /{secret}");
+            println!(
+                "You may bypass maintenance mode via [{}/{secret}].",
+                crate::routing::url::app_url()
+            );
         }
         Ok(())
     }
@@ -2367,6 +2493,16 @@ enum Failures {
     Print,
     /// Leave it to the caller of [`Application::run_with_args`].
     Return,
+}
+
+/// What `down` serves as the maintenance page: `--message` as plain text,
+/// or the `--render` view rendered once by `down`. Clap refuses both at
+/// once.
+enum DownPage {
+    /// `--message`, or nothing.
+    Message(Option<String>),
+    /// `--render <view>`.
+    Render(String),
 }
 
 /// A command's failure, carrying the text [`Application::run`] prints for

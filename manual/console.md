@@ -311,6 +311,103 @@ Three rules keep a command honest:
 
 What a command prints with `println!` reaches the standard output of the process, and a test cannot read it. The framework's own commands, `db:seed` and `model:prune` among them, print through the console.
 
+## Marked lines and verbosity
+
+`console::error(text)`, `console::warn(text)` and `console::info(text)` print one line behind a mark: `ERROR` and `WARN` on the standard error, `INFO` on the standard output. On a terminal the mark is styled, white on red, black on yellow and white on blue. Where the stream is not a terminal, or where `NO_COLOR` is set to a non-empty value, the line is plain text, `ERROR boom`. A test always reads the plain text.
+
+Every command accepts `-q` or `--quiet`, and `-v`, `-vv` or `-vvv` (also `--verbose`). Put the flags before the command name, `console -v users:purge`, or after it. A command that declares a flag of the same name keeps its own flag after its name. A raw `#[command]` gets everything after its name as typed, so give it the flags before its name.
+
+| Flag | `console::verbosity()` |
+|---|---|
+| `-q`, `--quiet` | `Verbosity::Quiet` |
+| none | `Verbosity::Normal` |
+| `-v` | `Verbosity::Verbose` |
+| `-vv` | `Verbosity::VeryVerbose` |
+| `-vvv` | `Verbosity::Debug` |
+
+`line`, `error_line`, `error`, `warn` and `info` write at `Normal`. `console::line_at(text, level)` and `console::error_at(text, level)` write only when the run asked for at least `level`. `--quiet` silences all of them. The error of a failed command still reaches the standard error, so a quiet run that fails says why.
+
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::console::{self, Verbosity};
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "orders:import", description = "Import the day's orders")]
+pub struct OrdersImport {}
+
+#[async_trait]
+impl TypedCommand for OrdersImport {
+    async fn run(self) -> Result<(), FrameworkError> {
+        console::info("importing 3 files");
+        console::line_at("reading orders-0001.csv", Verbosity::Verbose);
+        console::warn("orders-0002.csv has no rows");
+        console::error("orders-0003.csv is not UTF-8; skipped");
+        Ok(())
+    }
+}
+```
+
+## Prompts
+
+Beyond `ask` and `confirm`, the console offers the prompts Laravel Prompts gives a command. Each one reads one line from the standard input, a terminal and a pipe alike, so a script can pipe the answers in.
+
+| Function | What it does |
+|---|---|
+| `ask_with_default(question, default)` | Ask, and return `default` for an empty answer. The hint shows it: `Name? [Ada]`. |
+| `secret(question)` | Ask for a password or a token. A terminal does not echo the answer, and a test never captures it. Laravel Prompts calls this `password`. |
+| `select(question, options, default)` | Show the options, numbered, and return the index of the chosen one. The answer is an option as it is written, or its number. |
+| `select_keyed(question, options, default)` | Show `(key, label)` options and return the chosen key. The answer is a label or a key; `default` names a key. |
+| `multiselect(question, options, defaults)` | Return the indexes of the chosen options, in the order of the options. The answer lists them separated by commas: `Member,Owner`. |
+| `progress(label, items, f)` | Map each item through `f(item, &mut bar)` behind a progress bar, and return the results in order. |
+| `Progress::new(label, total)` | A bar you drive yourself with `advance(steps)`, `label(text)`, `hint(text)` and `finish()`. |
+| `form()` | Chain `text`, `secret`, `confirm` and `select` steps, each under a name, and read every answer by name from `submit()`. |
+
+An answer that is not one of the options is an error that names every option, and the command stops. An empty answer to a menu takes its default, and is an error when it has none.
+
+On a terminal, a progress bar redraws one line as the work advances. Where the output is not a terminal, such as a pipe, a log or a test, the bar writes one plain line when it finishes, `Sync 3/3`, and a quiet run writes nothing.
+
+```rust
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::console;
+use suprnova::{Command, FrameworkError, TypedCommand};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "users:invite", description = "Invite a user")]
+pub struct UsersInvite {}
+
+#[async_trait]
+impl TypedCommand for UsersInvite {
+    async fn run(self) -> Result<(), FrameworkError> {
+        let answers = console::form()
+            .text("email", "Email?")
+            .select("role", "Role?", &["Member", "Owner"], Some(0))
+            .secret("token", "API token?")
+            .confirm("notify", "Send the invitation now?", true)
+            .submit()?;
+        let email = answers.text("email").unwrap_or_default();
+        let role = answers.selected("role").unwrap_or_default();
+
+        let sent = console::progress("Inviting", [email], |address, bar| {
+            bar.hint(address);
+            address.len()
+        });
+        console::info(format!("invited {} user(s) with role {role}", sent.len()));
+        Ok(())
+    }
+}
+```
+
+`FormAnswers::text` reads a `text` or `secret` answer, `confirmed` a `confirm` answer, and `selected` a `select` answer. Two steps of one name are an error before anything is asked, since one answer would replace the other. The `Debug` output of the answers hides a secret.
+
+### Why Suprnova diverges
+
+Laravel Prompts draws its menus with the arrow keys and falls back to plain questions where there is no terminal. Suprnova's prompts read one line everywhere, so the same command runs the same way by hand, from a script, and under `console::test`. The hidden answer of `secret` uses the terminal's echo control from the `console` crate that `dialoguer` provides.
+
+`--quiet` silences what a command writes through these functions and nothing else: the error of a failed command and clap's own messages stay. A raw `#[command]` takes `-v` after its name as an argument of its own, because it receives its arguments as typed.
+
 ## Testing a command
 
 `suprnova::console::test(argv)` runs a command through the dispatcher the console binary uses and collects what it printed. `argv` is what you type after the name of the binary. `.expects_question(question, answer)` prepares an answer, and `.run().await` returns a `ConsoleRun`.
@@ -350,6 +447,28 @@ The assert methods return `&Self`, so you can chain them.
 Help, the version, parse errors and the error of a failed command are collected too, so `console::test(["--help"])` and an argument the command does not take are testable.
 
 Answers are given in order. A question that comes out of order, or one with no prepared answer, makes `ask` return an error and the command fails. An answer that went to another question than the one it was written for would let a test pass while the command deleted something the test never agreed to. For `confirm`, the question is the text without the `[y/N]` hint.
+
+A prompt of the [Prompts](#prompts) section takes its answer from `expects_question` as well. For a menu, `.expects_choice(question, answer, options)` also checks that the menu offers exactly `options`, in that order, and the command fails when it offers others, so the test notices when the choices change. The answer is typed as a person types it: an option's label, and for `multiselect` the labels separated by commas.
+
+```rust
+use suprnova::console;
+
+#[tokio::test]
+async fn invite_takes_the_answers_by_name() {
+    let run = console::test(["users:invite"])
+        .expects_question("Email?", "ada@example.com")
+        .expects_choice("Role?", "Owner", ["Member", "Owner"])
+        .expects_question("API token?", "t0k")
+        .expects_question("Send the invitation now?", "yes")
+        .run()
+        .await;
+
+    run.assert_successful().assert_every_question_was_asked();
+    assert!(!run.output().contains("t0k"));
+}
+```
+
+`console::test(["-q", "users:purge"])` runs the command quietly, and `console::verbosity()` inside it answers the level the flags asked for. The captured output is plain text: marks without styles, and a progress bar as its one finishing line.
 
 The collection belongs to the task the command runs on. What a task that the command spawned prints is not collected.
 
@@ -451,8 +570,14 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | `suprnova::console::list()`               | All registered commands, sorted by name.      |
 | `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. `about()` returns the text the help shows. |
 | `suprnova::console::line(text)`, `error_line(text)` | Print one line on the standard output or the standard error. A test reads them. |
+| `suprnova::console::line_at(text, level)`, `error_at(text, level)` | Print one line when the run asked for at least `level`. |
+| `suprnova::console::error(text)`, `warn(text)`, `info(text)` | Print one line marked `ERROR`, `WARN` or `INFO`, styled on a terminal. |
+| `suprnova::console::verbosity()`, `Verbosity` | The level `-q` and `-v` to `-vvv` asked for: `Quiet`, `Normal`, `Verbose`, `VeryVerbose` or `Debug`. |
 | `suprnova::console::ask(question)`, `confirm(question, default)` | Read an answer from the standard input, or from the answers a test prepared. |
-| `suprnova::console::test(argv)`           | Prepare a run of the console for a test. Returns a `ConsoleTest`; `.expects_question(..)` prepares an answer and `.run().await` returns a `ConsoleRun`. |
+| `suprnova::console::ask_with_default`, `secret`, `select`, `select_keyed`, `multiselect` | The prompts of [Prompts](#prompts). |
+| `suprnova::console::Progress`, `progress(label, items, f)` | A progress bar, and a map behind one. |
+| `suprnova::console::form()`, `Form`, `FormAnswers`, `FormValue` | Several prompts whose answers come back by name. |
+| `suprnova::console::test(argv)`           | Prepare a run of the console for a test. Returns a `ConsoleTest`; `.expects_question(..)` and `.expects_choice(..)` prepare answers and `.run().await` returns a `ConsoleRun`. |
 | `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
 | `FrameworkError::silent()` / `.is_silent()` | Construct / detect an error that the dispatcher will NOT print to stderr. Used internally to suppress double-prints when clap already wrote a parse error to the terminal. |
 

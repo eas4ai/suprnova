@@ -436,12 +436,15 @@ impl CronExpression {
         &self.raw
     }
 
-    /// Parse a `HH:MM` clock string into `(hour, minute)` `u32`s.
+    /// Parse a clock string into `(hour, minute)` `u32`s: `H` is that hour
+    /// on the hour, `H:i` its hour and minute, and `H:i:s` its hour and
+    /// minute too, the seconds being read and dropped, as Laravel's
+    /// `dailyAt` reads all three.
     ///
-    /// Returns `Err` when `time` is not exactly two `:`-separated
-    /// segments or when either segment fails to parse as `u32`.
-    /// Shared by [`at`](Self::at) (infallible, warn-and-return-self
-    /// on parse failure) and [`try_at`](Self::try_at) (fallible).
+    /// Returns `Err` for any other number of `:`-separated segments and
+    /// for a segment that does not parse as `u32`, the seconds included.
+    /// Shared by [`at`](Self::at) (infallible, warn-and-return-self on
+    /// parse failure) and [`try_at`](Self::try_at) (fallible).
     ///
     /// Range-checking (hour `0..=23`, minute `0..=59`) is intentionally
     /// NOT performed here - the existing `at` surface accepts any `u32`
@@ -451,40 +454,47 @@ impl CronExpression {
     /// required.
     fn parse_hh_mm(time: &str) -> Result<(u32, u32), String> {
         let parts: Vec<&str> = time.split(':').collect();
-        if parts.len() != 2 {
+        if parts.len() > 3 {
             return Err(format!(
-                "at: expected `HH:MM` (two `:`-separated segments), got `{time}`"
+                "at: expected `H`, `HH:MM` or `HH:MM:SS` (one to three `:`-separated \
+                 segments), got `{time}`"
             ));
         }
-        let hour: u32 = parts[0]
-            .parse()
-            .map_err(|_| format!("at: hour segment `{}` is not numeric in `{time}`", parts[0]))?;
-        let minute: u32 = parts[1].parse().map_err(|_| {
-            format!(
-                "at: minute segment `{}` is not numeric in `{time}`",
-                parts[1]
-            )
-        })?;
+        let number = |index: usize, what: &str| -> Result<u32, String> {
+            parts[index].parse().map_err(|_| {
+                format!(
+                    "at: {what} segment `{}` is not numeric in `{time}`",
+                    parts[index]
+                )
+            })
+        };
+        let hour = number(0, "hour")?;
+        let minute = if parts.len() > 1 {
+            number(1, "minute")?
+        } else {
+            0
+        };
+        if parts.len() > 2 {
+            number(2, "second")?;
+        }
         Ok((hour, minute))
     }
 
     /// Set the time component (modifies hour and minute).
     ///
-    /// `time` is a `HH:MM` 24-hour-clock string. On parse failure (wrong
-    /// segment count or non-numeric segment) the modifier logs at
-    /// `tracing::warn!` and returns `self` unchanged - this preserves the
-    /// existing builder ergonomics. Use [`try_at`](Self::try_at) when a
-    /// malformed time should surface as an error instead of being silently
-    /// swallowed.
+    /// `time` is a 24-hour-clock string: `H` for that hour on the hour,
+    /// `HH:MM`, or `HH:MM:SS`, whose seconds are dropped. On parse failure
+    /// (more than three segments or a non-numeric segment) the modifier
+    /// logs at `tracing::warn!` and returns `self` unchanged - this
+    /// preserves the existing builder ergonomics. Use
+    /// [`try_at`](Self::try_at) when a malformed time should surface as an
+    /// error instead of being silently swallowed.
     pub fn at(mut self, time: &str) -> Self {
         match Self::parse_hh_mm(time) {
             Ok((hour, minute)) => {
                 self.hour = CronField::value(hour);
                 self.minute = CronField::value(minute);
-                self.raw = format!(
-                    "{} {} {} {} {}",
-                    minute, hour, self.day_of_month, self.month, self.day_of_week,
-                );
+                self.raw = self.fields_text();
                 self
             }
             Err(e) => {
@@ -499,23 +509,77 @@ impl CronExpression {
     }
 
     /// Fallible sibling of [`at`](Self::at): returns `Err` on a malformed
-    /// `HH:MM` string instead of warn-and-return-unchanged.
+    /// time string instead of warn-and-return-unchanged.
     ///
     /// # Errors
     ///
-    /// Returns `Err` when `time` is not exactly two `:`-separated segments
-    /// or when either segment fails to parse as `u32`. Range-checking
-    /// (hour `0..=23`, minute `0..=59`) is intentionally not performed -
-    /// use [`try_daily_at`](Self::try_daily_at) for that.
+    /// Returns `Err` when `time` has more than three `:`-separated segments
+    /// or when a segment fails to parse as `u32`. Range-checking (hour
+    /// `0..=23`, minute `0..=59`) is intentionally not performed - use
+    /// [`try_daily_at`](Self::try_daily_at) for that.
     pub fn try_at(mut self, time: &str) -> Result<Self, String> {
         let (hour, minute) = Self::parse_hh_mm(time)?;
         self.hour = CronField::value(hour);
         self.minute = CronField::value(minute);
-        self.raw = format!(
-            "{} {} {} {} {}",
-            minute, hour, self.day_of_month, self.month, self.day_of_week,
-        );
+        self.raw = self.fields_text();
         Ok(self)
+    }
+
+    /// This expression with its day-of-week field replaced by `days`, and
+    /// every other field kept, as Laravel's `days` splices the fifth field
+    /// of the expression. `daily_at("09:30").with_days_of_week(&[Monday])`
+    /// is `30 9 * * 1`.
+    ///
+    /// An empty `days` names no day to keep, so the expression is returned
+    /// unchanged and a warning is logged: a field with no value is no cron
+    /// expression.
+    pub fn with_days_of_week(self, days: &[DayOfWeek]) -> Self {
+        let ranges: Vec<(DayOfWeek, DayOfWeek)> = days.iter().map(|day| (*day, *day)).collect();
+        self.with_day_ranges(&ranges)
+    }
+
+    /// [`with_days_of_week`](Self::with_days_of_week) for inclusive ranges
+    /// of days, each written `first-last`, so `weekdays` keeps its `1-5`.
+    pub(crate) fn with_day_ranges(mut self, ranges: &[(DayOfWeek, DayOfWeek)]) -> Self {
+        if ranges.is_empty() {
+            tracing::warn!(
+                cron = self.raw.as_str(),
+                "with_days_of_week: no day given; returning the expression unchanged"
+            );
+            return self;
+        }
+        self.day_of_week = CronField::Parts {
+            parts: ranges
+                .iter()
+                .map(|(first, last)| CronPart {
+                    first: *first as u32,
+                    last: *last as u32,
+                    step: 1,
+                })
+                .collect(),
+            text: ranges
+                .iter()
+                .map(|(first, last)| {
+                    if first == last {
+                        (*first as u32).to_string()
+                    } else {
+                        format!("{}-{}", *first as u32, *last as u32)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        self.raw = self.fields_text();
+        self
+    }
+
+    /// The five fields as they are written, for [`Self::expression`] after
+    /// a field changed.
+    fn fields_text(&self) -> String {
+        format!(
+            "{} {} {} {} {}",
+            self.minute, self.hour, self.day_of_month, self.month, self.day_of_week,
+        )
     }
 
     // =========================================================================
@@ -598,45 +662,47 @@ impl CronExpression {
 
     /// Daily at specific time: `M H * * *`
     ///
-    /// `time` is a `HH:MM` string (24-hour clock). Lenient parsing: a string
-    /// that is not exactly two `:`-separated segments falls back to
-    /// [`daily`](Self::daily); a non-numeric segment is treated as `0`.
+    /// `time` is a 24-hour-clock string: `H` for that hour on the hour,
+    /// `HH:MM`, or `HH:MM:SS`, whose seconds are dropped, as Laravel's
+    /// `dailyAt` reads it. Lenient parsing: a string of more than three
+    /// `:`-separated segments falls back to [`daily`](Self::daily); a
+    /// non-numeric segment is treated as `0`.
     ///
     /// # Panics
     ///
     /// Panics if either numeric segment is out of cron range (hour `0..=23`,
-    /// minute `0..=59`). Pass a well-formed `"HH:MM"` to avoid the panic -
-    /// e.g. `"09:30"` or `"23:00"` - or use [`try_daily_at`](Self::try_daily_at).
+    /// minute `0..=59`). Pass a well-formed time to avoid the panic -
+    /// e.g. `"9"`, `"09:30"` or `"23:00"` - or use
+    /// [`try_daily_at`](Self::try_daily_at).
     pub fn daily_at(time: &str) -> Self {
         Self::try_daily_at(time)
             .expect("daily_at: HH:MM segments must be in cron range (hour 0..=23, minute 0..=59)")
     }
 
     /// Fallible sibling of [`daily_at`](Self::daily_at): returns `Err` instead
-    /// of panicking when a numeric `HH:MM` segment is out of range. Mirrors
-    /// `daily_at`'s lenient parsing otherwise (non-`HH:MM` → [`daily`](Self::daily),
-    /// non-numeric segment → `0`).
+    /// of panicking when a numeric segment is out of range. Mirrors
+    /// `daily_at`'s lenient parsing otherwise (more than three segments →
+    /// [`daily`](Self::daily), non-numeric segment → `0`).
     ///
     /// # Errors
     ///
-    /// Returns `Err` when `time` is a well-formed `"HH:MM"` whose hour is
-    /// outside `0..=23` or whose minute is outside `0..=59`. Lenient
-    /// parsing is preserved for non-`HH:MM` strings and non-numeric segments.
+    /// Returns `Err` when the hour is outside `0..=23` or the minute is
+    /// outside `0..=59`. Lenient parsing is preserved for strings of more
+    /// than three segments and for non-numeric segments.
     pub fn try_daily_at(time: &str) -> Result<Self, String> {
         let parts: Vec<&str> = time.split(':').collect();
-        if parts.len() == 2 {
-            let hour: u32 = parts[0].parse().unwrap_or(0);
-            let minute: u32 = parts[1].parse().unwrap_or(0);
-            if hour > 23 {
-                return Err(format!("daily_at: hour `{hour}` must be in 0..=23"));
-            }
-            if minute > 59 {
-                return Err(format!("daily_at: minute `{minute}` must be in 0..=59"));
-            }
-            Self::parse(&format!("{} {} * * *", minute, hour))
-        } else {
-            Ok(Self::daily())
+        if parts.len() > 3 {
+            return Ok(Self::daily());
         }
+        let hour: u32 = parts[0].parse().unwrap_or(0);
+        let minute: u32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
+        if hour > 23 {
+            return Err(format!("daily_at: hour `{hour}` must be in 0..=23"));
+        }
+        if minute > 59 {
+            return Err(format!("daily_at: minute `{minute}` must be in 0..=59"));
+        }
+        Self::parse(&format!("{} {} * * *", minute, hour))
     }
 
     /// Weekly on Sunday at midnight: `0 0 * * 0`
@@ -751,14 +817,23 @@ mod tests {
     }
 
     #[test]
-    fn try_at_returns_err_on_wrong_segment_count() {
-        // Single segment ("14") and three segments ("14:30:00") were both
-        // silently swallowed by the infallible `at`; `try_at` must surface
-        // the parse failure.
-        assert!(CronExpression::daily().try_at("14").is_err());
-        let err = CronExpression::daily().try_at("14:30:00").unwrap_err();
+    fn try_at_reads_one_and_three_segments_and_refuses_four() {
+        // One segment is the hour on the hour and three are the hour and
+        // minute, as Laravel's `dailyAt` reads them; four are no time.
+        assert_eq!(
+            CronExpression::daily().try_at("14").unwrap().expression(),
+            "0 14 * * *"
+        );
+        assert_eq!(
+            CronExpression::daily()
+                .try_at("14:30:00")
+                .unwrap()
+                .expression(),
+            "30 14 * * *"
+        );
+        let err = CronExpression::daily().try_at("14:30:00:00").unwrap_err();
         assert!(
-            err.contains("HH:MM") && err.contains("14:30:00"),
+            err.contains("HH:MM") && err.contains("14:30:00:00"),
             "error should name the expected shape and the bad input: {err}"
         );
     }
@@ -788,8 +863,8 @@ mod tests {
         let baseline = CronExpression::daily();
         let after = baseline.clone().at("not-a-time");
         assert_eq!(after.expression(), baseline.expression());
-        // Three-segment input also returns unchanged.
-        let after2 = CronExpression::daily().at("14:30:00");
+        // A non-numeric seconds segment also returns unchanged.
+        let after2 = CronExpression::daily().at("14:30:xx");
         assert_eq!(after2.expression(), "0 0 * * *");
     }
 

@@ -33,6 +33,22 @@ use crate::http::{Cookie, HttpResponse, Request, Response, SameSite};
 use crate::middleware::{Middleware, Next};
 use subtle::ConstantTimeEq;
 
+/// Dispatched by `down` once maintenance mode is recorded, on the first
+/// `down` and on every `down` that updates its options.
+///
+/// It carries no data, as Laravel's `MaintenanceModeEnabled` carries none:
+/// a listener that needs the options reads them from [`maintenance_mode`].
+/// A listener tells the deployment, such as a status page or the chat of
+/// the people on call, without polling the down file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaintenanceModeEnabled;
+
+impl crate::events::Event for MaintenanceModeEnabled {
+    fn event_name() -> &'static str {
+        "MaintenanceModeEnabled"
+    }
+}
+
 /// Bypass cookie name (Laravel uses `laravel_maintenance`).
 const BYPASS_COOKIE: &str = "suprnova_maintenance";
 
@@ -81,6 +97,11 @@ pub struct MaintenancePayload {
     /// Seconds for the `Retry-After` header.
     #[serde(default)]
     pub retry: Option<u64>,
+    /// The date for the `Retry-After` header, in the RFC 7231 form
+    /// (`Sat, 01 Jan 2033 00:00:00 GMT`). `down --retry <date>` sets it in
+    /// place of [`retry`](Self::retry), and it wins when both are set.
+    #[serde(default)]
+    pub retry_at: Option<String>,
     /// Seconds for the `Refresh` header (browser auto-refresh).
     #[serde(default)]
     pub refresh: Option<u64>,
@@ -101,6 +122,7 @@ impl std::fmt::Debug for MaintenancePayload {
             .field("except", &self.except)
             .field("redirect", &self.redirect)
             .field("retry", &self.retry)
+            .field("retry_at", &self.retry_at)
             .field("refresh", &self.refresh)
             .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
             .field("status", &self.status)
@@ -119,6 +141,7 @@ impl Default for MaintenancePayload {
             except: Vec::new(),
             redirect: None,
             retry: None,
+            retry_at: None,
             refresh: None,
             secret: None,
             status: 503,
@@ -346,6 +369,109 @@ pub fn maintenance_mode() -> Arc<dyn MaintenanceMode> {
     }
 }
 
+/// When a client may retry, as `down --retry` takes it: a number of seconds
+/// or a date.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RetryAfter {
+    /// Seconds, sent as they are.
+    Seconds(u64),
+    /// A date, already in the RFC 7231 form `Retry-After` sends.
+    Date(String),
+}
+
+impl RetryAfter {
+    /// The value a `--render` template reads as `retry_after`: the number
+    /// of seconds, or the date.
+    pub(crate) fn to_value(&self) -> serde_json::Value {
+        match self {
+            Self::Seconds(seconds) => serde_json::Value::from(*seconds),
+            Self::Date(date) => serde_json::Value::from(date.clone()),
+        }
+    }
+}
+
+/// Read `down --retry`: a number of seconds, or a date in the RFC 7231
+/// form (`Sat, 01 Jan 2033 00:00:00 GMT`, the other two HTTP date forms
+/// too) or in RFC 3339 (`2033-01-01T00:00:00Z`). A date is kept in the
+/// RFC 7231 form, the one Laravel's `getRetryTime` writes.
+///
+/// # Errors
+///
+/// When `value` is neither. Laravel drops such a value and sends no
+/// `Retry-After`; refusing it tells the operator the header they asked
+/// for is not the one clients would get.
+pub(crate) fn parse_retry(value: &str) -> Result<RetryAfter, String> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Ok(RetryAfter::Seconds(seconds));
+    }
+    let date = httpdate::parse_http_date(value).ok().or_else(|| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(std::time::SystemTime::from)
+    });
+    match date {
+        Some(date) => Ok(RetryAfter::Date(httpdate::fmt_http_date(date))),
+        None => Err(format!(
+            "`{value}` is neither a number of seconds nor a date such as              `Sat, 01 Jan 2033 00:00:00 GMT` or `2033-01-01T00:00:00Z`"
+        )),
+    }
+}
+
+/// Render the Tera template at `resource_path("views/<view>")` for
+/// `down --render`, with `retry_after` in its context: the seconds or the
+/// date of `--retry`, and empty without one.
+///
+/// The page is rendered once, by `down`, and stored as the maintenance
+/// payload's template, as Laravel prerenders its view: the serving process
+/// then needs neither the views nor a template engine to answer.
+///
+/// # Errors
+///
+/// When `view` is not a relative path inside the views directory, when the
+/// file cannot be read, and when Tera cannot render it. The error names
+/// the view and the cause.
+pub(crate) fn render_view(
+    view: &str,
+    retry: Option<&RetryAfter>,
+) -> Result<String, FrameworkError> {
+    let relative = std::path::Path::new(view);
+    let inside = !view.is_empty()
+        && relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+    if !inside {
+        return Err(FrameworkError::internal(format!(
+            "the view `{view}` is not a path inside {}",
+            super::paths::resource_path("views").display()
+        )));
+    }
+    let path = super::paths::resource_path("views").join(relative);
+    let source = std::fs::read_to_string(&path).map_err(|e| {
+        FrameworkError::internal(format!(
+            "cannot read the view `{view}` at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut context = tera::Context::new();
+    context.insert(
+        "retry_after",
+        &retry.map_or(serde_json::Value::Null, RetryAfter::to_value),
+    );
+    tera::Tera::one_off(&source, &context, true).map_err(|e| {
+        // Tera's own message names its one-off template; the cause says
+        // what in the file is wrong.
+        let mut message = e.to_string();
+        let mut cause = std::error::Error::source(&e);
+        while let Some(inner) = cause {
+            message.push_str(": ");
+            message.push_str(&inner.to_string());
+            cause = inner.source();
+        }
+        FrameworkError::internal(format!("cannot render the view `{view}`: {message}"))
+    })
+}
+
 /// Generate a random hex bypass secret (16 bytes → 32 hex chars), used by
 /// `down --with-secret`. Hex keeps it safe as a URL path segment.
 pub(crate) fn random_secret() -> String {
@@ -520,7 +646,9 @@ fn service_unavailable(payload: &MaintenancePayload) -> HttpResponse {
         None => HttpResponse::text("503 Service Unavailable"),
     }
     .status(status);
-    if let Some(retry) = payload.retry {
+    if let Some(date) = &payload.retry_at {
+        resp = resp.header("Retry-After", date.clone());
+    } else if let Some(retry) = payload.retry {
         resp = resp.header("Retry-After", retry.to_string());
     }
     if let Some(refresh) = payload.refresh {
@@ -931,6 +1059,47 @@ mod tests {
             "temp files left behind: {leftovers:?}"
         );
         driver.deactivate().await.unwrap();
+    }
+
+    #[test]
+    fn retry_reads_seconds_and_dates() {
+        assert_eq!(parse_retry("120"), Ok(RetryAfter::Seconds(120)));
+        let date = RetryAfter::Date("Sat, 01 Jan 2033 00:00:00 GMT".to_string());
+        assert_eq!(
+            parse_retry("Sat, 01 Jan 2033 00:00:00 GMT"),
+            Ok(date.clone())
+        );
+        assert_eq!(parse_retry("2033-01-01T00:00:00Z"), Ok(date.clone()));
+        assert_eq!(parse_retry("2033-01-01T02:00:00+02:00"), Ok(date));
+        let error = parse_retry("tomorrow").expect_err("no date");
+        assert!(error.contains("tomorrow"), "{error}");
+        assert!(parse_retry("-5").is_err());
+    }
+
+    #[test]
+    fn a_retry_date_is_sent_in_place_of_seconds() {
+        let payload = MaintenancePayload {
+            retry: Some(30),
+            retry_at: Some("Sat, 01 Jan 2033 00:00:00 GMT".to_string()),
+            ..Default::default()
+        };
+        let response = service_unavailable(&payload);
+        assert_eq!(
+            response.header_value("Retry-After"),
+            Some("Sat, 01 Jan 2033 00:00:00 GMT")
+        );
+    }
+
+    #[test]
+    fn a_view_outside_the_views_directory_is_refused() {
+        for view in ["", "../secrets.txt", "/etc/passwd", "errors/../../x"] {
+            let error = render_view(view, None).expect_err("outside the views");
+            assert!(
+                error.message().contains("is not a path inside"),
+                "{view}: {}",
+                error.message()
+            );
+        }
     }
 
     #[test]

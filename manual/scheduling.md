@@ -317,6 +317,20 @@ use suprnova::DayOfWeek;
 .weekends()  // Saturday-Sunday
 ```
 
+After a frequency, a time or `.cron(..)`, a day method replaces only the
+day-of-week field and keeps the rest, as Laravel's `days` does:
+
+```rust
+.hourly().mondays()                         // 0 * * * 1 - every hour on Mondays
+.daily().at("09:30").weekdays()             // 30 9 * * 1-5
+.every_fifteen_minutes().weekends()         // */15 * * * 0,6
+.days(&[DayOfWeek::Monday, DayOfWeek::Friday]).at("08:00") // 0 8 * * 1,5
+```
+
+A day method alone runs at midnight on that day: `.mondays()` is
+`0 0 * * 1`. `CronExpression::with_days_of_week(days)` does the same splice
+on an expression you build yourself.
+
 ### Time Modifiers
 
 Chain `.at()` with any schedule to set a specific time:
@@ -326,7 +340,14 @@ Chain `.at()` with any schedule to set a specific time:
 .weekly().at("09:00")          // Weekly at 9:00 AM
 .mondays().at("08:00")         // Every Monday at 8:00 AM
 .monthly().at("00:00")         // First of month at midnight
+.monthly_on(15).at("9")        // The 15th at 9:00 AM
+.daily_at("23:59:59")          // Daily at 11:59 PM
 ```
+
+A time is `H` for that hour on the hour, `HH:MM`, or `HH:MM:SS`, whose
+seconds are dropped, as Laravel's `dailyAt` reads it. A non-numeric
+segment is an error from `try_at`, a warning from `at` (which keeps the
+expression), and `0` for `daily_at` and `try_daily_at`.
 
 ### Timezones
 
@@ -572,6 +593,11 @@ both.
 in-memory cache store the lock lives in a single process's heap, every
 replica wins its own election, and the guarantee is silently absent.
 
+With no cache store bound at all there is no lock to elect with. A schedule
+with an `on_one_server()` task then refuses to start, in every environment,
+with an error that names the tasks, and a tick that runs without the check
+skips such a task with an error log. No path runs it on every server.
+
 The check asks the cache store the scheduler actually locks through, not
 `CACHE_DRIVER`: an in-memory store your bootstrap binds, or a typed
 `CacheConfig` that selects memory, counts as per-process even when
@@ -583,8 +609,9 @@ In production a per-process lock is a **boot failure**, not a warning:
 > `refusing to boot in production: 1 task(s) request single-server execution (billing:nightly) but the bound cache store keeps its locks in this process (CACHE_DRIVER is memory or unset, or the application bound an in-memory store), so the election lock lives in this process's heap. Every replica would win its own election and run the task, which is what on_one_server() exists to prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true to acknowledge per-process locking - which is only accurate if you run exactly one scheduler.`
 
 Set `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` if your deployment
-really does run a single scheduler. Outside production the memory driver
-stays usable and the framework warns once instead.
+really does run a single scheduler. Outside production a bound in-memory
+store stays usable. The acknowledgement does not lift the refusal for a
+schedule with no cache store bound: there is no lock for it to acknowledge.
 
 **Custom lock TTL.** Defaults to 60 seconds - one minute-aligned tick.
 Both edges matter: too short and a replica whose tick lands a few seconds
@@ -620,7 +647,9 @@ Where it diverges is the failure mode. Laravel will happily run
 `onOneServer()` against a cache driver that cannot coordinate. Suprnova
 refuses to boot in production instead, on the same reasoning as the
 in-memory rate limiter: a control that silently does much less than it
-claims is worse than one that is visibly absent.
+claims is worse than one that is visibly absent. With no cache store at all,
+Suprnova refuses in every environment, where Laravel's mutex would fail on
+the missing store.
 
 ### A single-server default
 
@@ -641,6 +670,46 @@ with `Schedule::has_been_interrupted_since(started_at).await?`, where
 `started_at` is a `chrono::DateTime<chrono::Utc>`. You receive cache errors
 as `FrameworkError`. A run stops and reports an error when its configured
 cache cannot clear or read the mark.
+
+### Environments and maintenance mode
+
+`.environments([...])` limits a task to the named environments, read from
+`Config::environment()` at each tick. A task that never calls it runs in
+every environment.
+
+```rust
+use suprnova::Environment;
+
+schedule.add(
+    schedule.task(NightlyBillingTask::new())
+        .daily()
+        .at("02:00")
+        .name("billing:nightly")
+        .environments([Environment::Production]),
+);
+```
+
+While the application is in maintenance mode (`./app down`, see
+[Deployment](deployment.md#maintenance-mode)), `schedule:run` and
+`schedule:work` skip every task that does not ask
+`.even_in_maintenance_mode()`, as Laravel's `Event::isDue` does. A
+maintenance state the scheduler cannot read counts as down, and the error is
+logged: running every task against services an operator took down is the
+worse mistake.
+
+```rust
+schedule.add(
+    schedule.task(ReportQueueDepthTask::new())
+        .every_minute()
+        .name("queue:report-depth")
+        .even_in_maintenance_mode(),
+);
+```
+
+Both filters apply in `Schedule::run_due_tasks` and `run_due_tasks_into`.
+`Schedule::due_tasks()` still answers by the cron expression alone, and a
+`TaskEntry` reports its choices through `environments()`,
+`runs_in_environment(&env)` and `runs_in_maintenance_mode()`.
 
 ### Running in Background
 

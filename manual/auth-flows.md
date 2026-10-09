@@ -195,34 +195,35 @@ remember-revocation results.
 
 ### Registering the 2FA migrations
 
-The framework ships the schema; your app opts in by listing all three
-migrations in its own migrator:
+The framework ships the schema; your app opts in by loading the two-factor
+list, `auth_flows::two_factor::migrations()`, next to its own migrator:
 
 ```rust
-use sea_orm_migration::prelude::*;
+use suprnova::Application;
 
-pub struct Migrator;
-
-#[async_trait::async_trait]
-impl MigratorTrait for Migrator {
-    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![
-            // ... your own migrations ...
-
-            // Creates `two_factor_credentials`.
-            Box::new(suprnova::auth_flows::two_factor::migration::Migration),
-            // Adds `last_used_timestep` for TOTP replay protection.
-            Box::new(suprnova::auth_flows::two_factor::migration_replay::Migration),
-            // Creates `two_factor_attempts`, the second-factor
-            // brute-force counter.
-            Box::new(suprnova::auth_flows::two_factor::migration_attempts::Migration),
-            // Creates `two_factor_rotations`, where a rotation waits for
-            // its new secret to be confirmed.
-            Box::new(suprnova::auth_flows::two_factor::migration_rotation::Migration),
-        ]
-    }
+#[suprnova::main]
+async fn main() {
+    Application::new()
+        .bootstrap(my_app::bootstrap::bootstrap)
+        .routes(my_app::routes::register)
+        .migrations::<my_app::migrations::Migrator>()
+        .load_migrations_from(suprnova::auth_flows::two_factor::migrations)
+        .run()
+        .await
 }
 ```
+
+The list holds every two-factor migration in order: `migration` creates
+`two_factor_credentials`, `migration_replay` adds `last_used_timestep` for
+TOTP replay protection, `migration_attempts` creates `two_factor_attempts`,
+the second-factor brute-force counter, and `migration_rotation` creates
+`two_factor_rotations`, where a rotation waits for its new secret to be
+confirmed. A release that adds a two-factor migration adds it to the list,
+so your application runs it without an edit. Every migrate command runs the
+list; see [Migrations](migrations.md#migrations-from-the-framework-and-from-crates).
+
+An application that lists the four migrations in its own migrator by hand
+keeps working: a migration whose name the migrator already lists runs once.
 
 The migrations are idempotent against an already-applied database (the
 v1, the attempt table and the rotation table use `CREATE TABLE IF NOT
@@ -230,8 +231,9 @@ EXISTS`; the v2 is a column add). Re-running `suprnova migrate` against a produc
 that already has the schema is a no-op.
 
 An application that upgrades from a release without the attempt counter
-must add the third migration. Until it runs, every `TwoFactor` proof path
-answers `503`: the attempt cannot be counted, so no code is evaluated.
+runs `migrate` once; an application that lists the migrations by hand must
+add the third one. Until it runs, every `TwoFactor` proof path answers
+`503`: the attempt cannot be counted, so no code is evaluated.
 
 ### Environment
 

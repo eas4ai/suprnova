@@ -302,10 +302,12 @@ fn a_schedule_without_single_server_tasks_is_never_blocked() {
 }
 
 /// Outside production the memory driver is the useful default for a
-/// single-process dev loop, so the guard must not fire there - it warns
-/// instead.
+/// single-process dev loop, so the guard must not fire there. The store is
+/// bound: with none at all there is no lock, and the guard refuses in every
+/// environment.
 #[test]
 fn outside_production_a_memory_cache_is_allowed() {
+    let _cache = install_shared_cache();
     let mut schedule = Schedule::new();
     let task = schedule
         .call(|| async { Ok(()) })

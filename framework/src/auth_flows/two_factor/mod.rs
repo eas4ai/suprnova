@@ -51,6 +51,40 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 pub use lockout::TwoFactorLockout;
 
+/// Every two-factor migration, in the order they run: the credentials
+/// table, its replay column, the attempt counter and the pending
+/// rotations.
+///
+/// Load the list rather than its members, so a release that adds a
+/// two-factor migration reaches an application without an edit to its
+/// migrator:
+///
+/// ```rust,no_run
+/// # mod migrations {
+/// #     use sea_orm_migration::prelude::*;
+/// #     pub struct Migrator;
+/// #     impl MigratorTrait for Migrator {
+/// #         fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }
+/// #     }
+/// # }
+/// # fn ex() {
+/// suprnova::Application::new()
+///     .migrations::<migrations::Migrator>()
+///     .load_migrations_from(suprnova::auth_flows::two_factor::migrations);
+/// # }
+/// ```
+///
+/// The framework registers it nowhere itself: an application that does
+/// not use two-factor sign-in gets none of these tables.
+pub fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+    vec![
+        Box::new(migration::Migration),
+        Box::new(migration_replay::Migration),
+        Box::new(migration_attempts::Migration),
+        Box::new(migration_rotation::Migration),
+    ]
+}
+
 const ISSUER_ENV: &str = "APP_NAME";
 const DEFAULT_ISSUER: &str = "Suprnova";
 const RECOVERY_CODE_COUNT: usize = 10;
