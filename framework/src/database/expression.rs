@@ -167,7 +167,15 @@ impl DB {
     }
 }
 
-pub(crate) fn random_order(backend: DbBackend, seed: Option<u64>) -> String {
+/// Render the ORDER BY expression for a random order.
+///
+/// SQLite's `random()` cannot be seeded, so a seeded SQLite order is a fixed
+/// function of the seed and each row's `rowid` instead. `rowid` identifies the
+/// row in the rowid tables the model builder creates, so the same seed on the
+/// same rows always gives the same order. `table` is the query's main table as
+/// the FROM clause quotes it; qualifying `rowid` with it keeps the expression
+/// unambiguous when the query joins a second table that also has a rowid.
+pub(crate) fn random_order(backend: DbBackend, seed: Option<u64>, table: &str) -> String {
     match (backend, seed) {
         (DbBackend::MySql, Some(seed)) => format!("RAND({seed})"),
         (DbBackend::MySql, None) => "RAND()".into(),
@@ -178,6 +186,15 @@ pub(crate) fn random_order(backend: DbBackend, seed: Option<u64>) -> String {
             format!(
                 "CASE WHEN (SELECT setseed({seed:.17e})) IS NULL THEN RANDOM() ELSE RANDOM() END"
             )
+        }
+        (DbBackend::Sqlite, Some(seed)) => {
+            // Reducing the seed and the sum mod 2^32 keeps the product below
+            // 2^63, so SQLite stays in integer arithmetic. The multiplier is
+            // odd, so multiplying mod 2^32 is a bijection: rowids that differ
+            // by less than 2^32 never tie, and the order spreads consecutive
+            // ids across the range.
+            let offset = seed % 4_294_967_296;
+            format!("((((({table}.rowid) + {offset}) % 4294967296) * 1640531527) % 4294967296)")
         }
         _ => "RANDOM()".into(),
     }

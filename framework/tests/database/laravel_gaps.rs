@@ -625,3 +625,70 @@ async fn nested_db_transaction_uses_a_savepoint() {
     .unwrap();
     assert_eq!(DB::transaction_level(), 0);
 }
+
+async fn seeded_gap_ids(seed: u64) -> Vec<i64> {
+    DB::table("gap_rows")
+        .in_random_order_seeded(seed)
+        .get()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get_int("id").unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn table_seeded_random_order_repeats_for_the_same_seed_on_sqlite() {
+    let fx = fixture().await;
+    let rows: Vec<String> = (4..=12)
+        .map(|id| format!("({id}, {id}, 'c', '2026-10-04')"))
+        .collect();
+    fx.exec(&format!("INSERT INTO gap_rows VALUES {}", rows.join(", ")))
+        .await;
+    let every_row: Vec<i64> = (1..=12).collect();
+    let first = seeded_gap_ids(42).await;
+    assert_eq!(first, seeded_gap_ids(42).await);
+    let mut sorted = first.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, every_row);
+    let mut other = seeded_gap_ids(7).await;
+    other.sort_unstable();
+    assert_eq!(other, every_row);
+}
+
+#[tokio::test]
+async fn table_seeded_random_order_over_a_join_on_sqlite_repeats_each_row_once() {
+    let fx = fixture().await;
+    let rows: Vec<String> = (4..=12)
+        .map(|id| format!("({id}, {id}, 'c', '2026-10-04')"))
+        .collect();
+    fx.exec(&format!("INSERT INTO gap_rows VALUES {}", rows.join(", ")))
+        .await;
+    fx.exec("CREATE TABLE gap_links (a_id INTEGER, note TEXT)")
+        .await;
+    let links: Vec<String> = (1..=12).map(|id| format!("({id}, 'n{id}')")).collect();
+    fx.exec(&format!(
+        "INSERT INTO gap_links VALUES {}",
+        links.join(", ")
+    ))
+    .await;
+    let joined = |seed| {
+        DB::table("gap_rows")
+            .join("gap_links", "gap_rows.id", "=", "gap_links.a_id")
+            .in_random_order_seeded(seed)
+    };
+    let ids = |seed| async move {
+        joined(seed)
+            .get()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get_int("id").unwrap())
+            .collect::<Vec<i64>>()
+    };
+    let first = ids(42).await;
+    assert_eq!(first, ids(42).await);
+    let mut sorted = first;
+    sorted.sort_unstable();
+    assert_eq!(sorted, (1..=12).collect::<Vec<i64>>());
+}
