@@ -1248,6 +1248,11 @@ async fn run_labelled_worker(
                         })
                         .await;
                     }
+                    // Laravel's worker reports the error `FailOnException`
+                    // rethrows, after the attempt settles (PAR-111).
+                    if let Some(error) = &failed_by_error {
+                        crate::error::Exceptions::report(error);
+                    }
                 }
                 DispatchOutcome::Settled(JobOutcome::Deleted) => {
                     if sweep_unique_lock {
@@ -1259,7 +1264,13 @@ async fn run_labelled_worker(
                     if sweep_unique_lock {
                         release_unique_lock_if_held(&env).await;
                     }
-                    if env.attempts >= env.max_tries {
+                    // An error the application named with `dont_retry` or
+                    // `dont_retry_when` fails the job at once, whatever
+                    // attempts it has left: Laravel's
+                    // `markJobAsFailedIfItShouldntBeRetried` (PAR-111).
+                    if env.attempts >= env.max_tries
+                        || crate::error::Exceptions::should_stop_retries(&e)
+                    {
                         // Laravel fails the job before it raises
                         // JobExceptionOccurred (Worker.php:631, :644), and
                         // releases nothing for a failed job.
@@ -1320,6 +1331,9 @@ async fn run_labelled_worker(
                             .await;
                         }
                     }
+                    // Laravel's `runJob` reports the error `process`
+                    // rethrows, once the attempt has settled (PAR-111).
+                    crate::error::Exceptions::report(&e);
                 }
                 DispatchOutcome::TimedOut(t) => {
                     // Laravel's alarm handler fails the job first, then raises

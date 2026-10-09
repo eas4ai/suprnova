@@ -4,7 +4,10 @@
 //! an [`ErrorReport`], sent to an Inertia visit or to a request whose
 //! `Accept` lists `text/html`, is replaced by one HTML document: the
 //! error chain or the panic, the stack frames recorded where it began,
-//! and the request.
+//! and the request. The headline carries the error's type
+//! ([`ErrorReport::type_name`]). With `APP_EDITOR` set, each frame's
+//! location links to its line in that editor, as Laravel's
+//! `Frame::editorHref` does.
 //!
 //! # Where it happens
 //!
@@ -376,17 +379,26 @@ impl DebugRequest {
             .raw(STYLE)
             .raw("</style>\n</head>\n<body>\n<main>\n<header>\n<p class=\"status\">")
             .text(&status_line)
-            .raw("</p>\n<h1>")
+            .raw("</p>\n");
+        if let Some(type_name) = report.type_name() {
+            html.raw("<p class=\"type\"><code>")
+                .text(type_name)
+                .raw("</code></p>\n");
+        }
+        html.raw("<h1>")
             .text(&headline)
             .raw("</h1>\n<p class=\"note\">Suprnova's development error page, shown because debug mode is on. With debug off, this request gets the response the app sends in production.</p>\n</header>\n");
 
+        // Read here, when a page renders with debug on, and nowhere else.
+        let editor = configured_editor();
+        let editor = editor.as_deref();
         render_failure(&mut html, report);
-        render_frames(&mut html, report);
+        render_frames(&mut html, report, editor);
         for (message, recorded) in report.source_frames() {
             html.raw("<h2>Stack frames</h2>\n<p>Source error: ")
                 .text(&redact_text(message))
                 .raw("</p>\n");
-            render_recorded_frames(&mut html, recorded, false);
+            render_recorded_frames(&mut html, recorded, false, editor);
         }
         self.render_request(&mut html, request_id);
 
@@ -486,19 +498,21 @@ fn render_failure(html: &mut Html, report: &ErrorReport) {
 
 /// The recorded frames: the application's shown, every run of the
 /// others collapsed into a `<details>` whose summary counts them.
-fn render_frames(html: &mut Html, report: &ErrorReport) {
+/// `editor` is the `APP_EDITOR` value each frame's location links through.
+fn render_frames(html: &mut Html, report: &ErrorReport, editor: Option<&str>) {
     html.raw("<h2>Stack frames</h2>\n");
     let Some(recorded) = report.frames() else {
         html.raw("<p class=\"note\">No stack frames were recorded for this error. Suprnova records them on the request's own task, where a FrameworkError or AppError constructor or conversion creates the error, or where a panic is raised. This error was created somewhere else: on another task, before the request began, or as a struct literal.</p>\n");
         return;
     };
-    render_recorded_frames(html, recorded, report.is_panic());
+    render_recorded_frames(html, recorded, report.is_panic(), editor);
 }
 
 fn render_recorded_frames(
     html: &mut Html,
     recorded: &super::frames::RecordedFrames,
     is_panic: bool,
+    editor: Option<&str>,
 ) {
     if is_panic {
         html.raw("<p>Recorded where the panic was raised, at <code>");
@@ -508,9 +522,11 @@ fn render_recorded_frames(
     html.text(recorded.site()).raw("</code>.</p>\n");
     let resolved = recorded.resolve();
     // The innermost application caller has a known creation site even when
-    // debug symbols omit locations. Do not use it for an application frame
-    // farther out when a dependency or framework function created the error.
-    let mut creation_source = resolved
+    // debug symbols omit locations: it stands in as that frame's location,
+    // for its source lines and its editor link. Do not use it for an
+    // application frame farther out when a dependency or framework function
+    // created the error.
+    let mut creation_site = resolved
         .frames
         .iter()
         .find(|frame| {
@@ -529,10 +545,7 @@ fn render_recorded_frames(
     while let Some(first) = rest.first() {
         if first.origin == Origin::App {
             html.raw("<li class=\"app\">");
-            render_frame(html, first);
-            if let Some(site) = creation_source.take() {
-                render_source(html, site);
-            }
+            render_frame(html, first, creation_site.take(), editor);
             html.raw("</li>\n");
             rest = &rest[1..];
             continue;
@@ -547,7 +560,7 @@ fn render_recorded_frames(
             .raw("</summary>\n<ol>\n");
         for frame in collapsed {
             html.raw("<li>");
-            render_frame(html, frame);
+            render_frame(html, frame, None, editor);
             html.raw("</li>\n");
         }
         html.raw("</ol>\n</details></li>\n");
@@ -561,7 +574,11 @@ fn render_recorded_frames(
     }
 }
 
-fn render_frame(html: &mut Html, frame: &Frame) {
+/// One frame: its function, its location linked through `editor` when
+/// one is set, and for an application frame the source lines around it.
+/// `site` is the creation site, which stands in for a frame that has no
+/// location of its own.
+fn render_frame(html: &mut Html, frame: &Frame, site: Option<&str>, editor: Option<&str>) {
     html.raw("<code class=\"fn\">")
         .text(&frame.function)
         .raw("</code>");
@@ -570,41 +587,133 @@ fn render_frame(html: &mut Html, frame: &Frame) {
             .text(frame.origin.label())
             .raw("</span>");
     }
-    if let Some(location) = &frame.location {
-        html.raw("<span class=\"at\">")
-            .text(location)
-            .raw("</span>");
+    if let Some(location) = frame.location.as_deref().or(site) {
+        html.raw("<span class=\"at\">");
+        match editor.and_then(|editor| editor_href(editor, location)) {
+            Some(href) => html
+                .raw("<a href=\"")
+                .text(&href)
+                .raw("\">")
+                .text(location)
+                .raw("</a>"),
+            None => html.text(location),
+        };
+        html.raw("</span>");
         if frame.origin == Origin::App {
             render_source(html, location);
         }
     }
 }
 
-/// Keep only nearby source lines in memory and escape every line shown.
-fn render_source(html: &mut Html, location: &str) {
-    use std::io::{BufRead, BufReader};
-    use std::path::Path;
+/// The editor URL formats Laravel knows by name: `$editorHrefs` in
+/// `Illuminate\Foundation\Concerns\ResolvesDumpSource`.
+const EDITOR_HREFS: &[(&str, &str)] = &[
+    ("antigravity", "antigravity://file/{file}:{line}"),
+    ("atom", "atom://core/open/file?filename={file}&line={line}"),
+    ("cursor", "cursor://file/{file}:{line}"),
+    ("emacs", "emacs://open?url=file://{file}&line={line}"),
+    ("fleet", "fleet://open?file={file}&line={line}"),
+    ("idea", "idea://open?file={file}&line={line}"),
+    ("kiro", "kiro://file/{file}:{line}"),
+    ("macvim", "mvim://open/?url=file://{file}&line={line}"),
+    ("neovim", "nvim://open?url=file://{file}&line={line}"),
+    ("netbeans", "netbeans://open/?f={file}:{line}"),
+    ("nova", "nova://core/open/file?filename={file}&line={line}"),
+    ("phpstorm", "phpstorm://open?file={file}&line={line}"),
+    ("sublime", "subl://open?url=file://{file}&line={line}"),
+    ("textmate", "txmt://open?url=file://{file}&line={line}"),
+    ("trae", "trae://file/{file}:{line}"),
+    ("vscode", "vscode://file/{file}:{line}"),
+    ("vscode-insiders", "vscode-insiders://file/{file}:{line}"),
+    (
+        "vscode-insiders-remote",
+        "vscode-insiders://vscode-remote/{file}:{line}",
+    ),
+    ("vscode-remote", "vscode://vscode-remote/{file}:{line}"),
+    ("vscodium", "vscodium://file/{file}:{line}"),
+    ("windsurf", "windsurf://file/{file}:{line}"),
+    ("xdebug", "xdebug://{file}@{line}"),
+    ("zed", "zed://file/{file}:{line}"),
+];
 
-    let Some((prefix, last)) = location.rsplit_once(':') else {
-        return;
+/// The `APP_EDITOR` value the page links frames through, or `None` when it
+/// is unset or blank, which links nothing. Laravel's `app.editor`.
+fn configured_editor() -> Option<String> {
+    std::env::var("APP_EDITOR")
+        .ok()
+        .map(|editor| editor.trim().to_string())
+        .filter(|editor| !editor.is_empty())
+}
+
+/// The link that opens the frame at `location` in `editor`, Laravel's
+/// `Frame::editorHref`. `None` when `location` has no line.
+///
+/// A name from [`EDITOR_HREFS`] uses that editor's format; a value holding
+/// `{file}` is a template of its own; any other value `name` gives
+/// `name://open?file={file}&line={line}`. `{file}` is the absolute path of
+/// the frame's file, found the way [`render_source`] finds it, and
+/// `{line}` its line. The caller escapes the result like any other text.
+fn editor_href(editor: &str, location: &str) -> Option<String> {
+    let (path, line) = split_location(location)?;
+    let template = match EDITOR_HREFS.iter().find(|(name, _)| *name == editor) {
+        Some((_, href)) => (*href).to_string(),
+        None if editor.contains("{file}") => editor.to_string(),
+        None => format!("{editor}://open?file={{file}}&line={{line}}"),
     };
+    let file = absolute_source_path(path);
+    // `{line}` first: a path that holds the text `{line}` stays as it is.
+    Some(
+        template
+            .replace("{line}", &line.to_string())
+            .replace("{file}", &file.to_string_lossy()),
+    )
+}
+
+/// The path and line of a `file:line:column` or `file:line` location.
+/// `None` without a line, or for line 0.
+fn split_location(location: &str) -> Option<(&str, usize)> {
+    let (prefix, last) = location.rsplit_once(':')?;
     let (path, line) = match prefix.rsplit_once(':') {
         Some((path, line)) if line.parse::<usize>().is_ok() => (path, line),
         _ => (prefix, last),
     };
-    let Ok(line) = line.parse::<usize>() else {
-        return;
-    };
-    if line == 0 {
-        return;
-    }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        Path::new(path).to_path_buf(),
+    let line = line.parse::<usize>().ok()?;
+    (line != 0).then_some((path, line))
+}
+
+/// Where a frame's file may be: `path` from the working directory, then
+/// from the framework's manifest directory and its parent, which is the
+/// workspace root when the framework is built from this repository.
+fn source_candidates(path: &str) -> [std::path::PathBuf; 3] {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    [
+        std::path::PathBuf::from(path),
         manifest.join(path),
         manifest.parent().unwrap_or(manifest).join(path),
-    ];
-    let Some(file) = candidates
+    ]
+}
+
+/// The absolute path of the frame file `path`: the first of
+/// [`source_candidates`] that is a file, else `path` from the working
+/// directory. An absolute `path` is returned as it is.
+fn absolute_source_path(path: &str) -> std::path::PathBuf {
+    let candidates = source_candidates(path);
+    let found = candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or(&candidates[0])
+        .clone();
+    std::path::absolute(&found).unwrap_or(found)
+}
+
+/// Keep only nearby source lines in memory and escape every line shown.
+fn render_source(html: &mut Html, location: &str) {
+    use std::io::{BufRead, BufReader};
+
+    let Some((path, line)) = split_location(location) else {
+        return;
+    };
+    let Some(file) = source_candidates(path)
         .iter()
         .find_map(|path| std::fs::File::open(path).ok())
     else {
@@ -876,6 +985,7 @@ p{margin:0 0 8px}
 code,pre{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
 pre{margin:0;padding:10px 12px;white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:6px}
 .status{margin:0;font-weight:600;color:var(--accent)}
+.type{margin:4px 0 0;color:var(--muted)}
 .note,.none,.cause,.origin,.at,summary{color:var(--muted)}
 .note{font-size:13px}
 ol.chain{margin:0;padding-left:22px}
@@ -1168,6 +1278,44 @@ mod tests {
         assert!(page.contains("No stack frames were recorded"), "{page}");
         assert!(page.contains("None was assigned."), "{page}");
         assert!(page.contains("No route matched."), "{page}");
+    }
+
+    #[test]
+    fn an_editor_href_links_a_relative_location_through_its_absolute_path() {
+        // No candidate file exists, so the path resolves against the
+        // working directory.
+        let file = std::path::absolute("src/handlers.rs").expect("a working directory");
+        let file = file.to_string_lossy();
+
+        assert_eq!(
+            editor_href("vscode", "src/handlers.rs:12:5").as_deref(),
+            Some(format!("vscode://file/{file}:12").as_str())
+        );
+        assert_eq!(
+            editor_href("zed", "src/handlers.rs:12").as_deref(),
+            Some(format!("zed://file/{file}:12").as_str())
+        );
+        assert_eq!(
+            editor_href("myeditor://{file}#{line}", "src/handlers.rs:12:5").as_deref(),
+            Some(format!("myeditor://{file}#12").as_str())
+        );
+        assert_eq!(
+            editor_href("myeditor", "src/handlers.rs:12:5").as_deref(),
+            Some(format!("myeditor://open?file={file}&line=12").as_str())
+        );
+        assert_eq!(
+            editor_href("vscode", "/srv/app/src/{line}.rs:7:1").as_deref(),
+            Some("vscode://file//srv/app/src/{line}.rs:7"),
+            "a path holding `{{line}}` is not filled in twice"
+        );
+    }
+
+    #[test]
+    fn a_location_without_a_line_gets_no_editor_href() {
+        assert_eq!(editor_href("vscode", "src/handlers.rs"), None);
+        assert_eq!(editor_href("vscode", "src/handlers.rs:0:1"), None);
+        assert_eq!(split_location("src/a.rs:12:5"), Some(("src/a.rs", 12)));
+        assert_eq!(split_location("src/a.rs:12"), Some(("src/a.rs", 12)));
     }
 
     #[test]

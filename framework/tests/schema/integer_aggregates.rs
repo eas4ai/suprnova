@@ -27,7 +27,7 @@ use super::sqlite::connect_sqlite;
     entries: HasMany<IaEntry>,
 })]
 pub struct IaOwner {
-    pub id: i64,
+    pub id: u64,
     pub name: String,
 }
 
@@ -38,8 +38,8 @@ pub struct IaOwner {
     fillable = ["ia_owner_id", "amount", "hits", "small", "ratio", "weight", "tag"],
 )]
 pub struct IaEntry {
-    pub id: i64,
-    pub ia_owner_id: Option<i64>,
+    pub id: u64,
+    pub ia_owner_id: Option<u64>,
     pub amount: i64,
     pub hits: u64,
     pub small: i32,
@@ -61,7 +61,7 @@ async fn create_entries(conn: &DatabaseConnection) {
     .expect("create ia_owners");
     Schema::create(&manager, "ia_entries", |t| {
         t.id();
-        t.big_integer("ia_owner_id").nullable();
+        t.unsigned_big_integer("ia_owner_id").nullable();
         t.big_integer("amount");
         t.unsigned_big_integer("hits");
         t.integer("small");
