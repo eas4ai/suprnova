@@ -2,6 +2,28 @@
 //! `JsonApiResource::configure(...)`).
 
 use serde_json::{Map, Value};
+use std::sync::RwLock;
+
+static DEFAULT_JSONAPI: RwLock<Option<JsonApiInfo>> = RwLock::new(None);
+
+/// Register implementation information at boot so every resource document uses it.
+/// A response's `with_jsonapi` overrides it; `None` clears the application default.
+pub fn jsonapi_default(info: Option<JsonApiInfo>) -> Result<(), crate::FrameworkError> {
+    *DEFAULT_JSONAPI
+        .write()
+        .map_err(|_| crate::FrameworkError::internal("JSON:API default lock poisoned"))? = info;
+    Ok(())
+}
+
+/// Snapshot boot-time information so each response can override its own document.
+pub(crate) fn current_jsonapi_default() -> Option<Value> {
+    // No application code runs under the lock. A poisoned read keeps the last value.
+    DEFAULT_JSONAPI
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(JsonApiInfo::to_value)
+}
 
 /// JSON:API document-level implementation information. Mirrors Laravel
 /// 13's `JsonApiResource::$jsonApiInformation`. Renders to the optional

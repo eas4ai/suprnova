@@ -3,9 +3,8 @@
 //!
 //! This is Suprnova's analogue of Laravel's `MissingValue` / `whenLoaded`
 //! / `when` / `unless`. The renderer recognises `Maybe<T>` via its
-//! `Serialize` impl: a `Maybe::Missing` produces `null`; the attribute
-//! pass then drops `null` entries whose attribute name resolved through
-//! the macro-generated path for a `Maybe<T>` field.
+//! `Serialize` impl: a `Maybe::Missing` produces a namespaced sentinel;
+//! the attribute pass then removes the sentinel while preserving explicit nulls.
 //!
 //! In practice: a hand-rolled resource impl that wants conditional fields
 //! either calls `Maybe::present(v)` / `Maybe::missing()` and inserts the
@@ -145,6 +144,102 @@ impl<T> From<Maybe<T>> for Option<T> {
     }
 }
 
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for Maybe<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if is_missing_sentinel(&value) {
+            Ok(Self::Missing)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Present)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// A conditional field group that lets you emit several attributes together.
+/// The resource renderer merges its object fields into the surrounding attributes.
+#[derive(Debug, Clone)]
+pub struct MergeValue<T> {
+    fields: Option<T>,
+}
+
+/// Group fields under one condition so a resource can include or omit them together.
+pub fn merge_when<T>(condition: bool, fields: T) -> MergeValue<T> {
+    MergeValue {
+        fields: condition.then_some(fields),
+    }
+}
+
+const MERGE_TAG: &str = "__suprnova_merge_fields__";
+
+impl<T: Serialize> Serialize for MergeValue<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let Some(fields) = &self.fields else {
+            return Maybe::<T>::Missing.serialize(serializer);
+        };
+        let fields = serde_json::to_value(fields).map_err(serde::ser::Error::custom)?;
+        if !fields.is_object() {
+            return Err(serde::ser::Error::custom(
+                "Resource merge fields must be an object",
+            ));
+        }
+        let mut group = serializer.serialize_struct(MERGE_TAG, 1)?;
+        group.serialize_field(MERGE_TAG, &fields)?;
+        group.end()
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for MergeValue<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut fields = Value::deserialize(deserializer)?;
+        if is_missing_sentinel(&fields) {
+            return Ok(Self { fields: None });
+        }
+        if let Some(group) = fields
+            .as_object_mut()
+            .filter(|group| group.len() == 1)
+            .and_then(|group| group.remove(MERGE_TAG))
+        {
+            fields = group;
+        }
+        if !fields.is_object() {
+            return Err(serde::de::Error::custom(
+                "Resource merge fields must be an object",
+            ));
+        }
+        let fields = serde_json::from_value(fields).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            fields: Some(fields),
+        })
+    }
+}
+
+/// Read a loaded existence flag so an unloaded relation omits the resource field.
+/// The closure receives the flag, including a loaded `false`, and runs only when loaded.
+pub fn when_exists_loaded<M, T>(
+    model: &M,
+    relation: &str,
+    value: impl FnOnce(bool) -> T,
+) -> Maybe<T>
+where
+    M: crate::eloquent::Model + From<<M::Entity as sea_orm::EntityTrait>::Model>,
+    <M::Entity as sea_orm::EntityTrait>::Model: From<M>
+        + sea_orm::IntoActiveModel<<M::Entity as sea_orm::EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as sea_orm::EntityTrait>::ActiveModel: Send,
+    <<M::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    model
+        .__eager_cache()
+        .and_then(|cache| cache.get_exists(relation))
+        .map(value)
+        .into()
+}
+
 /// Sentinel object inserted into a `serde_json::Value` to signal "omit
 /// this key during the attributes-rendering pass". The wire field key
 /// itself is this long, namespaced constant - `serde_json` discards the
@@ -194,20 +289,28 @@ pub(crate) fn is_missing_sentinel(v: &Value) -> bool {
 pub fn strip_missing_values(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            // `retain` keeps the remaining keys in declaration order, as
-            // Laravel's resource does. `remove` on the order-preserving map
-            // swaps the last key into the hole, so a missing first attribute
-            // moved the last one to the front.
-            map.retain(|_, v| !is_missing_sentinel(v));
-            for (_, v) in map.iter_mut() {
-                strip_missing_values(v);
+            let original = std::mem::take(map);
+            for (key, mut field) in original {
+                strip_missing_values(&mut field);
+                if is_missing_sentinel(&field) {
+                    continue;
+                }
+                if let Some(group) = field
+                    .as_object()
+                    .filter(|group| group.len() == 1)
+                    .and_then(|group| group.get(MERGE_TAG))
+                    .and_then(Value::as_object)
+                {
+                    map.extend(group.clone());
+                } else {
+                    map.insert(key, field);
+                }
             }
         }
-        Value::Array(arr) => {
-            // Strip Missing entries inside arrays (rare but valid).
-            arr.retain(|v| !is_missing_sentinel(v));
-            for v in arr.iter_mut() {
-                strip_missing_values(v);
+        Value::Array(items) => {
+            items.retain(|item| !is_missing_sentinel(item));
+            for item in items {
+                strip_missing_values(item);
             }
         }
         _ => {}

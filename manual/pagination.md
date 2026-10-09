@@ -45,7 +45,7 @@ right index, regardless of where in the result set the user is.
 The JSON of the three paginators has the fields of Laravel's
 `toArray()`, so a front end that was written for Laravel's paginator
 reads it. That includes the pagination components of the Inertia starter
-kits, which draw the `links` array as it comes. Four differences matter
+kits, which draw the `links` array as it comes. Three differences matter
 to a reader who knows Laravel:
 
 - A paginator does not know the base URL of the request. You give it
@@ -57,10 +57,6 @@ to a reader who knows Laravel:
 - Give a `path` and a query string, never a URL with a host. The `path`
   is written into every URL as you give it, and the host of a request is
   whatever its `Host` header says, which the client chooses.
-- A paginator with no rows has a `last_page` of `0` and a `links` array
-  of two entries, the link before and the link behind. Laravel has a
-  `last_page` of `1` and a link to page 1. `last_page_url` is the URL of
-  page 1 in both.
 - `simple_paginate` keeps `has_more` beside Laravel's fields.
 
 [`Inertia::paginate`](frontend-inertia-responses.md) attaches Inertia
@@ -93,7 +89,7 @@ The struct's public fields:
 pub struct LengthAwarePaginator<T> {
     pub data: Vec<T>,           // rows on this page
     pub current_page: u64,       // 1-based
-    pub last_page: u64,          // 1-based; 0 when total == 0
+    pub last_page: u64,          // 1-based; 1 when total == 0
     pub per_page: u64,
     pub total: u64,              // every row across all pages
     pub from: Option<u64>,       // 1-based first row index on this page
@@ -157,9 +153,9 @@ end, the pages of that end are listed in one run of ten instead. For 50
 pages with page 25 current, the labels are `1 2 ... 22 23 24 25 26 27 28
 ... 49 50`.
 
-A paginator with no rows has `last_page` of `0`, both page URLs of page 1
-(`?page=1` with no path), and a `links` array of two entries with no page
-between them.
+When you have no matches, you get `last_page` 1 and page URLs pointing to
+page 1 (`?page=1` with no path). Your `links` array includes page 1 between
+the disabled previous and next links.
 
 In Rust, `links()` returns the same entries as `Vec<PageLink>`. A
 `PageLink` has the public fields `url: Option<String>`, `label: String`,
@@ -167,10 +163,9 @@ In Rust, `links()` returns the same entries as `Vec<PageLink>`. A
 
 ### Reading `?page=N` automatically
 
-`paginate(n)` reads the current page from `?page=N` on the active
-request via `Context::query_param`. Missing, empty, non-numeric, and
-zero values clamp to `1`. There's nothing to wire up - if a request is
-in scope, the parameter is read.
+Use `paginate(n)` to read `?page=N` from your active request through
+`Context::query_param`. You get page 1 for missing, empty, non-numeric,
+or below-one values, including `?page=0`, `?page=-1`, and `?page=abc`.
 
 ### Multiple paginators on one page
 
@@ -327,12 +322,31 @@ reversed back to ASC), fetches `LIMIT n+1` rows, and re-emits
 bidirectional - the client can walk forward and back without losing
 its position.
 
-Cursor pagination **replaces** any existing `ORDER BY` on the builder.
-A stable total order over the primary key is required for the keyset
-filter to slice the table deterministically; an arbitrary `ORDER BY
-random_score()` cursor would skip and duplicate rows. If you need a
-non-PK sort, switch to `paginate` / `simple_paginate`.
+Order by several columns to keep ties in your chosen order:
 
+```rust
+let page = User::query()
+    .order_by_desc("created_at")
+    .order_by_asc("id")
+    .cursor_paginate(20)
+    .await?;
+
+let cursor = suprnova::Cursor::decode(page.next_cursor.as_deref().ok_or_else(||
+    suprnova::FrameworkError::bad_request("No next page"))?)?;
+let created_at = cursor.parameter("created_at");
+let id = cursor.parameter("id");
+```
+
+You carry every ordered column in a named map, with each value's SQL type.
+`Cursor::parameter(name)` returns `None` for a missing name. The boundary
+compares the first column, then the next column when the earlier values
+tie. You preserve mixed ascending and descending orders while moving in
+either direction. The builder adds the primary key when your multiple
+ordered columns do not include it, so ties have a stable final order.
+Select every ordered column and use non-null values. A missing cursor
+parameter, null boundary, or unsupported multi-column order expression
+returns an error. With zero or one explicit order, you keep the existing
+ascending primary-key cursor behavior.
 An `OFFSET` on the builder positions the first page only, the page
 requested without a cursor. Every later page starts at its cursor, so
 an offset never skips rows between two pages.
@@ -344,8 +358,8 @@ ordering and a limit it had before `union`.
 ### Cursors are encrypted and authenticated
 
 Suprnova cursors are **not** Laravel's base64-JSON plaintext. The wire
-cursor is the keyset boundary (a typed `sea_orm::Value` - `Int`,
-`BigInt`, `Uuid`, datetimes, decimals, strings, bytes) plus a direction
+cursor contains the named boundaries (typed `sea_orm::Value` values -
+`Int`, `BigInt`, `Uuid`, datetimes, decimals, strings, bytes) plus a direction
 tag, JSON-encoded and then sealed with AES-256-GCM via the framework
 `Crypt` keyring (bound to `CryptPurpose::Cursor`, so a cursor
 ciphertext can never be replayed into any other surface - cookie, 2FA
@@ -402,10 +416,10 @@ a typed `cursor(query, cursor, per_page, order_col)` form that takes
 the keyset column explicitly - used when the cursor sorts on something
 other than the primary key.
 
-`Pagination::cursor` treats the `Select` the way `cursor_paginate`
-treats a builder: it drops an `ORDER BY` the `Select` already has and
-orders by the keyset column alone, and it applies the `Select`'s
-`OFFSET` to the first page only.
+When your `Select` orders by several entity columns, `Pagination::cursor`
+keeps each column and direction. Include a unique column to break ties.
+With zero or one explicit order, you order by the supplied `order_col`
+alone, ascending. You apply an `OFFSET` to the first page only.
 
 `Pagination::length_aware` treats the `Select` the way `paginate` does,
 as in Laravel: it drops a `LIMIT` and an `OFFSET` the `Select` already
@@ -599,26 +613,17 @@ pages" - which is all an infinite-scroll UI ever reads.
 
 ### Projecting rows before they go out
 
-Paginators have no `map` / `through` (Laravel's do). Rebuild from the
-public fields instead - the counters and cursors describe the *query*, so
-they carry across a change of row type unchanged:
+Use `through(transform)` to change the item type on a length-aware,
+simple, or cursor page. You preserve every count, URL setting, and cursor:
 
 ```rust
 let page = User::query().cursor_paginate(20).await?;
-
-let page = suprnova::CursorPaginator::new(
-    page.data.into_iter().map(PublicUser::from).collect(),
-    page.per_page,
-    page.next_cursor,
-    page.prev_cursor,
-);
+let page = page.through(PublicUser::from);
 ```
 
-Worth doing rather than serialising the model directly whenever the route
-is unauthenticated and the model carries anything the caller should not
-see. A cursor over a user table hands out one page at a time, but it
-hands out every page eventually.
-
+Your closure runs once per item in order. It does not run for an empty
+page. You keep pagination metadata unchanged, so a resource projection
+still describes the query that produced the page.
 The same helper exists as a chainable method on
 `InertiaResponse::paginate(key, paginator)` if you want to mix a
 paginator with other props:
@@ -743,7 +748,7 @@ when the UI is infinite scroll.
 | `Pagination` facade, `Paginated<T>` trait | `framework/src/pagination/mod.rs` |
 | `LengthAwarePaginator<T>` | `framework/src/pagination/length_aware.rs` |
 | `Paginator<T>` (simple) | `framework/src/pagination/simple.rs` |
-| `CursorPaginator<T>`, `CursorDirection`, `encode_value`, `decode_value` | `framework/src/pagination/cursor.rs` |
+| `CursorPaginator<T>`, `Cursor`, `CursorDirection`, `encode_value`, `decode_value` | `framework/src/pagination/cursor.rs` |
 | `IntoInertiaScroll` bridge | `framework/src/pagination/inertia.rs` |
 | `Builder::paginate` / `simple_paginate` / `cursor_paginate` | `framework/src/eloquent/builder.rs` |
 | `Inertia::paginate`, `InertiaResponse::paginate` | `framework/src/inertia/facade.rs`, `framework/src/inertia/response.rs` |

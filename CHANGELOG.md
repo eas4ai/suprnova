@@ -8,6 +8,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Conditional resource field groups.** `merge_when` merges an object into
+  resource attributes when its condition holds, with sparse fieldsets applied
+  to the merged fields.
+- **Relation existence flags.** `with_exists` loads a boolean per parent
+  without loading related models, alongside any requested rows or counts.
+- **Resources read existence flags.** `when_exists_loaded` emits loaded true
+  and false values and omits fields whose flag was not loaded.
+- **Application-wide JSON:API information.** `jsonapi_default` sets boot-time
+  implementation information for every resource document; a response can override it.
+- **Cursors over several columns.** Cursor pages preserve each ordered column
+  and direction, with named typed boundaries available through `Cursor::parameter`.
+- **Page item transformations.** `through` changes a length-aware, simple or
+  cursor page's item type while preserving all pagination metadata.
 - **A single-server default for scheduled tasks.** `Schedule::always_on_one_server()`
   elects one replica per tick for every task; `.on_every_server()` opts out.
 - **Interrupt running schedules.** `schedule:interrupt` writes a shared cache
@@ -854,6 +867,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Collection metadata belongs to the collection.** JSON:API collections
+  keep their document metadata at the root without merging the first item's metadata.
+- **Empty results have page one.** Length-aware pagination reports one last
+  page and includes its page-one link when there are no matching rows.
 - **`Storage::purge` takes the disk name.** The zero-argument `purge()` that
   dropped every disk is `purge_all()`; `purge(name)` drops one disk and reports
   whether it was registered.
