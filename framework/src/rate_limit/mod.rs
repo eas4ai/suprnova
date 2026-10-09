@@ -881,10 +881,12 @@ where
                                 key = %key,
                                 "rate limiter backend error; failing closed with 503"
                             );
+                            // Logged just above, with the key, so the
+                            // report skips its own line (PAR-111).
                             Err(HttpResponse::text("503 Service Unavailable")
                                 .status(503)
                                 .header("retry-after", "1")
-                                .with_reported_error_from(&e))
+                                .with_reported_logged_error_from(&e))
                         }
                     };
                 }

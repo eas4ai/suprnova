@@ -1440,7 +1440,10 @@ put `FailOnException` in that job's middleware.
 
 Every failed attempt is also reported through `Exceptions`, retried or
 not, so a callback registered with `Exceptions::reportable` sees each
-one. See [Error Handling](errors.md#report-errors-with-exceptions).
+one. That includes an attempt that runs past its timeout, which you
+receive as a `TimeoutExceeded` error, so `dont_retry::<TimeoutExceeded>()`
+ends the retries of a job that times out. See
+[Error Handling](errors.md#report-errors-with-exceptions).
 
 ## Context on queued work
 

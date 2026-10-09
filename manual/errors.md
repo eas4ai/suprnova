@@ -566,14 +566,24 @@ reported:
 
 - Every `FrameworkError` that becomes a 5xx response. `ErrorOccurred`
   still fires after it.
+- Every error behind a 5xx response the framework builds itself: a
+  session the store cannot write, a Live or WebSocket request the
+  framework cannot prepare or answer, a rate limiter or render cache that
+  fails closed, a readiness probe whose database check fails, and a
+  payment webhook that fails.
 - Every failed attempt of a queued job: a handler that returns `Err` or
-  panics, and an error `FailOnException` fails the job for.
+  panics, an attempt that runs past its timeout, and an error
+  `FailOnException` fails the job for.
 - Every error a console command returns.
 - Every error you pass to `Exceptions::report`.
 
 A report runs your callbacks in the order you registered them. Then it
 writes the `framework error` log line, with the status, the full source
-chain, and the request id when there is one.
+chain, and the request id when there is one. When the framework builds a
+5xx for a failure it has already logged, such as a rate limiter that fails
+closed, you get that line, with its own fields, in place of the
+`framework error` line, so each failure is logged once. A callback with
+`stop()` does not hold back that line.
 
 Register callbacks once, in `bootstrap.rs`. The parameter type of the
 closure decides which errors it receives:

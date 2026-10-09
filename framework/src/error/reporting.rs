@@ -21,6 +21,11 @@
 //!   [`FrameworkError::AlreadyReported`], which says the user has seen it.
 //! - Every error the application hands to [`Exceptions::report`].
 //!
+//! A report writes the `framework error` log line after the callbacks. A
+//! `5xx` site that has already logged its failure, with fields that line
+//! does not carry, reports through `Exceptions::report_logged` instead,
+//! which skips it, so one failure is logged once.
+//!
 //! # The registry is process-wide
 //!
 //! An application registers its callbacks once, in `bootstrap`, and every
@@ -143,19 +148,8 @@ impl Exceptions {
     /// [`FrameworkError::AlreadyReported`] is not reported: it says the
     /// user has seen the failure already.
     pub fn report(error: &FrameworkError) {
-        if error.is_silent() {
+        if !Self::run_callbacks(error) {
             return;
-        }
-        let reporters = read_registry(|registry| registry.reporters.clone());
-        for reporter in &reporters {
-            match catch_unwind(AssertUnwindSafe(|| (reporter.run)(error))) {
-                Ok(true) if reporter.stop.load(Ordering::Acquire) => return,
-                Ok(_) => {}
-                Err(payload) => tracing::error!(
-                    panic = %panic_text(&*payload),
-                    "a reportable callback panicked; the error is reported on"
-                ),
-            }
         }
         let request_id = crate::logging::current_request_id().map(|id| id.as_str().to_string());
         tracing::error!(
@@ -164,6 +158,44 @@ impl Exceptions {
             request_id = ?request_id,
             "framework error"
         );
+    }
+
+    /// Report `error`, a failure its call site has already written its own
+    /// log line for: the callbacks run as [`Self::report`] runs them, and
+    /// the `framework error` line is not written (PAR-111).
+    ///
+    /// For the `5xx` responses the framework builds itself whose site logs
+    /// the failure with fields the default line does not carry, such as the
+    /// key of a rate limiter that fails closed or the route of a Live
+    /// request that could not be prepared. Writing both lines logged one
+    /// failure twice, on every request of an outage. The site's line is
+    /// written before the report, whatever a callback does, as it was before
+    /// these sites reported, so a callback marked with
+    /// [`ReportableHandler::stop`] stops the later callbacks and not that
+    /// line.
+    pub(crate) fn report_logged(error: &FrameworkError) {
+        Self::run_callbacks(error);
+    }
+
+    /// Run the callbacks that receive `error`, in registration order, and
+    /// say whether the default log line is still due: not for a silent
+    /// error, and not for one a stopping callback received.
+    fn run_callbacks(error: &FrameworkError) -> bool {
+        if error.is_silent() {
+            return false;
+        }
+        let reporters = read_registry(|registry| registry.reporters.clone());
+        for reporter in &reporters {
+            match catch_unwind(AssertUnwindSafe(|| (reporter.run)(error))) {
+                Ok(true) if reporter.stop.load(Ordering::Acquire) => return false,
+                Ok(_) => {}
+                Err(payload) => tracing::error!(
+                    panic = %panic_text(&*payload),
+                    "a reportable callback panicked; the error is reported on"
+                ),
+            }
+        }
+        true
     }
 
     /// End a queued job's retries when it fails with an error of type

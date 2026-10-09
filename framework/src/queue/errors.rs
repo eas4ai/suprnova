@@ -1,10 +1,12 @@
 //! Typed queue errors mirroring Laravel 13's queue exception classes.
 //!
-//! These are constructed by the worker and middleware so callers can pattern
-//! match on the cause (timeout, max-attempts exhausted, manual fail). They
-//! convert into `FrameworkError::internal(...)` for callers that handle queue
-//! errors structurally; the worker keeps a typed copy alongside the message
-//! for event emission.
+//! These name the cause of a failed attempt (timeout, max-attempts
+//! exhausted, manual fail) so callers can match on it rather than on a
+//! message. The worker wraps a timed-out attempt's [`TimeoutExceeded`] with
+//! `FrameworkError::from_external`, and reports it through `Exceptions` like
+//! any failed attempt: a `reportable` callback taking `&TimeoutExceeded`
+//! receives it, and `Exceptions::dont_retry::<TimeoutExceeded>()` ends the
+//! retries of a job that times out (PAR-111).
 
 use std::time::Duration;
 use thiserror::Error;

@@ -26,7 +26,7 @@ use serde_json::Value;
 use serial_test::serial;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -34,7 +34,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use suprnova::config::{AppConfig, Config, Environment, ServerConfig};
-use suprnova::{MiddlewareRegistry, Router, handle_request};
+use suprnova::{Exceptions, FrameworkError, MiddlewareRegistry, Router, handle_request};
 
 /// Route through the real `handle_request`, so this exercises the actual
 /// short-circuit branch rather than a re-implementation of it.
@@ -181,4 +181,54 @@ async fn the_default_health_probe_is_unaffected() {
             "a probe that did not ask about the database must not report on it: {body}"
         );
     }
+}
+
+/// Empties the `Exceptions` registry when made and when dropped, and holds
+/// the env lock so no other test of this binary that registers callbacks
+/// overlaps. The registry is process-wide.
+struct Isolated {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Isolated {
+    async fn new() -> Self {
+        let lock = crate::env_lock::lock_env_async().await;
+        Exceptions::reset();
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for Isolated {
+    fn drop(&mut self) {
+        Exceptions::reset();
+    }
+}
+
+/// PAR-111: a database probe that fails is an error the framework answers
+/// with a 503, so the application's reportable callbacks see it, once, as
+/// Laravel's health route reports the exception its check throws.
+#[tokio::test]
+#[serial]
+async fn a_failed_database_probe_is_reported_once() {
+    let _isolated = Isolated::new().await;
+    install_app_config(Environment::Production, false);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Exceptions::reportable(move |error: &FrameworkError| {
+        let text = error.to_string();
+        if text.contains("health check: database probe failed") {
+            record.lock().expect("the list is not poisoned").push(text);
+        }
+    });
+    let addr = spawn_server(1).await;
+
+    let (status, body) = get(addr, "/_suprnova/health/ready").await;
+
+    assert_eq!(status, 503, "the probe fails: {body}");
+    let seen = seen.lock().expect("the list is not poisoned").clone();
+    assert_eq!(
+        seen,
+        ["Internal server error: health check: database probe failed: Database not initialized"],
+        "the probe's failure reaches the callbacks once"
+    );
 }

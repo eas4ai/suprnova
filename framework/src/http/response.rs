@@ -458,16 +458,48 @@ impl HttpResponse {
     /// The callbacks take a `FrameworkError`. Any other error, such as a
     /// database driver's error or a Live engine's, is reported as an
     /// internal error whose message is its source chain.
+    ///
+    /// The report writes the `framework error` log line. A site that has
+    /// already logged the failure calls
+    /// [`Self::with_reported_logged_error_from`] instead.
     pub(crate) fn with_reported_error_from(
         self,
         error: &(dyn std::error::Error + 'static),
     ) -> Self {
+        self.report_and_attach(error, crate::error::Exceptions::report)
+    }
+
+    /// [`Self::with_reported_error_from`] for a failure its call site has
+    /// already written its own log line for: the callbacks see `error` as
+    /// they do there, and the report skips the `framework error` line
+    /// ([`Exceptions::report_logged`](crate::error::Exceptions::report_logged)),
+    /// so the failure is logged once.
+    ///
+    /// The report skips its line rather than the site dropping its own:
+    /// the site's line carries fields the default one does not, such as the
+    /// key of a rate limiter that fails closed, the email a login throttle
+    /// checked, or the route and stage of a Live request that could not be
+    /// prepared, and the tests that read those lines keep reading them.
+    pub(crate) fn with_reported_logged_error_from(
+        self,
+        error: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        self.report_and_attach(error, crate::error::Exceptions::report_logged)
+    }
+
+    /// Report `error` through `report` when this response is a `5xx`, then
+    /// attach its report. The one body of the two reporting attachers.
+    fn report_and_attach(
+        self,
+        error: &(dyn std::error::Error + 'static),
+        report: fn(&FrameworkError),
+    ) -> Self {
         if self.status >= 500 {
             match error.downcast_ref::<FrameworkError>() {
-                Some(error) => crate::error::Exceptions::report(error),
+                Some(error) => report(error),
                 // A struct literal, not `FrameworkError::internal`: the
                 // stand-in is no new failure, so it records no frames.
-                None => crate::error::Exceptions::report(&FrameworkError::Internal {
+                None => report(&FrameworkError::Internal {
                     message: crate::error::render_error_chain(error),
                 }),
             }

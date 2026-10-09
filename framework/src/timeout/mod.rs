@@ -155,9 +155,11 @@ impl Middleware for TimeoutMiddleware {
                     ),
                     elapsed,
                 );
+                // Logged just above, at the level a timeout is logged at,
+                // so the report skips its own line (PAR-111).
                 Err(HttpResponse::text("Service Unavailable: request timed out")
                     .status(503)
-                    .with_reported_error_from(&failure))
+                    .with_reported_logged_error_from(&failure))
             }
         }
     }
