@@ -198,6 +198,132 @@ async fn moving_to_the_same_file_fails_without_deleting_it() {
     );
 }
 
+#[tokio::test]
+async fn moving_between_local_disks_with_the_same_root_fails_without_deleting_it() {
+    let _fake = Storage::fake();
+    let root = tempfile::tempdir().expect("root");
+    Storage::register_fs("local", root.path()).expect("local disk");
+    Storage::register_fs("archive", format!("{}/", root.path().display())).expect("archive disk");
+    let source = Storage::disk("local").expect("source");
+    source.write("a.txt", "original").await.expect("write");
+
+    let error = Storage::move_to_disk("local", "a.txt", "archive", "/a.txt")
+        .await
+        .expect_err("same object move must fail");
+    assert_eq!(error.status_code(), 400);
+    let error = Storage::copy_to_disk("local", "a.txt", "archive", "a.txt")
+        .await
+        .expect_err("same object copy must fail");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(
+        source
+            .read("a.txt")
+            .await
+            .expect("original survives")
+            .to_vec(),
+        b"original"
+    );
+    assert_eq!(
+        Storage::disk("archive")
+            .expect("archive")
+            .read("a.txt")
+            .await
+            .expect("destination survives")
+            .to_vec(),
+        b"original"
+    );
+}
+
+#[tokio::test]
+async fn moving_between_layered_memory_disks_fails_without_deleting_it() {
+    let source = Operator::new(services::Memory::default()).expect("source");
+    let destination = source
+        .clone()
+        .layer(suprnova::opendal::layers::LoggingLayer::default());
+    source.write("a.txt", "original").await.expect("write");
+
+    let error = Storage::move_to_disk(&source, "a.txt", &destination, "/a.txt")
+        .await
+        .expect_err("same object move must fail");
+    assert_eq!(error.status_code(), 400);
+    let error = Storage::copy_to_disk(&source, "a.txt", &destination, "a.txt")
+        .await
+        .expect_err("same object copy must fail");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(
+        destination
+            .read("a.txt")
+            .await
+            .expect("original survives")
+            .to_vec(),
+        b"original"
+    );
+}
+
+#[tokio::test]
+async fn moving_between_local_disks_with_different_roots_copies_then_deletes() {
+    let _fake = Storage::fake();
+    let source_root = tempfile::tempdir().expect("source root");
+    let destination_root = tempfile::tempdir().expect("destination root");
+    Storage::register_fs("local", source_root.path()).expect("local disk");
+    Storage::register_fs("archive", destination_root.path()).expect("archive disk");
+    let source = Storage::disk("local").expect("source");
+    source.write("a.txt", "original").await.expect("write");
+
+    assert_eq!(
+        Storage::move_to_disk("local", "a.txt", "archive", "a.txt")
+            .await
+            .expect("move to different storage"),
+        8
+    );
+    assert!(!source.exists("a.txt").await.expect("source deleted"));
+    assert_eq!(
+        Storage::disk("archive")
+            .expect("archive")
+            .read("a.txt")
+            .await
+            .expect("destination bytes")
+            .to_vec(),
+        b"original"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn moving_between_symlinked_local_roots_fails_without_deleting_it() {
+    let root = tempfile::tempdir().expect("root");
+    let alias_parent = tempfile::tempdir().expect("alias parent");
+    let alias = alias_parent.path().join("alias");
+    let source =
+        Operator::new(services::Fs::default().root(root.path().to_str().expect("root path")))
+            .expect("source");
+    // Preserve the source's reported root while that path becomes a symlink.
+    std::fs::rename(root.path(), &alias).expect("relocate root");
+    std::os::unix::fs::symlink(&alias, root.path()).expect("root alias");
+    let destination =
+        Operator::new(services::Fs::default().root(alias.to_str().expect("alias path")))
+            .expect("destination");
+    assert_ne!(source.info().root(), destination.info().root());
+    source.write("a.txt", "original").await.expect("write");
+
+    let error = Storage::move_to_disk(&source, "a.txt", &destination, "a.txt")
+        .await
+        .expect_err("same object move must fail");
+    assert_eq!(error.status_code(), 400);
+    let error = Storage::copy_to_disk(&source, "a.txt", &destination, "a.txt")
+        .await
+        .expect_err("same object copy must fail");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(
+        source
+            .read("a.txt")
+            .await
+            .expect("original survives")
+            .to_vec(),
+        b"original"
+    );
+}
+
 #[derive(Debug)]
 struct RefuseMutation {
     inner: suprnova::opendal::raw::Servicer,
