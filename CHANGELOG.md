@@ -8,6 +8,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Schema dumps without migration data.** `schema:dump --without-migration-data`
+  writes the schema while leaving applied migration rows out of the file.
+- **Named connections for schema dumps.** `schema:dump --database reporting`
+  dumps `DATABASE_REPORTING_URL`; an unknown connection fails with its name.
+- **Input preparation before authorization.** Form and multipart request hooks
+  expose `prepare_for_validation`. `Request::transform_input` normalizes text
+  when parsing starts, preserving authorization before the body is read.
+- **MIME family allowlists.** `MimeType` accepts entries such as `image/*`
+  while retaining content detection and rejecting spoofed image headers.
+
 - **Precognition with per-route opt-in.** Add `Precognitive` to a route
   or group to validate a draft without running the handler body. A passing
   request answers `204` with `Precognition-Success: true`; every marked
@@ -734,6 +744,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   remember checkbox, sent as a boolean (K11, K12, K13, K14, K15, K21).
 
 ### Changed
+
+- **Merged validation hook errors.** Real form and multipart requests run both
+  after-validation hooks after field rules and return their combined errors.
+- **Classic form validation redirects.** A failed form that prefers HTML
+  redirects back with errors and old text input flashed to the session.
+- **Unsigned MySQL IDs by default.** `id()` and `foreign_id()` match Laravel's
+  unsigned keys. `unsigned_ids = false` keeps signed IDs through
+  `#[suprnova::main]` or `Schema::set_unsigned_ids(false)`.
+- **Nullable default timestamps.** `timestamps()` creates nullable `created_at`
+  and `updated_at` on every database. The scaffold documents the schema defaults
+  and carries the signed-ID opt-out and model cast setting commented out.
 
 - **Precognition requires the route middleware.** A route must carry
   `Precognitive` for the header to count. Previously every form request

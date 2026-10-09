@@ -21,7 +21,13 @@ pub(crate) async fn parse_precognitive<T: DeserializeOwned>(
     } else {
         String::new()
     };
-    let mut input = Nested::from_urlencoded(query.as_bytes(), fields);
+    let query = bytes::Bytes::from(query);
+    let query = if request.has_prepared_input() {
+        crate::http::form_request::prepare_body(query, true, &request.prepared_input())?
+    } else {
+        query
+    };
+    let mut input = Nested::from_urlencoded(&query, fields);
     for node in input.names.values_mut() {
         node.decode_query_objects();
     }
@@ -57,8 +63,16 @@ async fn read_body(
         .await?;
         Ok(Nested::from_multipart(payload, fields))
     } else {
+        let has_preparation = request.has_prepared_input();
+        let transform = request.prepared_input();
         let (_, bytes) = request.body_bytes_with_cap(max_body_bytes).await?;
-        if super::super::body::is_form_urlencoded(&content_type) {
+        let is_form = super::super::body::is_form_urlencoded(&content_type);
+        let bytes = if has_preparation {
+            crate::http::form_request::prepare_body(bytes, is_form, &transform)?
+        } else {
+            bytes
+        };
+        if is_form {
             // The body outlives this read through owned decoded pairs.
             let mut body = Nested::new(fields);
             for (name, value) in url::form_urlencoded::parse(&bytes) {

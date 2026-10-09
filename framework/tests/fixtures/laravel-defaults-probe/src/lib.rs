@@ -4,8 +4,8 @@
 //! `datetime_cast = "native"` gives every `DateTime<Utc>` field without a
 //! cast of its own `AsNativeDateTime`, the managed timestamps included;
 //! `ProbePost::archived_at` names a text cast, which wins. The migrations
-//! use `id()` and `foreign_id()`, which `unsigned_ids = true` makes
-//! unsigned on MySQL once a binary installs it. The binaries of this
+//! use `id()` and `foreign_id()`, unsigned on MySQL by default.
+//! `unsigned_ids = false` keeps signed columns once a binary installs it. The binaries of this
 //! package run them; `tests/settings.rs` reads what they created.
 
 use sea_orm_migration::prelude::*;

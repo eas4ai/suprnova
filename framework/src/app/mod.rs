@@ -167,6 +167,12 @@ enum Commands {
         /// Replace the migrations the dump records with PrunedMigration names
         #[arg(long)]
         prune: bool,
+        /// Dump a named connection from DATABASE_<NAME>_URL instead of DATABASE_URL
+        #[arg(long)]
+        database: Option<String>,
+        /// Leave migration ledger rows out while keeping its table
+        #[arg(long)]
+        without_migration_data: bool,
     },
     /// Run the scheduler daemon (checks every minute)
     #[command(name = "schedule:work")]
@@ -1305,7 +1311,12 @@ where
                     Err(message) => Err(FrameworkError::internal(message)),
                 }
             }
-            Some(Commands::SchemaDump { path, prune }) => Self::dump_schema::<M>(path, prune).await,
+            Some(Commands::SchemaDump {
+                path,
+                prune,
+                database,
+                without_migration_data,
+            }) => Self::dump_schema::<M>(path, prune, database, without_migration_data).await,
             Some(Commands::ScheduleWork) => {
                 Self::run_scheduler_daemon_internal(boot, bootstrap_fn, schedule_fn).await
             }
@@ -1640,8 +1651,29 @@ where
     async fn dump_schema<Migrator: MigratorTrait>(
         path: Option<PathBuf>,
         prune: bool,
+        database: Option<String>,
+        without_migration_data: bool,
     ) -> Result<(), FrameworkError> {
-        let url = Self::database_url()?;
+        let url = match database {
+            None => Self::database_url()?,
+            Some(name) => {
+                if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                {
+                    return Err(failed(format!(
+                        "suprnova: unknown database connection `{name}`"
+                    )));
+                }
+                let key = format!("DATABASE_{}_URL", name.to_ascii_uppercase());
+                env::var(&key)
+                    .ok()
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| {
+                        failed(format!(
+                            "suprnova: unknown database connection `{name}`; set {key}"
+                        ))
+                    })?
+            }
+        };
         let path = match path {
             Some(path) => path,
             None => crate::SchemaDump::default_path(&url)
@@ -1649,15 +1681,16 @@ where
                 .map_err(|e| failed(format!("suprnova: schema dump failed: {e}")))?,
         };
         let outcome = if prune {
-            crate::SchemaDump::dump_and_prune::<Migrator>(
+            crate::SchemaDump::dump_and_prune_with_options::<Migrator>(
                 &url,
                 &path,
                 &crate::base_path("src/migrations"),
+                without_migration_data,
             )
             .await
             .map(Some)
         } else {
-            crate::SchemaDump::dump::<Migrator>(&url, &path)
+            crate::SchemaDump::dump_with_options::<Migrator>(&url, &path, without_migration_data)
                 .await
                 .map(|()| None)
         };

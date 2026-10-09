@@ -193,6 +193,30 @@ pub async fn dump_holds_the_schema_and_the_ledger(url: &str, dir: &Path, engine:
         );
     }
 
+    let without = dir.join("without-ledger.sql");
+    SchemaDump::dump_with_options::<First>(url, &without, true)
+        .await
+        .expect("dump without migration data");
+    let schema = std::fs::read_to_string(&without).expect("read schema");
+    assert!(
+        schema.contains("seaql_migrations"),
+        "the ledger schema remains"
+    );
+    for name in ["sd_users", "sd_posts", "sd_users_email"] {
+        assert!(schema.contains(name), "the schema retains {name}");
+    }
+    assert!(
+        !schema
+            .lines()
+            .any(|line| line.trim_start().to_ascii_uppercase().starts_with("INSERT"))
+    );
+    assert!(!schema.contains("kept-out@example.com"));
+    assert_eq!(
+        ledger(&db).await,
+        [USERS, POSTS],
+        "dumping leaves the live ledger intact"
+    );
+
     assert_eq!(
         SchemaDump::default_path(url).await.expect("a default path"),
         suprnova::database_path(format!("schema/{engine}-schema.sql"))

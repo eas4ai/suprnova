@@ -4,7 +4,7 @@
 //! validation, and authorization.
 
 use super::Request;
-use super::body::{parse_form, parse_json, parse_multipart_with_route_inputs};
+use super::body::{parse_form, parse_json};
 use super::extract::FromRequest;
 use crate::error::{FrameworkError, ValidationErrors};
 use async_trait::async_trait;
@@ -61,6 +61,13 @@ use validator::Validate;
 /// ```
 #[async_trait]
 pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
+    /// Prepares input before authorization so validation sees normalized text.
+    ///
+    /// Register deferred changes with `Request::transform_input` to keep the body unread.
+    fn prepare_for_validation(_req: &mut Request) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
     /// Check if the request is authorized
     ///
     /// Override this method to add authorization logic.
@@ -71,8 +78,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         true
     }
 
-    /// Cross-field validation hook. Called AFTER the derived
-    /// `Validate` rules pass. Return `Err(ValidationErrors)` to
+    /// Cross-field validation hook, called after the derived rules on real requests.
+    /// Its errors are merged with rule errors. Return `Err(ValidationErrors)` to
     /// surface additional errors (e.g. "passwords must match",
     /// "end_date must be after start_date").
     ///
@@ -139,13 +146,10 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     ///
     /// # Ordering and bail behavior
     ///
-    /// `extract` runs the stages in order - the derived `validate()`, the
-    /// synchronous [`after_validation`], then this async hook - and
-    /// **bails at the first failing stage**. The async hook therefore
-    /// only runs once the synchronous rules pass, so a malformed value
-    /// (e.g. a syntactically invalid email) never reaches the database
-    /// `Unique` query. Precognition filters derived errors before choosing
-    /// the next stage, and keeps every error this hook adds.
+    /// Real requests run derived validation and both hooks in order, merging
+    /// their messages. An empty error bag succeeds. Precognition keeps its
+    /// stage gates: selected derived errors stop the hooks, and synchronous
+    /// hook errors stop this hook.
     ///
     /// The default implementation returns `Ok(())`.
     ///
@@ -200,15 +204,16 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// Extract and validate data from the request
     ///
     /// This method:
-    /// 1. Checks authorization
+    /// 1. Prepares input and checks authorization before reading the body
     /// 2. Parses the request body (JSON, form or multipart based on
     ///    Content-Type)
     /// 3. Validates the parsed data
     ///
     /// Returns `Err(FrameworkError)` on authorization failure, parse error,
     /// or validation failure.
-    async fn extract(req: Request) -> Result<Self, FrameworkError> {
-        // Check authorization first
+    async fn extract(mut req: Request) -> Result<Self, FrameworkError> {
+        Self::prepare_for_validation(&mut req)?;
+        // Authorization still precedes every body read.
         if !Self::authorize(&req) {
             return Err(FrameworkError::Unauthorized);
         }
@@ -244,6 +249,10 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             return Err(FrameworkError::UnsupportedMediaType);
         }
         let route_inputs = Self::route_inputs(&req)?;
+        let target = req.validation_redirect_target();
+        let transform = req.prepared_input();
+        let has_preparation = req.has_prepared_input();
+        let mut old_input = serde_json::Value::Null;
 
         // Collect and parse body. Honor the per-struct cap, a multipart body
         // included; `body_bytes_with_cap` and the multipart parser read
@@ -258,9 +267,38 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             )
             .await
         } else if is_multipart {
-            parse_multipart_with_route_inputs(req, Self::max_body_bytes(), route_inputs).await
+            let payload = super::upload::parse_multipart_streaming_with_limits(
+                req,
+                super::upload::MultipartLimits {
+                    max_body_bytes: Self::max_body_bytes(),
+                    max_parts: super::upload::global_max_multipart_parts(),
+                    spill_threshold: super::upload::global_upload_spill_threshold(),
+                    per_field_max_counts: &[],
+                },
+                |_, _, _| Ok(()),
+            )
+            .await?;
+            if target.is_some() {
+                old_input = Request::multipart_old_input(&payload)?;
+            }
+            super::input::parse_multipart_with_route_inputs(payload, route_inputs)
+                .map_err(|error| error.into_framework_error("Failed to parse multipart body"))
         } else {
             let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
+            let bytes = if has_preparation {
+                prepare_body(bytes, is_form, &transform)?
+            } else {
+                bytes
+            };
+            if target.is_some() {
+                old_input = if is_form {
+                    super::input::parse_form_input(&bytes).map_err(|error| {
+                        error.into_framework_error("Failed to retain form input")
+                    })?
+                } else {
+                    serde_json::from_slice(&bytes).unwrap_or_default()
+                };
+            }
             if route_inputs.is_empty() && is_form {
                 parse_form(&bytes)
             } else if is_form {
@@ -276,6 +314,9 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             Ok(data) => data,
             Err(FrameworkError::Validation(errors)) if is_precognition => {
                 return Err(FrameworkError::PrecognitionFailure(errors));
+            }
+            Err(FrameworkError::Validation(errors)) => {
+                return Err(Request::validation_failure(errors, target, old_input));
             }
             Err(error) => return Err(error),
         };
@@ -315,33 +356,73 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             return Err(FrameworkError::PrecognitionSuccess);
         }
 
-        // Non-Precognition: standard flow. Same staged, bail-on-first
-        // structure as the Precognition branch above.
-        if let Err(errors) = validation_result {
-            return Err(FrameworkError::Validation(
-                ValidationErrors::from_validator_keyed(
-                    errors,
-                    crate::data::input_names::input_key::<Self>,
-                ),
-            ));
+        let mut errors = match validation_result {
+            Err(errors) => ValidationErrors::from_validator_keyed(
+                errors,
+                crate::data::input_names::input_key::<Self>,
+            ),
+            Ok(()) => ValidationErrors::new(),
+        };
+        if let Err(hook_errors) = data.after_validation() {
+            errors.merge(hook_errors.rename_keys(crate::data::input_names::input_key::<Self>));
         }
-
-        // Per-field rules passed - run the synchronous cross-field hook.
-        if let Err(errs) = data.after_validation() {
-            return Err(FrameworkError::Validation(
-                errs.rename_keys(crate::data::input_names::input_key::<Self>),
-            ));
+        if let Err(hook_errors) = data.after_validation_async().await {
+            errors.merge(hook_errors.rename_keys(crate::data::input_names::input_key::<Self>));
         }
-
-        // Synchronous stages passed - run the async cross-field hook
-        // (DB-backed rules such as `Unique`). This is the final stage.
-        if let Err(errs) = data.after_validation_async().await {
-            return Err(FrameworkError::Validation(
-                errs.rename_keys(crate::data::input_names::input_key::<Self>),
-            ));
+        if !errors.is_empty() {
+            return Err(Request::validation_failure(errors, target, old_input));
         }
 
         Ok(data)
+    }
+}
+
+/// Applies preparation after authorization while retaining each parser's coercion rules.
+pub(crate) fn prepare_body(
+    bytes: bytes::Bytes,
+    is_form: bool,
+    transform: &impl Fn(&str, String) -> String,
+) -> Result<bytes::Bytes, FrameworkError> {
+    if is_form {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        for (name, text) in url::form_urlencoded::parse(&bytes) {
+            form.append_pair(&name, &transform(&name, text.into_owned()));
+        }
+        return Ok(bytes::Bytes::from(form.finish()));
+    }
+    let mut input: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(input) => input,
+        Err(_) => return Ok(bytes),
+    };
+    prepare_json(&mut input, "", transform);
+    serde_json::to_vec(&input)
+        .map(bytes::Bytes::from)
+        .map_err(|error| FrameworkError::internal(format!("Failed to prepare JSON input: {error}")))
+}
+
+fn prepare_json(
+    input: &mut serde_json::Value,
+    path: &str,
+    transform: &impl Fn(&str, String) -> String,
+) {
+    match input {
+        serde_json::Value::String(text) => *text = transform(path, std::mem::take(text)),
+        serde_json::Value::Object(fields) => {
+            for (name, value) in fields {
+                let key = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                prepare_json(value, &key, transform);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for (index, value) in values.iter_mut().enumerate() {
+                prepare_json(value, &format!("{path}.{index}"), transform);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -232,6 +232,8 @@ Write the database's schema and its migration ledger to
 ```bash
 suprnova schema:dump
 suprnova schema:dump --path database/schema/baseline.sql
+suprnova schema:dump --without-migration-data
+suprnova schema:dump --database reporting
 suprnova schema:dump --prune
 ```
 
@@ -239,8 +241,14 @@ suprnova schema:dump --prune
 Database schema dumped to database/schema/postgres-schema.sql
 ```
 
+Use `--without-migration-data` to omit the ledger rows while retaining its
+schema. Use `--database reporting` to dump `DATABASE_REPORTING_URL` instead
+of `DATABASE_URL`. Connection names contain letters, digits or underscores;
+you set `DATABASE_<UPPERCASE_NAME>_URL` for each named connection. An unknown
+name fails with an error naming it.
+
 The CLI runs `cargo run -- schema:dump` with the same flags. `--prune`
-also deletes the migrations the dump records and keeps each name as a
+also deletes applied migrations, even when you omit ledger rows, and keeps each name as a
 `PrunedMigration`. See [Squashing migrations](migrations.md#squashing-migrations).
 
 ## db:sync
@@ -338,7 +346,7 @@ it without any wiring on your side. You can also run it with
 | `suprnova migrate:status` | Show applied/pending status |
 | `suprnova migrate:rollback [--step N]` | Roll back the last `N` migrations (default 1) |
 | `suprnova migrate:fresh` | Drop all tables and re-run every migration |
-| `suprnova schema:dump [--path <file>] [--prune]` | Write the schema and migration ledger to a dump file |
+| `suprnova schema:dump [--path <file>] [--prune] [--database <name>] [--without-migration-data]` | Write the schema and migration ledger to a dump file |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Regenerate SeaORM entities from the live schema |
 | `suprnova db:seed [<seeder>]` | Run registered seeders, through the per-project `console` binary |
 

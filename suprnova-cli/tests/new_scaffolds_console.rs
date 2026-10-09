@@ -155,7 +155,7 @@ fn assert_laravel_settings_commented_out(cargo: &str) {
         "# [package.metadata.suprnova.model]",
         "# datetime_cast = \"native\"",
         "# [package.metadata.suprnova.schema]",
-        "# unsigned_ids = true",
+        "# unsigned_ids = false",
     ] {
         assert!(
             cargo.lines().any(|l| l.trim() == line),

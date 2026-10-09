@@ -6,13 +6,12 @@
 //! datetime_cast = "native"   # or "naive"
 //!
 //! [package.metadata.suprnova.schema]
-//! unsigned_ids = true
+//! unsigned_ids = false
 //! ```
 //!
-//! An application ported from Laravel's MySQL schema wants every model's
-//! date-time fields cast to the native columns that schema has, and every
-//! migration's `id()` and `foreign_id()` unsigned, without repeating that
-//! on each model and each migration. The manifest is the one file every
+//! A package chooses date-time casts once for its models. A binary can
+//! preserve signed MySQL IDs instead of the unsigned default for every
+//! migration it runs, without repeating that choice in each migration. The manifest is the one file every
 //! build of the crate has, at `CARGO_MANIFEST_DIR`.
 //!
 //! `#[model]` reads the model table from the package that declares the
@@ -49,9 +48,15 @@ pub(crate) struct ModelSettings {
 }
 
 /// What `[package.metadata.suprnova.schema]` sets.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaSettings {
     pub(crate) unsigned_ids: bool,
+}
+
+impl Default for SchemaSettings {
+    fn default() -> Self {
+        Self { unsigned_ids: true }
+    }
 }
 
 /// A package's settings and the manifest they came from. The expansion
@@ -186,7 +191,7 @@ pub(crate) fn schema_settings_from_manifest(manifest: &str) -> Result<SchemaSett
         return Err(format!("unknown key `{key}`; the key is `unsigned_ids`"));
     }
     let unsigned_ids = match table.get("unsigned_ids") {
-        None => false,
+        None => true,
         Some(toml::Value::Boolean(value)) => *value,
         Some(other) => {
             return Err(format!(

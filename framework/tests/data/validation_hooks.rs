@@ -319,10 +319,9 @@ async fn the_route_parameter_path_runs_the_async_hook() {
     assert_eq!(failed_keys(result), ["team_id"]);
 }
 
-/// The stages bail at the first failure, so a bad slug never reaches the
-/// database rule and only its own error comes back.
+/// Real requests retain the synchronous failure and the database hook's failure.
 #[tokio::test]
-async fn a_failing_sync_hook_keeps_the_database_rule_from_running() {
+async fn a_failing_sync_hook_merges_the_database_rule_errors() {
     let _guard = TestContainer::fake();
     install_teams_db().await;
 
@@ -332,7 +331,7 @@ async fn a_failing_sync_hook_keeps_the_database_rule_from_running() {
         Precognition::Off,
     )
     .await;
-    assert_eq!(failed_keys(result), ["slug"]);
+    assert_eq!(failed_keys(result), ["slug", "team_id"]);
 }
 
 #[tokio::test]

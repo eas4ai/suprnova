@@ -216,6 +216,13 @@ impl ValidationErrors {
             .push(message.into());
     }
 
+    /// Appends another stage's messages so one response preserves every validation failure.
+    pub fn merge(&mut self, other: Self) {
+        for (field, messages) in other.errors {
+            self.errors.entry(field).or_default().extend(messages);
+        }
+    }
+
     /// Add an error scoped under a named bag (Laravel's
     /// `withErrors($errors, 'profile')`). The scope name is prepended
     /// to the field key with a `.` separator, producing keys like
@@ -975,6 +982,17 @@ pub enum FrameworkError {
     #[error("Validation failed")]
     Validation(ValidationErrors),
 
+    /// Carries a classic form failure to a redirect with flashed errors and old input.
+    #[error("Validation failed")]
+    ValidationRedirect {
+        /// The safe destination resolved from the request before extraction.
+        location: String,
+        /// The merged messages retained for the next request.
+        errors: Box<ValidationErrors>,
+        /// Submitted text input retained for repopulating the form.
+        input: Box<serde_json::Value>,
+    },
+
     /// Authorization failed (403 Forbidden)
     ///
     /// Used when FormRequest::authorize() returns false.
@@ -1327,6 +1345,7 @@ impl FrameworkError {
             Self::Internal { .. } => 500,
             Self::Domain { status_code, .. } => *status_code,
             Self::Validation(_) => 422,
+            Self::ValidationRedirect { .. } => 302,
             Self::Unauthorized => 403,
             Self::ModelNotFound { .. } => 404,
             Self::ParamParse { .. } => 400,
@@ -1521,7 +1540,7 @@ impl FrameworkError {
             Self::Database(msg) => msg,
             Self::Internal { message } => message,
             Self::Domain { message, .. } => message,
-            Self::Validation(_) => "Validation failed",
+            Self::Validation(_) | Self::ValidationRedirect { .. } => "Validation failed",
             Self::Unauthorized => "This action is unauthorized.",
             Self::ModelNotFound { model_name } => model_name,
             Self::ParamParse { param, .. } => param,
@@ -1600,6 +1619,15 @@ impl FrameworkError {
             // off - the result is byte-identical to the flattened
             // string this used to produce.
             Self::Validation(errors) => Self::Validation(prefix_messages(errors, &prefix)),
+            Self::ValidationRedirect {
+                location,
+                errors,
+                input,
+            } => Self::ValidationRedirect {
+                location,
+                errors: Box::new(prefix_messages(*errors, &prefix)),
+                input,
+            },
             Self::PrecognitionFailure(errors) => {
                 Self::PrecognitionFailure(prefix_messages(errors, &prefix))
             }

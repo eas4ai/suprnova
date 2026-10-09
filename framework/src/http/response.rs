@@ -1650,6 +1650,18 @@ impl HttpResponse {
         // so caches don't confuse Precognition responses with regular
         // form-submission responses.
         match &err {
+            crate::error::FrameworkError::ValidationRedirect {
+                location,
+                errors,
+                input,
+            } => {
+                let input = input.as_object().cloned().unwrap_or_default();
+                let response: Response = Redirect::to(location.clone())
+                    .with("errors.default", errors.to_json()["errors"].clone())
+                    .with_input(input)
+                    .into();
+                return response.unwrap_or_else(|response| response);
+            }
             crate::error::FrameworkError::PrecognitionSuccess => {
                 return HttpResponse::new()
                     .status(204)
