@@ -306,6 +306,8 @@ pub(crate) struct ListenerRegistry {
 
 // ---- Scopes of observation -----------------------------------------------
 
+type BeforeTransaction = Arc<dyn Fn() -> Result<(), crate::FrameworkError> + Send + Sync>;
+
 /// The `DB::listen` callbacks and the query log of one scope.
 ///
 /// The application has one for the whole process. Every test container
@@ -315,8 +317,10 @@ pub(crate) struct ListenerRegistry {
 /// it. Under plain `cargo test` the tests of a binary are threads of one
 /// process: a test that counted the queries of the process would also
 /// count the queries of every test running beside it.
+
 #[derive(Default)]
 pub(crate) struct QueryObservation {
+    pub(crate) before_transaction: std::sync::RwLock<Vec<BeforeTransaction>>,
     pub(crate) listeners: std::sync::RwLock<ListenerRegistry>,
     pub(crate) log: std::sync::Mutex<QueryLog>,
 }

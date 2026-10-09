@@ -166,6 +166,17 @@ fn bare_table(item: &str) -> Option<&str> {
 /// to flat chains. Explicit groups keep their parentheses.
 #[derive(Debug, Clone)]
 pub(crate) enum Condition {
+    ExpressionCompare {
+        column: super::expression::QueryExpression,
+        op: String,
+        value: SeaValue,
+    },
+    Between {
+        column: super::expression::QueryExpression,
+        low: SeaValue,
+        high: SeaValue,
+        negated: bool,
+    },
     /// `column op ?`. `binary` renders MySQL's `column op binary ?`,
     /// which every other backend refuses.
     Compare {
@@ -285,6 +296,11 @@ pub(crate) fn render_boolean_list<T>(
 /// groups and subqueries.
 pub(crate) fn validate_condition(condition: &Condition) -> Result<(), FrameworkError> {
     match condition {
+        Condition::ExpressionCompare { column, op, .. } => {
+            column.validate()?;
+            validate_sql_operator(op)?;
+        }
+        Condition::Between { column, .. } => column.validate()?,
         Condition::Compare { column, op, .. } => {
             validate_identifier(column)?;
             validate_sql_operator(op)?;
@@ -343,6 +359,36 @@ fn exact(backend: DbBackend, value: &SeaValue) -> SeaValue {
     }
 }
 
+// Column names and expressions share null handling and exact value binding.
+fn render_value_comparison(
+    backend: DbBackend,
+    column: &str,
+    op: &str,
+    value: &SeaValue,
+    binary: bool,
+    bindings: (&mut Vec<SeaValue>, &mut usize),
+) -> Result<String, FrameworkError> {
+    let (values, n) = bindings;
+    if binary && backend != DbBackend::MySql {
+        return Err(crate::database::binary_comparison_unsupported(backend));
+    }
+    if value == &value.as_null() {
+        let not = if matches!(op, "=" | "<=>") {
+            ""
+        } else {
+            "NOT "
+        };
+        return Ok(format!("{column} IS {not}NULL"));
+    }
+    let ph = bind(backend, value, values, n)?;
+    let op = if binary {
+        format!("{op} binary")
+    } else {
+        op.into()
+    };
+    Ok(format!("{column} {op} {ph}"))
+}
+
 /// Render `conditions` joined with `AND`, binding their values in order.
 pub(crate) fn render_conditions(
     conditions: &[Condition],
@@ -375,41 +421,38 @@ fn render_group(
     Ok(format!("({})", parts.join(joiner)))
 }
 
-fn render_condition(
+/// Share expression and comparison rendering across the table and model builders.
+pub(crate) fn render_condition(
     condition: &Condition,
     backend: DbBackend,
     values: &mut Vec<SeaValue>,
     n: &mut usize,
 ) -> Result<String, FrameworkError> {
     Ok(match condition {
+        Condition::ExpressionCompare { column, op, value } => {
+            let column = column.render(backend, values, n)?;
+            render_value_comparison(backend, &column, op, value, false, (values, n))?
+        }
+        Condition::Between {
+            column,
+            low,
+            high,
+            negated,
+        } => {
+            let column = column.render(backend, values, n)?;
+            let low = bind(backend, low, values, n)?;
+            let high = bind(backend, high, values, n)?;
+            let not = if *negated { "NOT " } else { "" };
+            format!("{column} {not}BETWEEN {low} AND {high}")
+        }
         Condition::Compare {
             column,
             op,
             value,
             binary,
         } => {
-            let column_sql = quote_identifier(backend, column);
-            if *binary && backend != DbBackend::MySql {
-                return Err(crate::database::binary_comparison_unsupported(backend));
-            }
-            if value == &value.as_null() {
-                let not = if matches!(op.as_str(), "=" | "<=>") {
-                    ""
-                } else {
-                    "NOT "
-                };
-                return Ok(format!("{column_sql} IS {not}NULL"));
-            }
-            let ph = bind(backend, value, values, n)?;
-            let op = if *binary {
-                match backend {
-                    DbBackend::MySql => format!("{op} binary"),
-                    _ => return Err(crate::database::binary_comparison_unsupported(backend)),
-                }
-            } else {
-                op.clone()
-            };
-            format!("{column_sql} {op} {ph}")
+            let column = quote_identifier(backend, column);
+            render_value_comparison(backend, &column, op, value, *binary, (values, n))?
         }
         Condition::Columns { first, op, second } => format!(
             "{} {op} {}",
@@ -530,6 +573,9 @@ pub(crate) fn raw_select_may_read(raw: &str) -> bool {
 /// raw fragment.
 pub(crate) fn condition_tables(condition: &Condition, out: &mut ReadSet) {
     match condition {
+        Condition::ExpressionCompare { column, .. } | Condition::Between { column, .. } => {
+            column.collect_tables(out)
+        }
         Condition::InQuery { query, .. } | Condition::Exists { query, .. } => {
             query.collect_tables(out);
         }
