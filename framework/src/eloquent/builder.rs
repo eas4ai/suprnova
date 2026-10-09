@@ -5908,12 +5908,38 @@ where
         out: &[M],
         exec: &crate::database::transaction::ExecutorChoice,
     ) -> Result<(), FrameworkError> {
+        use crate::eloquent::relations::RelationKind;
         for relation in &self.exists_relations {
-            if crate::eloquent::relations::find_relation::<M>(relation).is_none() {
+            let Some(entry) = crate::eloquent::relations::find_relation::<M>(relation) else {
                 return Err(FrameworkError::bad_request(format!(
                     "Unknown relation `{relation}`"
                 )));
-            }
+            };
+            // A `MorphTo` row names its owner's table in its type column, so
+            // its entry carries no target table and the generic `has` would
+            // render a probe that is always false. The morph engine asks
+            // every registered owner type instead. A through relation's entry
+            // names no intermediate table, so the engine has no correlation
+            // for it and the flag would be wrong; it is refused, as an
+            // unknown relation is, whether or not any row loaded.
+            let morph_owner = match entry.kind {
+                RelationKind::MorphTo => true,
+                RelationKind::HasOne
+                | RelationKind::HasMany
+                | RelationKind::BelongsTo
+                | RelationKind::BelongsToMany
+                | RelationKind::MorphOne
+                | RelationKind::MorphMany
+                | RelationKind::MorphToMany
+                | RelationKind::MorphedByMany => false,
+                RelationKind::HasOneThrough | RelationKind::HasManyThrough => {
+                    return Err(FrameworkError::bad_request(format!(
+                        "with_exists cannot load `{relation}`: the existence query does not \
+                         support a {:?} relation",
+                        entry.kind
+                    )));
+                }
+            };
             if out.is_empty() {
                 continue;
             }
@@ -5929,9 +5955,15 @@ where
                         })
                 })
                 .collect();
-            let mut probe = Self::new()
-                .filter_in(M::primary_key_name(), keys)
-                .has(relation);
+            let probe = Self::new().filter_in(M::primary_key_name(), keys);
+            let mut probe = if morph_owner {
+                // `has_morph(relation, "*")`: true when the type column names a
+                // registered type and that type's table holds the id, under the
+                // owner's own scopes; an unregistered type matches no branch.
+                probe.has_morph(relation, "*")
+            } else {
+                probe.has(relation)
+            };
             probe.tx_override = self.tx_override.clone();
             probe.connection_override = self.connection_override.clone();
             probe.binder = self.binder;
