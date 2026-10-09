@@ -833,6 +833,61 @@ fn emit_relation_inventory(
         },
     };
 
+    // The target column the existence engine joins the pivot's related
+    // key to. A many-to-many joins the column its reads join, as
+    // `target_primary_key` holds. A through relation joins its second
+    // key, the target's column that holds the intermediate's key, with
+    // the default the relation method uses. Every other kind has no pivot.
+    let target_join_key_expr: TokenStream = match rel.kind {
+        RelationKindAttr::BelongsToMany
+        | RelationKindAttr::MorphToMany
+        | RelationKindAttr::MorphedByMany => related_key_expr(rel, target_ty),
+        RelationKindAttr::HasOneThrough | RelationKindAttr::HasManyThrough => {
+            let second_key = second_key_override(rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(&rel.target))));
+            quote! { #second_key }
+        }
+        _ => quote! { "" },
+    };
+
+    // A through relation's intermediate (`rel.target`) soft-delete
+    // column, so `has` leaves out what a trashed intermediate reaches, as
+    // the relation's reads do.
+    let through_soft_deletes_column_expr: TokenStream = match rel.kind {
+        RelationKindAttr::HasOneThrough | RelationKindAttr::HasManyThrough => {
+            let through_ty = &rel.target;
+            quote! { <#through_ty as ::suprnova::eloquent::EloquentModel>::SOFT_DELETES_COLUMN }
+        }
+        _ => quote! { "" },
+    };
+
+    // A `MorphTo`'s declared owners, in declaration order, each with the
+    // snake-cased type name the fetch helper falls back to for an owner
+    // without `morph_type`. The existence engine reads this list rather
+    // than the morph registry, which holds every family and only the
+    // models that register.
+    let morph_targets_expr: TokenStream = match (rel.kind, morph_targets(rel)) {
+        (RelationKindAttr::MorphTo, Some(targets)) => {
+            let entries = targets.iter().map(|ty| {
+                let type_name = last_segment_name(ty);
+                let fallback = to_snake(&type_name);
+                quote! {
+                    ::suprnova::MorphToTarget {
+                        type_name: #type_name,
+                        fallback_morph_type: #fallback,
+                        table: <#ty as ::suprnova::eloquent::EloquentModel>::TABLE,
+                        primary_key: <#ty as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY,
+                        type_id: ::std::any::TypeId::of::<#ty>,
+                        query_constraints: ::suprnova::Builder::<#ty>::__morph_constraints,
+                    }
+                }
+            });
+            quote! { &[#(#entries),*] }
+        }
+        _ => quote! { &[] },
+    };
+
     // Parent key (the key on the OWNER's side). For the has-family
     // relations it is this model's column the relation matches its
     // foreign key against: the `lk` override, else this model's primary
@@ -929,6 +984,7 @@ fn emit_relation_inventory(
             let related_pivot_col = pivot_related_override(rel)
                 .map(str::to_string)
                 .unwrap_or_else(|| default_belongs_to_fk(target_ty));
+            let related_pivot_col = quote! { #related_pivot_col };
             return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
@@ -945,10 +1001,13 @@ fn emit_relation_inventory(
                 morph_type_column: "",
                 morph_type_value: "",
                 target_primary_key_expr: &target_primary_key_expr,
+                target_join_key_expr: &target_join_key_expr,
                 related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                through_soft_deletes_column_expr: &through_soft_deletes_column_expr,
                 related_updated_at_column_expr: &related_updated_at_column_expr,
                 related_updated_at_storage_expr: &related_updated_at_storage_expr,
                 related_bind_column_expr: &related_bind_column_expr,
+                morph_targets_expr: &morph_targets_expr,
             });
         }
         RelationKindAttr::MorphToMany | RelationKindAttr::MorphedByMany => {
@@ -996,6 +1055,7 @@ fn emit_relation_inventory(
                 }
                 _ => (morph_col.clone(), related_col.clone()),
             };
+            let pivot_related_col = quote! { #pivot_related_col };
             return emit_inventory_token(&InventoryFields {
                 struct_ident,
                 target_ty,
@@ -1012,10 +1072,48 @@ fn emit_relation_inventory(
                 morph_type_column: &parent_morph_type_col,
                 morph_type_value: &morph_type_value_str,
                 target_primary_key_expr: &target_primary_key_expr,
+                target_join_key_expr: &target_join_key_expr,
                 related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                through_soft_deletes_column_expr: &through_soft_deletes_column_expr,
                 related_updated_at_column_expr: &related_updated_at_column_expr,
                 related_updated_at_storage_expr: &related_updated_at_storage_expr,
                 related_bind_column_expr: &related_bind_column_expr,
+                morph_targets_expr: &morph_targets_expr,
+            });
+        }
+        // Through: the intermediate (`rel.target`) stands in for the
+        // pivot. The existence engine correlates
+        // `intermediate.<first_key> = parent.<local_key>` and joins
+        // `intermediate.<second_local_key> = target.<second_key>`, the
+        // join the relation's reads use.
+        RelationKindAttr::HasOneThrough | RelationKindAttr::HasManyThrough => {
+            let through_ty = &rel.target;
+            let intermediate_table =
+                quote! { <#through_ty as ::suprnova::eloquent::EloquentModel>::TABLE };
+            let second_local_key = second_local_key_expr(rel, through_ty);
+            return emit_inventory_token(&InventoryFields {
+                struct_ident,
+                target_ty,
+                name: &name_str,
+                kind_variant: &kind_variant,
+                parent_type_name: &parent_type_name,
+                target_type_name: &target_type_name,
+                target_table_expr: &target_table_expr,
+                foreign_key: &foreign_key_str,
+                parent_key: &parent_key_expr,
+                pivot_table_expr: &intermediate_table,
+                pivot_parent_key: &foreign_key_str,
+                pivot_related_key: &second_local_key,
+                morph_type_column: "",
+                morph_type_value: "",
+                target_primary_key_expr: &target_primary_key_expr,
+                target_join_key_expr: &target_join_key_expr,
+                related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+                through_soft_deletes_column_expr: &through_soft_deletes_column_expr,
+                related_updated_at_column_expr: &related_updated_at_column_expr,
+                related_updated_at_storage_expr: &related_updated_at_storage_expr,
+                related_bind_column_expr: &related_bind_column_expr,
+                morph_targets_expr: &morph_targets_expr,
             });
         }
         _ => (String::new(), String::new(), String::new()),
@@ -1034,6 +1132,7 @@ fn emit_relation_inventory(
     };
 
     let pivot_table_expr = quote! { #pivot_table_str };
+    let pivot_related_key_expr = quote! { #pivot_related_key_str };
     emit_inventory_token(&InventoryFields {
         struct_ident,
         target_ty,
@@ -1046,14 +1145,17 @@ fn emit_relation_inventory(
         parent_key: &parent_key_expr,
         pivot_table_expr: &pivot_table_expr,
         pivot_parent_key: &pivot_parent_key_str,
-        pivot_related_key: &pivot_related_key_str,
+        pivot_related_key: &pivot_related_key_expr,
         morph_type_column: &morph_type_column_str,
         morph_type_value: &morph_type_value_str,
         target_primary_key_expr: &target_primary_key_expr,
+        target_join_key_expr: &target_join_key_expr,
         related_soft_deletes_column_expr: &related_soft_deletes_column_expr,
+        through_soft_deletes_column_expr: &through_soft_deletes_column_expr,
         related_updated_at_column_expr: &related_updated_at_column_expr,
         related_updated_at_storage_expr: &related_updated_at_storage_expr,
         related_bind_column_expr: &related_bind_column_expr,
+        morph_targets_expr: &morph_targets_expr,
     })
 }
 
@@ -1072,14 +1174,17 @@ struct InventoryFields<'a> {
     parent_key: &'a TokenStream,
     pivot_table_expr: &'a TokenStream,
     pivot_parent_key: &'a str,
-    pivot_related_key: &'a str,
+    pivot_related_key: &'a TokenStream,
     morph_type_column: &'a str,
     morph_type_value: &'a str,
     target_primary_key_expr: &'a TokenStream,
+    target_join_key_expr: &'a TokenStream,
     related_soft_deletes_column_expr: &'a TokenStream,
+    through_soft_deletes_column_expr: &'a TokenStream,
     related_updated_at_column_expr: &'a TokenStream,
     related_updated_at_storage_expr: &'a TokenStream,
     related_bind_column_expr: &'a TokenStream,
+    morph_targets_expr: &'a TokenStream,
 }
 
 /// Single emission point for the inventory token. Keeps the kind-arms
@@ -1102,10 +1207,13 @@ fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
         morph_type_column,
         morph_type_value,
         target_primary_key_expr,
+        target_join_key_expr,
         related_soft_deletes_column_expr,
+        through_soft_deletes_column_expr,
         related_updated_at_column_expr,
         related_updated_at_storage_expr,
         related_bind_column_expr,
+        morph_targets_expr,
     } = fields;
     quote! {
         ::suprnova::inventory::submit! {
@@ -1125,10 +1233,13 @@ fn emit_inventory_token(fields: &InventoryFields<'_>) -> TokenStream {
                 morph_type_column: #morph_type_column,
                 morph_type_value: #morph_type_value,
                 target_primary_key: #target_primary_key_expr,
+                target_join_key: #target_join_key_expr,
                 related_soft_deletes_column: #related_soft_deletes_column_expr,
+                through_soft_deletes_column: #through_soft_deletes_column_expr,
                 related_updated_at_column: #related_updated_at_column_expr,
                 related_updated_at_storage: #related_updated_at_storage_expr,
                 related_bind_column: #related_bind_column_expr,
+                morph_targets: #morph_targets_expr,
             }
         }
     }

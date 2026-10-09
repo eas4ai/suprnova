@@ -56,7 +56,9 @@ pub use eager_cache::EagerLoadCache;
 pub use has_many::HasMany;
 pub use has_one::HasOne;
 pub use morph::{MorphMany, MorphOne, MorphTo};
-pub use morph_registry::{MorphTypeEntry, find_morph_type, find_morph_type_by_id, morph_types};
+pub use morph_registry::{
+    MorphToTarget, MorphTypeEntry, find_morph_type, find_morph_type_by_id, morph_types,
+};
 pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
@@ -401,16 +403,21 @@ pub trait Relation {
 ///
 /// Field semantics by [`RelationKind`]:
 ///
-/// | Kind                | target_table          | foreign_key                       | parent_key                | pivot_*                                              | morph_*                                                |
-/// |---------------------|-----------------------|-----------------------------------|---------------------------|------------------------------------------------------|--------------------------------------------------------|
-/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                            | - / -                                                  |
-/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                            | - / -                                                  |
-/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related| - / -                                                  |
-/// | HasOneThrough/Many  | final target table    | through table's FK                | parent column (PK)        | through table / - / through→target FK                | - / -                                                  |
-/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | - / - / -                                            | `<morph>_type` / parent's morph type string            |
-/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | - / - / -                                            | child's `<morph>_type` / `""`                          |
-/// | MorphToMany         | related table         | unused                            | parent column (PK)        | pivot table / `<morph>_id` / `<related>_id`          | `<morph>_type` / parent's morph type string            |
-/// | MorphedByMany       | related table         | unused                            | parent column (PK)        | pivot table / `<related>_id` / `<morph>_id`          | `<morph>_type` / related's morph type string           |
+/// | Kind                | target_table          | foreign_key                       | parent_key                | pivot_*                                                  | target_join_key        | morph_*                                                |
+/// |---------------------|-----------------------|-----------------------------------|---------------------------|----------------------------------------------------------|------------------------|--------------------------------------------------------|
+/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                                | -                      | - / -                                                  |
+/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                                | -                      | - / -                                                  |
+/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related   | related key            | - / -                                                  |
+/// | HasOneThrough/Many  | final target table    | first key (intermediate → parent) | parent column (local key) | intermediate table / first key / intermediate local key | second key (on target) | - / -                                                  |
+/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | - / - / -                                                | -                      | `<morph>_type` / parent's morph type string            |
+/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | - / - / -                                                | -                      | child's `<morph>_type` / `""`                          |
+/// | MorphToMany         | related table         | unused                            | parent column (PK)        | pivot table / `<morph>_id` / `<related>_id`              | related key            | `<morph>_type` / parent's morph type string            |
+/// | MorphedByMany       | related table         | unused                            | parent column (PK)        | pivot table / `<related>_id` / `<morph>_id`              | related key            | `<morph>_type` / related's morph type string           |
+///
+/// A through relation's intermediate table fills the pivot slots, so the
+/// existence engine joins it as it joins a pivot:
+/// `intermediate.<second_local_key> = target.<second_key>`, correlated on
+/// `intermediate.<first_key> = parent.<local_key>`.
 ///
 /// `""` (empty string) indicates "not applicable for this kind" - never
 /// `None`, because `inventory::submit!` requires every field to be
@@ -440,12 +447,15 @@ pub struct RelationEntry {
     pub foreign_key: &'static str,
     /// PK / local key on the parent side. See the table above.
     pub parent_key: &'static str,
-    /// Pivot table name (m2m / through families). `""` otherwise.
+    /// Pivot table name (m2m), or the intermediate table of a through
+    /// relation. `""` otherwise.
     pub pivot_table: &'static str,
-    /// Pivot column pointing at the parent. `""` when not a pivot kind.
+    /// Pivot column pointing at the parent: a through relation's first
+    /// key, on the intermediate. `""` when not a pivot or through kind.
     pub pivot_parent_key: &'static str,
-    /// Pivot column pointing at the related / final target. `""` when
-    /// not a pivot kind.
+    /// Pivot column pointing at the related / final target: a through
+    /// relation's second local key, the intermediate's column the target's
+    /// second key holds. `""` when not a pivot or through kind.
     pub pivot_related_key: &'static str,
     /// `<morph>_type` discriminator column (morph kinds). `""` otherwise.
     pub morph_type_column: &'static str,
@@ -455,21 +465,32 @@ pub struct RelationEntry {
     /// macro expansion site (`MorphTo` - the value lives on the child
     /// row itself).
     pub morph_type_value: &'static str,
-    /// Key column on the related/target side. Used by the existence
-    /// engine to join pivot rows against the target table
-    /// (`pivot.related_key = target.target_primary_key`). For a
-    /// many-to-many the macro emits the relation's declared
-    /// `related_key`, else the target model's
-    /// `EloquentModel::PRIMARY_KEY`, the column the relation's reads
-    /// join on; for every other kind, the target's primary key. `""` for
-    /// `MorphTo` where the target table is variable.
+    /// Key column on the related/target side. For a many-to-many the
+    /// macro emits the relation's declared `related_key`, else the target
+    /// model's `EloquentModel::PRIMARY_KEY`, the column the relation's
+    /// reads join on; for every other kind, the target's primary key. `""`
+    /// for `MorphTo` where the target table is variable.
     pub target_primary_key: &'static str,
+    /// The target column the existence engine joins `pivot_related_key`
+    /// to (`pivot.<pivot_related_key> = target.<target_join_key>`): a
+    /// many-to-many's related key, the same column as
+    /// `target_primary_key`, or a through relation's second key, the
+    /// target's column that holds the intermediate's key. A separate slot
+    /// because a through relation's second key is not the target's
+    /// primary key. `""` for every other kind.
+    pub target_join_key: &'static str,
     /// `deleted_at` (or custom `soft_deletes_column`) on the related
     /// model when it opts into `#[model(soft_deletes)]`. `""` when the
     /// related model does not soft-delete. The existence engine appends
     /// `target.<col> IS NULL` to has/where-has subqueries so the parent
     /// scope agrees with the child's default soft-delete scope.
     pub related_soft_deletes_column: &'static str,
+    /// The intermediate model's soft-delete column on a through relation
+    /// whose intermediate opts into `#[model(soft_deletes)]`; `""`
+    /// otherwise. The existence engine appends `intermediate.<col> IS
+    /// NULL`, so `has` leaves out a row reached through a trashed
+    /// intermediate, as the relation's reads and counts do.
+    pub through_soft_deletes_column: &'static str,
     /// The parent's `updated_at` column when the parent opts into
     /// timestamps, `""` when it doesn't. Populated by [`touch_column`]
     /// at link time. The parent-touch cascade reads this: empty means
@@ -491,6 +512,11 @@ pub struct RelationEntry {
     ///
     /// [`EloquentModel::bind_column`]: crate::eloquent::EloquentModel::bind_column
     pub related_bind_column: ColumnBinder,
+    /// The owner types a `MorphTo` relation declares in `targets = [...]`,
+    /// in declaration order; empty for every other kind. A `MorphTo`
+    /// existence query reads these owners, not every registered morph
+    /// type: see [`MorphToTarget`].
+    pub morph_targets: &'static [MorphToTarget],
 }
 
 /// How a model binds a value compared with one of its columns; see

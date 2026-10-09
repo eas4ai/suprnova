@@ -838,8 +838,10 @@ let mine = Post::query()
 ```
 
 You query a `MorphTo` with `has_morph`, `doesnt_have_morph`,
-`where_has_morph` or `where_doesnt_have_morph`. You supply registered morph
-names or `"*"`. The `where_` closure receives `Builder<()>` and the
+`where_has_morph` or `where_doesnt_have_morph`. You supply morph names, or
+`"*"` for every target the relation declares in `targets = [...]`. A target
+without `morph_type` answers to its snake-cased type name, the string its
+parent writes. The `where_` closure receives `Builder<()>` and the
 canonical morph name per type. Wildcard absence also includes null type
 columns. See [MorphTo existence](eloquent.md#morphto-existence).
 
@@ -856,7 +858,11 @@ appropriate SQL shape per kind:
   `EXISTS (SELECT 1 FROM parent WHERE parent.<pk> = child.<fk>)`.
 - `BelongsToMany` / `MorphToMany` → joins through the pivot:
   `EXISTS (SELECT 1 FROM pivot WHERE pivot.<parent_fk> = parent.<pk> ...)`.
-- Through relations → joins through the intermediate.
+- `HasOneThrough` / `HasManyThrough` → joins the target through the
+  intermediate:
+  `EXISTS (SELECT 1 FROM intermediate INNER JOIN target ON intermediate.<second_local_key> = target.<second_key> WHERE intermediate.<first_key> = parent.<pk>)`.
+  A soft-deleting intermediate adds `AND intermediate.<deleted_at> IS NULL`,
+  so a row reached through a trashed intermediate does not count.
 
 The closure form (`where_has::<R, _>(rel, |q| ...)`) constructs an
 inner `Builder<R>`; whatever WHERE terms that builder produces land

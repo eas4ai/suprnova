@@ -324,16 +324,24 @@ pub(crate) struct ExistsSpec {
     pub target_table: String,
     /// FK on the child / target side. Empty for pivot joins.
     pub foreign_key: String,
-    /// Pivot table for m2m / morph-m2m / through. Empty otherwise.
+    /// Pivot table for m2m / morph-m2m, or the intermediate table of a
+    /// through relation. Empty otherwise.
     pub pivot_table: String,
     /// Pivot column pointing at the parent. Empty when no pivot.
     pub pivot_parent_key: String,
     /// Pivot column pointing at the related / final target. Empty
     /// when no pivot.
     pub pivot_related_key: String,
-    /// Related table's PK (for joining pivot → related). Empty when no
-    /// pivot path.
+    /// The related table's column the pivot's `pivot_related_key` joins
+    /// (the relation entry's `target_join_key`): a many-to-many's related
+    /// key, or a through relation's second key. Empty when no pivot path.
     pub related_pk: String,
+    /// Soft-delete column on a through relation's intermediate model, the
+    /// relation entry's `through_soft_deletes_column`. Empty when the
+    /// intermediate does not soft-delete or there is no intermediate. When
+    /// present, the renderer appends `<pivot>.<col> IS NULL`, so a row
+    /// reached through a trashed intermediate does not count.
+    pub pivot_soft_deletes_column: String,
     /// Morph discriminator column on the child side. Empty for
     /// non-morph kinds.
     pub morph_type_column: String,
@@ -1103,6 +1111,9 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
             }
             if !spec.related_pk.is_empty() {
                 validate_identifier(&spec.related_pk)?;
+            }
+            if !spec.pivot_soft_deletes_column.is_empty() {
+                validate_identifier(&spec.pivot_soft_deletes_column)?;
             }
             if !spec.morph_type_column.is_empty() {
                 validate_identifier(&spec.morph_type_column)?;
@@ -3416,13 +3427,17 @@ fn morph_type_list(
 ///
 /// 1. **Pivot** (`pivot_table` populated) - m2m / morph-m2m / through:
 ///    ```sql
-///    EXISTS (SELECT 1 FROM target
-///             INNER JOIN pivot
+///    EXISTS (SELECT 1 FROM pivot
+///             INNER JOIN target
 ///                ON pivot.<pivot_related_key> = target.<related_pk>
 ///             WHERE pivot.<pivot_parent_key> = parent.<parent_key>
 ///               AND <morph_type_column> = '<morph_type_value>'
 ///               AND <inner where terms>)
 ///    ```
+///    A through relation's intermediate table stands in for the pivot:
+///    `pivot_parent_key` is its first key, `pivot_related_key` its local
+///    key and `related_pk` the target's second key. A soft-deleting
+///    intermediate adds `pivot.<pivot_soft_deletes_column> IS NULL`.
 /// 2. **BelongsTo** (`foreign_key` on parent table, `parent_key` is
 ///    target's PK) - child.id = parent.fk:
 ///    ```sql
@@ -3489,6 +3504,15 @@ fn render_exists(
             parent = parent,
             pk = spec.parent_key,
         ));
+        // A through relation's reads leave out what a trashed
+        // intermediate reaches; existence agrees with them.
+        if !spec.pivot_soft_deletes_column.is_empty() {
+            where_parts.push(format!(
+                "{pivot}.{col} IS NULL",
+                pivot = spec.pivot_table,
+                col = spec.pivot_soft_deletes_column,
+            ));
+        }
         if !spec.morph_type_column.is_empty() && !spec.morph_type_value.is_empty() {
             *n += 1;
             let ph = placeholder(backend, *n)?;
@@ -4908,8 +4932,9 @@ where
                 related_pk: if e.pivot_table.is_empty() {
                     String::new()
                 } else {
-                    e.target_primary_key.to_string()
+                    e.target_join_key.to_string()
                 },
+                pivot_soft_deletes_column: e.through_soft_deletes_column.to_string(),
                 morph_type_column: e.morph_type_column.to_string(),
                 morph_type_value: e.morph_type_value.to_string(),
                 related_soft_deletes_column: e.related_soft_deletes_column.to_string(),
@@ -4932,6 +4957,7 @@ where
                 pivot_parent_key: String::new(),
                 pivot_related_key: String::new(),
                 related_pk: String::new(),
+                pivot_soft_deletes_column: String::new(),
                 morph_type_column: String::new(),
                 morph_type_value: String::new(),
                 related_soft_deletes_column: String::new(),
@@ -4948,8 +4974,10 @@ where
         }
     }
 
-    /// Keep rows whose morph owner exists for one of these registered types.
-    /// Pass `"*"` to consider every registered type and its aliases.
+    /// Keep rows whose morph owner exists for one of these types: a
+    /// relation target's type string or Rust type name, or a registered
+    /// model's `morph_type` or alias. Pass `"*"` for every target the
+    /// relation declares.
     pub fn has_morph(self, relation: &str, types: impl IntoMorphTypes) -> Self {
         self.morph_existence(relation, types, true, |q: Builder<()>, _| q)
     }
@@ -4961,7 +4989,7 @@ where
     }
 
     /// Constrain each morph owner's existence query separately.
-    /// The closure receives the registered morph name so types can use different columns.
+    /// The closure receives the owner's morph type string so types can use different columns.
     pub fn where_has_morph<R, F>(
         self,
         relation: &str,
@@ -4998,7 +5026,9 @@ where
     where
         F: FnMut(Builder<R>, &str) -> Builder<R>,
     {
-        use crate::eloquent::relations::{RelationKind, find_morph_type, morph_types};
+        use crate::eloquent::relations::{
+            MorphToTarget, RelationKind, find_morph_type, morph_types,
+        };
         let Some(relation_entry) = crate::eloquent::relations::find_relation::<M>(relation)
             .filter(|entry| entry.kind == RelationKind::MorphTo)
         else {
@@ -5007,17 +5037,29 @@ where
         };
         let names = types.into_morph_types();
         let wildcard = names.as_slice() == ["*"];
-        let mut entries: Vec<&crate::eloquent::relations::MorphTypeEntry> = Vec::new();
+        // The wildcard means the owners the relation declares, not the
+        // registry: the registry holds other families, whose tables a schema
+        // may lack and whose keys may have another type, and misses an owner
+        // that declares no `morph_type`.
+        let mut entries: Vec<MorphToTarget> = Vec::new();
         if wildcard {
-            entries.extend(morph_types());
-            entries.sort_by_key(|entry| entry.morph_type);
+            entries.extend(relation_entry.morph_targets.iter().copied());
         } else {
             for name in names {
-                let entry = find_morph_type(&name)
-                    .or_else(|| morph_types().find(|entry| entry.type_name == name));
+                let entry = relation_entry
+                    .morph_targets
+                    .iter()
+                    .find(|target| target.is_named(&name))
+                    .copied()
+                    .or_else(|| {
+                        find_morph_type(&name)
+                            .or_else(|| morph_types().find(|entry| entry.type_name == name))
+                            .map(MorphToTarget::from_entry)
+                    });
                 let Some(entry) = entry else {
-                    self.relationship_error =
-                        Some(format!("morph type `{name}` is not registered"));
+                    self.relationship_error = Some(format!(
+                        "morph type `{name}` names no target of `{relation}` and no registered model"
+                    ));
                     return self;
                 };
                 if !entries
@@ -5040,7 +5082,7 @@ where
         let mut branches = Vec::new();
         for entry in entries {
             let constraints = (entry.query_constraints)();
-            let inner = predicate(Builder::<R>::new(), entry.morph_type);
+            let inner = predicate(Builder::<R>::new(), entry.morph_type());
             if let Some(error) = inner.relationship_error {
                 self.relationship_error = Some(error);
                 return self;
@@ -5065,11 +5107,11 @@ where
             spec.belongs_to = true;
             spec.morph_type_column.clear();
             spec.binder = constraints.binder;
-            let names =
-                crate::eloquent::relations::morph_registry::morph_type_names(entry.morph_type)
-                    .into_iter()
-                    .map(Value::String)
-                    .collect();
+            let names = entry
+                .morph_type_names()
+                .into_iter()
+                .map(Value::String)
+                .collect();
             branches.push(WhereTerm::Group(vec![
                 WhereTerm::In(type_column.clone(), names),
                 WhereTerm::Exists(Box::new(spec)),
@@ -5963,29 +6005,10 @@ where
             };
             // A `MorphTo` row names its owner's table in its type column, so
             // its entry carries no target table and the generic `has` would
-            // render a probe that is always false. The morph engine asks
-            // every registered owner type instead. A through relation's entry
-            // names no intermediate table, so the engine has no correlation
-            // for it and the flag would be wrong; it is refused, as an
-            // unknown relation is, whether or not any row loaded.
-            let morph_owner = match entry.kind {
-                RelationKind::MorphTo => true,
-                RelationKind::HasOne
-                | RelationKind::HasMany
-                | RelationKind::BelongsTo
-                | RelationKind::BelongsToMany
-                | RelationKind::MorphOne
-                | RelationKind::MorphMany
-                | RelationKind::MorphToMany
-                | RelationKind::MorphedByMany => false,
-                RelationKind::HasOneThrough | RelationKind::HasManyThrough => {
-                    return Err(FrameworkError::bad_request(format!(
-                        "with_exists cannot load `{relation}`: the existence query does not \
-                         support a {:?} relation",
-                        entry.kind
-                    )));
-                }
-            };
+            // render a probe that is always false. The morph engine asks the
+            // owner types the relation declares instead. Every other kind,
+            // through relations included, has the correlation `has` renders.
+            let morph_owner = entry.kind == RelationKind::MorphTo;
             if out.is_empty() {
                 continue;
             }
@@ -6003,9 +6026,10 @@ where
                 .collect();
             let probe = Self::new().filter_in(M::primary_key_name(), keys);
             let mut probe = if morph_owner {
-                // `has_morph(relation, "*")`: true when the type column names a
-                // registered type and that type's table holds the id, under the
-                // owner's own scopes; an unregistered type matches no branch.
+                // `has_morph(relation, "*")`: true when the type column names
+                // one of the relation's declared owners and that owner's table
+                // holds the id, under the owner's own scopes; a type string no
+                // declared owner answers to matches no branch.
                 probe.has_morph(relation, "*")
             } else {
                 probe.has(relation)
