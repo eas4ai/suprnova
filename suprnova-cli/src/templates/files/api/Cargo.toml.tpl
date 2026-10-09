@@ -7,13 +7,13 @@ rust-version = "1.94.0"
 # Two binaries are declared below, so `cargo run` has to be told which
 # one it means. Without `default-run` it refuses outright - it does NOT
 # fall back to the binary sharing the package name - and every wrapper
-# (`suprnova migrate`, `schedule:work`, `web:run`, …) fails before doing
+# (`suprnova migrate`, `schedule:work`, `web:run`) fails before doing
 # any work.
 default-run = "{package_name}"
 
-# Two settings that match Laravel's MySQL schema, for an application ported
-# from Laravel; uncomment them to use them. Neither converts a column: they
-# choose how models read columns and how migrations create them.
+# The schema defaults match Laravel's MySQL schema: unsigned IDs and nullable
+# timestamps. These commented settings choose model casts or signed IDs.
+# Neither converts a column. Uncomment a setting when your columns need it.
 #
 # datetime_cast picks the cast of every `DateTime<Utc>` model field that
 # names no cast of its own, `created_at`, `updated_at` and `deleted_at`
@@ -31,13 +31,15 @@ default-run = "{package_name}"
 # [package.metadata.suprnova.model]
 # datetime_cast = "native"
 #
-# unsigned_ids makes `id()` and `foreign_id()` create `BIGINT UNSIGNED` on
-# MySQL, as Laravel's `id()` and `foreignId()` do, in every migration this
-# package's binaries run. Postgres and SQLite have no unsigned integers and
-# keep `BIGINT`. Models read these keys into `u64` fields.
+# `id()` and `foreign_id()` create `BIGINT UNSIGNED` on MySQL by default,
+# as Laravel's `id()` and `foreignId()` do. Postgres and SQLite keep signed
+# `BIGINT`. Models read unsigned MySQL keys into `u64` fields.
+# This scaffold's `users.id` is already unsigned on MySQL.
+# Set unsigned_ids = false to keep signed IDs in every migration this binary
+# runs, including migrations from libraries. `#[suprnova::main]` installs it.
 #
 # [package.metadata.suprnova.schema]
-# unsigned_ids = true
+# unsigned_ids = false
 
 [[bin]]
 name = "{package_name}"

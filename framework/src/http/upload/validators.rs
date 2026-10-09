@@ -155,6 +155,17 @@ pub trait MimeAllowlist: Send + Sync + Default {
     fn allowed() -> &'static [&'static str];
 }
 
+fn mime_allowed(allowed: &[&str], mime: &str) -> bool {
+    allowed.iter().any(|pattern| {
+        pattern.eq_ignore_ascii_case(mime)
+            || pattern.strip_suffix("/*").is_some_and(|family| {
+                mime.split_once('/').is_some_and(|(actual, subtype)| {
+                    !subtype.is_empty() && family.eq_ignore_ascii_case(actual)
+                })
+            })
+    })
+}
+
 /// Resolve the effective MIME type for a part against an allowlist.
 ///
 /// The detected type from `infer::get` (magic-byte sniffing of the actual
@@ -183,14 +194,13 @@ fn validate_against_allowlist(
     // markup guard refuses every document that opens with `<`. When the
     // allowlist names SVG, the content itself is examined instead, as magic
     // bytes are for other types, and the header does not decide.
-    if allowed.iter().any(|m| m.eq_ignore_ascii_case(SVG)) && is_svg_document(sniff_content(sniff))
-    {
+    if mime_allowed(allowed, SVG) && is_svg_document(sniff_content(sniff)) {
         return Ok(());
     }
 
     if let Some(kind) = infer::get(sniff) {
         // Detected via magic bytes - the content itself, not the header.
-        if allowed.iter().any(|m| *m == kind.mime_type()) {
+        if mime_allowed(allowed, kind.mime_type()) {
             return Ok(());
         }
         return Err(refused());
@@ -235,7 +245,7 @@ fn validate_against_allowlist(
         return Err(refused());
     }
 
-    if !allowed.iter().any(|m| m.eq_ignore_ascii_case(declared)) {
+    if !mime_allowed(allowed, declared) {
         return Err(refused());
     }
     Ok(())

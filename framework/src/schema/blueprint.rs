@@ -238,9 +238,8 @@ impl Blueprint {
         ColumnBuilder::new(self, index)
     }
 
-    /// Adds `id`: `BIGINT`, auto-increment, primary key. After
-    /// [`Schema::use_unsigned_ids`](super::Schema::use_unsigned_ids) it is
-    /// [`unsigned_id`](Blueprint::unsigned_id).
+    /// Adds Laravel's auto-increment primary key, unsigned on MySQL by default.
+    /// Use [`Schema::set_unsigned_ids`](super::Schema::set_unsigned_ids) for signed IDs.
     pub fn id(&mut self) -> ColumnBuilder<'_> {
         if super::unsigned_ids() {
             return self.unsigned_id();
@@ -257,9 +256,7 @@ impl Blueprint {
     }
 
     /// Adds a `BIGINT` column meant to hold a foreign key. It has the type of
-    /// [`id`](Blueprint::id), so after
-    /// [`Schema::use_unsigned_ids`](super::Schema::use_unsigned_ids) it is
-    /// [`unsigned_foreign_id`](Blueprint::unsigned_foreign_id). Call
+    /// [`id`](Blueprint::id), unsigned on MySQL by default. Call
     /// `.constrained(table)` on the result to create the key.
     pub fn foreign_id(&mut self, name: &str) -> ForeignIdBuilder<'_> {
         if super::unsigned_ids() {
@@ -465,7 +462,7 @@ impl Blueprint {
         self.column(name, ColumnKind::Binary)
     }
 
-    /// Adds `created_at` and `updated_at`, both `NOT NULL`, the columns a
+    /// Adds nullable `created_at` and `updated_at`, the columns a
     /// `#[suprnova::model]` writes on every insert.
     ///
     /// They are `VARCHAR(255)` columns on every backend. A model field of
@@ -477,8 +474,8 @@ impl Blueprint {
     /// `AsNativeDateTime` cast, or [`datetimes`](Blueprint::datetimes)
     /// with `AsNaiveDateTime`.
     pub fn timestamps(&mut self) {
-        self.column("created_at", ColumnKind::String);
-        self.column("updated_at", ColumnKind::String);
+        self.column("created_at", ColumnKind::String).nullable();
+        self.column("updated_at", ColumnKind::String).nullable();
     }
 
     /// Adds a nullable `deleted_at`, the column a soft-deleting

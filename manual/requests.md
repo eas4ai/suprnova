@@ -303,8 +303,8 @@ routes! {
 
 ## Authorization and cross-field hooks
 
-The `FormRequest` trait exposes three lifecycle hooks: `authorize`,
-`after_validation`, and `after_validation_async`. Both the `#[request]`
+You use four lifecycle hooks on `FormRequest`: `prepare_for_validation`,
+`authorize`, `after_validation`, and `after_validation_async`. Both the `#[request]`
 attribute and the `#[derive(FormRequestDerive)]` form emit a default
 `impl FormRequest` for you. To override any hook, add the
 `#[form_request(custom_hooks)]` opt-out to suppress the default impl,
@@ -363,8 +363,30 @@ HTTP 403 Forbidden
 rules like "password and confirmation must match". `after_validation_async`
 is the asynchronous counterpart and is where database-backed rules
 (e.g. the built-in `Unique`) participate in automatic validation. Both
-fire after the per-field `validator` rules pass; `extract` bails at the
-first failing stage.
+run after the derived rules on a real request, even when those rules report
+errors. You get one merged error bag from the rules and both hooks. An
+empty error bag counts as success. For marked Precognition requests, you
+keep the stage rules described in [Precognition](precognition.md).
+
+You prepare input before authorization with `prepare_for_validation`:
+
+```rust,ignore
+fn prepare_for_validation(req: &mut Request) -> Result<(), suprnova::FrameworkError> {
+    req.transform_input("email", |text| text.to_ascii_lowercase());
+    Ok(())
+}
+```
+
+You register a transformation without reading the body. The parser applies
+it after authorization, before validation. Your JSON names use dotted
+paths; your form and multipart names use the submitted field name. You
+return an error to stop preparation before authorization or a body read.
+
+For a classic form whose `Accept` prefers `text/html` without `X-Inertia`,
+you get a `302` redirect back with `errors.default` and old input flashed
+to the session. You read old text with `session.get_old_input(key)` on the
+next request. You keep `422` errors for JSON and the Inertia middleware's
+`303` redirect for Inertia visits.
 
 ```rust
 use suprnova::{FormRequest, FormRequestDerive, ValidationErrors};
@@ -784,7 +806,8 @@ Built-in validators in `suprnova::http::upload::validators`:
   (Named after Laravel's own rule; the plain `Image` name belongs to the
   image-manipulation pipeline - see [Images](images.md).)
 - `MimeType<L>` - accepts a fixed allowlist provided by your own
-  `MimeAllowlist` type. The type is detected from the file's magic bytes.
+  `MimeAllowlist` type. You can allow `image/*` to admit any image subtype.
+  The type is detected from the file's magic bytes.
   The client's `Content-Type` counts only for bytes that carry no magic
   (`text/csv`, `application/json`), never for a type that has some: bytes
   that aren't a PNG don't pass as `image/png` whatever the header claims.
@@ -957,15 +980,22 @@ impl MultipartRequestHooks for NewAlbum {
 }
 ```
 
-The stages run in this order, each only after the one before it
-succeeded:
+You run these stages in order:
 
-1. `authorize`, before any byte of the body is read. `false` answers `403`.
-2. The extraction, with each field's validation.
-3. `after_validation`.
-4. `after_validation_async`, where database checks such as `Unique` and
-   `Exists` go.
-5. The handler.
+1. `prepare_for_validation`, where you register `Request::transform_input`
+   changes before authorization.
+2. `authorize`, before any byte of the body is read. `false` answers `403`.
+3. Extraction and field validation.
+4. `after_validation`.
+5. `after_validation_async`, where you use database checks such as `Unique`.
+6. The handler, only when the merged error bag is empty.
+
+You run both hooks for a real request with a constructed value, even when
+field validation reports errors. You stop before hooks on a streaming
+failure or when missing or malformed scalar input prevents construction.
+A marked request keeps the [Precognition](precognition.md) stage rules.
+You get a redirect with flashed errors and old text input for a classic
+HTML form, as with a form request.
 
 A hook's non-empty `ValidationErrors` answers `422` like a field failure;
 an empty set counts as success. Hook errors use the same input names: an

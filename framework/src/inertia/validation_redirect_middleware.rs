@@ -113,7 +113,12 @@ impl Middleware for InertiaValidationRedirectMiddleware {
 /// `current` is the request's URL with its public root, and the session
 /// records the previous URL with it, so every fallback carries the root
 /// once (PFX-005).
-fn back_target(referer: Option<&str>, host: Option<&str>, root: &str, current: &str) -> String {
+pub(crate) fn back_target(
+    referer: Option<&str>,
+    host: Option<&str>,
+    root: &str,
+    current: &str,
+) -> String {
     if let Some(from_referer) = referer.and_then(|r| same_origin_path(r, host, root)) {
         return from_referer;
     }

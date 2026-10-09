@@ -1402,6 +1402,16 @@ struct Staged {
 
 #[async_trait::async_trait]
 impl MultipartRequestHooks for Staged {
+    fn prepare_for_validation(req: &mut Request) -> Result<(), suprnova::FrameworkError> {
+        let run = req.header("X-Run").unwrap_or_default().to_string();
+        record(&run, "prepare_for_validation");
+        req.transform_input("fail", |text| text.to_ascii_lowercase());
+        if req.header("X-Prepare-Deny").is_some() {
+            return Err(suprnova::FrameworkError::Unauthorized);
+        }
+        Ok(())
+    }
+
     fn authorize(req: &Request) -> bool {
         let run = req.header("X-Run").unwrap_or_default().to_string();
         record(&run, "authorize");
@@ -1414,7 +1424,7 @@ impl MultipartRequestHooks for Staged {
     fn after_validation(&self) -> Result<(), ValidationErrors> {
         record(&self.run, "after_validation");
         let mut errs = ValidationErrors::new();
-        if self.fail == "sync" {
+        if ["sync", "both"].contains(&self.fail.as_str()) {
             errs.add("scan.0", "Rejected by the sync hook.");
         }
         // Empty unless this run fails here: success.
@@ -1426,7 +1436,7 @@ impl MultipartRequestHooks for Staged {
         tokio::task::yield_now().await;
         record(&self.run, "after_validation_async");
         let mut errs = ValidationErrors::new();
-        if self.fail == "async" {
+        if ["async", "both"].contains(&self.fail.as_str()) {
             errs.add("scan.0", "Rejected by the async hook.");
         }
         Err(errs)
@@ -1479,7 +1489,7 @@ async fn staged_run(
 }
 
 #[tokio::test]
-async fn the_stages_run_in_order_each_only_after_the_one_before_succeeded() {
+async fn the_stages_run_in_order_and_hooks_merge_validation_failures() {
     let app = App::new(Router::new().post("/staged", staged));
 
     let (reply, ran) = staged_run(&app, "none", "ok", false).await;
@@ -1487,6 +1497,7 @@ async fn the_stages_run_in_order_each_only_after_the_one_before_succeeded() {
     assert_eq!(
         ran,
         [
+            "prepare_for_validation",
             "authorize",
             "extraction",
             "after_validation",
@@ -1498,20 +1509,59 @@ async fn the_stages_run_in_order_each_only_after_the_one_before_succeeded() {
 
     let (reply, ran) = staged_run(&app, "none", "ok", true).await;
     assert_eq!(reply.status, 403, "{}", reply.text());
-    assert_eq!(ran, ["authorize"]);
+    assert_eq!(ran, ["prepare_for_validation", "authorize"]);
 
     let (reply, ran) = staged_run(&app, "none", "invalid", false).await;
     assert_eq!(reply.status, 422, "{}", reply.text());
     assert_eq!(first_message(&reply, "scans.0"), "The scan is unreadable.");
-    assert_eq!(ran, ["authorize", "extraction"]);
+    assert_eq!(
+        ran,
+        [
+            "prepare_for_validation",
+            "authorize",
+            "extraction",
+            "after_validation",
+            "after_validation_async"
+        ]
+    );
 
-    let (reply, ran) = staged_run(&app, "sync", "ok", false).await;
+    let (reply, ran) = staged_run(&app, "SYNC", "ok", false).await;
     assert_eq!(reply.status, 422, "{}", reply.text());
     assert_eq!(
         first_message(&reply, "scans.0"),
         "Rejected by the sync hook."
     );
-    assert_eq!(ran, ["authorize", "extraction", "after_validation"]);
+    assert_eq!(
+        ran,
+        [
+            "prepare_for_validation",
+            "authorize",
+            "extraction",
+            "after_validation",
+            "after_validation_async"
+        ]
+    );
+
+    let (reply, ran) = staged_run(&app, "both", "invalid", false).await;
+    assert_eq!(reply.status, 422);
+    assert_eq!(
+        reply.json()["errors"]["scans.0"],
+        json!([
+            "The scan is unreadable.",
+            "Rejected by the sync hook.",
+            "Rejected by the async hook."
+        ])
+    );
+    assert_eq!(
+        ran,
+        [
+            "prepare_for_validation",
+            "authorize",
+            "extraction",
+            "after_validation",
+            "after_validation_async"
+        ]
+    );
 
     let (reply, ran) = staged_run(&app, "async", "ok", false).await;
     assert_eq!(reply.status, 422, "{}", reply.text());
@@ -1522,6 +1572,7 @@ async fn the_stages_run_in_order_each_only_after_the_one_before_succeeded() {
     assert_eq!(
         ran,
         [
+            "prepare_for_validation",
             "authorize",
             "extraction",
             "after_validation",
@@ -2606,4 +2657,381 @@ async fn an_empty_part_of_a_list_that_cannot_hold_null_is_a_missing_element() {
     .await;
     assert_eq!(key(&errors, "tags.1"), "validation-required");
     assert_eq!(errors.errors.len(), 1, "{errors}");
+}
+
+#[derive(Default)]
+struct AnyImage;
+impl suprnova::MimeAllowlist for AnyImage {
+    fn allowed() -> &'static [&'static str] {
+        &["image/*"]
+    }
+}
+
+#[derive(MultipartRequest)]
+struct WildcardImage {
+    #[field("image")]
+    image: UploadedFile<suprnova::MimeType<AnyImage>>,
+}
+
+#[tokio::test]
+async fn a_mime_type_wildcard_accepts_images_and_refuses_other_types() {
+    for (content, accepted) in [(png(), true), (pdf(), false), (b"fake PNG".to_vec(), false)] {
+        let req = crate::common::request_from_multipart(
+            BOUNDARY,
+            form(&[file_part("image", "x.png", "image/png", &content)]).into(),
+        )
+        .await;
+        match WildcardImage::from_request(req).await {
+            Ok(form) => {
+                assert!(accepted);
+                assert!(form.image.size > 0);
+            }
+            Err(FrameworkError::Validation(errors)) => {
+                assert!(!accepted);
+                assert_eq!(key(&errors, "image"), "validation-mimetypes");
+            }
+            other => panic!("unexpected outcome: {:?}", other.err()),
+        }
+    }
+}
+
+#[derive(serde::Deserialize, validator::Validate)]
+struct HookSignup {
+    #[validate(email)]
+    email: String,
+    name: String,
+}
+
+#[async_trait::async_trait]
+impl suprnova::FormRequest for HookSignup {
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        if self.name == "sync" {
+            errors.add("name", "sync failure");
+        }
+        Err(errors)
+    }
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        if self.name == "sync" {
+            errors.add("name", "async failure");
+        }
+        Err(errors)
+    }
+}
+
+async fn hook_signup(req: Request) -> Response {
+    let form = HookSignup::from_request(req).await?;
+    Ok(HttpResponse::json(
+        json!({"email": form.email, "name": form.name}),
+    ))
+}
+
+#[tokio::test]
+async fn real_form_requests_merge_derived_sync_and_async_errors() {
+    let app = App::new(Router::new().post("/signup", hook_signup));
+    let reply = send(
+        &app,
+        Outgoing::post("/signup", b"email=bad&name=sync".to_vec())
+            .content_type("application/x-www-form-urlencoded"),
+    )
+    .await;
+    assert_eq!(reply.status, 422);
+    assert!(errors(&reply).contains_key("email"));
+    assert_eq!(
+        reply.json()["errors"]["name"],
+        json!(["sync failure", "async failure"])
+    );
+    let reply = send(
+        &app,
+        Outgoing::post("/signup", b"email=valid@example.test&name=none".to_vec())
+            .content_type("application/x-www-form-urlencoded"),
+    )
+    .await;
+    assert_eq!(reply.status, 200);
+}
+
+#[tokio::test]
+async fn classic_forms_redirect_back_with_errors_and_old_input() {
+    let slot = suprnova::session::new_session_slot_for_test();
+    let app = App::with(
+        Router::new()
+            .post("/signup", hook_signup)
+            .post("/gallery", gallery),
+        MiddlewareRegistry::new().append(SeededSessionScope(slot.clone())),
+    );
+    for (path, content_type, body, field, old) in [
+        (
+            "/signup",
+            "application/x-www-form-urlencoded",
+            b"email=bad&name=sync".to_vec(),
+            "email",
+            "bad",
+        ),
+        (
+            "/gallery",
+            "multipart/form-data; boundary=par043boundary",
+            form(&[
+                text_part("title", "Trip"),
+                file_part("files[]", "bad.pdf", "application/pdf", &pdf()),
+            ]),
+            "files.0",
+            "Trip",
+        ),
+    ] {
+        let reply = send(
+            &app,
+            Outgoing::post(path, body)
+                .content_type(content_type)
+                .header("Accept", "text/html, application/json;q=0.5")
+                .header("Referer", "http://localhost/form"),
+        )
+        .await;
+        assert_eq!(reply.status, 302, "{}", reply.text());
+        assert_eq!(
+            reply.headers.get("location").map(String::as_str),
+            Some("/form")
+        );
+        let mut session = slot.lock().expect("slot");
+        let session = session.as_mut().expect("session");
+        session.age_flash_data();
+        let errors: Value = session.get_flash("errors.default").expect("flashed errors");
+        assert!(errors.get(field).is_some(), "{errors}");
+        let old_key = if path == "/signup" { "email" } else { "title" };
+        assert_eq!(
+            session.get_old_input::<String>(old_key).as_deref(),
+            Some(old)
+        );
+    }
+}
+
+#[tokio::test]
+async fn preparation_failure_stops_authorization_and_body_reads() {
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let app = App::new(Router::new().post("/staged", staged));
+    let reply = send(
+        &app,
+        Outgoing::post("/staged", vec![])
+            .header("X-Run", run.clone())
+            .header("X-Prepare-Deny", "1")
+            .header("Content-Length", "999999999"),
+    )
+    .await;
+    assert_eq!(reply.status, 403);
+    assert_eq!(stages(&run), ["prepare_for_validation"]);
+}
+
+#[derive(serde::Deserialize, validator::Validate)]
+struct PreparedSignup {
+    #[validate(email)]
+    email: String,
+}
+
+impl suprnova::FormRequest for PreparedSignup {
+    fn prepare_for_validation(req: &mut Request) -> Result<(), suprnova::FrameworkError> {
+        let run = req.header("X-Run").unwrap_or_default().to_string();
+        record(&run, "prepare_for_validation");
+        req.transform_input("email", |text| text.trim().to_ascii_lowercase());
+        if req.header("X-Prepare-Deny").is_some() {
+            return Err(suprnova::FrameworkError::Unauthorized);
+        }
+        Ok(())
+    }
+    fn authorize(req: &Request) -> bool {
+        let run = req.header("X-Run").unwrap_or_default().to_string();
+        record(&run, "authorize");
+        if let Some(gate) = gates().lock().expect("gates").get(&run) {
+            gate.notify_one();
+        }
+        req.header("X-Deny").is_none()
+    }
+}
+
+async fn prepared_signup(req: Request) -> Response {
+    use suprnova::FormRequest;
+    let form = PreparedSignup::extract(req).await?;
+    Ok(HttpResponse::json(json!({"email": form.email})))
+}
+
+#[tokio::test]
+async fn form_preparation_normalizes_every_body_shape_before_validation() {
+    let app = App::new(Router::new().post("/prepared", prepared_signup));
+    let bodies = [
+        (
+            "application/json",
+            br#"{"email":" ADA@EXAMPLE.COM "}"#.to_vec(),
+        ),
+        (
+            "application/x-www-form-urlencoded",
+            b"email=%20ADA%40EXAMPLE.COM%20".to_vec(),
+        ),
+        (
+            "multipart/form-data; boundary=par043boundary",
+            form(&[text_part("email", " ADA@EXAMPLE.COM ")]),
+        ),
+    ];
+    for (content_type, body) in bodies {
+        let run = uuid::Uuid::new_v4().simple().to_string();
+        let gate = Arc::new(Notify::new());
+        gates()
+            .lock()
+            .expect("gates")
+            .insert(run.clone(), gate.clone());
+        let reply = send(
+            &app,
+            Outgoing::post("/prepared", body)
+                .content_type(content_type)
+                .header("X-Run", run.clone())
+                .gated(gate),
+        )
+        .await;
+        gates().lock().expect("gates").remove(&run);
+        assert_eq!(reply.status, 200, "{}", reply.text());
+        assert_eq!(reply.json()["email"], "ada@example.com");
+        assert_eq!(stages(&run), ["prepare_for_validation", "authorize"]);
+    }
+    for (header, expected) in [
+        ("X-Prepare-Deny", vec!["prepare_for_validation"]),
+        ("X-Deny", vec!["prepare_for_validation", "authorize"]),
+    ] {
+        let run = uuid::Uuid::new_v4().simple().to_string();
+        let reply = send(
+            &app,
+            Outgoing::post("/prepared", vec![])
+                .content_type("application/json")
+                .header("Content-Length", "999999999")
+                .header("X-Run", run.clone())
+                .header(header, "1"),
+        )
+        .await;
+        assert_eq!(reply.status, 403);
+        assert_eq!(stages(&run), expected);
+    }
+}
+
+#[derive(MultipartRequest)]
+struct HtmlLimited {
+    #[field("title")]
+    title: String,
+    #[field("file")]
+    file: UploadedFile<MaxSize<16>>,
+}
+
+async fn html_limited(req: Request) -> Response {
+    let form = HtmlLimited::from_request(req).await?;
+    Ok(HttpResponse::json(
+        json!({"title": form.title, "size": form.file.size}),
+    ))
+}
+
+#[tokio::test]
+async fn streaming_html_validation_flashes_completed_text_without_reading_the_tail() {
+    let slot = suprnova::session::new_session_slot_for_test();
+    let app = App::with(
+        Router::new().post("/limited", html_limited),
+        MiddlewareRegistry::new().append(SeededSessionScope(slot.clone())),
+    );
+    let body = form(&[
+        text_part("title", "Draft"),
+        file_part("file", "large.bin", "application/octet-stream", &[1; 32]),
+    ]);
+    let reply = send(
+        &app,
+        Outgoing::post("/limited", body)
+            .header("Accept", "text/html")
+            .header("Referer", "/form"),
+    )
+    .await;
+    assert_eq!(reply.status, 302, "{}", reply.text());
+    let mut session = slot.lock().expect("slot");
+    let session = session.as_mut().expect("session");
+    session.age_flash_data();
+    let errors: Value = session.get_flash("errors.default").expect("flashed errors");
+    assert!(errors.get("file").is_some(), "{errors}");
+    assert_eq!(
+        session.get_old_input::<String>("title").as_deref(),
+        Some("Draft")
+    );
+    assert!(session.get_old_input::<Value>("file").is_none());
+}
+
+#[derive(MultipartRequest)]
+#[multipart(custom_hooks)]
+struct PreparedMultipart {
+    #[field("email")]
+    email: String,
+}
+
+impl MultipartRequestHooks for PreparedMultipart {
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |text| text.trim().to_ascii_lowercase());
+        Ok(())
+    }
+
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        if self.email != "ada@example.com" {
+            errors.add("email", "Preparation must precede the hook.");
+        }
+        errors.into_result()
+    }
+}
+
+async fn prepared_multipart(req: Request) -> Response {
+    let form = PreparedMultipart::from_request(req).await?;
+    Ok(HttpResponse::json(json!({"email": form.email})))
+}
+
+#[tokio::test]
+async fn multipart_preparation_reaches_the_hooks_and_handler() {
+    let app = App::new(Router::new().post("/prepared", prepared_multipart));
+    let reply = send(
+        &app,
+        Outgoing::post(
+            "/prepared",
+            form(&[text_part("email", " ADA@EXAMPLE.COM ")]),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["email"], "ada@example.com");
+}
+
+#[tokio::test]
+async fn preparation_also_precedes_selected_live_validation() {
+    let app = App::with(
+        Router::new()
+            .post("/prepared", prepared_signup)
+            .get("/prepared", prepared_signup),
+        MiddlewareRegistry::new().append(suprnova::Precognitive),
+    );
+    let requests = [
+        Outgoing::post("/prepared", br#"{"email":" ADA@EXAMPLE.COM "}"#.to_vec())
+            .content_type("application/json"),
+        Outgoing::post("/prepared", b"email=%20ADA%40EXAMPLE.COM%20".to_vec())
+            .content_type("application/x-www-form-urlencoded"),
+        Outgoing::post(
+            "/prepared",
+            form(&[text_part("email", " ADA@EXAMPLE.COM ")]),
+        ),
+        Outgoing::get("/prepared?email=%20ADA%40EXAMPLE.COM%20"),
+    ];
+    for request in requests {
+        let reply = send(
+            &app,
+            request
+                .header("Precognition", "true")
+                .header("Precognition-Validate-Only", "email")
+                .header("Accept", "text/html"),
+        )
+        .await;
+        assert_eq!(reply.status, 204, "{}", reply.text());
+        assert_eq!(
+            reply
+                .headers
+                .get("precognition-success")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
 }

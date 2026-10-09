@@ -173,3 +173,53 @@ fn a_broken_dump_stops_serve_even_in_best_effort_mode() {
     assert!(stderr.contains("schema dump"), "{stderr}");
     assert!(!status.success(), "serve exits with an error");
 }
+
+#[test]
+fn the_app_binary_can_leave_migration_data_out() {
+    let dir = tempfile::tempdir().expect("directory");
+    run(dir.path(), &["migrate"]);
+    run(dir.path(), &["schema:dump", "--without-migration-data"]);
+    let sql = std::fs::read_to_string(dir.path().join("database/schema/sqlite-schema.sql"))
+        .expect("dump");
+    assert!(sql.contains("seaql_migrations"), "ledger schema stays");
+    assert!(ledger(&sql).is_empty(), "ledger rows stay out");
+}
+
+#[test]
+fn the_app_binary_dumps_the_named_connection_and_names_an_unknown_one() {
+    let dir = tempfile::tempdir().expect("directory");
+    run(dir.path(), &["migrate"]);
+    let reporting = dir.path().join("reporting.sqlite");
+    let url = format!("sqlite://{}?mode=rwc", reporting.display());
+    let migrated = app(dir.path(), &["migrate"])
+        .env("DATABASE_URL", &url)
+        .output()
+        .expect("migrate reporting");
+    assert!(migrated.status.success(), "{}", combined(&migrated));
+    std::fs::remove_file(dir.path().join("app.sqlite")).expect("remove default database");
+    let dumped = app(dir.path(), &["schema:dump", "--database", "reporting"])
+        .env("DATABASE_REPORTING_URL", &url)
+        .output()
+        .expect("dump reporting");
+    assert!(dumped.status.success(), "{}", combined(&dumped));
+    assert!(
+        !dir.path().join("app.sqlite").exists(),
+        "default database is never opened"
+    );
+    let sql = std::fs::read_to_string(dir.path().join("database/schema/sqlite-schema.sql"))
+        .expect("dump");
+    assert!(!ledger(&sql).is_empty(), "named database's ledger");
+    for name in ["never_configured", "never-configured", ""] {
+        let unknown = app(dir.path(), &["schema:dump", "--database", name])
+            .env_remove("DATABASE_NEVER_CONFIGURED_URL")
+            .output()
+            .expect("unknown connection");
+        assert!(!unknown.status.success());
+        assert!(combined(&unknown).contains(&format!("`{name}`")));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("database/schema/sqlite-schema.sql"))
+                .expect("previous dump"),
+            sql
+        );
+    }
+}

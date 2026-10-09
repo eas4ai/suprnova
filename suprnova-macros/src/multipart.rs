@@ -1,11 +1,11 @@
 //! `#[derive(MultipartRequest)]` - strongly-typed multipart extractor.
 //!
 //! Emits two impls per struct:
-//! 1. `impl FromRequest` - runs the stages in order: `authorize`, the
+//! 1. `impl FromRequest` - runs preparation, `authorize`, the
 //!    body parsed once via `parse_multipart_for_extractor` with each
 //!    `(name, value)` dispatched to its field, `after_validation`,
-//!    `after_validation_async`. Each runs only after the one before it
-//!    succeeded.
+//!    `after_validation_async`. Real requests merge validation failures;
+//!    Precognition keeps its stage gates.
 //! 2. `impl MultipartRequestHooks` - empty default unless the struct
 //!    carries `#[multipart(custom_hooks)]`, in which case the user
 //!    provides their own impl.
@@ -445,10 +445,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     let expanded = quote! {
         #[::suprnova::__async_trait::async_trait]
         impl ::suprnova::http::FromRequest for #struct_name {
-            async fn from_request(req: ::suprnova::http::Request)
+            async fn from_request(mut req: ::suprnova::http::Request)
                 -> ::core::result::Result<Self, ::suprnova::FrameworkError>
             {
-                // Stage 1: authorize, before any byte of the body is read.
+                <Self as ::suprnova::http::upload::MultipartRequestHooks>::prepare_for_validation(&mut req)?;
+                let __target = req.validation_redirect_target();
+                // Authorization precedes every body read.
                 if !<Self as ::suprnova::http::upload::MultipartRequestHooks>::authorize(&req) {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::Unauthorized);
                 }
@@ -516,6 +518,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     },
                 ).await?;
 
+                let __old_input = if __target.is_some() {
+                    ::suprnova::Request::multipart_old_input(&__payload)?
+                } else {
+                    ::suprnova::serde_json::Value::Null
+                };
                 #(#field_decls)*
                 let mut __errors = ::suprnova::ValidationErrors::new();
 
@@ -534,16 +541,10 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 let __selected_errors = __only.as_ref().map(|__only| __errors.retain_fields(__only));
                 let __reported_errors = __selected_errors.as_ref().unwrap_or(&__errors);
 
-                // A field failed: answer with every field's errors. The
-                // values built so far drop here, removing their temp files.
-                if !__reported_errors.is_empty() {
-                    let __errors = __reported_errors.clone();
+                // Precognition stops at selected field errors before either hook.
+                if __precognitive && !__reported_errors.is_empty() {
                     return ::core::result::Result::Err(
-                        if __precognitive {
-                            ::suprnova::FrameworkError::PrecognitionFailure(__errors)
-                        } else {
-                            ::suprnova::FrameworkError::validation_errors(__errors)
-                        },
+                        ::suprnova::FrameworkError::PrecognitionFailure(__reported_errors.clone()),
                     );
                 }
 
@@ -554,38 +555,25 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     ::suprnova::http::upload::hook_error_key(__key, &[ #(#hook_name_pairs),* ])
                 }
 
-                // Stage 3: the synchronous hook. An empty set is success.
-                // (A `match`, not a let chain: the expansion compiles in the
-                // caller's edition.)
-                match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed) {
-                    ::core::result::Result::Err(errs) if !errs.is_empty() => {
-                        return ::core::result::Result::Err(
-                            if __precognitive {
-                                  ::suprnova::FrameworkError::PrecognitionFailure(errs.rename_keys(__input_name))
-                              } else {
-                                  ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name))
-                              },
-                        );
+                if let ::core::result::Result::Err(errs) = <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation(&__constructed) {
+                    let errs = errs.rename_keys(__input_name);
+                    if __precognitive && !errs.is_empty() {
+                        return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionFailure(errs));
                     }
-                    _ => {}
+                    __errors.merge(errs);
                 }
-
-                // Stage 4: the async hook, only once the sync one passed.
-                match <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed).await {
-                    ::core::result::Result::Err(errs) if !errs.is_empty() => {
-                        return ::core::result::Result::Err(
-                            if __precognitive {
-                                  ::suprnova::FrameworkError::PrecognitionFailure(errs.rename_keys(__input_name))
-                              } else {
-                                  ::suprnova::FrameworkError::validation_errors(errs.rename_keys(__input_name))
-                              },
-                        );
+                if let ::core::result::Result::Err(errs) = <Self as ::suprnova::http::upload::MultipartRequestHooks>::after_validation_async(&__constructed).await {
+                    let errs = errs.rename_keys(__input_name);
+                    if __precognitive && !errs.is_empty() {
+                        return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionFailure(errs));
                     }
-                    _ => {}
+                    __errors.merge(errs);
                 }
-
                 if __precognitive {
                     return ::core::result::Result::Err(::suprnova::FrameworkError::PrecognitionSuccess);
+                }
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(::suprnova::Request::validation_failure(__errors, __target, __old_input));
                 }
                 ::core::result::Result::Ok(__constructed)
             }
@@ -640,9 +628,7 @@ fn push_required(
                 });
                 ::suprnova::FrameworkError::PrecognitionFailure(__field_errors)
             } else {
-                ::suprnova::FrameworkError::internal(
-                    format!("multipart field '{}' was neither extracted nor reported", #field_name_str)
-                )
+                ::suprnova::Request::validation_failure(__errors.clone(), __target.clone(), __old_input.clone())
             }
         })?,
     });

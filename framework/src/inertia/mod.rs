@@ -29,7 +29,7 @@ mod runtime;
 mod shared;
 pub(crate) mod ssr;
 mod ssr_gateway;
-mod validation_redirect_middleware;
+pub(crate) mod validation_redirect_middleware;
 mod version_middleware;
 pub(crate) mod visit;
 

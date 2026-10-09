@@ -186,3 +186,27 @@ async fn a_directory_module_is_pruned_with_its_directory() {
     );
     assert!(!dir.join(USERS).exists());
 }
+
+#[tokio::test]
+async fn pruning_without_migration_data_uses_the_live_ledger() {
+    let _lock = cases::exclusive().await;
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let dir = migrations(root.path());
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        root.path().join("app.sqlite").display()
+    );
+    SchemaDump::migrate::<cases::First>(&url, None)
+        .await
+        .expect("migrate");
+    let path = root.path().join("without-ledger.sql");
+    let pruned = SchemaDump::dump_and_prune_with_options::<cases::First>(&url, &path, &dir, true)
+        .await
+        .expect("dump and prune");
+    assert_eq!(pruned, [USERS, POSTS]);
+    let sql = fs::read_to_string(path).expect("read dump");
+    assert!(!sql.contains(USERS));
+    assert!(!sql.contains(POSTS));
+    assert!(!dir.join(format!("{USERS}.rs")).exists());
+    assert!(dir.join(format!("{COMMENTS}.rs")).exists());
+}

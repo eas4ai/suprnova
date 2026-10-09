@@ -470,6 +470,8 @@ pub use strings::Str;
 // against the version Suprnova links.
 pub use ::chrono_tz;
 pub use ::chrono_tz::Tz;
+/// Exposes migration defaults and the schema builder without colliding with SeaORM's `Schema`.
+pub use schema::Schema as MigrationSchema;
 pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{

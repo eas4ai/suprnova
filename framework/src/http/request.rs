@@ -202,7 +202,102 @@ fn forwarded_address(entry: &str) -> Option<std::net::IpAddr> {
 /// per-address connection cap, for one.
 pub(crate) type ConnectionHold = Box<dyn std::any::Any + Send + Sync>;
 
+/// Deferred text normalization registered before authorization without reading the body.
+type InputTransform = std::sync::Arc<dyn Fn(String) -> String + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct InputTransforms(Vec<(String, InputTransform)>);
+
 impl Request {
+    /// Registers text normalization so preparation precedes authorization without consuming input.
+    ///
+    /// Form and multipart extractors apply transformations in registration order to matching input names.
+    /// JSON uses dotted paths for nested fields. Forms use their submitted field names.
+    pub fn transform_input<F>(&mut self, name: impl Into<String>, transform: F)
+    where
+        F: Fn(String) -> String + Send + Sync + 'static,
+    {
+        if self.parts.extensions.get::<InputTransforms>().is_none() {
+            self.parts.extensions.insert(InputTransforms::default());
+        }
+        if let Some(transforms) = self.parts.extensions.get_mut::<InputTransforms>() {
+            transforms
+                .0
+                .push((name.into(), std::sync::Arc::new(transform)));
+        }
+    }
+
+    pub(crate) fn has_prepared_input(&self) -> bool {
+        self.parts.extensions.get::<InputTransforms>().is_some()
+    }
+
+    pub(crate) fn prepared_input(&self) -> impl Fn(&str, String) -> String + Send + Sync + 'static {
+        let transforms = self
+            .parts
+            .extensions
+            .get::<InputTransforms>()
+            .cloned()
+            .unwrap_or_default();
+        move |name, mut value| {
+            for (field, transform) in &transforms.0 {
+                if field == name {
+                    value = transform(value);
+                }
+            }
+            value
+        }
+    }
+
+    /// Resolves classic form redirects before extraction consumes the request.
+    #[doc(hidden)]
+    pub fn validation_redirect_target(&self) -> Option<String> {
+        if self.is_precognitive()
+            || self.is_inertia()
+            || self.header("Accept").is_none()
+            || self.prefers(&["text/html", "application/json"]).as_deref() != Some("text/html")
+        {
+            return None;
+        }
+        Some(crate::inertia::validation_redirect_middleware::back_target(
+            self.header("Referer"),
+            self.http_host().as_deref(),
+            &self.public_root(),
+            &crate::routing::url::current(self),
+        ))
+    }
+
+    /// Keeps generated extractors and form requests on the same failure response path.
+    #[doc(hidden)]
+    pub fn validation_failure(
+        errors: crate::ValidationErrors,
+        target: Option<String>,
+        input: serde_json::Value,
+    ) -> FrameworkError {
+        match target {
+            Some(location) => FrameworkError::ValidationRedirect {
+                location,
+                errors: Box::new(errors),
+                input: Box::new(input),
+            },
+            None => FrameworkError::validation_errors(errors),
+        }
+    }
+
+    /// Retains only multipart text input so redirects never flash uploaded files.
+    #[doc(hidden)]
+    pub fn multipart_old_input(
+        payload: &super::upload::MultipartPayload,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        for (name, value) in &payload.fields {
+            if let super::upload::MultipartValue::Text(text) = value {
+                form.append_pair(name, text);
+            }
+        }
+        super::input::parse_form_input(form.finish().as_bytes())
+            .map_err(|error| error.into_framework_error("Failed to retain form input"))
+    }
+
     /// Wrap a hyper request, splitting off the streaming body. Used by
     /// the server's request pipeline; in-process tests construct via
     /// [`crate::testing`] helpers instead.

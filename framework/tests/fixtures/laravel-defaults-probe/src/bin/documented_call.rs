@@ -3,7 +3,7 @@
 //! the one documented call, before its first migration.
 
 fn main() -> std::process::ExitCode {
-    suprnova::schema::Schema::use_unsigned_ids();
+    suprnova::schema::Schema::set_unsigned_ids(false);
     match suprnova::tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

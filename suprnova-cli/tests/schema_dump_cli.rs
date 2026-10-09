@@ -117,3 +117,25 @@ fn the_docker_images_carry_the_dumps_and_a_client() {
         );
     }
 }
+
+#[test]
+fn schema_dump_forwards_connection_and_without_migration_data() {
+    let dir = project();
+    assert_eq!(
+        app_arguments(
+            &dir,
+            &[
+                "schema:dump",
+                "--database",
+                "reporting",
+                "--without-migration-data"
+            ]
+        ),
+        [
+            "schema:dump",
+            "--database",
+            "reporting",
+            "--without-migration-data"
+        ]
+    );
+}
