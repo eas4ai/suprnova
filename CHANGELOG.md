@@ -1016,6 +1016,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`route_has`.** Returns true only when every route name in a list is
   registered, as Laravel's `Route::has` does.
 
+- **Encrypters with their own key.** `Encrypter::new(key)` encrypts and
+  decrypts with `encrypt_string_for`, `decrypt_string_for`, `encrypt` and
+  `decrypt` under the key you give it, and leaves `Crypt` as it was. It
+  writes the payload `Crypt` writes, so a value either one wrote under a key
+  opens with the other.
+- **Key generation that returns its error.** `EncryptionKey::try_generate`
+  and `Crypt::try_generate_key` return the refusal of the operating system
+  random source as an error, where `EncryptionKey::generate` panics.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`

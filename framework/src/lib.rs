@@ -158,7 +158,9 @@ pub use config::{
 };
 pub use container::{App, Container};
 pub use context::{Context, ContextSnapshot, ContextStore};
-pub use crypto::{AadVersion, Crypt, CryptPurpose, DecryptOrigin, EncryptionKey, KeyOrigin};
+pub use crypto::{
+    AadVersion, Crypt, CryptPurpose, DecryptOrigin, Encrypter, EncryptionKey, KeyOrigin,
+};
 pub use csrf::{CsrfMiddleware, OriginPolicy, csrf_field, csrf_meta_tag, csrf_token};
 pub use data::{
     Field, IncludeError, IncludeMiddleware, IsRelationLoaded, RequestIncludeSet,
