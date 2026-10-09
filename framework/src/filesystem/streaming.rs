@@ -44,6 +44,8 @@ const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 ///
 /// # Errors
 ///
+/// - `FrameworkError::Domain` with status 400 if both paths name the same
+///   object, so a move cannot delete its own destination.
 /// - `FrameworkError::Internal` if either disk is not registered, the source
 ///   object cannot be opened, the destination cannot be opened, a chunk read
 ///   fails mid-stream, a chunk write fails, or the final close fails. Each
@@ -62,8 +64,8 @@ pub async fn copy_between_disks(
 ) -> Result<u64, FrameworkError> {
     let src_op = src.into().resolve()?;
     let dest_op = dest.into().resolve()?;
-    if std::sync::Arc::ptr_eq(src_op.service(), dest_op.service())
-        && opendal::raw::normalize_path(src_path) == opendal::raw::normalize_path(dest_path)
+    if opendal::raw::normalize_path(src_path) == opendal::raw::normalize_path(dest_path)
+        && same_storage(&src_op, &dest_op).await
     {
         return Err(FrameworkError::bad_request(
             "source and destination paths must differ on the same disk",
@@ -91,6 +93,37 @@ pub async fn copy_between_disks(
         WriterGuard::new(dest_op.clone(), "destination", dest_path, writer).preserve_destination();
     let result = stream_to_writer(reader, guard.writer()).await;
     guard.settle(result).await
+}
+
+/// Identify shared storage across layers and registrations to reject self-copies.
+async fn same_storage(source: &Operator, destination: &Operator) -> bool {
+    if std::sync::Arc::ptr_eq(source.service(), destination.service()) {
+        return true;
+    }
+    let source_info = source.info();
+    let destination_info = destination.info();
+    if source_info.scheme() != destination_info.scheme()
+        || source_info.name() != destination_info.name()
+    {
+        return false;
+    }
+    let source_root = source_info.root();
+    let destination_root = destination_info.root();
+    if source_root == destination_root {
+        return true;
+    }
+    if source_info.scheme() != "fs" {
+        return false;
+    }
+    // Existing directories can have different spellings through symlinks.
+    // Unresolved roots have no proven identity beyond the comparison above.
+    match (
+        tokio::fs::canonicalize(source_root).await,
+        tokio::fs::canonicalize(destination_root).await,
+    ) {
+        (Ok(source_root), Ok(destination_root)) => source_root == destination_root,
+        _ => false,
+    }
 }
 
 /// Owns the destination writer across the transfer loop so cleanup runs on
