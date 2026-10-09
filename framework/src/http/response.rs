@@ -428,8 +428,51 @@ impl HttpResponse {
     /// ran out of time - rather than returning a `FrameworkError` through
     /// `From<FrameworkError>`. The body stays what that code chose for the
     /// client; the report keeps what went wrong.
+    ///
+    /// This reports nothing to [`Exceptions`](crate::Exceptions). A `5xx`
+    /// the framework builds for its own failure attaches its error with
+    /// [`Self::with_reported_error_from`], which reports it too.
     pub(crate) fn with_error_report_from(self, error: &(dyn std::error::Error + 'static)) -> Self {
         self.with_error_report(ErrorReport::from_error(error))
+    }
+
+    /// Attach the report of `error`, as [`Self::with_error_report_from`]
+    /// does, and report `error` through
+    /// [`Exceptions::report`](crate::Exceptions::report) when this response
+    /// is a `5xx` (PAR-111). Call it after the status is set.
+    ///
+    /// `From<FrameworkError>` reports the errors it turns into a `5xx`.
+    /// This reports the errors the framework answers with a `5xx` it builds
+    /// itself, such as the `500` of a session the store could not write, so
+    /// the application's callbacks see both.
+    ///
+    /// The report happens here, where the response is built, and not in
+    /// [`Self::with_error_report_from`]. That one also attaches a new report
+    /// to a response that `From<FrameworkError>` built and reported, so
+    /// reporting there would report a failure twice. A response built here
+    /// never passes through `From<FrameworkError>`, so its error is reported
+    /// once. A status below 500 reports nothing, as a `4xx` from
+    /// `From<FrameworkError>` reports nothing, and a response the
+    /// application built itself is never reported.
+    ///
+    /// The callbacks take a `FrameworkError`. Any other error, such as a
+    /// database driver's error or a Live engine's, is reported as an
+    /// internal error whose message is its source chain.
+    pub(crate) fn with_reported_error_from(
+        self,
+        error: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        if self.status >= 500 {
+            match error.downcast_ref::<FrameworkError>() {
+                Some(error) => crate::error::Exceptions::report(error),
+                // A struct literal, not `FrameworkError::internal`: the
+                // stand-in is no new failure, so it records no frames.
+                None => crate::error::Exceptions::report(&FrameworkError::Internal {
+                    message: crate::error::render_error_chain(error),
+                }),
+            }
+        }
+        self.with_error_report_from(error)
     }
 
     /// Keep the error report of `original`, the response this one

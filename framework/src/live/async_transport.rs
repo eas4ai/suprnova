@@ -134,7 +134,7 @@ impl AsyncRefusal {
     fn into_response(self) -> HttpResponse {
         let response = error_response(self.kind);
         match &self.cause {
-            Some(cause) => response.with_error_report_from(cause),
+            Some(cause) => response.with_reported_error_from(cause),
             None => response,
         }
     }

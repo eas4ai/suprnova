@@ -11,8 +11,12 @@
 //!
 //! - Every `FrameworkError` that `From<FrameworkError> for HttpResponse`
 //!   turns into a `5xx` response. The `ErrorOccurred` event still follows.
+//! - Every error the framework answers with a `5xx` response it builds
+//!   itself, such as the `500` of a changed session the store could not
+//!   write.
 //! - Every failed attempt of a queued job: a handler that returns `Err`
-//!   or panics, and an error `FailOnException` fails the job for.
+//!   or panics, an attempt that runs past its timeout, and an error
+//!   `FailOnException` fails the job for.
 //! - Every error a console command returns, except
 //!   [`FrameworkError::AlreadyReported`], which says the user has seen it.
 //! - Every error the application hands to [`Exceptions::report`].

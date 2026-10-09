@@ -255,7 +255,7 @@ impl Middleware for ThrottleRequestsMiddleware {
                 // report carries it, as the log does.
                 return Err(HttpResponse::text("Service Unavailable")
                     .status(503)
-                    .with_error_report_from(&crate::FrameworkError::internal(format!(
+                    .with_reported_error_from(&crate::FrameworkError::internal(format!(
                         "throttle middleware: named limiter [{name}] not registered - \
                          register it with RateLimiter::define(\"{name}\", |req| ...) at boot"
                     ))));
@@ -522,7 +522,7 @@ async fn build_too_many_attempts_response(
         tracing::error!(error = %e, "rate limiter backend error computing retry-after");
         HttpResponse::text("Internal Server Error")
             .status(500)
-            .with_error_report_from(&e)
+            .with_reported_error_from(&e)
     })?;
     let remaining = 0_i64;
     if let Some(cb) = &limit.response_callback {

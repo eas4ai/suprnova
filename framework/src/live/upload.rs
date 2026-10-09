@@ -237,28 +237,24 @@ pub(crate) async fn handle(request: Request) -> Response {
     let runtime = match super::runtime::LiveRuntime::bind() {
         Ok(runtime) => runtime,
         Err(error) => {
-            return Ok(
-                semantic_error(UploadErrorKind::ProviderUnavailable).with_error_report_from(&error)
-            );
+            return Ok(semantic_error(UploadErrorKind::ProviderUnavailable)
+                .with_reported_error_from(&error));
         }
     };
     if let Err(error) = runtime.ensure_upload_cleanup_runner() {
         return Ok(
-            semantic_error(UploadErrorKind::ProviderUnavailable).with_error_report_from(&error)
+            semantic_error(UploadErrorKind::ProviderUnavailable).with_reported_error_from(&error)
         );
     }
     let response = if control {
         let request = match request.buffer_body(16 * 1024).await {
             Ok(request) => request,
             Err(error) if error.status_code() == 413 => return Ok(closed_response(413)),
-            Err(error) => return Ok(closed_response(500).with_error_report_from(&error)),
+            Err(error) => return Ok(closed_response(500).with_reported_error_from(&error)),
         };
         let Some(body) = request.cached_body() else {
-            return Ok(
-                closed_response(500).with_error_report_from(&FrameworkError::internal(
-                    "the buffered upload control body was missing",
-                )),
-            );
+            let missing = FrameworkError::internal("the buffered upload control body was missing");
+            return Ok(closed_response(500).with_reported_error_from(&missing));
         };
         if !matches!(
             serde_json::from_slice(body),
