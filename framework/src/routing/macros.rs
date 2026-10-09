@@ -55,7 +55,9 @@ use crate::routing::binding::{
     HandlerRef, RouteBindingOptions, boxed_missing, handler_ref, record_of,
 };
 use crate::routing::params::ParamConstraint;
-use crate::routing::router::{ANY_METHODS, BoxedHandler, Router, register_route_name};
+use crate::routing::router::{
+    ANY_METHODS, BoxedHandler, Router, query_method, register_route_name,
+};
 use crate::session::SessionBlock;
 use crate::session::blocking::register_route_block;
 use hyper::Method;
@@ -178,6 +180,8 @@ pub enum HttpMethod {
     Head,
     /// `OPTIONS` - capabilities discovery and CORS preflight.
     Options,
+    /// QUERY carries a read query in its request body.
+    Query,
 }
 
 impl HttpMethod {
@@ -195,6 +199,7 @@ impl HttpMethod {
             HttpMethod::Delete => Method::DELETE,
             HttpMethod::Head => Method::HEAD,
             HttpMethod::Options => Method::OPTIONS,
+            HttpMethod::Query => query_method(),
         }
     }
 }
@@ -352,6 +357,7 @@ where
             HttpMethod::Delete => router.delete(&converted_path, self.handler),
             HttpMethod::Head => router.head(&converted_path, self.handler),
             HttpMethod::Options => router.options(&converted_path, self.handler),
+            HttpMethod::Query => router.query(&converted_path, self.handler),
         };
 
         // Apply any middleware
@@ -627,10 +633,29 @@ where
     RouteDefBuilder::new(HttpMethod::Options, path, handler)
 }
 
+/// Register a QUERY route with path validation so requests with query bodies reach it.
+#[macro_export]
+macro_rules! query {
+    ($path:expr, $handler:expr) => {{
+        const _: &str = $crate::validate_route_path($path);
+        $crate::__query_impl($path, $handler)
+    }};
+}
+
+/// Build a QUERY definition so the macro shares route names and middleware handling.
+#[doc(hidden)]
+pub fn __query_impl<H, Fut>(path: &'static str, handler: H) -> RouteDefBuilder<H>
+where
+    H: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    RouteDefBuilder::new(HttpMethod::Query, path, handler)
+}
+
 /// Create a route that responds to every common HTTP method -
 /// `any!()` is the Laravel `Route::any(...)` equivalent. The handler
 /// is registered against GET, POST, PUT, PATCH, DELETE, HEAD, and
-/// OPTIONS sharing one matchit slot per method (per-method O(1)
+/// OPTIONS and QUERY sharing one matchit slot per method (per-method O(1)
 /// dispatch). `.name()` registers the name once; `.middleware()` fans
 /// out across every method's `(method, path)` middleware key so a
 /// shared auth / CSRF / rate-limit guard cannot accidentally miss a
@@ -670,7 +695,7 @@ macro_rules! any {
 
 /// Internal implementation for `any!()` routes. Returns an
 /// [`AnyRouteDefBuilder`] that records path + handler + optional name
-/// + optional middlewares; the fan-out across seven methods happens
+/// + optional middlewares; the fan-out across eight methods happens
 /// at `.register(router)` time.
 #[doc(hidden)]
 pub fn __any_impl<H, Fut>(path: &'static str, handler: H) -> AnyRouteDefBuilder<H>
@@ -682,7 +707,7 @@ where
 }
 
 /// Macro-layer builder for `any!()` routes. Symmetric with
-/// [`RouteDefBuilder`] but registers across all seven common HTTP
+/// [`RouteDefBuilder`] but registers across all eight common HTTP
 /// methods at `register()` time. The `.name()` and `.middleware()`
 /// chain methods accumulate state for the eventual fan-out - name
 /// fires once, middleware fans out across every verb's
@@ -726,7 +751,7 @@ where
 
     crate::routing::params::where_methods!();
 
-    /// Name this route. Registered once across all seven verbs since
+    /// Name this route. Registered once across all eight verbs since
     /// the path is shared.
     pub fn name(mut self, name: &'static str) -> Self {
         self.name = Some(name);
@@ -1442,6 +1467,9 @@ impl GroupDef {
                         HttpMethod::Options => {
                             router.insert_options(full_path, route.handler);
                         }
+                        HttpMethod::Query => {
+                            router.insert_query(full_path, route.handler);
+                        }
                     }
 
                     // Register route name if present: process-wide for URL
@@ -1490,18 +1518,18 @@ impl GroupDef {
                     // registry of every method in `ANY_METHODS`, in its
                     // order, so this path and `Router::any` register the
                     // same verbs in the same sequence.
-                    for method in ANY_METHODS {
+                    for method in ANY_METHODS.iter() {
                         router.insert_method(method, full_path, any_route.handler.clone());
                     }
 
                     // Name is registered once - the path is shared
-                    // across all seven verbs so reverse-lookup returns
+                    // across all eight verbs so reverse-lookup returns
                     // the same URL no matter which method the caller
                     // is looking up.
                     if let Some(name) = any_route.name {
                         let name = format!("{name_prefix}{name}");
                         register_route_name(&name, full_path);
-                        for method in ANY_METHODS {
+                        for method in ANY_METHODS.iter() {
                             router.note_route_name(method.clone(), full_path, &name);
                         }
                     }
@@ -1511,7 +1539,7 @@ impl GroupDef {
                     // key of every method the handler went to above.
                     // Without this, auth / CSRF / rate-limit attached to
                     // an `any!` route would silently skip some verbs.
-                    for method in ANY_METHODS {
+                    for method in ANY_METHODS.iter() {
                         for mw in &combined_middleware {
                             router.add_middleware(method.clone(), full_path, mw.clone());
                         }
@@ -1604,7 +1632,7 @@ where
     Fut: Future<Output = Response> + Send + 'static,
 {
     /// Convert this `any!()` definition to a type-erased `GroupAnyRoute`
-    /// for use inside `group!{}`. Boxes the handler once; the seven-method
+    /// for use inside `group!{}`. Boxes the handler once; the eight-method
     /// fan-out happens inside `GroupDef::register_with_inherited`.
     pub fn into_group_any_route(self) -> GroupAnyRoute {
         let handler = self.handler;
@@ -2091,7 +2119,7 @@ mod tests {
         );
     }
 
-    /// An `any!` route inside a group lands on each of the seven methods
+    /// An `any!` route inside a group lands on each of the eight methods
     /// with its handler, the group's middleware and the group's session
     /// block. Auth, CSRF and rate limiting hang on these registrations, so
     /// a verb the fan-out skipped would be a verb they never guard.

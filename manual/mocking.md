@@ -280,7 +280,8 @@ async fn order_placed_enqueues_charge() {
 |------------------------------------------------|----------------------------------------------------------------|
 | `assert_pushed::<J>(\|j\| pred)`               | at least one push of `J` matches                               |
 | `assert_pushed_later::<J>(\|j, at\| pred)`     | a push of `J` was scheduled at `at` (delayed dispatch)         |
-| `assert_pushed_on_queue::<J>(queue)`           | a push of `J` declared `queue` via [`EnvelopeOverrides`](queues.md#per-push-overrides-with-envelopeoverrides) |
+| `assert_pushed_on_queue::<J>(queue, \|j\| pred)` | one push has both the queue and matching job data |
+| `assert_not_pushed::<J>(\|j\| pred)` | no push of `J` matches |
 | `assert_pushed_on_connection::<J>(connection)` | a push of `J` declared `connection` via `EnvelopeOverrides`    |
 | `assert_batched(\|batch\| pred)`               | at least one recorded batch matches                            |
 | `assert_batch_count(n)`                        | exactly `n` batches were recorded                              |
@@ -325,15 +326,12 @@ Only `Queue::push_with` and `Queue::later_with` carry an
 `EnvelopeOverrides::default()` for every other entry point - a plain
 `Queue::push` reads under the fake exactly as "no override was
 declared," the same as it would if you asserted `entries[0].1 ==
-EnvelopeOverrides::default()`. `assert_pushed_on_queue` /
-`assert_pushed_on_connection` check the *declared* override, not a
-resolved queue or connection name: `Queue::route` and `Job::queue`/
-`Job::connection` resolution never run under the fake (there's no
-driver push to resolve them for), so a job that would fall through to
-a route or a job-level default in production shows up here with no
-override at all. Reach for `pushed_with_overrides` directly to assert
-anything else the overlay carries - `timeout`, `fail_on_timeout`,
-`max_tries`, `backoff`.
+EnvelopeOverrides::default()`. You use `assert_pushed_on_queue` to match
+both a recorded queue and its typed payload. You match the override when
+one was supplied, otherwise the job's `Job::queue` declaration.
+You use `assert_pushed_on_connection` to check the declared connection
+override. You use `pushed_with_overrides` for the rest of the overlay:
+`timeout`, `fail_on_timeout`, `max_tries` and `backoff`.
 
 One variant lets some jobs through:
 
@@ -378,10 +376,31 @@ async fn order_placed_dispatches_charge() {
 | `assert_dispatched_times::<C>(\|c\| pred, n)`       | exactly `n` dispatched commands of `C` match                  |
 | `assert_nothing_dispatched()`                       | zero commands of any type dispatched under the active fake    |
 
-Under the fake, `Bus::dispatch` returns `Ok(Dispatched::Captured)`
-instead of running the handler. Real failures - encode/decode
-errors, no handler registered before the fake was installed - still
-surface as `Err(_)`. See [Command Bus](bus.md).
+You inspect captured commands with `dispatched::<C>()`,
+`dispatched_sync::<C>()` and `dispatched_after_response::<C>()` in
+`bus::testing` or at the crate root. You receive a `Vec<C>` in dispatch
+order for that mode alone, which you filter with its iterator.
+You receive an empty vector when that type was not dispatched.
+
+You call `Bus::dispatch_sync(command).await` for the separate synchronous
+mode. Under the fake, you receive `Dispatched::Captured` from ordinary or
+synchronous dispatch. You capture commands without registering a handler.
+You still receive an error when command serialization fails.
+
+You call `Bus::dispatch_after_response(command)?` inside your HTTP handler
+when the command should run after its response is sent. You register its
+handler at boot as you do for ordinary dispatch. You wait for the whole body
+and a successful socket flush before its handler starts, including streamed,
+empty and HEAD responses. You get a logged handler error after the response
+is sent; you cannot change that response. You discard the commands when
+writing the response fails. Under the fake, you capture the command at once
+and run no handler, so you need no HTTP request to assert its capture.
+
+You use `after_response_connection(io, |io| async move { ... })` if you
+embed `server::handle_request` in your own Hyper loop. You pass the wrapped
+IO to `TokioIo::new` and build `serve_connection` inside the closure.
+You receive an error from real deferred dispatch outside an active request
+or without that writer hook. You use `Server` to install it automatically.
 
 `Bus::fake()` and `bus::testing::install_fake()` are the same call and return
 the same `BusFakeGuard`. The same holds for `Queue::fake()` and

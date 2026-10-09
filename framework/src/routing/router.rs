@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::identity::RouteIdentity;
 
@@ -702,6 +702,7 @@ pub struct Router {
     delete_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     head_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     options_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
+    query_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
     /// WebSocket route registry. Separate from the HTTP route
     /// registries because the handler type is different
     /// (`BoxedWebSocketHandler` vs `Arc<BoxedHandler>`) and the match
@@ -812,6 +813,7 @@ impl Router {
             delete_routes: MatchitRouter::new(),
             head_routes: MatchitRouter::new(),
             options_routes: MatchitRouter::new(),
+            query_routes: MatchitRouter::new(),
             ws_routes: MatchitRouter::new(),
             route_names: HashMap::new(),
             route_middleware: HashMap::new(),
@@ -1430,6 +1432,25 @@ impl Router {
         Ok(())
     }
 
+    /// Insert a QUERY handler for macro and group registration.
+    pub(crate) fn insert_query(&mut self, path: &str, handler: Arc<BoxedHandler>) {
+        self.try_insert_query(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Fallible sibling of [`Router::insert_query`].
+    pub(crate) fn try_insert_query(
+        &mut self,
+        path: &str,
+        handler: Arc<BoxedHandler>,
+    ) -> Result<(), FrameworkError> {
+        insert_every_form(&mut self.query_routes, path, handler).map_err(|e| {
+            FrameworkError::internal(format!("Failed to register QUERY route '{path}': {e}"))
+        })?;
+        self.registered_patterns.push(path.to_string());
+        Ok(())
+    }
+
     /// Insert a route for `method` with a pre-boxed handler, for callers
     /// that walk a list of methods rather than name one verb.
     ///
@@ -1465,9 +1486,10 @@ impl Router {
             Method::DELETE => self.try_insert_delete(path, handler),
             Method::HEAD => self.try_insert_head(path, handler),
             Method::OPTIONS => self.try_insert_options(path, handler),
+            ref method if method.as_str() == "QUERY" => self.try_insert_query(path, handler),
             ref other => Err(FrameworkError::internal(format!(
                 "Router::methods() got unsupported method '{other}'; only \
-                 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS are accepted"
+                 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/QUERY are accepted"
             ))),
         }
     }
@@ -1784,6 +1806,41 @@ impl Router {
         })
     }
 
+    /// Register a QUERY route so a client can send a query in its request body.
+    pub fn query<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.try_query(path, handler)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible sibling of [`Router::query`]. See [`Router::try_get`].
+    pub fn try_query<H, Fut>(
+        mut self,
+        path: &str,
+        handler: H,
+    ) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let converted = crate::routing::macros::convert_route_params(path);
+        let handler: BoxedHandler = Box::new(move |req| Box::pin(handler(req)));
+        self.try_insert_query(&converted, Arc::new(handler))?;
+        self.bindings.note_route(
+            query_method(),
+            &converted,
+            super::binding::handler_ref::<H>(),
+        );
+        Ok(RouteBuilder {
+            router: self,
+            last_path: converted,
+            last_method: query_method(),
+        })
+    }
+
     /// Register the same handler against an explicit list of HTTP methods.
     ///
     /// Laravel parity for `Route::match([...], ...)`. Each method gets its
@@ -1799,7 +1856,7 @@ impl Router {
     /// # Panics
     ///
     /// Panics if `methods` is empty, contains a verb other than
-    /// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, or if any of the methods
+    /// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/QUERY, or if any of the methods
     /// already has a route registered at this path. The error message
     /// names the offending verb so the conflict is debuggable.
     ///
@@ -1859,15 +1916,15 @@ impl Router {
     }
 
     /// Register the same handler against every common HTTP method
-    /// (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
+    /// (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, QUERY).
     ///
     /// Laravel parity for `Route::any(...)`. Equivalent to calling
-    /// [`Router::methods`] with the seven-method list. Same dual-API
+    /// [`Router::methods`] with the eight-method list. Same dual-API
     /// + chained-name + fan-out-middleware story as [`Router::methods`].
     ///
     /// # Panics
     ///
-    /// Panics if any of the seven methods already has a route registered
+    /// Panics if any of the eight methods already has a route registered
     /// at this path. See [`Router::methods`] for the partial-failure
     /// caveat. Use [`Router::try_any`] when the path may already be
     /// registered (dynamic config, plugins).
@@ -1891,7 +1948,7 @@ impl Router {
         H: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
-        self.try_methods(ANY_METHODS, path, handler)
+        self.try_methods(ANY_METHODS.as_slice(), path, handler)
     }
 
     /// Register a WebSocket route. The handler runs after the
@@ -2227,6 +2284,7 @@ impl Router {
                 &self.get_routes
             }
             hyper::Method::OPTIONS => &self.options_routes,
+            ref method if method.as_str() == "QUERY" => &self.query_routes,
             _ => return None,
         };
         // A HEAD request with no HEAD route of its own runs the GET route,
@@ -2789,8 +2847,27 @@ impl RouteBuilder {
         self.router.try_options(path, handler)
     }
 
+    /// Register a QUERY route (for chaining without `.name()`).
+    pub fn query<H, Fut>(self, path: &str, handler: H) -> RouteBuilder
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.query(path, handler)
+    }
+
+    /// Fallible sibling of [`RouteBuilder::query`]. See
+    /// [`Router::try_query`].
+    pub fn try_query<H, Fut>(self, path: &str, handler: H) -> Result<RouteBuilder, FrameworkError>
+    where
+        H: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        self.router.try_query(path, handler)
+    }
+
     /// Register a route across every common HTTP method (GET / POST /
-    /// PUT / PATCH / DELETE / HEAD / OPTIONS) - Laravel `Route::any`.
+    /// PUT / PATCH / DELETE / HEAD / OPTIONS / QUERY) - Laravel `Route::any`.
     /// See [`Router::any`].
     pub fn any<H, Fut>(self, path: &str, handler: H) -> MultiMethodRouteBuilder
     where
@@ -2850,7 +2927,7 @@ impl From<RouteBuilder> for Router {
     }
 }
 
-/// The seven HTTP methods that an `any` route fans out across, in
+/// The eight HTTP methods that an `any` route fans out across, in
 /// registration order so `methods` field of the returned builder
 /// matches the order callers see in tests / logs. The one list behind
 /// [`Router::any`], [`GroupRouter::any`](super::GroupRouter::any) and
@@ -2858,15 +2935,23 @@ impl From<RouteBuilder> for Router {
 /// and the session block of an `any` route on every verb listed here, so
 /// auth, CSRF and rate limiting cannot skip a verb on one of the three
 /// registration paths only.
-pub(crate) const ANY_METHODS: &[Method] = &[
-    Method::GET,
-    Method::POST,
-    Method::PUT,
-    Method::PATCH,
-    Method::DELETE,
-    Method::HEAD,
-    Method::OPTIONS,
-];
+pub(crate) static ANY_METHODS: LazyLock<[Method; 8]> = LazyLock::new(|| {
+    [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::HEAD,
+        Method::OPTIONS,
+        query_method(),
+    ]
+});
+
+/// Hyper represents QUERY as an extension method in the pinned HTTP version.
+pub(crate) fn query_method() -> Method {
+    Method::from_bytes(b"QUERY").expect("QUERY is a valid HTTP method")
+}
 
 /// Builder returned by [`Router::methods`] and [`Router::any`]. Holds the
 /// inner `Router` plus the list of methods the route was registered against,
@@ -2882,7 +2967,7 @@ pub(crate) const ANY_METHODS: &[Method] = &[
 ///   matter which verb the user came from.
 /// - `.middleware(M)` adds the middleware under every
 ///   `(method, path)` key - auth / CSRF / rate-limit registered on an
-///   `any` route therefore guard all seven verbs, not just one.
+///   `any` route therefore guard all eight verbs, not just one.
 ///
 /// `MultiMethodRouteBuilder` cannot be re-entered as a `RouteBuilder`
 /// because the "most recently registered route" is ambiguous when N
@@ -3683,8 +3768,8 @@ mod tests {
     // ---- any / methods fan-out coverage -------------------------------
 
     /// `Router::any` registers the handler against every common HTTP
-    /// method (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).
-    /// Pins the seven-method fan-out - if a verb is missed, `match_route`
+    /// method (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS / QUERY).
+    /// Pins the supported-method fan-out - if a verb is missed, `match_route`
     /// against it returns `None` and the request 404s.
     #[test]
     fn any_route_registers_all_seven_methods() {
@@ -3758,9 +3843,7 @@ mod tests {
     }
 
     /// `.name(...)` on a MultiMethodRouteBuilder registers the name
-    /// once, and the path resolves correctly. The advisor flagged
-    /// this explicitly: "one name binding per `any` registration
-    /// (not seven)".
+    /// once, and the path resolves correctly for every supported verb.
     #[test]
     #[serial_test::serial(route_registry)]
     fn any_route_name_registers_once_and_resolves() {

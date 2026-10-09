@@ -1928,6 +1928,41 @@ never changes a job's attempt count however often you call it.
   pushed while no consumer for that stream is actively polling, not "any
   envelope nobody has explicitly popped yet".
 
+## Worker controls
+
+You pass worker controls beside `--poll`, `--visibility-timeout`, `--max-jobs`,
+`--queue` and `--connection`:
+
+```bash
+./app queue:work --sleep=3 --tries=2 --timeout=60 --memory=128
+./app queue:work --once
+./app queue:work --stop-when-empty --queue=emails
+```
+
+- You set `--sleep` in seconds to pause between empty polls. It overrides
+  `--poll`, which remains in milliseconds. Without either, you keep the
+  existing 100 millisecond poll interval.
+- You set `--tries` to override the attempt budget for this worker. With
+  `--tries=0`, you permit retries without an attempt cap.
+- You set `--timeout` in seconds to override the attempt timeout. With
+  `--timeout=0`, you remove it. Without these controls, you keep the envelope's
+  attempt budget and timeout.
+- You use `--once` to settle one reservation and exit. An empty first poll
+  also ends the worker. You leave any second job for another worker.
+- You use `--stop-when-empty` to drain available jobs and exit on the first
+  empty poll. You do not wait for delayed jobs to become available.
+- You set `--memory` in MiB to check resident memory from `/proc/self/status`
+  after each settled job. You receive exit status 12 when it exceeds the
+  limit, including when you also pass `--once` or `--max-jobs`. You use a
+  supervisor to restart the worker. With `--memory=0`, you disable the limit.
+  You receive an error if a configured limit cannot read resident memory.
+
+You use `run_worker_with_controls(driver, config, controls, shutdown)` or
+`run_worker_on_with_controls(connection, config, controls, shutdown)` from
+Rust. You pass a `WorkerControls` and receive `Result<i32, FrameworkError>`:
+0 for a normal stop, 12 for the memory limit. You keep existing worker
+callers with `run_worker` and `run_worker_on`, which use default controls.
+
 ## Worker restart signal
 
 `php artisan queue:restart` translates to:
@@ -2088,6 +2123,12 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
     j.user_id == 42 && at > chrono::Utc::now()
 });
 ```
+
+You assert absence with `assert_not_pushed::<J>(|job| job.id == 7)`.
+You filter a queue and its job together with
+`assert_pushed_on_queue::<J>("emails", |job| job.id == 7)`. You pass
+`|_| true` when you only need to check the queue. You match the per-push
+queue override or the job's declared queue, including pushes without an override.
 
 The fake guard serialises parallel tests via a process-wide mutex; it
 captures `(payload, available_at, overrides)` per push and clears on

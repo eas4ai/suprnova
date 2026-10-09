@@ -22,6 +22,14 @@ use std::sync::{Mutex, MutexGuard};
 #[derive(Default)]
 struct FakeStore {
     dispatched: HashMap<TypeId, Vec<serde_json::Value>>,
+    dispatched_sync: HashMap<TypeId, Vec<serde_json::Value>>,
+    dispatched_after_response: HashMap<TypeId, Vec<serde_json::Value>>,
+}
+
+pub(super) enum DispatchMode {
+    Regular,
+    Sync,
+    AfterResponse,
 }
 
 /// Process-wide serializer: only one test may hold the bus fake at a time.
@@ -38,17 +46,58 @@ pub(crate) fn is_active() -> bool {
     lock_fake().is_some()
 }
 
-pub(crate) fn record<C: Command>(cmd: &C) -> Result<(), FrameworkError> {
+pub(super) fn record<C: Command>(cmd: &C, mode: DispatchMode) -> Result<(), FrameworkError> {
     let payload = serde_json::to_value(cmd)
         .map_err(|e| FrameworkError::internal(format!("bus encode: {e}")))?;
     let mut g = lock_fake();
     if let Some(s) = g.as_mut() {
-        s.dispatched
-            .entry(TypeId::of::<C>())
-            .or_default()
-            .push(payload);
+        let commands = match mode {
+            DispatchMode::Regular => &mut s.dispatched,
+            DispatchMode::Sync => &mut s.dispatched_sync,
+            DispatchMode::AfterResponse => &mut s.dispatched_after_response,
+        };
+        commands.entry(TypeId::of::<C>()).or_default().push(payload);
     }
     Ok(())
+}
+
+fn commands<C: Command>(mode: DispatchMode) -> Vec<C> {
+    let payloads = {
+        let g = lock_fake();
+        let store = g.as_ref().expect("Bus::fake() must be active");
+        let commands = match mode {
+            DispatchMode::Regular => &store.dispatched,
+            DispatchMode::Sync => &store.dispatched_sync,
+            DispatchMode::AfterResponse => &store.dispatched_after_response,
+        };
+        commands
+            .get(&TypeId::of::<C>())
+            .cloned()
+            .unwrap_or_default()
+    };
+    payloads
+        .into_iter()
+        .map(|payload| {
+            serde_json::from_value(payload).unwrap_or_else(|error| {
+                panic!("cannot decode captured {}: {error}", C::command_name())
+            })
+        })
+        .collect()
+}
+
+/// Return captured ordinary commands in order so your test can filter their typed data.
+pub fn dispatched<C: Command>() -> Vec<C> {
+    commands(DispatchMode::Regular)
+}
+
+/// Return captured synchronous commands so your test can inspect that dispatch mode alone.
+pub fn dispatched_sync<C: Command>() -> Vec<C> {
+    commands(DispatchMode::Sync)
+}
+
+/// Return captured deferred commands so your test can inspect work scheduled after the response.
+pub fn dispatched_after_response<C: Command>() -> Vec<C> {
+    commands(DispatchMode::AfterResponse)
 }
 
 /// Install a fake Bus that captures dispatched commands instead of running handlers.
@@ -141,7 +190,13 @@ pub fn assert_nothing_dispatched() {
     let total: usize = {
         let g = lock_fake();
         let store = g.as_ref().expect("Bus::fake() must be active");
-        store.dispatched.values().map(Vec::len).sum()
+        store
+            .dispatched
+            .values()
+            .chain(store.dispatched_sync.values())
+            .chain(store.dispatched_after_response.values())
+            .map(Vec::len)
+            .sum()
     };
     assert_eq!(
         total, 0,

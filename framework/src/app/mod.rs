@@ -213,6 +213,9 @@ enum Commands {
         /// `SQS_QUEUE`, and omitting the list drains `SQS_QUEUE` only.
         #[arg(long = "queue", value_delimiter = ',')]
         queues: Vec<String>,
+        /// Lifetime, idle delay and attempt controls for this worker.
+        #[command(flatten)]
+        controls: crate::queue::worker::WorkerControls,
         /// Drain this queue connection. Omit for the default connection.
         #[arg(long)]
         connection: Option<String>,
@@ -1121,6 +1124,7 @@ where
     ///
     /// The process exits with status 1 when the command fails, and
     /// `ssr:start` exits with the status its SSR server exited with.
+    /// `queue:work` exits with status 12 after exceeding its memory limit.
     pub async fn run(self) {
         let cli = Cli::parse();
         // Configuration is loaded by `#[suprnova::main]` *before* the
@@ -1229,8 +1233,8 @@ where
     /// [`Failures::Print`] the failure is printed on stderr before that,
     /// where the commands printed it before they returned errors.
     ///
-    /// `Ok` carries the exit status: 0, or the status an `ssr:*` command
-    /// ended with after it printed its own report. A `FrameworkError` has no
+    /// `Ok` carries the exit status: 0, the queue worker's memory-limit status 12,
+    /// or the status an `ssr:*` command ended with after its report. A `FrameworkError` has no
     /// room for `ssr:start`'s, which is the status of the SSR server it ran.
     async fn run_cli(self, cli: Cli, failures: Failures) -> Result<i32, FrameworkError> {
         // Register all #[policy] gates collected via inventory::submit!.
@@ -1268,7 +1272,7 @@ where
         ) && boot != ProcessBoot::Migrations;
 
         // The exit status of a command that succeeded or reported its own
-        // failure; only the `ssr:*` commands set anything but 0.
+        // failure; SSR commands and the queue memory limit can return another status.
         let mut status = 0;
         let result = match cli.command {
             None
@@ -1346,17 +1350,25 @@ where
                 max_jobs,
                 queues,
                 connection,
+                controls,
             }) => {
-                Self::run_queue_worker_internal(
-                    boot,
-                    bootstrap_fn,
-                    visibility_timeout,
-                    poll_interval_ms,
+                let cfg = crate::queue::worker::WorkerConfig {
+                    visibility_timeout: Duration::from_secs(visibility_timeout),
+                    poll_interval: controls
+                        .sleep
+                        .map_or(Duration::from_millis(poll_interval_ms), Duration::from_secs),
                     max_jobs,
                     queues,
-                    connection,
-                )
-                .await
+                };
+                match Self::run_queue_worker_internal(boot, bootstrap_fn, cfg, controls, connection)
+                    .await
+                {
+                    Ok(exit_status) => {
+                        status = exit_status;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Some(Commands::QueuePause {
                 queue,
@@ -1895,12 +1907,10 @@ where
     async fn run_queue_worker_internal(
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
-        visibility_timeout: u64,
-        poll_interval_ms: u64,
-        max_jobs: Option<u64>,
-        queues: Vec<String>,
+        cfg: crate::queue::worker::WorkerConfig,
+        controls: crate::queue::worker::WorkerControls,
         connection: Option<String>,
-    ) -> Result<(), FrameworkError> {
+    ) -> Result<i32, FrameworkError> {
         let shutdown = Self::start_daemon();
         Self::boot_or_fail("queue:work", boot, bootstrap_fn).await?;
 
@@ -1918,12 +1928,9 @@ where
             }
         };
 
-        let cfg = crate::queue::worker::WorkerConfig {
-            visibility_timeout: Duration::from_secs(visibility_timeout),
-            poll_interval: Duration::from_millis(poll_interval_ms),
-            max_jobs,
-            queues,
-        };
+        let visibility_timeout = cfg.visibility_timeout.as_secs();
+        let poll_interval_ms = cfg.poll_interval.as_millis();
+        let max_jobs = cfg.max_jobs;
 
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -1956,7 +1963,13 @@ where
 
         let cancel_for_worker = cancel.clone();
         let mut worker = tokio::spawn(async move {
-            crate::queue::worker::run_worker_on(&connection, cfg, cancel_for_worker).await
+            crate::queue::worker::run_worker_on_with_controls(
+                &connection,
+                cfg,
+                controls,
+                cancel_for_worker,
+            )
+            .await
         });
         let worker_failed =
             |e: FrameworkError| failed(format!("suprnova: queue worker could not start: {e}"));

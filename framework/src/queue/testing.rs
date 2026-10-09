@@ -530,32 +530,34 @@ pub fn pushed_with_overrides<J: Job>() -> Vec<(J, EnvelopeOverrides)> {
         .unwrap_or_default()
 }
 
-/// Assert at least one captured push of `J` declared `queue` via
-/// [`EnvelopeOverrides`] (i.e. was pushed through
-/// [`Queue::push_with`](crate::queue::Queue::push_with) /
-/// [`Queue::later_with`](crate::queue::Queue::later_with) with
-/// `overrides.queue == Some(queue)`). Panics with every captured override
-/// set if no match is found.
-///
-/// Mirrors [`MailFake::assert_queued_on`](crate::mail::MailFake::assert_queued_on)
-/// so the two fakes read alike; unlike that method, this checks the
-/// declared override rather than a fully resolved queue name, since
-/// [`Queue::route`](crate::queue::Queue::route) / [`Job::queue`]
-/// resolution never runs under the fake.
-pub fn assert_pushed_on_queue<J: Job>(queue: &str) {
-    let entries = pushed_with_overrides::<J>();
-    let matching = entries
+/// Assert a push on `queue` satisfies `pred`, so the queue and payload belong to one job.
+/// The queue is the per-push override or the job's declared queue. Panics when none matches.
+pub fn assert_pushed_on_queue<J: Job>(queue: &str, pred: impl Fn(&J) -> bool) {
+    let pushes = {
+        let g = lock_fake();
+        let store = g.as_ref().expect("Queue::fake() must be active");
+        store.pushed.get(J::job_name()).cloned().unwrap_or_default()
+    };
+    let matching = pushes
         .iter()
-        .filter(|(_, o)| o.queue.as_deref() == Some(queue))
-        .count();
+        .filter(|push| push.queue.as_deref() == Some(queue))
+        .filter_map(|push| serde_json::from_value::<J>(push.payload.clone()).ok())
+        .any(|job| pred(&job));
     assert!(
-        matching > 0,
-        "expected at least one pushed {} with EnvelopeOverrides.queue == {:?}; \
-         captured {} push(es) with overrides: {:#?}",
+        matching,
+        "expected a pushed {} on {:?} matching the filter (EnvelopeOverrides.queue or Job::queue)",
         J::job_name(),
-        queue,
-        entries.len(),
-        entries.iter().map(|(_, o)| o).collect::<Vec<_>>()
+        queue
+    );
+}
+
+/// Assert no captured push satisfies `pred`, so another job of the type can still be present.
+/// Panics when the fake is inactive or a matching job was pushed.
+pub fn assert_not_pushed<J: Job>(pred: impl Fn(&J) -> bool) {
+    assert!(
+        !pushed::<J>().iter().any(pred),
+        "expected no pushed {} matching the filter",
+        J::job_name()
     );
 }
 

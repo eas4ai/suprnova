@@ -565,7 +565,6 @@ impl Server {
                     // its connecting address via `Request::ip()` as the
                     // trusted fallback when no proxy header is present.
                     let peer_ip: Option<std::net::IpAddr> = Some(peer_socket.ip());
-                    let io = TokioIo::new(stream);
                     let router = router.clone();
                     let middleware = middleware.clone();
 
@@ -578,7 +577,8 @@ impl Server {
                             }
                         });
 
-                        let serve = async move {
+                        let serve = crate::bus::after_response_connection(stream, |io| async move {
+                            let io = TokioIo::new(io);
                             // SEC-07: without an installed `Timer`, hyper's
                             // documented 30s `header_read_timeout` default
                             // is inert - `Time::check` logs a warning and
@@ -600,7 +600,7 @@ impl Server {
                             {
                                 tracing::error!(?err, "error serving connection");
                             }
-                        };
+                        });
 
                         // Carry the permit in a task-local for this connection.
                         // A plain request drops it when `serve` ends (the
@@ -731,7 +731,12 @@ pub async fn handle_request_with_peer(
     // the task that polls it, which deep render paths cannot spare.
     let root = request_root(&req, peer_ip);
     let file_request = crate::http::file_response::FileRequest::capture(&req);
-    let request = Box::pin(serve_request(router, middleware_registry, req, peer_ip));
+    let request = Box::pin(crate::bus::after_response::response(serve_request(
+        router,
+        middleware_registry,
+        req,
+        peer_ip,
+    )));
     crate::container::scope::run_in_new_scope(crate::routing::root::scope(
         root,
         file_request.serve(request),

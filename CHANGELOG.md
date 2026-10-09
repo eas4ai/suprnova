@@ -32,6 +32,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the relation's reachable records and returns a new instance when none match.
 - **Has-one-through compares in one query.** `is` asks the database whether
   the relation reaches a model without loading the target.
+- **Queue worker idle delays.** `queue:work --sleep` sets the seconds between
+  empty polls beside the existing millisecond `--poll` option.
+- **Queue worker attempt controls.** `--tries` and `--timeout` set a worker's
+  attempt budget and timeout without changing the queued payload.
+- **Queue workers with a stopping point.** `--once` settles one job and
+  `--stop-when-empty` drains available jobs before the worker exits.
+- **Queue worker memory limits.** `--memory` checks resident memory from
+  procfs after each job and returns status 12 when it exceeds the limit.
+- **Filtered queue absence assertions.** `assert_not_pushed` rejects a
+  captured job that satisfies your predicate.
+- **Filtered queue assertions.** `assert_pushed_on_queue` matches the queue
+  and your predicate against the same captured job.
+- **Commands after the response.** `Bus::dispatch_after_response` runs a
+  command after the response body is written and the socket flush succeeds.
+- **Typed bus capture lists.** `dispatched`, `dispatched_sync` and
+  `dispatched_after_response` return captured commands for iterator filters.
+- **Markdown responses.** `HttpResponse::markdown` and `markdown` preserve
+  your source with a UTF-8 Markdown content type.
+- **QUERY routes.** `query!` and the fluent routing methods accept QUERY,
+  and `any!` includes it with the other supported methods.
 
 - **Language-specific slugs.** `Str::slug_in` applies the named language's
   ASCII spelling, including German `ä` as `ae`.

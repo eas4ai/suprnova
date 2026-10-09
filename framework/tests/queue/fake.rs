@@ -312,7 +312,7 @@ async fn queue_fake_captures_push_with_queue_override() {
     .await
     .unwrap();
 
-    assert_pushed_on_queue::<Greet>("notifications");
+    assert_pushed_on_queue::<Greet>("notifications", |_| true);
 
     let entries = pushed_with_overrides::<Greet>();
     assert_eq!(entries.len(), 1);
@@ -379,7 +379,7 @@ async fn assert_pushed_on_queue_panics_when_nothing_matches() {
     .await
     .unwrap();
 
-    assert_pushed_on_queue::<Greet>("notifications");
+    assert_pushed_on_queue::<Greet>("notifications", |_| true);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
