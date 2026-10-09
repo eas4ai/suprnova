@@ -332,3 +332,37 @@ async fn a_resolved_name_stays_listed_when_it_is_defined_again() {
         "the name was resolved and never purged"
     );
 }
+
+#[tokio::test]
+#[ignore = "needs Redis: set REDIS_TEST_URL"]
+#[serial]
+async fn zzz_revised_typed_commands_use_configured_prefix() {
+    let key = unique("revised-prefix");
+    run_child(
+        "connections::child_writes_through_the_default_connection",
+        Some(&url()),
+        &[("SUPRNOVA_REDIS_KEY", &key), ("REDIS_PREFIX", "shop-")],
+    );
+    let prefixed = format!("shop-{key}");
+    let client = suprnova::redis::Client::open(url()).expect("test Redis URL");
+    let mut direct = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("connect Redis");
+    let value: Option<String> = suprnova::redis::cmd("GET")
+        .arg(&prefixed)
+        .query_async(&mut direct)
+        .await
+        .expect("read prefixed key");
+    let _: i64 = suprnova::redis::cmd("DEL")
+        .arg(&key)
+        .arg(&prefixed)
+        .query_async(&mut direct)
+        .await
+        .expect("remove probe keys");
+    assert_eq!(
+        value.as_deref(),
+        Some("from the child"),
+        "PAR-031 typed SET applies REDIS_PREFIX"
+    );
+}
