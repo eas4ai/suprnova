@@ -223,10 +223,13 @@ impl InvokedPool {
         self.pending.clear();
         let mut stopping = std::mem::take(&mut self.running);
         stopping.append(&mut self.exited);
-        let stops: FuturesUnordered<_> = stopping
-            .into_iter()
-            .map(|(index, key, process)| async move { (index, key, process.stop(grace).await) })
-            .collect();
+        let stops: FuturesUnordered<_> =
+            stopping
+                .into_iter()
+                .map(|(index, key, process)| async move {
+                    (index, key, process.stop(grace, None).await)
+                })
+                .collect();
         let stopped: Vec<_> = stops.collect().await;
         self.finished.extend(stopped);
         self.into_results()

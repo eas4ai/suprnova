@@ -272,6 +272,8 @@ mod tests {
             fail_on_timeout: false,
             backoff: Default::default(),
             queue: None,
+            message_group: None,
+            deduplication_id: None,
             delay_secs: None,
         }
         .to_envelope();
@@ -350,7 +352,7 @@ mod tests {
                 "The failed job [{retried}] has been pushed back onto the queue."
             )]
         );
-        assert_eq!(driver.size().await.unwrap(), 1);
+        assert_eq!(driver.size(None).await.unwrap(), 1);
         assert_eq!(store.ids().await.unwrap(), [kept]);
     }
 
@@ -373,7 +375,7 @@ mod tests {
                 format!("The failed job [{known}] has been pushed back onto the queue."),
             ]
         );
-        assert_eq!(driver.size().await.unwrap(), 1);
+        assert_eq!(driver.size(None).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -389,7 +391,7 @@ mod tests {
             report.lines,
             ["2 failed job(s) pushed back onto the queue."]
         );
-        assert_eq!(driver.size().await.unwrap(), 2);
+        assert_eq!(driver.size(None).await.unwrap(), 2);
         assert_eq!(store.count().await.unwrap(), 0);
     }
 
@@ -402,7 +404,7 @@ mod tests {
         let error = run(Command::Retry(vec!["42".into()])).await.unwrap_err();
 
         assert!(error.to_string().contains("`42` is not a failed-job id"));
-        assert_eq!(driver.size().await.unwrap(), 0, "nothing was retried");
+        assert_eq!(driver.size(None).await.unwrap(), 0, "nothing was retried");
         assert_eq!(store.count().await.unwrap(), 1);
     }
 
@@ -419,7 +421,7 @@ mod tests {
             [format!("The failed job [{id}] has been deleted.")]
         );
         assert_eq!(store.count().await.unwrap(), 0);
-        assert_eq!(driver.size().await.unwrap(), 0, "forget never pushes");
+        assert_eq!(driver.size(None).await.unwrap(), 0, "forget never pushes");
 
         let again = run(Command::Forget(id.to_string())).await.unwrap();
         assert!(!again.succeeded);

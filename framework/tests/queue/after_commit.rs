@@ -439,7 +439,7 @@ impl QueueDriver for RecordingDriver {
         Ok(())
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(self.count() as u64)
     }
 
@@ -613,7 +613,7 @@ async fn push_inside_a_transaction_is_invisible_until_commit() {
         Box::pin(async {
             Queue::push(AfterCommitJob).await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 0,
                 "an after_commit push must not reach the driver before the commit"
             );
@@ -683,7 +683,7 @@ async fn a_per_push_override_of_false_pushes_immediately() {
             )
             .await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 1,
                 "an explicit after_commit: Some(false) must push immediately"
             );
@@ -737,7 +737,7 @@ async fn queue_after_commit_defers_a_job_that_did_not_opt_in() {
             Queue::push(PlainJob).await?;
             Queue::bulk(vec![PlainJob, PlainJob]).await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 0,
                 "QUEUE_AFTER_COMMIT=true must hold every push until the commit"
             );
@@ -768,7 +768,7 @@ async fn a_per_push_override_of_false_outranks_queue_after_commit() {
             )
             .await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 1,
                 "one push can still go ahead of the commit"
             );
@@ -791,7 +791,7 @@ async fn queue_after_commit_is_off_for_any_value_but_true_or_1() {
     DB::transaction(|_tx| {
         Box::pin(async {
             Queue::push(PlainJob).await?;
-            assert_eq!(Queue::size().await?, 1, "the setting is off");
+            assert_eq!(Queue::size(None).await?, 1, "the setting is off");
             Ok::<(), FrameworkError>(())
         })
     })
@@ -811,7 +811,7 @@ async fn push_after_commit_defers_a_job_that_did_not_opt_in() {
         Box::pin(async {
             Queue::push_after_commit(PlainJob).await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 0,
                 "push_after_commit must defer even a job whose after_commit() is false"
             );
@@ -892,7 +892,11 @@ async fn bulk_defers_the_whole_batch() {
     DB::transaction(|_tx| {
         Box::pin(async {
             Queue::bulk(vec![AfterCommitJob, AfterCommitJob, AfterCommitJob]).await?;
-            assert_eq!(Queue::size().await?, 0, "bulk must defer the whole batch");
+            assert_eq!(
+                Queue::size(None).await?,
+                0,
+                "bulk must defer the whole batch"
+            );
             Ok::<(), FrameworkError>(())
         })
     })
@@ -937,7 +941,11 @@ async fn push_unique_locks_now_but_defers_the_envelope() {
                 first,
                 "the lock winner reports true even though the push is pending"
             );
-            assert_eq!(Queue::size().await?, 0, "the envelope waits for the commit");
+            assert_eq!(
+                Queue::size(None).await?,
+                0,
+                "the envelope waits for the commit"
+            );
 
             let second = Queue::push_unique(UniqueAfterCommitJob {
                 key: "defer-1".into(),
@@ -1725,7 +1733,7 @@ impl QueueDriver for DownDriver {
         Ok(())
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(0)
     }
 
@@ -1968,7 +1976,7 @@ impl QueueDriver for GatedDriver {
         Ok(())
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
+    async fn size(&self, _queue: Option<&str>) -> Result<u64, FrameworkError> {
         Ok(self.pushed.lock().unwrap().len() as u64)
     }
 
@@ -2072,7 +2080,7 @@ async fn a_deferred_push_carries_the_context_of_the_code_that_pushed_it() {
                     key: "context-1".into(),
                 })
                 .await?;
-                assert_eq!(Queue::size().await?, 0, "all three wait for the commit");
+                assert_eq!(Queue::size(None).await?, 0, "all three wait for the commit");
                 Ok::<(), FrameworkError>(())
             })
         })

@@ -591,7 +591,7 @@ async fn notify_queue_fail_on_timeout_dead_letters_on_the_first_timeout_with_zer
     );
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "zero retries: a job nacked for retry would still be held by the \
          driver (delayed), not gone"
@@ -637,7 +637,7 @@ async fn a_notification_that_opts_in_is_queued_at_the_commit() {
             )
             .await?;
             assert_eq!(
-                Queue::size().await?,
+                Queue::size(None).await?,
                 0,
                 "the notification must not reach the queue before the commit"
             );
@@ -648,7 +648,7 @@ async fn a_notification_that_opts_in_is_queued_at_the_commit() {
     .expect("commit");
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         1,
         "it is queued at the commit"
     );
@@ -679,7 +679,7 @@ async fn a_rollback_discards_a_queued_notification_that_opted_in() {
 
     assert!(result.is_err(), "the transaction rolled back");
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "a notification about work that was rolled back must never be queued"
     );
@@ -703,14 +703,14 @@ async fn a_notification_that_did_not_opt_in_is_queued_before_the_commit() {
                 },
             )
             .await?;
-            assert_eq!(Queue::size().await?, 1, "the default is unchanged");
+            assert_eq!(Queue::size(None).await?, 1, "the default is unchanged");
             Ok::<(), FrameworkError>(())
         })
     })
     .await
     .expect("commit");
 
-    assert_eq!(driver.size().await.unwrap(), 1);
+    assert_eq!(driver.size(None).await.unwrap(), 1);
 }
 
 #[tokio::test]

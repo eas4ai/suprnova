@@ -222,12 +222,12 @@ async fn push_unique_honors_job_delay() {
     assert!(pushed, "first push must enqueue (Fresh)");
 
     assert_eq!(
-        drv.pending_size().await.unwrap(),
+        drv.pending_size(None).await.unwrap(),
         0,
         "a job declaring Job::delay() must not be immediately pending"
     );
     assert_eq!(
-        drv.delayed_size().await.unwrap(),
+        drv.delayed_size(None).await.unwrap(),
         1,
         "Queue::push_unique must honor Job::delay() the same way Queue::push does - \
          the same job pushed via push vs push_unique must not disagree on timing"

@@ -20,6 +20,8 @@ fn env(name: &str, payload: serde_json::Value) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -117,6 +119,8 @@ async fn delayed_jobs_become_visible_after_available_at() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -182,16 +186,20 @@ async fn a_released_job_is_no_longer_reserved() {
     let d = MemoryQueueDriver::new();
     d.push(env("J", serde_json::json!({}))).await.unwrap();
     let res = d.pop(Duration::from_secs(60)).await.unwrap().unwrap();
-    assert_eq!(d.reserved_size().await.unwrap(), 1);
+    assert_eq!(d.reserved_size(None).await.unwrap(), 1);
 
     d.release(&res.token, &res.envelope, Duration::from_secs(30))
         .await
         .unwrap();
 
     assert_eq!(
-        d.reserved_size().await.unwrap(),
+        d.reserved_size(None).await.unwrap(),
         0,
         "the reservation is settled by the release itself"
     );
-    assert_eq!(d.size().await.unwrap(), 1, "and exactly one copy remains");
+    assert_eq!(
+        d.size(None).await.unwrap(),
+        1,
+        "and exactly one copy remains"
+    );
 }

@@ -78,6 +78,12 @@ pub struct Envelope {
     /// job that is actually routed adds the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// Message group captured from the job so FIFO dispatch preserves its ordering group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_group: Option<String>,
+    /// Deduplication id captured from the job so FIFO sends can identify repeated dispatches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduplication_id: Option<String>,
     /// Typed handler payload as JSON.
     pub payload: serde_json::Value,
     /// When the envelope was first pushed.

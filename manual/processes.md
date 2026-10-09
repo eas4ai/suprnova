@@ -68,7 +68,11 @@ let built = Process::command(["cargo", "build"]).run().await?.throw()?;
 
 `run` returns an error only when the program did not give a result: it
 could not be started (`ProcessError::NotStarted`, which names the
-program), or it was killed for a timeout.
+program and command line), or it was killed for a timeout.
+
+You see arguments quoted as a POSIX shell would quote them in results and
+errors. `Process::command(["printf", "a b"])` reports `printf 'a b'`.
+The quoting only describes the command; you still pass arguments directly.
 
 ## Options
 
@@ -77,13 +81,13 @@ Every option takes the builder and returns it:
 | Option | Effect |
 |---|---|
 | `path(dir)` | the working directory |
-| `env(key, value)` | adds a variable to the environment the program inherits |
+| `env(key, value)` | adds a variable to the inherited environment; `env("HOME", None)` removes it |
 | `input(bytes)` | writes to standard input, then closes it; without it, standard input is empty |
 | `timeout(duration)` | the longest it may run; 60 seconds unless set, and zero means none, as in Laravel |
 | `forever()` | no timeout |
 | `idle_timeout(duration)` | the longest it may go without writing output |
 | `quietly()` | keeps no output: it is read and thrown away, and no output callback is called |
-| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured, and an idle timeout is refused, since nothing can watch the terminal. `Process::supports_tty()` says whether there is a terminal |
+| `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured, and an idle timeout is refused, since nothing can watch the terminal. Redirected standard input or standard output returns an error naming that stream. `Process::supports_tty()` says whether there is a terminal |
 
 `run_with(callback)` calls the callback with each chunk of output as it
 arrives, marked `OutputKind::Out` or `OutputKind::Err`:
@@ -151,9 +155,12 @@ let result = worker.wait().await?;
 
 `output()` and `error_output()` return everything so far, and
 `latest_output()` and `latest_error_output()` what came since the last
-call. `signal(Signal::Term)` signals the program itself; `stop(grace)`
-sends a terminate signal to it and everything it started, then a kill to
-whatever is left after `grace`, and returns the result.
+call. You use `signal(Signal::Term)` to signal the program itself.
+You use `stop(grace, signal)` to signal it and everything it started,
+then kill whatever remains after the grace period and return the result.
+`stop(None, None)` gives it 10 seconds and sends `Signal::Term`.
+`stop(Duration::from_secs(1), Signal::Interrupt)` gives it one second
+after an interrupt.
 `wait_until(|kind, chunk| ...)` waits until the callback returns `true` for
 a chunk of output. The timeouts hold for a started process whether or not
 anything waits on it: a watchdog kills it at its timeout, and `wait` then
@@ -230,14 +237,31 @@ fake.when("npm run *", Process::result("").error_output("failed").exit_code(1));
 deploy().await?; // runs git and npm
 
 fake.assert_ran("git branch --show-current");
-fake.assert_ran_times("npm run build", 1);
+fake.assert_ran_times("npm run build");
 fake.assert_not_ran("git push --force");
 ```
 
 The command line is the arguments joined by spaces, or the shell line as
 given, and `*` matches any run of characters; the first matching pattern
-wins. `fake.prevent_stray_processes()` turns an unmatched command into
+wins. You use `assert_ran_times(command)` to assert one run and
+`assert_ran_count(command, count)` to assert another count.
+`fake.prevent_stray_processes()` turns an unmatched command into
 `ProcessError::Stray`.
+
+You can answer a matching command with a closure that receives the pending
+process and returns a `FakeResult`:
+
+```rust
+fake.when("git *", |pending: &suprnova::PendingProcess| {
+    assert_eq!(pending.arguments().map(|args| args[0].as_str()), Some("git"));
+    Process::result("main\n")
+});
+```
+
+You inspect `command_line()`, `arguments()`, `working_directory()`,
+`environment()` and `standard_input()` in the closure. Shell commands
+return `None` from `arguments()`. Environment entries hold `Some(value)`
+for a set variable and `None` for a removed variable.
 
 `Process::describe()` builds a process line by line, for a started process
 that reports itself running for a number of `running()` calls:
@@ -253,6 +277,10 @@ fake.when(
 );
 ```
 
+You receive described output and error output in the order you add their
+lines, including mixed streams. Each described line ends with one newline,
+including an empty line or a line you already end with a newline.
+
 `.id(n)` sets the process id a described process reports, and
 `.replace_output(text)` and `.replace_error_output(text)` set all of its
 lines at once. A faked started process records the signals sent to it, for
@@ -264,7 +292,7 @@ lines at once. A faked started process records the signals sent to it, for
 an empty success or `.when_empty(result)` gives the result to answer.
 
 The assertions are `assert_ran`, `assert_ran_with(|process| ...)`,
-`assert_ran_times`, `assert_ran_in_order`, `assert_not_ran` (and
+`assert_ran_times`, `assert_ran_count`, `assert_ran_in_order`, `assert_not_ran` (and
 `assert_didnt_run`) and `assert_nothing_ran`; `recorded()` returns every
 faked process with its command line, working directory, environment,
 input and result. Runs, starts, pools and pipes are all faked and

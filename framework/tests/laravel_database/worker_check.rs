@@ -59,7 +59,11 @@ async fn assert_refused(column: &str) {
         "the error names the table: {text}"
     );
     assert!(text.contains(column), "the error names `{column}`: {text}");
-    assert_eq!(memory.size().await.unwrap(), 1, "run_worker popped the job");
+    assert_eq!(
+        memory.size(None).await.unwrap(),
+        1,
+        "run_worker popped the job"
+    );
 
     Queue::register_connection("ldb-check", memory.clone());
     let refused = run_worker_on("ldb-check", one_job_config(), CancellationToken::new())
@@ -67,7 +71,7 @@ async fn assert_refused(column: &str) {
         .expect_err("run_worker_on started on a table its store cannot write");
     assert!(refused.to_string().contains(column), "{refused}");
     assert_eq!(
-        memory.size().await.unwrap(),
+        memory.size(None).await.unwrap(),
         1,
         "run_worker_on popped the job"
     );
@@ -82,7 +86,11 @@ async fn a_missing_table_is_refused(engine: Engine) {
         .expect_err("a worker started without a failed_jobs table");
     assert!(refused.to_string().contains("failed_jobs"), "{refused}");
     assert!(refused.to_string().contains("does not exist"), "{refused}");
-    assert_eq!(memory.size().await.unwrap(), 1, "the worker popped the job");
+    assert_eq!(
+        memory.size(None).await.unwrap(),
+        1,
+        "the worker popped the job"
+    );
 }
 
 on_every_engine!(a_missing_table_is_refused =>
@@ -172,7 +180,7 @@ async fn laravel_and_migration_tables_are_accepted(engine: Engine) {
             .await
             .unwrap_or_else(|e| panic!("{origin:?}: the worker refused a good table: {e}"));
         assert_eq!(
-            memory.size().await.unwrap(),
+            memory.size(None).await.unwrap(),
             0,
             "{origin:?}: the job did not run"
         );
@@ -204,7 +212,7 @@ async fn other_stores_do_not_refuse(engine: Engine) {
     run_worker(memory.clone(), one_job_config(), CancellationToken::new())
         .await
         .expect("a worker with the memory store refused to start");
-    assert_eq!(memory.size().await.unwrap(), 0);
+    assert_eq!(memory.size(None).await.unwrap(), 0);
 }
 
 on_every_engine!(other_stores_do_not_refuse =>
@@ -275,7 +283,11 @@ async fn queue_work_exits_non_zero_when_it_refuses(engine: Engine) {
         stderr.contains(RETURNED),
         "run_with_args did not return the refusal to its caller: {stderr}"
     );
-    assert_eq!(jobs.size().await.unwrap(), 1, "queue:work popped the job");
+    assert_eq!(
+        jobs.size(None).await.unwrap(),
+        1,
+        "queue:work popped the job"
+    );
 
     // Laravel's own table: the worker starts, runs the job and exits 0.
     db.conn
@@ -295,7 +307,7 @@ async fn queue_work_exits_non_zero_when_it_refuses(engine: Engine) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        jobs.size().await.unwrap(),
+        jobs.size(None).await.unwrap(),
         0,
         "queue:work did not run the job"
     );
@@ -459,7 +471,7 @@ async fn run_on_qualified_tables(db: &Db, jobs: &str, failed: &str) {
     run_worker(memory.clone(), one_job_config(), CancellationToken::new())
         .await
         .unwrap_or_else(|e| panic!("the worker refused {failed}: {e}"));
-    assert_eq!(memory.size().await.unwrap(), 0, "the job ran");
+    assert_eq!(memory.size(None).await.unwrap(), 0, "the job ran");
 
     let driver = DatabaseQueueDriver::new(db.conn.clone(), jobs.to_owned()).unwrap();
     driver
@@ -472,7 +484,7 @@ async fn run_on_qualified_tables(db: &Db, jobs: &str, failed: &str) {
         .unwrap_or_else(|e| panic!("pop from {jobs}: {e}"))
         .expect("the job just pushed");
     driver.ack(&popped.token).await.unwrap();
-    assert_eq!(driver.size().await.unwrap(), 0);
+    assert_eq!(driver.size(None).await.unwrap(), 0);
 }
 
 /// `Application::run_with_args` hands its failures to its caller instead

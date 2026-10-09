@@ -1,4 +1,4 @@
-//! Amazon SQS queue driver: standard queues over the AWS JSON 1.0 protocol
+//! Amazon SQS queue driver: standard and FIFO queues over the AWS JSON 1.0 protocol
 //! of SQS, signed with Signature Version 4.
 //!
 //! `QUEUE_DRIVER=sqs` builds it from the environment with
@@ -29,7 +29,7 @@
 //!
 //! # Delays
 //!
-//! SQS takes at most 15 minutes of delay on one message. A job due later is
+//! Standard SQS queues take at most 15 minutes of delay on one message. A job due later is
 //! sent with 15 minutes, and a receive before its time sends it on with what
 //! is left and deletes the copy that came too early. Waiting out a delay that
 //! way is not an attempt: the new copy starts its receive count again.
@@ -58,15 +58,15 @@
 //! # Overflow
 //!
 //! SQS takes at most 1 MiB in one message. With `SQS_OVERFLOW_ENABLED=true`,
-//! a larger job is written to a disk (`SQS_OVERFLOW_DISK`, or else the
-//! default disk) and SQS carries a pointer to it. Laravel keeps these
-//! payloads in a cache store, which can evict one before its job runs.
+//! a larger job is written to the named cache store `SQS_OVERFLOW_STORE`,
+//! when set, or the named or default disk otherwise. SQS carries a pointer
+//! to it. A cache can evict a payload before its job runs.
 //!
 //! A payload is deleted only when the driver knows no message points at it
 //! any more: after SQS refused the send that would have carried it, or after
 //! a delete of its message on a reservation that had not expired. A payload
 //! whose fate the driver cannot know, such as one whose send timed out, is
-//! left on the disk, and so is one whose send was refused after an earlier
+//! left in its store, and so is one whose send was refused after an earlier
 //! try timed out or met a fault of the service: that try may have left a
 //! message in the queue. A retry after such a try carries a copy of the
 //! payload at a new path, so when SQS took both tries each message owns
@@ -159,19 +159,22 @@ impl fmt::Debug for SqsCredentials {
 /// variables.
 #[derive(Debug, Clone)]
 pub struct SqsOverflow {
+    /// Named cache store used instead of a disk, so overflow can share its backend.
+    pub store: Option<String>,
     /// The disk payloads are written to; `None` is the default disk.
     pub disk: Option<String>,
-    /// Store every job on the disk, whatever its size.
+    /// Store every job in overflow storage, whatever its size.
     pub always: bool,
     /// Delete a job's payload when the job is acknowledged.
     pub delete_after_processing: bool,
-    /// Delete the payloads of the driver's queue when `clear` purges it.
+    /// Delete the selected queue's payloads when `clear` purges it.
     pub flush_on_clear: bool,
 }
 
 impl Default for SqsOverflow {
     fn default() -> Self {
         Self {
+            store: None,
             disk: None,
             always: false,
             delete_after_processing: true,
@@ -181,6 +184,94 @@ impl Default for SqsOverflow {
 }
 
 impl SqsOverflow {
+    fn cache(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn crate::cache::CacheStore>>, FrameworkError> {
+        self.store
+            .as_deref()
+            .map(|name| {
+                crate::cache::Cache::store_named(name).map_err(|error| {
+                    FrameworkError::internal(format!("SQS_OVERFLOW_STORE: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    fn validate(&self) -> Result<(), FrameworkError> {
+        if self.cache()?.is_none() {
+            self.operator()?;
+        }
+        Ok(())
+    }
+
+    async fn read(&self, path: &str) -> Result<Vec<u8>, FrameworkError> {
+        if let Some(store) = self.cache()? {
+            return store
+                .get_raw(path)
+                .await?
+                .map(String::into_bytes)
+                .ok_or_else(|| {
+                    FrameworkError::internal(format!(
+                        "SQS: overflow payload '{path}' is missing from cache"
+                    ))
+                });
+        }
+        self.operator()?
+            .read(path)
+            .await
+            .map(|buffer| buffer.to_bytes().to_vec())
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SQS: could not read the overflow payload '{path}': {error}"
+                ))
+            })
+    }
+
+    async fn write(&self, path: &str, bytes: Vec<u8>) -> Result<(), FrameworkError> {
+        if let Some(store) = self.cache()? {
+            let text = String::from_utf8(bytes).map_err(|error| {
+                FrameworkError::internal(format!("SQS: overflow payload is not text: {error}"))
+            })?;
+            let tag = path
+                .rsplit_once('/')
+                .map_or(path, |(directory, _)| directory);
+            return store.tagged_put_raw(&[tag], path, &text, None).await;
+        }
+        self.operator()?
+            .write(path, bytes)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SQS: could not write the job to the overflow disk: {error}"
+                ))
+            })
+    }
+
+    async fn delete(&self, path: &str) -> Result<(), FrameworkError> {
+        if let Some(store) = self.cache()? {
+            return store.forget(path).await.map(|_| ());
+        }
+        self.operator()?.delete(path).await.map_err(|error| {
+            FrameworkError::internal(format!("SQS: could not delete overflow payload: {error}"))
+        })
+    }
+
+    async fn flush(&self, directory: &str) -> Result<(), FrameworkError> {
+        if let Some(store) = self.cache()? {
+            return store.flush_tags(&[directory.trim_end_matches('/')]).await;
+        }
+        self.operator()?
+            .delete_with(directory)
+            .recursive(true)
+            .await
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SQS: purged the queue but could not delete its overflow payloads: {error}"
+                ))
+            })
+    }
+
     fn operator(&self) -> Result<opendal::Operator, FrameworkError> {
         match &self.disk {
             Some(name) => Storage::disk(name).map_err(|_| {
@@ -283,6 +374,7 @@ impl SqsConfig {
         let enabled = |name: &str| matches!(var(name).as_deref(), Some("true") | Some("1"));
         let disabled = |name: &str| matches!(var(name).as_deref(), Some("false") | Some("0"));
         let overflow = enabled("SQS_OVERFLOW_ENABLED").then(|| SqsOverflow {
+            store: var("SQS_OVERFLOW_STORE"),
             disk: var("SQS_OVERFLOW_DISK"),
             always: enabled("SQS_OVERFLOW_ALWAYS"),
             delete_after_processing: !disabled("SQS_OVERFLOW_DELETE_AFTER_PROCESSING"),
@@ -307,7 +399,7 @@ fn missing_region() -> FrameworkError {
     )
 }
 
-/// Queue driver over Amazon SQS standard queues. See the module
+/// Queue driver over Amazon SQS standard and FIFO queues. See the module
 /// documentation for how it maps the driver contract onto SQS.
 pub struct SqsQueueDriver {
     client: reqwest::Client,
@@ -357,6 +449,8 @@ impl Held {
 /// One message on its way to SQS.
 struct Outgoing {
     body: String,
+    group: Option<String>,
+    deduplication_id: Option<String>,
     /// `DelaySeconds`, at most 15 minutes.
     delay: u64,
     /// The overflow payload `body` points at, if it does.
@@ -505,9 +599,9 @@ impl SqsQueueDriver {
     /// # Errors
     ///
     /// When the region is empty; when the queue is not a URL and there is
-    /// no prefix; when the queue is a FIFO queue; when the endpoint is not
+    /// no prefix; when the endpoint is not
     /// an `http` or `https` URL; when the wait is over 20 seconds; and when
-    /// overflow is on and its disk is not registered.
+    /// overflow is on and its store or disk is not registered.
     pub fn new(config: SqsConfig) -> Result<Self, FrameworkError> {
         let region = config.region.trim().to_owned();
         if region.is_empty() {
@@ -531,7 +625,7 @@ impl SqsQueueDriver {
             ));
         }
         if let Some(overflow) = &config.overflow {
-            overflow.operator()?;
+            overflow.validate()?;
         }
 
         let client = reqwest::Client::builder()
@@ -623,13 +717,6 @@ impl SqsQueueDriver {
             };
             format!("{}/{base}{fifo}", prefix.trim_end_matches('/'))
         };
-        if url.ends_with(".fifo") {
-            return Err(FrameworkError::internal(format!(
-                "the sqs queue '{url}' is a FIFO queue, and the sqs driver sends to standard \
-                 queues only: a FIFO queue needs a message group and a deduplication ID on \
-                 each job. Name a standard queue in SQS_QUEUE or on the job"
-            )));
-        }
         Ok(url)
     }
 
@@ -919,18 +1006,9 @@ impl SqsQueueDriver {
                 "SQS: a message without an overflow payload has nothing to copy",
             ));
         };
-        let operator = overflow.operator()?;
-        let bytes = operator.read(path).await.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SQS: could not read the overflow payload '{path}' to copy it: {error}"
-            ))
-        })?;
+        let bytes = overflow.read(path).await?;
         let copy = overflow_path(&self.queue_key(queue_url));
-        operator.write(&copy, bytes).await.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SQS: could not write a copy of the overflow payload: {error}"
-            ))
-        })?;
+        overflow.write(&copy, bytes).await?;
         tracing::warn!(
             path = path.as_str(),
             copy = copy.as_str(),
@@ -940,6 +1018,8 @@ impl SqsQueueDriver {
         Ok(Outgoing {
             body: pointer_body(&copy),
             delay: message.delay,
+            group: message.group.clone(),
+            deduplication_id: message.deduplication_id.clone(),
             pointer: Some(copy),
         })
     }
@@ -975,18 +1055,23 @@ impl SqsQueueDriver {
         let body = envelope
             .to_json()
             .map_err(|error| FrameworkError::internal(format!("SQS: encode the job: {error}")))?;
+        let fifo = queue_url.ends_with(".fifo");
+        let group = fifo.then(|| {
+            envelope
+                .message_group
+                .clone()
+                .unwrap_or_else(|| "default".to_owned())
+        });
+        let deduplication_id = fifo.then(|| {
+            envelope
+                .deduplication_id
+                .clone()
+                .unwrap_or_else(|| hex::encode(Sha256::digest(body.as_bytes())))
+        });
         let (body, pointer) = match &self.overflow {
             Some(overflow) if overflow.always || body.len() >= MAX_MESSAGE_BYTES => {
                 let path = overflow_path(&self.queue_key(queue_url));
-                overflow
-                    .operator()?
-                    .write(&path, body.into_bytes())
-                    .await
-                    .map_err(|error| {
-                        FrameworkError::internal(format!(
-                            "SQS: could not write the job to the overflow disk: {error}"
-                        ))
-                    })?;
+                overflow.write(&path, body.into_bytes()).await?;
                 (pointer_body(&path), Some(path))
             }
             None if body.len() > MAX_MESSAGE_BYTES => {
@@ -1001,7 +1086,13 @@ impl SqsQueueDriver {
         };
         Ok(Outgoing {
             body,
-            delay: delay_secs(envelope.available_at),
+            delay: if fifo {
+                0
+            } else {
+                delay_secs(envelope.available_at)
+            },
+            group,
+            deduplication_id,
             pointer,
         })
     }
@@ -1128,12 +1219,7 @@ impl SqsQueueDriver {
                  SQS_OVERFLOW_ENABLED is off"
             ))
         })?;
-        let bytes = overflow.operator()?.read(path).await.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SQS: could not read the overflow payload '{path}': {error}"
-            ))
-        })?;
-        let bytes = bytes.to_bytes();
+        let bytes = overflow.read(path).await?;
         let text = std::str::from_utf8(&bytes).map_err(|error| {
             FrameworkError::internal(format!(
                 "SQS: the overflow payload '{path}' is not text: {error}"
@@ -1150,13 +1236,7 @@ impl SqsQueueDriver {
         let Some(overflow) = &self.overflow else {
             return;
         };
-        let result = match overflow.operator() {
-            Ok(operator) => operator
-                .delete(path)
-                .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
+        let result = overflow.delete(path).await;
         if let Err(error) = result {
             tracing::warn!(path, %error, "could not delete an SQS overflow payload");
         }
@@ -1243,12 +1323,12 @@ impl SqsQueueDriver {
 
     /// The approximate counts SQS keeps for the driver's queue: visible, in
     /// flight, and delayed.
-    async fn counts(&self) -> Result<(u64, u64, u64), FrameworkError> {
+    async fn counts(&self, queue: Option<&str>) -> Result<(u64, u64, u64), FrameworkError> {
         let reply = self
             .call(
                 "GetQueueAttributes",
                 json!({
-                    "QueueUrl": self.queue_url(None)?,
+                    "QueueUrl": self.queue_url(queue)?,
                     "AttributeNames": [
                         "ApproximateNumberOfMessages",
                         "ApproximateNumberOfMessagesNotVisible",
@@ -1284,7 +1364,7 @@ impl QueueDriver for SqsQueueDriver {
 
     /// Each queue's envelopes go in `SendMessageBatch` requests, in the
     /// order given. An envelope that cannot be sent, too large with
-    /// overflow off or bound for a FIFO queue, fails the call before
+    /// overflow off, fails the call before
     /// anything for its queue is sent.
     async fn bulk_push(&self, envs: Vec<Envelope>) -> Result<(), FrameworkError> {
         let mut queues: Vec<(String, Vec<Envelope>)> = Vec::new();
@@ -1413,43 +1493,37 @@ impl QueueDriver for SqsQueueDriver {
         self.delete_held(&held, true).await
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
-        let (visible, in_flight, delayed) = self.counts().await?;
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let (visible, in_flight, delayed) = self.counts(queue).await?;
         Ok(visible + in_flight + delayed)
     }
 
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        Ok(self.counts().await?.0)
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        Ok(self.counts(queue).await?.0)
     }
 
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        Ok(self.counts().await?.1)
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        Ok(self.counts(queue).await?.1)
     }
 
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        Ok(self.counts().await?.2)
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        Ok(self.counts(queue).await?.2)
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
-        let held = self.size().await?;
-        let url = self.queue_url(None)?;
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let held = self.size(queue).await?;
+        let url = self.queue_url(queue)?;
         self.call("PurgeQueue", json!({ "QueueUrl": url })).await?;
+        // An old release must not publish a copy after its queue is purged.
+        self.held_map()?
+            .retain(|_, reservation| reservation.queue_url != url);
         if let Some(overflow) = self
             .overflow
             .as_ref()
             .filter(|overflow| overflow.flush_on_clear)
         {
             let directory = format!("{OVERFLOW_ROOT}/{}/", self.queue_key(&url));
-            overflow
-                .operator()?
-                .delete_with(&directory)
-                .recursive(true)
-                .await
-                .map_err(|error| {
-                    FrameworkError::internal(format!(
-                        "SQS: purged the queue but could not delete its overflow payloads: {error}"
-                    ))
-                })?;
+            overflow.flush(&directory).await?;
         }
         Ok(held)
     }
@@ -1505,6 +1579,12 @@ fn send_message_request(queue_url: &str, messages: &[Outgoing]) -> Value {
     let mut request = json!({ "QueueUrl": queue_url });
     if let Some(message) = messages.first() {
         request["MessageBody"] = json!(message.body);
+        if let Some(group) = &message.group {
+            request["MessageGroupId"] = json!(group);
+        }
+        if let Some(id) = &message.deduplication_id {
+            request["MessageDeduplicationId"] = json!(id);
+        }
         if message.delay > 0 {
             request["DelaySeconds"] = json!(message.delay);
         }
@@ -1584,6 +1664,12 @@ fn batch_request(queue_url: &str, chunk: &[Outgoing]) -> Value {
         .enumerate()
         .map(|(index, message)| {
             let mut entry = json!({ "Id": index.to_string(), "MessageBody": message.body });
+            if let Some(group) = &message.group {
+                entry["MessageGroupId"] = json!(group);
+            }
+            if let Some(id) = &message.deduplication_id {
+                entry["MessageDeduplicationId"] = json!(id);
+            }
             if message.delay > 0 {
                 entry["DelaySeconds"] = json!(message.delay);
             }
@@ -1777,15 +1863,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fifo_queue_url_is_refused() {
+    fn a_fifo_queue_url_is_accepted() {
         let config = SqsConfig::new(
             "us-east-1",
             "https://sqs.us-east-1.amazonaws.com/1/orders.fifo",
         );
-        let Err(error) = SqsQueueDriver::new(config) else {
-            panic!("a FIFO queue URL must be refused");
-        };
-        assert!(error.to_string().contains("FIFO"));
+        assert!(SqsQueueDriver::new(config).is_ok());
     }
 
     #[test]

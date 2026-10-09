@@ -650,7 +650,7 @@ async fn a_failing_job_releases_its_lock_and_is_still_retried() {
     );
 
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         1,
         "a failure short of max_tries goes back on the queue: the release at \
          processing start does not cancel the retry"
@@ -662,7 +662,7 @@ async fn a_failing_job_releases_its_lock_and_is_still_retried() {
          while the failed attempt waits out its backoff"
     );
     assert_eq!(
-        driver.size().await.expect("size"),
+        driver.size(None).await.expect("size"),
         2,
         "two envelopes for one unique id - the trade `unique_until_processing` \
          makes, and the reason `unique_for` alone is the other option"

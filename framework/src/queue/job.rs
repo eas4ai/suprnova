@@ -87,6 +87,22 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         None
     }
 
+    /// Choose the SQS FIFO ordering group from job data. `None` uses `default`.
+    fn message_group(&self) -> Option<String>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Choose the SQS FIFO deduplication id. `None` uses a digest of the payload.
+    fn deduplication_id(&self) -> Option<String>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Connection this job is pushed to. `None` (default) means the default
     /// connection. Overridden by
     /// [`Queue::route`](crate::queue::Queue::route), same as [`Job::queue`].

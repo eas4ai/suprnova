@@ -157,7 +157,7 @@ async fn batch_dispatch_rejects_serialization_failure_before_storing_or_pushing(
         "an invalid batch must not be persisted"
     );
     assert_eq!(
-        driver.size().await.expect("read memory queue size"),
+        driver.size(None).await.expect("read memory queue size"),
         0,
         "an invalid batch must not push its valid prefix"
     );

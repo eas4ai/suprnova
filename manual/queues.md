@@ -162,9 +162,13 @@ Without them it uses the default credential chain of AWS: the shared
 profile, web identity, the ECS task role and the EC2 instance role.
 
 The server does not boot when no region is set, when the queue is not a URL
-and `SQS_PREFIX` is not set, or when the queue is a FIFO queue (its name
-ends in `.fifo`): a FIFO queue needs a message group and a deduplication ID
-on each job, which Suprnova jobs do not carry.
+and `SQS_PREFIX` is not set.
+
+You can use standard and FIFO queues. For a queue ending in `.fifo`, you
+set `Job::message_group()` and `Job::deduplication_id()` on each job.
+Without them, you get the group `default` and a SHA-256 digest of the job
+payload as its deduplication ID. FIFO sends omit `DelaySeconds`; the
+worker preserves the job's scheduled time when it receives it early.
 
 How the driver maps onto SQS:
 
@@ -191,7 +195,8 @@ How the driver maps onto SQS:
   minutes at most, so a job due later is sent on with what is left when it
   arrives early. Waiting out the delay is not an attempt.
 - **`Queue::size` and its siblings** report the approximate counts SQS
-  keeps for `SQS_QUEUE`, and `clear` purges it. SQS cannot list messages
+  keeps for the queue you pass as `Some("reports")`, and `clear` purges
+  that queue. You pass `None` to use `SQS_QUEUE`. SQS cannot list messages
   without receiving them, so `pending_jobs`, `delayed_jobs` and
   `reserved_jobs` return an error.
 
@@ -218,31 +223,36 @@ the driver's own requests are, where Laravel hands out the AWS client with
 `getSqs()`.
 
 SQS takes at most 1 MiB in one message, and a larger job fails its push
-with an error that says so. Turn on overflow to store large jobs on a disk
-instead. SQS then carries a pointer to the file:
+with an error that says so. You turn on overflow to store large jobs
+outside SQS. You set `SQS_OVERFLOW_STORE` to use a named cache store you
+register with `Cache::register_store(name, store)`. Without a cache store,
+you use the named or default disk. SQS carries a pointer to the payload:
 
 ```bash
 SQS_OVERFLOW_ENABLED=true
+SQS_OVERFLOW_STORE=redis                  # optional; takes precedence over the disk
 SQS_OVERFLOW_DISK=s3                      # optional; the default disk otherwise
-SQS_OVERFLOW_ALWAYS=false                 # true stores every job on the disk
-SQS_OVERFLOW_DELETE_AFTER_PROCESSING=true # delete the file when the job is done
-SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes the files on Queue::clear
+SQS_OVERFLOW_ALWAYS=false                 # true stores every job outside SQS
+SQS_OVERFLOW_DELETE_AFTER_PROCESSING=true # delete the payload when the job is done
+SQS_OVERFLOW_FLUSH_ON_CLEAR=false         # true deletes this queue's payloads on clear
 ```
 
-The files go under `sqs-payloads/<queue>-<digest>/` on the disk, where the
+You store payloads under `sqs-payloads/<queue>-<digest>/`, where the
 digest is 16 hexadecimal digits of the SHA-256 of the endpoint, the region
 and the full queue URL. Two queues with one name in different accounts or
 regions, or one queue URL served by two endpoints (two ElasticMQ or
 LocalStack instances, or LocalStack's per-region queues), never share a
 directory, and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared
-queue's files. The server does not boot when overflow is on and the disk is not
-registered. A file is deleted only when the driver knows no message points
-at it any more, so a send that times out, a send that is refused after an
+queue's payloads. You register the selected cache store or disk before boot;
+a missing store stops boot. Your cache store must support tags so clearing
+one queue keeps other queues and unrelated cache entries. An evicted cache
+payload returns an error when you receive its pointer. A payload is deleted
+only when the driver knows no message points at it any more, so a send that times out, a send that is refused after an
 earlier try timed out or met a fault of the service (5xx), or a settlement
-after its reservation expired, leaves the file on the disk rather than risk
+after its reservation expired, leaves the payload in its store rather than risk
 a message that can no longer be read. A retry after a send that got no
-answer, or met a fault of the service, carries its own copy of the file: if
-SQS took both tries, each of the two messages owns a file, and the job's
+answer, or met a fault of the service, carries its own copy of the payload: if
+SQS took both tries, each of the two messages owns a payload, and the job's
 duplicate stays readable after the first one is acknowledged.
 
 `SqsQueueDriver` is behind the `queue-sqs` cargo feature, which is on by
@@ -255,8 +265,6 @@ default and brings `filesystem` with it.
   keeps the rule every other driver follows.
 - **Long delays work.** Laravel passes SQS a delay over 900 seconds, which
   SQS refuses.
-- **Overflow goes to a disk, not a cache store.** A cache can evict a
-  payload before its job runs; a disk keeps it until the job is done.
 - **No default region or prefix.** Laravel's configuration falls back to
   `us-east-1` and a placeholder account URL; a missing setting here stops
   the boot instead.
@@ -322,9 +330,9 @@ commit returns the error before the commit, while you can still abandon the
 transaction.
 
 `Queue::connection(name)` returns the driver of one connection, and
-`Queue::connection_names()` lists the registered names. `Queue::size()` and
+`Queue::connection_names()` lists the registered names. `Queue::size(None)` and
 the other counts and listings read the default connection. Read another
-connection with `Queue::connection("reports")?.size().await`.
+connection with `Queue::connection("reports")?.size(None).await`.
 
 ### Register connections from the environment
 
@@ -1826,17 +1834,21 @@ so drivers written before this existed keep working unchanged.
 ## Introspection
 
 ```rust
-Queue::size().await?;            // total
-Queue::pending_size().await?;    // available_at <= now, not reserved
-Queue::delayed_size().await?;    // available_at > now
-Queue::reserved_size().await?;   // currently popped, not yet acked
-Queue::clear().await?;           // drop every envelope, returns the count
+Queue::size(None).await?;            // total
+Queue::pending_size(None).await?;    // available_at <= now, not reserved
+Queue::delayed_size(None).await?;    // available_at > now
+Queue::reserved_size(None).await?;   // currently popped, not yet acked
+Queue::clear(None).await?;           // drop every envelope, returns the count
 Queue::driver_name()?;           // configured driver name for logs / admin
 ```
 
 The `QueueDriver` trait declares defaults for `size` / `pending_size` /
 `reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver`,
 `DatabaseQueueDriver`, and `RedisQueueDriver` all implement them natively.
+You pass `Some("reports")` to count or clear only that queue, including its
+reserved and delayed jobs. You pass `None` to include all queues on a shared
+driver, or the configured `SQS_QUEUE` on SQS. Clearing one queue preserves
+other queues' jobs and live reservations. Sync and null drivers report zero.
 
 ### Inspecting queues
 
@@ -2139,9 +2151,9 @@ matches a chain made of exactly those jobs. `assert_nothing_batched` and
 `assert_nothing_chained` assert the opposite. See
 [Mocking](mocking.md#queue---queuefake) for the whole table.
 
-`assert_pushed_without_chain::<J>()` asserts the reverse of a chain: at least
-one push of `J` carried no chain. A job pushed on its own passes, and so does
-a batch member or a chain of one job. The head of a longer chain carries the
+You use `assert_pushed_without_chain::<J>(|job| predicate)` to assert that
+a typed push of `J` matches your filter and carries no chain. A job pushed
+on its own passes, and so does a batch member or a chain of one job. The head of a longer chain carries the
 rest of the chain, so it does not:
 
 ```rust
@@ -2151,7 +2163,7 @@ let _guard = suprnova::Queue::fake();
 send_receipt(order_id).await?;
 
 // The receipt went out on its own, not as the first step of a chain.
-assert_pushed_without_chain::<SendReceipt>();
+assert_pushed_without_chain::<SendReceipt>(|job| job.order_id == order_id);
 ```
 
 ### Letting some jobs through
@@ -2212,8 +2224,8 @@ pushes, as in Laravel: `pushed` and `assert_pushed` do not see them.
 Laravel's `except` and `assertPushedWithoutChain` take class names. Rust has
 no class name to pass at run time, so `except` takes `Job::job_name()`s, as
 `assert_chained` and `EventFacade::fake_except` do, and
-`assert_pushed_without_chain` takes the job type. It takes no callback; to
-narrow to some pushes of `J`, read them with `pushed::<J>()`. Laravel's
+`assert_pushed_without_chain` takes the job type and a closure filter. You
+assert only typed pushes with it; raw payloads remain separate. Laravel's
 `QueueFake` does not record batches at all, so it has no rule for a batch
 that mixes excepted and faked jobs; here the batch is recorded and each job
 goes where `except` sends it.

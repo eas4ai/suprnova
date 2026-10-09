@@ -150,7 +150,7 @@ async fn pools_and_pipes_are_faked_and_recorded() {
         .await
         .unwrap();
     assert_eq!(piped.output(), "ABC");
-    fake.assert_ran_times("upper a", 1);
+    fake.assert_ran_count("upper a", 1);
     fake.assert_ran_with(|process| process.command == "upper d" && process.input == b"ABC");
 }
 
@@ -167,8 +167,8 @@ async fn the_assertions_fail_on_a_record_that_does_not_match() {
 
     assert!(!panics(|| fake.assert_ran("ls -la")));
     assert!(panics(|| fake.assert_ran("ls")), "an exact command line");
-    assert!(!panics(|| fake.assert_ran_times("ls -la", 2)));
-    assert!(panics(|| fake.assert_ran_times("ls -la", 1)));
+    assert!(!panics(|| fake.assert_ran_count("ls -la", 2)));
+    assert!(panics(|| fake.assert_ran_count("ls -la", 1)));
     assert!(!panics(|| fake.assert_ran_in_order(&[
         "ls -la",
         "ls -la",
@@ -281,4 +281,89 @@ async fn a_quiet_faked_run_calls_no_callback_and_keeps_no_output() {
         .unwrap();
     assert_eq!(*calls.lock().unwrap(), 0, "as a real quiet run");
     assert_eq!((result.output(), result.error_output()), ("", ""));
+}
+
+#[tokio::test]
+#[serial]
+async fn closure_handlers_receive_the_pending_process_and_return_a_result() {
+    let fake = Process::fake();
+    fake.prevent_stray_processes();
+    let dir = tempfile::tempdir().unwrap();
+    let expected = dir.path().to_path_buf();
+    fake.when("printf a b", move |pending: &suprnova::PendingProcess| {
+        assert_eq!(
+            pending.arguments(),
+            Some(["printf".to_owned(), "a b".to_owned()].as_slice())
+        );
+        assert_eq!(pending.working_directory(), Some(expected.as_path()));
+        assert_eq!(
+            pending.environment(),
+            &[
+                ("VALUE".to_owned(), Some("set".to_owned())),
+                ("PATH".to_owned(), None)
+            ]
+        );
+        assert_eq!(pending.standard_input(), Some(b"input".as_slice()));
+        Process::result("answer")
+            .error_output("warning")
+            .exit_code(7)
+    });
+    let result = Process::command(["printf", "a b"])
+        .path(dir.path())
+        .env("VALUE", "set")
+        .env("PATH", None)
+        .input("input")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        (result.output(), result.error_output(), result.exit_code()),
+        ("answer", "warning", Some(7))
+    );
+    assert_eq!(result.command(), "printf 'a b'");
+    fake.assert_ran_times("printf a b");
+    assert!(Process::command(["other"]).run().await.is_err());
+}
+
+#[tokio::test]
+#[serial]
+async fn described_streams_replay_in_order_with_one_trailing_newline() {
+    use std::sync::{Arc, Mutex};
+    use suprnova::OutputKind::{Err, Out};
+    let fake = Process::fake();
+    fake.when(
+        "mixed",
+        Process::describe()
+            .output("one\n\n")
+            .error_output("two")
+            .output("")
+            .error_output("four\n")
+            .runs_for(4),
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let result = Process::command(["mixed"])
+        .run_with(move |kind, chunk| {
+            sink.lock().unwrap().push((kind, chunk.to_owned()));
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (Out, "one\n".to_owned()),
+            (Err, "two\n".to_owned()),
+            (Out, "\n".to_owned()),
+            (Err, "four\n".to_owned())
+        ]
+    );
+    assert_eq!(
+        (result.output(), result.error_output()),
+        ("one\n\n", "two\nfour\n")
+    );
+    fake.assert_ran_times("mixed");
+    assert!(panics(|| fake.assert_ran_times("absent")));
+    Process::command(["mixed"]).run().await.unwrap();
+    assert!(panics(|| fake.assert_ran_times("mixed")));
+    fake.assert_ran_count("mixed", 2);
 }

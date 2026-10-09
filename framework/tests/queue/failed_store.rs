@@ -108,7 +108,7 @@ async fn retry_failed_re_enqueues_and_clears_the_record() {
         "retry_failed should return true for a found record"
     );
     assert_eq!(store.count().await.unwrap(), 0);
-    assert_eq!(Queue::pending_size().await.unwrap(), 1);
+    assert_eq!(Queue::pending_size(None).await.unwrap(), 1);
     // Re-popping the retried envelope shows attempts back at 0.
     use suprnova::queue::QueueDriver;
     let popped = driver

@@ -278,7 +278,11 @@ async fn job_attempted_fires_when_middleware_deletes_the_job() {
         .await
         .expect("the worker starts");
 
-    assert_eq!(driver.size().await.unwrap(), 0, "the deleted job is gone");
+    assert_eq!(
+        driver.size(None).await.unwrap(),
+        0,
+        "the deleted job is gone"
+    );
     let attempted = dispatched::<JobAttempted>(|_| true);
     assert_eq!(
         attempted.len(),
@@ -418,7 +422,7 @@ async fn job_processed_fires_before_job_released_when_middleware_releases_the_jo
     EventFacade::forget::<suprnova::queue::events::JobReleased>();
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         1,
         "the released job is back on the queue"
     );

@@ -205,24 +205,24 @@ impl QueueDriver for FaultDriver {
         }
     }
 
-    async fn size(&self) -> Result<u64, FrameworkError> {
-        self.inner.size().await
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.size(queue).await
     }
 
-    async fn pending_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.pending_size().await
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.pending_size(queue).await
     }
 
-    async fn delayed_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.delayed_size().await
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.delayed_size(queue).await
     }
 
-    async fn reserved_size(&self) -> Result<u64, FrameworkError> {
-        self.inner.reserved_size().await
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.reserved_size(queue).await
     }
 
-    async fn clear(&self) -> Result<u64, FrameworkError> {
-        self.inner.clear().await
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        self.inner.clear(queue).await
     }
 
     fn name(&self) -> &'static str {
@@ -302,6 +302,8 @@ fn env(name: &str, payload: serde_json::Value) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
         unique_lock_owner: None,
         debounce_id: None,
         debounce_owner: None,
@@ -372,7 +374,7 @@ async fn a_lost_ack_response_does_not_retry_a_job_that_succeeded() {
     );
     assert_eq!(driver.ack_count(), 1, "the worker acked exactly once");
     assert_eq!(
-        inner.size().await.unwrap(),
+        inner.size(None).await.unwrap(),
         0,
         "the ack reached the inner driver, so nothing may remain queued - \
          if this fails, a lost ack response silently converts at-least-once \
@@ -410,7 +412,7 @@ async fn an_ack_that_never_landed_leaves_the_message_for_redelivery() {
         "no ack reached the broker, so none may be recorded"
     );
     assert_eq!(
-        inner.size().await.unwrap(),
+        inner.size(None).await.unwrap(),
         1,
         "the message is still held by the broker - this is the at-least-once \
          contract, and a worker that dropped it here would be at-most-once"
@@ -446,7 +448,7 @@ async fn a_failed_nack_keeps_the_job_rather_than_dropping_it() {
     assert_eq!(FAIL_RUNS.load(Ordering::SeqCst), 1, "the job ran once");
     assert_eq!(driver.nack_count(), 1, "the worker attempted one nack");
     assert_eq!(
-        inner.size().await.unwrap(),
+        inner.size(None).await.unwrap(),
         1,
         "the nack never landed, so the broker still holds the message; \
          dropping it here would lose a job that has retries left"
@@ -458,13 +460,13 @@ async fn a_failed_nack_keeps_the_job_rather_than_dropping_it() {
     // lapses. That difference is the whole content of
     // `settlement_failure("nack", "retry")`, so it is what to assert.
     assert_eq!(
-        inner.reserved_size().await.unwrap(),
+        inner.reserved_size(None).await.unwrap(),
         1,
         "the message must still be RESERVED, not requeued - the worker must \
          not act as though a nack it never confirmed had taken effect"
     );
     assert_eq!(
-        inner.pending_size().await.unwrap(),
+        inner.pending_size(None).await.unwrap(),
         0,
         "and it must not be visible for another worker yet; that only \
          happens when the lease expires"
@@ -494,12 +496,12 @@ async fn a_successful_nack_returns_the_message_to_the_visible_set() {
 
     assert_eq!(driver.nack_count(), 1);
     assert_eq!(
-        inner.reserved_size().await.unwrap(),
+        inner.reserved_size(None).await.unwrap(),
         0,
         "a nack that landed releases the reservation"
     );
     assert_eq!(
-        inner.pending_size().await.unwrap(),
+        inner.pending_size(None).await.unwrap(),
         1,
         "and makes the message available again for the retry"
     );
@@ -539,7 +541,7 @@ async fn a_partial_bulk_push_reports_the_failure_and_keeps_what_landed() {
          swallowing it leaves the caller believing work is queued that is not"
     );
     assert_eq!(
-        inner.size().await.unwrap(),
+        inner.size(None).await.unwrap(),
         2,
         "the two pushes that preceded the failure landed and must remain - \
          bulk_push is not transactional and must not pretend to roll back"
@@ -583,7 +585,7 @@ async fn settling_a_token_twice_is_idempotent_on_every_path() {
         .expect("nacking an already-acked token must be a no-op, not an error");
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "the redundant nack must not resurrect an acked message"
     );
@@ -599,7 +601,7 @@ async fn settling_a_token_twice_is_idempotent_on_every_path() {
         .await
         .expect("nacking an unknown token must be a no-op");
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "settling an unknown token must not invent a message"
     );
@@ -659,14 +661,14 @@ async fn a_lapsed_lease_redelivers_the_same_envelope_identity() {
         .await
         .expect("a stale ack must not error");
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         1,
         "a stale worker's ack must not delete a message that has since been \
          re-reserved by someone else - that is how a job silently vanishes"
     );
 
     driver.ack(&second.token).await.unwrap();
-    assert_eq!(driver.size().await.unwrap(), 0);
+    assert_eq!(driver.size(None).await.unwrap(), 0);
 }
 
 /// Tokens must be unique per reservation across the driver's lifetime.

@@ -163,12 +163,21 @@ async fn a_program_that_cannot_start_is_an_error_naming_it() {
 #[serial]
 async fn the_result_names_the_command() {
     let result = Process::command(["printf", "a b"]).run().await.unwrap();
-    assert_eq!(result.command(), "printf a b");
+    assert_eq!(result.command(), "printf 'a b'");
 }
 
 #[tokio::test]
 #[serial]
 async fn tty_captures_nothing() {
+    if !Process::supports_tty() {
+        let error = Process::command(["true"])
+            .tty()
+            .run()
+            .await
+            .expect_err("redirected terminal");
+        assert!(error.to_string().contains("stdin") || error.to_string().contains("stdout"));
+        return;
+    }
     let result = Process::command(["true"]).tty().run().await.unwrap();
     assert!(result.successful());
     assert_eq!(result.output(), "", "the terminal has the output");
@@ -273,6 +282,15 @@ async fn quietly_keeps_no_output() {
 #[tokio::test]
 #[serial]
 async fn tty_captures_nothing_a_process_writes() {
+    if !Process::supports_tty() {
+        let error = Process::command(["true"])
+            .tty()
+            .run()
+            .await
+            .expect_err("redirected terminal");
+        assert!(error.to_string().contains("stdin") || error.to_string().contains("stdout"));
+        return;
+    }
     let result = Process::command(sh("printf out; printf err >&2"))
         .tty()
         .run()
@@ -281,4 +299,88 @@ async fn tty_captures_nothing_a_process_writes() {
     assert!(result.successful());
     assert_eq!(result.output(), "");
     assert_eq!(result.error_output(), "");
+}
+
+#[tokio::test]
+#[serial]
+async fn none_removes_an_inherited_environment_variable() {
+    assert!(std::env::var_os("HOME").is_some());
+    let result = Process::shell("printf '%s' \"${HOME+present}\"")
+        .env("HOME", None)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output(), "");
+    let result = Process::shell("printf '%s' \"${SUPRNOVA_REMOVE_TEST+present}\"")
+        .env("SUPRNOVA_REMOVE_TEST", "value")
+        .env("SUPRNOVA_REMOVE_TEST", None)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output(), "");
+}
+
+#[tokio::test]
+#[serial]
+async fn diagnostic_commands_quote_empty_and_shell_special_arguments() {
+    let args = ["printf", "%s", "", "a b", "a'b", "$HOME;*", "é"];
+    let result = Process::command(args).run().await.unwrap();
+    assert_eq!(
+        result.command(),
+        "printf %s '' 'a b' 'a'\\''b' '$HOME;*' 'é'"
+    );
+    let error = Process::command(["suprnova-no-such-program", "a b"])
+        .run()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("suprnova-no-such-program 'a b'"));
+}
+
+#[tokio::test]
+#[serial]
+async fn terminal_probe() {
+    let Ok(mode) = std::env::var("SUPRNOVA_TERMINAL_PROBE") else {
+        return;
+    };
+    if mode == "terminal" {
+        assert!(Process::supports_tty());
+        let result = Process::shell("printf out; printf err >&2")
+            .tty()
+            .run()
+            .await
+            .unwrap();
+        assert_eq!((result.output(), result.error_output()), ("", ""));
+    } else {
+        let error = Process::command(["true"]).tty().run().await.unwrap_err();
+        assert!(error.to_string().contains(&mode), "{error}");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn tty_names_each_redirected_stream_and_runs_on_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    for mode in ["terminal", "stdin", "stdout"] {
+        let redirect = match mode {
+            "stdin" => " < /dev/null".to_owned(),
+            "stdout" => format!(" > '{}'", dir.path().join("out").display()),
+            _ => String::new(),
+        };
+        let command = format!(
+            "'{}' --exact run::terminal_probe --nocapture{redirect}",
+            executable.display()
+        );
+        let output = Process::command(["script", "-q", "-e", "-c", &command, "/dev/null"])
+            .env("SUPRNOVA_TERMINAL_PROBE", mode)
+            .run()
+            .await
+            .unwrap();
+        assert!(
+            output.successful(),
+            "{mode}: {} {}",
+            output.output(),
+            output.error_output()
+        );
+    }
 }

@@ -423,7 +423,7 @@ async fn a_faked_batch_is_recorded_and_reaches_no_driver() {
         .unwrap();
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "a faked batch must not write to the driver"
     );
@@ -476,7 +476,7 @@ async fn a_faked_chain_is_recorded_and_reaches_no_driver() {
         .unwrap();
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "a faked chain must not write to the driver"
     );
@@ -585,7 +585,7 @@ async fn a_faked_retry_is_recorded_and_reaches_no_driver() {
     assert_eq!(Queue::retry_all_failed(None).await.unwrap(), 1);
 
     assert_eq!(
-        driver.size().await.unwrap(),
+        driver.size(None).await.unwrap(),
         0,
         "a faked retry must not write to the driver"
     );
