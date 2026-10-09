@@ -297,6 +297,9 @@ one remaining error, or ` (and N more errors)` for more than one:
 }
 ```
 
+You localize the count suffix with `validation-summary-more` in your
+request's locale catalog, with an English fallback when the message is missing.
+
 With only one error, `message` has no count. Bind field errors to their
 exact keys, including dotted array paths.
 

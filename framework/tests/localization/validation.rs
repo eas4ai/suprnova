@@ -109,7 +109,7 @@ async fn field_name_message_is_used_when_defined() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn invalid_data_banner_translates() {
+async fn empty_bag_invalid_data_banner_translates() {
     let tmp = tempfile::tempdir().unwrap();
     write_lang(
         tmp.path(),
@@ -119,8 +119,7 @@ async fn invalid_data_banner_translates() {
     );
     bind_translator(tmp.path());
 
-    let mut errs = ValidationErrors::new();
-    errs.add("x", rules::Required.passes("").unwrap_err());
+    let errs = ValidationErrors::new();
 
     scope_locale(Locale::parse("es").unwrap(), async move {
         assert_eq!(errs.to_json()["message"], "Datos no válidos.");
@@ -282,6 +281,7 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
 
     let keys = [
         "validation-invalid-data",
+        "validation-summary-more",
         "validation-required",
         "validation-email",
         "validation-min",

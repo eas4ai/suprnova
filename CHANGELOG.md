@@ -23,7 +23,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   - A marked request neither saves the session nor becomes the previous
     URL, so live validation leaves flash data for the next page.
   - The `422` message summarises the first error and the count of the
-    rest, with the field-keyed `errors` bag kept.
+    rest, with the count suffix localized through the catalog and the
+    field-keyed `errors` bag kept.
   - `with_precognition()` sends the request header, and
     `assert_successful_precognition()` checks the status and success
     header. The new [Precognition chapter](manual/precognition.md) covers
