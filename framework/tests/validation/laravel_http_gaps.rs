@@ -3,20 +3,24 @@
 //! `Rule::requiredIf`, the `image` rule's type list and the `dimensions`
 //! rule.
 //!
-//! The upload validators are driven directly with the sniff buffer the
-//! multipart extractor hands them, as `framework/src/http/upload/validators.rs`
-//! does in its own tests; each image fixture is a header of the format,
-//! checked against `infer` first so a test proves the type it names.
+//! The upload validators are driven directly with the bytes of a whole
+//! file, as `framework/src/http/upload/validators.rs` does in its own tests,
+//! and `Dimensions` also through both extractors, `#[derive(MultipartRequest)]`
+//! and a `#[request]` form request, which read the size from the whole part
+//! as it streams in. Each image fixture is a header of the format, checked
+//! against `infer` first so a test proves the type it names.
 
 use std::cell::Cell;
 use std::sync::Arc;
 
+use crate::common::{build_multipart_body, request_from_multipart};
 use suprnova::http::upload::validators::UploadValidator;
 use suprnova::rules::{Required, RequiredIf};
 use suprnova::testing::TestContainer;
 use suprnova::{
-    DimensionLimits, Dimensions, FrameworkError, ImageFile, MimeAllowlist, MimeType, Rule,
-    ValidationErrors, ValidationMessage, validate,
+    DimensionLimits, Dimensions, FormRequest, FrameworkError, FromRequest, ImageFile, MaxSize,
+    MimeAllowlist, MimeType, MultipartRequest, Rule, UploadedFile, ValidationErrors,
+    ValidationMessage, validate,
 };
 use validator::Validate;
 
@@ -291,13 +295,38 @@ fn jpeg(width: u16, height: u16) -> Vec<u8> {
     bytes
 }
 
-/// A JPEG whose first segment, an APP1 of 64 KiB as a camera's metadata
-/// and thumbnail make it, runs past the 16 KiB sniff buffer, so the start
-/// of frame is never in view.
-fn jpeg_with_large_metadata() -> Vec<u8> {
-    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF];
+/// A baseline JPEG whose start of frame comes after an APP1 segment of
+/// `metadata` bytes, as a camera's EXIF block and thumbnail put it: start of
+/// image, the APP1 segment, a start of frame with the height and the width,
+/// end of image. The size is read from the start of frame, so the file needs
+/// no pixel data.
+fn jpeg_after_metadata(width: u16, height: u16, metadata: usize) -> Vec<u8> {
+    let mut bytes = jpeg_metadata(metadata);
+    bytes.extend([0xFF, 0xC0, 0x00, 0x11, 0x08]);
+    bytes.extend(height.to_be_bytes());
+    bytes.extend(width.to_be_bytes());
+    bytes.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    bytes.extend([0xFF, 0xD9]);
+    bytes
+}
+
+/// A JPEG whose start of frame never comes: an APP1 segment of `metadata`
+/// bytes, then the end of image.
+fn jpeg_without_frame(metadata: usize) -> Vec<u8> {
+    let mut bytes = jpeg_metadata(metadata);
+    bytes.extend([0xFF, 0xD9]);
+    bytes
+}
+
+/// Start of image and one APP1 segment of `metadata` bytes, `Exif` then
+/// filler. One segment holds at most 65,533 bytes.
+fn jpeg_metadata(metadata: usize) -> Vec<u8> {
+    let length = u16::try_from(metadata + 2).expect("one APP1 segment");
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    bytes.extend(length.to_be_bytes());
+    let start = bytes.len();
     bytes.extend(b"Exif\0\0");
-    bytes.resize(16 * 1024, 0);
+    bytes.resize(start + metadata, 0);
     bytes
 }
 
@@ -410,6 +439,18 @@ fn avif(width: u32, height: u32) -> Vec<u8> {
     isobmff(b"avif", width, height)
 }
 
+/// A HEIC file with a `free` box of `filler` bytes between its `ftyp` and
+/// `meta` boxes, so the size is stated only past them.
+fn heic_after_box(width: u32, height: u32, filler: usize) -> Vec<u8> {
+    let plain = heic(width, height);
+    let mut bytes = plain[..24].to_vec();
+    bytes.extend(u32::try_from(8 + filler).expect("a box size").to_be_bytes());
+    bytes.extend(b"free");
+    bytes.resize(bytes.len() + filler, 0);
+    bytes.extend(&plain[24..]);
+    bytes
+}
+
 fn heic(width: u32, height: u32) -> Vec<u8> {
     isobmff(b"heic", width, height)
 }
@@ -452,7 +493,21 @@ fn the_fixtures_are_the_types_they_name() {
     for (name, bytes, expected) in [
         ("png", png(1, 1), "image/png"),
         ("jpeg", jpeg(1, 1), "image/jpeg"),
-        ("jpeg metadata", jpeg_with_large_metadata(), "image/jpeg"),
+        (
+            "jpeg metadata",
+            jpeg_after_metadata(1, 1, 60 * 1024),
+            "image/jpeg",
+        ),
+        (
+            "jpeg without frame",
+            jpeg_without_frame(20 * 1024),
+            "image/jpeg",
+        ),
+        (
+            "heic after a box",
+            heic_after_box(1, 1, 20 * 1024),
+            "image/heif",
+        ),
         ("gif", gif(1, 1), "image/gif"),
         ("bmp", bmp(1, 1), "image/bmp"),
         ("bmp os/2", bmp_os2(1, 1), "image/bmp"),
@@ -677,8 +732,12 @@ fn dimensions_refuse_a_file_whose_size_cannot_be_read() {
         ("psd", psd()),
         ("svg", SVG.to_vec()),
         (
-            "jpeg metadata past the sniff buffer",
-            jpeg_with_large_metadata(),
+            "jpeg whose frame never comes",
+            jpeg_without_frame(20 * 1024),
+        ),
+        (
+            "jpeg cut off inside its metadata",
+            jpeg_after_metadata(10, 10, 60 * 1024)[..16 * 1024].to_vec(),
         ),
         ("truncated png", png(10, 10)[..18].to_vec()),
         ("zero-width png", png(0, 10)),
@@ -693,6 +752,10 @@ fn dimensions_refuse_a_file_whose_size_cannot_be_read() {
     assert!(
         final_check::<Dimensions<Anything>>(&png(10, 10)).is_ok(),
         "with no limit set, a readable image passes"
+    );
+    assert!(
+        final_check::<Dimensions<Anything>>(&jpeg_after_metadata(10, 10, 60 * 1024)).is_ok(),
+        "a JPEG's size is read past its metadata, wherever the frame starts"
     );
 }
 
@@ -718,5 +781,202 @@ async fn a_refused_size_reads_laravels_dimensions_message() {
     assert_eq!(
         english(bag("avatar", message), "avatar").await,
         ["The avatar field has invalid image dimensions."]
+    );
+}
+
+// ── `Dimensions` through the extractors ─────────────────────────────
+
+/// 100 pixels wide at most, 100 tall at least.
+#[derive(Default)]
+struct Avatar100;
+
+impl DimensionLimits for Avatar100 {
+    fn max_width() -> Option<u32> {
+        Some(100)
+    }
+    fn min_height() -> Option<u32> {
+        Some(100)
+    }
+}
+
+#[derive(Default)]
+struct AtMost99Wide;
+
+impl DimensionLimits for AtMost99Wide {
+    fn max_width() -> Option<u32> {
+        Some(99)
+    }
+}
+
+#[derive(MultipartRequest)]
+struct AvatarUpload {
+    #[field("avatar")]
+    avatar: UploadedFile<(ImageFile, Dimensions<Avatar100>)>,
+}
+
+#[derive(MultipartRequest)]
+struct NarrowUpload {
+    #[field("avatar")]
+    avatar: UploadedFile<(ImageFile, Dimensions<AtMost99Wide>)>,
+}
+
+#[derive(MultipartRequest)]
+struct WideUpload {
+    #[field("avatar")]
+    avatar: UploadedFile<(ImageFile, Dimensions<AtMost100Wide>)>,
+}
+
+/// A 32 KiB file limit after the dimension check, as the manual orders
+/// the validators.
+#[derive(MultipartRequest)]
+struct CappedUpload {
+    #[field("avatar")]
+    avatar: UploadedFile<(ImageFile, Dimensions<AtMost99Wide>, MaxSize<32_768>)>,
+}
+
+#[suprnova::request]
+struct AvatarForm {
+    avatar: UploadedFile<(ImageFile, Dimensions<Avatar100>)>,
+}
+
+#[suprnova::request]
+struct NarrowForm {
+    avatar: UploadedFile<(ImageFile, Dimensions<AtMost99Wide>)>,
+}
+
+/// A multipart request carrying `bytes` as the `avatar` file.
+async fn avatar_request(bytes: &[u8]) -> suprnova::Request {
+    let body = build_multipart_body("gaps", &[("avatar", Some("avatar.jpg"), bytes)]);
+    request_from_multipart("gaps", body).await
+}
+
+/// `T` read by `#[derive(MultipartRequest)]` from a request carrying `bytes`.
+async fn derived<T: FromRequest>(bytes: &[u8]) -> Result<T, FrameworkError> {
+    T::from_request(avatar_request(bytes).await).await
+}
+
+/// The form `result` read, or a panic naming why it was refused.
+fn accepted<T>(result: Result<T, FrameworkError>) -> T {
+    result.unwrap_or_else(|error| panic!("expected the upload to pass, got {error:?}"))
+}
+
+/// The key of the message `result` refused the avatar with.
+fn avatar_refusal<T>(result: Result<T, FrameworkError>) -> String {
+    match result {
+        Err(FrameworkError::Validation(errors)) => match errors.errors.get("avatar") {
+            Some(messages) => messages[0].key.to_string(),
+            None => panic!("no avatar error: {errors}"),
+        },
+        Err(other) => panic!("expected a refused avatar, got {other:?}"),
+        Ok(_) => panic!("expected a refused avatar, the upload passed"),
+    }
+}
+
+/// A JPEG whose metadata runs past the first 16 KiB is read by both
+/// extractors: its size is in the start of frame after the metadata.
+#[tokio::test]
+async fn dimensions_read_a_jpeg_size_past_twenty_kib_of_metadata() {
+    let jpeg = jpeg_after_metadata(100, 100, 20 * 1024);
+    let whole = jpeg.len() as u64;
+    assert!(jpeg.len() > 16 * 1024);
+
+    let upload = derived::<AvatarUpload>(&jpeg).await;
+    assert_eq!(accepted(upload).avatar.size, whole);
+    assert_eq!(
+        avatar_refusal(derived::<NarrowUpload>(&jpeg).await),
+        "validation-dimensions"
+    );
+
+    let form = AvatarForm::extract(avatar_request(&jpeg).await).await;
+    assert_eq!(accepted(form).avatar.size, whole);
+    assert_eq!(
+        avatar_refusal(NarrowForm::extract(avatar_request(&jpeg).await).await),
+        "validation-dimensions"
+    );
+
+    let narrow = jpeg_after_metadata(99, 100, 20 * 1024);
+    let upload = derived::<NarrowUpload>(&narrow).await;
+    assert_eq!(accepted(upload).avatar.size, narrow.len() as u64);
+    let form = NarrowForm::extract(avatar_request(&narrow).await).await;
+    assert_eq!(accepted(form).avatar.size, narrow.len() as u64);
+}
+
+#[tokio::test]
+async fn dimensions_read_a_jpeg_size_past_forty_kib_of_metadata() {
+    let jpeg = jpeg_after_metadata(100, 100, 40 * 1024);
+    let whole = jpeg.len() as u64;
+    let upload = derived::<AvatarUpload>(&jpeg).await;
+    assert_eq!(accepted(upload).avatar.size, whole);
+    let form = AvatarForm::extract(avatar_request(&jpeg).await).await;
+    assert_eq!(accepted(form).avatar.size, whole);
+    assert_eq!(
+        avatar_refusal(derived::<NarrowUpload>(&jpeg).await),
+        "validation-dimensions"
+    );
+}
+
+/// A JPEG that ends before any start of frame states no size, so the file
+/// is refused, as Laravel refuses a file `getimagesize` cannot read.
+#[tokio::test]
+async fn dimensions_refuse_a_jpeg_whose_frame_never_comes() {
+    let jpeg = jpeg_without_frame(20 * 1024);
+    assert_eq!(
+        avatar_refusal(derived::<AvatarUpload>(&jpeg).await),
+        "validation-dimensions"
+    );
+    assert_eq!(
+        avatar_refusal(AvatarForm::extract(avatar_request(&jpeg).await).await),
+        "validation-dimensions"
+    );
+}
+
+/// A HEIC file whose `meta` box comes after 20 KiB of other boxes is read
+/// as well.
+#[tokio::test]
+async fn dimensions_read_a_heic_size_past_a_leading_box() {
+    let heic = heic_after_box(100, 100, 20 * 1024);
+    let upload = derived::<AvatarUpload>(&heic).await;
+    assert_eq!(accepted(upload).avatar.size, heic.len() as u64);
+    assert_eq!(
+        avatar_refusal(derived::<NarrowUpload>(&heic).await),
+        "validation-dimensions"
+    );
+}
+
+/// The formats whose size sits in the first bytes pass and fail by their
+/// sizes through the extractor, as they do when checked directly.
+#[tokio::test]
+async fn dimensions_through_the_extractor_still_read_png_and_gif() {
+    for (name, fits, too_wide) in [
+        ("png", png(100, 50), png(101, 50)),
+        ("gif", gif(100, 50), gif(101, 50)),
+    ] {
+        let upload = derived::<WideUpload>(&fits).await;
+        assert_eq!(accepted(upload).avatar.size, fits.len() as u64, "{name}");
+        assert_eq!(
+            avatar_refusal(derived::<WideUpload>(&too_wide).await),
+            "validation-dimensions",
+            "{name}"
+        );
+    }
+}
+
+/// A file over its `MaxSize` is refused as too large while it streams, so
+/// its dimensions, too wide here, are never the reason.
+#[tokio::test]
+async fn a_file_over_max_size_is_too_large_before_its_dimensions_are_read() {
+    let jpeg = jpeg_after_metadata(100, 100, 40 * 1024);
+    assert!(jpeg.len() > 32_768);
+    assert_eq!(
+        avatar_refusal(derived::<CappedUpload>(&jpeg).await),
+        "validation-max-file"
+    );
+    // Under the limit, the size past the metadata decides.
+    let small = jpeg_after_metadata(99, 100, 20 * 1024);
+    let upload = derived::<CappedUpload>(&small).await;
+    assert_eq!(accepted(upload).avatar.size, small.len() as u64);
+    assert_eq!(
+        avatar_refusal(derived::<CappedUpload>(&jpeg_after_metadata(100, 100, 20 * 1024)).await),
+        "validation-dimensions"
     );
 }

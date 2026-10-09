@@ -47,8 +47,10 @@ use tempfile::NamedTempFile;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
+mod image_size;
 pub mod validators;
-use validators::UploadValidator;
+use image_size::ImageSizeProbe;
+use validators::{ReceivedPart, UploadValidator};
 
 /// Default per-request multipart body cap when none is configured.
 /// 25 MiB matches what most production apps want as their default
@@ -456,6 +458,8 @@ pub enum MultipartValue {
     /// bounded ≤16 KiB prefix captured during parse, surfaced here so
     /// `validate_final` callers (the derive macro, primarily) can run
     /// content-aware checks without re-reading the spilled file.
+    /// `image_size` is an image's width and height, read from every chunk
+    /// of the part because the header can sit past the sniff buffer.
     File {
         /// Where the bytes live - in-memory `Bytes` or a disk-spilled temp file.
         backing: UploadedFileBacking,
@@ -469,6 +473,11 @@ pub enum MultipartValue {
         inferred_extension: Option<&'static str>,
         /// Bounded ≤16 KiB prefix captured during parse, for content-aware validators.
         sniff: Vec<u8>,
+        /// The width and height the part's image header states, wherever it
+        /// sits in the part, for the types `ImageFile` accepts; `None` for
+        /// another type or a header the part ends before. Read as the part
+        /// streams in, keeping none of the bytes passed over.
+        image_size: Option<(u32, u32)>,
     },
     /// Text part - a non-file field carrying its UTF-8 value.
     Text(String),
@@ -497,6 +506,7 @@ struct CollectedPart {
     size: u64,
     sniff: Vec<u8>,
     inferred_extension: Option<&'static str>,
+    image_size: Option<(u32, u32)>,
 }
 
 /// Internal: the byte buffer underlying a `CollectedPart`. Either an
@@ -553,7 +563,10 @@ struct BodyBudget<'a> {
 /// Updates `*budget.used` after each chunk and short-circuits with a 413 if
 /// the running total exceeds `budget.cap`, or if a text part crosses
 /// `spill_threshold`. Validators see the bounded sniff buffer + current
-/// accumulated size and may also short-circuit.
+/// accumulated size and may also short-circuit. Each chunk of a file part
+/// the validators let through also feeds an [`ImageSizeProbe`], which reads
+/// an image's width and height wherever its header sits, holding a few
+/// bytes at a time.
 async fn collect_part<F>(
     field: &mut multer::Field<'_>,
     name: &str,
@@ -571,6 +584,8 @@ where
     let mut size: u64 = 0;
     // `saturating_add`: `usize::MAX` is the documented "never spill" value.
     let mut sniff: Vec<u8> = Vec::with_capacity(SNIFF_BYTES.min(spill_threshold.saturating_add(1)));
+    // Form text is never an image.
+    let mut probe = (!is_text).then(ImageSizeProbe::new);
 
     while let Some(chunk) = field
         .chunk()
@@ -659,6 +674,12 @@ where
         if check_chunks {
             per_field_validator(name, &sniff, size)?;
         }
+
+        // After the validators, so a chunk that ends the part's read is
+        // never probed.
+        if let Some(probe) = probe.as_mut() {
+            probe.feed(&chunk);
+        }
     }
 
     if is_text {
@@ -672,6 +693,7 @@ where
     } else {
         infer::get(&sniff).map(|k| k.extension())
     };
+    let image_size = probe.and_then(|probe| probe.size(&sniff));
 
     let backing = if let Some((temp, mut writer)) = spill {
         writer
@@ -693,6 +715,7 @@ where
         size,
         sniff,
         inferred_extension,
+        image_size,
     }))
 }
 
@@ -1035,6 +1058,7 @@ where
                     content_type: mime,
                     inferred_extension: part.inferred_extension,
                     sniff: part.sniff,
+                    image_size: part.image_size,
                 }
             }
             Collected::Text(bytes) => match String::from_utf8(bytes) {
@@ -1350,8 +1374,9 @@ pub(crate) fn leaves_file_out(value: &MultipartValue) -> bool {
 /// name and no bytes (an empty file input) are how clients leave a file
 /// out, so they are [`Taken::Absent`], never an empty file a validator
 /// would refuse. Other text, UTF-8 or not, is a failure, as is a file
-/// `validator` refuses with [`FrameworkError::invalid_upload`]; both are
-/// filed under the part's key. Any other validator error is returned.
+/// `validator` refuses with [`FrameworkError::invalid_upload`] from
+/// [`UploadValidator::validate_received`]; both are filed under the part's
+/// key. Any other validator error is returned.
 #[doc(hidden)]
 pub fn take_file<V: UploadValidator>(
     validator: &V,
@@ -1375,7 +1400,13 @@ pub fn take_file<V: UploadValidator>(
             content_type,
             inferred_extension,
             sniff,
-        } => match validator.validate_final(&sniff, size, content_type.as_deref()) {
+            image_size,
+        } => match validator.validate_received(&ReceivedPart::new(
+            &sniff,
+            size,
+            content_type.as_deref(),
+            image_size,
+        )) {
             Ok(()) => Ok(Taken::Value(match backing {
                 UploadedFileBacking::Memory(bytes) => {
                     UploadedFile::from_memory(bytes, file_name, content_type, inferred_extension)
