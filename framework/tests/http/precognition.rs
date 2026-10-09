@@ -134,6 +134,20 @@ struct NoPlaceholderForm {
 }
 impl FormRequest for NoPlaceholderForm {}
 
+#[derive(Deserialize, Validate)]
+struct NoPlaceholderDateForm {
+    #[validate(email)]
+    email: String,
+    count: u32,
+    profile: DateProfile,
+}
+impl FormRequest for NoPlaceholderDateForm {}
+
+#[derive(Deserialize)]
+struct DateProfile {
+    birth_date: chrono::NaiveDate,
+}
+
 mod data_routes {
     use super::*;
     use suprnova::{delete, get, handler, post, routes};
@@ -176,6 +190,14 @@ mod data_routes {
         BODY_CALLS.fetch_add(1, Ordering::SeqCst);
         suprnova::text(format!("{} {}", input.count, input.address))
     }
+    #[handler]
+    async fn date_no_placeholder(input: NoPlaceholderDateForm) -> Response {
+        BODY_CALLS.fetch_add(1, Ordering::SeqCst);
+        suprnova::text(format!(
+            "{} {} {}",
+            input.email, input.count, input.profile.birth_date
+        ))
+    }
     routes! {
         post!("/database", database).middleware(Precognitive),
         post!("/hooks", hooks).middleware(Precognitive),
@@ -186,6 +208,7 @@ mod data_routes {
         post!("/multipart", multipart).middleware(Precognitive),
         post!("/no-placeholder", no_placeholder).middleware(Precognitive),
         post!("/multipart-no-placeholder", multipart_no_placeholder).middleware(Precognitive),
+        post!("/date-no-placeholder", date_no_placeholder).middleware(Precognitive),
     }
 }
 
@@ -558,7 +581,7 @@ async fn precognition_inline_validation_answers_protocol_and_returns_real_value(
 }
 
 #[tokio::test]
-async fn precognition_unselected_type_without_placeholder_answers_server_error() {
+async fn precognition_unselected_type_without_placeholder_answers_its_parse_error() {
     let response = send(
         data_routes::register(),
         "/no-placeholder",
@@ -570,13 +593,21 @@ async fn precognition_unselected_type_without_placeholder_answers_server_error()
         r#"{"email":"ada@example.com","address":false}"#,
     )
     .await;
-    assert_eq!(response.status(), 500);
-    assert_eq!(response.headers().get("Precognition").unwrap(), "true");
+    assert_eq!(error_keys(&response), ["address"]);
+    let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(
+        body["errors"]["address"],
+        serde_json::json!(["The address field must be a string."])
+    );
+    assert_eq!(body["message"], body["errors"]["address"][0]);
 }
 
 #[tokio::test]
 async fn precognition_multipart_selected_parse_error_precedes_missing_placeholder() {
-    for (count, status) in [("bad", 422), ("7", 500)] {
+    for (count, field, message) in [
+        ("bad", "count", "The count field must be an integer."),
+        ("7", "address", "The address field format is invalid."),
+    ] {
         let body = format!(
             "--selection\r\nContent-Disposition: form-data; name=\"count\"\r\n\r\n{count}\r\n--selection\r\nContent-Disposition: form-data; name=\"address\"\r\n\r\nbad\r\n--selection--\r\n"
         );
@@ -591,12 +622,33 @@ async fn precognition_multipart_selected_parse_error_precedes_missing_placeholde
             &body,
         )
         .await;
-        assert_eq!(response.status(), status);
-        assert_eq!(response.headers().get("Precognition").unwrap(), "true");
-        if status == 422 {
-            assert_eq!(error_keys(&response), ["count"]);
-        }
+        assert_eq!(error_keys(&response), [field]);
+        let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["errors"][field], serde_json::json!([message]));
+        assert_eq!(body["message"], message);
     }
+}
+
+#[tokio::test]
+async fn precognition_unlisted_json_date_parse_failure_keeps_its_field_path() {
+    let response = send(
+        data_routes::register(),
+        "/date-no-placeholder",
+        &[
+            ("Precognition", "true"),
+            ("Precognition-Validate-Only", "email"),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"email":"ada@example.com","count":"bad","profile":{"birth_date":"2026-"}}"#,
+    )
+    .await;
+    assert_eq!(error_keys(&response), ["profile.birth_date"]);
+    let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(
+        body["errors"]["profile.birth_date"],
+        serde_json::json!(["The profile.birth date field must be a string."])
+    );
+    assert_eq!(body["message"], body["errors"]["profile.birth_date"][0]);
 }
 
 #[derive(Deserialize, Validate)]

@@ -64,14 +64,28 @@ pub(super) fn read_nested_selected<T: DeserializeOwned>(
         if let (Some(fields), Some(present)) = (fields, present) {
             record_missing_fields::<T>(&collector, fields, present);
         }
-        let errors = collector.into_errors().retain_fields(only);
-        if !errors.is_empty() {
-            return Err(InputError::Fields(errors));
+        let stopped = collector.stopped.borrow_mut().take();
+        let mut errors = collector.into_errors();
+        let selected = errors.retain_fields(only);
+        if !selected.is_empty() {
+            return Err(InputError::Fields(selected));
         }
-        return read.map_err(|_| {
-            InputError::Failed(crate::FrameworkError::internal(
-                "Precognitive input cannot build a placeholder for an unselected field",
-            ))
+        // A type that refuses its placeholder must answer its own parse
+        // failure, without reporting other recoverable unselected fields.
+        if let Some(stopped) = stopped {
+            errors.errors.retain(|path, _| {
+                path == &stopped
+                    || path
+                        .strip_prefix(&stopped)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            });
+        }
+        return read.map_err(|error| {
+            if errors.is_empty() {
+                InputError::Other(error.to_string())
+            } else {
+                InputError::Fields(errors)
+            }
         });
     }
     let error = match read {
@@ -220,6 +234,14 @@ fn read_node<'de, S: DeserializeSeed<'de>>(
             collector,
         }),
     }
+    .inspect_err(|_| {
+        if collector.precognitive {
+            collector
+                .stopped
+                .borrow_mut()
+                .get_or_insert_with(|| path.to_owned());
+        }
+    })
 }
 
 /// The entries of a read as `(name, value)` pairs.

@@ -367,7 +367,9 @@ See [HTTP tests](http-tests.md) for the client and its other assertions.
   without requiring values for every other field. A parse failure on an
   unlisted field does not block the listed fields' answer. Your real
   submit still needs every required field to parse before you receive
-  the typed struct.
+  the typed struct. During live validation, a field whose type parses a
+  string itself (a date, an address) answers its own parse error when its
+  value does not parse, even when you leave it unlisted.
 
 ## Next
 

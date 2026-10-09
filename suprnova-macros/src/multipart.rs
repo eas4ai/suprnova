@@ -530,13 +530,14 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
                 #(#precognitive_defaults)*
                 #(#required_checks)*
-                if let ::core::option::Option::Some(__only) = &__only {
-                    __errors = __errors.retain_fields(__only);
-                }
+                // Keep the original errors for a field that refuses every placeholder.
+                let __selected_errors = __only.as_ref().map(|__only| __errors.retain_fields(__only));
+                let __reported_errors = __selected_errors.as_ref().unwrap_or(&__errors);
 
                 // A field failed: answer with every field's errors. The
                 // values built so far drop here, removing their temp files.
-                if !__errors.is_empty() {
+                if !__reported_errors.is_empty() {
+                    let __errors = __reported_errors.clone();
                     return ::core::result::Result::Err(
                         if __precognitive {
                             ::suprnova::FrameworkError::PrecognitionFailure(__errors)
@@ -628,11 +629,22 @@ fn push_required(
         }
     });
     // Selected errors are checked before construction. An unselected field
-    // without a placeholder reports an internal error here, never a field error.
+    // that refuses every placeholder answers with its own extraction failure.
     struct_init.push(quote! {
-        #ident: #ident.ok_or_else(|| ::suprnova::FrameworkError::internal(
-            format!("multipart field '{}' was neither extracted nor reported", #field_name_str)
-        ))?,
+        #ident: #ident.ok_or_else(|| {
+            if __precognitive {
+                let __key = ::suprnova::http::upload::field_error_key(#field_name_str, None);
+                let mut __field_errors = __errors.clone();
+                __field_errors.errors.retain(|__path, _| {
+                    __path == &__key || __path.strip_prefix(&__key).is_some_and(|__suffix| __suffix.starts_with('.'))
+                });
+                ::suprnova::FrameworkError::PrecognitionFailure(__field_errors)
+            } else {
+                ::suprnova::FrameworkError::internal(
+                    format!("multipart field '{}' was neither extracted nor reported", #field_name_str)
+                )
+            }
+        })?,
     });
 }
 
