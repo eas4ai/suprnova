@@ -1,0 +1,7 @@
+{% import "tests/macros.html" as ui %}
+<section>
+<form live:submit="save">
+{% call ui::field("query", "Search", hint="Type to search") %}{% call ui::input("query", required=true) %}{% endcall %}{% endcall %}
+{% call ui::submit("Save", "save") %}{% endcall %}
+</form>
+</section>

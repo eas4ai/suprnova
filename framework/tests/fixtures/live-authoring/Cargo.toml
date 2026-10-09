@@ -1,0 +1,30 @@
+[package]
+name = "live-authoring-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+suprnova = { path = "../../.." }
+
+[[bin]]
+name = "internal-engine"
+path = "compile-fail/internal_engine.rs"
+
+[[bin]]
+name = "internal-parser"
+path = "compile-fail/internal_parser.rs"
+
+[[bin]]
+name = "trusted-html-bypass"
+path = "compile-fail/trusted_html_bypass.rs"
+
+[[bin]]
+name = "invalid-view-attribute"
+path = "compile-fail/invalid_view_attribute.rs"
+
+[[bin]]
+name = "windows-path-traversal"
+path = "compile-fail/windows_path_traversal.rs"
