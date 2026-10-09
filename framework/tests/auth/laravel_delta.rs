@@ -166,6 +166,110 @@ async fn logout_preserves_current_session_and_remember_but_revokes_other_devices
 }
 
 #[tokio::test]
+async fn logout_other_devices_uses_column_identity_before_payload_identity() {
+    use base64::Engine as _;
+
+    TestContainer::scope(async {
+        let db = database().await;
+        let store = configure(db.clone());
+        let current = current_session(true);
+        store.write(&current).await.expect("current stored");
+        for (id, user, payload) in [
+            ("legacy-alice", 7, serde_json::json!({"cart": "keep"})),
+            ("legacy-bob", 8, serde_json::json!({"cart": "keep"})),
+            ("column-alice", 7, serde_json::json!({"_suprnova_user": "8"})),
+            ("column-bob", 8, serde_json::json!({"_suprnova_user": "7"})),
+        ] {
+            let payload = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+            db.inner()
+                .execute_raw(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    "INSERT INTO d4_sessions (id, user_id, payload, last_activity) VALUES (?, ?, ?, ?)",
+                    [
+                        id.into(),
+                        user.into(),
+                        payload.into(),
+                        suprnova::clock::now().timestamp().into(),
+                    ],
+                ))
+                .await
+                .expect("legacy session stored");
+            let persisted = store
+                .read(id)
+                .await
+                .expect("read legacy")
+                .expect("legacy present");
+            request(persisted, async {
+                assert_eq!(
+                    Auth::user_or_fail()
+                        .await
+                        .expect("column user signed in")
+                        .get_auth_identifier(),
+                    user.to_string()
+                );
+            })
+            .await;
+        }
+        request(current.clone(), async {
+            Auth::logout_other_devices("secret")
+                .await
+                .expect("logout other devices");
+            assert_eq!(Auth::id().as_deref(), Some("7"));
+            assert_eq!(
+                suprnova::session::session().expect("current retained").data,
+                current.data
+            );
+        })
+        .await;
+        for id in ["legacy-alice", "column-alice"] {
+            assert!(
+                store.read(id).await.expect("other read").is_none(),
+                "other device {id} must be deleted"
+            );
+        }
+        for id in ["legacy-bob", "column-bob", "current-session"] {
+            assert!(
+                store.read(id).await.expect("retained read").is_some(),
+                "session {id} must survive"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn guard_session_revocation_uses_column_identity_before_payload_identity() {
+    TestContainer::scope(async {
+        let db = database().await;
+        let store = configure(db.clone());
+        let mut bob = SessionData::new("column-bob".into(), "csrf".into());
+        bob.user_id = Some("7".into());
+        store.write(&bob).await.expect("payload user stored");
+        db.inner()
+            .execute_unprepared("UPDATE d4_sessions SET user_id = 8 WHERE id = 'column-bob'")
+            .await
+            .expect("column user stored");
+        let destroyed = store
+            .destroy_guard_sessions("web", "7")
+            .await
+            .expect("revoke guard sessions");
+        assert_eq!(destroyed.count, 0);
+        assert!(destroyed.ids.is_empty());
+        assert_eq!(
+            store
+                .read("column-bob")
+                .await
+                .expect("read bob")
+                .expect("bob retained")
+                .user_id
+                .as_deref(),
+            Some("8")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn wrong_password_returns_password_validation_and_changes_nothing() {
     TestContainer::scope(async {
         let db = database().await;
