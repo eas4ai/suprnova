@@ -555,8 +555,100 @@ EventFacade::listen::<ErrorOccurred, SentryReporter>(Arc::new(SentryReporter)).a
 
 The event carries the raw error message (the wire body is still
 sanitised - see [Error Model](error-model.md)), the status, and the
-correlatable request id. This is Suprnova's equivalent of Laravel's
-`report()` callback on the exception handler.
+correlatable request id. To run code for failed queue jobs and console
+commands too, register a callback with `Exceptions::reportable`.
+
+## Report errors with `Exceptions`
+
+`Exceptions` is the place every error the framework does not answer
+itself goes through, as Laravel's exception handler is. These errors are
+reported:
+
+- Every `FrameworkError` that becomes a 5xx response. `ErrorOccurred`
+  still fires after it.
+- Every failed attempt of a queued job: a handler that returns `Err` or
+  panics, and an error `FailOnException` fails the job for.
+- Every error a console command returns.
+- Every error you pass to `Exceptions::report`.
+
+A report runs your callbacks in the order you registered them. Then it
+writes the `framework error` log line, with the status, the full source
+chain, and the request id when there is one.
+
+Register callbacks once, in `bootstrap.rs`. The parameter type of the
+closure decides which errors it receives:
+
+```rust
+use suprnova::{Exceptions, FrameworkError};
+
+#[derive(Debug)]
+pub struct PaymentDeclined(pub String);
+
+impl std::fmt::Display for PaymentDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "payment declined: {}", self.0)
+    }
+}
+
+impl std::error::Error for PaymentDeclined {}
+
+pub fn register_reporting() {
+    // Every reported error.
+    Exceptions::reportable(|error: &FrameworkError| {
+        eprintln!("reported: {error}");
+    });
+
+    // Only errors that wrap a `PaymentDeclined`. `stop()` keeps the
+    // callbacks after this one and the default log line from running
+    // for those errors.
+    Exceptions::reportable(|error: &PaymentDeclined| {
+        eprintln!("billing alert: {error}");
+    })
+    .stop();
+}
+```
+
+A callback that takes `&FrameworkError` receives every error. A callback
+that takes another error type `E` receives an error whose wrapped source
+is an `E`: the error you passed to `FrameworkError::from_external` or
+`from_external_with`. Only that wrapped error is compared, not the errors
+in its own `source()` chain. To act on a deeper cause, take
+`&FrameworkError` and walk `std::error::Error::source` yourself.
+
+To report an error your code handles, and still have it recorded, pass it
+to `Exceptions::report`:
+
+```rust
+use suprnova::{Exceptions, FrameworkError};
+
+fn read_settings() -> String {
+    match std::fs::read_to_string("storage/settings.json") {
+        Ok(settings) => settings,
+        Err(e) => {
+            Exceptions::report(&FrameworkError::from_external_with(
+                "reading the settings failed; using the defaults",
+                e,
+            ));
+            String::from("{}")
+        }
+    }
+}
+```
+
+`Exceptions::dont_retry::<E>()` and `Exceptions::dont_retry_when` name
+the errors that end a queued job's retries. See
+[Queue](queues.md#errors-that-end-retries).
+
+### Why Suprnova diverges
+
+- A Laravel callback that returns `false` also stops reporting. A
+  Suprnova callback returns nothing, so `stop()` is the only way to stop.
+- An exception thrown from a Laravel callback ends the report. A
+  Suprnova callback that panics is logged, and the report goes on to
+  the next callback and the log line. A broken reporter cannot take a
+  queue worker down.
+- `Exceptions::report` takes a `FrameworkError`. Wrap a foreign error
+  with `FrameworkError::from_external` first.
 
 ## See a failure in the browser
 
@@ -712,6 +804,8 @@ and the lookup failure to a response.
 | Duplicate-key violation → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Annotate an existing error | `err.context("creating user")` |
 | Observe every 5xx | Listen for `ErrorOccurred` |
+| Run code for every reported error | `Exceptions::reportable(callback)` |
+| Record an error you handled | `Exceptions::report(&err)` |
 | See a 5xx in the browser while developing | `APP_DEBUG=true`, then open the route |
 | Render errors as an Inertia page | `InertiaConfig::error_page("Error")` |
 
@@ -724,5 +818,6 @@ and the lookup failure to a response.
 - [Responses](responses.md) - `HttpResponse` builders, status, headers
 - [Events](events.md) - listening to `ErrorOccurred` and other
   built-in events
+- [Queue](queues.md) - retries, and the errors that end them
 - [Request Lifecycle](lifecycle.md) - where in the request flow the
   error conversion runs

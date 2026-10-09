@@ -236,6 +236,13 @@ where
             // stays outside.
             let command = (entry.handler)(sub_matches);
             let result = crate::container::scope::run_in_new_scope(command).await;
+            // Laravel's console kernel reports the error before it renders
+            // it (PAR-111). `report` passes over `AlreadyReported`, which
+            // the user has seen. Before the drain below, so the queued
+            // listeners a reporter starts are awaited too.
+            if let Err(ref e) = result {
+                crate::error::Exceptions::report(e);
+            }
             // A supervisor the bootstrap started and a queued listener both
             // run as tasks of their own, and the console's runtime ends when
             // `main` returns: stop and drain them first, as the server's
