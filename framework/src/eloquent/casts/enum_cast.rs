@@ -23,6 +23,8 @@
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+use serde::Deserialize;
+
 use super::{Cast, DynCast, IntoDynCast};
 use crate::error::FrameworkError;
 
@@ -87,8 +89,12 @@ where
     }
 }
 
-/// Store enum lists as JSON strings using each variant's `AsRef<str>` value.
+/// Store enum lists as a JSON array of each variant's `AsRef<str>` value.
 /// You can read Laravel enum collection columns without relying on serde's enum names.
+///
+/// The storage is `serde_json::Value`, so the column is a native JSON column
+/// (`json` or `jsonb` on Postgres). A `String` storage would declare a text
+/// column, which Postgres will not read a `json` or `jsonb` value into.
 pub struct AsEnumCollection<E>(PhantomData<E>);
 
 impl<E> Cast for AsEnumCollection<E>
@@ -97,16 +103,16 @@ where
     E::Err: std::fmt::Display,
 {
     type Runtime = Vec<E>;
-    type Storage = String;
+    type Storage = serde_json::Value;
 
-    fn to_storage(value: &Vec<E>) -> Result<String, FrameworkError> {
+    fn to_storage(value: &Vec<E>) -> Result<serde_json::Value, FrameworkError> {
         let strings: Vec<&str> = value.iter().map(AsRef::as_ref).collect();
-        serde_json::to_string(&strings)
+        serde_json::to_value(&strings)
             .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))
     }
 
-    fn from_storage(stored: &String) -> Result<Vec<E>, FrameworkError> {
-        let strings: Vec<String> = serde_json::from_str(stored)
+    fn from_storage(stored: &serde_json::Value) -> Result<Vec<E>, FrameworkError> {
+        let strings: Vec<String> = Vec::<String>::deserialize(stored)
             .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))?;
         strings
             .iter()
@@ -121,6 +127,19 @@ where
             })
             .collect()
     }
+
+    /// A query compares or writes this column as a native JSON parameter, so
+    /// Postgres accepts it against a `json` or `jsonb` column. A value that is
+    /// not an array of accepted variant strings answers `None`, and the engine
+    /// then reports the mismatch.
+    fn bind_json(value: &serde_json::Value) -> Option<sea_orm::Value> {
+        let accepted = value.as_array()?.iter().all(|element| {
+            element
+                .as_str()
+                .is_some_and(|name| E::from_str(name).is_ok())
+        });
+        accepted.then(|| sea_orm::Value::Json(Some(Box::new(value.clone()))))
+    }
 }
 
 struct AsEnumCollectionDyn<E>(PhantomData<E>);
@@ -134,10 +153,7 @@ where
         &self,
         value: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        let stored = value.as_str().ok_or_else(|| {
-            FrameworkError::validation("AsEnumCollection", "expected JSON-encoded text")
-        })?;
-        let runtime = AsEnumCollection::<E>::from_storage(&stored.to_owned())?;
+        let runtime = AsEnumCollection::<E>::from_storage(value)?;
         serde_json::to_value(runtime)
             .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))
     }
@@ -148,7 +164,7 @@ where
     ) -> Result<serde_json::Value, FrameworkError> {
         let runtime: Vec<E> = serde_json::from_value(value.clone())
             .map_err(|error| FrameworkError::validation("AsEnumCollection", error.to_string()))?;
-        AsEnumCollection::<E>::to_storage(&runtime).map(serde_json::Value::String)
+        AsEnumCollection::<E>::to_storage(&runtime)
     }
 }
 
