@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "severities": ["error", "warning", "info"],
+  "phases": ["feature", "resource", "upload", "async"],
+  "codes": ["feature_incompatible", "resource_retired", "upload_authorization_failed", "upload_limit_exceeded", "async_authorization_lost", "async_continuity_lost", "async_buffer_exceeded"],
+  "redacted_classes": ["snapshot", "signature", "cookie", "token", "model_value", "transient_value", "html", "url", "instance_id", "correlation_id", "idempotency_key", "exception_message", "upload_handle", "transfer_grant", "transport_credential", "subscription_descriptor", "filename", "storage_path", "stream_topic", "event_payload"],
+  "allowed_dimensions": ["code", "feature", "phase", "severity", "state", "transport"],
+  "retention": {"maximum_entries": 256, "sequence_maximum": 4294967295},
+  "redaction_cases": [
+    {"id":"transfer-grant","class":"transfer_grant","sample":"grant-test-sentinel","expected":"[redacted]"},
+    {"id":"transport-credential","class":"transport_credential","sample":"transport-test-sentinel","expected":"[redacted]"},
+    {"id":"upload-handle","class":"upload_handle","sample":"018f47c1-2af0-7cc4-a001-000000000001","expected":"[redacted]"},
+    {"id":"client-filename","class":"filename","sample":"private-record.pdf","expected":"[redacted]"},
+    {"id":"stream-topic","class":"stream_topic","sample":"tenant-7/orders","expected":"[redacted]"},
+    {"id":"event-payload","class":"event_payload","sample":{"account":"private"},"expected":"[redacted]"}
+  ]
+}
