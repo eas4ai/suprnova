@@ -14,3 +14,4 @@ pub mod rate_limit;
 pub mod redis;
 pub mod rtc_sweep;
 pub mod throttle;
+pub mod laravel_auth_gaps;
