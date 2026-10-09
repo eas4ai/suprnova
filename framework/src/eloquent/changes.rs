@@ -100,8 +100,8 @@ struct SaveInProgress {
 /// a new one, so a reader that cloned the old one keeps a consistent view.
 #[derive(Clone, Default)]
 struct History {
-    /// The row as the database held it after the instance's last read or
-    /// save: what the next save compares against, and the original once no
+    /// The instance's fields after its last read or save: what the next
+    /// save compares against, and the original once no
     /// save is in progress.
     synced: Option<Arc<dyn StoredRow>>,
     /// Set from a save's write until the save returns.
@@ -159,6 +159,18 @@ impl RowState {
     /// instance the record it built on the row the write returned.
     pub(crate) fn adopt(&self, other: &RowState) {
         self.write(other.read());
+    }
+
+    /// End a borrowed save with the caller's fields as its original, so
+    /// another writer's values never make the unchanged caller dirty.
+    pub(crate) fn sync_original<R>(&self, row: R)
+    where
+        R: Serialize + Send + Sync + 'static,
+    {
+        let mut history = self.read();
+        history.synced = Some(Arc::new(row));
+        history.in_progress = None;
+        self.write(history);
     }
 }
 

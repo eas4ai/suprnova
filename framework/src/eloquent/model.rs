@@ -306,9 +306,9 @@ fn row_state(
 /// cannot hand back `current`, so the caller's model has to carry it.
 /// `update` returns `current` and leaves `saved`, the observer's
 /// `previous`, as it was. The save ends with
-/// [`finish_save`](crate::eloquent::changes::finish_save) on the model the
-/// caller keeps, after the `Saved` event and the owner touches, as
-/// Laravel's `finishSave` ends with `syncOriginal`.
+/// `syncOriginal` on the model the caller keeps, after the `Saved` event
+/// and the owner touches. A borrowed save syncs the caller's own fields;
+/// an update syncs the returned row.
 ///
 /// `decoded_equal` is the model's [`Model::__decoded_values_equal`], which
 /// compares a column whose cast stores a new value on every write by its
@@ -1061,6 +1061,8 @@ where
 
     /// Persist the fields that differ from the instance's kept original values.
     /// A clean save fires `Saving` and `Saved` without reading or updating the row.
+    /// After a dirty save, the original holds this instance's fields. Values
+    /// another writer changed in the database do not make this instance dirty.
     ///
     /// ## Lifecycle events (Phase 10C T1)
     ///
@@ -1109,6 +1111,7 @@ where
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
+        let original = self.clone().try_into_storage()?;
         // T11/T12: route through resolve_write.
         let current =
             crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
@@ -1138,7 +1141,9 @@ where
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
-        crate::eloquent::changes::finish_save(row_state(self.__eager_cache()));
+        if let Some(state) = row_state(self.__eager_cache()) {
+            state.sync_original(original);
+        }
         Ok(())
     }
 
@@ -1695,6 +1700,7 @@ where
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
+        let original = self.clone().try_into_storage()?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let updated = exec
             .update_active(am)
@@ -1713,7 +1719,9 @@ where
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
-        crate::eloquent::changes::finish_save(row_state(self.__eager_cache()));
+        if let Some(state) = row_state(self.__eager_cache()) {
+            state.sync_original(original);
+        }
         Ok(())
     }
 
