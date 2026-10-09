@@ -208,36 +208,10 @@ where
     ) -> Result<bool, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         match (password, user.get_auth_password()) {
-            (Some(plaintext), Some(hash)) => {
-                let valid = hashing::verify_async(plaintext, hash).await?;
-                // While the application shares its database with Laravel,
-                // a valid sign-in rewrites a hash Laravel's hasher would
-                // refuse (`$2b$`, Argon2id) as the `$2y$` one it accepts,
-                // as Laravel itself rehashes on login, keeping a stored
-                // bcrypt cost above the configured one. If the rewrite
-                // cannot be minted or stored, the sign-in fails with that
-                // error: signing in on a hash Laravel refuses would leave a
-                // user Laravel cannot sign in (LDB-004). The stored hash is
-                // left as it was, and the next sign-in tries again.
-                if valid && crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash) {
-                    let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
-                        Ok(rehashed) => {
-                            self.set_password(&user.get_auth_identifier(), &rehashed)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = rewritten {
-                        tracing::warn!(
-                            error = %error,
-                            "the password hash could not be rewritten for Laravel after a \
-                             valid password; the sign-in fails"
-                        );
-                        return Err(error);
-                    }
-                }
-                Ok(valid)
-            }
+            // Answers without writing, as Laravel's `validateCredentials`
+            // does; a sign-in rewrites the hash through
+            // `rehash_password_if_required`.
+            (Some(plaintext), Some(hash)) => hashing::verify_async(plaintext, hash).await,
             // A password was supplied but the matched account is
             // passwordless. Returning `Ok(false)` here with no hash work
             // would fingerprint "account exists but is passwordless": the
@@ -253,6 +227,44 @@ where
             // real verify, so no dummy work is warranted.
             (None, _) => Ok(false),
         }
+    }
+
+    async fn rehash_password_if_required(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+    ) -> Result<(), FrameworkError> {
+        let password = credentials.get("password").and_then(|v| v.as_str());
+        let (Some(plaintext), Some(hash)) = (password, user.get_auth_password()) else {
+            return Ok(());
+        };
+        // While the application shares its database with Laravel, a sign-in
+        // rewrites a hash Laravel's hasher would refuse (`$2b$`, Argon2id) as
+        // the `$2y$` one it accepts, as Laravel itself rehashes on login,
+        // keeping a stored bcrypt cost above the configured one. If the
+        // rewrite cannot be minted or stored, the sign-in fails with that
+        // error: signing in on a hash Laravel refuses would leave a user
+        // Laravel cannot sign in (LDB-004). The stored hash is left as it
+        // was, and the next sign-in tries again.
+        if !(crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash)) {
+            return Ok(());
+        }
+        let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
+            Ok(rehashed) => {
+                self.set_password(&user.get_auth_identifier(), &rehashed)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = rewritten {
+            tracing::warn!(
+                error = %error,
+                "the password hash could not be rewritten for Laravel after a \
+                 valid password; the sign-in fails"
+            );
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
@@ -354,6 +366,37 @@ where
             .await?
             .map(|u| u.is_email_verified())
             .unwrap_or(false))
+    }
+
+    async fn send_email_verification_notification(
+        &self,
+        id: &str,
+        verification_link: &str,
+    ) -> Result<(), FrameworkError> {
+        // The model decides how its link goes out, as Laravel's `resend`
+        // calls `sendEmailVerificationNotification` on the user. A user
+        // deleted since the lookup gets nothing.
+        match self.find_by_identifier(id).await? {
+            Some(user) => {
+                user.send_email_verification_notification(verification_link)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    async fn send_password_reset_notification(
+        &self,
+        id: &str,
+        reset_link: &str,
+    ) -> Result<(), FrameworkError> {
+        // The model decides how its link goes out, as Laravel's broker calls
+        // `sendPasswordResetNotification` on the user. A user deleted since
+        // the lookup gets nothing.
+        match self.find_by_identifier(id).await? {
+            Some(user) => user.send_password_reset_notification(reset_link).await,
+            None => Ok(()),
+        }
     }
 }
 

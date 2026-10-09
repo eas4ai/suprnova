@@ -4,7 +4,9 @@
 //! storage backend. Laravel's `MustVerifyEmail` and `CanResetPassword`.
 
 use crate::auth::Authenticatable;
+use crate::error::FrameworkError;
 use chrono::{DateTime, Utc};
+use std::future::Future;
 
 /// Model trait the email-verification flow uses to read a user's email,
 /// display name, and verification timestamp without coupling to any particular
@@ -26,6 +28,34 @@ pub trait MustVerifyEmail: Authenticatable {
     fn name(&self) -> Option<&str> {
         None
     }
+
+    /// Send `verification_link` to the user, Laravel's
+    /// `sendEmailVerificationNotification`.
+    ///
+    /// [`EmailVerification::send_link`](crate::auth_flows::EmailVerification::send_link)
+    /// mints the single-use token, builds the link and calls this, and
+    /// `EloquentUserProvider` calls it for
+    /// [`EmailVerification::resend`](crate::auth_flows::EmailVerification::resend).
+    /// The default sends the framework's
+    /// [`VerifyEmailNotification`](crate::auth_flows::VerifyEmailNotification)
+    /// to [`email`](Self::email) as an on-demand mail notification through
+    /// [`Notify`](crate::notifications::Notify), greeting [`name`](Self::name).
+    /// Override it to send your own message, by mail or any other channel;
+    /// the framework then sends nothing itself. An `async fn` in your `impl`
+    /// satisfies this signature.
+    fn send_email_verification_notification(
+        &self,
+        verification_link: &str,
+    ) -> impl Future<Output = Result<(), FrameworkError>> + Send {
+        async move {
+            crate::auth_flows::mail::send_verification_notification(
+                self.email(),
+                self.name().map(str::to_owned),
+                verification_link,
+            )
+            .await
+        }
+    }
 }
 
 /// Model trait the password-reset flow uses to address the reset / password-
@@ -44,6 +74,32 @@ pub trait CanResetPassword: Authenticatable {
     /// [`UserProvider`](crate::auth::UserProvider) can persist a reset password
     /// without coupling to any concrete model's field layout.
     fn set_password_hash(&mut self, hash: &str);
+
+    /// Send `reset_link` to the user, Laravel's
+    /// `sendPasswordResetNotification`.
+    ///
+    /// `EloquentUserProvider` calls it when
+    /// [`PasswordReset::send_link`](crate::auth_flows::PasswordReset::send_link)
+    /// has minted the single-use token and built the link. The default sends
+    /// the framework's [`PasswordResetMail`](crate::auth_flows::PasswordResetMail)
+    /// to [`email_for_reset`](Self::email_for_reset). The default mail greets
+    /// the reader without a name, because this trait has none to read; Laravel's
+    /// reset notification opens with a plain greeting too. Override it to send
+    /// your own message; the framework then sends nothing itself. An
+    /// `async fn` in your `impl` satisfies this signature.
+    fn send_password_reset_notification(
+        &self,
+        reset_link: &str,
+    ) -> impl Future<Output = Result<(), FrameworkError>> + Send {
+        async move {
+            crate::auth_flows::mail::send_password_reset_mail(
+                self.email_for_reset(),
+                None,
+                reset_link,
+            )
+            .await
+        }
+    }
 }
 
 /// Lightweight user carrier the `UserProvider` returns to the auth-flow
