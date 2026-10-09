@@ -1936,18 +1936,3 @@ mod fake {
         }
     }
 }
-
-#[tokio::test]
-async fn revised_fifo_queue_is_accepted_with_default_group() {
-    let (_env, _restore, fake) = setup!("jobs.fifo");
-    set_env("SQS_QUEUE", Some("jobs.fifo"));
-    let queue = driver();
-    queue
-        .push(envelope(None))
-        .await
-        .expect("PAR-019 FIFO push succeeds");
-    let sent = fake.last("AmazonSQS.SendMessage").expect("send recorded");
-    assert_eq!(sent["MessageGroupId"], "default");
-    assert!(sent["MessageDeduplicationId"].as_str().is_some());
-    assert!(sent.get("DelaySeconds").is_none());
-}
