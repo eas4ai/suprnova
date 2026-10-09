@@ -169,6 +169,22 @@ impl HaPostPolicy {
     fn create(user: &HaUser, _post: &HaPost) -> bool {
         user.can_create
     }
+
+    fn preview(user: Option<&HaUser>, post: &HaPost) -> bool {
+        !post.hidden || user.is_some_and(|user| user.id == post.author_id)
+    }
+
+    fn concealed(user: Option<&HaUser>, post: &HaPost) -> GateResponse {
+        if user.is_some_and(|user| user.id == post.author_id) {
+            GateResponse::allow()
+        } else {
+            GateResponse::deny_as_not_found()
+        }
+    }
+
+    fn guest_create(user: Option<&HaUser>, _post: &HaPost) -> bool {
+        user.is_none()
+    }
 }
 
 fn register_gates() {
@@ -265,6 +281,42 @@ pub async fn show_destructured(RouteParam(post): RouteParam<HaPost>) -> Response
     text(format!("destructured {}", post.id))
 }
 
+enum HaAbility {
+    Update,
+}
+
+impl From<HaAbility> for String {
+    fn from(ability: HaAbility) -> Self {
+        match ability {
+            HaAbility::Update => "update".to_owned(),
+        }
+    }
+}
+
+#[handler]
+#[authorize("preview-ha-post", post)]
+pub async fn preview(post: RouteParam<HaPost>) -> Response {
+    text(format!("preview {}", post.id))
+}
+
+#[handler]
+#[authorize("concealed-ha-post", post)]
+pub async fn concealed(post: RouteParam<HaPost>) -> Response {
+    text(format!("concealed {}", post.id))
+}
+
+#[handler]
+#[authorize("guest_create-ha-post", HaPost)]
+pub async fn guest_store() -> Response {
+    text("guest stored")
+}
+
+#[handler]
+#[authorize(HaAbility::Update, post)]
+pub async fn enum_update(post: RouteParam<HaPost>) -> Response {
+    text(format!("enum updated {}", post.id))
+}
+
 fn build_router() -> Router {
     Router::new()
         .get("/posts/{post}", show)
@@ -274,6 +326,10 @@ fn build_router() -> Router {
         .post("/posts/{post}/publish", publish)
         .post("/posts/{post}/archive", archive)
         .get("/destructured/{post}", show_destructured)
+        .get("/preview/{post}", preview)
+        .get("/concealed/{post}", concealed)
+        .post("/guest-posts", guest_store)
+        .put("/enum/{post}", enum_update)
         .into()
 }
 
@@ -686,4 +742,49 @@ async fn without_a_route_guard_the_default_guard_user_is_checked() {
         assert_eq!(status, 403, "body: {body}");
     })
     .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn optional_user_policy_consults_guests_and_authenticated_users() {
+    let (_db, addr) = boot().await;
+    assert_eq!(
+        send(addr, "GET", "/preview/1", None, None).await,
+        (200, "preview 1".into())
+    );
+    assert_eq!(send(addr, "GET", "/preview/2", None, None).await.0, 403);
+    assert_eq!(
+        send(addr, "GET", "/preview/2", Some(AUTHOR), None).await.0,
+        200
+    );
+    assert_eq!(
+        send(addr, "GET", "/preview/2", Some(STRANGER), None)
+            .await
+            .0,
+        403
+    );
+    assert_eq!(send(addr, "GET", "/preview/999", None, None).await.0, 404);
+    assert_eq!(send(addr, "GET", "/concealed/1", None, None).await.0, 404);
+    assert_eq!(send(addr, "POST", "/guest-posts", None, None).await.0, 200);
+    assert_eq!(
+        send(addr, "POST", "/guest-posts", Some(AUTHOR), None)
+            .await
+            .0,
+        403
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn enum_ability_uses_the_async_gate_and_its_denial() {
+    let (_db, addr) = boot().await;
+    assert_eq!(
+        send(addr, "PUT", "/enum/1", Some(AUTHOR), None).await,
+        (200, "enum updated 1".into())
+    );
+    assert_eq!(
+        send(addr, "PUT", "/enum/1", Some(STRANGER), None).await.0,
+        403
+    );
+    assert_eq!(send(addr, "PUT", "/enum/1", None, None).await.0, 401);
 }

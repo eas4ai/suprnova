@@ -74,10 +74,10 @@ const URL_PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// when it boots, beside the queue, the rate limiter and the mail
 /// transport, so an application sets the variables and has the disk.
 ///
-/// When `S3_BUCKET` is set, an S3 disk is registered under the name `s3`
+/// When `S3_BUCKET` or `AWS_BUCKET` is set, an S3 disk is registered under the name `s3`
 /// ([`ENV_S3_DISK`]), from the variables [`S3Config::from_env`] reads.
-/// `S3_PUBLIC_URL` gives the disk its public base URL, see
-/// [`Storage::url`]. With `S3_BUCKET` not set, nothing is registered.
+/// `S3_PUBLIC_URL` or `AWS_URL` gives the disk its public base URL, see
+/// [`Storage::url`]. With neither bucket set, nothing is registered.
 ///
 /// A disk the application registered under the name `s3` is left as it
 /// is, and the variables are not read then: the bootstrap of the
@@ -151,17 +151,40 @@ fn register_env_s3(variable: &impl Fn(&str) -> Option<String>) -> Result<(), Fra
     let Some(config) = S3Config::from_variables(variable)? else {
         return Ok(());
     };
-    Storage::register_s3(ENV_S3_DISK, config)?;
-    if let Some(url) = set_variable(variable, "S3_PUBLIC_URL") {
+    Storage::register_s3_config(
+        ENV_S3_DISK,
+        config,
+        s3_path_style(variable)?,
+        default_cloud_resilience,
+    )?;
+    if let Some(url) =
+        set_variable(variable, "S3_PUBLIC_URL").or_else(|| set_variable(variable, "AWS_URL"))
+    {
         let base = public_base(&url).map_err(|reason| {
             FrameworkError::internal(format!(
-                "S3_PUBLIC_URL was refused: {reason}. Write an absolute URL \
+                "S3_PUBLIC_URL or AWS_URL was refused: {reason}. Write an absolute URL \
                  (https://cdn.example.com/files) or a path of this host (/storage)"
             ))
         })?;
         registry::set_public_url(ENV_S3_DISK, base);
     }
     Ok(())
+}
+
+/// Read the environment disk's URL style without changing application disk configs.
+fn s3_path_style(
+    variable: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<bool>, FrameworkError> {
+    set_variable(variable, "S3_USE_PATH_STYLE_ENDPOINT")
+        .or_else(|| set_variable(variable, "AWS_USE_PATH_STYLE_ENDPOINT"))
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err(FrameworkError::internal(
+                "S3_USE_PATH_STYLE_ENDPOINT or AWS_USE_PATH_STYLE_ENDPOINT must be true or false",
+            )),
+        })
+        .transpose()
 }
 
 /// `base_url` as the base of the public URLs of a disk, with no slash at
@@ -344,8 +367,8 @@ pub struct S3Config {
 }
 
 impl S3Config {
-    /// The S3 disk the environment describes, and `None` when `S3_BUCKET`
-    /// is not set. Use it to register the disk under a name of your own:
+    /// The S3 disk the environment describes, and `None` when neither
+    /// `S3_BUCKET` nor `AWS_BUCKET` is set. Use it to register the disk under a name of your own:
     ///
     /// ```rust,no_run
     /// use suprnova::{S3Config, Storage};
@@ -359,20 +382,20 @@ impl S3Config {
     ///
     /// | Variable | |
     /// |---|---|
-    /// | `S3_BUCKET` | The bucket. With it not set there is no disk. |
-    /// | `S3_REGION` | The region, which the driver needs. `AWS_REGION` and `AWS_DEFAULT_REGION` are read when it is not set. A service that is no AWS takes any name: `us-east-1`, `auto`. |
-    /// | `S3_ENDPOINT` | The endpoint of a service that is no AWS: MinIO, RustFS, R2, B2. |
-    /// | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys, both or none. |
+    /// | `S3_BUCKET`, `AWS_BUCKET` | The bucket. With neither set there is no disk. |
+    /// | `S3_REGION` | The region, which the driver needs. `AWS_DEFAULT_REGION` and then `AWS_REGION` are read when it is not set. A service that is no AWS takes any name: `us-east-1`, `auto`. |
+    /// | `S3_ENDPOINT`, `AWS_ENDPOINT` | The endpoint of a service that is no AWS: MinIO, RustFS, R2, B2. |
+    /// | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys, both or none. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` supply each missing value. |
     /// | `S3_ROOT` | A prefix inside the bucket that every path is under. |
     ///
     /// With no keys set the driver asks the default provider chain of
-    /// AWS, which reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`,
-    /// the profile, and the role of the instance.
+    /// AWS, which reads the profile and the role of the instance. Each
+    /// explicit S3 variable wins over its AWS alias.
     ///
     /// # Errors
     ///
-    /// When one of `S3_ACCESS_KEY` and `S3_SECRET_KEY` is set and the
-    /// other is not. The driver would go on with the provider chain, and
+    /// When one effective access key or secret key is set and the other
+    /// is not. The driver would go on with the provider chain, and
     /// the disk would work with credentials nobody meant it to have, or
     /// fail on its first request with an error that names no variable.
     /// When no region is set, which the driver refuses with an error
@@ -386,29 +409,31 @@ impl S3Config {
         variable: &impl Fn(&str) -> Option<String>,
     ) -> Result<Option<Self>, FrameworkError> {
         let set = |name: &str| set_variable(variable, name);
-        let Some(bucket) = set("S3_BUCKET") else {
+        let Some(bucket) = set("S3_BUCKET").or_else(|| set("AWS_BUCKET")) else {
             return Ok(None);
         };
-        let (access_key_id, secret_access_key) = match (set("S3_ACCESS_KEY"), set("S3_SECRET_KEY"))
-        {
+        let (access_key_id, secret_access_key) = match (
+            set("S3_ACCESS_KEY").or_else(|| set("AWS_ACCESS_KEY_ID")),
+            set("S3_SECRET_KEY").or_else(|| set("AWS_SECRET_ACCESS_KEY")),
+        ) {
             (Some(key), Some(secret)) => (Some(key), Some(secret)),
             (None, None) => (None, None),
             (Some(_), None) => {
                 return Err(FrameworkError::internal(
-                    "S3_ACCESS_KEY is set and S3_SECRET_KEY is not; set both, or neither to \
+                    "S3_ACCESS_KEY or AWS_ACCESS_KEY_ID is set and S3_SECRET_KEY or AWS_SECRET_ACCESS_KEY is not; set both, or neither to \
                      use the default credential chain",
                 ));
             }
             (None, Some(_)) => {
                 return Err(FrameworkError::internal(
-                    "S3_SECRET_KEY is set and S3_ACCESS_KEY is not; set both, or neither to \
+                    "S3_SECRET_KEY or AWS_SECRET_ACCESS_KEY is set and S3_ACCESS_KEY or AWS_ACCESS_KEY_ID is not; set both, or neither to \
                      use the default credential chain",
                 ));
             }
         };
         let region = set("S3_REGION")
-            .or_else(|| set("AWS_REGION"))
             .or_else(|| set("AWS_DEFAULT_REGION"))
+            .or_else(|| set("AWS_REGION"))
             .ok_or_else(|| {
                 FrameworkError::internal(
                     "S3_BUCKET is set and no region is; set S3_REGION. A service that is no \
@@ -418,7 +443,7 @@ impl S3Config {
         Ok(Some(Self {
             bucket,
             region: Some(region),
-            endpoint: set("S3_ENDPOINT"),
+            endpoint: set("S3_ENDPOINT").or_else(|| set("AWS_ENDPOINT")),
             access_key_id,
             secret_access_key,
             root: set("S3_ROOT"),
@@ -666,25 +691,21 @@ impl Storage {
     }
 
     /// The application's default disk: the one named with
-    /// [`Storage::set_default_disk`], or else by `FILESYSTEM_DISK`.
+    /// [`Storage::set_default_disk`], or else by `FILESYSTEM_DISK`, or `local`.
     ///
     /// Laravel's `Storage::disk()` with no name. A call that names its disk
     /// with [`Storage::disk`] is not affected by the default.
     ///
     /// # Errors
     ///
-    /// When neither names a disk, with an error that names
-    /// `FILESYSTEM_DISK`; when the named disk is not registered. The server
-    /// already refuses to boot in the second case
+    /// When the selected disk is not registered. Without an explicit name,
+    /// the error names `local` and `FILESYSTEM_DISK`. The server
+    /// already refuses to boot when an explicit default names a missing disk
     /// ([`bootstrap_from_env`]), so in a running server it
     /// means a disk was forgotten after boot.
     pub fn default_disk() -> Result<Operator, FrameworkError> {
-        let name = default_disk_name(&|name| std::env::var(name).ok()).ok_or_else(|| {
-            FrameworkError::internal(
-                "no default disk is named: set FILESYSTEM_DISK or call \
-                 Storage::set_default_disk in the bootstrap",
-            )
-        })?;
+        let name = default_disk_name(&|name| std::env::var(name).ok())
+            .unwrap_or_else(|| "local".to_owned());
         if !registry::contains(&name) {
             return Err(unregistered_default_disk(&name));
         }
@@ -911,6 +932,16 @@ impl Storage {
         config: S3Config,
         layer_fn: impl FnOnce(Operator) -> Operator,
     ) -> Result<(), FrameworkError> {
+        Self::register_s3_config(name, config, None, layer_fn)
+    }
+
+    /// Build an environment disk with its URL style while preserving ordinary registration.
+    fn register_s3_config(
+        name: impl Into<String>,
+        config: S3Config,
+        path_style: Option<bool>,
+        layer_fn: impl FnOnce(Operator) -> Operator,
+    ) -> Result<(), FrameworkError> {
         if config.bucket.trim().is_empty() {
             return Err(FrameworkError::internal(
                 "S3 storage config requires a non-empty `bucket`",
@@ -931,6 +962,9 @@ impl Storage {
         }
         if let Some(root) = config.root.as_deref() {
             builder = builder.root(root);
+        }
+        if path_style == Some(false) {
+            builder = builder.enable_virtual_host_style();
         }
         let raw = Operator::new(builder)
             .map_err(|e| FrameworkError::internal(format!("opendal s3 init: {e}")))?;

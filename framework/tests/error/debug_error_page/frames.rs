@@ -300,3 +300,63 @@ async fn std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups() {
         );
     }
 }
+
+#[tokio::test]
+#[serial]
+async fn an_application_frame_shows_the_source_line_and_its_neighbors() {
+    let _debug = debug_mode(true, &[]).await;
+    let reply = get(ledger_routes(), "/ledger-index", BROWSER).await;
+    let source = reply.text();
+    let application_frame = source
+        .split("<li class=\"app\">")
+        .find(|frame| {
+            frame.starts_with("<code class=\"fn\">error::debug_error_page::read_ledger_index_page")
+        })
+        .and_then(|frame| frame.split("</li>").next())
+        .expect("the panicking application frame is shown");
+    assert!(
+        application_frame.contains("<pre class=\"source\">"),
+        "{}",
+        reply.body
+    );
+    assert!(
+        source.contains("PANIC_LINE.store(line!() + 1"),
+        "{}",
+        reply.body
+    );
+    assert!(
+        source.contains("panic!(\"{PANIC_MESSAGE}\")"),
+        "{}",
+        reply.body
+    );
+}
+
+fn inner_recorded_error() -> FrameworkError {
+    FrameworkError::internal("inner recorded failure")
+}
+
+fn outer_recorded_error() -> FrameworkError {
+    FrameworkError::from_external_with("outer recorded failure", inner_recorded_error())
+}
+
+#[tokio::test]
+#[serial]
+async fn each_error_in_a_chain_displays_the_trace_it_recorded() {
+    let _debug = debug_mode(true, &[]).await;
+    let routes = Router::new()
+        .get("/chained", |_req| async {
+            Err::<HttpResponse, _>(HttpResponse::from(outer_recorded_error()))
+        })
+        .into();
+    let reply = get(routes, "/chained", BROWSER).await;
+    assert_debug_page(&reply, 500);
+    assert_eq!(
+        reply.body.matches("<h2>Stack frames").count(),
+        2,
+        "{}",
+        reply.body
+    );
+    let traces: Vec<&str> = reply.body.split("<h2>Stack frames").skip(1).collect();
+    assert!(traces[0].contains("outer_recorded_error"));
+    assert!(traces[1].contains("inner_recorded_error"));
+}

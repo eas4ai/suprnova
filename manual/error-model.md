@@ -615,9 +615,11 @@ Everything else stays as it is. A 4xx keeps its body, and so does a 5xx
 your handler built itself without an error. A client whose `Accept`
 header doesn't list `text/html` (`application/json`, `*/*`, or no
 `Accept` at all) and isn't an Inertia visit keeps the JSON body with
-`debug_message`. With debug off, no request gets the page,
-nothing about the request is captured, no stack frames are recorded, and
-every response is the one production sends.
+`debug_message`. With debug off, you receive a minimal HTML view for a
+5xx when your request accepts `text/html` and is not an Inertia visit. You
+see its status without error details or frames. Your Inertia visits keep
+the application error page, and your JSON requests keep their JSON body.
+No frames or request details are recorded for this production view.
 
 The page is built in the server, after the panic boundary, so it covers
 panics as well as returned errors. For these responses it takes the
@@ -642,7 +644,10 @@ curl -H 'Accept: text/html' http://localhost:8000/invoices/42
 - The stack frames recorded at that site. Your application's frames are
   listed: your handlers and middleware, and the code they call. Each run
   of frames from the framework, the async runtime, other dependencies,
-  and the standard library is collapsed behind a count.
+  and the standard library is collapsed behind a count. You see the
+  source line and a few nearby lines for every application frame whose
+  source file is readable. Each source error with recorded frames has
+  its own trace.
 - The request: the method, the path, the query parameters, the headers,
   the matched route pattern, and the request id.
 

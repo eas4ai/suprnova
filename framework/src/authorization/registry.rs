@@ -11,6 +11,7 @@ use super::Response;
 // invocation clones it out of the registry and calls it with no lock held:
 // a gate that defines a gate must not wait on a lock its own call holds.
 type SyncGateFn = Arc<dyn Fn(&dyn Any, &dyn Any) -> Response + Send + Sync>;
+type GuestGateFn = Arc<dyn Fn(&dyn Any) -> Response + Send + Sync>;
 
 // An async gate closure, type-erased.
 // The closure returns an owned, boxed future (no borrowed references in the
@@ -49,6 +50,10 @@ type AfterFn = dyn Fn(&dyn Any, &str, Option<bool>) -> Option<bool> + Send + Syn
 #[derive(Clone)]
 enum GateEntry {
     Sync(SyncGateFn),
+    Optional {
+        authenticated: SyncGateFn,
+        guest: GuestGateFn,
+    },
     Async(AsyncGateFn),
 }
 
@@ -241,6 +246,67 @@ impl GateRegistry {
         self.insert_gate::<U, R>(action, GateEntry::Sync(erased), "sync(response)");
     }
 
+    /// Register one nullable-user policy for both authenticated and guest dispatch.
+    pub(crate) fn register_optional_with<U: 'static, R: 'static>(
+        &self,
+        action: &str,
+        f: impl Fn(Option<&U>, &R) -> Response + Send + Sync + 'static,
+    ) {
+        let f = Arc::new(f);
+        let authenticated = f.clone();
+        let authenticated: SyncGateFn = Arc::new(move |u, r| match downcast_pair::<U, R>(u, r) {
+            Some((u, r)) => authenticated(Some(u), r),
+            None => Response::deny(),
+        });
+        let guest: GuestGateFn = Arc::new(move |r| {
+            r.downcast_ref::<R>()
+                .map_or_else(Response::deny, |r| f(None, r))
+        });
+        self.insert_gate::<U, R>(
+            action,
+            GateEntry::Optional {
+                authenticated,
+                guest,
+            },
+            "optional",
+        );
+    }
+
+    /// Register a nullable-user bool policy using the configured denial response.
+    pub(crate) fn register_optional<U: 'static, R: 'static>(
+        &self,
+        action: &str,
+        f: impl Fn(Option<&U>, &R) -> bool + Send + Sync + 'static,
+    ) {
+        self.register_optional_with(action, move |u, r| bool_to_response(f(u, r)));
+    }
+
+    /// Resolve a guest policy without guessing the absent user's concrete type.
+    pub(crate) fn invoke_guest<R: 'static>(&self, action: &str, resource: &R) -> Option<Response> {
+        let guests = match self.gates.read() {
+            Ok(gates) => gates
+                .iter()
+                .filter_map(|((name, _, resource_type), entry)| {
+                    if name == action
+                        && *resource_type == TypeId::of::<R>()
+                        && let GateEntry::Optional { guest, .. } = entry
+                    {
+                        Some(guest.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => return Some(Response::deny()),
+        };
+        match guests.as_slice() {
+            [] => None,
+            [guest] => Some(guest(resource)),
+            // Ambiguous nullable policies fail closed instead of depending on map order.
+            _ => Some(Response::deny()),
+        }
+    }
+
     /// Register an async gate.
     ///
     /// The closure must produce an *owned* future - it cannot borrow `user` or
@@ -306,6 +372,7 @@ impl GateRegistry {
             Ok(mut gates) => {
                 let previous_kind = gates.get(&key).map(|e| match e {
                     GateEntry::Sync(_) => "sync",
+                    GateEntry::Optional { .. } => "optional",
                     GateEntry::Async(_) => "async",
                 });
                 if let Some(previous_kind) = previous_kind {
@@ -475,7 +542,12 @@ impl GateRegistry {
             }
         };
         match entry {
-            Some(GateEntry::Sync(f)) => Some(f(user as &dyn Any, resource as &dyn Any)),
+            Some(
+                GateEntry::Sync(f)
+                | GateEntry::Optional {
+                    authenticated: f, ..
+                },
+            ) => Some(f(user as &dyn Any, resource as &dyn Any)),
             Some(GateEntry::Async(_)) => {
                 tracing::warn!(
                     action = %action,
@@ -527,7 +599,12 @@ impl GateRegistry {
             }
         };
         let entry_result: EntryResult = match entry {
-            Some(GateEntry::Sync(f)) => Some(Ok(f(user.as_gate_any(), resource as &dyn Any))),
+            Some(
+                GateEntry::Sync(f)
+                | GateEntry::Optional {
+                    authenticated: f, ..
+                },
+            ) => Some(Ok(f(user.as_gate_any(), resource as &dyn Any))),
             Some(GateEntry::Async(f)) => Some(Err(f(user.as_gate_any(), resource as &dyn Any))),
             None => None,
         };

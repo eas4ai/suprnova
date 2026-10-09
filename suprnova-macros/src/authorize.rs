@@ -17,7 +17,7 @@
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Attribute, Ident, ItemFn, LitStr, Meta, Token, Type};
+use syn::{Attribute, Expr, Ident, ItemFn, Lit, Meta, Token, Type};
 
 /// The shape the attribute accepts, quoted in every argument error.
 const USAGE: &str = "expected `#[authorize(\"ability\", Type)]` or \
@@ -30,7 +30,7 @@ const NO_HANDLER: &str = "#[authorize] works only on a `#[handler]` function: \
 /// One parsed `#[authorize(ability, target)]`.
 pub(crate) struct AuthorizeSpec {
     /// The gate ability, passed to the gate as written.
-    pub(crate) ability: LitStr,
+    pub(crate) ability: Expr,
     /// What the ability is checked against.
     pub(crate) target: Target,
 }
@@ -51,10 +51,21 @@ pub(crate) enum Target {
 
 impl Parse for AuthorizeSpec {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let ability: LitStr = input
+        let ability: Expr = input
             .parse()
             .map_err(|err| syn::Error::new(err.span(), USAGE))?;
-        if ability.value().is_empty() {
+        if !matches!(
+            &ability,
+            Expr::Path(_)
+                | Expr::Lit(syn::ExprLit {
+                    lit: Lit::Str(_),
+                    ..
+                })
+        ) {
+            return Err(syn::Error::new_spanned(&ability, USAGE));
+        }
+        if matches!(&ability, Expr::Lit(literal) if matches!(&literal.lit, Lit::Str(name) if name.value().is_empty()))
+        {
             return Err(syn::Error::new_spanned(
                 &ability,
                 "#[authorize] needs a non-empty ability name",

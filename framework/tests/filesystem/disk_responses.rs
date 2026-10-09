@@ -30,6 +30,18 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = suprnova::Response> + Send + 'static,
 {
+    serve_with(path, &[], handler).await
+}
+
+async fn serve_with<F, Fut>(
+    path: &'static str,
+    headers: &[(&str, &str)],
+    handler: F,
+) -> (u16, HeaderMap, Bytes)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = suprnova::Response> + Send + 'static,
+{
     let handler = Arc::new(handler);
     let router: Router = Router::new()
         .get(path, move |_req| {
@@ -37,7 +49,7 @@ where
             async move { handler().await }
         })
         .into();
-    let req = incoming_get_request(path, &[]).await;
+    let req = incoming_get_request(path, headers).await;
     let resp = tokio::time::timeout(
         WAIT,
         handle_request(Arc::new(router), Arc::new(MiddlewareRegistry::new()), req),
@@ -293,4 +305,123 @@ async fn a_large_file_on_a_disk_is_streamed_and_arrives_whole() {
             "the body from `{disk}` must match"
         );
     }
+}
+
+#[tokio::test]
+async fn disk_ranges_use_the_disk_reader_and_file_mtime() {
+    let _guard = Storage::fake();
+    let tmp = local_disk_with_outside_secret("local");
+    let modified = httpdate::fmt_http_date(
+        std::fs::metadata(tmp.path().join("root/reports/q3.pdf"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+    );
+    for (range, status, expected, content_range) in [
+        ("bytes=0-9", 206, b"%PDF-1.7 q".as_slice(), "bytes 0-9/11"),
+        ("bytes=11-", 416, b"".as_slice(), "bytes */11"),
+    ] {
+        let (actual, headers, body) = serve_with("/disk-range", &[("Range", range)], || async {
+            Storage::download("local", "reports/q3.pdf", None)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .await;
+        assert_eq!(actual, status);
+        assert_eq!(&body[..], expected);
+        assert_eq!(header(&headers, "content-range"), content_range);
+        assert_eq!(header(&headers, "last-modified"), modified);
+        assert_eq!(header(&headers, "accept-ranges"), "bytes");
+    }
+}
+
+#[tokio::test]
+async fn disk_response_options_preserve_headers_and_select_the_disposition() {
+    let _guard = Storage::fake();
+    let _tmp = local_disk_with_outside_secret("local");
+    for download in [false, true] {
+        let (status, headers, body) = serve("/disk-options", move || async move {
+            let headers = [
+                ("Cache-Control", "private, max-age=30"),
+                ("X-File", "yes"),
+                ("Content-Type", "application/custom"),
+            ];
+            if download {
+                Storage::download_with(
+                    "local",
+                    "reports/q3.pdf",
+                    Some("Pérez.pdf"),
+                    headers,
+                    suprnova::ContentDisposition::Inline,
+                )
+                .await
+            } else {
+                Storage::response_with(
+                    "local",
+                    "reports/q3.pdf",
+                    Some("Pérez.pdf"),
+                    headers,
+                    suprnova::ContentDisposition::Attachment,
+                )
+                .await
+            }
+            .map_err(HttpResponse::from)
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(header(&headers, "cache-control"), "private, max-age=30");
+        assert_eq!(header(&headers, "x-file"), "yes");
+        assert_eq!(header(&headers, "content-type"), "application/custom");
+        assert!(
+            header(&headers, "content-disposition").starts_with(if download {
+                "inline;"
+            } else {
+                "attachment;"
+            })
+        );
+        assert!(
+            header(&headers, "content-disposition").contains("filename*=UTF-8''P%C3%A9rez.pdf")
+        );
+        assert_eq!(&body[..], b"%PDF-1.7 q3");
+    }
+    assert!(
+        Storage::download_with(
+            "local",
+            "../secret.txt",
+            None,
+            [("X-File", "yes")],
+            suprnova::ContentDisposition::Inline
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_large_memory_disk_range_uses_a_stream_at_the_correct_offset() {
+    let _guard = Storage::fake();
+    Storage::register_memory("memory");
+    let bytes: Vec<u8> = (0..3 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    Storage::disk("memory")
+        .unwrap()
+        .write("large.bin", bytes.clone())
+        .await
+        .unwrap();
+    let (status, headers, body) =
+        serve_with("/memory-range", &[("Range", "bytes=1048576-")], || async {
+            let response = Storage::response("memory", "large.bin", None)
+                .await
+                .map_err(HttpResponse::from)?;
+            assert!(response.is_streaming());
+            Ok(response)
+        })
+        .await;
+    assert_eq!(status, 206);
+    assert_eq!(
+        header(&headers, "content-length"),
+        (2 * 1024 * 1024).to_string()
+    );
+    assert_eq!(&body[..], &bytes[1024 * 1024..]);
 }

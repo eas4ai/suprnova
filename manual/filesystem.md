@@ -389,6 +389,18 @@ The response follows the same rules as `HttpResponse::download` and
 - A file of 1 MiB or less is read whole. A larger file is streamed from the
   disk in 64 KiB chunks. Both carry a `Content-Length`.
 
+You receive `Last-Modified` when the disk reports a modification time, and
+`Accept-Ranges: bytes`. Your GET range requests receive `206` with the
+selected bytes and `Content-Range`, or `416` with `Content-Range: bytes
+*/<size>` when the range is unsatisfiable. You read only the selected range
+through the disk, so its path guard still applies.
+
+You use `Storage::download_with(disk, path, name, headers, disposition)` or
+`Storage::response_with(disk, path, name, headers, disposition)` to pass
+extra headers and select `ContentDisposition::Inline` or
+`ContentDisposition::Attachment`. Your `Content-Type` and `Cache-Control`
+are kept. You cannot override the body's length or range metadata.
+
 The errors map to these status codes:
 
 | Case | Status |
@@ -822,18 +834,20 @@ mail transport.
 
 ### An S3 disk from the environment
 
-When `S3_BUCKET` is set, the server registers an S3 disk under the name `s3`
-(the constant `suprnova::ENV_S3_DISK`). With `S3_BUCKET` not set, it
-registers nothing. A value that is blank counts as not set.
+You configure the `s3` disk with `S3_BUCKET` or its Laravel alias
+`AWS_BUCKET`. The server registers it under `suprnova::ENV_S3_DISK` at boot.
+When neither bucket is set, you get no environment disk. A blank value
+counts as unset. Each `S3_` value wins over its AWS alias.
 
 | Variable | Meaning |
 |----------|---------|
-| `S3_BUCKET` | The bucket. Without it there is no disk. |
-| `S3_REGION` | The region. The driver needs one. When `S3_REGION` is not set, `AWS_REGION` is read, then `AWS_DEFAULT_REGION`. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
-| `S3_ENDPOINT` | The endpoint of a service that is not AWS: MinIO, RustFS, R2, B2. |
-| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys. Set both or neither. |
+| `S3_BUCKET`, `AWS_BUCKET` | The bucket. Without either there is no disk. |
+| `S3_REGION` | The region. The driver needs one. When `S3_REGION` is not set, `AWS_DEFAULT_REGION` is read, then `AWS_REGION`. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
+| `S3_ENDPOINT`, `AWS_ENDPOINT` | The endpoint of a service that is not AWS: MinIO, RustFS, R2, B2. |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | The keys. You use `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the corresponding S3 name is unset. You set both effective keys or neither. |
 | `S3_ROOT` | A prefix inside the bucket. Every path is under it. |
-| `S3_PUBLIC_URL` | The public base URL of the disk, as `Storage::set_public_url` takes it. See [Public URLs](#public-urls). |
+| `S3_PUBLIC_URL`, `AWS_URL` | The public base URL of the disk, as `Storage::set_public_url` takes it. See [Public URLs](#public-urls). |
+| `S3_USE_PATH_STYLE_ENDPOINT`, `AWS_USE_PATH_STYLE_ENDPOINT` | You set `true` for endpoint/bucket paths or `false` for bucket hostnames. With neither set, you keep path-style URLs. An invalid value fails boot. |
 
 With no keys set, the driver uses the default credential chain of AWS. That
 chain reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the profile and
@@ -865,7 +879,7 @@ the variables are not read. Your registration is a decision, and a fault in
 variables that describe nothing in use must not stop the boot.
 
 To register the environment's disk under a name of your own, call
-`S3Config::from_env()`. It returns `Ok(None)` when `S3_BUCKET` is not set.
+`S3Config::from_env()`. It returns `Ok(None)` when neither `S3_BUCKET` nor `AWS_BUCKET` is set.
 
 ```rust,ignore
 use suprnova::{S3Config, Storage};
@@ -907,17 +921,18 @@ Storage::default_disk()?.write("avatars/42.png", bytes).await?;
 The boot checks the name once the bootstrap and the `s3` disk of the
 environment are in place: a default disk that names no registered disk
 stops the server with an error that names the disk and `FILESYSTEM_DISK`,
-rather than failing the first upload. With nothing named there is no
-default disk, and `Storage::default_disk()` returns an error that names
+rather than failing the first upload. With neither setting present, you use
+the registered `local` disk. When you have not registered `local`,
+`Storage::default_disk()` returns an error naming `local` and
 `FILESYSTEM_DISK`. A call that names its disk, `Storage::disk("s3")`, is
 not affected.
 
 #### Why Suprnova diverges
 
 Laravel ships a `local` disk and defaults `FILESYSTEM_DISK` to it. Suprnova
-registers no disk on its own, so there is no default until you name one,
-and the default disk is reached through `Storage::default_disk()` rather
-than through `Storage::put` and the other methods on the facade.
+registers no local disk on its own, so you register `local` in your
+bootstrap to use the implicit default. You reach it through
+`Storage::default_disk()` rather than `Storage::put`.
 
 See [Configuration](configuration.md) for the wider rule on where the
 framework reads from the environment.
