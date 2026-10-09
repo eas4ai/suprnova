@@ -52,7 +52,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Table queries ordered by age.** `oldest` and `oldest_by` order rows ascending.
 - **Seeded random query ordering.** `in_random_order()` orders rows randomly on
   both builders, and `in_random_order_seeded(seed)` repeats an order with RAND(seed)
-  on MySQL and setseed with random() on Postgres; SQLite orders by a seed-derived expression over the model's primary key, or `rowid` on `DB::table`, then by that key, so the same seed repeats the order.
+  on MySQL and setseed with random() on Postgres; SQLite orders by a seed-derived expression over each row's `rowid`, then by the `rowid`, on both builders, so the same seed repeats the order for any primary key type, a union and its pages included.
 - **Inspect applied model scopes.** `apply_scopes` returns the builder with
   its registered global scopes and soft-delete filter applied once.
 - **Polymorphic existence queries.** `has_morph`, `doesnt_have_morph` and
