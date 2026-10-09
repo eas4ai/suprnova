@@ -416,12 +416,19 @@ async fn colliding_deferred_clauses_debit_once_on_both_response_branches() {
             .middleware(
                 ThrottleRequestsMiddleware::with_limits(limits).prefix(format!("deferred-{fail}")),
             );
-        let addr = spawn_server(router, 3).await;
+        let addr = spawn_server(router, 2).await;
         let expected = if fail { 500 } else { 200 };
         let (status, headers) = get_with_headers(addr, "/quota").await;
         assert_eq!(status, expected);
-        assert_eq!(headers["x-ratelimit-remaining"], "1");
-        assert_eq!(get_with_headers(addr, "/quota").await.0, expected);
+        // The two clauses share the fallback key `same:attempts:2:decay:60`,
+        // and each debits it once, as Laravel hits a key once for each limit.
+        assert_eq!(headers["x-ratelimit-remaining"], "0");
+        assert_eq!(
+            RateLimiter::attempts(&format!("deferred-{fail}:same:attempts:2:decay:60"))
+                .await
+                .unwrap(),
+            2
+        );
         assert_eq!(get_with_headers(addr, "/quota").await.0, 418);
     }
 }

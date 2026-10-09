@@ -26,23 +26,30 @@
 //! `ThrottleRequests::getHeaders($maxAttempts, $remainingAttempts,
 //! $retryAfter, $response)` shape.
 //!
-//! A request the middleware refuses leaves every bucket's count where it
-//! was, as in Laravel, which checks every limit before it counts a request.
-//! The decision itself stays on the atomic post-increment count (see
-//! [`RateLimiter::hit_and_check`]).
+//! Each limit counts under the key it carries, prefixed with the limiter's
+//! name for a named limiter, so a direct caller of
+//! [`RateLimiter::attempts`] reads the bucket the middleware counts in.
+//! Limits whose keys clean alike share that bucket, and a request counts
+//! in it once for each of them, as Laravel's `ThrottleRequests` hits a key
+//! once for each limit.
+//!
+//! The middleware checks every limit before it counts a request, as
+//! Laravel does, so a request refused there leaves every count where it
+//! was. The admission itself stays on the atomic post-increment count (see
+//! [`RateLimiter::hit_and_check`]), and the middleware never takes a count
+//! back, so no window admits more requests than its limit (see
+//! `count_request` for why there is no give-back).
 
 use async_trait::async_trait;
-use hex::encode;
 
 use crate::Middleware;
 use crate::Next;
 use crate::Request;
 use crate::http::{HttpResponse, Response};
 
-use super::laravel::{NamedLimiterFn, RateLimiter};
+use super::laravel::{NamedLimiterFn, RateLimiter, give_shared_keys_fallback_keys};
 use super::limit::{Limit, LimitResult};
 
-use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 /// HTTP throttling middleware backed by the Cache-shape
@@ -193,6 +200,11 @@ impl ThrottleRequestsMiddleware {
     /// [`Limit`]s. The first limit to trip wins. This is the most
     /// Rust-idiomatic constructor and doesn't require a named-limiter
     /// registration.
+    ///
+    /// Limits that share a key count under their
+    /// [`fallback_key`](Limit::fallback_key)s, as the limits of a named
+    /// limiter do (see [`RateLimiter::limiter`]), so a per-minute and a
+    /// per-hour limit on one key keep a count each.
     pub fn with_limits(limits: Vec<Limit>) -> Self {
         Self {
             mode: Mode::Limits(limits),
@@ -326,47 +338,34 @@ impl Middleware for ThrottleRequestsMiddleware {
             }
         };
 
-        let keys = independent_keys(&limits, &self.mode, &self.prefix);
+        // The keys the limits carry, prefixed, never rewritten: a direct
+        // caller reads the buckets the middleware counts in. Computed once so
+        // the check, the count, the deferred hits and the headers agree.
+        let keys: Vec<Option<String>> = limits
+            .iter()
+            .map(|limit| prefixed_key(limit, &self.mode, &self.prefix))
+            .collect();
+        let mut buckets = buckets_of(&limits, &keys);
 
-        // Apply each limit's gate. First trip wins, then short-circuit with
-        // the 429 (or its custom-response equivalent). Matches Laravel's
-        // first-trip-wins pass through `handleRequest`.
-        //
-        // Two gating shapes:
-        //
-        // - Limits WITHOUT an `after_callback` debit unconditionally, so the
-        //   gate and the debit are fused into a single atomic
-        //   increment-and-check (`hit_and_check`). Gating on the
-        //   post-increment count closes the check-then-act race a separate
-        //   `too_many_attempts`-then-`hit` pair would leave open - a
-        //   concurrent burst can no longer all observe a below-limit count and
-        //   all pass, over-admitting past the ceiling.
-        // - Limits WITH an `after_callback` only burn an attempt when the
-        //   post-response predicate matches, so the debit is deferred until
-        //   after `next`. They gate on the already-recorded count via a read
-        //   (`too_many_attempts`); there is nothing to increment yet.
-        //
-        // A refused request gives back every increment it made, so it
-        // leaves each bucket's count where it was, as Laravel's
-        // check-before-hit does. Only refused increments are given back, so
-        // a bucket's count never falls below the requests it admitted, and
-        // the post-increment decision still admits at most the limit.
-        let mut debited: Vec<(&str, u64)> = Vec::new();
-        for (limit, key) in limits.iter().zip(&keys) {
+        // Check every limit before the request is counted, as Laravel's
+        // `handleRequest` does. The first limit whose bucket already holds
+        // it refuses the request, and nothing has been counted. A limit with
+        // an `after` callback is only counted once the response is known, so
+        // the check is all it gets here.
+        for (index, (limit, key)) in limits.iter().zip(&keys).enumerate() {
             let Some(key) = key else { continue }; // Unlimited never trips.
-            let over = if limit.after_callback.is_some() {
+            let full = if limit.after_callback.is_some() {
                 RateLimiter::too_many_attempts(key, limit.max_attempts).await?
             } else {
-                let over =
-                    RateLimiter::hit_and_check(key, limit.max_attempts, limit.decay_seconds())
-                        .await?;
-                debited.push((key.as_str(), limit.decay_seconds()));
-                over
+                holds_limit(&mut buckets, &limits, index).await?
             };
-            if over {
-                give_back(&debited).await?;
+            if full {
                 return Err(build_too_many_attempts_response(&request, limit, key).await?);
             }
+        }
+
+        if let Some((limit, key)) = count_request(&limits, &buckets).await? {
+            return Err(build_too_many_attempts_response(&request, limit, key).await?);
         }
 
         request
@@ -382,19 +381,181 @@ impl Middleware for ThrottleRequestsMiddleware {
     }
 }
 
-/// Take back the increments a refused request made, one per bucket it was
-/// counted in.
-///
-/// If a bucket's window ends between the increment and this decrement, the
-/// decrement opens the next window at `-1`, which admits one request more
-/// in that window. That needs a refused request to straddle the window's
-/// end; the alternative, keeping every refused request's increment, lets a
-/// client that keeps retrying keep its own bucket full.
-async fn give_back(debited: &[(&str, u64)]) -> Result<(), crate::FrameworkError> {
-    for (key, decay_seconds) in debited {
-        RateLimiter::decrement(key, *decay_seconds, 1).await?;
+/// One bucket a request is checked and counted in. Limits whose keys clean
+/// to one stored key share it, as the [`RateLimiter`] facade stores them.
+struct Bucket<'a> {
+    /// The key of the first limit in the bucket, as written; the facade
+    /// cleans it, so it names the bucket every other key of it names.
+    key: &'a str,
+    /// The limits counted when the request is admitted, those without an
+    /// `after` callback, by index, in the order they were given.
+    counted: Vec<usize>,
+    /// The count the bucket held when the request was checked, read once.
+    before: Option<i64>,
+    /// Whether the bucket's window was open then, read once when a count
+    /// reaches a limit.
+    open: Option<bool>,
+}
+
+/// Group the limits by the bucket they count in: the bucket of each limit,
+/// by index, and the buckets in the order of their first limit. An
+/// unlimited limit has no key and no bucket.
+fn buckets_of<'a>(limits: &[Limit], keys: &'a [Option<String>]) -> Buckets<'a> {
+    let mut stored: Vec<String> = Vec::new();
+    let mut buckets: Vec<Bucket<'a>> = Vec::new();
+    let mut of_limit = Vec::with_capacity(limits.len());
+    for (index, (limit, key)) in limits.iter().zip(keys).enumerate() {
+        let Some(key) = key else {
+            of_limit.push(None);
+            continue;
+        };
+        let cleaned = RateLimiter::clean_rate_limiter_key(key);
+        let position = match stored.iter().position(|known| *known == cleaned) {
+            Some(position) => position,
+            None => {
+                stored.push(cleaned);
+                buckets.push(Bucket {
+                    key,
+                    counted: Vec::new(),
+                    before: None,
+                    open: None,
+                });
+                buckets.len() - 1
+            }
+        };
+        if limit.after_callback.is_none()
+            && let Some(bucket) = buckets.get_mut(position)
+        {
+            bucket.counted.push(index);
+        }
+        of_limit.push(Some(position));
     }
-    Ok(())
+    Buckets { buckets, of_limit }
+}
+
+/// The buckets of one request, and which bucket each limit counts in.
+struct Buckets<'a> {
+    buckets: Vec<Bucket<'a>>,
+    of_limit: Vec<Option<usize>>,
+}
+
+/// Whether the bucket of the limit at `index` already holds that limit in
+/// an open window, so the request is refused before it is counted. It is
+/// Laravel's `tooManyAttempts` check, without its reset of a count whose
+/// window has ended: the count is then left to age out, because a reset
+/// here could erase counts a new window has already taken.
+async fn holds_limit(
+    buckets: &mut Buckets<'_>,
+    limits: &[Limit],
+    index: usize,
+) -> Result<bool, crate::FrameworkError> {
+    let (Some(Some(position)), Some(limit)) = (buckets.of_limit.get(index), limits.get(index))
+    else {
+        return Ok(false);
+    };
+    let Some(bucket) = buckets.buckets.get_mut(*position) else {
+        return Ok(false);
+    };
+    let before = match bucket.before {
+        Some(before) => before,
+        None => {
+            let before = RateLimiter::attempts(bucket.key).await?;
+            bucket.before = Some(before);
+            before
+        }
+    };
+    if before < limit.max_attempts {
+        return Ok(false);
+    }
+    match bucket.open {
+        Some(open) => Ok(open),
+        None => {
+            let open = RateLimiter::window_is_open(bucket.key).await?;
+            bucket.open = Some(open);
+            Ok(open)
+        }
+    }
+}
+
+/// Count the request in each of its buckets, and answer the limit that
+/// refuses it and that limit's key, if one does.
+///
+/// Each bucket takes one atomic increment, by the number of limits counted
+/// in it, as Laravel hits a key once for each limit. The request is
+/// admitted only when the first of the counts it got in a bucket is within
+/// every limit counted there, which is Laravel's check-before-hit decided
+/// on the atomic post-increment count.
+///
+/// # Why a count is never taken back
+///
+/// A decrement that gives a refused request's count back carries no mark of
+/// the window it came from, and the cache store has no step that decrements
+/// a count only while a given window lasts. If the window ended between the
+/// count and the give-back, the decrement would land in the next window, as
+/// `-1` on a new counter or as one count off requests that window already
+/// admitted, and that window would admit one request more than its limit.
+/// So the middleware takes nothing back, and that is why it cannot
+/// over-admit: an increment hands each request in a window its own counts,
+/// counts in a window only grow, and a request is admitted only on a count
+/// within the limit, so no more requests than the limit get one, however
+/// late any step of a refused request runs.
+///
+/// A request refused at the check was never counted. The one refused
+/// request that keeps a count is one that passed the check beside
+/// concurrent requests and found the bucket full when it counted. The
+/// bucket that refused it already holds its limit, so that count admits or
+/// refuses nothing else in the window, and it ends with the window. A
+/// bucket of that request counted before the one that refused it keeps a
+/// count too, which can refuse a request early but never admits one; the
+/// buckets are counted fewest places left first, so the bucket that runs
+/// out is usually counted first.
+async fn count_request<'b>(
+    limits: &'b [Limit],
+    buckets: &Buckets<'b>,
+) -> Result<Option<(&'b Limit, &'b str)>, crate::FrameworkError> {
+    let mut order: Vec<&Bucket<'b>> = buckets
+        .buckets
+        .iter()
+        .filter(|bucket| !bucket.counted.is_empty())
+        .collect();
+    order.sort_by_key(|bucket| places_left(bucket, limits));
+    for bucket in order {
+        let Some(decay_seconds) = bucket
+            .counted
+            .first()
+            .and_then(|index| limits.get(*index))
+            .map(Limit::decay_seconds)
+        else {
+            continue;
+        };
+        let hits = i64::try_from(bucket.counted.len()).unwrap_or(i64::MAX);
+        let total = RateLimiter::increment(bucket.key, decay_seconds, hits).await?;
+        let first = total.saturating_sub(hits).saturating_add(1);
+        let refusing = bucket
+            .counted
+            .iter()
+            .filter_map(|index| limits.get(*index))
+            .find(|limit| first > limit.max_attempts);
+        if let Some(limit) = refusing {
+            return Ok(Some((limit, bucket.key)));
+        }
+    }
+    Ok(None)
+}
+
+/// The places a bucket had left at the check, for the tightest limit
+/// counted in it. A bucket the check did not read sorts last.
+fn places_left(bucket: &Bucket<'_>, limits: &[Limit]) -> i64 {
+    let Some(before) = bucket.before else {
+        return i64::MAX;
+    };
+    bucket
+        .counted
+        .iter()
+        .filter_map(|index| limits.get(*index))
+        .map(|limit| limit.max_attempts.saturating_sub(before))
+        .min()
+        .unwrap_or(i64::MAX)
 }
 
 /// Count the hits the limits' `after` callbacks ask for, then add one
@@ -481,7 +642,11 @@ fn resolve_limits(mode: &Mode, request: &Request) -> ResolvedLimits {
                 Limit::new(max_attempts, std::time::Duration::from_secs(*decay_seconds)).by(key),
             ])
         }
-        Mode::Limits(limits) => ResolvedLimits::Ok(limits.clone()),
+        Mode::Limits(limits) => {
+            let mut limits = limits.clone();
+            give_shared_keys_fallback_keys(&mut limits);
+            ResolvedLimits::Ok(limits)
+        }
         Mode::PerUserOrIp {
             max_attempts,
             decay_seconds,
@@ -536,70 +701,6 @@ fn prefixed_key(limit: &Limit, mode: &Mode, prefix: &str) -> Option<String> {
     }
     key.push_str(&base);
     Some(key)
-}
-
-// Keep each limit's own key unless several finite clauses still share a
-// storage identity after cleaning (a named limiter's exact duplicates
-// already carry their fallback keys, see `RateLimiter::limiter`). Compute
-// once so gating, deferred hits, and response headers use the same key.
-fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<String>> {
-    let mut keys: Vec<_> = limits
-        .iter()
-        .map(|limit| prefixed_key(limit, mode, prefix))
-        .collect();
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut reserved = HashSet::new();
-    for (index, key) in keys.iter().enumerate() {
-        if let Some(key) = key {
-            // The facade cleans each key once; compare the cleaned key, the
-            // identity the store holds. `café` and `cafe` are one bucket.
-            let stored = RateLimiter::clean_rate_limiter_key(key);
-            reserved.insert(stored.clone());
-            reserved.insert(format!("{stored}:timer"));
-            groups.entry(stored).or_default().push(index);
-        }
-    }
-    for (base, mut indices) in groups {
-        if indices.len() < 2 {
-            continue;
-        }
-        indices.sort_by_key(|&index| {
-            (
-                limits[index].max_attempts,
-                limits[index].decay_seconds(),
-                limits[index].after_callback.is_some(),
-            )
-        });
-        let mut occurrences = BTreeMap::new();
-        for index in indices {
-            let limit = &limits[index];
-            let identity = (
-                limit.max_attempts,
-                limit.decay_seconds(),
-                limit.after_callback.is_some(),
-            );
-            let occurrence = occurrences.entry(identity).or_insert(0_usize);
-            // Hex is unambiguous and unaffected by the facade's cleaner.
-            let mut key = format!(
-                "suprnova:throttle:{}:{}:{}:{}:{}",
-                encode(&base),
-                identity.0,
-                identity.1,
-                identity.2,
-                occurrence
-            );
-            *occurrence += 1;
-            // Caller-provided keys may even match this private namespace.
-            // Reserve both counter and timer identities, deterministically.
-            while reserved.contains(&key) || reserved.contains(&format!("{key}:timer")) {
-                key.push('_');
-            }
-            reserved.insert(key.clone());
-            reserved.insert(format!("{key}:timer"));
-            keys[index] = Some(key);
-        }
-    }
-    keys
 }
 
 fn default_request_key(request: &Request) -> String {
@@ -684,50 +785,57 @@ fn inject_headers(
 mod tests {
     use super::*;
 
-    #[test]
-    fn independent_keys_preserve_singletons_and_skip_unlimited() {
-        let limits = vec![Limit::per_minute(2).by("user:1"), Limit::none().into()];
-        assert_eq!(
-            independent_keys(&limits, &Mode::Named("api".into()), "shop"),
-            vec![Some("shop:api:user:1".into()), None]
-        );
+    fn keys_of(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<String>> {
+        limits
+            .iter()
+            .map(|limit| prefixed_key(limit, mode, prefix))
+            .collect()
     }
 
     #[test]
-    fn independent_keys_separate_keys_that_clean_alike_whatever_their_order() {
-        // `café` and `cafe` both clean to `cafe`, so they would share a bucket.
-        let mut limits = vec![
+    fn buckets_join_keys_that_clean_alike_and_skip_unlimited() {
+        let limits = vec![
             Limit::per_minute(2).by("café"),
+            Limit::none().into(),
             Limit::per_hour(10).by("cafe"),
+            Limit::per_minute(3).by("cafe").after(|_| true),
+            Limit::per_minute(4).by("other"),
         ];
-        let keys = independent_keys(&limits, &Mode::Limits(vec![]), "");
-        assert_ne!(keys[0], keys[1]);
-        for key in keys.iter().flatten() {
-            assert_eq!(RateLimiter::clean_rate_limiter_key(key), *key);
-        }
-        limits.reverse();
-        let mut reversed = independent_keys(&limits, &Mode::Limits(vec![]), "");
-        reversed.reverse();
-        assert_eq!(keys, reversed);
+        let keys = keys_of(&limits, &Mode::Named("api".into()), "");
+        assert_eq!(
+            keys,
+            vec![
+                Some("api:café".into()),
+                None,
+                Some("api:cafe".into()),
+                Some("api:cafe".into()),
+                Some("api:other".into()),
+            ],
+            "each limit keeps the key it carries"
+        );
+
+        let buckets = buckets_of(&limits, &keys);
+        assert_eq!(
+            buckets.of_limit,
+            vec![Some(0), None, Some(0), Some(0), Some(1)]
+        );
+        assert_eq!(buckets.buckets[0].key, "api:café");
+        assert_eq!(
+            buckets.buckets[0].counted,
+            vec![0, 2],
+            "a limit with an `after` callback is not counted with the request"
+        );
+        assert_eq!(buckets.buckets[1].counted, vec![4]);
     }
 
     #[test]
-    fn independent_keys_do_not_overlap_caller_counter_or_timer_keys() {
-        let mode = Mode::Limits(vec![]);
-        let base_limits = vec![Limit::per_minute(2).by("a"), Limit::per_hour(10).by("a")];
-        let original = independent_keys(&base_limits, &mode, "");
-        let generated = original[0].as_ref().unwrap();
-        for caller_key in [generated.clone(), format!("{generated}:timer")] {
-            let mut limits = base_limits.clone();
-            limits.push(Limit::per_minute(4).by(&caller_key));
-            let keys = independent_keys(&limits, &mode, "");
-            assert_eq!(keys[2].as_deref(), Some(caller_key.as_str()));
-            let mut identities = HashSet::new();
-            for key in keys.into_iter().flatten() {
-                assert!(identities.insert(key.clone()));
-                assert!(identities.insert(format!("{key}:timer")));
-            }
-        }
+    fn places_left_is_the_tightest_limits_and_unread_buckets_sort_last() {
+        let limits = vec![Limit::per_minute(5).by("a"), Limit::per_minute(3).by("a")];
+        let keys = keys_of(&limits, &Mode::Limits(vec![]), "");
+        let mut buckets = buckets_of(&limits, &keys);
+        assert_eq!(places_left(&buckets.buckets[0], &limits), i64::MAX);
+        buckets.buckets[0].before = Some(2);
+        assert_eq!(places_left(&buckets.buckets[0], &limits), 1);
     }
 
     #[test]

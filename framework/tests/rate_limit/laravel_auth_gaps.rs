@@ -4,18 +4,20 @@
 //! renames the keys its limits share, and the throttle middleware counts
 //! them as a direct caller does; `hit_for_minute` and `hit_until` set the
 //! window; and the middleware writes one header pair, leaves a refused
-//! request's buckets where they were, keys `throttle:60,1` by the signed-in
+//! request's buckets where they were, admits no more than the limit in a
+//! window that ends around a refusal, keys `throttle:60,1` by the signed-in
 //! user and reads `throttle:<guest>|<user>`.
 
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use suprnova::cache::{CacheStore, InMemoryCache};
 use suprnova::container::testing::TestContainer;
 use suprnova::http::{HttpResponse, text};
 use suprnova::rate_limit::{Limit, LimitResult};
 use suprnova::{
-    MiddlewareRegistry, RateLimiter, Request, Router, ThrottleRequestsMiddleware,
+    FrameworkError, MiddlewareRegistry, RateLimiter, Request, Router, ThrottleRequestsMiddleware,
     handle_request_with_peer,
 };
 
@@ -232,6 +234,85 @@ async fn one_request_through_a_named_throttle_counts_each_fallback_bucket_once()
         0,
         "no limit counts under the shared key itself"
     );
+}
+
+/// A route behind the limiter named `name`.
+fn named_router(name: &str) -> Arc<Router> {
+    Arc::new(
+        Router::new()
+            .get("/named", |_request| async { text("ok") })
+            .middleware(ThrottleRequestsMiddleware::by_name(name))
+            .into(),
+    )
+}
+
+#[tokio::test]
+async fn two_identical_clauses_count_their_one_bucket_once_each_as_laravel_does() {
+    let _cache = install_test_cache();
+    RateLimiter::define("gaps-identical", |_request| {
+        vec![Limit::per_minute(2).by("a"), Limit::per_minute(2).by("a")].into()
+    });
+    let router = named_router("gaps-identical");
+    let bucket = "gaps-identical:a:attempts:2:decay:60";
+
+    let first = send(&router, "/named", None, None).await;
+
+    assert_eq!(first.status, 200);
+    assert_eq!(
+        RateLimiter::attempts(bucket).await.expect("attempts"),
+        2,
+        "both clauses get the one fallback key, and Laravel hits it once for each"
+    );
+    assert_eq!(first.remainings, ["0"]);
+    assert_eq!(
+        send(&router, "/named", None, None).await.status,
+        429,
+        "the bucket a direct caller reads already holds the limit"
+    );
+    assert_eq!(
+        RateLimiter::attempts(bucket).await.expect("attempts"),
+        2,
+        "the refused request is not counted"
+    );
+}
+
+#[tokio::test]
+async fn keys_that_clean_alike_share_one_bucket_for_the_middleware_and_a_direct_caller() {
+    let _cache = install_test_cache();
+    RateLimiter::define("gaps-clean-alike", |_request| {
+        vec![
+            Limit::per_minute(5).by("café"),
+            Limit::per_hour(10).by("cafe"),
+        ]
+        .into()
+    });
+    let router = named_router("gaps-clean-alike");
+
+    assert_eq!(send(&router, "/named", None, None).await.status, 200);
+    for key in ["gaps-clean-alike:café", "gaps-clean-alike:cafe"] {
+        assert_eq!(
+            RateLimiter::attempts(key).await.expect("attempts"),
+            2,
+            "{key} reads the one bucket, counted once for each limit"
+        );
+    }
+    assert_eq!(
+        RateLimiter::hit("gaps-clean-alike:cafe", 60)
+            .await
+            .expect("hit"),
+        3,
+        "a direct caller counts in the bucket the middleware counts in"
+    );
+
+    let second = send(&router, "/named", None, None).await;
+    assert_eq!(second.status, 200);
+    assert_eq!(
+        second.remainings,
+        ["0"],
+        "the minute's limit of 5 holds the direct hit and both counts of each request"
+    );
+    assert_eq!(second.limits, ["5"]);
+    assert_eq!(send(&router, "/named", None, None).await.status, 429);
 }
 
 // --- hit_for_minute and hit_until ---------------------------------------------
@@ -477,6 +558,219 @@ async fn a_concurrent_burst_is_admitted_on_the_post_increment_count() {
             .expect("attempts"),
         3,
         "the count ends at the requests admitted"
+    );
+}
+
+// --- Windows that end around a refusal ------------------------------------------
+
+/// A store whose windows end when the test says so, and which holds every
+/// decrement back until the test runs it, as a give-back that runs after
+/// its window ended would. It can also let another request take a place in
+/// a bucket just before the next count there, so a request that passed the
+/// check finds the bucket full when it counts.
+#[derive(Default)]
+struct WindowsEndOnCue {
+    inner: InMemoryCache,
+    held_decrements: Mutex<Vec<(String, i64)>>,
+    racing: Mutex<Option<String>>,
+}
+
+impl WindowsEndOnCue {
+    /// End the window of the bucket stored under `key`: its count and its
+    /// timer go, as they do when their time to live runs out.
+    async fn end_window(&self, key: &str) {
+        self.inner.forget(key).await.expect("forget the count");
+        self.inner
+            .forget(&format!("{key}:timer"))
+            .await
+            .expect("forget the timer");
+    }
+
+    /// Run the decrements held back so far, after the window they were
+    /// meant for has ended.
+    async fn run_held_decrements(&self) {
+        let held = std::mem::take(&mut *self.held_decrements.lock().expect("held decrements"));
+        for (key, amount) in held {
+            self.inner
+                .decrement(&key, amount)
+                .await
+                .expect("run a held decrement");
+        }
+    }
+
+    /// Let another request take one place in `key`'s bucket just before the
+    /// next count there.
+    fn race_next_count(&self, key: &str) {
+        *self.racing.lock().expect("racing key") = Some(key.to_owned());
+    }
+}
+
+#[suprnova::async_trait]
+impl CacheStore for WindowsEndOnCue {
+    async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+        self.inner.get_raw(key).await
+    }
+    async fn put_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.inner.put_raw(key, value, ttl).await
+    }
+    async fn add_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<bool, FrameworkError> {
+        self.inner.add_raw(key, value, ttl).await
+    }
+    async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.inner.has(key).await
+    }
+    async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.inner.forget(key).await
+    }
+    async fn flush(&self) -> Result<(), FrameworkError> {
+        self.inner.flush().await
+    }
+    async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        let raced = {
+            let mut racing = self.racing.lock().expect("racing key");
+            racing.take_if(|racing| racing.as_str() == key).is_some()
+        };
+        if raced {
+            self.inner.increment(key, 1).await?;
+        }
+        self.inner.increment(key, amount).await
+    }
+    async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.held_decrements
+            .lock()
+            .expect("held decrements")
+            .push((key.to_owned(), amount));
+        // Nothing has changed yet, so the answer is the count as it stands.
+        let current = self.inner.get_raw(key).await?;
+        Ok(current.and_then(|count| count.parse().ok()).unwrap_or(0))
+    }
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.inner.tagged_put_raw(tags, key, value, ttl).await
+    }
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        self.inner.flush_tags(tags).await
+    }
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError> {
+        self.inner.acquire_lock(key, ttl).await
+    }
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        self.inner.release_lock(key, token).await
+    }
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError> {
+        self.inner.refresh_lock(key, token, ttl).await
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.inner.touch(key, ttl).await
+    }
+}
+
+/// Bind a [`WindowsEndOnCue`] store for this test and return it with a route
+/// behind one limit of two requests a minute, counted under `key`.
+fn windows_on_cue(key: &str) -> (impl Drop, Arc<WindowsEndOnCue>, Arc<Router>) {
+    let guard = TestContainer::fake();
+    let store = Arc::new(WindowsEndOnCue::default());
+    TestContainer::bind::<dyn CacheStore>(store.clone());
+    let router = Arc::new(
+        Router::new()
+            .get("/cue", |_request| async { text("ok") })
+            .middleware(ThrottleRequestsMiddleware::with_limits(vec![
+                Limit::per_minute(2).by(key),
+            ]))
+            .into(),
+    );
+    (guard, store, router)
+}
+
+/// The statuses of `count` requests sent one after another.
+async fn statuses(router: &Arc<Router>, count: usize) -> Vec<u16> {
+    let mut statuses = Vec::with_capacity(count);
+    for _ in 0..count {
+        statuses.push(send(router, "/cue", None, None).await.status);
+    }
+    statuses
+}
+
+#[tokio::test]
+async fn a_refusal_whose_window_ends_first_leaves_the_next_window_admitting_the_limit() {
+    let (_guard, store, router) = windows_on_cue("cue:one");
+
+    assert_eq!(statuses(&router, 3).await, [200, 200, 429]);
+    store.end_window("cue:one").await;
+    store.run_held_decrements().await;
+
+    assert_eq!(
+        statuses(&router, 3).await,
+        [200, 200, 429],
+        "the next window admits exactly the limit of 2"
+    );
+    assert_eq!(RateLimiter::attempts("cue:one").await.expect("attempts"), 2);
+}
+
+#[tokio::test]
+async fn several_refusals_whose_window_ends_first_leave_the_next_window_admitting_the_limit() {
+    let (_guard, store, router) = windows_on_cue("cue:several");
+
+    assert_eq!(statuses(&router, 5).await, [200, 200, 429, 429, 429]);
+    store.end_window("cue:several").await;
+    store.run_held_decrements().await;
+
+    assert_eq!(
+        statuses(&router, 3).await,
+        [200, 200, 429],
+        "no refusal of the last window buys a place in this one"
+    );
+    assert_eq!(
+        RateLimiter::attempts("cue:several")
+            .await
+            .expect("attempts"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_request_that_loses_the_last_place_leaves_the_next_window_admitting_the_limit() {
+    let (_guard, store, router) = windows_on_cue("cue:race");
+
+    assert_eq!(statuses(&router, 1).await, [200]);
+    store.race_next_count("cue:race");
+    assert_eq!(
+        statuses(&router, 2).await,
+        [429, 429],
+        "another request takes the last place before this one counts, and the \
+         bucket stays full for the rest of the window"
+    );
+    store.end_window("cue:race").await;
+    store.run_held_decrements().await;
+
+    assert_eq!(
+        statuses(&router, 3).await,
+        [200, 200, 429],
+        "the next window admits exactly the limit of 2"
     );
 }
 
