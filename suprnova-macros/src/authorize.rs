@@ -17,7 +17,7 @@
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{Attribute, Expr, Ident, ItemFn, Lit, Meta, Token, Type};
+use syn::{Attribute, Expr, ExprLit, Ident, ItemFn, Lit, Meta, Token, Type};
 
 /// The shape the attribute accepts, quoted in every argument error.
 const USAGE: &str = "expected `#[authorize(\"ability\", Type)]` or \
@@ -54,23 +54,7 @@ impl Parse for AuthorizeSpec {
         let ability: Expr = input
             .parse()
             .map_err(|err| syn::Error::new(err.span(), USAGE))?;
-        if !matches!(
-            &ability,
-            Expr::Path(_)
-                | Expr::Lit(syn::ExprLit {
-                    lit: Lit::Str(_),
-                    ..
-                })
-        ) {
-            return Err(syn::Error::new_spanned(&ability, USAGE));
-        }
-        if matches!(&ability, Expr::Lit(literal) if matches!(&literal.lit, Lit::Str(name) if name.value().is_empty()))
-        {
-            return Err(syn::Error::new_spanned(
-                &ability,
-                "#[authorize] needs a non-empty ability name",
-            ));
-        }
+        check_ability(&ability)?;
         input
             .parse::<Token![,]>()
             .map_err(|err| syn::Error::new(err.span(), USAGE))?;
@@ -94,14 +78,58 @@ impl Target {
         if let Type::Path(path) = &target
             && path.qself.is_none()
             && let Some(ident) = path.path.get_ident()
-            && ident
-                .to_string()
-                .starts_with(|c: char| c.is_lowercase() || c == '_')
+            && is_value_name(ident)
         {
             return Self::Param(ident.clone());
         }
         Self::Type(Box::new(target))
     }
+}
+
+/// Accept an ability that names one: a non-empty string literal, or a path
+/// to an enum variant that converts into the ability name.
+///
+/// A lone identifier spelled as a value, such as `update`, is the string
+/// with its quotes dropped. Emitted as written it would resolve to a
+/// parameter, a local or the handler function itself, never to an ability,
+/// and fail inside the generated check with an error that names neither
+/// the attribute nor the fix. A capitalized identifier stays accepted: an
+/// enum variant imported into scope is spelled that way.
+fn check_ability(ability: &Expr) -> syn::Result<()> {
+    match ability {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(name),
+            ..
+        }) if name.value().is_empty() => Err(syn::Error::new_spanned(
+            ability,
+            "#[authorize] needs a non-empty ability name",
+        )),
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(_), ..
+        }) => Ok(()),
+        Expr::Path(path) => match path.path.get_ident() {
+            Some(ident) if path.qself.is_none() && is_value_name(ident) => {
+                Err(syn::Error::new_spanned(
+                    ability,
+                    format!(
+                        "expected `#[authorize(\"ability\", target)]`: the ability `{ident}` is \
+                         a bare identifier; write it as the string `\"{ident}\"`, or as an enum \
+                         variant that converts into the ability name, such as `Ability::Update`"
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        },
+        _ => Err(syn::Error::new_spanned(ability, USAGE)),
+    }
+}
+
+/// Whether `ident` is spelled as Rust spells a value (a parameter, a local,
+/// a function) rather than a type, an enum variant or a constant.
+fn is_value_name(ident: &Ident) -> bool {
+    ident
+        .to_string()
+        .starts_with(|c: char| c.is_lowercase() || c == '_')
 }
 
 /// Whether `attr` is an `#[authorize]`, however its path is spelled.
