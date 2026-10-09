@@ -262,8 +262,8 @@ pub(crate) async fn handle(request: Request) -> Response {
     if let Some(breach) = failure.and_then(|error| size_breach(&error)) {
         tracing::warn!(limit = %breach, "Live response was refused");
         return match projected {
-            Ok(response) => Ok(response.with_error_report_from(&breach)),
-            Err(response) => Err(response.with_error_report_from(&breach)),
+            Ok(response) => Ok(response.with_reported_error_from(&breach)),
+            Err(response) => Err(response.with_reported_error_from(&breach)),
         };
     }
     if !completed || projected.is_err() {
@@ -323,11 +323,11 @@ fn error_response(kind: EndpointErrorKind) -> Response {
 
 /// [`error_response`] for a failure with its error in hand: the client gets
 /// the same closed answer, and the response carries `error` as its
-/// in-process report.
+/// in-process report. A `5xx` reports `error` through `Exceptions`.
 fn failure_response(kind: EndpointErrorKind, error: &(dyn Error + 'static)) -> Response {
     match error_response(kind) {
-        Ok(response) => Ok(response.with_error_report_from(error)),
-        Err(response) => Err(response.with_error_report_from(error)),
+        Ok(response) => Ok(response.with_reported_error_from(error)),
+        Err(response) => Err(response.with_reported_error_from(error)),
     }
 }
 

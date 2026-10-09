@@ -1721,7 +1721,7 @@ async fn handle_ws_upgrade(
                         "internal error: websocket upgrade aborted (terminator lock poisoned)",
                     )
                     .status(500)
-                    .with_error_report_from(&error)),
+                    .with_reported_error_from(&error)),
                 }
             })
                 as std::pin::Pin<
@@ -1776,6 +1776,11 @@ async fn handle_ws_upgrade(
                     route = %pattern,
                     "websocket middleware panicked - aborting upgrade"
                 );
+                // Reported as the HTTP path reports a panic: as the
+                // `Internal` error `panic_into_response` converts (PAR-111).
+                crate::error::Exceptions::report(&crate::error::FrameworkError::internal(format!(
+                    "websocket middleware panicked: {msg}"
+                )));
                 return HttpResponse::text(
                     "internal error: websocket upgrade aborted (middleware panicked)",
                 )
@@ -1832,7 +1837,7 @@ async fn handle_ws_upgrade(
                     )
                     .status(500)
                     .header("X-Request-Id", request_id.as_str())
-                    .with_error_report_from(&crate::error::FrameworkError::internal(
+                    .with_reported_error_from(&crate::error::FrameworkError::internal(
                         "websocket upgrade aborted: the middleware chain answered 2xx \
                          without calling next",
                     ))
@@ -1849,7 +1854,7 @@ async fn handle_ws_upgrade(
                 )
                 .status(500)
                 .header("X-Request-Id", request_id.as_str())
-                .with_error_report_from(&error)
+                .with_reported_error_from(&error)
                 .into_hyper();
             }
         }
@@ -2130,7 +2135,7 @@ fn live_preparation_failed(
     );
     HttpResponse::text("Live request preparation failed")
         .status(500)
-        .with_error_report_from(error)
+        .with_reported_error_from(error)
         .into_hyper()
 }
 

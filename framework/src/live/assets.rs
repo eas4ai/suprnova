@@ -369,7 +369,7 @@ pub(crate) async fn handle(request: Request) -> Response {
     }
     let catalog = match live_asset_catalog() {
         Ok(catalog) => catalog,
-        Err(error) => return Ok(closed_response(503).with_error_report_from(&error)),
+        Err(error) => return Ok(closed_response(503).with_reported_error_from(&error)),
     };
     if request.query().is_some() {
         return Ok(closed_response(404));

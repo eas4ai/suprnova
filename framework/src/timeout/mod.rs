@@ -157,7 +157,7 @@ impl Middleware for TimeoutMiddleware {
                 );
                 Err(HttpResponse::text("Service Unavailable: request timed out")
                     .status(503)
-                    .with_error_report_from(&failure))
+                    .with_reported_error_from(&failure))
             }
         }
     }

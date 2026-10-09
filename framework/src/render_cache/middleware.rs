@@ -869,7 +869,7 @@ impl Middleware for RenderCacheMiddleware {
                     FailurePolicy::Open => next(request).await,
                     FailurePolicy::Closed => Ok(HttpResponse::text("")
                         .status(503)
-                        .with_error_report_from(&error)),
+                        .with_reported_error_from(&error)),
                 }
             }
         }
@@ -2525,7 +2525,7 @@ async fn lead_render(
             LookupOutcome::Declined(LookupDeclineReason::UnreasonedPrivateClass).record();
             return Ok(HttpResponse::text("")
                 .status(500)
-                .with_error_report_from(&error));
+                .with_reported_error_from(&error));
         }
     };
     // Test-only race seam (R72/R83): fires the instant the read view has

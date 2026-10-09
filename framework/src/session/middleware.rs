@@ -2104,7 +2104,7 @@ impl SessionMiddleware {
                     "Internal Server Error: identity transition cleanup failed",
                 )
                 .status(500)
-                .with_error_report_from(&error));
+                .with_reported_error_from(&error));
                 return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
             }
         }
@@ -2190,7 +2190,7 @@ impl SessionMiddleware {
             );
             let failure = Err(crate::http::HttpResponse::text(error.to_string())
                 .status(error.status_code())
-                .with_error_report_from(&error));
+                .with_reported_error_from(&error));
             return ControlFlow::Break(attach_pending_cookies(failure, pending_cookies));
         }
 
@@ -2332,7 +2332,7 @@ impl SessionMiddleware {
                 "Internal Server Error: session state unavailable",
             )
             .status(500)
-            .with_error_report_from(&FrameworkError::internal(
+            .with_reported_error_from(&FrameworkError::internal(
                 "a closure passed to session_mut panicked and the panic was caught; \
                  the session is not stored",
             )));
@@ -2444,7 +2444,7 @@ impl SessionMiddleware {
                 "Internal Server Error: session state unavailable",
             )
             .status(500)
-            .with_error_report_from(read_error));
+            .with_reported_error_from(read_error));
             return attach_pending_cookies(failure, pending_cookies);
         }
 
@@ -2518,7 +2518,7 @@ impl SessionMiddleware {
                             "Internal Server Error: session rotation failed",
                         )
                         .status(500)
-                        .with_error_report_from(&e));
+                        .with_reported_error_from(&e));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 }
@@ -2550,7 +2550,7 @@ impl SessionMiddleware {
                         "Internal Server Error: session cookie encryption failed",
                     )
                     .status(500)
-                    .with_error_report_from(&error));
+                    .with_reported_error_from(&error));
                     return attach_pending_cookies(failure, pending_cookies);
                 }
             };
@@ -2584,7 +2584,7 @@ impl SessionMiddleware {
                             "Internal Server Error: two-factor session promotion failed",
                         )
                         .status(500)
-                        .with_error_report_from(&error));
+                        .with_reported_error_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                     Err(SessionMigrationError::OutcomeUnknown(error)) => {
@@ -2615,7 +2615,7 @@ impl SessionMiddleware {
                             "Internal Server Error: two-factor session promotion outcome unknown",
                         )
                         .status(500)
-                        .with_error_report_from(&error));
+                        .with_reported_error_from(&error));
                         return attach_pending_cookies(failure, pending_cookies);
                     }
                 },
@@ -2658,7 +2658,7 @@ impl SessionMiddleware {
                         "Internal Server Error: session persistence failed",
                     )
                     .status(500)
-                    .with_error_report_from(&e));
+                    .with_reported_error_from(&e));
                     return attach_pending_cookies(failure, pending_cookies);
                 }
             };
@@ -2701,7 +2701,7 @@ impl Middleware for SessionMiddleware {
                 "Internal Server Error: encryption key not installed",
             )
             .status(500)
-            .with_error_report_from(&FrameworkError::internal(
+            .with_reported_error_from(&FrameworkError::internal(
                 "the session middleware ran without an installed encryption key; \
                  install one with Crypt before serving requests",
             )));

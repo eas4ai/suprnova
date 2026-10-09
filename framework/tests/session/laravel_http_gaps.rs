@@ -2,7 +2,9 @@
 //! (PAR-113): `CsrfMiddleware` checks every method but `GET`, `HEAD` and
 //! `OPTIONS`, reads `_token` from a JSON body as from a form body, and
 //! `regenerate_session_id()` issues a new CSRF token as Laravel's
-//! `Session::regenerate` does.
+//! `Session::regenerate` does. And PAR-111's clause for the session layer:
+//! the `500` the session middleware answers a failed write with is
+//! reported through `Exceptions`, once.
 //!
 //! The requests run through a `TestClient` whose registry holds a real
 //! `SessionMiddleware` and `CsrfMiddleware`, the order an application
@@ -18,18 +20,20 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
+use serial_test::serial;
 use suprnova::live::testing::{
     LiveSecurityCheck, LiveSecurityDisposition, LiveTestOperation, LiveTestRoutePolicy,
     inspect_request_attestation, register_live_route_for_test,
 };
+use suprnova::logging::current_request_id;
 use suprnova::session::{
     SessionConfig, SessionData, SessionMiddleware, SessionStore, new_session_slot_for_test,
-    regenerate_session_id, session, session_scope_for_test,
+    regenerate_session_id, session, session_mut, session_scope_for_test,
 };
 use suprnova::testing::{TestClient, TestResponse};
 use suprnova::{
-    App, CsrfMiddleware, FrameworkError, HttpResponse, Method, MiddlewareRegistry, Request,
-    Response, Router, query, routes,
+    App, CsrfMiddleware, Exceptions, FrameworkError, HttpResponse, Method, MiddlewareRegistry,
+    Request, Response, Router, query, routes,
 };
 
 /// A session store keyed by id that remembers which ids it destroyed, so
@@ -508,5 +512,183 @@ async fn a_live_stream_still_passes_without_a_token() {
     assert_eq!(
         report.disposition(LiveSecurityCheck::Csrf),
         Some(LiveSecurityDisposition::NotRequired)
+    );
+}
+
+// ---- PAR-111: the session layer's 500s are reported ----------------------
+//
+// The `Exceptions` registry is process-wide. Each test below runs
+// `#[serial]`, holds the binary's env lock, empties the registry at its
+// start and end ([`Isolated`]), and counts only the errors reported while
+// its own request, named by its `X-Request-Id`, is in flight.
+
+/// Empties the `Exceptions` registry when made and when dropped, and holds
+/// the env lock so no other test of this binary that registers callbacks
+/// overlaps.
+struct Isolated {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Isolated {
+    async fn new() -> Self {
+        let lock = crate::env_lock::lock_env_async().await;
+        Exceptions::reset();
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for Isolated {
+    fn drop(&mut self) {
+        Exceptions::reset();
+    }
+}
+
+/// Record the text of each error reported while the request `request_id`
+/// is in flight.
+fn record_reports_for(request_id: &'static str) -> Arc<Mutex<Vec<String>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    Exceptions::reportable(move |error: &FrameworkError| {
+        let current = current_request_id();
+        if current.as_ref().map(|id| id.as_str()) == Some(request_id) {
+            record.lock().unwrap().push(error.to_string());
+        }
+    });
+    seen
+}
+
+fn reports(list: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    list.lock().unwrap().clone()
+}
+
+/// A session store whose every write fails, as an unreachable database
+/// does. A cookieless request never reads.
+struct WriteRefused;
+
+#[async_trait]
+impl SessionStore for WriteRefused {
+    async fn read(&self, _id: &str) -> Result<Option<SessionData>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn write(&self, _session: &SessionData) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(
+            "laravel_http_gaps: the session store refused the write",
+        ))
+    }
+
+    async fn destroy(&self, _id: &str) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn destroy_for_user(&self, _user_id: &str) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
+    async fn gc(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+}
+
+/// Changes the session, so the middleware must store it.
+async fn put_in_cart(_request: Request) -> Response {
+    session_mut(|session| session.put("cart", 3));
+    Ok(HttpResponse::text("added"))
+}
+
+/// Answers with a `500` of its own, as an application may.
+async fn own_500(_request: Request) -> Response {
+    Ok(HttpResponse::text("the kettle is down").status(500))
+}
+
+/// Fails with a `FrameworkError`, which the framework turns into a `500`.
+async fn failing(_request: Request) -> Response {
+    Err(HttpResponse::from(FrameworkError::internal(
+        "laravel_http_gaps: the handler failed",
+    )))
+}
+
+/// A client whose registry runs `SessionMiddleware` alone over `store`.
+fn session_client(store: Arc<dyn SessionStore>) -> TestClient {
+    suprnova::testing::install_test_encryption_key();
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    let router: Router = Router::new()
+        .get("/gaps/cart", put_in_cart)
+        .get("/gaps/own-500", own_500)
+        .get("/gaps/failing", failing)
+        .into();
+    TestClient::new(
+        router,
+        MiddlewareRegistry::new().append(SessionMiddleware::with_store(config, store)),
+    )
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_session_write_is_reported_once() {
+    let _isolated = Isolated::new().await;
+    let seen = record_reports_for("gaps-session-write-refused");
+    let client = session_client(Arc::new(WriteRefused));
+
+    let response = client
+        .get("/gaps/cart")
+        .header("X-Request-Id", "gaps-session-write-refused")
+        .send()
+        .await;
+
+    assert_eq!(response.status(), 500);
+    assert!(
+        response.body_text().contains("session persistence failed"),
+        "the 500 is the failed write's: {}",
+        response.body_text()
+    );
+    assert_eq!(
+        reports(&seen),
+        ["Internal server error: laravel_http_gaps: the session store refused the write"],
+        "the write's error reaches the callbacks once"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_500_the_application_answers_with_is_not_reported() {
+    let _isolated = Isolated::new().await;
+    let seen = record_reports_for("gaps-session-own-500");
+    let client = session_client(Arc::new(SessionMap::default()));
+
+    let response = client
+        .get("/gaps/own-500")
+        .header("X-Request-Id", "gaps-session-own-500")
+        .send()
+        .await;
+
+    assert_eq!(response.status(), 500);
+    assert_eq!(response.body_text(), "the kettle is down");
+    assert!(
+        reports(&seen).is_empty(),
+        "an application's own response is no framework error: {:?}",
+        reports(&seen)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_framework_error_that_becomes_a_500_behind_the_session_is_reported_once() {
+    let _isolated = Isolated::new().await;
+    let seen = record_reports_for("gaps-session-handler-failed");
+    let client = session_client(Arc::new(SessionMap::default()));
+
+    let response = client
+        .get("/gaps/failing")
+        .header("X-Request-Id", "gaps-session-handler-failed")
+        .send()
+        .await;
+
+    assert_eq!(response.status(), 500);
+    assert_eq!(
+        reports(&seen),
+        ["Internal server error: laravel_http_gaps: the handler failed"],
+        "the 5xx block reports the handler's error, and nothing reports it again"
     );
 }
