@@ -16,6 +16,7 @@ mod route_values;
 mod router;
 mod signed;
 pub mod url;
+mod validate_signature;
 
 #[doc(hidden)]
 pub use binding::{
@@ -68,7 +69,9 @@ pub(crate) use router::{
 };
 pub use signed::{
     EXPIRES_KEY, SIGNATURE_KEY, SignatureVerdict, sign_route, sign_url, verify_signature,
+    verify_signature_ignoring,
 };
+pub use validate_signature::ValidateSignature;
 
 /// Top-level `redirect()` helper. Laravel's `redirect()` global with no
 /// arguments returns a `Redirector` you chain methods on; Rust's

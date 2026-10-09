@@ -431,7 +431,7 @@ let _ = Redirect::back("/login");
 // Session-stored intended URL, consumed on read, with fallback
 let _ = Redirect::intended("/home");
 
-// Guest redirect: stashes the current request URL as "intended" and
+// Guest redirect: stores the URL to come back to as "intended" and
 // sends the user to a login page
 // let _ = Redirect::guest(&request, "/login");
 ```
@@ -449,6 +449,24 @@ never stored), and the same check runs again on every read, so `back`
 can't be steered off-origin either by a request that reaches your app
 with an unusual path or by a session cookie written before this guard
 existed. See [Session](session.md#other-operations) for the full rule.
+
+`Redirect::guest` stores the URL that `Redirect::intended` sends the user
+to after sign-in, as Laravel's `redirect()->guest()` does:
+
+- A `GET` that does not expect JSON stores its own public root, path and
+  query, such as `/billing/invoices?page=2`. That is a page you can send
+  the user back to.
+- Any other request - a `POST`, a `DELETE`, or a `GET` that expects JSON
+  (`Request::expects_json`) - stores the session's previous URL, the page
+  the user was on. Sending the browser back to a form submission or an
+  API call after sign-in would replay it as a `GET` or show raw JSON.
+  With no previous URL recorded, nothing is stored.
+
+`guest` never reads the `Referer` header, which the client sets; Laravel
+falls back to it through `url()->previous()`. Both sources pass the same
+same-site check `back` uses, and when nothing is stored, `guest` removes
+any intended URL already in the session, so `intended` goes to its
+fallback rather than to a stale page.
 
 ### Named-route validation
 

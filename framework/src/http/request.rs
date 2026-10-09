@@ -262,7 +262,7 @@ impl Request {
             self.header("Referer"),
             self.http_host().as_deref(),
             &self.public_root(),
-            &crate::routing::url::current(self),
+            &crate::routing::url::current_path_and_query(self),
         ))
     }
 

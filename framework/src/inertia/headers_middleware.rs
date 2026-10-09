@@ -169,7 +169,7 @@ impl RequestFacts {
                 .map(str::to_string),
             // Only an Inertia `GET` records it, so only one builds it.
             current_url: if is_inertia && is_get {
-                crate::routing::url::current(request)
+                crate::routing::url::current_path_and_query(request)
             } else {
                 String::new()
             },

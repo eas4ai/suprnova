@@ -11,7 +11,7 @@ async fn answer(request: Request) -> Response {
     ))
 }
 
-async fn server(router: Router) -> std::net::SocketAddr {
+pub(crate) async fn server(router: Router) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener");

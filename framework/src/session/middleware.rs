@@ -2058,7 +2058,7 @@ impl SessionMiddleware {
             .unwrap_or(false);
         // The URL the browser asked for, public root included, so
         // `Redirect::back` sends it back under the same root (PFX-004).
-        let current_url = crate::routing::url::current(request);
+        let current_url = crate::routing::url::current_path_and_query(request);
 
         PreviousUrlCandidate {
             is_get,
