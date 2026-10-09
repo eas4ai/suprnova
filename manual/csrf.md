@@ -96,9 +96,12 @@ value, in Laravel's order (`getTokenFromRequest`):
 The first source with a value is the token, and the others aren't read: a
 form whose `_token` is wrong fails even beside a right header, and a
 right `_token` passes whatever header came with it. A source counts as
-having no value as PHP's `?:` reads one: absent, empty, or `0`. A JSON
-`_token` that is not a string, or a JSON body that does not parse, holds no
-token, and the headers decide.
+having no value as PHP's `?:` reads one: absent, empty, `0`, or a JSON
+value that is falsy in PHP (`null`, `false`, `0.0`, `[]`, `{}`). A JSON
+`_token` that is present but not a string, such as `123`, `true`, or a
+non-empty array, is kept and the request is refused with a `419`, without
+reading the headers. A JSON body that does not parse holds no token, and the
+headers decide.
 
 ```ts
 await fetch('/posts', {

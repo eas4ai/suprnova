@@ -681,9 +681,10 @@ impl Middleware for CsrfMiddleware {
         // the token is still empty. A body's own `_token`, from a form or
         // a JSON object, therefore decides whenever it has a value,
         // whatever header came with it, and a value counts as empty as
-        // PHP's `?:` reads one: no value, `""`, or `"0"`. A form's
-        // `_token` is its last value, as PHP keeps a repeated name's last
-        // value and `req.form()` reads it.
+        // PHP's `?:` reads one: no value, `""`, or `"0"`. A JSON `_token`
+        // that is present but not a string refuses the request outright.
+        // A form's `_token` is its last value, as PHP keeps a repeated
+        // name's last value and `req.form()` reads it.
         let mut request = request;
         let body_token = match TokenBody::of(&request) {
             Some(TokenBody::Form) => {
@@ -700,7 +701,10 @@ impl Middleware for CsrfMiddleware {
                     Ok(request) => request,
                     Err(error) => return Err(HttpResponse::from(error)),
                 };
-                request.cached_body().and_then(|body| form_body_token(body))
+                request
+                    .cached_body()
+                    .and_then(|body| form_body_token(body))
+                    .map(BodyToken::Text)
             }
             Some(TokenBody::Json) => {
                 // Read up to the same limit and kept on the request, so the
@@ -718,10 +722,15 @@ impl Middleware for CsrfMiddleware {
             }
             None => None,
         };
-        let token = body_token
-            .filter(|token| has_value(token))
-            .or_else(|| header_token(&request, "X-CSRF-TOKEN"))
-            .or_else(|| header_token(&request, "X-XSRF-TOKEN"));
+        let token = match body_token {
+            // A present `_token` that is not a string cannot match the
+            // session token. Laravel keeps such a value, so it is refused
+            // here and the headers are not read.
+            Some(BodyToken::Other) => return reject_with_419(),
+            Some(BodyToken::Text(token)) if has_value(&token) => Some(token),
+            Some(BodyToken::Text(_)) | None => header_token(&request, "X-CSRF-TOKEN")
+                .or_else(|| header_token(&request, "X-XSRF-TOKEN")),
+        };
 
         match token {
             Some(token) if constant_time_compare(&token, &expected_token) => {
@@ -774,6 +783,17 @@ impl TokenBody {
     }
 }
 
+/// The `_token` a body carries, as far as the token check reads it.
+#[derive(Debug, PartialEq)]
+enum BodyToken {
+    /// A string `_token`, which is compared with the session token when it
+    /// has a value.
+    Text(String),
+    /// A present `_token` that is not a string, such as a number, `true`, or
+    /// a non-empty array or object.
+    Other,
+}
+
 /// The last `_token` of a form body, the value PHP keeps for a name sent
 /// more than once and the value `req.form()` reads.
 fn form_body_token(body: &[u8]) -> Option<String> {
@@ -783,19 +803,21 @@ fn form_body_token(body: &[u8]) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-/// The top-level `_token` of a JSON body, when it is a string.
+/// The top-level `_token` of a JSON body, as Laravel's
+/// `$request->input('_token')` reads it.
 ///
-/// Laravel's `$request->input('_token')` reads a JSON body's top-level
-/// `_token`. Only a string can match a session token, so another value, a
-/// body that is not a JSON object, or a body that does not parse holds no
-/// token, and the headers decide. A key sent twice counts by its last
-/// value, as PHP's `json_decode` keeps it. Every other member is skipped
-/// without being kept, so a large body is not copied to find one field.
-fn json_body_token(body: &[u8]) -> Option<String> {
+/// A PHP-falsy value (`null`, `false`, `0`, `0.0`, `""`, `"0"`, `[]`, `{}`)
+/// is no token and the headers decide. A string is the token. Any other
+/// value is kept as [`BodyToken::Other`] and refuses the request. A body
+/// that is not a JSON object, or does not parse, holds no token. A key sent
+/// twice counts by its last value, as PHP's `json_decode` keeps it. Every
+/// other member is skipped without being kept, so a large body is not
+/// copied to find one field.
+fn json_body_token(body: &[u8]) -> Option<BodyToken> {
     use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
 
     /// The `_token` member of a JSON object, read and nothing else.
-    struct TokenMember(Option<String>);
+    struct TokenMember(Option<BodyToken>);
 
     impl<'de> serde::Deserialize<'de> for TokenMember {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -817,8 +839,16 @@ fn json_body_token(body: &[u8]) -> Option<String> {
             while let Some(key) = map.next_key::<String>()? {
                 if key == "_token" {
                     token = match map.next_value::<serde_json::Value>()? {
-                        serde_json::Value::String(value) => Some(value),
-                        _ => None,
+                        serde_json::Value::String(value) => Some(BodyToken::Text(value)),
+                        serde_json::Value::Null | serde_json::Value::Bool(false) => None,
+                        serde_json::Value::Number(number)
+                            if number.as_f64().is_some_and(|value| value == 0.0) =>
+                        {
+                            None
+                        }
+                        serde_json::Value::Array(items) if items.is_empty() => None,
+                        serde_json::Value::Object(members) if members.is_empty() => None,
+                        _ => Some(BodyToken::Other),
                     };
                 } else {
                     map.next_value::<IgnoredAny>()?;
@@ -1648,24 +1678,38 @@ mod tests {
         let _ = Empty::<Bytes>::new();
     }
 
-    /// A JSON body's `_token` is its top-level string member, the last one
-    /// when the key repeats, as PHP's `json_decode` keeps it. Anything
-    /// else holds no token.
+    /// A JSON body's `_token` is its top-level member, the last one when
+    /// the key repeats, as PHP's `json_decode` keeps it. A falsy value is
+    /// no token, a string is the token, and any other value is kept as
+    /// `Other`. A body that is not an object holds no token.
     #[test]
-    fn json_body_token_reads_the_top_level_string_member() {
+    fn json_body_token_classifies_the_top_level_member() {
+        use super::BodyToken::{Other, Text};
         assert_eq!(
-            json_body_token(br#"{"a": {"_token": "inner"}, "_token": "outer"}"#).as_deref(),
-            Some("outer")
+            json_body_token(br#"{"a": {"_token": "inner"}, "_token": "outer"}"#),
+            Some(Text("outer".to_string()))
         );
         assert_eq!(
-            json_body_token(br#"{"_token": "first", "_token": "last"}"#).as_deref(),
-            Some("last")
+            json_body_token(br#"{"_token": "first", "_token": "last"}"#),
+            Some(Text("last".to_string()))
         );
         assert_eq!(
             json_body_token(br#"{"_token": "first", "_token": 7}"#),
-            None
+            Some(Other)
         );
-        assert_eq!(json_body_token(br#"{"_token": ["t"]}"#), None);
+        assert_eq!(json_body_token(br#"{"_token": 7, "_token": null}"#), None);
+        assert_eq!(
+            json_body_token(br#"{"_token": ""}"#),
+            Some(Text(String::new()))
+        );
+        for falsy in ["null", "false", "0", "0.0", "-0", "[]", "{}"] {
+            let body = format!(r#"{{"_token": {falsy}}}"#);
+            assert_eq!(json_body_token(body.as_bytes()), None, "{falsy}");
+        }
+        for kept in ["1", "-1", "0.5", "true", r#"["t"]"#, r#"{"a": 1}"#] {
+            let body = format!(r#"{{"_token": {kept}}}"#);
+            assert_eq!(json_body_token(body.as_bytes()), Some(Other), "{kept}");
+        }
         assert_eq!(json_body_token(br#"[{"_token": "t"}]"#), None);
         assert_eq!(json_body_token(br#"{"_token": "t""#), None);
         assert_eq!(json_body_token(br#"{"_token": "t"} trailing"#), None);
