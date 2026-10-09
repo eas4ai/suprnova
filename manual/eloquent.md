@@ -491,12 +491,11 @@ The rules follow Laravel's `save`:
 
 ### Why Suprnova diverges
 
-Laravel skips the `UPDATE` and the `updating` and `updated` events when no
-attribute is dirty. Suprnova always writes the row and fires the events; a
-save that changes nothing still leaves the previous record in place, as in
-Laravel. `refresh` replaces the model with a fresh read, so it also clears
-the record, where Laravel's `refresh` keeps `getChanges`. `getPrevious` has
-no counterpart.
+A save that changes nothing runs no `UPDATE` and fires neither `updating`
+nor `updated`, as in Laravel, while `saving` and `saved` still fire; the
+previous save's change record stays in place. `refresh` replaces the model
+with a fresh read, so it also clears the record, where Laravel's `refresh`
+keeps `getChanges`.
 
 ### Increment / decrement
 
