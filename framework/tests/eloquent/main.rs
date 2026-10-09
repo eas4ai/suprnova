@@ -1,0 +1,96 @@
+//! Integration tests for the `eloquent` module: one binary per module,
+//! one former top-level test file per submodule (folded 2026-09-05).
+
+#[path = "../support/query_fixture.rs"]
+mod query_fixture;
+
+pub mod accessor_serialization;
+pub mod accessors;
+pub mod aggregate_postgres;
+pub mod auto_datetime_cast;
+pub mod builder;
+pub mod builder_identifier_validation;
+pub mod cast_panic_diagnostic;
+pub mod casts_encrypted;
+pub mod casts_encrypted_key_rotation;
+pub mod casts_native_columns;
+pub mod casts_primitive;
+pub mod casts_structured;
+pub mod chunking;
+pub mod collection_surface;
+pub mod dump;
+pub mod eager;
+pub mod eager_cache;
+pub mod eager_cache_rows;
+pub mod eager_dispatcher;
+pub mod eager_named_connection;
+pub mod eager_query_count;
+pub mod events;
+pub mod factory_events;
+pub mod factory_persist;
+pub mod fillable;
+pub mod has;
+pub mod joins_model;
+mod key_ring;
+/// Contract tests observe the Laravel relation delta.
+pub mod laravel_delta;
+/// Tests observe the agreed data gaps.
+pub mod laravel_gaps;
+pub mod laravel_parity;
+pub mod lazy_loading;
+pub mod locking;
+pub mod macro_hygiene;
+pub mod macro_smoke_relations;
+pub mod mass_write_mysql;
+pub mod mass_write_postgres;
+pub mod model;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod model_changes;
+pub mod observers;
+pub mod pagination;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod pivot_timestamps_engines;
+pub mod prunable_relations;
+pub mod query_helpers_model;
+pub mod query_shapes_engines;
+pub mod read_instrumentation;
+pub mod registry;
+pub mod relation_registry;
+pub mod relation_trait;
+pub mod relations_declarations;
+pub mod relations_m2m_tx;
+pub mod relations_morph;
+pub mod relations_morph_custom_type;
+pub mod relations_morph_keys;
+pub mod relations_morph_m2m;
+pub mod relations_morph_nested;
+pub mod relations_morph_touches;
+pub mod relations_one_to_many;
+pub mod relations_one_to_one;
+pub mod relations_pivot;
+pub mod relations_pivot_filters;
+pub mod relations_pivot_filters_postgres;
+pub mod relations_pivot_named_connection;
+pub mod relations_through;
+pub mod relations_tx;
+pub mod replication;
+pub mod restore_named_connection;
+pub mod save_listener_mutation;
+pub mod scopes_global;
+pub mod scopes_local;
+pub mod scopes_resolution;
+pub mod serialization;
+pub mod serialization_eager_pivot;
+pub mod soft_delete_postgres;
+pub mod soft_deletes_relations;
+// Its tests move the framework clock with `TestClock`, which exists with
+// the `testing` feature only.
+#[cfg(feature = "testing")]
+pub mod sync_without_detaching;
+pub mod timestamps;
+pub mod typed_attrs;
+pub mod unique_id;
