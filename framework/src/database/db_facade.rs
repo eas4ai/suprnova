@@ -237,10 +237,13 @@ impl SelectItem {
 }
 
 impl TableOrder {
+    /// `row_key` is the main table's `rowid`, qualified as the FROM names
+    /// the table, which a seeded SQLite order reads: the facade knows no
+    /// primary key, so it uses the rowid every ordinary table has.
     fn render(
         &self,
         backend: DbBackend,
-        table: &str,
+        row_key: &str,
         values: &mut Vec<SeaValue>,
         counter: &mut usize,
     ) -> Result<String, FrameworkError> {
@@ -259,7 +262,7 @@ impl TableOrder {
             Self::Raw(sql, bindings) => {
                 render_bound_fragment(backend, sql, bindings, values, counter)
             }
-            Self::Random(seed) => Ok(random_order(backend, *seed, table)),
+            Self::Random(seed) => Ok(random_order(backend, *seed, row_key)),
         }
     }
 }
@@ -892,8 +895,12 @@ impl DbTableBuilder {
     /// Order the rows randomly with a seed, so a repeated seed can repeat
     /// the order for stable pagination or reproducible samples.
     /// MySQL uses RAND(seed), and Postgres sets the connection seed in the
-    /// same statement before random(). SQLite accepts the seed, but its
-    /// RANDOM() has no seed support, so its order stays unseeded.
+    /// same statement before random(). SQLite cannot seed RANDOM(), so it
+    /// orders by a fixed function of the seed and each row's `rowid`, then
+    /// by the `rowid`: the same seed on the same rows gives the same order.
+    /// The builder knows no primary key, so the table needs a rowid, as
+    /// every table a migration creates has; a view or a `WITHOUT ROWID`
+    /// table returns the engine's error.
     pub fn in_random_order_seeded(mut self, seed: u64) -> Self {
         self.order.push(TableOrder::Random(Some(seed)));
         self
@@ -1791,10 +1798,11 @@ impl DbTableBuilder {
         }
         if !self.order.is_empty() {
             sql.push_str(" ORDER BY ");
+            let row_key = format!("{quoted_table}.rowid");
             let order = self
                 .order
                 .iter()
-                .map(|order| order.render(backend, &quoted_table, values, counter))
+                .map(|order| order.render(backend, &row_key, values, counter))
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
             sql.push_str(&order.join(", "));
         }
