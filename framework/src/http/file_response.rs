@@ -27,6 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Range headers of the active request, shared by local and disk responses.
 pub(crate) struct FileRequest {
+    range_present: bool,
     range: Option<String>,
     if_range: Option<String>,
 }
@@ -47,6 +48,8 @@ impl FileRequest {
             })
             .flatten();
         Self {
+            range_present: request.method() == hyper::Method::GET
+                && headers.contains_key(hyper::header::RANGE),
             range,
             if_range: headers
                 .get(hyper::header::IF_RANGE)
@@ -73,6 +76,9 @@ impl FileRange {
     pub(crate) fn current(size: u64, modified: Option<&str>) -> Self {
         FILE_REQUEST
             .try_with(|request| {
+                if size == 0 && request.range_present {
+                    return Self::Unsatisfiable;
+                }
                 if request
                     .if_range
                     .as_deref()
@@ -89,16 +95,16 @@ impl FileRange {
     }
 
     fn parse(range: &str, size: u64) -> Self {
-        // Empty representations and multipart ranges may use the full response.
+        if size == 0 {
+            return Self::Unsatisfiable;
+        }
+        // Multipart ranges may use the full response.
         let Some(range) = range
             .strip_prefix("bytes=")
             .filter(|range| !range.contains(','))
         else {
             return Self::Full;
         };
-        if size == 0 {
-            return Self::Full;
-        }
         let Some((first, last)) = range.trim().split_once('-') else {
             return Self::Full;
         };

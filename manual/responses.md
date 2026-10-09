@@ -239,8 +239,9 @@ with an empty body and `Content-Range: bytes */<size>`. You can also request
 an open range or a suffix, such as `bytes=10-` or `bytes=-10`. These follow
 [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#section-14).
 Invalid ranges, multiple ranges, unsupported units and ranges on methods
-other than GET receive the full response. An empty file also receives the
-full response. A mismatched `If-Range` receives the full response.
+other than GET receive the full response. You receive the full response for
+an empty file without a `Range` header, and `416` for a GET with a `Range`
+header. A mismatched `If-Range` receives the full response.
 
 ### Why Suprnova diverges
 

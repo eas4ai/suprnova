@@ -670,6 +670,60 @@ async fn ranges_and_file_metadata_reach_the_wire() {
 }
 
 #[tokio::test]
+async fn an_empty_file_without_a_range_returns_200() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_file(dir.path(), "empty.txt", b"");
+    let (status, headers, body) = serve("/empty", move || {
+        let path = path.clone();
+        async move {
+            HttpResponse::file(path, None)
+                .await
+                .map_err(HttpResponse::from)
+        }
+    })
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(header(&headers, "accept-ranges"), "bytes");
+    assert_eq!(header(&headers, "content-length"), "0");
+    assert!(headers.get("content-range").is_none());
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn an_empty_file_with_a_range_returns_416() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_file(dir.path(), "empty.txt", b"");
+    for request_headers in [
+        vec![("Range", "bytes=0-")],
+        vec![("Range", "bytes=-1")],
+        vec![("Range", "bytes=0-1,2-3")],
+        vec![("Range", "items=0-")],
+        vec![("Range", "invalid")],
+        vec![("Range", "bytes=0-"), ("Range", "bytes=1-")],
+        vec![
+            ("Range", "bytes=0-"),
+            ("If-Range", "Thu, 01 Jan 1970 00:00:00 GMT"),
+        ],
+    ] {
+        let path = path.clone();
+        let (status, headers, body) = serve_with("/empty", &request_headers, move || {
+            let path = path.clone();
+            async move {
+                HttpResponse::file(path, None)
+                    .await
+                    .map_err(HttpResponse::from)
+            }
+        })
+        .await;
+        assert_eq!(status, 416, "{request_headers:?}");
+        assert_eq!(header(&headers, "content-range"), "bytes */0");
+        assert_eq!(header(&headers, "accept-ranges"), "bytes");
+        assert_eq!(header(&headers, "content-length"), "0");
+        assert!(body.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_stale_if_range_gets_the_whole_download() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_file(dir.path(), "range.txt", b"0123456789");

@@ -34,7 +34,9 @@
 //! wrote against it. The recorder keeps them beside the error instead:
 //! the frames of the last [`MAX_RECORDED`] errors created in the request,
 //! each under the error's message. An `ErrorReport` built for an error
-//! takes the most recent frames recorded under that error's message.
+//! walks the chain outermost first. Each occurrence of a message takes
+//! the next most recent record under that message, so equal messages
+//! keep separate traces. Creation records run from inner to outer.
 //! `FrameworkError::context` changes the message, so it moves the frames
 //! to the new one with [`rename`].
 //!
@@ -272,8 +274,11 @@ pub(crate) fn rename(before: &str, after: String) {
     });
 }
 
-/// The frames most recently recorded under `message` in this request.
-pub(crate) fn recorded_for(message: &str) -> Option<RecordedFrames> {
+/// The frames at `rank` under `message`, newest first, in this request.
+///
+/// Rank zero is the outermost error with this message. A rank beyond
+/// the retained records has no frames, including after eviction.
+pub(crate) fn recorded_for(message: &str, rank: usize) -> Option<RecordedFrames> {
     RECORDER
         .try_with(|recorder| {
             recorder.try_borrow().ok().and_then(|recorder| {
@@ -281,7 +286,8 @@ pub(crate) fn recorded_for(message: &str) -> Option<RecordedFrames> {
                     .recorded
                     .iter()
                     .rev()
-                    .find(|(recorded, _)| recorded == message)
+                    .filter(|(recorded, _)| recorded == message)
+                    .nth(rank)
                     .map(|(_, frames)| frames.clone())
             })
         })
@@ -701,8 +707,8 @@ mod tests {
             .expect_err("the panic must be caught");
             (
                 is_recording(),
-                recorded_for(&error.to_string()).is_some()
-                    || recorded_for(&app_error.to_string()).is_some(),
+                recorded_for(&error.to_string(), 0).is_some()
+                    || recorded_for(&app_error.to_string(), 0).is_some(),
                 ErrorReport::from_error(&error).frames().is_some(),
                 panic.frames.is_some(),
             )
@@ -840,14 +846,74 @@ mod tests {
                 let _ = FrameworkError::internal(format!("error {n}"));
             }
             (
-                recorded_for("Internal server error: error 0").is_some(),
-                recorded_for(&format!("Internal server error: error {MAX_RECORDED}")).is_some(),
+                recorded_for("Internal server error: error 0", 0).is_some(),
+                recorded_for(&format!("Internal server error: error {MAX_RECORDED}"), 0).is_some(),
             )
         })
         .await;
 
         assert!(!oldest, "the oldest entry is dropped past the bound");
         assert!(newest);
+    }
+
+    #[tokio::test]
+    async fn repeated_messages_keep_each_chain_positions_site_before_text_deduplication() {
+        let message = "Internal server error: same";
+        for middle_message in [message, "a different failure"] {
+            record_frames(true, async {
+                let inner_line = line!() + 1;
+                let inner = FrameworkError::internal("same");
+                let middle_line = line!() + 1;
+                let middle = FrameworkError::from_external_with(middle_message, inner);
+                let outer_line = line!() + 1;
+                let outer = FrameworkError::from_external_with(message, middle);
+
+                // Building a report must not consume the records: middleware
+                // can build another report for the same failure.
+                for _ in 0..2 {
+                    let report = ErrorReport::from_error(&outer);
+                    let frames = report.frames().expect("the outer error records frames");
+                    assert!(
+                        frames
+                            .site()
+                            .starts_with(&format!("{}:{outer_line}:", file!()))
+                    );
+                    let sources = report.source_frames();
+                    assert_eq!(sources.len(), 2);
+                    for ((_, frames), line) in sources.iter().zip([middle_line, inner_line]) {
+                        assert!(frames.site().starts_with(&format!("{}:{line}:", file!())));
+                    }
+                    if middle_message == "Internal server error: same" {
+                        assert_eq!(report.chain(), ["Internal server error: same"]);
+                    } else {
+                        assert_eq!(
+                            report.chain(),
+                            [
+                                "Internal server error: same",
+                                "a different failure",
+                                "Internal server error: same"
+                            ]
+                        );
+                    }
+                }
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_evicted_equal_message_trace_is_not_replaced_by_a_newer_trace() {
+        record_frames(true, async {
+            let mut error = FrameworkError::internal("same");
+            for _ in 0..MAX_RECORDED + 1 {
+                error = FrameworkError::from_external(error);
+            }
+            let report = ErrorReport::from_error(&error);
+            assert!(report.frames().is_some());
+            assert_eq!(report.source_frames().len(), MAX_RECORDED - 1);
+            assert_eq!(report.chain(), ["Internal server error: same"]);
+        })
+        .await;
     }
 
     #[test]
