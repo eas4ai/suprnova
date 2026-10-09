@@ -485,7 +485,7 @@ async fn joined_mass_writes_match_only_joined_rows() {
     let log = DB::get_query_log().expect("log");
     let predicate = r#" WHERE "jm_posts"."deleted_at" IS NULL AND "jm_users"."name" = ?"#;
     let selector = format!(
-        r#" WHERE "rowid" IN (SELECT "jm_posts"."rowid" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id"{predicate})"#
+        r#" WHERE "id" IN (SELECT "jm_posts"."id" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id"{predicate})"#
     );
     let update = log
         .iter()
@@ -508,7 +508,7 @@ async fn joined_mass_writes_match_only_joined_rows() {
         .expect("logged delete");
     assert_eq!(
         delete.sql,
-        r#"DELETE FROM "jm_posts" WHERE "rowid" IN (SELECT "jm_posts"."rowid" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id" WHERE "jm_users"."name" = ?)"#
+        r#"DELETE FROM "jm_posts" WHERE "id" IN (SELECT "jm_posts"."id" FROM "jm_posts" INNER JOIN "jm_users" ON "jm_users"."id" = "jm_posts"."author_id" WHERE "jm_users"."name" = ?)"#
     );
     assert_eq!(delete.bindings, vec![r#"String(Some("Ada"))"#.to_string()]);
 }
@@ -647,4 +647,107 @@ async fn column_operator_and_cross_join_closure_match_raw_sql() {
             .await
             .is_err()
     );
+}
+
+/// A custom key makes use of the model's key metadata observable.
+#[model(table = "jm_shadow_rows", primary_key = "key", timestamps = false)]
+pub struct JmShadowRow {
+    /// The renamed key selects the matched model row.
+    pub key: i64,
+    /// Duplicate values expose accidental use of the shadowed identity.
+    pub rowid: i64,
+    /// The join selects only one of the two rows.
+    pub matched: i64,
+    /// A changed title exposes writes to the unmatched row.
+    pub title: String,
+}
+
+async fn shadowed_model_writes(fx: &Fixture) {
+    fx.exec("CREATE TEMPORARY TABLE jm_shadow_match (id INTEGER)")
+        .await;
+    fx.exec("INSERT INTO jm_shadow_match VALUES (1)").await;
+    let joined = || {
+        JmShadowRow::query().join(
+            "jm_shadow_match",
+            "jm_shadow_match.id",
+            "=",
+            "jm_shadow_rows.matched",
+        )
+    };
+    let updated = joined()
+        .update(attrs! { title: "changed" })
+        .await
+        .expect("update");
+    let other = JmShadowRow::find_or_fail(2).await.expect("unmatched row");
+    if fx.backend == DatabaseBackend::Postgres {
+        // Both writes must face colliding physical identities independently.
+        fx.exec("TRUNCATE jm_shadow_one, jm_shadow_two").await;
+        fx.exec("INSERT INTO jm_shadow_one VALUES (1, 7, 1, 'matched')")
+            .await;
+        fx.exec("INSERT INTO jm_shadow_two VALUES (2, 7, 2, 'other')")
+            .await;
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(DISTINCT ctid) FROM jm_shadow_rows", vec![])
+                .await
+                .expect("ctid count"),
+            1
+        );
+    }
+    let deleted = joined().delete().await.expect("delete");
+    let remaining = JmShadowRow::query().get().await.expect("remaining");
+    assert_eq!(updated, 1);
+    assert_eq!(other.title, "other");
+    assert_eq!(deleted, 1);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].key, 2);
+}
+
+#[tokio::test]
+async fn joined_model_writes_use_the_custom_key_when_rowid_is_shadowed() {
+    let fx = Fixture::sqlite().await;
+    fx.exec("CREATE TEMPORARY TABLE jm_shadow_rows (key INTEGER PRIMARY KEY, rowid INTEGER, matched INTEGER, title TEXT)").await;
+    fx.exec("INSERT INTO jm_shadow_rows VALUES (1, 7, 1, 'matched'), (2, 7, 2, 'other')")
+        .await;
+    shadowed_model_writes(&fx).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_joined_model_writes_use_the_key_across_inherited_tables() {
+    let fx = Fixture::live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    fx.exec("CREATE TEMPORARY TABLE jm_shadow_rows (key BIGINT, rowid BIGINT, matched BIGINT, title TEXT)").await;
+    fx.exec("CREATE TEMPORARY TABLE jm_shadow_one () INHERITS (jm_shadow_rows)")
+        .await;
+    fx.exec("CREATE TEMPORARY TABLE jm_shadow_two () INHERITS (jm_shadow_rows)")
+        .await;
+    fx.exec("INSERT INTO jm_shadow_one VALUES (1, 7, 1, 'matched')")
+        .await;
+    fx.exec("INSERT INTO jm_shadow_two VALUES (2, 7, 2, 'other')")
+        .await;
+    assert_eq!(
+        DB::scalar::<i64>("SELECT COUNT(DISTINCT ctid) FROM jm_shadow_rows", vec![])
+            .await
+            .expect("ctid count"),
+        1
+    );
+    shadowed_model_writes(&fx).await;
+    fx.close().await;
+}
+
+#[test]
+fn postgres_joined_delete_uses_the_models_qualified_key() {
+    let (sql, values) = JmShadowRow::query()
+        .join(
+            "jm_shadow_match",
+            "jm_shadow_match.id",
+            "=",
+            "jm_shadow_rows.matched",
+        )
+        .filter("jm_shadow_match.id", 1)
+        .to_delete_sql_with_bindings_for(DatabaseBackend::Postgres, "jm_shadow_rows");
+    assert_eq!(
+        sql,
+        r#"DELETE FROM "jm_shadow_rows" WHERE "key" IN (SELECT "jm_shadow_rows"."key" FROM "jm_shadow_rows" INNER JOIN "jm_shadow_match" ON "jm_shadow_match"."id" = "jm_shadow_rows"."matched" WHERE "jm_shadow_match"."id" = $1)"#
+    );
+    assert_eq!(values, vec![SeaValue::BigInt(Some(1))]);
 }

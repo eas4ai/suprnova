@@ -223,6 +223,8 @@ pub struct DbTableBuilder {
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_items: Vec<SelectItem>,
+    /// SQLite's safe joined-write key, read on the write executor.
+    write_key: Vec<String>,
     /// Phase 10C T12 - per-builder connection override. Set via
     /// [`Self::on`] or constructed pre-set via
     /// [`DB::table_on`](crate::DB::table_on). Routes terminal methods
@@ -247,6 +249,7 @@ impl DbTableBuilder {
             limit_value: None,
             offset_value: None,
             select_items: Vec::new(),
+            write_key: Vec::new(),
             connection_override: None,
         }
     }
@@ -1299,9 +1302,9 @@ impl DbTableBuilder {
     /// supported but rarely-correct operation - callers should add at
     /// least one `filter` unless they really mean "all rows."
     ///
-    /// A builder with a join is refused with an error: the `UPDATE` names
-    /// one table and would ignore the join. Narrow the rows with
-    /// `where_in` or `where_exists` on a subquery instead.
+    /// A joined update changes only rows selected by the join. SQLite uses
+    /// the table's non-null primary key or its hidden `_rowid_`. A table
+    /// without a usable key that declares `_rowid_` is refused.
     ///
     /// Dual-API: this is the Laravel-faithful name; the
     /// `Builder<M>`-style alias is [`Self::update_all`]. Both call into
@@ -1315,7 +1318,7 @@ impl DbTableBuilder {
         crate::render_cache::orm::atomic(connection.as_deref(), || self.update_inner(attrs)).await
     }
 
-    async fn update_inner(self, attrs: Attrs) -> Result<u64, FrameworkError> {
+    async fn update_inner(mut self, attrs: Attrs) -> Result<u64, FrameworkError> {
         if attrs.is_empty() {
             return Err(FrameworkError::database(format!(
                 "DB::table(\"{}\")::update called with empty attrs",
@@ -1337,6 +1340,7 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
+        self.resolve_joined_write_key(&exec).await?;
         let large = large_unsigned_writes(&exec, &self.table, &attrs).await?;
         let (sql, values) = self.render_update(&attrs, &large, backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -1367,8 +1371,7 @@ impl DbTableBuilder {
     /// removes every row by design - add a `filter` if you don't mean
     /// that.
     ///
-    /// A builder with a join is refused with an error, for the reason
-    /// [`Self::update`] gives.
+    /// A joined delete selects rows by the same key as [`Self::update`].
     ///
     /// Dual-API: this is the Laravel-faithful name; the
     /// `Builder<M>`-style alias is [`Self::delete_all`]. Both call into
@@ -1379,7 +1382,7 @@ impl DbTableBuilder {
         crate::render_cache::orm::atomic(connection.as_deref(), || self.delete_inner()).await
     }
 
-    async fn delete_inner(self) -> Result<u64, FrameworkError> {
+    async fn delete_inner(mut self) -> Result<u64, FrameworkError> {
         // Audit HIGH `database` #2 - identifier + operator validation.
         self.validate_inputs()?;
         // T11/T12: route through resolve_write.
@@ -1390,6 +1393,7 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
+        self.resolve_joined_write_key(&exec).await?;
         let (sql, values) = self.render_delete(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let result = exec
@@ -1515,7 +1519,68 @@ impl DbTableBuilder {
         Ok(sql)
     }
 
-    /// Select physical row identities so joined writes affect exactly the selected rows.
+    /// Read SQLite's key on the same executor that writes, including temporary
+    /// tables and explicit schemas. Nullable keys cannot select a matched NULL.
+    async fn resolve_joined_write_key(
+        &mut self,
+        exec: &crate::database::transaction::ExecutorChoice,
+    ) -> Result<(), FrameworkError> {
+        if self.joins.is_empty() || exec.backend() != DbBackend::Sqlite {
+            return Ok(());
+        }
+        let (schema, table) = self
+            .table
+            .rsplit_once('.')
+            .map_or((None, self.table.as_str()), |(schema, table)| {
+                (Some(schema), table)
+            });
+        // A true INTEGER PRIMARY KEY aliases the hidden identity and has no
+        // primary-key index. INTEGER PRIMARY KEY DESC can be nullable instead.
+        let rows = exec
+            .query_all(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT name, pk, \"notnull\", type, \
+                 (SELECT COUNT(*) FROM pragma_index_list(?, ?) WHERE origin = 'pk') AS key_indexes \
+                 FROM pragma_table_xinfo(?, ?) ORDER BY pk",
+                [table.into(), schema.into(), table.into(), schema.into()],
+            ))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        let mut keys = Vec::new();
+        let mut shadow = None;
+        for row in rows {
+            let name: String = row.try_get("", "name")?;
+            if name.eq_ignore_ascii_case("_rowid_") {
+                shadow = Some(name.clone());
+            }
+            if row.try_get::<i64>("", "pk")? > 0 {
+                keys.push((
+                    name,
+                    row.try_get::<i64>("", "notnull")? != 0,
+                    row.try_get::<String>("", "type")?,
+                    row.try_get::<i64>("", "key_indexes")?,
+                ));
+            }
+        }
+        let integer_alias =
+            matches!(keys.as_slice(), [(_, _, ty, 0)] if ty.eq_ignore_ascii_case("INTEGER"));
+        if !keys.is_empty() && (keys.iter().all(|(_, required, _, _)| *required) || integer_alias) {
+            for (name, _, _, _) in &keys {
+                crate::database::validate_identifier(name)?;
+            }
+            self.write_key = keys.into_iter().map(|(name, _, _, _)| name).collect();
+        } else if let Some(column) = shadow {
+            return Err(FrameworkError::database(format!(
+                "joined write on `{}` has no non-null primary key and column `{column}` shadows SQLite's hidden `_rowid_`",
+                self.table
+            )));
+        } else {
+            self.write_key = vec!["_rowid_".to_string()];
+        }
+        Ok(())
+    }
+
+    /// Select keys or table-qualified physical identities to retain joined rows.
     fn render_write_where(
         &self,
         backend: DbBackend,
@@ -1525,17 +1590,28 @@ impl DbTableBuilder {
         if self.joins.is_empty() || backend == DbBackend::MySql {
             return self.render_where_clauses(backend, values, n);
         }
-        let identity = if backend == DbBackend::Postgres {
-            "ctid"
+        let identities = if backend == DbBackend::Postgres {
+            vec!["tableoid".to_string(), "ctid".to_string()]
         } else {
-            "rowid"
+            self.write_key.clone()
         };
-        let query = self.clone().select([format!("{}.{identity}", self.table)]);
+        let query = self.clone().select(
+            identities
+                .iter()
+                .map(|identity| format!("{}.{identity}", self.table)),
+        );
         let select = query.render_select_into(backend, values, n)?;
-        Ok(format!(
-            " WHERE {} IN ({select})",
-            quote_identifier(backend, identity)
-        ))
+        let key = identities
+            .iter()
+            .map(|identity| quote_identifier(backend, identity))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key = if identities.len() == 1 {
+            key
+        } else {
+            format!("({key})")
+        };
+        Ok(format!(" WHERE {key} IN ({select})"))
     }
 
     fn render_update(

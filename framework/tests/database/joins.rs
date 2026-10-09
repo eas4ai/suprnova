@@ -737,7 +737,7 @@ async fn update_and_delete_match_only_joined_rows() {
     assert_eq!(joined().delete().await.expect("joined delete"), 1);
     assert_eq!(DB::table("pj_posts").count().await.expect("count"), 3);
     let log = DB::get_query_log().expect("log");
-    let selector = r#" WHERE "rowid" IN (SELECT "pj_posts"."rowid" FROM "pj_posts" INNER JOIN "pj_users" ON "pj_users"."id" = "pj_posts"."author_id" WHERE "pj_users"."name" = ?)"#;
+    let selector = r#" WHERE "id" IN (SELECT "pj_posts"."id" FROM "pj_posts" INNER JOIN "pj_users" ON "pj_users"."id" = "pj_posts"."author_id" WHERE "pj_users"."name" = ?)"#;
     let update = log
         .iter()
         .find(|query| query.sql.starts_with("UPDATE"))
@@ -859,4 +859,228 @@ async fn explicit_column_operator_and_cross_join_closure_keep_conditions() {
             .await
             .is_err()
     );
+}
+
+async fn shadowed_rowid_writes(fx: &Fixture, key: &str) {
+    fx.exec(&format!(
+        "CREATE TEMPORARY TABLE pj_shadow_rows ({key}rowid INTEGER, matched INTEGER, title TEXT)"
+    ))
+    .await;
+    fx.exec("CREATE TEMPORARY TABLE pj_shadow_match (id INTEGER)")
+        .await;
+    fx.exec("INSERT INTO pj_shadow_match VALUES (1)").await;
+    fx.exec("INSERT INTO pj_shadow_rows VALUES (1, 7, 1, 'matched'), (2, 7, 2, 'other')")
+        .await;
+    let joined = || {
+        DB::table("pj_shadow_rows").join(
+            "pj_shadow_match",
+            "pj_shadow_match.id",
+            "=",
+            "pj_shadow_rows.matched",
+        )
+    };
+    let updated = joined()
+        .update(suprnova::attrs! { title: "changed" })
+        .await
+        .expect("joined update");
+    let titles = raw("SELECT title FROM pj_shadow_rows ORDER BY matched").await;
+    let deleted = joined().delete().await.expect("joined delete");
+    let remaining = raw("SELECT title FROM pj_shadow_rows ORDER BY matched").await;
+    assert_eq!(updated, 1);
+    assert_eq!(
+        column(&titles, "title"),
+        vec![json!("changed"), json!("other")]
+    );
+    assert_eq!(deleted, 1);
+    assert_eq!(column(&remaining, "title"), vec![json!("other")]);
+}
+
+#[tokio::test]
+async fn joined_writes_use_the_primary_key_when_rowid_is_shadowed() {
+    let fx = Fixture::sqlite().await;
+    shadowed_rowid_writes(&fx, "key INTEGER PRIMARY KEY, ").await;
+}
+
+#[tokio::test]
+async fn joined_writes_use_hidden_identity_when_rowid_is_shadowed_without_a_key() {
+    let fx = Fixture::sqlite().await;
+    shadowed_rowid_writes(&fx, "key INTEGER, ").await;
+}
+
+#[tokio::test]
+async fn joined_writes_refuse_a_shadowed_hidden_identity_without_a_key() {
+    for column in [
+        "_RoWiD_ INTEGER DEFAULT 7",
+        "_rowid_ INTEGER GENERATED ALWAYS AS (matched) VIRTUAL",
+    ] {
+        let fx = Fixture::sqlite().await;
+        fx.exec(&format!(
+            "CREATE TEMPORARY TABLE pj_shadow_rows ({column}, matched INTEGER, title TEXT)"
+        ))
+        .await;
+        fx.exec("INSERT INTO pj_shadow_rows (matched, title) VALUES (1, 'matched'), (2, 'other')")
+            .await;
+        fx.exec("CREATE TEMPORARY TABLE pj_shadow_match (id INTEGER)")
+            .await;
+        fx.exec("INSERT INTO pj_shadow_match VALUES (1)").await;
+        let joined = || {
+            DB::table("pj_shadow_rows").join(
+                "pj_shadow_match",
+                "pj_shadow_match.id",
+                "=",
+                "pj_shadow_rows.matched",
+            )
+        };
+        let update = joined().update(suprnova::attrs! { title: "changed" }).await;
+        let delete = joined().delete().await;
+        for result in [update, delete] {
+            let error = result.expect_err("a shadowed _rowid_ must be refused");
+            assert!(
+                error.to_string().to_lowercase().contains("_rowid_"),
+                "{error}"
+            );
+        }
+        assert_eq!(DB::table("pj_shadow_rows").count().await.expect("count"), 2);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL at PG_TEST_URL"]
+async fn postgres_joined_writes_distinguish_inherited_rows_with_the_same_ctid() {
+    let fx = Fixture::live("PG_TEST_URL", DatabaseBackend::Postgres).await;
+    fx.exec("CREATE TEMPORARY TABLE pj_inherited_rows (matched INTEGER, title TEXT)")
+        .await;
+    fx.exec("CREATE TEMPORARY TABLE pj_inherited_one () INHERITS (pj_inherited_rows)")
+        .await;
+    fx.exec("CREATE TEMPORARY TABLE pj_inherited_two () INHERITS (pj_inherited_rows)")
+        .await;
+    fx.exec("CREATE TEMPORARY TABLE pj_inherited_match (id INTEGER)")
+        .await;
+    fx.exec("INSERT INTO pj_inherited_match VALUES (1)").await;
+    // Each fresh child puts its first row at the same physical offset.
+    fx.exec("TRUNCATE pj_inherited_one, pj_inherited_two").await;
+    fx.exec("INSERT INTO pj_inherited_one VALUES (1, 'matched')")
+        .await;
+    fx.exec("INSERT INTO pj_inherited_two VALUES (2, 'other')")
+        .await;
+    assert_eq!(
+        DB::scalar::<i64>("SELECT COUNT(DISTINCT ctid) FROM pj_inherited_rows", vec![])
+            .await
+            .expect("ctid count"),
+        1
+    );
+    let joined = || {
+        DB::table("pj_inherited_rows").join(
+            "pj_inherited_match",
+            "pj_inherited_match.id",
+            "=",
+            "pj_inherited_rows.matched",
+        )
+    };
+    assert_eq!(
+        joined()
+            .update(suprnova::attrs! { title: "changed" })
+            .await
+            .expect("update"),
+        1
+    );
+    assert_eq!(
+        column(
+            &raw("SELECT title FROM pj_inherited_rows ORDER BY matched").await,
+            "title"
+        ),
+        vec![json!("changed"), json!("other")]
+    );
+    // Reseed so the delete also encounters colliding ctids.
+    fx.exec("TRUNCATE pj_inherited_one, pj_inherited_two").await;
+    fx.exec("INSERT INTO pj_inherited_one VALUES (1, 'matched')")
+        .await;
+    fx.exec("INSERT INTO pj_inherited_two VALUES (2, 'other')")
+        .await;
+    assert_eq!(joined().delete().await.expect("delete"), 1);
+    assert_eq!(
+        column(&raw("SELECT title FROM pj_inherited_rows").await, "title"),
+        vec![json!("other")]
+    );
+    fx.close().await;
+}
+
+#[tokio::test]
+async fn joined_writes_use_composite_keys_without_a_hidden_identity() {
+    let fx = Fixture::sqlite().await;
+    fx.exec("CREATE TEMPORARY TABLE pj_composite_rows (tenant INTEGER, key TEXT, rowid INTEGER, _rowid_ INTEGER, matched INTEGER, title TEXT, PRIMARY KEY (tenant, key)) WITHOUT ROWID").await;
+    fx.exec("INSERT INTO pj_composite_rows VALUES (1, 'shared', 7, 8, 1, 'matched'), (2, 'shared', 7, 8, 2, 'other')").await;
+    fx.exec("CREATE TEMPORARY TABLE pj_shadow_match (id INTEGER)")
+        .await;
+    fx.exec("INSERT INTO pj_shadow_match VALUES (1)").await;
+    // Qualifying the schema also tests metadata lookup outside the default schema.
+    let joined = || {
+        DB::table("temp.pj_composite_rows").join(
+            "pj_shadow_match",
+            "pj_shadow_match.id",
+            "=",
+            "pj_composite_rows.matched",
+        )
+    };
+    assert_eq!(
+        joined()
+            .update(suprnova::attrs! { title: "changed" })
+            .await
+            .expect("update"),
+        1
+    );
+    assert_eq!(
+        column(
+            &raw("SELECT title FROM pj_composite_rows ORDER BY tenant").await,
+            "title"
+        ),
+        vec![json!("changed"), json!("other")]
+    );
+    assert_eq!(joined().delete().await.expect("delete"), 1);
+    assert_eq!(
+        column(&raw("SELECT title FROM pj_composite_rows").await, "title"),
+        vec![json!("other")]
+    );
+}
+
+#[tokio::test]
+async fn joined_writes_fall_back_for_nullable_primary_keys() {
+    for key in ["TEXT PRIMARY KEY", "INTEGER PRIMARY KEY DESC"] {
+        let fx = Fixture::sqlite().await;
+        fx.exec(&format!("CREATE TEMPORARY TABLE pj_nullable_rows (key {key}, rowid INTEGER, matched INTEGER, title TEXT)")).await;
+        fx.exec(
+            "INSERT INTO pj_nullable_rows VALUES (NULL, 7, 1, 'matched'), (NULL, 7, 2, 'other')",
+        )
+        .await;
+        fx.exec("CREATE TEMPORARY TABLE pj_shadow_match (id INTEGER)")
+            .await;
+        fx.exec("INSERT INTO pj_shadow_match VALUES (1)").await;
+        let joined = || {
+            DB::table("pj_nullable_rows").join(
+                "pj_shadow_match",
+                "pj_shadow_match.id",
+                "=",
+                "pj_nullable_rows.matched",
+            )
+        };
+        assert_eq!(
+            joined()
+                .update(suprnova::attrs! { title: "changed" })
+                .await
+                .expect("update"),
+            1
+        );
+        assert_eq!(
+            column(
+                &raw("SELECT title FROM pj_nullable_rows ORDER BY matched").await,
+                "title"
+            ),
+            vec![json!("changed"), json!("other")]
+        );
+        assert_eq!(joined().delete().await.expect("delete"), 1);
+        assert_eq!(
+            column(&raw("SELECT title FROM pj_nullable_rows").await, "title"),
+            vec![json!("other")]
+        );
+    }
 }
