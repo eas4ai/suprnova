@@ -1,0 +1,13 @@
+{#
+  suprnova.flash-region - the outcome of the last accepted request, read
+  once from the session by the page handler and rendered on the document
+  that follows a redirect (FDB-004). A restored or reloaded document has
+  nothing to show because the flash was consumed. Each message is an
+  ordinary alert-shaped block announced politely from one region; the
+  messages carry a variant and a text.
+#}
+{% macro flash_region(id, messages, label="Notices") %}
+<div class="sn-flash-region" id="{{ id }}" role="status" aria-label="{{ label }}">
+{% for message in messages %}<div class="sn-flash" data-sn-variant="{{ message.variant }}">{{ message.text }}</div>
+{% endfor %}</div>
+{% endmacro %}
