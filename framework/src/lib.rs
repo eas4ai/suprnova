@@ -330,8 +330,8 @@ pub use http::{
     abort_if, abort_unless, abort_with, json, markdown, text,
 };
 pub use http_client::{
-    ClientResponse, FailOnRealCallsGuard, Http, RecordedRequest, RequestBuilder, RetryContext,
-    RetryOutcome, assert_not_sent, assert_sent, fake_response,
+    ClientResponse, FailOnRealCallsGuard, FakeResponse, Http, RecordedRequest, RequestBuilder,
+    ResponseSequence, RetryContext, RetryOutcome, assert_not_sent, assert_sent, fake_response,
 };
 pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
@@ -540,7 +540,7 @@ pub use media::{
     Color, CustomTransformation, DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES,
     DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver,
     ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
-    Transformation, register_transformation,
+    Transformation, TransformationSettings, register_transformation, register_transformation_with,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

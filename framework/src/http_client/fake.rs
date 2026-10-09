@@ -28,7 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use super::{Body, ClientResponse, Http, RequestBuilder};
+use super::{ClientResponse, GlobalConfiguration, Http, Prepared, RequestBuilder};
+use crate::http::glob_match;
 
 tokio::task_local! {
     /// Per-task fake state. Set by [`Http::fake`]. Inside the scope,
@@ -48,6 +49,14 @@ tokio::task_local! {
 pub(crate) struct FakeState {
     recorded: Vec<RecordedRequest>,
     canned: Vec<CannedResponse>,
+    /// The stubs that stay: [`Http::fake_url`], [`Http::fake_using`] and
+    /// [`Http::fake_sequence`], asked in the order they were registered.
+    stubs: Vec<Stub>,
+    /// The URL patterns of [`Http::allow_stray_requests`].
+    allowed_stray: Vec<String>,
+    /// The global middleware and options registered inside this fake: they
+    /// belong to the fake, so parallel tests do not see each other's.
+    pub(crate) global: GlobalConfiguration,
 }
 
 /// A recorded outbound request - used by [`assert_sent`] /
@@ -56,13 +65,216 @@ pub(crate) struct FakeState {
 pub struct RecordedRequest {
     /// HTTP method as a static string: `"GET"`, `"POST"`, etc.
     pub method: String,
-    /// Full request URL exactly as passed to `Http::get`/`post`/etc.
+    /// The URL the request is sent to: the URL passed to
+    /// `Http::get`/`post`/etc., with its base URL, URL parameters and
+    /// query applied.
     pub url: String,
-    /// Headers added to the request, in the order they were appended.
+    /// The headers the request is sent with, in order: the ones the
+    /// request and the global middleware added, then the `Content-Type`
+    /// its body sets and the user agent, unless the request set them.
     pub headers: Vec<(String, String)>,
     /// Raw body bytes (JSON serialized as JSON, form serialized as
-    /// urlencoded, raw passed through).
+    /// urlencoded, multipart as its encoded parts, raw passed through).
     pub body: Option<Vec<u8>>,
+}
+
+impl RecordedRequest {
+    /// The first value of the header `name`, compared without regard to
+    /// case, as Laravel's `Request::header` reads it.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Whether the request was sent with the header `name` set to exactly
+    /// `value`; the name is compared without regard to case (Laravel's
+    /// `hasHeader($name, $value)`).
+    pub fn has_header(&self, name: &str, value: &str) -> bool {
+        self.headers
+            .iter()
+            .any(|(header, sent)| header.eq_ignore_ascii_case(name) && sent == value)
+    }
+
+    /// Whether the body is JSON: the `Content-Type` names `json`, as
+    /// Laravel's `isJson` decides.
+    pub fn is_json(&self) -> bool {
+        self.header("content-type")
+            .is_some_and(|content_type| content_type.contains("json"))
+    }
+
+    /// Whether the body is an URL-encoded form (Laravel's `isForm`).
+    pub fn is_form(&self) -> bool {
+        self.header("content-type").is_some_and(|content_type| {
+            content_type.split(';').next().is_some_and(|media| {
+                media
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            })
+        })
+    }
+
+    /// Whether the body is `multipart/form-data`, as
+    /// [`RequestBuilder::attach`] sends it (Laravel's `isMultipart`).
+    pub fn is_multipart(&self) -> bool {
+        self.header("content-type")
+            .is_some_and(|content_type| content_type.contains("multipart"))
+    }
+}
+
+/// A response a stub answers with: [`Http::fake_url`],
+/// [`Http::fake_using`] and [`Http::fake_sequence`] take it (Laravel's
+/// `Http::response`).
+#[derive(Debug, Clone)]
+pub struct FakeResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Bytes,
+}
+
+impl FakeResponse {
+    /// A response with `status`, no headers and an empty body.
+    pub fn new(status: u16) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: Bytes::new(),
+        }
+    }
+
+    /// A response with `status` and `body` as JSON, with
+    /// `Content-Type: application/json`.
+    pub fn json(status: u16, body: serde_json::Value) -> Self {
+        Self::new(status)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+    }
+
+    /// A response with `status` and `body` as it is, with
+    /// `Content-Type: text/plain; charset=utf-8`.
+    pub fn text(status: u16, body: impl Into<String>) -> Self {
+        Self::new(status)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(body.into())
+    }
+
+    /// Add a header to the response.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Replace the body. The `Content-Type` is not changed.
+    pub fn body(mut self, body: impl Into<Bytes>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    fn to_response(&self) -> ClientResponse {
+        ClientResponse::fake(self.status, self.headers.clone(), self.body.clone())
+    }
+}
+
+/// The responses of [`Http::fake_sequence`], answered in turn (Laravel's
+/// `ResponseSequence`).
+///
+/// The fake holds the same sequence, so responses pushed after the call
+/// are answered too. Once the responses run out, a request fails, unless
+/// [`when_empty`](Self::when_empty) gives the response to answer then or
+/// [`dont_fail_when_empty`](Self::dont_fail_when_empty) makes it an empty
+/// `200`.
+#[derive(Clone, Default)]
+pub struct ResponseSequence {
+    state: Arc<Mutex<SequenceState>>,
+}
+
+#[derive(Default)]
+struct SequenceState {
+    responses: std::collections::VecDeque<FakeResponse>,
+    when_empty: Option<FakeResponse>,
+}
+
+impl ResponseSequence {
+    fn state(&self) -> std::sync::MutexGuard<'_, SequenceState> {
+        // The queue is whole after any panic, so a poisoned lock goes on
+        // with it.
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Answer `response` after the ones before it.
+    pub fn push(self, response: FakeResponse) -> Self {
+        self.state().responses.push_back(response);
+        self
+    }
+
+    /// Answer an empty response with `status` after the ones before it
+    /// (Laravel's `pushStatus`).
+    pub fn push_status(self, status: u16) -> Self {
+        self.push(FakeResponse::new(status))
+    }
+
+    /// Answer `response` to every request once the sequence runs out.
+    pub fn when_empty(self, response: FakeResponse) -> Self {
+        self.state().when_empty = Some(response);
+        self
+    }
+
+    /// Answer an empty `200` once the sequence runs out, instead of
+    /// failing the request.
+    pub fn dont_fail_when_empty(self) -> Self {
+        self.when_empty(FakeResponse::new(200))
+    }
+
+    /// Whether every pushed response has been answered.
+    pub fn is_empty(&self) -> bool {
+        self.state().responses.is_empty()
+    }
+
+    fn next(&self, pattern: &str, url: &str) -> Result<ClientResponse, crate::FrameworkError> {
+        let mut state = self.state();
+        match state.responses.pop_front() {
+            Some(response) => Ok(response.to_response()),
+            None => match &state.when_empty {
+                Some(response) => Ok(response.to_response()),
+                None => Err(crate::FrameworkError::internal(format!(
+                    "Http::fake_sequence(\"{pattern}\"): the response sequence is empty, and \
+                     {url} asked it for another response. Push more responses, or give it \
+                     when_empty(...) or dont_fail_when_empty()."
+                ))),
+            },
+        }
+    }
+}
+
+/// The function behind [`Http::fake_using`].
+type StubCallback = dyn Fn(&RecordedRequest) -> Option<FakeResponse> + Send + Sync;
+
+/// A stub that stays, asked in the order it was registered.
+#[derive(Clone)]
+enum Stub {
+    Url {
+        pattern: String,
+        response: FakeResponse,
+    },
+    Callback(Arc<StubCallback>),
+    Sequence {
+        pattern: String,
+        sequence: ResponseSequence,
+    },
+}
+
+/// Whether `url` matches a stub `pattern`: `*` matches any run of
+/// characters, and a leading `*` is implied, as Laravel's `stubUrl` puts
+/// one in front of the pattern before it calls `Str::is`.
+fn stub_matches(pattern: &str, url: &str) -> bool {
+    if pattern.starts_with('*') {
+        glob_match(pattern, url)
+    } else {
+        glob_match(&format!("*{pattern}"), url)
+    }
 }
 
 struct CannedResponse {
@@ -85,7 +297,8 @@ struct CannedResponse {
 /// Method `"*"` matches any method.
 ///
 /// Subsequent matching requests fall through to the next canned entry,
-/// or - if none match - return an empty `200 {}`.
+/// then to the stubs of [`Http::fake_url`], [`Http::fake_using`] and
+/// [`Http::fake_sequence`], or - if none match - return an empty `200 {}`.
 ///
 /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
 /// Panics if no fake scope is active on the current task.
@@ -223,58 +436,149 @@ pub(crate) fn is_fake_active() -> bool {
     FAKE_STATE.try_with(|_| ()).is_ok()
 }
 
-pub(crate) fn intercept(req: &RequestBuilder) -> Result<ClientResponse, crate::FrameworkError> {
-    let body_bytes = match &req.body {
-        Some(Body::Json(v)) => Some(serde_json::to_vec(v).unwrap_or_default()),
-        Some(Body::Form(v)) => Some(
-            serde_urlencoded::to_string(v)
-                .unwrap_or_default()
-                .into_bytes(),
-        ),
-        Some(Body::Raw(b)) => Some(b.to_vec()),
-        None => None,
+/// What the fake does with a request.
+pub(crate) enum Interception {
+    /// The fake answered: a stub's response, the default `200 {}`, or the
+    /// refusal of a stray request.
+    Answered(Result<ClientResponse, crate::FrameworkError>),
+    /// No stub answered and the URL is one
+    /// [`Http::allow_stray_requests`] allows: the request goes to the
+    /// network.
+    Network,
+}
+
+/// Record `req` as `prepared` describes it and decide what answers it:
+/// a [`fake_response`] entry first, used up as it answers, then the
+/// stubs that stay, in the order they were registered, then the
+/// allowlist of stray requests.
+pub(crate) fn intercept(req: &RequestBuilder, prepared: &Prepared) -> Interception {
+    let request = RecordedRequest {
+        method: req.method.as_str().to_string(),
+        url: req.url.clone(),
+        headers: prepared.headers.clone(),
+        body: prepared.body.as_ref().map(|body| body.to_vec()),
     };
+    let method_str = req.method.as_str();
 
-    with_state(|s| {
-        s.recorded.push(RecordedRequest {
-            method: req.method.as_str().to_string(),
-            url: req.url.clone(),
-            headers: req.headers.clone(),
-            body: body_bytes,
-        });
-
-        let method_str = req.method.as_str();
+    let (canned, stubs, allowed) = with_state(|s| {
+        s.recorded.push(request.clone());
         let idx = s.canned.iter().position(|c| {
             let m_ok = c.method == "*" || c.method.eq_ignore_ascii_case(method_str);
             m_ok && req.url.contains(&c.url_substring)
         });
+        let canned = idx.map(|i| s.canned.remove(i));
+        let allowed = s
+            .allowed_stray
+            .iter()
+            .any(|pattern| glob_match(pattern, &req.url));
+        (canned, s.stubs.clone(), allowed)
+    });
 
-        match idx {
-            Some(i) => {
-                let c = s.canned.remove(i);
-                Ok(ClientResponse::fake(
-                    c.status,
-                    vec![("content-type".to_string(), c.content_type.clone())],
-                    c.body,
-                ))
+    if let Some(c) = canned {
+        return Interception::Answered(Ok(ClientResponse::fake(
+            c.status,
+            vec![("content-type".to_string(), c.content_type.clone())],
+            c.body,
+        )));
+    }
+
+    // The state is not locked while a stub runs: a `fake_using` callback
+    // may call the fake's own helpers.
+    for stub in &stubs {
+        let answer = match stub {
+            Stub::Url { pattern, response } => {
+                stub_matches(pattern, &request.url).then(|| Ok(response.to_response()))
             }
-            // No canned response matched. With the fail-closed guard active,
-            // a drifted URL/method must fail loudly rather than silently
-            // returning an empty 200 that masks the mismatch.
-            None if Http::is_guarded() => Err(crate::FrameworkError::internal(format!(
-                "Http::fake: no canned response matched {} {} while \
-                 Http::fail_on_real_calls is active. Register a matching \
-                 fake_response(...), or release the guard to allow the \
-                 default empty 200 response.",
-                method_str, req.url
-            ))),
-            None => Ok(ClientResponse::fake(
-                200,
-                vec![("content-type".to_string(), "application/json".to_string())],
-                Bytes::from_static(b"{}"),
-            )),
+            Stub::Callback(callback) => {
+                callback(&request).map(|response| Ok(response.to_response()))
+            }
+            Stub::Sequence { pattern, sequence } => {
+                stub_matches(pattern, &request.url).then(|| sequence.next(pattern, &request.url))
+            }
+        };
+        if let Some(answer) = answer {
+            return Interception::Answered(answer);
         }
-    })
+    }
+
+    if allowed {
+        return Interception::Network;
+    }
+    if Http::is_guarded() {
+        // No stub matched. With the fail-closed guard active, a drifted
+        // URL/method must fail loudly rather than silently returning an
+        // empty 200 that masks the mismatch.
+        return Interception::Answered(Err(crate::FrameworkError::internal(format!(
+            "Http::fake: no canned response matched {} {} while \
+             Http::fail_on_real_calls is active. Register a matching \
+             fake_response(...), allow the URL with Http::allow_stray_requests, \
+             or release the guard to allow the default empty 200 response.",
+            method_str, req.url
+        ))));
+    }
+    Interception::Answered(Ok(ClientResponse::fake(
+        200,
+        vec![("content-type".to_string(), "application/json".to_string())],
+        Bytes::from_static(b"{}"),
+    )))
+}
+
+/// Answer every request whose URL matches `pattern` with `response`.
+pub(crate) fn fake_url(pattern: &str, response: FakeResponse) {
+    with_state(|s| {
+        s.stubs.push(Stub::Url {
+            pattern: pattern.to_string(),
+            response,
+        });
+    });
+}
+
+/// Ask `callback` for the response to each request.
+pub(crate) fn fake_using(callback: Arc<StubCallback>) {
+    with_state(|s| s.stubs.push(Stub::Callback(callback)));
+}
+
+/// Answer the requests whose URL matches `pattern` from a new sequence.
+pub(crate) fn fake_sequence(pattern: &str) -> ResponseSequence {
+    let sequence = ResponseSequence::default();
+    with_state(|s| {
+        s.stubs.push(Stub::Sequence {
+            pattern: pattern.to_string(),
+            sequence: sequence.clone(),
+        });
+    });
+    sequence
+}
+
+/// Let the stray requests whose URL matches one of `patterns` reach the
+/// network, replacing the patterns before.
+pub(crate) fn allow_stray_requests(patterns: &[&str]) {
+    with_state(|s| {
+        s.allowed_stray = patterns.iter().map(|pattern| pattern.to_string()).collect();
+    });
+}
+
+/// Run `configure` on the global configuration of the fake active on this
+/// task. `false`, without running it, when no fake is active.
+pub(crate) fn configure_scoped(configure: impl FnOnce(&mut GlobalConfiguration)) -> bool {
+    if !is_fake_active() {
+        return false;
+    }
+    with_state(|s| configure(&mut s.global));
+    true
+}
+
+/// The global configuration registered inside the fake active on this
+/// task, when one is.
+pub(crate) fn scoped_global() -> Option<GlobalConfiguration> {
+    FAKE_STATE
+        .try_with(|state| {
+            lock::lock(state, "http fake state")
+                .map(|guard| guard.global.clone())
+                .ok()
+        })
+        .ok()
+        .flatten()
 }
 
 /// Access the per-task `FakeState`. Panics if no scope is active.

@@ -15,7 +15,7 @@
 use crate::error::FrameworkError;
 
 use super::color::Color;
-use super::custom::CustomTransformation;
+use super::custom::{CustomTransformation, TransformationSettings};
 
 /// Default encode quality, matching Laravel's `Image::quality()` default.
 ///
@@ -117,6 +117,14 @@ pub enum Transformation {
     ResizeWidth(u32),
     /// Resize to a height, deriving the width from the source aspect ratio.
     ResizeHeight(u32),
+    /// Resize to a width and keep the height the image has at this point
+    /// of the pipeline (Laravel's `resize(width: ...)`), so the aspect
+    /// ratio changes. [`Transformation::ResizeWidth`] keeps the aspect
+    /// ratio instead.
+    ResizeWidthOnly(u32),
+    /// Resize to a height and keep the width the image has at this point
+    /// of the pipeline (Laravel's `resize(height: ...)`).
+    ResizeHeightOnly(u32),
     /// Fit inside a box, preserving aspect ratio and never enlarging.
     Scale {
         /// Bounding width in pixels.
@@ -210,6 +218,15 @@ pub struct ImagePipeline {
     /// image with a side longer than 16383 px, and
     /// [`OutputFormat::WebPLossless`].
     pub quality: u8,
+    /// The settings of the custom steps recorded with
+    /// [`Image::transform_with`](super::Image::transform_with).
+    ///
+    /// The pipeline holds them, not the step, so [`Transformation`] stays
+    /// `Copy`: a step carries only a key into this table. A driver hands
+    /// the table to [`CustomTransformation::apply_with`] with the step.
+    /// The settings are released when the last pipeline holding them is
+    /// dropped.
+    pub settings: TransformationSettings,
 }
 
 impl Default for ImagePipeline {
@@ -218,6 +235,7 @@ impl Default for ImagePipeline {
             transformations: Vec::new(),
             format: None,
             quality: DEFAULT_IMAGE_QUALITY,
+            settings: TransformationSettings::default(),
         }
     }
 }
@@ -246,7 +264,8 @@ impl Default for ImagePipeline {
 /// ends in a wildcard arm. That arm returns an error naming the step,
 /// rather than skipping it: an image that silently loses a step is a wrong
 /// image nobody notices. A [`Transformation::Custom`] step can be run with
-/// [`CustomTransformation::apply`] on the decoded pixels.
+/// [`CustomTransformation::apply_with`] on the decoded pixels and the
+/// pipeline's [`settings`](ImagePipeline::settings).
 pub trait ImageDriver: Send + Sync + 'static {
     /// Decode `contents`, replay `pipeline`, and encode the result.
     ///

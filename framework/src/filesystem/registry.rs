@@ -31,6 +31,10 @@ use std::sync::RwLock;
 struct Disk {
     operator: Operator,
     public_url: Option<String>,
+    /// The operator as it was before an upload URL callback was layered
+    /// over it, so a later callback replaces the earlier one rather than
+    /// wrapping it. `None` while the disk has no callback.
+    without_upload_urls: Option<Operator>,
 }
 
 static REGISTRY: RwLock<Option<HashMap<String, Disk>>> = RwLock::new(None);
@@ -79,6 +83,27 @@ pub(crate) fn set_public_url(name: &str, base: String) -> bool {
     }
 }
 
+/// Layer the disk `name` with what `wrap` builds over the operator it had
+/// before any upload URL callback, keeping its public URL. `false` when no
+/// disk is registered under the name.
+///
+/// The disk stays the same disk, so this is not a registration: the public
+/// URL stays and no re-registration warning is logged.
+pub(crate) fn set_upload_urls(name: &str, wrap: impl FnOnce(Operator) -> Operator) -> bool {
+    let mut guard = REGISTRY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(disk) = guard.as_mut().and_then(|disks| disks.get_mut(name)) else {
+        return false;
+    };
+    let base = disk
+        .without_upload_urls
+        .get_or_insert_with(|| disk.operator.clone())
+        .clone();
+    disk.operator = wrap(base);
+    true
+}
+
 /// The public base URL of the disk `name`: `Ok(None)` for a private
 /// disk, and the error of [`get`] when no disk has the name.
 pub(crate) fn public_url(name: &str) -> Result<Option<String>, FrameworkError> {
@@ -111,6 +136,7 @@ pub(crate) fn register(name: impl Into<String>, op: Operator) {
     let disk = Disk {
         operator: op,
         public_url: None,
+        without_upload_urls: None,
     };
     if map.insert(name.clone(), disk).is_some() {
         tracing::warn!(

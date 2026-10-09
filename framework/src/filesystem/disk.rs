@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use opendal::{EntryMode, Operator};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::SystemTime;
@@ -302,8 +303,26 @@ pub trait DiskExt {
     ) -> impl Future<Output = Result<Vec<String>, FrameworkError>> + Send;
 
     /// Laravel alias for [`Operator::create_dir`].
+    ///
+    /// opendal's `create_dir` takes a directory path only with a slash at
+    /// its end and refuses `docs/nested`, while Laravel's `makeDirectory`
+    /// takes either form. So a path without the slash gets one before it
+    /// reaches `create_dir`; an empty path (the root) and a path that ends
+    /// in `/` reach it unchanged.
     fn make_directory(&self, path: &str)
     -> impl Future<Output = Result<(), FrameworkError>> + Send;
+
+    /// Create the directory `path` names unless it already exists
+    /// (Laravel's `ensureDirectoryExists`), so code that needs the
+    /// directory can call it every time.
+    ///
+    /// The path takes either form, as for [`DiskExt::make_directory`]. The
+    /// existence check comes first, as in Laravel, so an object store does
+    /// not write its directory marker again on every call.
+    fn ensure_directory_exists(
+        &self,
+        path: &str,
+    ) -> impl Future<Output = Result<(), FrameworkError>> + Send;
 
     /// Laravel alias for [`Operator::remove_all`]. Deletes a directory and
     /// every entry under it.
@@ -344,6 +363,10 @@ pub trait DiskExt {
     /// headers. See [`TemporaryUploadUrl`] for why the URL alone is not
     /// enough. Backed by [`Operator::presign_write`]; errors on backends that
     /// do not implement presigning.
+    ///
+    /// A disk given a callback with
+    /// [`Storage::build_temporary_upload_urls_using`](crate::Storage::build_temporary_upload_urls_using)
+    /// answers from the callback instead, ahead of its own presigning.
     fn temporary_upload_url(
         &self,
         path: &str,
@@ -610,9 +633,17 @@ impl DiskExt for Operator {
     }
 
     async fn make_directory(&self, path: &str) -> Result<(), FrameworkError> {
-        self.create_dir(path)
+        self.create_dir(&directory_path(path))
             .await
             .map_err(|e| FrameworkError::internal(format!("storage create_dir({path}): {e}")))
+    }
+
+    async fn ensure_directory_exists(&self, path: &str) -> Result<(), FrameworkError> {
+        let directory = directory_path(path);
+        if self.directory_exists(&directory).await? {
+            return Ok(());
+        }
+        self.make_directory(&directory).await
     }
 
     async fn delete_directory(&self, path: &str) -> Result<(), FrameworkError> {
@@ -730,6 +761,19 @@ async fn list_entries(
     // can rely on deterministic ordering even when the backend doesn't sort.
     paths.sort();
     Ok(paths)
+}
+
+/// `path` as the directory path opendal's `create_dir` takes: with a slash
+/// at its end. An empty path, the root, and a path that already ends in `/`
+/// are returned as they are. Unlike [`normalise_directory`], which a
+/// listing uses, it neither trims a leading slash nor maps `/` to `""`, so
+/// what `create_dir` received before for those paths it still receives.
+fn directory_path(path: &str) -> Cow<'_, str> {
+    if path.is_empty() || path.ends_with('/') {
+        Cow::Borrowed(path)
+    } else {
+        Cow::Owned(format!("{path}/"))
+    }
 }
 
 fn normalise_directory(directory: &str) -> String {

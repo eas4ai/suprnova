@@ -85,7 +85,10 @@ use crate::error::FrameworkError;
 use crate::http::HttpResponse;
 
 pub use color::Color;
-pub use custom::{CustomTransformation, ImagePixels, register_transformation};
+pub use custom::{
+    CustomTransformation, ImagePixels, TransformationSettings, register_transformation,
+    register_transformation_with,
+};
 pub use driver::{DEFAULT_IMAGE_QUALITY, ImageDriver, ImagePipeline, OutputFormat, Transformation};
 pub use magick::MagickCliDriver;
 pub use oxideav::OxideAvImageDriver;
@@ -491,18 +494,44 @@ impl Image {
     // ───────────────────────── operations ─────────────────────────
 
     /// Force exact dimensions, ignoring the source aspect ratio.
+    ///
+    /// A side of 0 is recorded as 1, as Laravel's `Image` clamps with
+    /// `max(1, ...)`, so no driver, a custom one included, receives a zero
+    /// side; ImageMagick refuses a `0x0` geometry.
     pub fn resize(self, width: u32, height: u32) -> Self {
-        self.push(Transformation::Resize { width, height })
+        self.push(Transformation::Resize {
+            width: width.max(1),
+            height: height.max(1),
+        })
     }
 
-    /// Resize to a width, deriving the height from the aspect ratio.
+    /// Resize to a width, deriving the height from the aspect ratio. A
+    /// width of 0 is recorded as 1.
     pub fn resize_width(self, width: u32) -> Self {
-        self.push(Transformation::ResizeWidth(width))
+        self.push(Transformation::ResizeWidth(width.max(1)))
     }
 
-    /// Resize to a height, deriving the width from the aspect ratio.
+    /// Resize to a height, deriving the width from the aspect ratio. A
+    /// height of 0 is recorded as 1.
     pub fn resize_height(self, height: u32) -> Self {
-        self.push(Transformation::ResizeHeight(height))
+        self.push(Transformation::ResizeHeight(height.max(1)))
+    }
+
+    /// Resize to a width and keep the height the image has at this point
+    /// of the pipeline (Laravel's `resize(width: ...)`), so the aspect
+    /// ratio changes; [`Image::resize_width`] keeps it instead. A width of
+    /// 0 is recorded as 1.
+    ///
+    /// The new size meets the same decode limits as any resize target.
+    pub fn resize_width_only(self, width: u32) -> Self {
+        self.push(Transformation::ResizeWidthOnly(width.max(1)))
+    }
+
+    /// Resize to a height and keep the width the image has at this point
+    /// of the pipeline (Laravel's `resize(height: ...)`). A height of 0 is
+    /// recorded as 1.
+    pub fn resize_height_only(self, height: u32) -> Self {
+        self.push(Transformation::ResizeHeightOnly(height.max(1)))
     }
 
     /// Fit inside a box, preserving aspect ratio. Never enlarges.
@@ -531,8 +560,13 @@ impl Image {
     }
 
     /// Fill the target box exactly, cropping the overflow from the centre.
+    ///
+    /// A side of 0 is recorded as 1, as for [`Image::resize`].
     pub fn cover(self, width: u32, height: u32) -> Self {
-        self.push(Transformation::Cover { width, height })
+        self.push(Transformation::Cover {
+            width: width.max(1),
+            height: height.max(1),
+        })
     }
 
     /// Fit inside the target box, preserving aspect ratio. No padding.
@@ -599,6 +633,26 @@ impl Image {
     /// `Transformation::custom(name)` (Laravel's `transform`).
     pub fn transform(self, transformation: Transformation) -> Self {
         self.push(transformation)
+    }
+
+    /// Add the custom transformation registered as `name` with
+    /// [`register_transformation_with`], handing its function `settings`
+    /// when the pipeline runs (Laravel's `transform` with a transformation
+    /// object that carries its own fields).
+    ///
+    /// The image holds the settings, not the step, so [`Transformation`]
+    /// stays `Copy`; the image's clones share them, and they are released
+    /// when the last of them is dropped. A step whose settings are not of
+    /// the type the transformation was registered for fails the image
+    /// with an error naming the transformation.
+    pub fn transform_with<S>(mut self, name: &'static str, settings: S) -> Self
+    where
+        S: std::any::Any + Send + Sync,
+    {
+        let key = self.pipeline.settings.push(settings);
+        self.push(Transformation::Custom(CustomTransformation::with_settings(
+            name, key,
+        )))
     }
 
     /// Gaussian blur. `amount` clamps to `0..=100`; `0` is a no-op.

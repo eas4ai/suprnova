@@ -10,6 +10,8 @@
 // `Process::fake` exists with the `testing` feature only.
 #[cfg(feature = "testing")]
 pub mod fake;
+#[cfg(feature = "testing")]
+pub mod laravel_infra_gaps;
 pub mod pool;
 pub mod run;
 pub mod support;

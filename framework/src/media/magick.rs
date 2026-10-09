@@ -52,7 +52,7 @@ use crate::error::FrameworkError;
 
 use super::ImageConfig;
 use super::color::Color;
-use super::custom::CustomTransformation;
+use super::custom::{CustomTransformation, TransformationSettings};
 use super::driver::{ImageDriver, ImagePipeline, OutputFormat, Transformation};
 use super::metadata::{self, ColourClass, IccData, Kept, SrgbConversion};
 use super::orientation::Orientation;
@@ -517,6 +517,7 @@ impl MagickCliDriver {
             input = Some(rust_stage(
                 &intermediate,
                 AfterStage::Custom(custom),
+                &pipeline.settings,
                 run.orienting.keeps_exif(applied),
                 run.config,
             )?);
@@ -558,7 +559,13 @@ impl MagickCliDriver {
         }
         args.extend(intermediate_args(keeps_exif));
         let intermediate = self.run(&args, source, run.config)?;
-        let converted = rust_stage(&intermediate, AfterStage::Srgb, keeps_exif, run.config)?;
+        let converted = rust_stage(
+            &intermediate,
+            AfterStage::Srgb,
+            &pipeline.settings,
+            keeps_exif,
+            run.config,
+        )?;
         let mut args = run.args(false, &[], &mut applied);
         args.extend(output_args(
             pipeline, run.target, plan, keeps_exif, background,
@@ -796,9 +803,14 @@ fn intermediate_args(keeps_exif: bool) -> Vec<String> {
 /// [`metadata::add`] adds them to any output, into the room the encoder's
 /// buffer was given for them: the encoder would compress the profile again
 /// rather than carry the chunk as it stands.
+///
+/// A custom step finds the settings it was recorded with in `settings`,
+/// the pipeline's table; they reach only its Rust function, never an
+/// ImageMagick argument.
 fn rust_stage(
     intermediate: &[u8],
     after: AfterStage,
+    settings: &TransformationSettings,
     keeps_exif: bool,
     config: &ImageConfig,
 ) -> Result<Vec<u8>, FrameworkError> {
@@ -859,7 +871,7 @@ fn rust_stage(
         .and_then(|found| found.png_chunk());
     let mut pixels = match after {
         AfterStage::Custom(custom) => {
-            let out = custom.apply(pixels)?;
+            let out = custom.apply_with(pixels, settings)?;
             sniff::enforce_limits(out.width(), out.height(), config)?;
             out
         }
@@ -1110,6 +1122,15 @@ fn transformation_args(step: Transformation, target: OutputFormat) -> Vec<String
         }
         Transformation::ResizeWidth(width) => vec![arg("-resize"), format!("{width}x")],
         Transformation::ResizeHeight(height) => vec![arg("-resize"), format!("x{height}")],
+        // The kept side is the image's own at this point of the run:
+        // ImageMagick 7 expands `%[h]` and `%[w]` in the geometry against
+        // the image the operator receives, after every step before it.
+        Transformation::ResizeWidthOnly(width) => {
+            vec![arg("-resize"), format!("{width}x%[h]!")]
+        }
+        Transformation::ResizeHeightOnly(height) => {
+            vec![arg("-resize"), format!("%[w]x{height}!")]
+        }
         Transformation::Scale { width, height } => {
             vec![arg("-resize"), format!("{width}x{height}>")]
         }
@@ -1546,6 +1567,7 @@ mod tests {
             ],
             format: Some(OutputFormat::WebP),
             quality: 65,
+            settings: TransformationSettings::default(),
         };
         let mut expected = limits();
         expected.extend(
@@ -1589,6 +1611,7 @@ mod tests {
             transformations: Vec::new(),
             format: Some(OutputFormat::WebPLossless),
             quality: 65,
+            settings: TransformationSettings::default(),
         };
         let lossless = process_args(
             &pipeline,
@@ -1778,6 +1801,7 @@ mod tests {
             ],
             format: Some(OutputFormat::Jpeg),
             quality: 70,
+            settings: TransformationSettings::default(),
         };
         for arg in process_args(
             &pipeline,

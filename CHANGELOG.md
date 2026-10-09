@@ -1089,6 +1089,55 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   runs after the password validates and before the user is signed in, in
   `attempt`, `once` and `Auth::logout_other_devices`.
 
+- **Directories that may exist already.** `DiskExt::ensure_directory_exists`
+  creates a directory unless it is there, and succeeds when it is.
+- **Upload URLs from your own callback.**
+  `Storage::build_temporary_upload_urls_using(disk, callback)` answers the
+  disk's `temporary_upload_url` from the callback, which receives the path
+  and the lifetime, ahead of the disk's own presigning; a read-through disk
+  and an S3 disk answer from it too.
+- **Asking a disk about upload URLs.** `Storage::provides_temporary_upload_urls`
+  answers whether a disk has an upload URL callback or presigns writes.
+- **Faked processes keep their argument list.** A recorded process keeps its
+  arguments, `None` for a shell line, and its quoted command line;
+  `assert_ran_args` and `assert_ran_command_line` compare them exactly, while
+  `assert_ran` keeps matching the arguments joined by spaces.
+- **One-side resizes.** `Image::resize_width_only` and `resize_height_only`
+  set one side and keep the other at the size the image has at that point of
+  the pipeline, on the `oxideav` and `magick` drivers alike.
+- **Custom transformations with settings.** `register_transformation_with`
+  registers a function that receives per-call settings of its own type, and
+  `Image::transform_with(name, settings)` records a step that hands them to
+  it. The image holds the settings and releases them with its last clone; a
+  step whose settings are of another type fails the image with an error
+  naming the transformation.
+- **HEAD requests.** `Http::head(url)` sends `HEAD`.
+- **Global HTTP middleware and options.** `Http::global_request_middleware`,
+  `global_response_middleware` and `global_options` apply to every request
+  created after them, and `Http::without_global_configuration` creates
+  requests without any of them. Registered inside an `Http::fake` scope they
+  belong to that scope.
+- **Building the request URL.** `RequestBuilder::base_url` goes in front of a
+  URL without a scheme, `query` merges pairs into the URL's query, and
+  `url_parameters` expands `{name}` placeholders with each value
+  percent-encoded, so a value cannot add a path segment, a query or a host.
+- **Multipart uploads.** `RequestBuilder::attach(name, contents, filename)`
+  sends the body as `multipart/form-data`.
+- **A connect timeout per request.** `RequestBuilder::connect_timeout`
+  replaces the shared client's 10 seconds for one request.
+- **HTTP stubs that stay.** `Http::fake_url` answers every request whose URL
+  matches a pattern, `Http::fake_using` asks a callback that may pass with
+  `None`, and `Http::fake_sequence` answers in turn and then with its
+  `when_empty` response, each with a `FakeResponse`.
+- **Reading a recorded request.** `RecordedRequest::header`, `has_header`,
+  `is_json`, `is_form` and `is_multipart` compare header names without regard
+  to case.
+- **Laravel's stray-request names.** `Http::prevent_stray_requests(on)` and
+  `Http::preventing_stray_requests()` move and read the switch
+  `fail_on_real_calls` moves, and `Http::allow_stray_requests(patterns)` lets
+  a request inside a fake that no stub answers reach the network when its URL
+  matches.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -1918,6 +1967,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   for a database shared with Laravel, so `Auth::validate` and a guard's
   `validate` leave it as it is; the sign-in rewrites it, and a rewrite that
   fails still fails the sign-in.
+
+- **`make_directory` takes a path without its trailing slash.**
+  `make_directory("a/b")` creates the directory as `"a/b/"` does; it used to
+  fail on every disk. An empty path and a path that ends in `/` reach the
+  backend unchanged.
+- **No image driver receives a zero side.** `Image::resize`, `cover`,
+  `resize_width` and `resize_height` record a side of 0 as 1, as Laravel
+  clamps it; the `magick` driver failed on the `0x0` geometry.
+- **`ImagePipeline` carries the settings of its custom steps.** The new
+  `settings` field holds what `Image::transform_with` recorded, and a custom
+  driver runs a custom step with `CustomTransformation::apply_with(pixels,
+  &pipeline.settings)`. A struct literal of `ImagePipeline` ends with
+  `..ImagePipeline::default()` or names the field.
+- **A started fake process reveals its output a line at a time.** Each
+  `output()` or `latest_output()` call reveals the next line, `output()`
+  answering every line so far and `latest_output()` the new one; the error
+  output works the same way, and `wait()` still returns the whole output.
+- **The HTTP fake records a request as it is sent.** The recorded headers
+  include the `Content-Type` a JSON, form or multipart body sets, the user
+  agent, and the headers global middleware adds, and the recorded URL has its
+  base URL, URL parameters and query applied.
 
 ### Fixed
 
