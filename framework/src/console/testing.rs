@@ -6,7 +6,7 @@
 //! said, and a command that asks a question waited on the standard input
 //! of the test runner.
 
-use super::io::{Capture, collect_into};
+use super::io::{Capture, Expected, collect_into};
 use crate::error::FrameworkError;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -33,13 +33,16 @@ use std::sync::Arc;
 ///
 /// # What is collected
 ///
-/// What the command writes with [`line`](super::line) and
-/// [`error_line`](super::error_line), what it asks with
-/// [`ask`](super::ask) and [`confirm`](super::confirm), and what the
-/// console itself prints: help, the version, parse errors, and the error
-/// a command returned. What a command prints with `println!` is not
-/// collected, and neither is what a task that the command spawned
-/// prints: the collection belongs to the task the command runs on.
+/// What the command writes with [`line`](super::line),
+/// [`error_line`](super::error_line), their `_at` forms,
+/// [`error`](super::error), [`warn`](super::warn), [`info`](super::info)
+/// and a [`Progress`](super::Progress) bar, the questions its prompts ask
+/// (never a [`secret`](super::secret) answer), and what the console itself
+/// prints: help, the version, parse errors, and the error a command
+/// returned. All of it is plain text, with no terminal styles. What a
+/// command prints with `println!` is not collected, and neither is what a
+/// task that the command spawned prints: the collection belongs to the
+/// task the command runs on.
 pub fn test<I, S>(argv: I) -> ConsoleTest
 where
     I: IntoIterator<Item = S>,
@@ -57,7 +60,7 @@ where
 #[must_use = "a prepared run does nothing until `.run().await`"]
 pub struct ConsoleTest {
     argv: Vec<String>,
-    answers: VecDeque<(String, String)>,
+    answers: VecDeque<Expected>,
 }
 
 impl ConsoleTest {
@@ -74,7 +77,40 @@ impl ConsoleTest {
         question: impl Into<String>,
         answer: impl Into<String>,
     ) -> Self {
-        self.answers.push_back((question.into(), answer.into()));
+        self.answers.push_back(Expected {
+            question: question.into(),
+            answer: answer.into(),
+            options: None,
+        });
+        self
+    }
+
+    /// Answer the menu `question` with `answer`, and expect the menu to
+    /// offer exactly `options`, in that order.
+    ///
+    /// For [`select`](super::select), [`select_keyed`](super::select_keyed)
+    /// and [`multiselect`](super::multiselect). The answer is typed as a
+    /// person types it: an option's label, and for a multiselect the labels
+    /// separated by commas, `"Member,Owner"`. A menu that offers other
+    /// options fails the command, and so does a prompt that is no menu, so
+    /// the test notices when the choices change. Use
+    /// [`expects_question`](Self::expects_question) to answer a menu without
+    /// checking its options.
+    pub fn expects_choice<I, S>(
+        mut self,
+        question: impl Into<String>,
+        answer: impl Into<String>,
+        options: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.answers.push_back(Expected {
+            question: question.into(),
+            answer: answer.into(),
+            options: Some(options.into_iter().map(Into::into).collect()),
+        });
         self
     }
 
@@ -89,7 +125,7 @@ impl ConsoleTest {
             unasked: captured
                 .answers
                 .into_iter()
-                .map(|(question, _)| question)
+                .map(|expected| expected.question)
                 .collect(),
             result,
         }

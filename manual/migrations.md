@@ -132,6 +132,58 @@ async fn main() {
 
 The scaffolder writes this for you on `suprnova new`.
 
+### Migrations from the framework and from crates
+
+Some migrations live outside `src/migrations`: the framework's two-factor
+tables, a payments adapter's schema, or an internal crate your applications
+share. Load such a list with `Application::load_migrations_from`, and every
+migrate command runs it after your migrator's own list: `migrate`,
+`migrate:status`, `migrate:rollback`, `migrate:fresh`, `schema:dump` and the
+migration `serve` runs on boot. Laravel's service providers do the same with
+`loadMigrationsFrom`.
+
+```rust
+use suprnova::Application;
+
+#[suprnova::main]
+async fn main() {
+    Application::new()
+        .config(my_app::config::register)
+        .bootstrap(my_app::bootstrap::bootstrap)
+        .routes(my_app::routes::register)
+        .migrations::<my_app::migrations::Migrator>()
+        .load_migrations_from(suprnova::auth_flows::two_factor::migrations)
+        .load_migrations_from(suprnova::payments::migrations::migrations)
+        .run()
+        .await
+}
+```
+
+A list is a function that returns the migrations in order,
+`fn() -> Vec<Box<dyn MigrationTrait>>`. A crate registers its own list for
+every application that links it with `register_migrations!`, in its
+`lib.rs`:
+
+```rust
+pub fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+    vec![Box::new(m_2026_10_01_create_invoices::Migration)]
+}
+
+suprnova::register_migrations!("acme-billing", migrations);
+```
+
+The order is your migrator's list, then each loaded list in the order you
+loaded it, then the registered lists by owner name. A migration whose name
+an earlier list already holds runs once, so a list that repeats a migration
+your migrator lists is harmless. The framework registers none of its own
+migrations: an application that never loads the two-factor list gets none
+of its tables.
+
+`migrate:status` prints every migration of the combined list with
+`Applied` or `Pending`, one line each. `TestDatabase::fresh::<Migrator>()`
+runs the migrator you name and nothing else; list what a test needs in that
+migrator.
+
 ### Why Suprnova diverges
 
 Most of the framework deliberately hides SeaORM - you write `#[suprnova::model]`

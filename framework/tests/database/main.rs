@@ -29,6 +29,7 @@ pub mod tx_leak_diagnostic;
 pub mod url_prod_validation;
 
 pub mod laravel_delta;
+pub mod laravel_infra_gaps;
 
 /// Observe the data-gap contract through the shared verification filter.
 pub mod laravel_gaps;

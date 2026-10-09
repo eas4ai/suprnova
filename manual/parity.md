@@ -338,7 +338,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | Pennant (feature flags) | Re-implemented as `features::*` | shipped | [Feature Flags](feature-flags.md) |
 | Pint (PHP code style) | `cargo fmt` + `cargo clippy` | diverged | Standard Rust toolchain |
 | Precognition | Precognitive requests (the `Precognition` header) answered by `FormRequest` extraction, with the same `#[derive(Data, Validate)]` types | shipped | Validation runs without calling the handler |
-| Prompts (CLI UI) | Use the `dialoguer` / `inquire` crate when needed | by design no | Rust ecosystem already covers this |
+| Prompts (CLI UI) | `console::ask_with_default`, `secret`, `select`, `select_keyed`, `multiselect`, `Progress`, `progress` and `form` | shipped | [Console](console.md#prompts); `console::test` answers them with `expects_question` and `expects_choice` |
 | Pulse | n/a | not built | OTel metrics and traces |
 | Reverb (WebSocket server) | Built into Suprnova (`ws!()` + `BroadcastHub`) | diverged | No separate server needed - it's the same process |
 | Sail (Docker dev) | `suprnova-cli` ships Docker recipes inline | shipped | [CLI Docker](cli-docker.md) |
@@ -436,7 +436,7 @@ instead:
 | Envoy (SSH deploys) | Containers / systemd / orchestrators do the job; we don't need a bespoke SSH DSL |
 | Concurrency facade (`Concurrency::run`) | Tokio (`tokio::join!` / `tokio::spawn` / `tokio::select!`) is the answer; no facade needed |
 | First-party AI SDK / MCP / Boost | Pick the Rust crates you already use; we don't gatekeep |
-| Prompts (CLI UI library) | `dialoguer` / `inquire` already exist; we don't reinvent |
+| Prompts' arrow-key terminal UI | The prompts ship as `console::secret`, `select`, `multiselect`, `progress` and `form`, and each reads one line, so a command runs the same by hand, from a script and under `console::test`. [Console](console.md#prompts) |
 | Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` - one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
 | `php artisan dev --tabs` (TUI multi-pane dev-process mode) | Single-terminal, `[name]`-prefixed output is the Rust dev-tooling norm (`cargo watch`, `bacon`, `just`) - `suprnova serve` already gives every process (backend, frontend, and any `suprnova.toml` entry) its own colored prefix and auto-restart. A tabbed TUI is a second interaction model for a signal this already provides; `--stream`'s job - one scriptable, real-time output stream - ships as `suprnova serve --json` (NDJSON, one event per line). [Serve](cli-serve.md#extra-dev-processes) |
 

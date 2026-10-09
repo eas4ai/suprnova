@@ -44,6 +44,14 @@ pub struct TaskBuilder {
     pub(crate) one_server_ttl: Option<Duration>,
     pub(crate) run_in_background: bool,
     pub(crate) timezone: Option<Tz>,
+    /// Whether a frequency, time or `cron` call set the expression. The
+    /// day helpers splice their day into such an expression, and give a
+    /// builder no such call set the midnight their documentation names.
+    expression_set: bool,
+    /// The environments the task runs in; empty is every environment.
+    environments: Vec<crate::config::Environment>,
+    /// Whether the task runs while the application is in maintenance mode.
+    even_in_maintenance_mode: bool,
 }
 
 impl TaskBuilder {
@@ -66,6 +74,9 @@ impl TaskBuilder {
             one_server_ttl: None,
             run_in_background: false,
             timezone: None,
+            expression_set: false,
+            environments: Vec::new(),
+            even_in_maintenance_mode: false,
         }
     }
 
@@ -116,6 +127,9 @@ impl TaskBuilder {
             one_server_ttl: None,
             run_in_background: false,
             timezone: None,
+            expression_set: false,
+            environments: Vec::new(),
+            even_in_maintenance_mode: false,
         }
     }
 
@@ -141,6 +155,7 @@ impl TaskBuilder {
     /// for a fallible alternative.
     pub fn cron(mut self, expression: &str) -> Self {
         self.expression = CronExpression::parse(expression).expect("Invalid cron expression");
+        self.expression_set = true;
         self
     }
 
@@ -155,48 +170,56 @@ impl TaskBuilder {
     /// numeric segment (step, range bound, list element, or single value).
     pub fn try_cron(mut self, expression: &str) -> Result<Self, String> {
         self.expression = CronExpression::parse(expression)?;
+        self.expression_set = true;
         Ok(self)
     }
 
     /// Run every minute
     pub fn every_minute(mut self) -> Self {
         self.expression = CronExpression::every_minute();
+        self.expression_set = true;
         self
     }
 
     /// Run every 2 minutes
     pub fn every_two_minutes(mut self) -> Self {
         self.expression = CronExpression::every_n_minutes(2);
+        self.expression_set = true;
         self
     }
 
     /// Run every 5 minutes
     pub fn every_five_minutes(mut self) -> Self {
         self.expression = CronExpression::every_n_minutes(5);
+        self.expression_set = true;
         self
     }
 
     /// Run every 10 minutes
     pub fn every_ten_minutes(mut self) -> Self {
         self.expression = CronExpression::every_n_minutes(10);
+        self.expression_set = true;
         self
     }
 
     /// Run every 15 minutes
     pub fn every_fifteen_minutes(mut self) -> Self {
         self.expression = CronExpression::every_n_minutes(15);
+        self.expression_set = true;
         self
     }
 
     /// Run every 30 minutes
     pub fn every_thirty_minutes(mut self) -> Self {
         self.expression = CronExpression::every_n_minutes(30);
+        self.expression_set = true;
         self
     }
 
     /// Run every hour at minute 0
     pub fn hourly(mut self) -> Self {
         self.expression = CronExpression::hourly();
+        self.expression_set = true;
         self
     }
 
@@ -217,6 +240,7 @@ impl TaskBuilder {
     /// [`try_hourly_at`](Self::try_hourly_at) for a fallible alternative.
     pub fn hourly_at(mut self, minute: u32) -> Self {
         self.expression = CronExpression::hourly_at(minute);
+        self.expression_set = true;
         self
     }
 
@@ -229,36 +253,42 @@ impl TaskBuilder {
     /// field width). Delegates to [`CronExpression::try_hourly_at`].
     pub fn try_hourly_at(mut self, minute: u32) -> Result<Self, String> {
         self.expression = CronExpression::try_hourly_at(minute)?;
+        self.expression_set = true;
         Ok(self)
     }
 
     /// Run every 2 hours
     pub fn every_two_hours(mut self) -> Self {
         self.expression = CronExpression::parse("0 */2 * * *").unwrap();
+        self.expression_set = true;
         self
     }
 
     /// Run every 3 hours
     pub fn every_three_hours(mut self) -> Self {
         self.expression = CronExpression::parse("0 */3 * * *").unwrap();
+        self.expression_set = true;
         self
     }
 
     /// Run every 4 hours
     pub fn every_four_hours(mut self) -> Self {
         self.expression = CronExpression::parse("0 */4 * * *").unwrap();
+        self.expression_set = true;
         self
     }
 
     /// Run every 6 hours
     pub fn every_six_hours(mut self) -> Self {
         self.expression = CronExpression::parse("0 */6 * * *").unwrap();
+        self.expression_set = true;
         self
     }
 
     /// Run once daily at midnight
     pub fn daily(mut self) -> Self {
         self.expression = CronExpression::daily();
+        self.expression_set = true;
         self
     }
 
@@ -275,13 +305,15 @@ impl TaskBuilder {
     ///
     /// # Panics
     ///
-    /// Panics if `time` is a well-formed `"HH:MM"` whose numeric segments
-    /// are out of cron range (hour `0..=23`, minute `0..=59`). A non-`HH:MM`
-    /// string falls back to [`daily`](Self::daily); a non-numeric segment
-    /// is treated as `0`. Use [`try_daily_at`](Self::try_daily_at) for a
-    /// fallible alternative.
+    /// Panics if the hour or minute of `time` is out of cron range (hour
+    /// `0..=23`, minute `0..=59`). `time` is `H` for that hour on the hour,
+    /// `HH:MM`, or `HH:MM:SS`, whose seconds are dropped; a string of more
+    /// than three segments falls back to [`daily`](Self::daily), and a
+    /// non-numeric segment is treated as `0`. Use
+    /// [`try_daily_at`](Self::try_daily_at) for a fallible alternative.
     pub fn daily_at(mut self, time: &str) -> Self {
         self.expression = CronExpression::daily_at(time);
+        self.expression_set = true;
         self
     }
 
@@ -290,13 +322,14 @@ impl TaskBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `Err` when `time` is a well-formed `"HH:MM"` whose hour is
-    /// outside `0..=23` or whose minute is outside `0..=59`. Lenient parsing
-    /// is preserved: a non-`HH:MM` string yields the equivalent of
+    /// Returns `Err` when the hour of `time` is outside `0..=23` or its
+    /// minute is outside `0..=59`. Lenient parsing is preserved: a string of
+    /// more than three segments yields the equivalent of
     /// [`daily`](Self::daily); a non-numeric segment is treated as `0`.
     /// Delegates to [`CronExpression::try_daily_at`].
     pub fn try_daily_at(mut self, time: &str) -> Result<Self, String> {
         self.expression = CronExpression::try_daily_at(time)?;
+        self.expression_set = true;
         Ok(self)
     }
 
@@ -336,15 +369,18 @@ impl TaskBuilder {
         }
         self.expression =
             CronExpression::parse(&format!("0 {},{} * * *", first_hour, second_hour))?;
+        self.expression_set = true;
         Ok(self)
     }
 
     /// Set the time for the current schedule.
     ///
     /// This can be chained with other methods to set a specific time.
-    /// A malformed `HH:MM` string is logged at `tracing::warn!` and the
-    /// schedule is left unchanged. Use [`try_at`](Self::try_at) when you
-    /// want the parse failure to surface as an error.
+    /// `time` is `H` for that hour on the hour, `HH:MM`, or `HH:MM:SS`,
+    /// whose seconds are dropped. A malformed string is logged at
+    /// `tracing::warn!` and the schedule is left unchanged. Use
+    /// [`try_at`](Self::try_at) when you want the parse failure to surface
+    /// as an error.
     ///
     /// # Example
     /// ```rust,no_run
@@ -355,26 +391,36 @@ impl TaskBuilder {
     /// # }
     /// ```
     pub fn at(mut self, time: &str) -> Self {
-        self.expression = self.expression.at(time);
+        match self.expression.clone().try_at(time) {
+            Ok(expression) => {
+                self.expression = expression;
+                self.expression_set = true;
+            }
+            // `at` logs the failure and keeps the expression; a time that
+            // did not apply sets nothing for a later day helper to keep.
+            Err(_) => self.expression = self.expression.at(time),
+        }
         self
     }
 
     /// Fallible sibling of [`at`](Self::at): returns `Err` on a malformed
-    /// `HH:MM` string instead of warn-and-return-unchanged. Mirrors
+    /// time string instead of warn-and-return-unchanged. Mirrors
     /// [`CronExpression::try_at`](crate::schedule::CronExpression::try_at).
     ///
     /// # Errors
     ///
-    /// Returns `Err` when `time` is not exactly two `:`-separated segments
-    /// or when either segment fails to parse as `u32`.
+    /// Returns `Err` when `time` has more than three `:`-separated segments
+    /// or when a segment fails to parse as `u32`.
     pub fn try_at(mut self, time: &str) -> Result<Self, String> {
         self.expression = self.expression.try_at(time)?;
+        self.expression_set = true;
         Ok(self)
     }
 
     /// Run once weekly on Sunday at midnight
     pub fn weekly(mut self) -> Self {
         self.expression = CronExpression::weekly();
+        self.expression_set = true;
         self
     }
 
@@ -390,81 +436,102 @@ impl TaskBuilder {
     /// ```
     pub fn weekly_on(mut self, day: DayOfWeek) -> Self {
         self.expression = CronExpression::weekly_on(day);
+        self.expression_set = true;
         self
     }
 
-    /// Run on specific days of the week at midnight
+    /// Run on specific days of the week.
+    ///
+    /// After a frequency, time or [`cron`](Self::cron) call this replaces
+    /// only the day-of-week field and keeps the rest, as Laravel's `days`
+    /// does: `.hourly().days(&[DayOfWeek::Monday])` is `0 * * * 1`. On a
+    /// builder no such call has set, the task runs at midnight on those
+    /// days, `0 0 * * D`.
     ///
     /// # Example
     /// ```rust,no_run
     /// # use suprnova::{Schedule, DayOfWeek};
     /// # fn ex(schedule: &Schedule) {
     /// schedule.call(|| async { Ok(()) })
+    /// .daily_at("09:30")
     /// .days(&[DayOfWeek::Monday, DayOfWeek::Wednesday, DayOfWeek::Friday]);
     /// # }
     /// ```
-    pub fn days(mut self, days: &[DayOfWeek]) -> Self {
-        self.expression = CronExpression::on_days(days);
+    pub fn days(self, days: &[DayOfWeek]) -> Self {
+        let ranges: Vec<(DayOfWeek, DayOfWeek)> = days.iter().map(|day| (*day, *day)).collect();
+        self.on_day_ranges(&ranges)
+    }
+
+    /// The day helpers' shared body: splice `ranges` into the expression a
+    /// frequency, time or `cron` call set, or into midnight when none did.
+    fn on_day_ranges(mut self, ranges: &[(DayOfWeek, DayOfWeek)]) -> Self {
+        let base = if self.expression_set {
+            self.expression
+        } else {
+            CronExpression::daily()
+        };
+        self.expression = base.with_day_ranges(ranges);
         self
     }
 
-    /// Run on weekdays (Monday-Friday) at midnight
-    pub fn weekdays(mut self) -> Self {
-        self.expression = CronExpression::weekdays();
-        self
+    /// Run on weekdays (Monday-Friday), at midnight unless a frequency or
+    /// time was set before, as [`days`](Self::days) explains.
+    pub fn weekdays(self) -> Self {
+        self.on_day_ranges(&[(DayOfWeek::Monday, DayOfWeek::Friday)])
     }
 
-    /// Run on weekends (Saturday-Sunday) at midnight
-    pub fn weekends(mut self) -> Self {
-        self.expression = CronExpression::weekends();
-        self
+    /// Run on weekends (Saturday-Sunday), at midnight unless a frequency or
+    /// time was set before, as [`days`](Self::days) explains.
+    pub fn weekends(self) -> Self {
+        self.days(&[DayOfWeek::Sunday, DayOfWeek::Saturday])
     }
 
-    /// Run on Sundays at midnight
-    pub fn sundays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Sunday);
-        self
+    /// Run on Sundays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn sundays(self) -> Self {
+        self.days(&[DayOfWeek::Sunday])
     }
 
-    /// Run on Mondays at midnight
-    pub fn mondays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Monday);
-        self
+    /// Run on Mondays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn mondays(self) -> Self {
+        self.days(&[DayOfWeek::Monday])
     }
 
-    /// Run on Tuesdays at midnight
-    pub fn tuesdays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Tuesday);
-        self
+    /// Run on Tuesdays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn tuesdays(self) -> Self {
+        self.days(&[DayOfWeek::Tuesday])
     }
 
-    /// Run on Wednesdays at midnight
-    pub fn wednesdays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Wednesday);
-        self
+    /// Run on Wednesdays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn wednesdays(self) -> Self {
+        self.days(&[DayOfWeek::Wednesday])
     }
 
-    /// Run on Thursdays at midnight
-    pub fn thursdays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Thursday);
-        self
+    /// Run on Thursdays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn thursdays(self) -> Self {
+        self.days(&[DayOfWeek::Thursday])
     }
 
-    /// Run on Fridays at midnight
-    pub fn fridays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Friday);
-        self
+    /// Run on Fridays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn fridays(self) -> Self {
+        self.days(&[DayOfWeek::Friday])
     }
 
-    /// Run on Saturdays at midnight
-    pub fn saturdays(mut self) -> Self {
-        self.expression = CronExpression::weekly_on(DayOfWeek::Saturday);
-        self
+    /// Run on Saturdays, at midnight unless a frequency or time was set
+    /// before, as [`days`](Self::days) explains.
+    pub fn saturdays(self) -> Self {
+        self.days(&[DayOfWeek::Saturday])
     }
 
     /// Run once monthly on the first day at midnight
     pub fn monthly(mut self) -> Self {
         self.expression = CronExpression::monthly();
+        self.expression_set = true;
         self
     }
 
@@ -486,6 +553,7 @@ impl TaskBuilder {
     /// Months without a 31st silently skip - that is cron-standard behaviour.
     pub fn monthly_on(mut self, day: u32) -> Self {
         self.expression = CronExpression::monthly_on(day);
+        self.expression_set = true;
         self
     }
 
@@ -498,18 +566,21 @@ impl TaskBuilder {
     /// [`CronExpression::try_monthly_on`].
     pub fn try_monthly_on(mut self, day: u32) -> Result<Self, String> {
         self.expression = CronExpression::try_monthly_on(day)?;
+        self.expression_set = true;
         Ok(self)
     }
 
     /// Run quarterly on the first day of each quarter at midnight
     pub fn quarterly(mut self) -> Self {
         self.expression = CronExpression::quarterly();
+        self.expression_set = true;
         self
     }
 
     /// Run yearly on January 1st at midnight
     pub fn yearly(mut self) -> Self {
         self.expression = CronExpression::yearly();
+        self.expression_set = true;
         self
     }
 
@@ -644,9 +715,12 @@ impl TaskBuilder {
     /// # Requires a shared cache
     ///
     /// The lock is a [`Cache::lock`], so "one server" means "one process
-    /// among those sharing a cache backend". Under `CACHE_DRIVER=memory`
-    /// the lock is per-process and the guarantee is absent; in production
-    /// that is a hard boot failure rather than a silent downgrade, unless
+    /// among those sharing a cache backend". With no cache store bound at
+    /// all there is no lock: the schedule refuses to start in every
+    /// environment, and a tick that runs anyway skips the task with an
+    /// error log. Under `CACHE_DRIVER=memory` the lock is per-process and
+    /// the guarantee is absent; in production that is a hard boot failure
+    /// rather than a silent downgrade, unless
     /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` says the deployment
     /// really does run a single scheduler.
     ///
@@ -678,6 +752,41 @@ impl TaskBuilder {
         self.on_one_server = true;
         self.on_every_server = false;
         self.one_server_ttl = Some(ttl);
+        self
+    }
+
+    /// Run this task only in the named environments, as Laravel's
+    /// `environments` limits an event. A task that never calls this runs
+    /// in every environment.
+    ///
+    /// The environment is [`Config::environment`](crate::Config::environment)
+    /// at the tick, so a schedule shared by every deployment can keep a
+    /// task to production:
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::{Environment, Schedule};
+    /// # fn ex(schedule: &Schedule) {
+    /// schedule.call(|| async { Ok(()) })
+    ///     .daily()
+    ///     .environments([Environment::Production]);
+    /// # }
+    /// ```
+    pub fn environments<I>(mut self, environments: I) -> Self
+    where
+        I: IntoIterator<Item = crate::config::Environment>,
+    {
+        self.environments = environments.into_iter().collect();
+        self
+    }
+
+    /// Run this task while the application is in maintenance mode too.
+    ///
+    /// A task is skipped while `down` is in effect, as Laravel skips one:
+    /// it would reach the database or the services the operator took the
+    /// application down to work on. A task that is safe to run then, such
+    /// as one that reports the state, asks for this.
+    pub fn even_in_maintenance_mode(mut self) -> Self {
+        self.even_in_maintenance_mode = true;
         self
     }
 
@@ -748,6 +857,8 @@ impl TaskBuilder {
             one_server_ttl,
             timezone: self.timezone,
             state: TaskState::new(),
+            environments: self.environments,
+            even_in_maintenance_mode: self.even_in_maintenance_mode,
         }
     }
 }
@@ -898,7 +1009,9 @@ mod tests {
         let ok = create_test_builder().daily().try_at("09:15").unwrap();
         assert_eq!(ok.expression.expression(), "15 9 * * *");
         assert!(create_test_builder().daily().try_at("nope").is_err());
-        assert!(create_test_builder().daily().try_at("09:15:00").is_err());
+        let seconds = create_test_builder().daily().try_at("09:15:00").unwrap();
+        assert_eq!(seconds.expression.expression(), "15 9 * * *");
+        assert!(create_test_builder().daily().try_at("09:15:xx").is_err());
         assert!(create_test_builder().daily().try_at("ab:cd").is_err());
     }
 

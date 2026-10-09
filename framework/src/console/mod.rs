@@ -34,12 +34,19 @@ use std::sync::OnceLock;
 pub mod builtins;
 mod io;
 pub mod output;
+mod prompts;
 pub mod ssr;
 pub mod testing;
 mod typed;
 
-pub use io::{ask, confirm, error_line, line};
+pub use io::{
+    Verbosity, ask, confirm, error, error_at, error_line, info, line, line_at, verbosity, warn,
+};
 pub use output::{DETAIL_WIDTH, two_column_detail};
+pub use prompts::{
+    Form, FormAnswers, FormValue, Progress, ask_with_default, form, multiselect, progress, secret,
+    select, select_keyed,
+};
 pub use testing::{ConsoleRun, ConsoleTest, test};
 pub use typed::TypedCommand;
 
@@ -129,17 +136,111 @@ pub fn list() -> Vec<&'static CommandEntry> {
 /// `String` here because `clap::builder::Str` only converts from
 /// `&'static str` or `Box<str>`, and we'd rather not leak per call.
 fn build_root() -> clap::Command {
-    let mut root = clap::Command::new("console")
-        .about("Suprnova console - per-project command dispatch")
-        .arg_required_else_help(true)
-        .subcommand_required(false);
+    let mut root = with_verbosity_flags(
+        clap::Command::new("console")
+            .about("Suprnova console - per-project command dispatch")
+            .arg_required_else_help(true)
+            .subcommand_required(false),
+    );
     if let Some(v) = VERSION.get() {
         root = root.version(*v);
     }
     for entry in list() {
-        root = root.subcommand((entry.clap_builder)());
+        root = root.subcommand(command_with_verbosity_flags((entry.clap_builder)()));
     }
     root
+}
+
+/// The id of the `-q` / `--quiet` flag the console adds. Prefixed so it
+/// cannot meet the id of a command's own argument.
+const QUIET: &str = "__suprnova_quiet";
+
+/// The id of the `-v` / `--verbose` flag the console adds, counted.
+const VERBOSE: &str = "__suprnova_verbose";
+
+/// The id of a raw `#[command]`'s trailing arguments.
+const TRAILING_ARGS: &str = "__suprnova_trailing_args";
+
+/// `cmd` with the console's `-q` and `-v` flags, each left out where `cmd`
+/// already declares a flag of that short or long name.
+///
+/// The flags are added to each command rather than made global: clap's
+/// debug assertions refuse a global flag that a subcommand declares too,
+/// and a command's own `-v` keeps its meaning.
+fn with_verbosity_flags(cmd: clap::Command) -> clap::Command {
+    let declares = |short: char, long: &str| {
+        cmd.get_arguments().any(|arg| {
+            arg.get_short() == Some(short)
+                || arg.get_long() == Some(long)
+                || arg
+                    .get_all_short_aliases()
+                    .is_some_and(|aliases| aliases.contains(&short))
+                || arg
+                    .get_all_aliases()
+                    .is_some_and(|aliases| aliases.contains(&long))
+        })
+    };
+    let quiet = !declares('q', "quiet");
+    let verbose = !declares('v', "verbose");
+    let mut cmd = cmd;
+    if quiet {
+        cmd = cmd.arg(
+            clap::Arg::new(QUIET)
+                .short('q')
+                .long("quiet")
+                .action(clap::ArgAction::SetTrue)
+                .help("Write nothing but the error of a failed command"),
+        );
+    }
+    if verbose {
+        cmd = cmd.arg(
+            clap::Arg::new(VERBOSE)
+                .short('v')
+                .long("verbose")
+                .action(clap::ArgAction::Count)
+                .help("Write more detail: -v, -vv or -vvv"),
+        );
+    }
+    cmd
+}
+
+/// A registered command with the console's flags after its name, unless
+/// it takes raw arguments: those reach its handler as they were typed, a
+/// `-v` among them, so the flags come before the command's name instead.
+/// Its subcommands get the flags too.
+fn command_with_verbosity_flags(cmd: clap::Command) -> clap::Command {
+    let takes_raw_arguments = cmd
+        .get_arguments()
+        .any(|arg| arg.get_id() == TRAILING_ARGS || arg.is_trailing_var_arg_set());
+    let cmd = if takes_raw_arguments {
+        cmd
+    } else {
+        with_verbosity_flags(cmd)
+    };
+    cmd.mut_subcommands(command_with_verbosity_flags)
+}
+
+/// The level the console's flags ask for, from the root and every
+/// subcommand on the way to the one that runs: `-q` anywhere is quiet, and
+/// the `-v` counts add up.
+fn verbosity_of(matches: &clap::ArgMatches) -> io::Verbosity {
+    let mut quiet = false;
+    let mut count: u8 = 0;
+    let mut current = Some(matches);
+    while let Some(m) = current {
+        if m.try_get_one::<bool>(QUIET).ok().flatten() == Some(&true) {
+            quiet = true;
+        }
+        if let Ok(Some(n)) = m.try_get_one::<u8>(VERBOSE) {
+            count = count.saturating_add(*n);
+        }
+        current = m.subcommand().map(|(_, sub)| sub);
+    }
+    if quiet {
+        io::Verbosity::Quiet
+    } else {
+        io::Verbosity::from_count(count)
+    }
 }
 
 /// Dispatch argv to a registered command and nothing else: no
@@ -205,6 +306,7 @@ where
         Ok(m) => m,
         Err(e) => return handle_clap_error(e),
     };
+    io::set_verbosity(verbosity_of(&matches));
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
@@ -225,7 +327,9 @@ where
                     // supervisors: they are drained as after a command.
                     crate::app::process_boot::finish_process().await;
                     let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
-                    io::error_line(format!("error: {}", error.message()));
+                    // Written past the verbosity: `-q` silences the
+                    // command, and never the reason it did not run.
+                    io::write_errors(&format!("error: {}\n", error.message()));
                     crate::logging::Log::flush();
                     return Err(error);
                 }
@@ -256,7 +360,8 @@ where
             if let Err(ref e) = result
                 && !e.is_silent()
             {
-                io::error_line(format!("error: {}", e.message()));
+                // Past the verbosity, as the bootstrap failure above.
+                io::write_errors(&format!("error: {}\n", e.message()));
             }
             return result;
         }
@@ -316,7 +421,7 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
 #[doc(hidden)]
 pub fn collect_trailing_args(matches: &clap::ArgMatches) -> Vec<String> {
     matches
-        .get_many::<String>("__suprnova_trailing_args")
+        .get_many::<String>(TRAILING_ARGS)
         .map(|values| values.cloned().collect())
         .unwrap_or_default()
 }
@@ -329,7 +434,7 @@ pub fn collect_trailing_args(matches: &clap::ArgMatches) -> Vec<String> {
 #[doc(hidden)]
 pub fn raw_clap_builder(name: &'static str, description: &'static str) -> clap::Command {
     clap::Command::new(name).about(description).arg(
-        clap::Arg::new("__suprnova_trailing_args")
+        clap::Arg::new(TRAILING_ARGS)
             .action(clap::ArgAction::Append)
             .num_args(0..)
             .trailing_var_arg(true)

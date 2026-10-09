@@ -460,6 +460,83 @@ characters) and prints the bypass URL, over picking a memorable string for
 `--secret` - and treat it like any other credential in your incident
 notes.
 
+`down` prints what it did, in Laravel's words:
+
+```text
+Application is now in maintenance mode.
+You may bypass maintenance mode via [https://example.com/abc123].
+```
+
+A `down` while the application is already down updates the options and
+prints `Maintenance mode options updated.` instead. The bypass address is
+`APP_URL` followed by the secret. When `down` cannot record maintenance
+mode, it prints `Failed to enter maintenance mode: <error>.` and exits
+with a failing status.
+
+`--retry` takes a number of seconds or a date. A date is sent as the
+`Retry-After` header in the RFC 7231 form, so a client reads when to come
+back:
+
+```bash
+./app down --retry "Sat, 01 Jan 2033 00:00:00 GMT"
+./app down --retry 2033-01-01T00:00:00Z     # the same header
+```
+
+`--render <view>` renders the Tera template at
+`resources/views/<view>` once, when you run `down`, and serves the result
+as the maintenance page. The template reads `retry_after`: the seconds or
+the date of `--retry`, and empty without one. A template that cannot be
+read or rendered fails `down` before maintenance mode starts, so a typo
+never takes the site down with a broken page. `--render` and `--message`
+exclude each other.
+
+```html
+<!-- resources/views/errors/503.html -->
+<h1>Back soon</h1>
+<p>Try again after {{ retry_after }}.</p>
+```
+
+```bash
+./app down --render errors/503.html --retry 600
+```
+
+After it records maintenance mode, `down` dispatches the
+`MaintenanceModeEnabled` event, which carries no data. Listen for it to
+tell a status page or the people on call:
+
+```rust
+use suprnova::{EventFacade, FrameworkError, Listener, MaintenanceModeEnabled, async_trait};
+use std::sync::Arc;
+
+struct TellTheStatusPage;
+
+#[async_trait]
+impl Listener<MaintenanceModeEnabled> for TellTheStatusPage {
+    async fn handle(&self, _event: &MaintenanceModeEnabled) -> Result<(), FrameworkError> {
+        // Post to the status page here.
+        Ok(())
+    }
+}
+
+// In bootstrap::register():
+pub async fn register() {
+    EventFacade::listen::<MaintenanceModeEnabled, _>(Arc::new(TellTheStatusPage)).await;
+}
+```
+
+A listener that fails is logged, and `down` still reports the state it
+recorded: maintenance mode is on either way. Scheduled tasks skip their
+runs while the application is down, unless they ask
+`even_in_maintenance_mode()`; see [Scheduling](scheduling.md).
+
+### Why Suprnova diverges
+
+Laravel drops a `--retry` value that is neither a number nor a date it
+can parse, and sends no `Retry-After`. Suprnova refuses it, so the header
+you asked for is the one clients get. Laravel renders `--render` with a
+Blade view; Suprnova renders a Tera template with `retry_after` in its
+context.
+
 ## Serving under a path prefix
 
 A reverse proxy can serve the application under a path, such as
