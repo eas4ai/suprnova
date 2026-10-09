@@ -33,10 +33,38 @@ impl EncryptionKey {
     }
 
     /// Generate a new random 32-byte key using the OS RNG.
+    ///
+    /// Panics when the operating system random source refuses. A test, a
+    /// one-off command or a development boot can stop there; a request
+    /// handler, a job or a long-running service cannot. Call
+    /// [`Self::try_generate`] where a panic must not happen.
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).expect("OS RNG must be available to mint an AES-256 key");
         Self(bytes)
+    }
+
+    /// Generate a new random 32-byte key from the operating system random
+    /// source, or return why the source refused.
+    ///
+    /// The source can refuse on a host without an entropy device or in a
+    /// sandbox that blocks the call. Laravel's `Encrypter::generateKey`
+    /// throws in that case; this returns the refusal as an error, so the
+    /// caller decides what happens and the process keeps running.
+    ///
+    /// # Errors
+    ///
+    /// `FrameworkError::Internal` when the operating system random source
+    /// does not supply the 32 bytes.
+    pub fn try_generate() -> Result<Self, FrameworkError> {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| {
+            FrameworkError::internal(format!(
+                "the operating system random source refused to supply the 32 bytes of an \
+                 encryption key: {e}"
+            ))
+        })?;
+        Ok(Self(bytes))
     }
 
     /// Decode a base64-url-no-pad encoded key. Rejects any input that

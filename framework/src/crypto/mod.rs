@@ -85,12 +85,21 @@
 //! the key-ring axis and this AAD axis independently, because they can
 //! be stale at the same time - a value can be both mid-key-rotation
 //! *and* legacy-AAD.
+//!
+//! # An encrypter with its own key
+//!
+//! [`Encrypter`] holds the one key it is built with and no process-wide
+//! state. It writes and reads the payload `Crypt` writes, under the same
+//! purposes and contexts, so a value either one wrote under a key opens
+//! with the other under that key.
 
 pub(crate) mod aead;
+mod encrypter;
 pub mod key;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use encrypter::Encrypter;
 pub use key::EncryptionKey;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -363,6 +372,23 @@ impl Crypt {
     /// Whether a key has been installed.
     pub fn is_initialized() -> bool {
         CRYPT_RING.get().is_some()
+    }
+
+    /// Generate a new random key, or return why the operating system
+    /// random source refused. Delegates to [`EncryptionKey::try_generate`].
+    ///
+    /// This is Laravel's `Crypt::generateKey`, which throws when the source
+    /// fails; here the failure is an error the caller handles. Use the key
+    /// for an [`Encrypter`], or encode it with
+    /// [`EncryptionKey::to_base64`] for `APP_KEY`. The installed key ring
+    /// does not change. It stays the one `APP_KEY` named at boot.
+    ///
+    /// # Errors
+    ///
+    /// `FrameworkError::Internal` when the operating system random source
+    /// does not supply the 32 bytes.
+    pub fn try_generate_key() -> Result<EncryptionKey, FrameworkError> {
+        EncryptionKey::try_generate()
     }
 
     fn ring() -> Result<&'static KeyRing, FrameworkError> {
@@ -884,34 +910,50 @@ pub(crate) fn decrypt_string_for_with_ring(
     let bytes = URL_SAFE_NO_PAD
         .decode(wire.trim())
         .map_err(|e| FrameworkError::internal(format!("Crypt base64 decode failed: {e}")))?;
-    let (plain_bytes, origin) = match decrypt_with_ring(ring, &purpose.aad_for(context), &bytes) {
-        Ok((plain, key)) => (
+    let (plain_bytes, origin) = decrypt_bytes_for_with_ring(ring, purpose, context, &bytes)?;
+    let plain = String::from_utf8(plain_bytes)
+        .map_err(|e| FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}")))?;
+    Ok((plain, origin))
+}
+
+/// The two passes of every contexted read, on decoded bytes: the
+/// name-bound label across the ring, then the label without a context
+/// for every purpose but [`CryptPurpose::Cookie`].
+///
+/// [`Crypt::decrypt_string_for`] and [`Encrypter::decrypt_string_for`]
+/// both read through it, so the two cannot disagree on which values
+/// open. Each one decodes the wire and names itself in its own errors.
+fn decrypt_bytes_for_with_ring(
+    ring: &KeyRing,
+    purpose: CryptPurpose,
+    context: &str,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, DecryptOrigin), FrameworkError> {
+    match decrypt_with_ring(ring, &purpose.aad_for(context), bytes) {
+        Ok((plain, key)) => Ok((
             plain,
             DecryptOrigin {
                 key,
                 aad: AadVersion::Current,
             },
-        ),
-        Err(v2_err) if purpose == CryptPurpose::Cookie => return Err(v2_err),
-        Err(v2_err) => match decrypt_with_ring(ring, purpose.aad(), &bytes) {
-            Ok((plain, key)) => (
+        )),
+        Err(v2_err) if purpose == CryptPurpose::Cookie => Err(v2_err),
+        Err(v2_err) => match decrypt_with_ring(ring, purpose.aad(), bytes) {
+            Ok((plain, key)) => Ok((
                 plain,
                 DecryptOrigin {
                     key,
                     aad: AadVersion::Legacy,
                 },
-            ),
+            )),
             // Surface the v2 error. Both branches produce a
             // byte-identical opaque "AEAD decrypt failed" today, so the
             // choice is unobservable right now - but v2 is the path
             // current writes take, so if decrypt errors ever gain more
             // detail, this is the one that should surface it.
-            Err(_) => return Err(v2_err),
+            Err(_) => Err(v2_err),
         },
-    };
-    let plain = String::from_utf8(plain_bytes)
-        .map_err(|e| FrameworkError::internal(format!("Crypt decrypted bytes not UTF-8: {e}")))?;
-    Ok((plain, origin))
+    }
 }
 
 /// Boot-time policy decision: given the runtime environment and the raw

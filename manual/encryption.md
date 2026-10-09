@@ -21,6 +21,10 @@ pagination cursors, 2FA secrets, recovery codes, and the
 code with no extra wiring once `APP_KEY` is configured (see
 [configuration.md](configuration.md#the-env-file)).
 
+When a value belongs under a key other than `APP_KEY`, build an
+`Encrypter` with that key (see
+[An encrypter with its own key](#an-encrypter-with-its-own-key)).
+
 ## The wire format
 
 `encrypt_string` and `encrypt` both return URL-safe base64 (no
@@ -67,6 +71,27 @@ Or pipe straight into the environment:
 ```bash
 echo "APP_KEY=$(suprnova key:generate --show)" >> .env
 ```
+
+### Generating a key in code
+
+`EncryptionKey::try_generate` draws 32 bytes from the operating system
+random source. It returns `Err` when the source refuses, for example in a
+sandbox that blocks the call, so a request handler or a job keeps running.
+`Crypt::try_generate_key` does the same under the name of Laravel's
+`Crypt::generateKey`:
+
+```rust
+use suprnova::{Crypt, EncryptionKey};
+
+let key = EncryptionKey::try_generate()?;
+println!("APP_KEY={}", key.to_base64());
+
+let tenant_key = Crypt::try_generate_key()?;
+```
+
+Neither function changes the key `Crypt` holds. That key is the one
+`APP_KEY` named at boot. `EncryptionKey::generate` panics when the source
+refuses; use it only in tests and one-off commands.
 
 ### Boot-time validation - fail closed
 
@@ -365,6 +390,81 @@ into AES-GCM, so it **cannot** distinguish a valid ciphertext from
 random bytes of the right shape. Callers that need authentication
 must call `decrypt_string` / `decrypt` and handle the error.
 
+## An encrypter with its own key
+
+`Crypt` holds one key ring for the whole process, sealed at boot from
+`APP_KEY`. Some values belong under another key: a tenant's own key, a key
+you share with one other service, or a key you read from a secrets manager
+after boot. For these, build an `Encrypter`:
+
+```rust
+use suprnova::{CryptPurpose, EncryptionKey, Encrypter};
+
+// A key you keep per tenant, for example in a secrets manager.
+let key = EncryptionKey::from_base64(&tenant_key_base64)?;
+let encrypter = Encrypter::new(key);
+
+let wire = encrypter.encrypt_string_for(CryptPurpose::Cast, "tenants.api_token", "tok_123")?;
+let plain = encrypter.decrypt_string_for(CryptPurpose::Cast, "tenants.api_token", &wire)?;
+assert_eq!(plain, "tok_123");
+```
+
+`Encrypter::new` takes the key and nothing else. It installs nothing and
+reads no environment, so it works before boot, in a test, and next to a
+`Crypt` that holds another key. Building one never changes what `Crypt`
+encrypts or decrypts.
+
+The four methods take the arguments of their `Crypt` counterparts and
+write the same payload:
+
+| `Encrypter` method | Reads like |
+|---|---|
+| `encrypt_string_for(purpose, context, plaintext)` | `Crypt::encrypt_string_for` |
+| `decrypt_string_for(purpose, context, wire)` | `Crypt::decrypt_string_for` |
+| `encrypt(purpose, &value)` | `Crypt::encrypt` |
+| `decrypt::<T>(purpose, wire)` | `Crypt::decrypt` |
+
+Because the payload is the same, a value `Crypt` wrote under a key opens
+with `Encrypter::new` of that key, and a value an encrypter of the current
+`APP_KEY` wrote opens with `Crypt`. A value opens only under the key, the
+purpose and the context it was written with.
+
+The rules of `Crypt` hold here too:
+
+- `decrypt_string_for` makes the two tries `Crypt` makes. For every purpose
+  but `CryptPurpose::Cookie` it opens a value written without a context.
+  It logs no warning for that value; write it again with
+  `encrypt_string_for`.
+- `encrypt` and `decrypt` refuse `CryptPurpose::Cookie`. Use the `_for`
+  pair with the cookie name.
+- An encrypter has one key and no previous keys. Key rotation stays with
+  `Crypt` and `APP_KEY_PREVIOUS`.
+- The errors are the ones in [Failure modes](#failure-modes---what-errors-look-like),
+  with `Encrypter` in place of `Crypt`. There is no "not initialized"
+  error.
+- `format!("{encrypter:?}")` prints the key as `[REDACTED]`.
+
+The key is always 32 bytes. `EncryptionKey::from_base64` refuses a value
+that decodes to any other length, a 16-byte key included, so no weaker key
+reaches the cipher.
+
+### Why Suprnova diverges
+
+Laravel's `new Encrypter($key, $cipher)` takes a cipher name and accepts
+AES-128 and AES-256, in CBC and GCM modes. Suprnova's `Encrypter` has one
+cipher, AES-256-GCM, and no cipher argument, so no configuration can move a
+value to a weaker cipher or a shorter key.
+
+Each call takes a `CryptPurpose`, and the string pair takes a context,
+because the encrypter writes the purpose-bound payload of `Crypt`. That is
+what lets the two read each other's values. The payload is not Laravel's
+JSON payload of `iv`, `value`, `mac` and `tag`, so an `Encrypter` does not
+read a value that Laravel's encrypter wrote.
+
+Laravel's `Encrypter::generateKey` throws when `random_bytes` fails.
+`EncryptionKey::try_generate` and `Crypt::try_generate_key` return the
+failure as an error.
+
 ## Key rotation - the keyring
 
 Suprnova supports zero-downtime rotation through a key *ring*: one
@@ -640,7 +740,7 @@ production binaries when the `testing` feature is disabled
 ## Failure modes - what errors look like
 
 Every fallible `Crypt::*` call returns `Result<_, FrameworkError>`.
-The five errors you can see:
+The six errors you can see:
 
 | Cause | Where | Surface |
 |---|---|---|
@@ -649,6 +749,7 @@ The five errors you can see:
 | Wire too short (< 28 bytes) | `decrypt_string`, `decrypt` | `FrameworkError::Internal("AEAD wire too short …")` |
 | Tag check fails - wrong key, wrong AAD, tampered bytes | `decrypt_string`, `decrypt` | `FrameworkError::Internal("AEAD decrypt failed: …")` |
 | JSON encode / decode fails | `encrypt`, `decrypt` | `FrameworkError::Internal("Crypt JSON {encode,decode} failed: …")` |
+| The operating system random source refuses | `EncryptionKey::try_generate`, `Crypt::try_generate_key` | `FrameworkError::Internal("the operating system random source refused to supply the 32 bytes of an encryption key: …")` |
 
 There is no silent fallback to garbage. A wrong key against an
 existing ciphertext is always a hard error, both at the facade
