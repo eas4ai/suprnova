@@ -1016,6 +1016,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`route_has`.** Returns true only when every route name in a list is
   registered, as Laravel's `Route::has` does.
 
+- **Rate-limiter hits with a default or a date.** `RateLimiter::hit_for_minute`
+  counts a hit in a 60-second window, as Laravel's `hit($key)` does, and
+  `RateLimiter::hit_until` counts one in a window that ends at a given time; a
+  time that has passed opens no window.
+- **Guest and user throttle limits.** `throttle:10|60,1` allows a guest 10
+  requests a minute and a signed-in user 60, as Laravel's `throttle` reads
+  its first argument.
+- **Named hasher drivers.** `hashing::extend` registers a driver under a name
+  and `HASH_DRIVER` selects it, as Laravel's `Hash::extend` does; it refuses a
+  built-in algorithm's name, a name registered before, and a registration
+  after the first hash.
+- **`ARGON_TIME`.** The hashing configuration reads Laravel's `ARGON_TIME` as
+  the Argon time when `HASH_TIME` is unset; `HASH_TIME` still wins.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -1803,6 +1817,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SameSite` from `SESSION_PATH`, `SESSION_DOMAIN` and `SESSION_SAME_SITE`,
   so the deletion cookie matches the cookie it deletes; an explicit path or
   domain given to `Cookie::forget_with` still wins.
+
+- **Rate-limiter keys are cleaned as Laravel cleans them.**
+  `RateLimiter::clean_rate_limiter_key`, and every counter method through it,
+  applies PHP's `htmlentities` before it strips entity markers, so `café` and
+  `cafe` count in one bucket and `a&b` is stored as `aab`.
+- **Named limiters rename shared keys.** `RateLimiter::limiter` returns a
+  callback that gives each limit sharing a key with another limit of the same
+  result its fallback key, and `throttle:<name>` counts each limit under
+  `<name>:<key>` from that result, so the middleware and a direct caller read
+  the same buckets.
+- **One rate-limit header pair.** The throttle middleware writes one
+  `X-RateLimit-Limit` and `X-RateLimit-Remaining` pair, the limit with the
+  fewest attempts left, and none when the handler's response already carries
+  an equal or lower `X-RateLimit-Remaining`.
+- **Refused requests are not counted.** A request the throttle middleware
+  refuses leaves every bucket's count where it was; the decision still uses
+  the atomic post-increment count.
+- **`throttle:60,1` counts signed-in users by user.** The inline throttle keys
+  a signed-in user by the user's identifier and a guest by address, each per
+  path, so one user cannot buy a fresh budget from another address.
 
 ### Fixed
 

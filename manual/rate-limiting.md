@@ -239,6 +239,15 @@ use suprnova::RateLimiter;
 // Burn one attempt; seeds the window if missing.
 let n = RateLimiter::hit("login:1.2.3.4", 60).await?;
 
+// Laravel's `hit($key)` defaults to a 60-second window; this is that call.
+let n = RateLimiter::hit_for_minute("login:1.2.3.4").await?;
+
+// Burn one attempt in a window that ends at a given time. A time that has
+// already passed opens no window: the hit counts in a window that is
+// already open, and leaves no count behind otherwise.
+let window_end = suprnova::chrono::Utc::now() + suprnova::chrono::Duration::hours(2);
+let n = RateLimiter::hit_until("exports:user:1", window_end).await?;
+
 // Burn one attempt AND test the limit in a single atomic round-trip.
 // Returns `true` when this hit pushed the bucket over `max` (refuse the
 // request), `false` when it was admitted. Use this instead of a separate
@@ -320,13 +329,40 @@ A named-limiter callback returns a [`LimitResult`], constructible from:
 - A `Vec<Limit>` - apply every limit; first to trip wins.
 - An `HttpResponse` - short-circuit immediately with this response (used for "admin gets unlimited access" via `Limit::none()`, or to refuse the request outright).
 
-### Sanitising keys
-
-`RateLimiter::clean_rate_limiter_key(key)` strips `&abc;` HTML-entity markers from a key - Laravel uses this for user-supplied strings that round-trip through `htmlentities`. Suprnova reproduces the strip stage exactly but does NOT prepend the `htmlentities` encoding (which only matters for non-UTF-8 inputs, irrelevant for Rust `String`). The function is deterministic and idempotent inside Suprnova; consumers who need byte-identical hashing with a PHP service should run their own `htmlentities` pre-step on the input.
+`RateLimiter::limiter(name)` returns a callback that wraps the one you registered, as Laravel's does. When the result holds several limits and two or more of them share a key, each of those limits gets its `fallback_key()` instead, `<key>:attempts:<max>:decay:<seconds>`. Otherwise a per-minute limit and a per-hour limit on the same key count in one bucket, and the minute's limit trips on the hour's hits:
 
 ```rust
-assert_eq!(RateLimiter::clean_rate_limiter_key("a&amp;b"), "aab");
+RateLimiter::define("api", |req| {
+    let ip = req.ip().unwrap_or_else(|| "anon".into());
+    vec![
+        Limit::per_minute(60).by(ip.clone()),
+        Limit::per_day(10_000).by(ip),
+    ]
+    .into()
+});
+
+// For the address 203.0.113.5, the two limits count under
+// `203.0.113.5:attempts:60:decay:60` and `203.0.113.5:attempts:10000:decay:86400`.
 ```
+
+`ThrottleRequestsMiddleware::by_name("api")` resolves the limiter through the same method and counts each limit under `api:<key>`, so the middleware and your own code read the same buckets: `RateLimiter::attempts("api:203.0.113.5:attempts:60:decay:60")` is the count the middleware keeps.
+
+### Sanitising keys
+
+Every counter method cleans its key with `RateLimiter::clean_rate_limiter_key(key)` before it touches the cache, as Laravel's `cleanRateLimiterKey` does. The key is first encoded as PHP's `htmlentities` encodes it under its default flags: each character with a named HTML 4.01 entity becomes that entity, `&`, `<`, `>`, and `"` included, and `'` becomes `&#039;`. Then each `&name;` marker of two or more letters is reduced to its first letter. So `café` and `cafe` count in one bucket, and a key is stored as a Laravel application sharing the cache store stores it.
+
+```rust
+use suprnova::RateLimiter;
+
+assert_eq!(RateLimiter::clean_rate_limiter_key("café"), "cafe");
+assert_eq!(RateLimiter::clean_rate_limiter_key("a&b"), "aab");
+assert_eq!(RateLimiter::clean_rate_limiter_key("Ω"), "O");
+// Entities named with digits, and the apostrophe, stay encoded.
+assert_eq!(RateLimiter::clean_rate_limiter_key("x²"), "x&sup2;");
+assert_eq!(RateLimiter::clean_rate_limiter_key("it's"), "it&#039;s");
+```
+
+Cleaning a cleaned key changes it again (`it&#039;s` cleans to `ita#039;s`), so pass the raw key to `hit`, `attempts`, and the other counter methods.
 
 ## `Limit` builder
 
@@ -373,7 +409,8 @@ ThrottleRequestsMiddleware::default();
 // Named limiter - resolves at request time via RateLimiter::limiter(name).
 ThrottleRequestsMiddleware::by_name("api");
 
-// Inline max/decay/prefix - the literal Laravel `throttle:60,1` shape.
+// Inline max/decay/prefix - the literal Laravel `throttle:60,1` shape,
+// counted for each signed-in user, or each address, on each path.
 ThrottleRequestsMiddleware::with(60, 1, "myroute");
 
 // Explicit list of Limits - first-to-trip wins; most Rust-idiomatic.
@@ -389,7 +426,7 @@ ThrottleRequestsMiddleware::with_limits(vec![
 
 `ThrottleRequestsMiddleware::default()` allows 60 requests a minute. The constants `DEFAULT_MAX_ATTEMPTS` (`60`) and `DEFAULT_DECAY_SECONDS` (`60`) hold the numbers. It is the shape of Laravel's default `api` limiter: `Limit::perMinute(60)->by($request->user()?->id ?: $request->ip())`.
 
-The bucket is one for each signed-in user, and one for each client address when nobody is signed in. The two are spelled apart, as `user:<id>` and `ip:<address>`, so a user whose id reads like an address shares no bucket with it. The user's bucket follows the user across routes and across addresses, and the address's bucket is shared by every route, as in Laravel. `with(...)` differs: it counts per address and per path. Use `.prefix(...)` to give a group of routes a budget of its own.
+The bucket is one for each signed-in user, and one for each client address when nobody is signed in. The two are spelled apart, as `user:<id>` and `ip:<address>`, so a user whose id reads like an address shares no bucket with it. The user's bucket follows the user across routes and across addresses, and the address's bucket is shared by every route, as in Laravel. `with(...)` differs: it counts per user or address, and per path, under `user:<id>:path:<path>` or `ip:<address>:path:<path>`. Use `.prefix(...)` to give a group of routes a budget of its own.
 
 The user is the one the default guard signed in. Run the session middleware before this one, or a signed-in user counts as an address. The address is `Request::ip()`, so [the trusted proxies](#the-client-address-behind-a-proxy) apply.
 
@@ -414,9 +451,10 @@ let router = Router::new()
 | `throttle:60` | 60 requests a minute, as `with(60, 1, "")` |
 | `throttle:60,5` | 60 requests in 5 minutes |
 | `throttle:60,5,uploads` | the same, with the key prefix `uploads` |
+| `throttle:10\|60,1` | 10 requests a minute for a guest, 60 for a signed-in user |
 | `throttle:api` | the limiter named `api`, as `by_name("api")` |
 
-A first argument that is not a number names a limiter, and a limiter takes no further arguments. The alias refuses a number that does not parse, a limit or a window of zero, and more than three arguments. The route that names it then fails to register. See [Middleware](middleware.md#named-aliases-and-groups) for how names resolve.
+The numeric forms count each signed-in user in a bucket of their own on each path, whatever address they connect from, and each guest by address. A first argument of two whole numbers joined by `|` is the guest's limit and the signed-in user's, as Laravel's `resolveMaxAttempts` reads it. Any other first argument that is not a number names a limiter, and a limiter takes no further arguments. The alias refuses a number that does not parse, a limit or a window of zero (either half of `<guest>|<user>` included), and more than three arguments. The route that names it then fails to register. See [Middleware](middleware.md#named-aliases-and-groups) for how names resolve.
 
 Wire it into a route group:
 
@@ -466,10 +504,12 @@ The corollary matters as much: with `APP_TRUSTED_PROXIES` unset - the default - 
 
 ### Response headers
 
-Every wrapped response carries:
+Every wrapped response carries one pair:
 
 - `X-RateLimit-Limit` - the configured `max_attempts`.
 - `X-RateLimit-Remaining` - retries left for this bucket.
+
+Behind several limits, the pair is the one of the limit with the fewest retries left. When your handler sets `X-RateLimit-Remaining` itself, at or below that count, the middleware leaves your headers alone; above it, the middleware replaces them.
 
 429 responses additionally carry:
 
@@ -477,6 +517,10 @@ Every wrapped response carries:
 - `X-RateLimit-Reset` - unix-seconds-since-epoch when the bucket reopens.
 
 This matches Laravel's `ThrottleRequests::getHeaders` shape exactly.
+
+### Refused requests
+
+A request the middleware refuses leaves every bucket's count where it was. After `throttle:2,1` refuses a third request, the count is still `2`, so a client that keeps retrying a refused request doesn't keep its own window full. The decision stays atomic: the middleware counts the request and decides on the count it gets back, so a burst of concurrent requests admits at most the limit, then it takes back each count of a request it refused.
 
 ### Missing named limiter
 
@@ -511,6 +555,8 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 |---------|----------|
 | `RateLimiter::for('api', fn ($req) => Limit::perMinute(60))` | `RateLimiter::define("api", \|req\| Limit::per_minute(60).into())` or `RateLimiter::r#for(...)` |
 | `RateLimiter::hit($key, $decay)` | `RateLimiter::hit(key, decay).await?` |
+| `RateLimiter::hit($key)` | `RateLimiter::hit_for_minute(key).await?` |
+| `RateLimiter::hit($key, $date)` | `RateLimiter::hit_until(key, date).await?` |
 | `RateLimiter::tooManyAttempts($key, $max)` | `RateLimiter::too_many_attempts(key, max).await?` |
 | `RateLimiter::availableIn($key)` | `RateLimiter::available_in(key).await?` |
 | `RateLimiter::attempt($key, $max, $cb, $decay)` | `RateLimiter::attempt(key, max, \|\| async { ... }, decay).await?` |
@@ -521,6 +567,7 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 | `Limit::none()` | `Limit::none()` |
 | `throttle:api` middleware | `.middleware_named("throttle:api")` or `ThrottleRequestsMiddleware::by_name("api")` |
 | `throttle:60,1` middleware | `.middleware_named("throttle:60,1")` with `from_alias_args` registered, or `ThrottleRequestsMiddleware::with(60, 1, "")` |
+| `throttle:10\|60,1` middleware | `.middleware_named("throttle:10\|60,1")` with `from_alias_args` registered |
 | `throttle` middleware (the default limit) | `ThrottleRequestsMiddleware::default()` |
 | `X-RateLimit-Limit/Remaining/Reset` + `Retry-After` headers | Same headers, same shape |
 
@@ -529,6 +576,8 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 Laravel ships one shape: `Illuminate\Cache\RateLimiter` (Cache-backed fixed-window counter) with `Illuminate\Routing\Middleware\ThrottleRequests` as its HTTP wrapper. Suprnova ships both that shape *and* a native sliding-window driver SPI because two real questions need two real answers.
 
 A Cache-backed counter is the right answer to "I have named limiters, response callbacks, after-callbacks for failed-login-only counting, and I want to be source-compatible with Laravel migrations." It's the wrong answer to "I need exact one-slot-per-request sliding-window enforcement against a Redis ZSET with atomic Lua eval and no separate timer key." That second question is what most Rust services hitting Tokio's concurrency limits actually have, so `RateLimiterDriver` + `RateLimitMiddleware` exist alongside, not behind a feature flag.
+
+`ThrottleRequestsMiddleware::with`, the `throttle:60,1` shape, keeps the request path in its key, where Laravel keys the user or the address alone. Two routes behind the same inline limit therefore count apart; use a named limiter or `with_limits` for one budget across routes. Laravel checks every limit before it counts a request; Suprnova counts and checks in one atomic step, then takes back the counts of a refused request, so a concurrent burst cannot slip past the limit between the check and the count.
 
 The backend-error policy is also a Suprnova addition. Laravel's middleware never surfaces a "the limiter is broken" decision because PHP's per-request lifecycle hides it - the next request gets a fresh process. A long-lived Tokio worker that loses Redis for ten seconds must decide what to do with the requests arriving during that window; `BackendErrorPolicy::FailOpen` (default) vs `FailClosed` is that decision exposed explicitly.
 

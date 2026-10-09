@@ -60,7 +60,17 @@ pub trait Hasher: Send + Sync + 'static {
 
 /// Build a driver from a config. Used by the facade's
 /// [`crate::hashing::default_driver`] resolver.
-pub(super) fn build(cfg: &HashConfig) -> Result<Box<dyn Hasher>, FrameworkError> {
+///
+/// `registered` is the name of a driver [`crate::hashing::extend`]
+/// registered, when `HASH_DRIVER` selects one; its factory builds the
+/// driver and the config's algorithm settings are not used.
+pub(super) fn build(
+    cfg: &HashConfig,
+    registered: Option<&str>,
+) -> Result<Box<dyn Hasher>, FrameworkError> {
+    if let Some(name) = registered {
+        return super::build_registered_driver(name);
+    }
     match cfg.driver {
         Algorithm::Bcrypt => Ok(Box::new(BcryptHasher {
             opts: BcryptOptions { rounds: cfg.rounds },

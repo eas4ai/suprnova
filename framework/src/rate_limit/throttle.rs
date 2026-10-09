@@ -18,11 +18,18 @@
 //!   [`Limit`]s in Rust and pass them through. Useful when the limits
 //!   are computed at boot time and don't need to be named.
 //!
-//! Every wrapped response carries the `X-RateLimit-Limit` and
-//! `X-RateLimit-Remaining` headers; 429 responses additionally carry
+//! Every wrapped response carries one `X-RateLimit-Limit` and
+//! `X-RateLimit-Remaining` pair, the one of the limit with the fewest
+//! attempts left, unless the handler's response already carries an equal
+//! or lower `X-RateLimit-Remaining`. 429 responses additionally carry
 //! `Retry-After` and `X-RateLimit-Reset`. This matches Laravel's
 //! `ThrottleRequests::getHeaders($maxAttempts, $remainingAttempts,
 //! $retryAfter, $response)` shape.
+//!
+//! A request the middleware refuses leaves every bucket's count where it
+//! was, as in Laravel, which checks every limit before it counts a request.
+//! The decision itself stays on the atomic post-increment count (see
+//! [`RateLimiter::hit_and_check`]).
 
 use async_trait::async_trait;
 use hex::encode;
@@ -55,8 +62,13 @@ pub struct ThrottleRequestsMiddleware {
 
 enum Mode {
     Named(String),
+    /// The `throttle:60,1` shape: one bucket for each signed-in user and
+    /// one for each client IP, each per path. `throttle:<guest>|<user>,1`
+    /// gives the two their own limits; [`ThrottleRequestsMiddleware::with`]
+    /// gives both the same.
     Inline {
-        max_attempts: i64,
+        guest_max_attempts: i64,
+        user_max_attempts: i64,
         decay_seconds: u64,
     },
     Limits(Vec<Limit>),
@@ -141,10 +153,36 @@ impl ThrottleRequestsMiddleware {
     /// Build a throttle middleware with literal Laravel-shape
     /// `max,decay,prefix` arguments. Mirrors
     /// `ThrottleRequests::with($maxAttempts, $decayMinutes, $prefix)`.
+    ///
+    /// The bucket is the one Laravel's `resolveRequestSignature` picks: the
+    /// signed-in user, by the identifier [`Auth::id`](crate::Auth::id)
+    /// reads, and the client IP ([`Request::ip`]) when nobody is signed in.
+    /// The user's bucket follows the user across addresses. Unlike Laravel,
+    /// the key also holds the request path, `user:<id>:path:<path>` or
+    /// `ip:<address>:path:<path>`, so two routes behind the same limit
+    /// count apart.
+    ///
+    /// The user is the one the default guard signed in, so the session
+    /// middleware has to run before this one. Where the render cache stores
+    /// the route, the read of the user counts as a read of the principal,
+    /// as it does for [`Self::default`].
     pub fn with(max_attempts: i64, decay_minutes: u64, prefix: impl Into<String>) -> Self {
+        Self::with_guest_and_user(max_attempts, max_attempts, decay_minutes, prefix)
+    }
+
+    /// The `throttle:<guest>|<user>,<minutes>,<prefix>` shape: `guest`
+    /// attempts for a request nobody is signed in for, `user` attempts for
+    /// a signed-in user, keyed as [`Self::with`] keys them.
+    fn with_guest_and_user(
+        guest_max_attempts: i64,
+        user_max_attempts: i64,
+        decay_minutes: u64,
+        prefix: impl Into<String>,
+    ) -> Self {
         Self {
             mode: Mode::Inline {
-                max_attempts,
+                guest_max_attempts,
+                user_max_attempts,
                 decay_seconds: 60 * decay_minutes,
             },
             prefix: prefix.into(),
@@ -187,7 +225,13 @@ impl ThrottleRequestsMiddleware {
     /// | `throttle:60` | 60 requests a minute, [`Self::with`] |
     /// | `throttle:60,5` | 60 requests in 5 minutes |
     /// | `throttle:60,5,uploads` | the same, with the key prefix `uploads` |
+    /// | `throttle:10\|60,1` | 10 requests a minute for a guest, 60 for a signed-in user |
     /// | `throttle:api` | the limiter named `api`, [`Self::by_name`] |
+    ///
+    /// A first argument of two whole numbers joined by `|` is the guest's
+    /// limit and the signed-in user's, as Laravel's `resolveMaxAttempts`
+    /// reads it. Any other first argument that is no number names a
+    /// limiter.
     ///
     /// # Errors
     ///
@@ -205,19 +249,25 @@ impl ThrottleRequestsMiddleware {
                 arguments.len()
             )));
         }
-        // A first argument that is no number names a limiter.
-        let Ok(max_attempts) = first.parse::<i64>() else {
-            if arguments.len() > 1 {
+        let (guest_max_attempts, user_max_attempts) = match first.parse::<i64>() {
+            Ok(max_attempts) => (max_attempts, max_attempts),
+            Err(_) => match guest_and_user_limits(first) {
+                Some(limits) => limits,
+                // A first argument that is no number names a limiter.
+                None if arguments.len() > 1 => {
+                    return Err(refused(format!(
+                        "throttle:{first} names a limiter, which takes no further arguments"
+                    )));
+                }
+                None => return Ok(Self::by_name(*first)),
+            },
+        };
+        for max_attempts in [guest_max_attempts, user_max_attempts] {
+            if max_attempts < 1 {
                 return Err(refused(format!(
-                    "throttle:{first} names a limiter, which takes no further arguments"
+                    "a throttle limit of {max_attempts} would refuse every request"
                 )));
             }
-            return Ok(Self::by_name(*first));
-        };
-        if max_attempts < 1 {
-            return Err(refused(format!(
-                "a throttle limit of {max_attempts} would refuse every request"
-            )));
         }
         let decay_minutes = match arguments.get(1) {
             None => 1,
@@ -232,8 +282,21 @@ impl ThrottleRequestsMiddleware {
                 })?,
         };
         let prefix = arguments.get(2).copied().unwrap_or_default();
-        Ok(Self::with(max_attempts, decay_minutes, prefix))
+        Ok(Self::with_guest_and_user(
+            guest_max_attempts,
+            user_max_attempts,
+            decay_minutes,
+            prefix,
+        ))
     }
+}
+
+/// Read `<guest>|<user>`, two whole numbers joined by `|`, as Laravel's
+/// `resolveMaxAttempts` splits the first `throttle` argument. `None` when
+/// the argument is not that shape, so it names a limiter instead.
+fn guest_and_user_limits(argument: &str) -> Option<(i64, i64)> {
+    let (guest, user) = argument.split_once('|')?;
+    Some((guest.parse().ok()?, user.parse().ok()?))
 }
 
 #[async_trait]
@@ -282,14 +345,26 @@ impl Middleware for ThrottleRequestsMiddleware {
         //   post-response predicate matches, so the debit is deferred until
         //   after `next`. They gate on the already-recorded count via a read
         //   (`too_many_attempts`); there is nothing to increment yet.
+        //
+        // A refused request gives back every increment it made, so it
+        // leaves each bucket's count where it was, as Laravel's
+        // check-before-hit does. Only refused increments are given back, so
+        // a bucket's count never falls below the requests it admitted, and
+        // the post-increment decision still admits at most the limit.
+        let mut debited: Vec<(&str, u64)> = Vec::new();
         for (limit, key) in limits.iter().zip(&keys) {
             let Some(key) = key else { continue }; // Unlimited never trips.
             let over = if limit.after_callback.is_some() {
                 RateLimiter::too_many_attempts(key, limit.max_attempts).await?
             } else {
-                RateLimiter::hit_and_check(key, limit.max_attempts, limit.decay_seconds()).await?
+                let over =
+                    RateLimiter::hit_and_check(key, limit.max_attempts, limit.decay_seconds())
+                        .await?;
+                debited.push((key.as_str(), limit.decay_seconds()));
+                over
             };
             if over {
+                give_back(&debited).await?;
                 return Err(build_too_many_attempts_response(&request, limit, key).await?);
             }
         }
@@ -298,39 +373,71 @@ impl Middleware for ThrottleRequestsMiddleware {
             .record_live_security_check(crate::live::attestation::SecurityCheck::RateLimit, None);
         let response = next(request).await;
 
-        // Apply after-callback gated hits, and inject X-RateLimit
-        // headers on the outgoing response.
+        // Apply after-callback gated hits, and add the X-RateLimit headers
+        // to the outgoing response.
         match response {
-            Ok(mut r) => {
-                for (limit, key) in limits.iter().zip(&keys) {
-                    let Some(key) = key else { continue };
-                    if let Some(after) = &limit.after_callback
-                        && after(&r)
-                        && limit.max_attempts != i64::MAX
-                    {
-                        RateLimiter::hit(key, limit.decay_seconds()).await?;
-                    }
-                    let remaining = RateLimiter::remaining(key, limit.max_attempts).await?;
-                    r = inject_headers(r, limit.max_attempts, remaining, None);
-                }
-                Ok(r)
-            }
-            Err(mut r) => {
-                for (limit, key) in limits.iter().zip(&keys) {
-                    let Some(key) = key else { continue };
-                    if let Some(after) = &limit.after_callback
-                        && after(&r)
-                        && limit.max_attempts != i64::MAX
-                    {
-                        RateLimiter::hit(key, limit.decay_seconds()).await?;
-                    }
-                    let remaining = RateLimiter::remaining(key, limit.max_attempts).await?;
-                    r = inject_headers(r, limit.max_attempts, remaining, None);
-                }
-                Err(r)
-            }
+            Ok(r) => Ok(settle(r, &limits, &keys).await?),
+            Err(r) => Err(settle(r, &limits, &keys).await?),
         }
     }
+}
+
+/// Take back the increments a refused request made, one per bucket it was
+/// counted in.
+///
+/// If a bucket's window ends between the increment and this decrement, the
+/// decrement opens the next window at `-1`, which admits one request more
+/// in that window. That needs a refused request to straddle the window's
+/// end; the alternative, keeping every refused request's increment, lets a
+/// client that keeps retrying keep its own bucket full.
+async fn give_back(debited: &[(&str, u64)]) -> Result<(), crate::FrameworkError> {
+    for (key, decay_seconds) in debited {
+        RateLimiter::decrement(key, *decay_seconds, 1).await?;
+    }
+    Ok(())
+}
+
+/// Count the hits the limits' `after` callbacks ask for, then add one
+/// `X-RateLimit-Limit` and `X-RateLimit-Remaining` pair: the one of the
+/// limit with the fewest attempts left, the first such limit on a tie.
+///
+/// Laravel's `getHeaders` writes a limit's pair only when the response
+/// carries no `X-RateLimit-Remaining` at or below that limit's remaining
+/// count, and its header bag replaces rather than appends. So the lowest
+/// count wins, and a handler that set an equal or lower count of its own
+/// keeps its headers. A handler's value that is no whole number reads as
+/// `0`, as PHP's `(int)` cast reads it, and keeps the handler's headers.
+async fn settle(
+    response: HttpResponse,
+    limits: &[Limit],
+    keys: &[Option<String>],
+) -> Result<HttpResponse, crate::FrameworkError> {
+    let mut lowest: Option<(i64, i64)> = None;
+    for (limit, key) in limits.iter().zip(keys) {
+        let Some(key) = key else { continue };
+        if let Some(after) = &limit.after_callback
+            && after(&response)
+            && limit.max_attempts != i64::MAX
+        {
+            RateLimiter::hit(key, limit.decay_seconds()).await?;
+        }
+        let remaining = RateLimiter::remaining(key, limit.max_attempts).await?;
+        if lowest.is_none_or(|(_, fewest)| remaining < fewest) {
+            lowest = Some((limit.max_attempts, remaining));
+        }
+    }
+    let Some((max_attempts, remaining)) = lowest else {
+        return Ok(response);
+    };
+    let handler_remaining = response
+        .header_value("X-RateLimit-Remaining")
+        .map(|value| value.trim().parse::<i64>().unwrap_or(0));
+    if handler_remaining.is_some_and(|handler| handler <= remaining) {
+        return Ok(response);
+    }
+    Ok(response
+        .replace_header("X-RateLimit-Limit", max_attempts.to_string())
+        .replace_header("X-RateLimit-Remaining", remaining.to_string()))
 }
 
 enum ResolvedLimits {
@@ -352,23 +459,26 @@ fn resolve_limits(mode: &Mode, request: &Request) -> ResolvedLimits {
             }
         }
         Mode::Inline {
-            max_attempts,
+            guest_max_attempts,
+            user_max_attempts,
             decay_seconds,
         } => {
-            // Fall back to a request-derived key when no per-request
-            // closure was supplied. Mirrors Laravel's
-            // `resolveRequestSignature` (user-or-IP) but path is added
-            // so two throttled routes with the same scope don't share
-            // a bucket inadvertently. The middleware's `prefix` is
-            // prepended later inside `prefixed_key`; baking it in here
-            // would land it twice.
-            let key = default_request_key(request);
+            // Mirrors Laravel's `resolveRequestSignature` (the user, else
+            // the IP) and `resolveMaxAttempts` (the guest's or the user's
+            // limit), but the path is added so two throttled routes with
+            // the same scope don't share a bucket inadvertently. The user
+            // is read once, so the limit and the key agree. The
+            // middleware's `prefix` is prepended later inside
+            // `prefixed_key`; baking it in here would land it twice.
+            let (max_attempts, key) = match crate::session::auth_user_id() {
+                Some(user) => (
+                    *user_max_attempts,
+                    format!("user:{user}:path:{}", request.path()),
+                ),
+                None => (*guest_max_attempts, default_request_key(request)),
+            };
             ResolvedLimits::Ok(vec![
-                Limit::new(
-                    *max_attempts,
-                    std::time::Duration::from_secs(*decay_seconds),
-                )
-                .by(key),
+                Limit::new(max_attempts, std::time::Duration::from_secs(*decay_seconds)).by(key),
             ])
         }
         Mode::Limits(limits) => ResolvedLimits::Ok(limits.clone()),
@@ -401,6 +511,11 @@ fn invoke(cb: &Arc<NamedLimiterFn>, request: &Request) -> LimitResult {
     cb(request)
 }
 
+/// The raw key a limit counts under: `<prefix>:<name>:<key>`, each part
+/// present when set, or `None` for an unlimited limit. It stays raw because
+/// the facade cleans each key once (see
+/// [`RateLimiter::clean_rate_limiter_key`]), so the middleware and a direct
+/// caller of `RateLimiter::attempts("<name>:<key>")` count the same bucket.
 fn prefixed_key(limit: &Limit, mode: &Mode, prefix: &str) -> Option<String> {
     if limit.max_attempts == i64::MAX {
         return None;
@@ -420,11 +535,13 @@ fn prefixed_key(limit: &Limit, mode: &Mode, prefix: &str) -> Option<String> {
         key.push(':');
     }
     key.push_str(&base);
-    Some(RateLimiter::clean_rate_limiter_key(&key))
+    Some(key)
 }
 
-// Keep legacy keys unless multiple finite clauses share a storage identity.
-// Compute once so gating, deferred hits, and response headers use the same key.
+// Keep each limit's own key unless several finite clauses still share a
+// storage identity after cleaning (a named limiter's exact duplicates
+// already carry their fallback keys, see `RateLimiter::limiter`). Compute
+// once so gating, deferred hits, and response headers use the same key.
 fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<String>> {
     let mut keys: Vec<_> = limits
         .iter()
@@ -434,8 +551,8 @@ fn independent_keys(limits: &[Limit], mode: &Mode, prefix: &str) -> Vec<Option<S
     let mut reserved = HashSet::new();
     for (index, key) in keys.iter().enumerate() {
         if let Some(key) = key {
-            // The facade cleans once more. Cleaning nested entity markers
-            // is not idempotent, so compare the actual backing-store identity.
+            // The facade cleans each key once; compare the cleaned key, the
+            // identity the store holds. `café` and `cafe` are one bucket.
             let stored = RateLimiter::clean_rate_limiter_key(key);
             reserved.insert(stored.clone());
             reserved.insert(format!("{stored}:timer"));
@@ -577,10 +694,11 @@ mod tests {
     }
 
     #[test]
-    fn independent_keys_handle_nested_normalization_and_reordering() {
+    fn independent_keys_separate_keys_that_clean_alike_whatever_their_order() {
+        // `café` and `cafe` both clean to `cafe`, so they would share a bucket.
         let mut limits = vec![
-            Limit::per_minute(2).by("&a&bc;;"),
-            Limit::per_hour(10).by("a"),
+            Limit::per_minute(2).by("café"),
+            Limit::per_hour(10).by("cafe"),
         ];
         let keys = independent_keys(&limits, &Mode::Limits(vec![]), "");
         assert_ne!(keys[0], keys[1]);
@@ -623,7 +741,8 @@ mod tests {
     #[test]
     fn prefixed_key_returns_none_for_unlimited() {
         let mode = Mode::Inline {
-            max_attempts: i64::MAX,
+            guest_max_attempts: i64::MAX,
+            user_max_attempts: i64::MAX,
             decay_seconds: 60,
         };
         let limit: Limit = Limit::none().into();
@@ -633,7 +752,8 @@ mod tests {
     #[test]
     fn prefixed_key_uses_fallback_when_limit_unkeyed() {
         let mode = Mode::Inline {
-            max_attempts: 10,
+            guest_max_attempts: 10,
+            user_max_attempts: 10,
             decay_seconds: 60,
         };
         let limit = Limit::per_minute(10);
