@@ -33,6 +33,7 @@
 
 pub mod algorithm;
 pub mod connections;
+mod html_entities;
 pub mod laravel;
 pub mod limit;
 pub mod memory;

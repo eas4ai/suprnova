@@ -25,15 +25,18 @@ The free-function facade reads the active driver from `HASH_DRIVER` (or falls ba
 
 | Variable | Description | Default | Range |
 |----------|-------------|---------|-------|
-| `HASH_DRIVER` | Active algorithm | `bcrypt` | `bcrypt` \| `argon` \| `argon2i` \| `argon2id` |
+| `HASH_DRIVER` | Active algorithm | `bcrypt` | `bcrypt` \| `argon` \| `argon2i` \| `argon2id` \| a name registered with `hashing::extend` |
 | `HASH_ROUNDS` | Bcrypt cost factor | `12` | `4..=31` (bcrypt only) |
 | `HASH_MEMORY` | Argon memory cost in KiB | `65536` (64 MiB) | `>= 8` (argon only) |
 | `HASH_TIME` | Argon time iterations | `4` | `>= 1` (argon only) |
+| `ARGON_TIME` | Laravel's name for the Argon time, read when `HASH_TIME` is unset | unset | `>= 1` (argon only) |
 | `HASH_THREADS` | Argon parallelism / lanes | `1` | `>= 1` (argon only) |
 | `HASH_VERIFY` | When true, `verify()` rejects cross-algorithm hashes | `false` | `true` / `false` |
 | `HASH_MAX_CONCURRENCY` | Most password hashes running at once in the process, the async functions and Magnetar together | the host's available parallelism | whole number `>= 1`; blank is unset |
 
-Misconfiguration (bad value, out-of-range parameter) surfaces as a `FrameworkError::param` at the first call to `hash` / `verify` / `needs_rehash` - not as a silent default.
+Misconfiguration (bad value, out-of-range parameter, a `HASH_DRIVER` that names neither an algorithm nor a registered driver) surfaces as a `FrameworkError::param` at the first call to `hash` / `verify` / `needs_rehash` - not as a silent default.
+
+A Laravel `.env` that sets `ARGON_TIME` keeps working: Suprnova reads it as the Argon time when `HASH_TIME` is unset, under the same minimum of `1`. When both are set, `HASH_TIME` wins.
 
 ### Example `.env` for argon2id
 
@@ -96,6 +99,40 @@ assert!(verify_with(&driver, &long, &h)?);
 ### Argon2i
 
 Same shape as Argon2id; `Argon2iHasher::new(opts)`. Use Argon2id for new projects - Argon2i is supported for parity but Argon2id is the modern recommendation.
+
+### Argon options for one call
+
+Laravel passes options to one hash, as in `Hash::make($password, ['time' => 3])`. In Suprnova, build an `Argon2idHasher` from `Argon2Options` and hash with `hash_with`, as the Argon2id example above does. The options apply to that call only, under the minimums `HASH_TIME`, `HASH_MEMORY`, and `HASH_THREADS` have, and the configured driver stays as it is.
+
+## Registering a driver (`extend`)
+
+`hashing::extend(name, factory)` registers a driver of your own under a name, and `HASH_DRIVER=<name>` selects it, as Laravel's `Hash::extend` does. The factory is a closure that returns a `Box<dyn Hasher>`. Use it for a peppered hasher, a hasher that wraps a key service, or an algorithm the framework doesn't ship.
+
+```rust
+use suprnova::hashing::{self, BcryptHasher, BcryptOptions, Hasher};
+
+// At boot, before the first hash. With `HASH_DRIVER=strong-bcrypt`, the
+// facade hashes with this driver.
+hashing::extend("strong-bcrypt", || {
+    Ok(Box::new(BcryptHasher::new(BcryptOptions { rounds: 14 })) as Box<dyn Hasher>)
+})?;
+
+let hashed = hashing::hash_async("my_password").await?;
+```
+
+The factory runs once, when the facade first resolves its driver, and only when `HASH_DRIVER` names it. It takes no arguments, so the algorithm settings in the environment don't reach it; read what your driver needs inside the closure. The cross-algorithm gate follows the driver's own `verify_algorithm()`, not `HASH_VERIFY`, and compares a stored hash's algorithm with the driver's `algorithm()`. `verify` still dispatches on the stored hash's algorithm, and hands a hash in no recognised algorithm to your driver.
+
+`extend` returns an error and registers nothing when:
+
+- The name is a built-in algorithm's (`bcrypt`, `argon`, `argon2i`, `argon2id`, in any case), or blank, or has surrounding whitespace.
+- A driver is already registered under the name.
+- The facade has already resolved its driver, through a hash, a verify, a rehash check, or `set_default_driver`. A registration could no longer take effect.
+
+`HASH_DRIVER` matches a registered name exactly, case included. A `HASH_DRIVER` that names neither a built-in algorithm nor a registered driver fails with `FrameworkError::param`; the facade never falls back to bcrypt. With `HASH_DRIVER` unset, the default driver stays bcrypt, whatever you register.
+
+### Why Suprnova diverges
+
+Laravel's `extend` replaces a driver registered under the same name, and accepts a registration at any time. Suprnova refuses both. The facade builds its driver once per process, so a late registration would do nothing, and an error at boot says so. Two packages that register the same name would otherwise swap each other's hasher in silence, which changes how every password is stored.
 
 ## Bcrypt with an explicit cost (`hash_with_cost`)
 

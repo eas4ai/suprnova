@@ -45,15 +45,16 @@
 //!
 //! # Configuration
 //!
-//! Seven env vars select and tune the driver - see [`HashConfig`] for the
+//! Eight env vars select and tune the driver - see [`HashConfig`] for the
 //! resolved shape:
 //!
 //! | Env var | Default | Range |
 //! |---------|---------|-------|
-//! | `HASH_DRIVER` | `bcrypt` | `bcrypt` \| `argon` \| `argon2id` |
+//! | `HASH_DRIVER` | `bcrypt` | `bcrypt` \| `argon` \| `argon2i` \| `argon2id` \| a name registered with [`extend`] |
 //! | `HASH_ROUNDS` | `12` | `4..=31` (bcrypt only) |
 //! | `HASH_MEMORY` | `65536` KiB | argon only; `>= 8` |
 //! | `HASH_TIME` | `4` | argon only; `>= 1` |
+//! | `ARGON_TIME` | unset | Laravel's name for `HASH_TIME`, read when `HASH_TIME` is unset; `>= 1` |
 //! | `HASH_THREADS` | `1` | argon only; `>= 1` |
 //! | `HASH_VERIFY` | `false` | when `true`, [`verify`] rejects hashes from a different algorithm |
 //! | `HASH_MAX_CONCURRENCY` | available parallelism | `>= 1`; hashes running at once across the async siblings and Magnetar |
@@ -87,7 +88,8 @@
 //! ```
 
 use crate::error::FrameworkError;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 mod config;
 mod driver;
@@ -133,6 +135,108 @@ pub const MAX_BCRYPT_PASSWORD_BYTES: usize = 71;
 pub const MAX_PASSWORD_BYTES: usize = MAX_BCRYPT_PASSWORD_BYTES;
 
 static DEFAULT_DRIVER: OnceLock<Box<dyn Hasher>> = OnceLock::new();
+
+/// What [`extend`] registers: a closure that builds a driver.
+type DriverFactory = dyn Fn() -> Result<Box<dyn Hasher>, FrameworkError> + Send + Sync;
+
+/// The drivers [`extend`] registered, by name. Mirrors the
+/// `$customCreators` array of Laravel's `Manager`. Process-wide, like
+/// [`DEFAULT_DRIVER`], which is built from it at most once.
+static REGISTERED_DRIVERS: OnceLock<Mutex<HashMap<String, Arc<DriverFactory>>>> = OnceLock::new();
+
+fn registered_drivers() -> MutexGuard<'static, HashMap<String, Arc<DriverFactory>>> {
+    // The guarded sections are single map operations, so a poisoned lock
+    // holds a consistent map; recovering keeps hashing up, as the rate
+    // limiter's registry does.
+    REGISTERED_DRIVERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether [`extend`] registered a driver under `name`.
+fn is_registered_driver(name: &str) -> bool {
+    registered_drivers().contains_key(name)
+}
+
+/// Build the driver [`extend`] registered under `name`. The factory runs
+/// outside the registry's lock, so a factory that reads the registry does
+/// not deadlock.
+fn build_registered_driver(name: &str) -> Result<Box<dyn Hasher>, FrameworkError> {
+    let factory = registered_drivers().get(name).cloned().ok_or_else(|| {
+        FrameworkError::param(format!(
+            "hashing: no driver is registered under `{name}`; register it with hashing::extend"
+        ))
+    })?;
+    factory()
+}
+
+/// Register a hasher driver under `name`, for `HASH_DRIVER=<name>` to
+/// select. Mirrors Laravel's `Hash::extend($driver, $callback)`
+/// (`Manager::extend`): a package or an application adds a driver of its
+/// own, a peppered hasher or a scrypt one, and configuration picks it, with
+/// no fork of the facade.
+///
+/// The factory runs once, when the default driver is first resolved, and
+/// only when `HASH_DRIVER` names it. Register at boot, before any hash,
+/// verify or rehash check runs.
+///
+/// ```rust,no_run
+/// use suprnova::hashing::{self, BcryptHasher, BcryptOptions, Hasher};
+///
+/// # fn ex() -> Result<(), suprnova::FrameworkError> {
+/// // At boot, with `HASH_DRIVER=strong-bcrypt` in the environment.
+/// hashing::extend("strong-bcrypt", || {
+///     Ok(Box::new(BcryptHasher::new(BcryptOptions { rounds: 14 })) as Box<dyn Hasher>)
+/// })?;
+/// # Ok(()) }
+/// ```
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] and registers nothing when:
+///
+/// - the default driver is already initialised, by a hash, a verify, a
+///   rehash check or [`set_default_driver`], so a registration could no
+///   longer take effect;
+/// - `name` is blank, has surrounding whitespace, or is a name
+///   `HASH_DRIVER` reads as a built-in algorithm (`bcrypt`, `argon`,
+///   `argon2i`, `argon2id`, in any case), which a registration could never
+///   be selected over;
+/// - a driver is already registered under `name`. Laravel replaces it;
+///   Suprnova refuses, so two packages cannot silently swap each other's
+///   hasher.
+pub fn extend<F>(name: impl Into<String>, factory: F) -> Result<(), FrameworkError>
+where
+    F: Fn() -> Result<Box<dyn Hasher>, FrameworkError> + Send + Sync + 'static,
+{
+    let name = name.into();
+    let mut drivers = registered_drivers();
+    if DEFAULT_DRIVER.get().is_some() {
+        return Err(FrameworkError::internal(format!(
+            "hashing::extend(`{name}`): default driver already initialised; \
+             register drivers at boot, before the first hash"
+        )));
+    }
+    if name.trim().is_empty() || name.trim() != name {
+        return Err(FrameworkError::param(format!(
+            "hashing::extend(`{name}`): a driver name must not be blank or carry \
+             surrounding whitespace"
+        )));
+    }
+    if Algorithm::parse(&name).is_some() {
+        return Err(FrameworkError::param(format!(
+            "hashing::extend(`{name}`): `{name}` is a built-in algorithm and cannot be replaced"
+        )));
+    }
+    if drivers.contains_key(&name) {
+        return Err(FrameworkError::param(format!(
+            "hashing::extend(`{name}`): a driver is already registered under that name"
+        )));
+    }
+    drivers.insert(name, Arc::new(factory));
+    Ok(())
+}
 
 /// Set once this process has handed `HASH_MAX_CONCURRENCY` to the hash work
 /// limit. Only a success sets it, so an invalid setting is refused by every
@@ -189,14 +293,15 @@ where
 ///
 /// First call initialises the driver from the process environment via
 /// [`HashConfig::from_env`]; subsequent calls return the cached instance.
-/// Configuration errors propagate; callers see a concrete error instead
-/// of a panic.
+/// When `HASH_DRIVER` names a driver registered with [`extend`], its
+/// factory builds the driver. Configuration errors propagate; callers see
+/// a concrete error instead of a panic.
 pub fn default_driver() -> Result<&'static dyn Hasher, FrameworkError> {
     if let Some(d) = DEFAULT_DRIVER.get() {
         return Ok(d.as_ref());
     }
-    let cfg = HashConfig::from_env()?;
-    let driver = driver::build(&cfg)?;
+    let (cfg, registered) = HashConfig::from_env_with_driver_name()?;
+    let driver = driver::build(&cfg, registered.as_deref())?;
     // Race-safe: OnceLock::set returns Err if another thread initialised
     // first; both drivers were built from the same env, so we just
     // discard ours and return the winner.
