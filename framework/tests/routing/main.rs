@@ -7,6 +7,7 @@ mod http_wire;
 pub mod group_names;
 pub mod inertia;
 mod laravel_delta;
+pub mod laravel_http_gaps;
 pub mod method_names;
 pub mod params;
 pub mod root_group_redirect;

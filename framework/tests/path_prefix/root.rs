@@ -53,7 +53,7 @@ async fn pfx_002_the_app_url_path_is_the_root_when_no_prefix_arrives() {
             "https://example.org/billing/x",
             "https://example.org/billing/x",
             "https://example.org/billing/invoices?page=2",
-            "/billing/invoices?page=2",
+            "https://example.org/billing/invoices",
             "http://app.test/billing/invoices",
             "http://app.test/billing/invoices?page=2",
             "/billing",
@@ -84,7 +84,7 @@ async fn pfx_002_a_trusted_prefix_replaces_the_app_url_path_once() {
             "https://example.org/billing/x",
             "https://example.org/billing/x",
             "https://example.org/billing/invoices?page=2",
-            "/billing/invoices?page=2",
+            "https://example.org/billing/invoices",
             "http://app.test/billing/invoices",
             "http://app.test/billing/invoices?page=2",
             "/billing",
@@ -108,7 +108,7 @@ async fn pfx_002_a_trusted_prefix_wins_over_another_app_url_path() {
     )
     .await;
     assert_eq!(urls[0], "https://example.org/billing/x");
-    assert_eq!(urls[3], "/billing/invoices?page=2");
+    assert_eq!(urls[3], "https://example.org/billing/invoices");
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn pfx_002_at_the_host_root_every_url_is_unchanged() {
             "https://example.org/x",
             "https://example.org/x",
             "https://example.org/invoices?page=2",
-            "/invoices?page=2",
+            "https://example.org/invoices",
             "http://app.test/invoices",
             "http://app.test/invoices?page=2",
             "",

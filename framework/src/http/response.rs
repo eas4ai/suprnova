@@ -938,7 +938,7 @@ impl Redirect {
     /// redirect goes to the root, as [`Self::refresh`] does when it has
     /// no previous URL.
     pub fn refresh_for(request: &crate::http::Request) -> Self {
-        let current = crate::routing::url::current(request);
+        let current = crate::routing::url::current_path_and_query(request);
         Self::to(
             crate::routing::url::root_relative_or_none(&current).unwrap_or_else(|| "/".to_string()),
         )
@@ -950,18 +950,36 @@ impl Redirect {
     /// Mirrors Laravel's `redirect()->guest($path, $status, $headers,
     /// $secure)` from `Illuminate/Routing/Redirector.php:71`.
     ///
-    /// Pass the inbound `request` so the originally-requested URL can
-    /// be recovered after authentication via
-    /// [`Self::intended`]. The intended URL is flashed
-    /// to the session under `url.intended` (Laravel's key).
+    /// Pass the inbound `request` so the URL to come back to can be
+    /// recovered after authentication via [`Self::intended`]. It is stored
+    /// in the session under `url.intended` (Laravel's key):
     ///
-    /// A request-target a browser would read as another host, such as
-    /// `//evil.example/x` at the host root, is not stored, and any intended
-    /// URL already stored is removed, so [`Self::intended`] goes to its
-    /// default rather than off the origin.
+    /// - For a `GET` that does not expect JSON
+    ///   ([`Request::expects_json`](crate::http::Request::expects_json)),
+    ///   the request's own public root, path and query. That is a page the
+    ///   user can be sent back to.
+    /// - For any other request, the session's previous URL, the page the
+    ///   user was on. A `POST` or a JSON call is not a page: sending the
+    ///   browser back to it after sign-in would replay a form with a `GET`
+    ///   or show raw JSON. With no previous URL recorded, nothing is
+    ///   stored.
+    ///
+    /// The `Referer` header is never read, because the client sets it.
+    /// Laravel's `guest()` falls back to it through `url()->previous()`.
+    ///
+    /// A target a browser would read as another host, such as a request
+    /// for `//evil.example/x` at the host root, is not stored. When nothing
+    /// is stored, any intended URL already stored is removed, so
+    /// [`Self::intended`] goes to its default rather than to a stale or
+    /// foreign page.
     pub fn guest(request: &crate::http::Request, login_path: impl Into<String>) -> Self {
-        let current = crate::routing::url::current(request);
-        let intended = crate::routing::url::root_relative_or_none(&current);
+        let candidate = if *request.method() == hyper::Method::GET && !request.expects_json() {
+            Some(crate::routing::url::current_path_and_query(request))
+        } else {
+            crate::session::session().and_then(|s| s.previous_url())
+        };
+        let intended =
+            candidate.and_then(|target| crate::routing::url::root_relative_or_none(&target));
         crate::session::session_mut(|s| match intended {
             Some(intended) => s.put("url.intended", intended),
             None => {

@@ -29,7 +29,9 @@
 //! Verification reverses the build: strip `signature`, recompute the HMAC over
 //! the canonical form, and compare in constant time. Expired signatures
 //! verify cleanly but report `expired` separately so callers can render a
-//! refresh flow.
+//! refresh flow. [`verify_signature_ignoring`] also drops the parameters the
+//! caller names, such as a `utm_source` a mail client appends after signing,
+//! before it builds the canonical form.
 //!
 //! ## Why HMAC over the path + sorted query
 //!
@@ -319,6 +321,33 @@ pub fn verify_signature(
     url: &str,
     now_epoch_seconds: i64,
 ) -> Result<SignatureVerdict, FrameworkError> {
+    verify_signature_ignoring(url, now_epoch_seconds, &[])
+}
+
+/// Verify a signed URL while leaving the query parameters named in
+/// `ignore` out of the verified text.
+///
+/// Some parameters are added to a signed link after it is minted: a mail
+/// client or a campaign tool appends `utm_source`, and a signed link would
+/// otherwise stop verifying. Every pair whose key is in `ignore` is dropped
+/// before the canonical text is built, a repeated key included, so the
+/// HMAC covers the same text the signer covered. Laravel's
+/// `hasCorrectSignature($request, $absolute, $ignoreQuery)` drops them the
+/// same way.
+///
+/// `signature` and `expires` are never left out. The signature is always
+/// stripped, and the expiry stays covered by the HMAC, so naming either
+/// one here changes nothing. A repeated `signature` or `expires` is still
+/// refused, and the key ring is walked as [`verify_signature`] walks it.
+///
+/// # Errors
+///
+/// Returns `FrameworkError` when the encryption key is not installed.
+pub fn verify_signature_ignoring(
+    url: &str,
+    now_epoch_seconds: i64,
+    ignore: &[&str],
+) -> Result<SignatureVerdict, FrameworkError> {
     let current_key = signed_url_key()?;
     let previous_keys = Crypt::previous_key_bytes();
     Ok(verify_signature_with_keys(
@@ -326,6 +355,7 @@ pub fn verify_signature(
         now_epoch_seconds,
         &current_key,
         &previous_keys,
+        ignore,
     ))
 }
 
@@ -341,11 +371,16 @@ pub fn verify_signature(
 /// previous-ring index on a hit so an operator running a log search
 /// for "APP_KEY_PREVIOUS" sees one consistent rotation-in-progress
 /// signal across the crypto surface.
+///
+/// A pair whose key is in `ignore` is left out of the canonical text, as
+/// [`verify_signature_ignoring`] describes; the control parameters are
+/// read before the ignore list applies, so they cannot be ignored.
 fn verify_signature_with_keys(
     url: &str,
     now_epoch_seconds: i64,
     current_key: &[u8],
     previous_keys: &[Vec<u8>],
+    ignore: &[&str],
 ) -> SignatureVerdict {
     let (path, pairs) = split_url(url);
 
@@ -363,6 +398,10 @@ fn verify_signature_with_keys(
             if k == EXPIRES_KEY {
                 expires_count += 1;
                 expires = v.parse::<i64>().ok();
+            } else if ignore.contains(&k.as_str()) {
+                // Added after signing, such as a campaign tag: not part of
+                // the text the signer covered.
+                continue;
             }
             rest.push((k, v));
         }
@@ -458,6 +497,17 @@ mod tests {
         if !Crypt::is_initialized() {
             Crypt::init(EncryptionKey::generate());
         }
+    }
+
+    /// [`verify_signature_with_keys`] with nothing ignored, the form every
+    /// key-ring test checks.
+    fn verify_with_ring(
+        url: &str,
+        now_epoch_seconds: i64,
+        current_key: &[u8],
+        previous_keys: &[Vec<u8>],
+    ) -> SignatureVerdict {
+        verify_signature_with_keys(url, now_epoch_seconds, current_key, previous_keys, &[])
     }
 
     /// The three verdicts are genuinely three, and `Invalid` is not
@@ -664,8 +714,7 @@ mod tests {
         let current = EncryptionKey::generate();
         let prev = EncryptionKey::generate();
         let signed = sign_url_with_key("/orders/42?foo=1", prev.as_bytes(), None);
-        let verdict =
-            verify_signature_with_keys(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
+        let verdict = verify_with_ring(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
         assert_eq!(
             verdict,
             SignatureVerdict::Valid,
@@ -684,7 +733,7 @@ mod tests {
         let oldest = EncryptionKey::generate();
         let signed = sign_url_with_key("/x?a=1&b=2", oldest.as_bytes(), None);
         let previous = vec![oldest.as_bytes().to_vec(), mid.as_bytes().to_vec()];
-        let verdict = verify_signature_with_keys(&signed, 0, current.as_bytes(), &previous);
+        let verdict = verify_with_ring(&signed, 0, current.as_bytes(), &previous);
         assert_eq!(verdict, SignatureVerdict::Valid);
     }
 
@@ -696,7 +745,7 @@ mod tests {
         let current = EncryptionKey::generate();
         let prev = EncryptionKey::generate();
         let signed = sign_url_with_key("/reset", prev.as_bytes(), Some(1000));
-        let verdict = verify_signature_with_keys(
+        let verdict = verify_with_ring(
             &signed,
             2000,
             current.as_bytes(),
@@ -718,8 +767,7 @@ mod tests {
         let prev = EncryptionKey::generate();
         let unrelated = EncryptionKey::generate();
         let signed = sign_url_with_key("/orders/42", unrelated.as_bytes(), None);
-        let verdict =
-            verify_signature_with_keys(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
+        let verdict = verify_with_ring(&signed, 0, current.as_bytes(), &[prev.as_bytes().to_vec()]);
         assert_eq!(verdict, SignatureVerdict::Invalid);
     }
 
@@ -733,14 +781,10 @@ mod tests {
         // non-matching previous key is added.
         let current = EncryptionKey::generate();
         let signed = sign_url_with_key("/x", current.as_bytes(), None);
-        let no_prev = verify_signature_with_keys(&signed, 0, current.as_bytes(), &[]);
+        let no_prev = verify_with_ring(&signed, 0, current.as_bytes(), &[]);
         let other = EncryptionKey::generate();
-        let with_prev = verify_signature_with_keys(
-            &signed,
-            0,
-            current.as_bytes(),
-            &[other.as_bytes().to_vec()],
-        );
+        let with_prev =
+            verify_with_ring(&signed, 0, current.as_bytes(), &[other.as_bytes().to_vec()]);
         assert_eq!(no_prev, SignatureVerdict::Valid);
         assert_eq!(with_prev, SignatureVerdict::Valid);
     }
@@ -875,7 +919,7 @@ mod tests {
         let attacked = format!("/promote?user=attacker&user=victim&signature={sig}");
 
         assert_eq!(
-            verify_signature_with_keys(&attacked, 0, &key, &[]),
+            verify_with_ring(&attacked, 0, &key, &[]),
             SignatureVerdict::Invalid,
             "adding a value for an already-signed key must break the HMAC; \
              it verified, which means the canonical form is losing values again"
@@ -883,7 +927,7 @@ mod tests {
         // …and the untouched URL still verifies, so the test is failing on
         // the substitution rather than on a broken signer.
         assert_eq!(
-            verify_signature_with_keys(&signed, 0, &key, &[]),
+            verify_with_ring(&signed, 0, &key, &[]),
             SignatureVerdict::Valid,
         );
     }
@@ -898,7 +942,7 @@ mod tests {
 
         let attacked = format!("/promote?user=victim&user=attacker&signature={sig}");
         assert_eq!(
-            verify_signature_with_keys(&attacked, 0, &key, &[]),
+            verify_with_ring(&attacked, 0, &key, &[]),
             SignatureVerdict::Invalid,
         );
     }
@@ -912,7 +956,7 @@ mod tests {
         let key = vec![9u8; 32];
         let signed = sign_url_with_key("/feed?tag=a&tag=b", &key, None);
         assert_eq!(
-            verify_signature_with_keys(&signed, 0, &key, &[]),
+            verify_with_ring(&signed, 0, &key, &[]),
             SignatureVerdict::Valid,
             "both values must survive into the canonical payload"
         );
@@ -920,7 +964,7 @@ mod tests {
         // Dropping one of them is a different URL and must not verify.
         let sig = signed.rsplit_once("signature=").expect("signature").1;
         assert_eq!(
-            verify_signature_with_keys(&format!("/feed?tag=a&signature={sig}"), 0, &key, &[]),
+            verify_with_ring(&format!("/feed?tag=a&signature={sig}"), 0, &key, &[]),
             SignatureVerdict::Invalid,
             "removing a signed value must invalidate too, not just adding one"
         );
@@ -949,14 +993,14 @@ mod tests {
         let key = vec![3u8; 32];
         let signed = sign_url_with_key("/operation?mode=a&mode=b", &key, None);
         assert_eq!(
-            verify_signature_with_keys(&signed, 0, &key, &[]),
+            verify_with_ring(&signed, 0, &key, &[]),
             SignatureVerdict::Valid
         );
 
         let sig = signed.rsplit_once("signature=").expect("signature").1;
         let reordered = format!("/operation?mode=b&mode=a&signature={sig}");
         assert_eq!(
-            verify_signature_with_keys(&reordered, 0, &key, &[]),
+            verify_with_ring(&reordered, 0, &key, &[]),
             SignatureVerdict::Invalid,
             "the swapped order hands the handler a different last value"
         );
@@ -987,7 +1031,7 @@ mod tests {
         let minted_payload = "/feed?a=1&tag=a&tag=b";
         let sig = hmac_hex(&key, minted_payload.as_bytes());
         assert_eq!(
-            verify_signature_with_keys(&format!("{minted_payload}&signature={sig}"), 0, &key, &[]),
+            verify_with_ring(&format!("{minted_payload}&signature={sig}"), 0, &key, &[]),
             SignatureVerdict::Valid
         );
     }
@@ -1002,7 +1046,7 @@ mod tests {
         let sig = signed.rsplit_once("signature=").expect("signature").1;
 
         assert_eq!(
-            verify_signature_with_keys(
+            verify_with_ring(
                 &format!("/promote?user=victim&signature={sig}&signature=deadbeef"),
                 0,
                 &key,
@@ -1011,7 +1055,7 @@ mod tests {
             SignatureVerdict::Invalid,
         );
         assert_eq!(
-            verify_signature_with_keys(
+            verify_with_ring(
                 &format!("/promote?user=victim&signature=deadbeef&signature={sig}"),
                 0,
                 &key,
@@ -1039,7 +1083,7 @@ mod tests {
         let sig = signed.rsplit_once("signature=").expect("signature").1;
 
         assert_eq!(
-            verify_signature_with_keys(
+            verify_with_ring(
                 &format!("/report?expires=1000&expires=99999999999&signature={sig}"),
                 0,
                 &key,

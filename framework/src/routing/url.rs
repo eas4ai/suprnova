@@ -10,14 +10,16 @@
 //!
 //! What does land here is the user-facing shape consumers reach for:
 //!
-//! - [`to`] / [`secure`] - build an absolute URL from a path against
-//!   the configured `APP_URL`.
-//! - [`current`] / [`full`] / [`previous`] - read the current request's
-//!   URL, full URL, and the previous URL recorded in the session.
+//! - [`to`] / [`secure`] / [`secure_with`] - build an absolute URL from a
+//!   path against the configured `APP_URL`.
+//! - [`current`] / [`full`] / [`previous`] / [`previous_path`] - read the
+//!   current request's URL without and with its query, and the previous
+//!   URL recorded in the session, whole or as a path.
 //! - [`signed_route`] / [`temporary_signed_route`] - sign a named route
 //!   for HMAC-verified delivery.
-//! - [`has_valid_signature`] / [`signature_verdict`] - verify a signed URL
-//!   coming in on a request; the latter tells `Expired` from `Invalid`.
+//! - [`has_valid_signature`] / [`has_valid_signature_ignoring`] /
+//!   [`signature_verdict`] - verify a signed URL coming in on a request;
+//!   the last tells `Expired` from `Invalid`.
 //!
 //! All helpers are free functions in the `crate::routing::url` namespace,
 //! re-exported under `suprnova::url::*` so consumers write:
@@ -39,8 +41,10 @@
 use crate::FrameworkError;
 use crate::http::Request;
 use crate::routing::signed::{
-    SignatureVerdict, sign_route as do_sign_route, sign_url as do_sign_url, verify_signature,
+    SignatureVerdict, sign_route as do_sign_route, sign_url as do_sign_url,
+    verify_signature_ignoring,
 };
+use percent_encoding::utf8_percent_encode;
 
 /// Build an absolute URL by joining `path` to the configured
 /// `APP_URL` under the public root.
@@ -92,23 +96,77 @@ pub fn secure(path: &str) -> String {
     }
 }
 
-/// The current request's public root, path and query string: the URL
-/// the browser asked for, relative to its host.
+/// [`secure`] with `segments` appended to the path, each one
+/// percent-encoded as one path segment.
 ///
-/// Mirrors Laravel's `url()->current()` (path only, without query is the
-/// PHP default; Suprnova returns path+query because Rust callers
-/// typically want the full visible URL). Behind a proxy that strips a
-/// path prefix the request arrives without it, so the root is put back
-/// in front: a request for `/invoices` behind a trusted
-/// `X-Forwarded-Prefix: /billing` gives `/billing/invoices` (PFX-002).
-/// Use [`Request::path`] directly when you need the path the
-/// application matched its routes on.
+/// Mirrors Laravel's `url()->secure($path, $parameters)`. A value taken
+/// from user input, such as a name with a space or a slash, stays one
+/// segment: it is encoded with the set [`crate::route`] uses for a route
+/// parameter, so `secure_with("users", &["a b", "7"])` gives
+/// `https://<APP_URL host>/users/a%20b/7`. The segments go in front of a
+/// query or a fragment that `path` carries. The `APP_URL` origin, the
+/// public root and the `https` upgrade are those of [`secure`].
+///
+/// An absolute `path` gets the segments too. Laravel returns an absolute
+/// path unchanged and drops them, which loses the caller's values without
+/// a word.
+pub fn secure_with(path: &str, segments: &[&str]) -> String {
+    secure(&append_segments(path, segments))
+}
+
+/// `path` with every segment of `segments` encoded and appended, before
+/// any query or fragment, with one `/` between each part.
+fn append_segments(path: &str, segments: &[&str]) -> String {
+    if segments.is_empty() {
+        return path.to_string();
+    }
+    let split = path.find(['?', '#']).unwrap_or(path.len());
+    let (head, tail) = path.split_at(split);
+    let mut out = head.trim_end_matches('/').to_string();
+    for segment in segments {
+        out.push('/');
+        out.extend(utf8_percent_encode(
+            segment,
+            super::router::PATH_SEGMENT_ENCODE,
+        ));
+    }
+    out.push_str(tail);
+    out
+}
+
+/// The absolute URL of the current request without its query: the
+/// `APP_URL` origin, the public root and the path.
+///
+/// Mirrors Laravel's `url()->current()`, which builds the URL from the path
+/// alone. Use [`full`] when you need the query too. Behind a proxy that
+/// strips a path prefix the request arrives without it, so the root is put
+/// back in front: a request for `/invoices` behind a trusted
+/// `X-Forwarded-Prefix: /billing` gives `https://example.com/billing/invoices`
+/// (PFX-002). The origin comes from `APP_URL`, never from the `Host`
+/// header, so a forged host cannot change it. Use [`Request::path`] directly
+/// when you need the path the application matched its routes on.
+///
+/// The path is what the client sent. A request-target such as
+/// `//evil.example/x` stays a path on the `APP_URL` origin, as it does in
+/// [`full`].
+pub fn current(request: &Request) -> String {
+    on_app_origin(&format!("{}{}", request.public_root(), request.path()))
+}
+
+/// The current request's public root, path and query string: the URL the
+/// browser asked for, relative to its host.
+///
+/// The framework sends a request back to this URL and records it in the
+/// session, so it keeps the query, which [`current`] leaves out: the
+/// session's previous URL, [`crate::Redirect::guest`] and
+/// [`crate::Redirect::refresh_for`], the Inertia and form validation
+/// redirects, and signature verification, which reads the query.
 ///
 /// The value is what the client sent. At the host root a request-target
 /// such as `//evil.example/x` gives a network-path reference, which a
 /// browser reads as another host, so the framework's redirects and the
-/// intended URL check it before they use it.
-pub fn current(request: &Request) -> String {
+/// intended URL check it with [`root_relative_or_none`] before they use it.
+pub(crate) fn current_path_and_query(request: &Request) -> String {
     let root = request.public_root();
     let path = request.path();
     match request.uri().query() {
@@ -117,20 +175,25 @@ pub fn current(request: &Request) -> String {
     }
 }
 
-/// Full absolute URL of the current request - `APP_URL` host +
-/// [`current`]. Mirrors Laravel's `url()->full()`.
+/// Full absolute URL of the current request, query included: the
+/// `APP_URL` origin, the public root, the path and the query. Mirrors
+/// Laravel's `url()->full()`.
+pub fn full(request: &Request) -> String {
+    on_app_origin(&current_path_and_query(request))
+}
+
+/// `target`, a request's root and path, on the `APP_URL` origin.
 ///
 /// The origin is joined here rather than through [`to`], which returns a
 /// target that starts with `//` unchanged: a request for `//evil.example/x`
-/// is a path on this host, and its full URL stays on `APP_URL`'s origin.
-pub fn full(request: &Request) -> String {
-    let current = current(request);
-    if !current.starts_with('/') {
-        return to(&current);
+/// is a path on this host, and its URL stays on `APP_URL`'s origin.
+fn on_app_origin(target: &str) -> String {
+    if !target.starts_with('/') {
+        return to(target);
     }
     let app_url = app_url();
     let (origin, _) = super::root::split_app_url(&app_url);
-    format!("{origin}{current}")
+    format!("{origin}{target}")
 }
 
 /// The public root of the request being handled, without a trailing
@@ -171,6 +234,52 @@ pub fn previous(fallback: &str) -> String {
     crate::session::session()
         .and_then(|s| s.previous_url())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+/// The path of [`previous`]: no query, no fragment, no public root and no
+/// trailing slash, and `/` when nothing is left.
+///
+/// Mirrors Laravel's `url()->previousPath($fallback)`. A handler compares
+/// it with a route's path to ask where the user came from, and a route's
+/// path carries neither the root nor the query. A previous URL of
+/// `/billing/invoices/?page=2` under the root `/billing` gives
+/// `/invoices`. With no previous URL recorded, the same is done to
+/// `fallback`, and an absolute fallback such as `https://example.com/home`
+/// gives `/home`.
+///
+/// The path is returned as the browser sent it, still percent-encoded.
+pub fn previous_path(fallback: &str) -> String {
+    path_under_root(&previous(fallback), &root())
+}
+
+/// The path part of `url` with `root` and the trailing slashes removed,
+/// or `/` when nothing is left.
+fn path_under_root(url: &str, root: &str) -> String {
+    // An absolute URL or a network-path reference: the path starts after
+    // the authority.
+    let after_authority = if is_absolute(url) {
+        let authority_start = url.find("//").map_or(0, |at| at + 2);
+        let rest = &url[authority_start..];
+        rest.find(['/', '?', '#']).map_or("", |at| &rest[at..])
+    } else {
+        url
+    };
+    let path = after_authority.split(['?', '#']).next().unwrap_or_default();
+    let path = if !root.is_empty() && super::root::is_under(root, path) {
+        &path[root.len()..]
+    } else {
+        path
+    };
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        // A relative fallback such as `home`, which `to` would put under
+        // the root.
+        format!("/{path}")
+    }
 }
 
 /// Sign a named route. Convenience wrapper over
@@ -225,7 +334,28 @@ pub fn signed_url(
 ///
 /// Returns `FrameworkError` when the encryption key is not installed.
 pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
-    Ok(verdict_for_request(request)?.is_valid())
+    Ok(verdict_for_request(request, &[])?.is_valid())
+}
+
+/// [`has_valid_signature`], leaving the query parameters named in
+/// `names` out of the verified text.
+///
+/// For a parameter added to a signed link after it was minted, such as the
+/// `utm_source` a mail client or a campaign tool appends: the link still
+/// verifies, and the parameter is not covered by the signature, so treat
+/// its value as untrusted. Every other parameter, the path and the root
+/// stay covered. `signature` and `expires` cannot be ignored. Mirrors the
+/// `$ignoreQuery` argument of Laravel's `URL::hasValidSignature`, and is
+/// what [`crate::routing::ValidateSignature`] checks.
+///
+/// # Errors
+///
+/// Returns `FrameworkError` when the encryption key is not installed.
+pub fn has_valid_signature_ignoring(
+    request: &Request,
+    names: &[&str],
+) -> Result<bool, FrameworkError> {
+    Ok(verdict_for_request(request, names)?.is_valid())
 }
 
 /// `true` only when the signature is valid **and** the URL has not expired.
@@ -264,20 +394,25 @@ pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
             to tell Expired from Invalid"
 )]
 pub fn signature_has_not_expired(request: &Request) -> Result<bool, FrameworkError> {
-    Ok(verdict_for_request(request)?.is_valid())
+    Ok(verdict_for_request(request, &[])?.is_valid())
 }
 
 /// Return the full [`SignatureVerdict`] for the inbound request. Lets
 /// callers branch on `Valid`/`Expired`/`Invalid` to render distinct UX
 /// (e.g. "this link has expired - request a new one").
 pub fn signature_verdict(request: &Request) -> Result<SignatureVerdict, FrameworkError> {
-    verdict_for_request(request)
+    verdict_for_request(request, &[])
 }
 
-fn verdict_for_request(request: &Request) -> Result<SignatureVerdict, FrameworkError> {
-    let url = current(request);
+/// Verify the root, path and query the request arrived with, leaving the
+/// parameters in `ignore` out.
+fn verdict_for_request(
+    request: &Request,
+    ignore: &[&str],
+) -> Result<SignatureVerdict, FrameworkError> {
+    let url = current_path_and_query(request);
     let now = crate::clock::now().timestamp();
-    verify_signature(&url, now)
+    verify_signature_ignoring(&url, now, ignore)
 }
 
 /// Whether `path` is already absolute (`http://`, `https://`, or `//`).
