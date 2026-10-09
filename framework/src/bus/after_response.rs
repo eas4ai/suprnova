@@ -90,6 +90,13 @@ impl CompletionBody {
     }
 }
 
+impl Drop for CompletionBody {
+    fn drop(&mut self) {
+        // Hyper can stop polling once Content-Length bytes have been written.
+        self.finish();
+    }
+}
+
 impl Body for CompletionBody {
     type Data = Bytes;
     type Error = Infallible;

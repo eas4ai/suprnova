@@ -188,6 +188,12 @@ async fn response_must_flush_before_dispatch(kind: &'static str, fail_flush: boo
                     Ok::<_, Infallible>(Bytes::from_static(b"first")),
                     Ok(Bytes::from_static(b"last")),
                 ])),
+                "stream-content-length" => {
+                    let frame = Bytes::from_static(b"sent");
+                    let length = frame.len().to_string();
+                    HttpResponse::stream_bytes(futures::stream::iter([Ok::<_, Infallible>(frame)]))
+                        .header("Content-Length", length)
+                }
                 _ => HttpResponse::text("sent"),
             };
             Ok(response)
@@ -291,6 +297,11 @@ async fn streamed_response_dispatch_waits_for_successful_socket_flush() {
 }
 #[tokio::test]
 #[serial]
+async fn streamed_response_with_content_length_dispatches_after_successful_socket_flush() {
+    response_must_flush_before_dispatch("stream-content-length", false).await;
+}
+#[tokio::test]
+#[serial]
 async fn empty_response_dispatch_waits_for_successful_socket_flush() {
     response_must_flush_before_dispatch("empty", false).await;
 }
@@ -303,6 +314,7 @@ async fn head_response_dispatch_waits_for_successful_socket_flush() {
 #[serial]
 async fn failed_socket_flush_discards_after_response_commands() {
     response_must_flush_before_dispatch("buffered", true).await;
+    response_must_flush_before_dispatch("stream-content-length", true).await;
 }
 
 #[tokio::test]
