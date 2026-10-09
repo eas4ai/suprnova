@@ -79,9 +79,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// The default implementation returns `Ok(())`.
     ///
     /// This hook runs in both normal and Precognition flows. In
-    /// Precognition mode the errors are filtered by the
-    /// `Precognition-Validate-Only` header just like single-field
-    /// validator errors, and surface as `FrameworkError::PrecognitionFailure`.
+    /// Precognition mode every hook error is retained and surfaces as
+    /// `FrameworkError::PrecognitionFailure`.
     /// In the standard flow they surface as `FrameworkError::Validation`
     /// (HTTP 422).
     ///
@@ -145,9 +144,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// **bails at the first failing stage**. The async hook therefore
     /// only runs once the synchronous rules pass, so a malformed value
     /// (e.g. a syntactically invalid email) never reaches the database
-    /// `Unique` query. In Precognition mode the hook's errors are
-    /// filtered by `Precognition-Validate-Only` exactly like the other
-    /// stages.
+    /// `Unique` query. Precognition filters derived errors before choosing
+    /// the next stage, and keeps every error this hook adds.
     ///
     /// The default implementation returns `Ok(())`.
     ///
@@ -217,16 +215,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 
         // Only the route middleware opts into validation without dispatch.
         let is_precognition = req.is_precognitive();
-        let validate_only: Vec<String> = req
-            .header("Precognition-Validate-Only")
-            .map(|raw| {
-                raw.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
+        let validate_only = is_precognition.then(|| req.validate_only()).flatten();
+        let query_input = is_precognition && (req.is_method("GET") || req.is_method("DELETE"));
         // Get the content type before consuming the body and decide how to
         // parse from it. Strip any parameters (`; charset=...`), trim, and
         // lowercase so `Application/JSON; charset=utf-8` classifies the same
@@ -242,15 +232,15 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         // Three body shapes are understood: form-urlencoded, multipart (the
         // body the Inertia client sends for a form with a file), and JSON
         // (`application/json` or any `application/*+json` suffix type). Every
-        // other content type - including a missing or empty `Content-Type` -
-        // is rejected with 415 rather than silently parsed as JSON. The check
+        // other content type is rejected with 415. A marked GET or DELETE
+        // may omit Content-Type and validate query input. The check
         // runs BEFORE the body is read so an unsupported request never streams.
         let is_form = media_type.as_deref() == Some("application/x-www-form-urlencoded");
         let is_multipart = media_type.as_deref() == Some("multipart/form-data");
         let is_json = media_type
             .as_deref()
             .is_some_and(|mt| mt == "application/json" || mt.ends_with("+json"));
-        if !is_form && !is_multipart && !is_json {
+        if !is_form && !is_multipart && !is_json && !(query_input && media_type.is_none()) {
             return Err(FrameworkError::UnsupportedMediaType);
         }
         let route_inputs = Self::route_inputs(&req)?;
@@ -259,7 +249,15 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         // included; `body_bytes_with_cap` and the multipart parser read
         // `Content-Length` from headers and pre-reject oversized requests
         // with 413 before consuming any body bytes.
-        let parsed = if is_multipart {
+        let parsed = if is_precognition && (validate_only.is_some() || query_input) {
+            super::input::parse_precognitive::<Self>(
+                req,
+                Self::max_body_bytes(),
+                route_inputs,
+                validate_only.as_deref(),
+            )
+            .await
+        } else if is_multipart {
             parse_multipart_with_route_inputs(req, Self::max_body_bytes(), route_inputs).await
         } else {
             let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
@@ -276,20 +274,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         };
         let data: Self = match parsed {
             Ok(data) => data,
-            // A field that does not parse keeps the struct from being built,
-            // so no rule can run. A precognitive request hears about the
-            // fields it asked after. When none of those failed it is still
-            // not told the form is valid, since no rule checked it: it hears
-            // which fields are in the way.
             Err(FrameworkError::Validation(errors)) if is_precognition => {
-                let asked = errors.retain_fields(&validate_only);
-                return Err(FrameworkError::PrecognitionFailure(
-                    if validate_only.is_empty() || asked.is_empty() {
-                        errors
-                    } else {
-                        asked
-                    },
-                ));
+                return Err(FrameworkError::PrecognitionFailure(errors));
             }
             Err(error) => return Err(error),
         };
@@ -302,29 +288,31 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         let validation_result = data.validate();
 
         if is_precognition {
-            // Walk the validation stages in order, bailing at the first
-            // that fails: the derived `validate()`, then the synchronous
-            // cross-field hook, then the async cross-field hook (where
-            // `Unique` and other DB-backed rules live). The async stage
-            // runs only once the cheaper synchronous stages pass, so a
-            // malformed value never reaches a database `Unique` query -
-            // and if a *different* field is malformed, the client's
-            // requested field still resolves through the same filter. An
-            // empty bag means every stage passed.
-            let bag = match validation_result {
+            let mut bag = match validation_result {
                 Err(errors) => ValidationErrors::from_validator_keyed(
                     errors,
                     crate::data::input_names::input_key::<Self>,
                 ),
-                Ok(()) => match data.after_validation() {
-                    Err(errs) => errs.rename_keys(crate::data::input_names::input_key::<Self>),
-                    Ok(()) => match data.after_validation_async().await {
-                        Err(errs) => errs.rename_keys(crate::data::input_names::input_key::<Self>),
-                        Ok(()) => ValidationErrors::new(),
-                    },
-                },
+                Ok(()) => ValidationErrors::new(),
             };
-            return Err(precognition_outcome(bag, &validate_only));
+            if let Some(only) = &validate_only {
+                bag = bag.retain_fields(only);
+            }
+            if !bag.is_empty() {
+                return Err(precognition_outcome(bag));
+            }
+            if let Err(errors) = data.after_validation() {
+                let bag = errors.rename_keys(crate::data::input_names::input_key::<Self>);
+                if !bag.is_empty() {
+                    return Err(precognition_outcome(bag));
+                }
+            }
+            if let Err(errors) = data.after_validation_async().await {
+                return Err(precognition_outcome(
+                    errors.rename_keys(crate::data::input_names::input_key::<Self>),
+                ));
+            }
+            return Err(FrameworkError::PrecognitionSuccess);
         }
 
         // Non-Precognition: standard flow. Same staged, bail-on-first
@@ -387,22 +375,62 @@ fn parse_json_with_route_inputs<T: DeserializeOwned>(
     parse_json(&bytes::Bytes::from(merged))
 }
 
-/// Collapse a (possibly empty) validation error bag into the Precognition
-/// outcome: filter to the `Precognition-Validate-Only` fields (when the
-/// client supplied a filter), then map an empty result to
-/// [`FrameworkError::PrecognitionSuccess`] (HTTP 204) and a non-empty one
-/// to [`FrameworkError::PrecognitionFailure`] (HTTP 422). An empty input
-/// bag - every validation stage passed - is always success.
-fn precognition_outcome(bag: ValidationErrors, validate_only: &[String]) -> FrameworkError {
-    let filtered = if validate_only.is_empty() {
-        bag
-    } else {
-        bag.retain_fields(validate_only)
-    };
-    if filtered.is_empty() {
+/// Answer from the errors of the stage that actually failed.
+fn precognition_outcome(bag: ValidationErrors) -> FrameworkError {
+    if bag.is_empty() {
         FrameworkError::PrecognitionSuccess
     } else {
-        FrameworkError::PrecognitionFailure(filtered)
+        FrameworkError::PrecognitionFailure(bag)
+    }
+}
+
+impl Request {
+    /// Read the selected input names so rules can use the extractor's selection.
+    ///
+    /// An absent header returns `None`. A present empty header returns an
+    /// empty list. Names are comma-separated, trimmed, and empty names are dropped.
+    pub fn validate_only(&self) -> Option<Vec<String>> {
+        self.header("Precognition-Validate-Only").map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
+    /// Match an input key so your own checks agree with Precognition's rules.
+    ///
+    /// An absent selection includes every key. Each `*` matches one non-empty
+    /// dotted segment. `tags.*` includes `tags.3`; `tags` includes only `tags`.
+    pub fn should_validate(&self, field: &str) -> bool {
+        self.validate_only().is_none_or(|only| {
+            only.iter()
+                .any(|name| crate::error::field_covers(name, field))
+        })
+    }
+
+    /// Extract validated input inline so raw-request handlers share form validation.
+    ///
+    /// Ordinary requests return the typed value. A marked request returns
+    /// `PrecognitionSuccess` or `PrecognitionFailure` for the response layer.
+    ///
+    /// ```rust
+    /// use suprnova::{Request, Response, request};
+    ///
+    /// #[request]
+    /// struct Signup {
+    ///     #[validate(email)]
+    ///     email: String,
+    /// }
+    ///
+    /// async fn signup(request: Request) -> Response {
+    ///     let input = request.validate::<Signup>().await?;
+    ///     suprnova::text(input.email)
+    /// }
+    /// ```
+    pub async fn validate<T: FormRequest>(self) -> Result<T, FrameworkError> {
+        T::extract(self).await
     }
 }
 

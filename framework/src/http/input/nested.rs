@@ -37,6 +37,8 @@ const MAX_DEPTH: usize = 64;
 
 /// The value one name holds.
 pub(super) enum Node<'a> {
+    /// A JSON body value or a JSON-encoded query object.
+    Json(serde_json::Value),
     /// A value as sent. An empty one is `null`.
     Text(Cow<'a, str>),
     /// A multipart text part whose bytes are not UTF-8, which no type
@@ -153,6 +155,23 @@ impl<'a> Array<'a> {
 }
 
 impl<'a> Node<'a> {
+    /// Decode the objects the official Precognition client puts in query values.
+    pub(super) fn decode_query_objects(&mut self) {
+        match self {
+            Self::Text(text) => {
+                if let Ok(value @ serde_json::Value::Object(_)) = serde_json::from_str(text) {
+                    *self = Self::Json(value);
+                }
+            }
+            Self::Array(array) => {
+                for node in array.entries.values_mut() {
+                    node.decode_query_objects();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The array this place holds, made one when it holds a value.
     fn make_array(&mut self) -> Option<&mut Array<'a>> {
         if !matches!(self, Self::Array(_)) {
@@ -160,7 +179,7 @@ impl<'a> Node<'a> {
         }
         match self {
             Self::Array(array) => Some(array),
-            Self::Text(_) | Self::NotUtf8 | Self::File(_) => None,
+            Self::Text(_) | Self::NotUtf8 | Self::File(_) | Self::Json(_) => None,
         }
     }
 }

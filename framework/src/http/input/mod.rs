@@ -24,6 +24,7 @@ mod json;
 mod multipart;
 mod nested;
 mod placeholder;
+mod precognitive;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -38,6 +39,7 @@ use crate::validation::message::ValidationMessage;
 pub(crate) use form::parse_form_input;
 pub(crate) use json::json_field_failures;
 pub(crate) use multipart::parse_multipart_input;
+pub(crate) use precognitive::parse_precognitive;
 
 use placeholder::Skeleton;
 
@@ -177,6 +179,8 @@ enum Recorded {
 /// runs.
 #[derive(Default)]
 struct Collector {
+    /// JSON reads may recover field shapes only during selected Precognition.
+    precognitive: bool,
     failures: RefCell<Vec<(String, Recorded)>>,
     /// The input names already recorded: a field is reported once, by the
     /// first failure found for it.

@@ -387,16 +387,14 @@ async fn precognition_runs_the_async_hook_on_the_default_path() {
     );
 }
 
-/// An array rule reports each element under its index. Asking about the
-/// array, or about its elements the way Laravel names the rule, keeps
-/// those errors; asking about another field drops them.
+/// Database rules in an after-hook keep their messages for every selection.
 #[tokio::test]
-async fn validate_only_keeps_the_errors_of_an_arrays_elements() {
+async fn precognition_validate_only_keeps_every_async_hook_error() {
     let _guard = TestContainer::fake();
     install_teams_db().await;
 
     let body = || serde_json::json!({ "team_id": 7, "tag_ids": [1, 3, 4] });
-    for fields in ["tag_ids", "tag_ids.*", "team_id,tag_ids"] {
+    for fields in ["tag_ids", "tag_ids.*", "team_id,tag_ids", "team_id", ""] {
         assert_eq!(
             precognition_keys(
                 extract::<AssignTagsDto>(&[], body(), Precognition::Only(fields)).await
@@ -405,9 +403,4 @@ async fn validate_only_keeps_the_errors_of_an_arrays_elements() {
             "{fields}"
         );
     }
-    let other = extract::<AssignTagsDto>(&[], body(), Precognition::Only("team_id")).await;
-    assert!(
-        matches!(other, Err(FrameworkError::PrecognitionSuccess)),
-        "got {other:?}"
-    );
 }

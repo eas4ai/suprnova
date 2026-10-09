@@ -169,10 +169,8 @@ async fn async_hook_runs_in_precognition_flow() {
 }
 
 #[tokio::test]
-async fn async_hook_errors_are_precognition_filtered() {
-    // Same failing async hook, but the client only asks about `email`
-    // (which is valid). The hook's `username` error is filtered out, so
-    // from the client's perspective the asked field is fine → 204.
+async fn precognition_async_hook_keeps_unlisted_messages() {
+    // A hook's message survives selection even when it names another field.
     let addr = spawn().await;
     let resp = post_json(
         addr,
@@ -183,17 +181,14 @@ async fn async_hook_errors_are_precognition_filtered() {
         ],
     )
     .await;
-    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.status(), 422);
+    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert!(body["errors"].as_object().unwrap().contains_key("username"));
 }
 
 #[tokio::test]
-async fn async_hook_is_skipped_when_a_sync_field_is_malformed() {
-    // The documented bail behavior: `extract()` runs stages in order and
-    // bails at the first failure, so a malformed `email` (sync) stops the
-    // pipeline before the async hook. The client asks about `username` -
-    // whose async check WOULD fail - yet the response is 204, because the
-    // async hook never ran. If it had run, `username` would be in the bag
-    // and survive the `username` filter → 422. 204 is the proof it bailed.
+async fn precognition_async_hook_runs_after_an_unlisted_derived_failure() {
+    // Selection removes the email failure before the async hook is chosen.
     let addr = spawn().await;
     let resp = post_json(
         addr,
@@ -204,9 +199,9 @@ async fn async_hook_is_skipped_when_a_sync_field_is_malformed() {
         ],
     )
     .await;
-    assert_eq!(
-        resp.status(),
-        204,
-        "async hook must not run when an earlier sync stage failed"
-    );
+    assert_eq!(resp.status(), 422);
+    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    let errors = body["errors"].as_object().unwrap();
+    assert!(errors.contains_key("username"));
+    assert!(!errors.contains_key("email"));
 }
