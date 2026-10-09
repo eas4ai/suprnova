@@ -1,0 +1,25 @@
+//! Integration tests for the `session` module: one binary per module,
+//! one former top-level test file per submodule (folded 2026-09-05).
+
+pub mod blocking;
+pub mod config_knobs;
+pub mod cookie_name_bound_aad;
+pub mod cookie_prefix_roundtrip;
+pub mod cookie_queue;
+pub mod custom_table;
+pub mod destroy_for_user;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
+pub mod facade;
+pub mod gc_loop;
+pub mod id_shape_validation;
+#[cfg(feature = "testing")]
+pub mod lazy_persistence;
+#[path = "../support/own_process.rs"]
+mod own_process;
+pub mod persistence_fail_closed;
+pub mod precognition;
+pub mod previous_url_open_redirect;
+pub mod store_container_binding;
