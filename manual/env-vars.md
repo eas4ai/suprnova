@@ -442,6 +442,7 @@ misconfiguration immediately instead of silently defaulting.
 | `HASH_ROUNDS` | `12` | `u32` | Bcrypt cost (range `4..=31`). Out-of-range values fail with a clear error. |
 | `HASH_MEMORY` | `65536` (64 MiB, KiB units) | `u32` | Argon2 memory in KiB. Minimum `8`. Argon-only. |
 | `HASH_TIME` | `4` | `u32` | Argon2 time / iterations. Minimum `1`. Argon-only. |
+| `ARGON_TIME` | Read when `HASH_TIME` is unset: the Argon2 time cost in iterations, minimum 1; `HASH_TIME` wins when both are set | `u32` | Argon2 time / iterations. Minimum `1`. Argon-only. |
 | `HASH_THREADS` | `1` | `u32` | Argon2 parallelism (matches OWASP / libsodium). Minimum `1`. Argon-only. |
 | `HASH_VERIFY` | `false` | `bool` | When true, `verify()` rejects hashes from a different algorithm than `HASH_DRIVER` (returns `Ok(false)`). Default `false` so legacy bcrypt hashes still verify after a driver flip until they're rotated. |
 | `HASH_MAX_CONCURRENCY` | the host's available parallelism | whole number, at least `1` | How many password hashes run at once in the process. `hash_async`, `verify_async` and Magnetar's sign-in hashing share the limit; work past it waits as a task holding no thread, so a burst of sign-ins holds at most the limit times one hash's memory. `0` or a value that is not a whole number fails with a clear error. A blank value is unset. |
