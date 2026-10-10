@@ -203,18 +203,26 @@ the migration's error.
 
 ### `migrate`
 
-`migrate` runs the migrations, schema dump included, on the connection
-it registers. There's no transaction around the test, so another
-connection sees its rows. When the helper drops, it rolls back the
-migrations it ran and no others, and the next `refresh` of the process
-migrates again. Use it for a test whose code must see committed rows
-from a second connection.
+`migrate` runs your pending migrations on the connection it registers,
+each through its `up`. There's no transaction around the test, so
+another connection sees its rows. Use it for a test whose code must see
+committed rows from a second connection.
+
+When the helper drops, it rolls back the migrations it ran and no
+others, and drops the migration table when it created it, so the
+database holds no table the helper created. The next `refresh` of the
+process migrates again.
+
+`migrate` never loads a schema dump, even into an empty database: a
+table that a dump creates has no `down` to remove it. A migrator whose
+migrations you pruned into a dump can't run them, so `migrate` returns
+an error that names the dump. Test that migrator with `refresh`, which
+loads the dump.
 
 When a migration fails, `migrate` rolls back the migrations that ran
 before it and returns the error. When the rollback on drop fails, the
 drop panics, so a test can't pass while it leaves its tables behind.
-Tables that a schema dump created stay, since a dump has nothing to
-roll back. Two `migrate` tests on one database must not run at once.
+Two `migrate` tests on one database must not run at once.
 
 ### Seed before the body
 
@@ -250,6 +258,10 @@ takes the same choices as keys: `refresh`, `seed`, and `seed = Path`.
   one database, and a migrated database stays valid between runs. To
   start from empty tables, run `migrate:fresh` on the test database
   before the run.
+- Laravel's `DatabaseMigrations` also runs `migrate:fresh`, which loads
+  the schema dump. `migrate` runs the pending migrations only and never
+  loads the dump, so every table it creates has a `down` that removes
+  it when the helper drops.
 - Laravel's `#[Seed]` seeds once per process, inside `migrate:fresh`,
   and the rows stay committed. `seed` runs in each test, inside its
   transaction, so a seeder that inserts rows doesn't add them again on
@@ -289,7 +301,8 @@ order:
 3. The SQLite connection itself drops, which destroys the in-memory
    database. For `refresh` and `refresh_lazily`, this step closes the
    test's connection and the database discards its transaction; for
-   `migrate`, it rolls the migrations back.
+   `migrate`, it rolls the migrations back and drops the migration
+   table when it created it.
 
 Because state is rebuilt rather than rolled back, the isolation is
 stronger than `BEGIN`/`ROLLBACK` wrapping: there is no committed
@@ -673,8 +686,8 @@ returns that same connection directly.
   `test!`, fakes.
 - [Database](database.md#testing) - the surface-level testing
   section that introduces `TestDatabase`.
-- [Migrations](migrations.md) - the `migrate` command and schema dumps
-  that `refresh` and `migrate` run.
+- [Migrations](migrations.md) - the migrations that `refresh` and
+  `migrate` run, and the schema dumps that `refresh` loads.
 - [Eloquent → Factories](eloquent-factories.md) - factory definition
   syntax, states, sequences, relations.
 - [Seeding](seeding.md) - seeder authoring, ordering, idempotency.
