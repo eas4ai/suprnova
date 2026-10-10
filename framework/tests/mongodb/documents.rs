@@ -29,7 +29,7 @@ use suprnova::{
     DocumentObserver, EventResult, FrameworkError, Mongo, MongoConfig, RouteBinding,
 };
 
-use suprnova::mongodb::__rendered_array_update;
+use suprnova::mongodb::{__rendered_array_update, __rendered_embedded_update};
 
 use crate::support::{database_of, test_url};
 
@@ -100,6 +100,16 @@ pub struct Stamped {
     pub tags: Vec<String>,
     pub created_at: Option<suprnova::bson::DateTime>,
     pub updated_at: Option<suprnova::bson::DateTime>,
+}
+
+/// A model without timestamps that embeds documents: its embedded
+/// relations send their operator alone.
+#[suprnova::document(collection = "m2_itineraries", timestamps = false)]
+pub struct Itinerary {
+    #[embeds_many]
+    pub stops: Vec<Address>,
+    #[embeds_one]
+    pub origin: Option<Address>,
 }
 
 /// A card that serializes only the fields `visible` lists.
@@ -245,6 +255,92 @@ fn an_array_update_on_the_key_an_unknown_field_or_another_operator_is_refused() 
     let error = __rendered_array_update::<Member, _>("$set", "tags", &"x", now)
         .expect_err("no array operator");
     assert!(names(&error, "`$set`"), "{error}");
+}
+
+#[test]
+fn the_embedded_relations_set_updated_at_in_the_same_update_on_a_model_with_timestamps() {
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    let address = doc! { "street": "2 Engine Row", "city": "Leeds" };
+
+    // `EmbedsMany::save` and `destroy`: the operator, and a `$set` of
+    // `updated_at` beside it.
+    for operator in ["$push", "$pull"] {
+        let update = __rendered_embedded_update::<Member>(
+            operator,
+            "addresses",
+            Bson::Document(address.clone()),
+            now,
+        )
+        .expect("render the update");
+        let mut expected = Document::new();
+        expected.insert(operator, doc! { "addresses": address.clone() });
+        expected.insert("$set", doc! { "updated_at": now });
+        assert_eq!(update, expected, "{operator}");
+    }
+
+    // `EmbedsMany::save_many`: one `$push` with `$each`.
+    let update = __rendered_embedded_update::<Member>(
+        "$push",
+        "addresses",
+        Bson::Document(doc! { "$each": [address] }),
+        now,
+    )
+    .expect("render save_many");
+    assert_eq!(
+        update,
+        doc! {
+            "$push": { "addresses": { "$each": [{ "street": "2 Engine Row", "city": "Leeds" }] } },
+            "$set": { "updated_at": now },
+        }
+    );
+
+    // `EmbedsOne::save`, `EmbedsOne::delete` and `EmbedsMany::clear` write
+    // with `$set`. An update holds one `$set`, so `updated_at` joins it and
+    // the embedded value stays.
+    let cases = [
+        ("profile", Bson::Document(doc! { "bio": "Analyst" })),
+        ("profile", Bson::Null),
+        ("addresses", Bson::Array(Vec::new())),
+    ];
+    for (field, value) in cases {
+        let update = __rendered_embedded_update::<Member>("$set", field, value.clone(), now)
+            .expect("render a `$set`");
+        let mut set = Document::new();
+        set.insert(field, value);
+        set.insert("updated_at", now);
+        let mut expected = Document::new();
+        expected.insert("$set", set);
+        assert_eq!(update, expected, "{field}");
+    }
+}
+
+#[test]
+fn the_embedded_relations_send_the_operator_alone_on_a_model_without_timestamps() {
+    assert_eq!(Itinerary::TIMESTAMPS, None);
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    let stop = doc! { "street": "3 Mill Lane", "city": "York" };
+    for (operator, field) in [("$push", "stops"), ("$pull", "stops"), ("$set", "origin")] {
+        let update = __rendered_embedded_update::<Itinerary>(
+            operator,
+            field,
+            Bson::Document(stop.clone()),
+            now,
+        )
+        .expect("render the update");
+        let mut set = Document::new();
+        set.insert(field, stop.clone());
+        let mut expected = Document::new();
+        expected.insert(operator, set);
+        assert_eq!(update, expected, "{operator}");
+    }
+}
+
+#[test]
+fn an_embedded_update_with_another_operator_is_refused_naming_it() {
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    let error = __rendered_embedded_update::<Member>("$addToSet", "addresses", Bson::Null, now)
+        .expect_err("no embedded-document operator");
+    assert!(names(&error, "`$addToSet`"), "{error}");
 }
 
 #[test]
@@ -804,26 +900,56 @@ async fn mongodb_embedded_documents_round_trip_and_their_relations_write() {
     let mut member = Member::create(member_with_email(email))
         .await
         .expect("create");
+    let created_at = member.created_at.expect("created_at is set");
+    let mut updated_at = member.updated_at.expect("updated_at is set");
+
+    // A BSON datetime holds milliseconds, so each write waits past one
+    // before it runs: an `updated_at` it set is then strictly later.
+    let advanced = |member: &Member, before: &mut suprnova::bson::DateTime, call: &str| {
+        let after = member.updated_at.expect("updated_at stays set");
+        assert!(
+            after > *before,
+            "{call} advances updated_at: {before:?} then {after:?}"
+        );
+        assert_eq!(
+            member.created_at,
+            Some(created_at),
+            "{call} keeps created_at"
+        );
+        *before = after;
+    };
+    let tick = || tokio::time::sleep(std::time::Duration::from_millis(5));
+
     let second = Address {
         street: "2 Engine Row".into(),
         city: "Leeds".into(),
     };
+    tick().await;
     member
         .addresses()
         .save(&second)
         .await
         .expect("save an embedded address");
     assert_eq!(member.addresses.len(), 2);
+    advanced(&member, &mut updated_at, "EmbedsMany::save");
     let found = Member::find(member.id).await.expect("find").expect("found");
     assert_eq!(found.addresses, member.addresses);
+    assert_eq!(
+        found.updated_at,
+        Some(updated_at),
+        "the server holds the new updated_at"
+    );
 
+    tick().await;
     member
         .addresses()
         .destroy(&second)
         .await
         .expect("remove it");
     assert_eq!(member.addresses.len(), 1);
+    advanced(&member, &mut updated_at, "EmbedsMany::destroy");
 
+    tick().await;
     member
         .profile()
         .save(&Profile {
@@ -831,6 +957,7 @@ async fn mongodb_embedded_documents_round_trip_and_their_relations_write() {
         })
         .await
         .expect("replace the profile");
+    advanced(&member, &mut updated_at, "EmbedsOne::save");
     assert_eq!(
         Member::find(member.id)
             .await
@@ -841,8 +968,10 @@ async fn mongodb_embedded_documents_round_trip_and_their_relations_write() {
             bio: "Analyst".into()
         })
     );
+    tick().await;
     member.profile().delete().await.expect("remove the profile");
     assert_eq!(member.profile, None);
+    advanced(&member, &mut updated_at, "EmbedsOne::delete");
 }
 
 #[tokio::test]

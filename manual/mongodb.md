@@ -406,10 +406,17 @@ it.
 ### Timestamps
 
 When the struct has both `created_at` and `updated_at`, the model manages
-them as BSON datetimes. `create` sets both, and `save`, `update`, `restore`,
-and `increment` set `updated_at`. A struct with only one of the two fields
-fails to compile. To turn the timestamps off, set `timestamps = false`. To
-rename the fields, set `created_at = "..."` and `updated_at = "..."`.
+them as BSON datetimes. `create` sets both, and so does a `save` that inserts
+the document. Every write through the model sets `updated_at`: `save`,
+`update`, `restore`, a soft `delete`, `increment`, `decrement`, `push`,
+`push_unique`, and `pull`, and the embedded relations' `save`, `save_many`,
+`destroy`, `clear`, and `delete`. Each call sets it in the same write as its
+change.
+
+A struct with only one of the two fields fails to compile.
+`timestamps = true` on a struct without the fields also fails to compile. To
+turn the timestamps off, set `timestamps = false`. To rename the fields, set
+`created_at = "..."` and `updated_at = "..."`.
 
 ### Soft deletes
 
