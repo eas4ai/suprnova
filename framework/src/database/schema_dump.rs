@@ -1166,10 +1166,18 @@ async fn run_tool(
     Ok(out.stdout)
 }
 
+/// Open the connection the migrate, fresh, dump and load paths work on. It
+/// goes through the framework's pool builder, not a bare SeaORM connect, so
+/// on MySQL and MariaDB it sends the configured character set and collation
+/// as it opens (PAR-135), the same way the application's own connections
+/// do; a migration then compares and stores text under the collation the
+/// tables it creates get.
 async fn connect(url: &str) -> Result<DatabaseConnection, FrameworkError> {
-    sea_orm::Database::connect(crate::database::config::driver_url(url).as_ref())
+    let config = crate::database::DatabaseConfig::builder().url(url).build();
+    let connection = crate::database::DbConnection::connect(&config)
         .await
-        .map_err(|e| FrameworkError::database(format!("could not connect to the database: {e}")))
+        .map_err(|e| FrameworkError::database(format!("could not connect to the database: {e}")))?;
+    Ok(connection.inner().clone())
 }
 
 /// Writes `contents` to `path` through a temporary file beside it, so an

@@ -349,3 +349,117 @@ async fn mysql_schema_create_takes_the_configured_collation() {
     assert_eq!(default, "utf8mb4_unicode_ci");
     assert_eq!(binary, "utf8mb4_bin");
 }
+
+/// One migration that writes the collation its own connection speaks, so a
+/// test can read back what the `migrate` command connected with.
+struct RecordCollation;
+
+impl sea_orm_migration::MigrationName for RecordCollation {
+    fn name(&self) -> &str {
+        "m20261009_000001_infra_gaps_record_collation"
+    }
+}
+
+#[async_trait::async_trait]
+impl sea_orm_migration::MigrationTrait for RecordCollation {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+        let db = manager.get_connection();
+        db.execute_unprepared(
+            "CREATE TABLE infra_gaps_migrator_collation (value VARCHAR(64) NOT NULL)",
+        )
+        .await?;
+        db.execute_unprepared(
+            "INSERT INTO infra_gaps_migrator_collation (value) SELECT @@collation_connection",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TABLE IF EXISTS infra_gaps_migrator_collation")
+            .await?;
+        Ok(())
+    }
+}
+
+struct RecordingMigrator;
+
+#[async_trait::async_trait]
+impl sea_orm_migration::MigratorTrait for RecordingMigrator {
+    fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+        vec![Box::new(RecordCollation)]
+    }
+
+    fn migration_table_name() -> sea_orm::DynIden {
+        use sea_orm::sea_query::IntoIden;
+        sea_orm::sea_query::Alias::new("infra_gaps_migrator_migrations").into_iden()
+    }
+}
+
+/// PAR-135: every connection the framework opens to the database sends the
+/// configured character set and collation, the one the `migrate` command
+/// runs on included. The migration records `@@collation_connection` as it
+/// runs; a migrate connection opened outside the pool builder would record
+/// the server's default instead of `utf8mb4_bin`. The command loads the
+/// environment before the runtime, as `#[suprnova::main]` does, so this is
+/// a plain test that builds its own runtime.
+#[test]
+#[serial_test::serial]
+#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+fn mysql_the_migrate_command_connects_with_the_configured_collation() {
+    let _env = crate::env_lock::lock_env();
+    let _snap = EnvSnapshot::capture(&["DATABASE_URL", "DB_CHARSET", "DB_COLLATION", "APP_ENV"]);
+    let url = mysql_url();
+    set_env("DATABASE_URL", Some(&url));
+    set_env("DB_CHARSET", None);
+    set_env("DB_COLLATION", Some("utf8mb4_bin"));
+    set_env("APP_ENV", Some("testing"));
+    suprnova::boot::load_env().expect("the environment loads before the runtime");
+
+    let recorded = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let probe = DbConnection::connect(&DatabaseConfig::builder().url(url.clone()).build())
+                .await
+                .expect("connect");
+            let cleanup = [
+                "DROP TABLE IF EXISTS infra_gaps_migrator_collation",
+                "DROP TABLE IF EXISTS infra_gaps_migrator_migrations",
+            ];
+            for sql in cleanup {
+                probe
+                    .inner()
+                    .execute_unprepared(sql)
+                    .await
+                    .expect("a clean start");
+            }
+
+            suprnova::Application::new()
+                .migrations::<RecordingMigrator>()
+                .run_with_args(["app", "migrate"])
+                .await
+                .expect("the migrate command runs");
+
+            let recorded = one_string(
+                probe.inner(),
+                "SELECT value FROM infra_gaps_migrator_collation",
+            )
+            .await;
+            for sql in cleanup {
+                probe
+                    .inner()
+                    .execute_unprepared(sql)
+                    .await
+                    .expect("cleanup");
+            }
+            recorded
+        });
+    assert_eq!(
+        recorded, "utf8mb4_bin",
+        "the migrate command's connection sends the configured collation"
+    );
+}

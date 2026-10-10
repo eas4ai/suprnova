@@ -1575,11 +1575,19 @@ where
             .map_err(|e| failed(format!("suprnova: server exited with error: {e}")))
     }
 
+    /// The connection the migrate commands run on. It is opened through
+    /// the framework's own pool builder, not a bare SeaORM connect, so it
+    /// carries the pool settings and, on MySQL and MariaDB, sends the
+    /// configured character set and collation when it opens (PAR-135): a
+    /// migration that compares or inserts text then uses the same
+    /// collation as the application's connection and the tables it makes.
     async fn get_database_connection() -> Result<sea_orm::DatabaseConnection, FrameworkError> {
-        let database_url = Self::database_url()?;
-        sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
+        Self::database_url()?;
+        let config = crate::database::DatabaseConfig::from_env();
+        let connection = crate::database::DbConnection::connect(&config)
             .await
-            .map_err(|e| failed(format!("suprnova: failed to connect to the database: {e}")))
+            .map_err(|e| failed(format!("suprnova: failed to connect to the database: {e}")))?;
+        Ok(connection.inner().clone())
     }
 
     /// `DATABASE_URL`, with a SQLite file created when it does not exist
