@@ -168,6 +168,16 @@ pub(crate) async fn migration_present_off_transaction() -> Result<bool, Framewor
     use sea_orm::ConnectionTrait as _;
 
     let connection = DB::get()?;
+    if connection.in_test_transaction() {
+        // Under `TestDatabase::refresh` the pool is one connection that holds
+        // the test's transaction, so there is no connection outside it to
+        // probe on, and on PostgreSQL the failed read would poison the
+        // test's own transaction. The catalog answers without failing.
+        return sea_orm_migration::SchemaManager::new(connection.inner())
+            .has_table("suprnova_render_epochs")
+            .await
+            .map_err(database_error);
+    }
     let backend = connection.inner().get_database_backend();
     let statement = sea_orm::Statement::from_sql_and_values(
         backend,

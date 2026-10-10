@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["1-component", "10-component", "100-component"]
