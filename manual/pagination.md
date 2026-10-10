@@ -315,12 +315,24 @@ The client passes the previous page's cursor through `?cursor=<opaque>`:
 GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 ```
 
-`cursor_paginate` decodes the cursor, walks the keyset filter
-(`pk > boundary ASC` for `next`; `pk < boundary DESC` for `prev`,
-reversed back to ASC), fetches `LIMIT n+1` rows, and re-emits
+`cursor_paginate` decodes the cursor, walks the keyset filter past the
+boundary in your query's order (for `prev`, in the reversed order, and
+then reverses the page back), fetches `LIMIT n+1` rows, and re-emits
 `next_cursor` / `prev_cursor` as the page's neighbours exist. It's
 bidirectional - the client can walk forward and back without losing
-its position.
+its position. With no `order_by`, the filter is `pk > boundary ASC` for
+`next` and `pk < boundary DESC` for `prev`.
+
+`cursor_paginate` keeps your query's order, as Laravel's
+`cursorPaginate` does. A descending order walks downward, so a list that
+starts with the newest row stays newest first on every page:
+
+```rust
+let page = User::query()
+    .latest() // ORDER BY created_at DESC
+    .cursor_paginate(20)
+    .await?;
+```
 
 Order by several columns to keep ties in your chosen order:
 
@@ -341,12 +353,13 @@ You carry every ordered column in a named map, with each value's SQL type.
 `Cursor::parameter(name)` returns `None` for a missing name. The boundary
 compares the first column, then the next column when the earlier values
 tie. You preserve mixed ascending and descending orders while moving in
-either direction. The builder adds the primary key when your multiple
-ordered columns do not include it, so ties have a stable final order.
-Select every ordered column and use non-null values. A missing cursor
-parameter, null boundary, or unsupported multi-column order expression
-returns an error. With zero or one explicit order, you keep the existing
-ascending primary-key cursor behavior.
+either direction. The builder adds the primary key, ascending, when
+your ordered columns do not include it, so ties have a stable final
+order: `latest()` walks `created_at DESC, id ASC`. Select every ordered
+column and use non-null values. A missing cursor parameter, a null
+boundary, or an order the cursor cannot carry (`order_by_raw`,
+`in_random_order`) returns a 400 error rather than a page in another
+order.
 An `OFFSET` on the builder positions the first page only, the page
 requested without a cursor. Every later page starts at its cursor, so
 an offset never skips rows between two pages.

@@ -393,6 +393,8 @@ impl ModelInput {
         // is ever registered under that name).
         let connection = attrs.connection;
         let timestamps_default = attrs.timestamps.unwrap_or(true);
+        // `timestamps = true` or the bare flag: the model asked for them.
+        let timestamps_explicit = attrs.timestamps == Some(true);
         let created_at = attrs.created_at.unwrap_or_else(|| "created_at".to_string());
         let updated_at = attrs.updated_at.unwrap_or_else(|| "updated_at".to_string());
         let soft_deletes = attrs.soft_deletes.unwrap_or(false);
@@ -541,6 +543,7 @@ impl ModelInput {
         //   ---------------------+----------------------+-----------------+---------
         //   timestamps = false   | disabled             | disabled        | disabled
         //   timestamps (default) | enabled              | compile_error!  | disabled
+        //   timestamps = true    | enabled              | compile_error!  | compile_error!
         //
         // The default-enabled case used to fail at compile time if the
         // struct lacked `created_at` / `updated_at` (the macro emitted
@@ -549,7 +552,10 @@ impl ModelInput {
         // opt-out ceremony for join tables / pivots / no-history models.
         // The exactly-one case still errors loudly because it's almost
         // certainly a typo (e.g. `craeted_at`) - silently skipping
-        // there would mask the bug.
+        // there would mask the bug. An explicit `timestamps = true` (or
+        // the bare flag) with neither column errors too, naming both, as
+        // `#[suprnova::document]` does: the model asked for managed
+        // timestamps, and turning them off would hide the missing fields.
         let field_names: std::collections::HashSet<String> = match &item.fields {
             syn::Fields::Named(named) => named
                 .named
@@ -579,6 +585,16 @@ impl ModelInput {
         } else {
             match (has_created, has_updated) {
                 (true, true) => true,
+                (false, false) if timestamps_explicit => {
+                    return Err(syn::Error::new_spanned(
+                        &item.ident,
+                        format!(
+                            "`timestamps = true` names no timestamp columns: add `{}` and \
+                             `{}`, or drop `timestamps = true`",
+                            created_at, updated_at,
+                        ),
+                    ));
+                }
                 (false, false) => false,
                 _ => {
                     return Err(syn::Error::new_spanned(
@@ -2111,6 +2127,39 @@ mod tests {
                 e.to_string().contains("only one of"),
                 "unexpected error message: {e}",
             ),
+        }
+    }
+
+    #[test]
+    fn explicit_timestamps_without_either_column_errors_naming_both() {
+        // `timestamps = true` and the bare flag ask for managed
+        // timestamps, so a struct with neither column is an error that
+        // names the columns, the renamed ones included.
+        for (attrs, created, updated) in [
+            (quote! { timestamps = true }, "created_at", "updated_at"),
+            (quote! { timestamps }, "created_at", "updated_at"),
+            (
+                quote! { timestamps, created_at = "made_at", updated_at = "changed_at" },
+                "made_at",
+                "changed_at",
+            ),
+        ] {
+            let result = ModelInput::parse(
+                attrs,
+                quote! { pub struct Pivot { pub id: i64, pub user_id: i64 } },
+            );
+            match result {
+                Ok(_) => panic!("expected the explicit-timestamps error, got Ok"),
+                Err(e) => {
+                    let message = e.to_string();
+                    assert!(
+                        message.contains("names no timestamp columns")
+                            && message.contains(&format!("`{created}`"))
+                            && message.contains(&format!("`{updated}`")),
+                        "unexpected error message: {message}",
+                    );
+                }
+            }
         }
     }
 

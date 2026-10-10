@@ -2794,6 +2794,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   breaks the HTTP/1 framing, and asserted on the mismatch in a debug
   build. The header is now dropped when the tag is added, and the server
   sends the tagged document's length (DT-02, DT-10).
+- **`where_relation` on a `MorphTo` relation matches the owners.**
+  `where_relation`, `where_relation_op` and `or_where_relation` on a
+  polymorphic owner relation built the generic probe, which has no table
+  to read, so they matched no row. They now go through the morph engine,
+  as `has` and `where_has` do: the condition runs against every owner
+  type the relation declares, under each owner's own scopes, as Laravel's
+  `whereRelation` reaches `hasMorph` through `whereHas` (PAR-121).
+- **`cursor_paginate` keeps the query's order.** A query with one
+  `order_by`, such as `latest()`, was paged by the primary key ascending,
+  so a newest-first list came back oldest first. Every ordering is now
+  kept and carried in the cursor: a descending order walks downward, the
+  primary key breaks ties, and a query with no order still walks the
+  primary key ascending. An ordering the cursor cannot carry, such as
+  `order_by_raw` alone, now fails with a 400 error instead of being
+  dropped (PAR-080).
+- **`#[model(timestamps = true)]` without the columns fails the build.**
+  An explicit `timestamps = true`, or the bare `timestamps` flag, on a
+  struct with neither `created_at` nor `updated_at` was accepted and
+  managed no timestamps. It is now a compile error that names both
+  columns, as `#[suprnova::document]` reports it. The default and
+  `timestamps = false` compile as before (PAR-183).
 
 ## 3.2.1 - 2026-10-05
 
