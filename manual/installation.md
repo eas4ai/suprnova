@@ -191,6 +191,12 @@ dependency in `Cargo.toml`:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
+A CLI built from a commit that is not a release, such as one you install
+from `main` between two releases, pins that commit instead, as
+`rev = "<commit hash>"`. Its templates can use framework API that the last
+release tag does not have yet, so the scaffold needs the framework from the
+same commit. Replace `rev` with a release `tag` when you move to a release.
+
 To pull the latest framework changes:
 
 ```bash

@@ -14,7 +14,7 @@
 //!   stage stubbing only one of two declared binaries all shipped.
 //!
 //! This test closes that gap: scaffold, build the image with the real
-//! Dockerfile and the real pinned git tag, then run the migrator inside
+//! Dockerfile and the real pinned git source, then run the migrator inside
 //! the resulting container. Nothing is rewritten - the point is to
 //! exercise what a user gets.
 //!
@@ -26,18 +26,21 @@
 //! cargo test -p suprnova-cli --test docker_scaffold -- --ignored --nocapture
 //! ```
 //!
-//! ## Why the pinned tag rather than the local tree
+//! ## Why the pinned git source rather than the local tree
 //!
 //! Docker cannot `COPY` from outside the build context, so a local-path
 //! dependency would mean vendoring the framework into the project and
 //! editing the generated Dockerfile to copy it - at which point the thing
 //! under test is no longer the Dockerfile we ship.
 //!
-//! Resolving the real `tag = "v<version>"` is also the more honest test:
-//! REL-01's finding was that *generated release artifacts do not match the
-//! released framework*, and this is the check that compares them. The tag
-//! is always the last released one at gate time, because `release.sh` runs
-//! the full gate before it bumps.
+//! Resolving the real pin is also the more honest test: REL-01's finding
+//! was that *generated release artifacts do not match the released
+//! framework*, and this is the check that compares them. `release.sh` runs
+//! the full gate before it bumps and tags, so at gate time the CLI is built
+//! from a commit that is not a release and pins that commit as
+//! `rev = "<hash>"` (PAR-080). The image then builds the framework the
+//! release will carry, fetched from GitHub, so that commit must be pushed
+//! first.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

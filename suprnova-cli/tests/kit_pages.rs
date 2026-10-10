@@ -16,6 +16,10 @@ mod backend {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use suprnova_cli::templates::{
+        BuildCommit, FrameworkPin, api, cargo_toml_pinned, framework_pin,
+    };
+
     const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
     const KITS: [&str; 3] = ["svelte", "react", "vue"];
@@ -768,6 +772,96 @@ mod backend {
             source.contains(r#"const EXPECTED_INERTIA_PIN: &str = "^3.8.0";"#),
             "scaffold_snapshot.rs must expect the `^3.8.0` pin"
         );
+    }
+
+    /// The `tag` and `rev` of the `suprnova` dependency and dev-dependency
+    /// of a scaffolded `Cargo.toml`, in that order.
+    fn framework_pins(manifest: &str) -> Vec<(Option<String>, Option<String>)> {
+        let table: toml::Table = manifest
+            .parse()
+            .unwrap_or_else(|e| panic!("the scaffold's Cargo.toml must parse: {e}\n{manifest}"));
+        ["dependencies", "dev-dependencies"]
+            .into_iter()
+            .map(|section| {
+                let suprnova = table
+                    .get(section)
+                    .and_then(|dependencies| dependencies.get("suprnova"))
+                    .unwrap_or_else(|| panic!("[{section}] must name suprnova:\n{manifest}"));
+                let key = |name: &str| {
+                    suprnova
+                        .get(name)
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned)
+                };
+                (key("tag"), key("rev"))
+            })
+            .collect()
+    }
+
+    /// The `tag` and `rev` a manifest written with `pin` carries.
+    fn pin_keys(pin: &FrameworkPin) -> (Option<String>, Option<String>) {
+        match pin {
+            FrameworkPin::Tag(tag) => (Some(tag.clone()), None),
+            FrameworkPin::Rev(rev) => (None, Some(rev.clone())),
+        }
+    }
+
+    /// PAR-080: the pin follows the facts the build recorded. A build from a
+    /// commit that is not the release writes that commit as `rev`, a build
+    /// from the release writes its tag, and a build git could not read
+    /// writes the tag. The dependency and the dev-dependency of the backend
+    /// and of the API starter carry the same pin, and never a `tag` beside
+    /// a `rev`.
+    #[test]
+    fn kit_an_untagged_build_pins_its_commit_and_a_tagged_build_pins_the_tag() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let tag = FrameworkPin::Tag("v4.0.0".to_owned());
+        let cases = [
+            (
+                Some(BuildCommit { sha, tagged: false }),
+                FrameworkPin::Rev(sha.to_owned()),
+            ),
+            (Some(BuildCommit { sha, tagged: true }), tag.clone()),
+            (None, tag),
+        ];
+        for (commit, want) in cases {
+            let pin = FrameworkPin::choose("v4.0.0", commit);
+            assert_eq!(pin, want, "the pin for {commit:?}");
+            for manifest in [
+                cargo_toml_pinned("kit_app", "A kit app", "", &pin),
+                api::cargo_toml_pinned("kit_api", "kit-api", &pin),
+            ] {
+                for found in framework_pins(&manifest) {
+                    assert_eq!(
+                        found,
+                        pin_keys(&want),
+                        "{commit:?}: the manifest must pin `{want}`; got:\n{manifest}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// PAR-080: a fresh scaffold compiles against the framework it pins,
+    /// so it pins the framework the CLI's templates were written for: the
+    /// commit the CLI was built from when that commit is not the release
+    /// `v<version>`, as on main between two releases, and the tag
+    /// otherwise. Both the dependency and the dev-dependency carry the pin
+    /// this build recorded.
+    #[test]
+    fn kit_scaffold_pins_the_framework_the_cli_was_built_from() {
+        let pin = framework_pin();
+        let want = pin_keys(&pin);
+        each_kit(|app| {
+            let manifest = app.read("Cargo.toml");
+            for found in framework_pins(&manifest) {
+                assert_eq!(
+                    found, want,
+                    "{}: the scaffold must pin the framework at `{pin}`; got:\n{manifest}",
+                    app.kit
+                );
+            }
+        });
     }
 }
 
