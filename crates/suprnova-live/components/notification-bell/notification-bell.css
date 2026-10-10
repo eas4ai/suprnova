@@ -1,0 +1,50 @@
+@layer suprnova-ui {
+  .sn-bell {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sn-space-2);
+    padding: var(--sn-space-1) var(--sn-space-3);
+    border-radius: var(--sn-radius-full);
+    color: var(--sn-color-text);
+    text-decoration: none;
+  }
+
+  .sn-bell:hover {
+    background: var(--sn-color-surface-sunken);
+  }
+
+  .sn-bell:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-bell-count {
+    padding: 0 var(--sn-space-2);
+    border-radius: var(--sn-radius-full);
+    background: var(--sn-color-accent);
+    color: var(--sn-color-on-accent);
+    font-size: var(--sn-font-size-sm);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sn-bell-count[data-sn-count="0"] {
+    background: var(--sn-color-surface-sunken);
+    color: var(--sn-color-text-muted);
+  }
+
+  .sn-bell-status {
+    display: inline-block;
+    color: var(--sn-color-text-muted);
+    font-size: var(--sn-font-size-sm);
+  }
+
+  [data-live-stream-state="degraded"] .sn-bell-status,
+  [data-live-stream-state="reconnecting"] .sn-bell-status,
+  [data-live-stream-state="closed"] .sn-bell-status {
+    color: var(--sn-color-warning);
+  }
+
+  [data-live-stream-state="current"] .sn-bell-status {
+    color: var(--sn-color-success);
+  }
+}
