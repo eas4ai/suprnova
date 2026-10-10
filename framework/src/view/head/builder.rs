@@ -9,6 +9,7 @@
 use serde_json::Value;
 
 use super::schema::Schema;
+use crate::FrameworkError;
 
 /// Where a tag applies: a color scheme, an orientation, or any media query.
 /// Laravel Head's `Media` enum, with a custom query as a variant.
@@ -601,14 +602,75 @@ impl LinkTag {
 
     /// Add an attribute, such as `type` or `title`. A later one with the
     /// same name replaces it.
-    pub fn attribute(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    ///
+    /// The value is escaped when the tag is written, but a name is written
+    /// as it is, so a name that is not a valid HTML attribute name (see
+    /// [`Self::try_attribute`]) could end the tag and open another element.
+    /// Such a name is dropped with a warning in the log; call
+    /// [`Self::try_attribute`] to get the refusal as an error.
+    pub fn attribute(self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
-        let value = value.into();
+        if let Some(reason) = attribute_name_problem(&name) {
+            tracing::warn!(
+                name = ?name,
+                reason,
+                "a link attribute with an invalid name was dropped"
+            );
+            return self;
+        }
+        self.set_attribute(name, value.into())
+    }
+
+    /// Add an attribute, as [`Self::attribute`] does, or refuse a name
+    /// that is not a valid HTML attribute name. A valid name starts with an
+    /// ASCII letter and holds only ASCII letters, digits, `-`, `_`, `:` and
+    /// `.`, so it can never hold whitespace, a quote, `>`, `/`, `=` or a
+    /// control character. Use it when the name comes from data, such as a
+    /// CMS field, rather than from your code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error that names the attribute and the reason when the
+    /// name is not a valid HTML attribute name.
+    pub fn try_attribute(
+        self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, FrameworkError> {
+        let name = name.into();
+        match attribute_name_problem(&name) {
+            Some(reason) => Err(FrameworkError::internal(format!(
+                "the link attribute name {name:?} is not a valid HTML attribute name: {reason}"
+            ))),
+            None => Ok(self.set_attribute(name, value.into())),
+        }
+    }
+
+    fn set_attribute(mut self, name: String, value: String) -> Self {
         match self.attributes.iter_mut().find(|(key, _)| *key == name) {
             Some(slot) => slot.1 = value,
             None => self.attributes.push((name, value)),
         }
         self
+    }
+}
+
+/// Why `name` is not a valid HTML attribute name, or `None` when it is.
+///
+/// The rule is narrower than the HTML syntax allows: an ASCII letter, then
+/// ASCII letters, digits, `-`, `_`, `:` and `.`. Every attribute a head tag
+/// needs fits it, and a name that fits it cannot end the tag, start a
+/// value, or open another element, whatever the parser.
+pub(super) fn attribute_name_problem(name: &str) -> Option<&'static str> {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => Some("the name is empty"),
+        Some(first) if !first.is_ascii_alphabetic() => {
+            Some("the name must start with an ASCII letter")
+        }
+        Some(_) => chars
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+            .then_some("the name may hold only ASCII letters, digits, `-`, `_`, `:` and `.`"),
     }
 }
 

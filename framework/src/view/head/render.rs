@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-use super::builder::{HeadData, Hint, Icon, OgMedia};
+use super::builder::{HeadData, Hint, Icon, OgMedia, attribute_name_problem};
 use crate::inertia::escape_html_attr;
 
 /// What an element holds between its tags.
@@ -84,6 +84,16 @@ impl Tag {
                 .any(|(name, value)| name == "name" && value.as_deref() == Some("viewport"))
     }
 
+    /// The attributes that are written. A name is written as it is, not
+    /// escaped, so one that is not a valid HTML attribute name is left out
+    /// here as well as where the application supplies it: a name that ends
+    /// the tag must never reach the page or the data.
+    fn written_attributes(&self) -> impl Iterator<Item = &(String, Option<String>)> {
+        self.attributes
+            .iter()
+            .filter(|(name, _)| attribute_name_problem(name).is_none())
+    }
+
     /// The element as HTML, with its `data-inertia` key when `keyed`.
     pub(super) fn html(&self, keyed: bool) -> String {
         let mut html = format!("<{}", self.element);
@@ -92,7 +102,7 @@ impl Tag {
             html.push_str(&escape_html_attr(&self.key));
             html.push('"');
         }
-        for (name, value) in &self.attributes {
+        for (name, value) in self.written_attributes() {
             html.push(' ');
             html.push_str(name);
             if let Some(value) = value {
@@ -125,8 +135,7 @@ impl Tag {
             Value::String(self.element.to_string()),
         );
         let attributes: Map<String, Value> = self
-            .attributes
-            .iter()
+            .written_attributes()
             .map(|(name, value)| {
                 (
                     name.clone(),
@@ -453,5 +462,28 @@ fn twitter_tags(data: &HeadData, tags: &mut Vec<Tag>) {
         if let Some(value) = value {
             tags.push(Tag::meta(name, name, value));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tag_leaves_out_an_attribute_name_that_could_end_it() {
+        let tag = Tag::new("link:x", "link")
+            .attr("rel", "alternate")
+            .attr("x><script>alert(1)</script><link x", "v")
+            .flag("a b")
+            .attr("hreflang", "fr");
+        let html = tag.html(true);
+        assert_eq!(
+            html,
+            "<link data-inertia=\"link:x\" rel=\"alternate\" hreflang=\"fr\">"
+        );
+        let data = tag.data();
+        let attributes = data["attributes"].as_object().expect("the attributes");
+        assert_eq!(attributes.len(), 2, "{data}");
+        assert!(attributes.contains_key("rel") && attributes.contains_key("hreflang"));
     }
 }

@@ -32,6 +32,9 @@ pub(crate) struct Visit {
     http_host: Option<String>,
     /// The public root a `Referer` path must sit under.
     public_root: String,
+    /// The request's path, which with the public root gives the request's
+    /// URL to code that runs without the request, such as `Head::canonical`.
+    path: String,
     /// The component the page render answered with, when one rendered.
     rendered_component: Mutex<Option<String>>,
     /// The application's middleware hooks, when it installed any.
@@ -53,6 +56,7 @@ impl Visit {
             referer: request.header("Referer").map(str::to_string),
             http_host: request.http_host(),
             public_root: request.public_root().to_string(),
+            path: request.path().to_string(),
             rendered_component: Mutex::new(None),
             hooks: None,
             hooks_location: None,
@@ -124,6 +128,17 @@ pub(crate) async fn scope<F: std::future::Future>(visit: Arc<Visit>, fut: F) -> 
 /// not pass through it.
 pub(crate) fn current() -> Option<Arc<Visit>> {
     VISIT.try_with(Arc::clone).ok()
+}
+
+/// The absolute URL of the request in scope without its query, as
+/// [`crate::routing::url::current`] gives it, or `None` outside a
+/// dispatched request. The server scopes a visit around every request it
+/// dispatches through the middleware chain, so a handler on any route can
+/// name its own URL without holding the request.
+pub(crate) fn request_url() -> Option<String> {
+    VISIT
+        .try_with(|visit| crate::routing::url::current_at(&visit.public_root, &visit.path))
+        .ok()
 }
 
 /// The `version` hook's answer for the request in scope, which the version
