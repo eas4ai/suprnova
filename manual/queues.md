@@ -1967,8 +1967,12 @@ for job in &pending {
 listings still report a row whose `payload` failed to decode - as
 `id: None` and `payload: {"unparseable": true}` - rather than dropping it
 and hiding a poison job from whoever is looking; `Queue::fake()`'s
-projection never records a dispatch timestamp separate from
-`available_at`, so `created_at` is always `None` there.
+pending and delayed projections never record a dispatch timestamp
+separate from `available_at`, so `created_at` is always `None` there.
+
+Under `Queue::fake()`, `Queue::reserved_jobs` reads no driver. It lists the
+reservations workers made from the fake, each built from the envelope the
+worker reserved. See [Run a worker on the fake](#run-a-worker-on-the-fake).
 
 On the memory driver, `delayed_size()` reads the delayed store's length
 directly, while `delayed_jobs()` and `pending_jobs()` first promote any
@@ -2213,6 +2217,9 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 ```
 
 You assert absence with `assert_not_pushed::<J>(|job| job.id == 7)`.
+`pushed::<J>()` and `assert_not_pushed` fail, naming the job and the decode
+error, when a recorded payload of `J` doesn't decode as `J`, so neither passes
+over a push it can't read. `try_pushed::<J>()` returns the error instead.
 You filter a queue and its job together with
 `assert_pushed_on_queue::<J>("emails", |job| job.id == 7)`. You pass
 `|_| true` when you only need to check the queue. You match the per-push
@@ -2327,6 +2334,51 @@ reaches the real queue, and any other link is recorded and does not run. A
 raw push is always recorded, whatever `except` names, because a raw payload is
 not a job type.
 
+### Run a worker on the fake
+
+`fake.driver()` returns a `QueueDriver` over the fake. A worker you run on it
+reserves the recorded pushes and runs them, and the fake records each
+reservation:
+
+```rust
+use suprnova::queue::testing::reserved;
+use suprnova::{Queue, WorkerControls, run_worker_with_controls};
+use tokio_util::sync::CancellationToken;
+
+let fake = Queue::fake();
+send_invoices().await?;
+
+let controls = WorkerControls { stop_when_empty: true, ..Default::default() };
+run_worker_with_controls(fake.driver(), Default::default(), controls, CancellationToken::new())
+    .await?;
+
+let invoices: Vec<SendInvoice> = reserved::<SendInvoice>();
+let records = Queue::reserved_jobs(None).await?;
+```
+
+The driver follows these rules:
+
+- It reserves the recorded pushes in push order, each once it is due, and
+  filters by queue as the memory driver does.
+- Each envelope is the one a real push builds: the job's own retry policy,
+  the per-push overrides and the pusher's context, on the queue the fake
+  recorded.
+- A reservation lasts until the worker settles it. There is no visibility
+  timeout. An `ack` takes the job off the fake's queue. A `nack` puts it back
+  with one more attempt, and a `release` puts it back without one.
+- A push to the driver, such as the next link of a chain, is recorded as a
+  push. A raw push stays apart from the typed pushes, and the driver doesn't
+  reserve it.
+- The push records never change, so `pushed` still lists a job after a worker
+  ran it.
+
+`reserved::<J>()` returns every reservation of `J`, one entry per reservation,
+so a job the worker retried once is listed twice. `Queue::reserved_jobs(queue)`
+lists the same records as `InspectedJob`s, filtered by queue, and keeps them
+after the jobs settle. `try_reserved::<J>()` returns a decode error as
+`try_pushed` does. Once the guard drops, every method of the driver returns an
+error.
+
 ### Raw pushes under the fake
 
 Under the fake, [`Queue::push_raw`](#raw-pushes) records its payload and writes
@@ -2358,6 +2410,12 @@ assert only typed pushes with it; raw payloads remain separate. Laravel's
 `QueueFake` does not record batches at all, so it has no rule for a batch
 that mixes excepted and faked jobs; here the batch is recorded and each job
 goes where `except` sends it.
+
+Laravel's `QueueFake` restores a job from its serialized form only after
+`serializeAndRestore()`, and its `pop` returns nothing, so a test marks a job
+reserved by hand with `Queue::reserve($job)`. Suprnova records every push as
+JSON and decodes it on every read, so a payload that doesn't decode always
+fails the read. A real worker makes the reservations, through `fake.driver()`.
 
 ## Idempotency is the contract between the worker and you
 

@@ -205,6 +205,8 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_with(name, \|q\| …)`   | a queued mailable matches the predicate             |
 | `fake.assert_queued_to("…")`               | a queued mailable was routed to email               |
 | `fake.assert_not_queued("MailableName")`   | no queued mailable of this name                     |
+| `fake.assert_queued_mailable::<M>(\|m\| pred)` | a queued mailable of type `M` matches         |
+| `fake.assert_not_queued_mailable::<M>(\|m\| pred)` | no queued mailable of type `M` matches    |
 | `fake.assert_queued_count(n)`              | exactly `n` queued mailables                        |
 | `fake.queued_on("…")`                      | queued mailables routed to a queue                  |
 | `fake.assert_queued_on(name, "…")`         | a queued mailable of this name routed to a queue    |
@@ -238,6 +240,38 @@ even when `Queue::fake` isn't installed.
 `QueuedSnapshot::connection` - the `.on_connection(...)` override, if
 any - the same field `Queue::fake`'s `assert_pushed_on_connection` reads
 on the plain-job path below, so the two fakes stay symmetric.
+
+You read queued mailables back as their own type, as Laravel's
+`MailFake::queued` does with a class and a closure.
+`fake.queued_of::<M>()` rebuilds every queued mailable of type `M` from
+its payload, in queue order, and `fake.queued_where::<M>(|m| pred)`
+returns the ones the filter accepts:
+
+```rust,ignore
+let fake = Mail::fake();
+Mail::queue(Welcome { name: "Ada".into() }).await?;
+
+let queued: Vec<Welcome> = fake.queued_of::<Welcome>();
+assert_eq!(queued[0].name, "Ada");
+fake.assert_queued_mailable::<Welcome>(|m| m.name == "Ada");
+fake.assert_not_queued_mailable::<Welcome>(|m| m.name == "Eve");
+```
+
+A payload that doesn't rebuild as `M` fails the call with a message that
+names the mailable and the decode error. It isn't left out, so
+`assert_not_queued_mailable` never passes over a mailable it can't read.
+`fake.try_queued_of::<M>()` and `fake.try_queued_where::<M>(...)` return
+that error instead of panicking. `fake.queued()` still returns the
+`QueuedSnapshot` list.
+
+### Why Suprnova diverges
+
+Laravel's `assertQueued` and `assertNotQueued` take a class name, a
+closure, or both. Rust has no overloading, and `assert_queued(name)` and
+`assert_not_queued(name)` keep the signature they shipped with. The
+typed forms are `assert_queued_mailable::<M>` and
+`assert_not_queued_mailable::<M>`, as `has_sent_mailable::<M>` sits
+beside `has_sent`.
 
 ## Notifications - `Notify::fake()`
 
@@ -322,7 +356,13 @@ async fn order_placed_enqueues_charge() {
 
 The data side returns the typed jobs themselves:
 
-- `pushed::<J>() -> Vec<J>` - every captured push of `J`
+- `pushed::<J>() -> Vec<J>` - every captured push of `J`. A payload that
+  doesn't decode as `J` fails the call with a message that names the job
+  and the decode error, instead of being left out. `try_pushed::<J>()`
+  returns that error.
+- `reserved::<J>() -> Vec<J>` - every reservation of `J` a worker made
+  through `fake.driver()`, one entry per reservation. `try_reserved::<J>()`
+  returns the decode error, as `try_pushed` does.
 - `pushed_with_available_at::<J>() -> Vec<(J, DateTime<Utc>)>` - same,
   with each job's scheduled timestamp
 - `pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` - same,
@@ -377,6 +417,26 @@ An excepted job is pushed exactly as it is without the fake, so install the
 driver it should reach first, for example `SyncQueueDriver` to run it inline.
 See [Queues](queues.md#letting-some-jobs-through) for how batches, chains and
 raw pushes behave under `except`.
+
+To run the recorded jobs, pass `fake.driver()` to a worker. The fake records
+each reservation the worker makes, and `Queue::reserved_jobs` answers from
+those records instead of reading a driver:
+
+```rust,ignore
+use suprnova::queue::testing::reserved;
+use suprnova::{Queue, WorkerControls, run_worker_with_controls};
+
+let fake = Queue::fake();
+place_order(42).await?;
+
+let controls = WorkerControls { stop_when_empty: true, ..Default::default() };
+run_worker_with_controls(fake.driver(), Default::default(), controls, Default::default()).await?;
+
+assert_eq!(reserved::<ChargeCustomerJob>()[0].order_id, 42);
+assert_eq!(Queue::reserved_jobs(None).await?.len(), 1);
+```
+
+See [Queues](queues.md#run-a-worker-on-the-fake) for what the driver does.
 
 ## Bus - `Bus::fake()`
 
