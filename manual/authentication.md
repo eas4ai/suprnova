@@ -542,9 +542,11 @@ Auth::extend("api_key", |_name, provider| {
 
 The factory has the type
 `Fn(&str, Arc<dyn UserProvider>) -> Result<Arc<dyn Guard>, FrameworkError>`.
-The manager builds a guard each time you resolve it, so the factory runs
-on every `Auth::guard("partner")`. Keep the state of a guard in
-request-scoped state, not in the guard value.
+Inside a request the manager builds one instance per guard name and keeps
+it for that request, so the factory runs once per request and a guard may
+keep its user on the instance; outside a request each `Auth::guard("partner")`
+builds a fresh one. State that must outlive the request still belongs in
+the session or your own store, not in the guard value.
 
 If you resolve a guard whose driver has no factory, you get an error
 that names the guard and the driver and tells you to call

@@ -33,9 +33,11 @@ pub struct AuthMiddleware {
     redirect_to: Option<String>,
     /// Let anonymous requests continue without principal evidence.
     optional: bool,
-    /// Named guard to check (None = the sync session-backed default-guard
-    /// fast path, or the default guard itself when it is a guard of the
-    /// application; `Some(name)` checks that guard via the `AuthManager`).
+    /// Named guard to check (None = the guard in use: the one a test client
+    /// selected with `acting_as_with_guard`, else the sync session-backed
+    /// default-guard fast path, or the default guard itself when it is a
+    /// guard of the application; `Some(name)` checks that guard via the
+    /// `AuthManager`).
     guard: Option<String>,
 }
 
@@ -142,15 +144,17 @@ impl Middleware for AuthMiddleware {
         // session slot to clear. A guard of `Auth::via_request` gets its
         // resolver's answer bound first.
         //
-        // Without a guard name, a custom default guard is asked the same
-        // way: the session fast path below would decide from an identity
-        // that guard never reads, and attest a different one.
-        let custom_default = match &self.guard {
+        // Without a guard name, the guard in use is asked the same way when
+        // it is not the configured default guard (a test client selected it,
+        // as Laravel's `shouldUse` does), and so is a custom default guard:
+        // the session fast path below would decide from the default guard's
+        // identity, which neither guard reads, and attest a different one.
+        let unnamed = match &self.guard {
             Some(_) => None,
-            None => Auth::custom_default_guard(),
+            None => Auth::used_guard().or_else(Auth::custom_default_guard),
         };
         let mut guard_principal = None;
-        let authenticated = match self.guard.as_deref().or(custom_default.as_deref()) {
+        let authenticated = match self.guard.as_deref().or(unnamed.as_deref()) {
             Some(name) => {
                 let manager = Auth::manager()?;
                 manager.resolve_request_guard(name, &request).await?;
@@ -270,8 +274,10 @@ impl Middleware for AuthMiddleware {
 pub struct GuestMiddleware {
     /// Path to redirect to if authenticated
     redirect_to: String,
-    /// Named guard to check (None = the sync session-backed default-guard
-    /// fast path; `Some(name)` checks that guard via the `AuthManager`).
+    /// Named guard to check (None = the guard in use: the one a test client
+    /// selected with `acting_as_with_guard`, else the sync session-backed
+    /// default-guard fast path; `Some(name)` checks that guard via the
+    /// `AuthManager`).
     guard: Option<String>,
 }
 
@@ -313,11 +319,13 @@ impl Default for GuestMiddleware {
 #[async_trait]
 impl Middleware for GuestMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        let is_guest = match &self.guard {
+        // Without a guard name, the guard in use is asked when it is not the
+        // configured default guard, as the auth middleware asks it.
+        let is_guest = match self.guard.clone().or_else(Auth::used_guard) {
             Some(name) => {
                 let manager = Auth::manager()?;
-                manager.resolve_request_guard(name, &request).await?;
-                manager.guard(name)?.guest().await?
+                manager.resolve_request_guard(&name, &request).await?;
+                manager.guard(&name)?.guest().await?
             }
             None => Auth::guest(),
         };

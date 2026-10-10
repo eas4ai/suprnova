@@ -201,9 +201,18 @@ other `Authenticatable` that is `Clone` is cloned, and an
 `acting_as_with_guard(&user, "api")` signs the user in through the named
 guard instead, as `actingAs($user, 'api')` does. A route behind
 `AuthMiddleware::new().for_guard("api")` answers as the user, and
-`Auth::guard("api")` reports the user. The default guard gets no user
-unless you name it. A token guard also reports the user's id through
-`Auth::id()`, as it does for a request that sent a valid bearer token.
+`Auth::guard("api")` reports the user. The named guard is also the guard
+in use for every request the client sends, as `actingAs` calls
+`shouldUse('api')`: `Auth::user()`, `Auth::id()`, `Auth::check()` and
+`AuthMiddleware::new()` answer through it. The configured default guard
+holds no user unless you name it.
+
+The auth manager keeps one instance of each guard for the length of a
+request, so a guard you register with `Auth::extend` that keeps its user
+on the instance answers the middleware and the handler with the user the
+client set on it. `Auth::id()` and `Auth::check()` do not wait, so they
+cannot ask such a guard: when it is the guard in use, they report nobody,
+and you ask `Auth::user()` or `Auth::guard(name)` instead.
 
 The client looks the guard up when a request runs, so an `AuthManager`
 the test registers after building the client is the one it uses. A
@@ -240,14 +249,16 @@ calls do. Laravel keeps both on the test case. Clone the client first
 when you still need it without them. `flush_headers` changes the client
 in place, so it takes `&mut self`.
 
-Laravel's `actingAs($user, 'api')` also makes `api` the default guard
-for the rest of the test (`shouldUse`), so `Auth::user()` answers through
-it. Suprnova signs the user in through the named guard only:
-`Auth::user()` keeps asking the default guard, and the user stays out of
-it. A test that names a guard then proves that the route checks that
-guard. Laravel throws for an undefined guard when `actingAs` runs;
-Suprnova fails the request instead, because the guard registry belongs
-to the container the request runs in.
+Laravel's `shouldUse('api')` changes the application's default guard
+for the rest of the test. Suprnova selects the guard for the requests of
+the client that names it: the application's configured default guard is
+untouched outside those requests, and another client on the same
+application starts from it. Only the reads follow the selected guard.
+`Auth::login`, `Auth::logout`, `Auth::set_user` and the other functions
+that sign a user in or out still act on the configured default guard,
+where Laravel's act on `api`. Laravel throws for an undefined guard when
+`actingAs` runs; Suprnova fails the request instead, because the guard
+registry belongs to the container the request runs in.
 
 ## The hyper body problem
 

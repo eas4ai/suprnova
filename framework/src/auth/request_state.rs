@@ -35,6 +35,14 @@
 //!    keyed by guard name. The middleware that takes the guard's name binds
 //!    it once per request; only the guard of that name reads it.
 //!
+//! Two slots name guards rather than identities. The **guard in use** is
+//! the guard the facade without a guard name answers through when it is
+//! not the configured default guard, Laravel's `shouldUse`: a test client
+//! that signs a user in with `acting_as_with_guard` selects it for each of
+//! its requests. The **guard instances** are the instances the auth manager
+//! built this request, one per guard name, so a guard that keeps its user on
+//! the instance answers every resolution in the request with that user.
+//!
 //! Session guard identities and remember provenance are keyed by the complete
 //! guard name. The generic slots remain the compatibility view used by
 //! [`crate::Auth`] and are mirrored only from the configured default guard.
@@ -51,6 +59,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::authenticatable::Authenticatable;
+use super::config::AuthConfig;
+use super::contract::Guard;
 
 struct ActiveRememberCarrier {
     guard: String,
@@ -97,6 +107,25 @@ struct AuthRequestState {
     /// this guard for the user, as Laravel's `can` middleware asks the guard
     /// that `auth:<guard>` selected.
     route_guard: Option<String>,
+    /// The guard the facade without a guard name answers through this
+    /// request, by name, as Laravel's `shouldUse` selects it; `None` for the
+    /// configured default guard.
+    used_guard: Option<String>,
+    /// The guard instances the auth manager built this request.
+    guard_instances: Vec<GuardInstance>,
+}
+
+/// One guard instance the auth manager built this request.
+struct GuardInstance {
+    /// The configuration of the manager that built it. Two managers never
+    /// share one configuration allocation, and holding it keeps its address
+    /// from being reused by another manager while the entry lives, so the
+    /// pointer identifies the manager.
+    config: Arc<AuthConfig>,
+    /// The guard's name.
+    name: String,
+    /// The instance every resolution of the guard in this request returns.
+    guard: Arc<dyn Guard>,
 }
 
 tokio::task_local! {
@@ -341,18 +370,98 @@ pub(crate) fn request_guard_user(guard_name: &str) -> Option<Arc<dyn Authenticat
 /// Clear every authentication identity and provenance slot in this request.
 ///
 /// The `via_request` bindings are forgotten but stay resolved, for the reason
-/// `forget_request_guard_users` gives. The route's guard stays: a logout ends
-/// the identity, not the guard the route checks, so a later `#[authorize]`
-/// finds no user on that guard instead of asking the default guard.
+/// `forget_request_guard_users` gives. The route's guard and the guard in use
+/// stay: a logout ends the identity, not the guard the route checks, so a
+/// later `#[authorize]` finds no user on that guard instead of asking the
+/// default guard. The guard instances go, with any user a guard keeps on its
+/// instance; the next resolution builds a new one.
 pub(crate) fn clear_all_authentication() {
-    let _ = AUTH_STATE.try_with(|state| {
+    // The instances are dropped after the lock is released, so a guard whose
+    // drop reads the request's auth state cannot wait on the lock it holds.
+    let _instances = AUTH_STATE.try_with(|state| {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         let resolved = std::mem::take(&mut state.request_guard_users);
         let route_guard = state.route_guard.take();
+        let used_guard = state.used_guard.take();
+        let instances = std::mem::take(&mut state.guard_instances);
         *state = AuthRequestState::default();
         state.request_guard_users = resolved.into_keys().map(|name| (name, None)).collect();
         state.route_guard = route_guard;
+        state.used_guard = used_guard;
+        instances
     });
+}
+
+/// Make the guard `guard_name` the guard the facade without a guard name
+/// answers through for the rest of this request, as Laravel's `shouldUse`
+/// does. The test client calls it for a user it signs in through a named
+/// guard.
+///
+/// No-op outside a request scope, matching the other setters.
+pub(crate) fn set_used_guard(guard_name: &str) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .used_guard = Some(guard_name.to_owned());
+    });
+}
+
+/// The guard [`set_used_guard`] selected for this request, by name, or
+/// `None` (also outside a request scope).
+pub(crate) fn used_guard() -> Option<String> {
+    read_state(|state| state.used_guard.clone()).flatten()
+}
+
+/// The instance of the guard `guard_name` that the manager whose
+/// configuration is `config` built this request, if it built one.
+///
+/// A guard instance names no identity, so this read is not an identity read.
+/// `None` outside a request scope.
+pub(crate) fn guard_instance(config: &Arc<AuthConfig>, guard_name: &str) -> Option<Arc<dyn Guard>> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .guard_instances
+                .iter()
+                .find(|instance| {
+                    Arc::ptr_eq(&instance.config, config) && instance.name == guard_name
+                })
+                .map(|instance| instance.guard.clone())
+        })
+        .ok()
+        .flatten()
+}
+
+/// Keep `guard` as the instance of the guard `guard_name` for the rest of
+/// this request, and return the instance the request keeps: `guard`, or the
+/// one an earlier call kept, so two resolutions that raced each other end on
+/// one instance.
+///
+/// Outside a request scope nothing is kept and `guard` comes back.
+pub(crate) fn keep_guard_instance(
+    config: &Arc<AuthConfig>,
+    guard_name: &str,
+    guard: Arc<dyn Guard>,
+) -> Arc<dyn Guard> {
+    AUTH_STATE
+        .try_with(|state| {
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            let kept = state.guard_instances.iter().find(|instance| {
+                Arc::ptr_eq(&instance.config, config) && instance.name == guard_name
+            });
+            if let Some(kept) = kept {
+                return kept.guard.clone();
+            }
+            state.guard_instances.push(GuardInstance {
+                config: config.clone(),
+                name: guard_name.to_owned(),
+                guard: guard.clone(),
+            });
+            guard.clone()
+        })
+        .unwrap_or(guard)
 }
 
 /// Record the guard an `AuthMiddleware` checked before it passed the request
@@ -1010,6 +1119,27 @@ mod tests {
             assert!(request_guard_user("partner").is_none());
         })
         .await;
+    }
+
+    // Clearing every identity ends neither the guard the route checks nor
+    // the guard in use: they name guards, not users.
+    #[tokio::test]
+    async fn clearing_authentication_keeps_the_guard_in_use() {
+        scope(async {
+            assert_eq!(used_guard(), None);
+            set_used_guard("api");
+            set_route_guard(Some("admin".to_owned()));
+            set_bearer_user("api", Arc::new(TestUser { id: "7".into() }));
+
+            clear_all_authentication();
+            assert_eq!(used_guard().as_deref(), Some("api"));
+            assert_eq!(route_guard().as_deref(), Some("admin"));
+            assert!(bearer_user("api").is_none());
+        })
+        .await;
+        // Outside a request nothing is selected and nothing is kept.
+        set_used_guard("api");
+        assert_eq!(used_guard(), None);
     }
 
     #[tokio::test]
