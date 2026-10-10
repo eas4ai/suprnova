@@ -25,7 +25,7 @@ the long form.
 | `crypto::testing::encrypt_string_under` | A value encrypted under an old key, for a rotation test |
 | `console::test` | Run a console command, read what it printed, and answer what it asks - see [Console](console.md#testing-a-command) |
 | Per-surface `fake()` helpers | Mail, Notify, Queue, Bus, Events, Storage, HTTP - see [Mocking](mocking.md) |
-| `TestClient` | Sends requests through your router and middleware over an in-memory connection, carrying cookies between them - see [HTTP Tests](http-tests.md#the-test-client) |
+| `TestClient` | Sends requests through your router and middleware over an in-memory connection, carrying cookies and default headers between them, signed in as a user when you ask - see [HTTP Tests](http-tests.md#the-test-client) and [Acting as a user](#acting-as-a-user) |
 | `TestResponse` | Fluent assertions over an HTTP test's `(status, headers, body)` triple - see [HTTP Tests](http-tests.md#fluent-response-assertions-with-testresponse) |
 | `AssertableInertia` | Fluent assertions over an Inertia page object - see [HTTP Tests](http-tests.md#testing-inertia-responses) |
 
@@ -336,6 +336,44 @@ You don't call this from a test - it runs from `TestContainerGuard`'s
 "named connection vanished mid-test" symptom, which usually means a
 sibling test forgot to wait for its own guard to drop first.
 
+## Acting as a user
+
+A test of a route behind `AuthMiddleware` needs a signed-in user.
+`TestClient::acting_as(&user)` returns a client whose every request is
+signed in as `user` through the default guard, as Laravel's
+`actingAs($user)` does, and `acting_as_with_guard(&user, "api")` signs
+the user in through the named guard:
+
+```rust
+use std::sync::Arc;
+
+use suprnova::testing::{TestClient, TestContainer};
+use suprnova::{Auth, AuthConfig, AuthManager, AuthMiddleware, MiddlewareRegistry, Router};
+
+#[tokio::test]
+async fn the_dashboard_answers_the_signed_in_user() {
+    TestContainer::scope(async {
+        TestContainer::singleton(AuthManager::new(AuthConfig::new("web")));
+        Auth::register_provider("users", Arc::new(UserRepository::default())).unwrap();
+
+        let router = Router::new()
+            .get("/dashboard", dashboard)
+            .middleware(AuthMiddleware::new());
+        let client = TestClient::new(router, MiddlewareRegistry::new())
+            .acting_as(&User { id: 7, name: "Ada".into() });
+
+        client.get("/dashboard").send().await.assert_ok().assert_see("Ada");
+    })
+    .await;
+}
+```
+
+The user is set on the guard at the start of each request, so no test
+writes a middleware to sign it in and nothing reaches the session. A
+guard the application did not register fails the request with an error
+that names it. See [HTTP Tests](http-tests.md#acting-as-a-user) for the
+guard rules and how Suprnova differs from Laravel here.
+
 ## Console tests
 
 `suprnova::console::test` runs a console command through the dispatcher the
@@ -627,7 +665,7 @@ matcher is a build error, not a flaky test.
 | `encrypt_string_under`, `encrypt_string_for_under` | `framework/src/crypto/testing.rs` |
 | `console::test`, `ConsoleRun` | `framework/src/console/testing.rs` |
 | Per-surface fakes (Mail, Notify, Queue, Bus, Events, Storage, HTTP) | per-domain `testing` submodules - see [Mocking](mocking.md) |
-| `TestClient`, `TestRequest` | `framework/src/testing/client.rs` |
+| `TestClient`, `TestRequest`, `ActingUser` | `framework/src/testing/client.rs` |
 | `TestResponse` | `framework/src/testing/response.rs` |
 | `AssertableInertia`, `ReloadRequest` | `framework/src/testing/inertia.rs` |
 

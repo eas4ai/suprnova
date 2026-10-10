@@ -69,7 +69,7 @@ pub use router::{
     route_with_params, try_register_route_name, try_route, try_route_with_params,
 };
 pub(crate) use router::{
-    LiveRouteResolutionError, prepare_live_route_identity, resolve_live_route,
+    LiveRouteResolutionError, prepare_live_route_identity, query_method, resolve_live_route,
 };
 pub use signed::{
     EXPIRES_KEY, SIGNATURE_KEY, SignatureVerdict, sign_route, sign_url, verify_signature,

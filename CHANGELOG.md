@@ -1380,6 +1380,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form.
 - **Log level names.** `LogLevel::parse` reads the eight PSR-3 names and
   `warn` and `trace`, and `LOG_LEVEL` accepts the PSR-3 names.
+- **Test client default headers.** `TestClient::with_header` and
+  `with_headers` send headers on every request the client builds, a
+  request's own header winning, and `flush_headers` clears them.
+- **`QUERY` requests in tests.** `TestClient::query_json` sends a `QUERY`
+  request with a JSON body and the JSON content type and accept headers.
+- **Acting as a user in tests.** `TestClient::acting_as` signs a user into
+  the default guard for every request, and `acting_as_with_guard` into a
+  named guard; an unregistered guard fails the request naming it.
+- **No-content assertions.** `TestResponse::assert_no_content` passes only
+  for an empty `204`, and `assert_no_content_status` for an empty response
+  of another status.
 
 ### Changed
 

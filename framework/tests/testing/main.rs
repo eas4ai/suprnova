@@ -19,6 +19,8 @@ pub mod clock;
 pub mod clock_reads;
 /// Tests observe the agreed infrastructure gaps.
 pub mod laravel_infra_gaps;
+/// The test client and test response gaps, observed by the `par-laravel-gaps-testing` mechanism.
+pub mod laravel_testing_gaps;
 pub mod precognition;
 pub mod registry_clears;
 pub mod request_diagnostics;

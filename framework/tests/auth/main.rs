@@ -34,3 +34,5 @@ pub mod session_guard;
 pub mod laravel_auth_gaps;
 /// Verifies the added Laravel behaviours through the shared delta mechanism.
 pub mod laravel_delta;
+/// Signing a user in for a test, observed by the `par-laravel-gaps-testing` mechanism.
+pub mod laravel_testing_gaps;
