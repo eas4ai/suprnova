@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-infra
+Current: laravel-gaps-testing
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -902,6 +902,39 @@ Requirements: PAR-133, PAR-134, PAR-135, PAR-136, PAR-137, PAR-138, PAR-139, PAR
    against the local Redis, and the CLI test).
    Done when it passes on a committed tree, the manual passages are in
    place, and the review is recorded.
+## laravel-gaps-testing
+
+Requirements: PAR-174, PAR-175, PAR-176, PAR-177, PAR-178, PAR-179, PAR-180, PAR-181
+
+48. laravel-gaps-testing - the thirteenth of the parity rounds the
+   developer ordered on 2026-10-07 (17:35), ruled build by the parity
+   default: the build rows of the log's testing, HTTP test, database
+   test, mocking and console test areas where Suprnova lacks or differs
+   from Laravel 13.35.0, with the full-text search row the developer
+   added on 2026-10-09 ("Yes add that"), grouped into PAR-174 to
+   PAR-181; the browser-test row of `docs:dusk` stays kept by his word
+   of 2026-10-07 17:17. Delivery: the test client's default headers,
+   `QUERY` helper and signed-in user in `framework/src/testing/`; the
+   configured-connection, transaction-per-test, lazy and seeded test
+   databases in `framework/src/database/testing.rs` and the
+   `#[suprnova_test]` options in `suprnova-macros/`; the console test
+   expectations, confirmations and exit codes in `framework/src/console/`;
+   the typed queued reads of the mail fake in `framework/src/mail/`; the
+   queue fake's decode failures and reserved jobs in
+   `framework/src/queue/`; `assert_no_content` in
+   `framework/src/testing/response.rs`; `where_full_text`,
+   `or_where_full_text`, `Blueprint::full_text` and `drop_full_text` in
+   `framework/src/database/`, `framework/src/eloquent/` and
+   `framework/src/schema/`, with engine tests named for the gate's
+   Postgres and MySQL passes; a `laravel_testing_gaps` test module in
+   each of the testing, auth, console, database, eloquent, schema, mail
+   and queue suites; the manual chapters each area owns (testing, HTTP
+   tests, database testing, mocking, console, database, migrations) and
+   the changelog. Mechanisms: `par-laravel-gaps-testing` (the
+   `laravel_testing_gaps` modules of the eight suites). Done when it
+   passes on a committed tree, the manual passages are in place, and the
+   review is recorded.
+
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,

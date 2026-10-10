@@ -3192,3 +3192,130 @@ Falsifier: `manual/documentation.md` links no such chapter, or the chapter names
 Mechanism: `par-laravel-gaps-infra`.
 Rationale: Rows `docs:ai` and `docs:boost`; Laravel's manual covers assistant guidance, documentation search and Boost (`docs-13.x/ai.md`, `docs-13.x/boost.md`), and the developer asked on 2026-10-07 for a section with this guidance, Boost itself not being ported.
 Status: Agreed 2026-10-09
+
+## Laravel API gaps: testing
+
+The members of Laravel 13.35.0's testing surface that the parity review
+found missing or differing in Suprnova and ruled build: the HTTP test
+client's default headers and `QUERY` helper, signing a user in for a
+test, database testing on the application's configured connection,
+console test expectations, the typed reads of the mail fake, the queue
+fake's reserved jobs and decode failures, and the `204` assertion; with
+the full-text search row the developer added on 2026-10-09 ("Yes add
+that"). The browser-test row of `docs:dusk` stays kept, by the
+developer's word of 2026-10-07 17:17: agents drive Playwright directly.
+
+[PAR-174] `suprnova::testing::TestClient` MUST carry default headers:
+`with_header(name, value)` and `with_headers(pairs)` set headers the
+client sends on every request it builds afterwards, a header set on one
+request winning over the client's, `flush_headers()` MUST clear them, and
+`query_json(path, body)` MUST send a `QUERY` request with `body` as JSON
+and the JSON content type and accept headers, as Laravel's
+`MakesHttpRequests::withHeaders`, `flushHeaders` and `queryJson` do.
+Falsifier: after `with_header("X-Team", "a")`, a `get` the client sends carries no `X-Team: a`, or a request's own `header("X-Team", "b")` does not win; after `flush_headers()` a request still carries the header; or `query_json("/search", &json!({"q": "x"}))` reaches a `query!` route as another method, without the JSON body, or without the JSON content type.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Rows `MakesHttpRequests::withHeaders`, `flushHeaders` and `queryJson`; Laravel feature tests set their headers once on the test case (`Foundation/Testing/Concerns/MakesHttpRequests.php`), where every Suprnova request repeats them.
+Status: Agreed 2026-10-10
+
+[PAR-175] `TestClient::acting_as(user)` MUST make `user` the authenticated
+user of every request the client sends afterwards, through the default
+guard, and `acting_as_with_guard(user, guard)` through the named guard,
+with no middleware written by hand, so a route behind the auth
+middleware answers as it does for a signed-in user and `Auth::user()`
+in the handler is that user; a guard name the application did not
+register MUST fail the first request with an error naming it, as
+Laravel's `InteractsWithAuthentication::actingAs` signs the user into a
+guard for the test.
+Falsifier: after `acting_as(&user)`, a route behind the auth middleware answers `401` or redirects to the login page, or `Auth::user()` in its handler is `None`; `acting_as_with_guard(&user, "api")` signs the user into the default guard instead; or an unregistered guard name signs the user in somewhere or passes silently.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Row `InteractsWithAuthentication::actingAs` (`Foundation/Testing/Concerns/InteractsWithAuthentication.php`); Suprnova tests sign a user in with a middleware they write for the purpose.
+Status: Agreed 2026-10-10
+
+[PAR-176] The test database helpers MUST run a test against the
+application's configured connection when asked: `TestDatabase::refresh::<M>()`
+migrates `DATABASE_URL`'s database once per test process and wraps each
+test in a transaction rolled back when the helper drops, so a row one
+test writes is gone for the next, as Laravel's `RefreshDatabase` does;
+`TestDatabase::migrate::<M>()` runs the migrations on that connection
+and rolls them back when the helper drops, as `DatabaseMigrations` does;
+`TestDatabase::refresh_lazily::<M>()` does the same as `refresh` on the
+first query only, as `LazilyRefreshDatabase` does; and `seed::<S>()` on
+any of them (and `seed` and `refresh` options of `#[suprnova_test]`)
+runs the named seeder, or the root seeder when none is named, after the
+migrations and before the test body, as the `#[Seed]` attribute and
+`CanConfigureMigrationCommands::seeder` do. `TestDatabase::fresh`, the
+in-memory SQLite database, stays the default and is unchanged.
+Falsifier: with `DATABASE_URL` naming a Postgres or MySQL database, `TestDatabase::refresh::<M>()` migrates an in-memory SQLite database instead; a row one `refresh` test writes is visible to the next; the migrations run again for a second `refresh` test in the same process; `migrate` leaves its tables after the helper drops; `refresh_lazily` migrates before the first query; or a seeder given to `seed` has not run when the test body starts.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Rows `DatabaseMigrations::refreshTestDatabase` and `runDatabaseMigrations`, `LazilyRefreshDatabase::refreshDatabase`, `RefreshDatabase::refreshDatabase`, the `#[Seed]` attribute and `CanConfigureMigrationCommands::seeder` (`Foundation/Testing/RefreshDatabase.php`, `DatabaseMigrations.php`, `LazilyRefreshDatabase.php`, `Traits/CanConfigureMigrationCommands.php`); Suprnova's helpers never reached the configured database, so a suite could not run on the engine it ships on.
+Status: Agreed 2026-10-10
+
+[PAR-177] `console::test` MUST take up-front expectations and answer
+more than text: `expects_output(line)` expects that exact line, several
+calls in the order the command prints them; `expects_output_to_contain(text)`
+and `doesnt_expect_output_to_contain(text)` search the output and the
+error stream, a match never spanning two writes; `expects_confirmation(question, answer)`
+answers a `confirm` with a yes or a no; the run's `assert_exit_code(code)`
+and `assert_not_exit_code(code)` compare the exit code the console binary
+would end with, and a command MUST be able to end with an exit code of
+its own through a `FrameworkError` that names it, as Laravel commands
+return one; and a question the test did not expect, or expected in
+another order, MUST fail the test's assertions naming the question, as
+Laravel's `PendingCommand` fails the test, while every expectation the
+command did not meet, an output line not printed included, fails
+`assert_successful` and is reported by the run.
+Falsifier: `expects_output("a").expects_output("b")` passes a command that prints `b` then `a`; `expects_output_to_contain("boom")` fails when only the error stream holds `boom`, or passes when `bo` and `om` were two writes; `doesnt_expect_output_to_contain("x")` passes a run that printed `x`; no command can make `assert_exit_code(2)` pass; a command that asked a question the test did not expect passes `assert_successful`, or its failure message does not name the question; or an expected output line the command never printed goes unreported.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Rows `PendingCommand::assertNotExitCode`, `doesntExpectOutputToContain`, `expectsOutput`, `expectsOutputToContain` and `expectsQuestion` (`Testing/PendingCommand.php`); the run keeps `output()`, `errors()`, `assert_output_contains` and `assert_errors_contain` as they are.
+Status: Agreed 2026-10-10
+
+[PAR-178] The mail fake MUST answer queued mailables typed:
+`queued_of::<M>()` returns every mailable of type `M` queued while the
+fake was active, rebuilt from its payload, `queued_where::<M>(f)` those
+`f` accepts, and `assert_queued::<M>(f)` and `assert_not_queued::<M>(f)`
+assert on them, as Laravel's `MailFake::queued` takes a class and a
+closure; `queued()`, the snapshot list, stays as it is.
+Falsifier: after `Mail::queue(Welcome { name: "a" })` under `Mail::fake()`, `queued_of::<Welcome>()` is empty or its element lacks `name == "a"`; `queued_where::<Welcome>(|m| m.name == "b")` returns it; `assert_queued::<Welcome>(|m| m.name == "a")` fails; or `assert_not_queued::<Welcome>(|_| true)` passes.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Row `MailFake::queued` (`Support/Testing/Fakes/MailFake.php`); the fake stores JSON snapshots a test cannot read by field.
+Status: Agreed 2026-10-10
+
+[PAR-179] Under `Queue::fake()`, `queue::testing::pushed::<J>()` MUST fail
+with a message naming the job and the decode error when a captured
+payload does not decode as `J`, instead of leaving it out, and
+`try_pushed::<J>()` MUST return that error; and the fake MUST record
+the jobs a worker reserves from it, `Queue::reserved_jobs(queue)` under
+the fake answering those records rather than reading the real driver,
+with `queue::testing::reserved::<J>()` returning them typed, as Laravel's
+`QueueFake::serializeAndRestore` surfaces a payload that does not
+restore and its reserved-job list stands in for the driver's.
+Falsifier: a push whose payload no longer decodes as `J` is silently absent from `pushed::<J>()`, or `try_pushed::<J>()` answers `Ok`; or, under `Queue::fake()`, a reserve leaves `Queue::reserved_jobs(None)` reading the real driver or empty, or `reserved::<J>()` lacks the reserved job.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Rows `QueueFake::allReservedJobs` and `serializeAndRestore` (`Support/Testing/Fakes/QueueFake.php`); the always-on JSON round trip stays, stricter than Laravel's opt-in.
+Status: Agreed 2026-10-10
+
+[PAR-180] `TestResponse::assert_no_content()` MUST pass only for a `204`
+response with an empty body, with `assert_no_content_status(status)` for
+another status, as Laravel's `AssertsStatusCodes::assertNoContent` does,
+and its failure MUST include the response's error report when it has
+one, as PAR-011 requires of every assertion.
+Falsifier: `assert_no_content()` fails on a `204` with an empty body, passes on a `200` with an empty body, or passes on a `204` carrying a body; or `assert_no_content_status(205)` fails on an empty `205`.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Row `AssertsStatusCodes::assertNoContent` (`Testing/Concerns/AssertsStatusCodes.php`).
+Status: Agreed 2026-10-10
+
+[PAR-181] The query builder and the Eloquent builder MUST offer
+`where_full_text(columns, text)` and `or_where_full_text(columns, text)`,
+with options for the mode (natural language, boolean, websearch) and the
+language, rendering `MATCH (columns) AGAINST (?)` with the mode on MySQL
+and MariaDB and `to_tsvector(language, columns) @@ plainto_tsquery(language, ?)`
+(or `websearch_to_tsquery`) on Postgres, and `Blueprint::full_text(columns)`
+with a `language` option MUST create a `FULLTEXT` index on MySQL and
+MariaDB and a `GIN` index over `to_tsvector` on Postgres, with
+`drop_full_text(columns)` dropping it, as Laravel's `whereFullText` and
+`fullText` do; on SQLite each MUST answer an error naming the engine
+and the call.
+Falsifier: on MySQL a migration calling `full_text(["title", "body"])` creates no `FULLTEXT` index, or `where_full_text(["title", "body"], "laravel")` matches no row whose body holds `laravel`; on Postgres the index is not a `GIN` index over `to_tsvector` or the clause renders no `@@`; `or_where_full_text` is joined with `AND`; or on SQLite either call succeeds or fails without naming SQLite.
+Mechanism: `par-laravel-gaps-testing`.
+Rationale: Row `docs:search`, the developer on 2026-10-09 19:01 ("Yes add that and we will focus on creating a layer on top of our existing drivers which are faster I think"): Laravel's `Builder::whereFullText` (`Database/Query/Builder.php`) and `Blueprint::fullText` (`Database/Schema/Blueprint.php`); the engine tests follow the gate's naming (`postgres_` and `mysql_`) so the engine passes select them.
+Status: Agreed 2026-10-10
