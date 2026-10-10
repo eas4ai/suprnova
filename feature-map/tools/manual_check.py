@@ -107,7 +107,7 @@ STD_MACROS = {"println", "print", "eprintln", "format", "vec", "assert", "assert
 meta = json.loads((ROOT / "feature-map/meta.json").read_text())
 head = subprocess.run(["git", "-C", str(ROOT), "log", "-1", "--format=%h", "--", *meta["source_paths"]],
                       capture_output=True, text=True, check=True).stdout.strip()
-if False:  # VIOLATING EXAMPLE
+if head != meta["source_rev"]:
     sys.exit(f"surface built from {meta['source_rev']} but source is now at {head}; "
              "run feature-map/tools/generate.sh first")
 
