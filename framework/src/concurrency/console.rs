@@ -8,6 +8,13 @@
 //! the outcome as one marked line on its standard output, which the
 //! driver reads back, and ends with exit code 1 when the task fails.
 //!
+//! The command refuses a task name that is empty or carries a control
+//! character before it looks the name up. The console reports a failed
+//! command through the application's logging, which can share standard
+//! output with the outcome, and an error that repeated a name with a line
+//! break could start a line there that reads as an outcome. The refusal
+//! shows the name escaped.
+//!
 //! The command is hidden from the console's help, as Laravel hides its
 //! command: it is a protocol between two processes, not a command for
 //! people. It is registered the way the other built-in hidden commands
@@ -75,8 +82,9 @@ async fn run(name: String) -> Result<(), FrameworkError> {
     result
 }
 
-/// Read the input, find the task and run it.
+/// Check the name, read the input, find the task and run it.
 async fn execute(name: &str) -> Result<Value, FrameworkError> {
+    task::check_name(RUN_COMMAND, name)?;
     let mut bytes = Vec::new();
     tokio::io::stdin()
         .read_to_end(&mut bytes)

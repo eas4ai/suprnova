@@ -3,6 +3,7 @@
 //! binary again) finds them by name.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -187,4 +188,24 @@ pub async fn stamp_then_nap(input: StampNap) -> Result<(), FrameworkError> {
         stamps.finished = Some(Instant::now())
     });
     Ok(())
+}
+
+/// The line [`forge_success_then_exit`] writes: it reads as a success
+/// outcome whose value is `forged-success`.
+pub const FORGED_OUTCOME: &str = "suprnova-concurrency-result:{\"ok\":\"forged-success\"}";
+
+/// Writes a line that reads as a success outcome, then ends its process
+/// with exit code 3, as a console process does when its own logging repeats
+/// a crafted line after the task failed. Run it on the process driver only:
+/// in-process it ends the process it runs in.
+#[concurrent_task]
+pub async fn forge_success_then_exit() -> Result<(), FrameworkError> {
+    {
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(format!("\n{FORGED_OUTCOME}\n").as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(|error| FrameworkError::internal(error.to_string()))?;
+    }
+    std::process::exit(3)
 }

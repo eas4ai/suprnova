@@ -16,8 +16,9 @@ pub(crate) const RUN_COMMAND: &str = "concurrency:run";
 
 /// The start of the line that carries a task's outcome on the console
 /// process's standard output. The application's own logging may write to
-/// the same stream; the driver reads only the last line that starts with
-/// this.
+/// the same stream, so the driver reads only the last line that starts with
+/// this, and takes a success from it only when the process ended with exit
+/// code 0.
 pub(crate) const RESULT_MARKER: &str = "suprnova-concurrency-result:";
 
 /// A task's outcome as the console process writes it.
@@ -53,6 +54,13 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// executable itself, which is right when the console binary is the one
 /// that runs the tasks. Starting a process costs far more than a Tokio
 /// task, so this driver pays off for heavy or untrusted work.
+///
+/// The outcome shares standard output with the application's own logging.
+/// A stdout log channel reports a failed command after the outcome line,
+/// with whatever text its error carries, so a line that reads as a success
+/// can follow a failure. The driver therefore takes a success only from a
+/// console process that ended with exit code 0, and a task name carries no
+/// control character, so a name cannot start a line of its own there.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessConcurrencyDriver;
 
@@ -111,7 +119,15 @@ async fn run_one(
 }
 
 /// The outcome the console process wrote, or an error naming the task
-/// when it wrote none.
+/// when it wrote none or did not succeed.
+///
+/// The outcome is the last marked line on standard output. The exit status
+/// is checked too, because the application's own logging shares that
+/// stream: a stdout log channel reports a failed command after the outcome
+/// line, with whatever text its error carries, so a line that reads as a
+/// success can follow a failure. `concurrency:run` ends with exit code 1
+/// whenever the task fails, so a success counts only from a process that
+/// ended with exit code 0.
 fn read_outcome(name: &str, result: &ProcessResult) -> Result<TaskResult, FrameworkError> {
     let envelope = result
         .output()
@@ -119,31 +135,47 @@ fn read_outcome(name: &str, result: &ProcessResult) -> Result<TaskResult, Framew
         .rev()
         .find_map(|line| line.strip_prefix(RESULT_MARKER));
     match envelope.map(serde_json::from_str::<Envelope>) {
-        Some(Ok(Envelope::Ok(value))) => Ok(TaskResult::new(name, value)),
+        Some(Ok(Envelope::Ok(value))) if result.successful() => Ok(TaskResult::new(name, value)),
+        Some(Ok(Envelope::Ok(_))) => Err(FrameworkError::internal(format!(
+            "concurrent task `{name}` did not succeed: `{}` ended with {} after a line that \
+             reads as a success outcome, and only a console process that ends with exit \
+             code 0 answers a success{}",
+            result.command(),
+            ended(result),
+            error_output(result)
+        ))),
         Some(Ok(Envelope::Error(message))) => Err(FrameworkError::internal(format!(
             "concurrent task `{name}` failed: {message}"
         ))),
         Some(Err(error)) => Err(FrameworkError::internal(format!(
             "concurrent task `{name}` wrote an outcome that does not decode: {error}"
         ))),
-        None => {
-            let ended = match result.exit_code() {
-                Some(code) => format!("exit code {code}"),
-                None => "a signal".to_owned(),
-            };
-            let errors = result.error_output().trim();
-            let errors = if errors.is_empty() {
-                String::new()
-            } else {
-                format!("; its error output: {errors}")
-            };
-            Err(FrameworkError::internal(format!(
-                "concurrent task `{name}` wrote no outcome: `{}` ended with {ended}; \
-                 the console binary must be the application's, which registers \
-                 `{RUN_COMMAND}`{errors}",
-                result.command()
-            )))
-        }
+        None => Err(FrameworkError::internal(format!(
+            "concurrent task `{name}` wrote no outcome: `{}` ended with {}; the console \
+             binary must be the application's, which registers `{RUN_COMMAND}`{}",
+            result.command(),
+            ended(result),
+            error_output(result)
+        ))),
+    }
+}
+
+/// How the console process ended, for an error: its exit code, or a signal.
+fn ended(result: &ProcessResult) -> String {
+    match result.exit_code() {
+        Some(code) => format!("exit code {code}"),
+        None => "a signal".to_owned(),
+    }
+}
+
+/// The console process's error output as the end of an error, or nothing
+/// when it wrote none.
+fn error_output(result: &ProcessResult) -> String {
+    let errors = result.error_output().trim();
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!("; its error output: {errors}")
     }
 }
 

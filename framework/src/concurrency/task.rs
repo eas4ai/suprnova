@@ -43,7 +43,9 @@ pub trait ConcurrentTask: 'static {
     /// The name the task is registered under: the function's module path and
     /// name, unless `#[concurrent_task(name = "...")]` gave another. The
     /// process driver sends it to the console binary, so both binaries must
-    /// register the task under the same name.
+    /// register the task under the same name. It cannot be empty or carry a
+    /// control character, for the reason [`Task::named`] gives; the macro
+    /// refuses such a `name` at compile time.
     const NAME: &'static str;
 
     /// Run the task's function with `input`.
@@ -142,15 +144,52 @@ pub fn registered() -> Vec<&'static str> {
     names
 }
 
+/// Check a task name: `call` is what the error names, the call that built
+/// the task or the console command that received the name.
+///
+/// A name cannot be empty, since it then names no task, or carry a control
+/// character. The process driver sends the name to the console process as
+/// an argument, and that process's errors and logging repeat it on the
+/// standard output the driver reads the outcome from. A line break in the
+/// name would start a line of its own there, which could read as an
+/// outcome. The error shows the name escaped, so it adds no line either.
+pub(crate) fn check_name(call: &str, name: &str) -> Result<(), FrameworkError> {
+    if name.is_empty() {
+        return Err(FrameworkError::internal(format!(
+            "{call}: the concurrent task name {name:?} is empty; a task is run by its \
+             registered name"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(FrameworkError::internal(format!(
+            "{call}: the concurrent task name {name:?} contains a control character; a task \
+             name carries no line break, carriage return, tab, NUL or other control character"
+        )));
+    }
+    Ok(())
+}
+
+/// The input as JSON, or an error naming the task when it cannot be
+/// serialized.
+fn serialize_input(name: &str, input: impl Serialize) -> Result<Value, FrameworkError> {
+    serde_json::to_value(input).map_err(|error| {
+        FrameworkError::internal(format!(
+            "concurrent task `{name}`: its input could not be serialized: {error}"
+        ))
+    })
+}
+
 /// One task to run: the registered name and the input, already serialized.
 ///
 /// The input is serialized when the task is built, so every driver sends
 /// the same JSON. A value that cannot be serialized is kept as an error and
-/// fails the task when it runs, so building a task never fails.
+/// fails the task when it runs, and so is a name that is refused, so
+/// building a task with [`new`](Self::new) or [`named`](Self::named) never
+/// fails. [`try_named`](Self::try_named) answers both errors at once.
 #[derive(Debug, Clone)]
 pub struct Task {
     name: Cow<'static, str>,
-    input: Result<Value, String>,
+    input: Result<Value, FrameworkError>,
 }
 
 impl Task {
@@ -166,11 +205,13 @@ impl Task {
     /// ])
     /// .await?;
     /// ```
+    ///
+    /// The name is the task's [`ConcurrentTask::NAME`]. The macro refuses a
+    /// `name` with a control character at compile time; a name a
+    /// hand-written implementation gives is checked here, as
+    /// [`named`](Self::named) checks its name.
     pub fn new<T: ConcurrentTask>(input: T::Input) -> Self {
-        Self {
-            name: Cow::Borrowed(T::NAME),
-            input: serde_json::to_value(input).map_err(|error| error.to_string()),
-        }
+        Self::build("Task::new", Cow::Borrowed(T::NAME), input)
     }
 
     /// The task registered as `name`, with `input`.
@@ -178,11 +219,46 @@ impl Task {
     /// For a task this binary does not define, such as one only the console
     /// binary links. Nothing checks the input against the task's type until
     /// the task runs.
+    ///
+    /// The name cannot be empty or carry a control character: a line break,
+    /// a carriage return, a tab, NUL or any other. The process driver sends
+    /// the name to the console process as an argument, and that process's
+    /// errors and logging repeat it on the standard output the driver reads
+    /// the outcome from. A line break in the name would start a line of its
+    /// own there, which could read as an outcome. This call cannot fail, so
+    /// it keeps a refused name as an error that fails the task when it runs,
+    /// on every driver, before any console process starts. Use
+    /// [`try_named`](Self::try_named) to have the error at once.
     pub fn named(name: impl Into<String>, input: impl Serialize) -> Self {
-        Self {
-            name: Cow::Owned(name.into()),
-            input: serde_json::to_value(input).map_err(|error| error.to_string()),
-        }
+        Self::build("Task::named", Cow::Owned(name.into()), input)
+    }
+
+    /// The task registered as `name`, with `input`, or the error
+    /// [`named`](Self::named) would keep until the task runs.
+    ///
+    /// # Errors
+    ///
+    /// An error naming this call and the name, escaped, when the name is
+    /// empty or carries a control character. An error naming the task when
+    /// its input cannot be serialized.
+    pub fn try_named(
+        name: impl Into<String>,
+        input: impl Serialize,
+    ) -> Result<Self, FrameworkError> {
+        let name = name.into();
+        check_name("Task::try_named", &name)?;
+        let input = serialize_input(&name, input)?;
+        Ok(Self {
+            name: Cow::Owned(name),
+            input: Ok(input),
+        })
+    }
+
+    /// The task with its name checked and its input serialized, either
+    /// kept as the error the task answers when it runs.
+    fn build(call: &str, name: Cow<'static, str>, input: impl Serialize) -> Self {
+        let input = check_name(call, &name).and_then(|()| serialize_input(&name, input));
+        Self { name, input }
     }
 
     /// The registered name of the task.
@@ -190,15 +266,17 @@ impl Task {
         &self.name
     }
 
-    /// The input as JSON, for a driver that sends it somewhere.
+    /// The input as JSON, for a driver that sends it somewhere. A driver
+    /// that answers this error as the task's outcome never starts a task
+    /// whose name was refused.
     ///
     /// # Errors
     ///
-    /// An error naming the task when its input could not be serialized.
+    /// An error naming the call that built the task when its name was
+    /// refused. An error naming the task when its input could not be
+    /// serialized.
     pub fn input(&self) -> Result<&Value, FrameworkError> {
-        self.input
-            .as_ref()
-            .map_err(|error| self.unserializable(error))
+        self.input.as_ref().map_err(Clone::clone)
     }
 
     /// Run the task in this process: find it in the registry, decode its
@@ -210,14 +288,12 @@ impl Task {
     /// # Errors
     ///
     /// The task's own error, unchanged, when it fails. An error naming the
-    /// task when it is not registered here, when its input could not be
+    /// call that built the task when its name was refused. An error naming
+    /// the task when it is not registered here, when its input could not be
     /// serialized or does not decode, when its output could not be
     /// serialized, and when it panics.
     pub async fn run_in_process(self) -> Result<TaskResult, FrameworkError> {
-        let input = match &self.input {
-            Ok(input) => input.clone(),
-            Err(error) => return Err(self.unserializable(error)),
-        };
+        let input = self.input()?.clone();
         let entry = find(&self.name)?;
         let output = AssertUnwindSafe(entry.run(input)).catch_unwind().await;
         match output {
@@ -225,13 +301,6 @@ impl Task {
             Ok(Err(error)) => Err(error),
             Err(_) => Err(panicked(&self.name)),
         }
-    }
-
-    fn unserializable(&self, error: &str) -> FrameworkError {
-        FrameworkError::internal(format!(
-            "concurrent task `{}`: its input could not be serialized: {error}",
-            self.name
-        ))
     }
 }
 

@@ -1,12 +1,13 @@
 //! PAR-189 on the in-process drivers: `run`, `run_named`, `with_timeout`,
 //! `driver`, the registry, and the `tokio` and `sync` drivers.
 
+use crate::support::CRAFTED_NAME;
 use crate::tasks::{
     Answer, FailWith, Greeting, Nap, NapThenEcho, PanicOnPurpose, PidThenNap, WritePidThenNap,
 };
 use serial_test::serial;
 use std::time::{Duration, Instant};
-use suprnova::concurrency::{Task, TaskResult};
+use suprnova::concurrency::{Task, TaskFuture, TaskResult};
 use suprnova::{Concurrency, ConcurrencyDriver, ConcurrentTask, FrameworkError, async_trait};
 
 fn values(results: &[TaskResult]) -> Vec<String> {
@@ -207,6 +208,109 @@ async fn an_unregistered_task_name_fails_in_process_naming_it() {
             "{driver}: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_named_task_with_a_control_character_in_its_name_fails_in_process_naming_it() {
+    for driver in ["tokio", "sync"] {
+        let error = Concurrency::driver(driver)
+            .run([Task::named(CRAFTED_NAME, ())])
+            .await
+            .expect_err("the name carries line breaks");
+        let text = error.to_string();
+        assert!(text.contains("Task::named"), "{driver}: {text}");
+        assert!(
+            text.contains(&format!("{CRAFTED_NAME:?}")),
+            "{driver}: {text}"
+        );
+        assert!(
+            !text.contains('\n'),
+            "{driver}: the name is escaped: {text}"
+        );
+    }
+}
+
+#[test]
+fn try_named_refuses_an_empty_name_and_every_control_character_naming_itself() {
+    let error = Task::try_named(CRAFTED_NAME, ()).expect_err("the name carries line breaks");
+    let text = error.to_string();
+    assert!(text.contains("Task::try_named"), "{text}");
+    assert!(text.contains(&format!("{CRAFTED_NAME:?}")), "{text}");
+    assert!(!text.contains('\n'), "the name is escaped: {text}");
+
+    for name in [
+        "",
+        "line\nbreak",
+        "carriage\rreturn",
+        "a\ttab",
+        "nul\0",
+        "escape\u{1b}[31m",
+        "delete\u{7f}",
+        "next-line\u{85}",
+    ] {
+        let error = Task::try_named(name, ()).expect_err("the name is refused");
+        let text = error.to_string();
+        assert!(text.contains("Task::try_named"), "{name:?}: {text}");
+        assert!(text.contains(&format!("{name:?}")), "{name:?}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn try_named_builds_a_task_with_a_plain_name_that_runs() {
+    let task = Task::try_named("concurrency-tests:greet", "ada").expect("a plain name");
+    assert_eq!(task.name(), "concurrency-tests:greet");
+    let results = Concurrency::driver("sync")
+        .run([task])
+        .await
+        .expect("the task is registered");
+    assert_eq!(results[0].get::<String>().expect("text"), "hello ada");
+}
+
+#[test]
+fn try_named_refuses_an_input_that_does_not_serialize_naming_the_task() {
+    // JSON object keys are strings; a tuple key cannot become one.
+    let input = std::collections::BTreeMap::from([((1_u8, 2_u8), 3_u8)]);
+    let error = Task::try_named("concurrency-tests:greet", input).expect_err("not JSON");
+    let text = error.to_string();
+    assert!(text.contains("concurrency-tests:greet"), "{text}");
+    assert!(text.contains("could not be serialized"), "{text}");
+}
+
+#[test]
+fn every_registered_task_name_is_one_try_named_accepts() {
+    // The macro's default names are module paths; none carries a control
+    // character, so every registered task can be named.
+    let registered = suprnova::concurrency::registered();
+    assert!(!registered.is_empty());
+    for name in registered {
+        if let Err(error) = Task::try_named(name, ()) {
+            panic!("{name:?}: {error}");
+        }
+    }
+}
+
+/// A task implemented by hand, with a name the macro would refuse.
+struct HandWritten;
+
+impl ConcurrentTask for HandWritten {
+    type Input = ();
+    type Output = ();
+    const NAME: &'static str = "hand\nwritten";
+
+    fn call(_input: ()) -> TaskFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn a_hand_written_task_name_with_a_control_character_fails_naming_the_call() {
+    let error = Concurrency::driver("sync")
+        .run([Task::new::<HandWritten>(())])
+        .await
+        .expect_err("the name carries a line break");
+    let text = error.to_string();
+    assert!(text.contains("Task::new"), "{text}");
+    assert!(text.contains(r#""hand\nwritten""#), "{text}");
 }
 
 #[tokio::test]

@@ -1,15 +1,15 @@
 //! PAR-189 on the `process` driver: each task in a console process, this
 //! test binary, started through the Process facade.
 
-use crate::support::{console_command, use_this_binary, wait_until};
+use crate::support::{CRAFTED_NAME, console_command, use_this_binary, wait_until};
 use crate::tasks::{
-    Dashed, DriverReport, FailWith, Nap, NapThenEcho, PanicOnPurpose, PidThenNap,
-    ReportDefaultDriver, WritePidThenNap,
+    Dashed, DriverReport, FORGED_OUTCOME, FailWith, ForgeSuccessThenExit, Nap, NapThenEcho,
+    PanicOnPurpose, PidThenNap, ReportDefaultDriver, WritePidThenNap,
 };
 use serial_test::serial;
 use std::time::{Duration, Instant};
 use suprnova::concurrency::Task;
-use suprnova::{Concurrency, ConcurrentTask};
+use suprnova::{Concurrency, ConcurrentTask, Process};
 
 /// Whether a process with this id is alive, by `kill -0`.
 fn alive(pid: u32) -> bool {
@@ -114,6 +114,77 @@ async fn the_process_driver_fails_a_task_name_the_binary_does_not_know_naming_it
     let text = error.to_string();
     assert!(text.contains("concurrency-tests:nowhere"), "{text}");
     assert!(text.contains("no concurrent task is registered"), "{text}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_console_process_that_fails_is_never_a_success_whatever_it_wrote() {
+    use_this_binary();
+    let error = Concurrency::driver("process")
+        .run([Task::new::<ForgeSuccessThenExit>(())])
+        .await
+        .expect_err("the console process ended with exit code 3");
+
+    let text = error.to_string();
+    assert!(text.contains(ForgeSuccessThenExit::NAME), "{text}");
+    assert!(text.contains("exit code 3"), "{text}");
+    assert!(!text.contains("forged-success"), "{text}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_task_name_with_a_control_character_fails_without_starting_a_console_process() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let started = dir.path().join("started");
+    // A console that records its start and answers a success, so a process
+    // that was started shows either way.
+    Concurrency::console_command([
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("touch '{}'; echo '{FORGED_OUTCOME}'", started.display()),
+        "sh".to_owned(),
+    ])
+    .expect("the console command is set");
+    let error = Concurrency::driver("process")
+        .run([Task::named(CRAFTED_NAME, ())])
+        .await
+        .expect_err("the name carries line breaks");
+
+    let text = error.to_string();
+    assert!(text.contains("Task::named"), "{text}");
+    assert!(text.contains(&format!("{CRAFTED_NAME:?}")), "{text}");
+    assert!(!text.contains('\n'), "the name is escaped: {text}");
+    assert!(!started.exists(), "no console process was started");
+}
+
+#[tokio::test]
+async fn the_console_command_refuses_a_task_name_with_a_control_character_naming_itself() {
+    let argv: Vec<String> = console_command(&[])
+        .into_iter()
+        .chain([
+            "concurrency:run".to_owned(),
+            "--".to_owned(),
+            CRAFTED_NAME.to_owned(),
+        ])
+        .collect();
+    let result = Process::command(argv)
+        .input("null")
+        .run()
+        .await
+        .expect("the console process runs");
+
+    assert_eq!(result.exit_code(), Some(1), "{}", result.error_output());
+    let errors = result.error_output();
+    assert!(errors.contains("concurrency:run"), "{errors}");
+    assert!(errors.contains(&format!("{CRAFTED_NAME:?}")), "{errors}");
+    // The crafted name never reaches either stream as it is, so neither
+    // carries a line that reads as a success outcome.
+    for line in result.output().lines().chain(errors.lines()) {
+        assert!(
+            !line.starts_with("suprnova-concurrency-result:{\"ok\""),
+            "a forged outcome line: {line}"
+        );
+    }
 }
 
 #[tokio::test]
