@@ -169,7 +169,9 @@ pub(crate) fn current_at(root: &str, path: &str) -> String {
 /// [`crate::Redirect::refresh_for`], the Inertia and form validation
 /// redirects, and signature verification, which reads the query.
 ///
-/// The value is what the client sent. At the host root a request-target
+/// The value is what the client sent; the session and Inertia middleware
+/// normalise its query before they record it as the previous URL, as
+/// Laravel stores `$request->fullUrl()`. At the host root a request-target
 /// such as `//evil.example/x` gives a network-path reference, which a
 /// browser reads as another host, so the framework's redirects and the
 /// intended URL check it with [`root_relative_or_none`] before they use it.
@@ -184,9 +186,14 @@ pub(crate) fn current_path_and_query(request: &Request) -> String {
 
 /// Full absolute URL of the current request, query included: the
 /// `APP_URL` origin, the public root, the path and the query. Mirrors
-/// Laravel's `url()->full()`.
+/// Laravel's `url()->full()`, which is `$request->fullUrl()`: the query is
+/// normalised as [`Request::full_url`] normalises it, its pairs sorted by
+/// key and re-encoded per RFC 3986 (PAR-056), and a query that normalises
+/// to nothing leaves no `?`.
 pub fn full(request: &Request) -> String {
-    on_app_origin(&current_path_and_query(request))
+    on_app_origin(&crate::http::query_string::normalize_path_and_query(
+        current_path_and_query(request),
+    ))
 }
 
 /// `target`, a request's root and path, on the `APP_URL` origin.

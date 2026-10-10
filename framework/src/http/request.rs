@@ -153,6 +153,15 @@ struct RouteAction(&'static str);
 #[derive(Clone)]
 struct RouteName(Option<String>);
 
+/// The mark the server puts on a request its fallback route answers.
+///
+/// A mark rather than a route pattern: RenderCache keys its policy on the
+/// pattern, and the debug page and Inertia DevTools show the pattern as the
+/// matched route, so a fallback request keeps none and still counts as a
+/// matched route where Laravel counts its fallback route as one.
+#[derive(Clone, Copy)]
+struct FallbackRoute;
+
 /// Middleware's protocol mark, kept with the request as it moves through the chain.
 #[derive(Clone)]
 struct PrecognitiveMark(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -1330,9 +1339,29 @@ impl Request {
         format!("{scheme_host}{stripped}")
     }
 
-    /// Get the full URL (URL + `?` + query string when present).
-    /// Mirrors Laravel's `Request::fullUrl()`.
+    /// Get the full URL: [`url`](Self::url), then `?` and the query
+    /// normalised as Laravel's `Request::fullUrl()` writes it through
+    /// Symfony's `normalizeQueryString` (PAR-056). The pairs are parsed as
+    /// PHP reads them, sorted by key, and re-encoded per RFC 3986, so
+    /// `/s?b=2&a=1+x` is `/s?a=1%20x&b=2`. A query that normalises to
+    /// nothing leaves no `?`.
+    ///
+    /// [`query`](Self::query) and [`uri`](Self::uri) keep the query as the
+    /// client sent it.
     pub fn full_url(&self) -> String {
+        let url = self.url();
+        match self
+            .query()
+            .map(super::query_string::normalize_query_string)
+        {
+            Some(query) if !query.is_empty() => format!("{url}?{query}"),
+            _ => url,
+        }
+    }
+
+    /// [`url`](Self::url) with the query as the client sent it, for the
+    /// readers that keep the client's order of the pairs.
+    fn url_with_query_as_sent(&self) -> String {
         match self.query() {
             Some(q) if !q.is_empty() => format!("{}?{}", self.url(), q),
             _ => self.url(),
@@ -1341,12 +1370,17 @@ impl Request {
 
     /// Build the full URL with extra/overridden query params merged in.
     /// Mirrors Laravel's `Request::fullUrlWithQuery($query)`.
+    ///
+    /// The query keeps the order the client sent its pairs in, with the
+    /// new pairs after them, as Laravel merges into `query()` without
+    /// sorting; it is not the normalised query of
+    /// [`full_url`](Self::full_url).
     pub fn full_url_with_query<K, V>(&self, extra: &[(K, V)]) -> String
     where
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        super::response::append_query_params(&self.full_url(), extra)
+        super::response::append_query_params(&self.url_with_query_as_sent(), extra)
     }
 
     /// Build the full URL with the given query keys removed. Mirrors
@@ -1465,6 +1499,26 @@ impl Request {
         self.route_pattern.as_deref()
     }
 
+    /// Mark the request as one the router's fallback route answers. Called
+    /// by the server when no route matches and a fallback is registered.
+    pub(crate) fn with_fallback_route(mut self) -> Self {
+        self.parts.extensions.insert(FallbackRoute);
+        self
+    }
+
+    /// Whether the router's fallback route answers this request: Laravel's
+    /// `$request->route()->isFallback`.
+    ///
+    /// A fallback request has no [`route_pattern`](Self::route_pattern) and
+    /// no [`route_name`](Self::route_name), so nothing that reads those
+    /// takes it for a routed match. It still counts as a matched route
+    /// where Laravel's fallback route is one: an Inertia `GET` it answers
+    /// records the session's previous URL (PAR-048). `false` for a matched
+    /// route, an unrouted request and a request built in a test.
+    pub fn is_fallback_route(&self) -> bool {
+        self.parts.extensions.get::<FallbackRoute>().is_some()
+    }
+
     /// Record the name of the route the request matched, `None` for an
     /// unnamed route. Called by the server with the name the router holds
     /// for the matched method and pattern.
@@ -1517,6 +1571,9 @@ impl Request {
     /// Determine if the current full URL matches any of the given
     /// patterns. Each pattern may contain `*` wildcards. Mirrors
     /// Laravel's `Request::fullUrlIs(...)`.
+    ///
+    /// The URL is [`full_url`](Self::full_url)'s, its query sorted by key
+    /// and re-encoded, so a pattern names the pairs in that order.
     pub fn full_url_is(&self, patterns: &[&str]) -> bool {
         let full = self.full_url();
         patterns.iter().any(|p| glob_match(p, &full))

@@ -35,9 +35,10 @@
 //!    reaches the page at the end of a chain of redirects.
 //!
 //! 5. **The previous URL.** The session middleware records only full page
-//!    loads, so an Inertia `GET` records its own URL here, unless it is a
-//!    prefetch, a Precognition request or a partial reload of the page it
-//!    rendered (see [`InertiaConfig::store_previous_url`]).
+//!    loads, so an Inertia `GET` that matched a route, the fallback route
+//!    included, records its own URL here, unless it is a prefetch, a
+//!    Precognition request or a partial reload of the page it rendered
+//!    (see [`InertiaConfig::store_previous_url`]).
 //!
 //! Register it first (it is registered first by
 //! [`Inertia::install`](crate::Inertia::install)) so it is the outermost
@@ -140,11 +141,13 @@ struct RequestFacts {
     needs_303: bool,
     is_prefetch: bool,
     is_precognitive: Arc<std::sync::atomic::AtomicBool>,
-    /// The router matched a route (Laravel's `$request->route()`).
+    /// The router matched a route or answered with its fallback route
+    /// (Laravel's `$request->route()`, which is a `Route` for both).
     matched_route: bool,
     /// `X-Inertia-Partial-Component`, when the visit is a partial reload.
     partial_component: Option<String>,
-    /// The URL the visit records as the previous URL, public root included.
+    /// The URL the visit records as the previous URL, public root included
+    /// and query normalised.
     current_url: String,
 }
 
@@ -163,13 +166,18 @@ impl RequestFacts {
             ),
             is_prefetch: visit::is_prefetch(|name| request.header(name)),
             is_precognitive,
-            matched_route: request.route_pattern().is_some(),
+            matched_route: request.route_pattern().is_some() || request.is_fallback_route(),
             partial_component: request
                 .header("X-Inertia-Partial-Component")
                 .map(str::to_string),
-            // Only an Inertia `GET` records it, so only one builds it.
+            // Only an Inertia `GET` records it, so only one builds it. The
+            // query is normalised, as Laravel stores `$request->fullUrl()`,
+            // so the previous URL spells it as the page `url` and the
+            // version 409's location do (PAR-056).
             current_url: if is_inertia && is_get {
-                crate::routing::url::current_path_and_query(request)
+                crate::http::query_string::normalize_path_and_query(
+                    crate::routing::url::current_path_and_query(request),
+                )
             } else {
                 String::new()
             },
@@ -223,13 +231,14 @@ pub(super) fn redirect_with_fragment(location: String, response: HttpResponse) -
 }
 
 impl InertiaHeadersMiddleware {
-    /// Laravel's `storeCurrentUrl`: an Inertia `GET` that matched a route
-    /// becomes the previous URL, unless it is a prefetch, a Precognition
-    /// request or a partial reload of the component it rendered (deferred
-    /// props, polling and infinite scroll reload the page the visitor is
-    /// on). Whatever the visit answered counts, as Laravel's
-    /// `shouldStoreCurrentUrl` reads the request alone (PAR-048); the
-    /// session middleware's status rule is for full page loads.
+    /// Laravel's `storeCurrentUrl`: an Inertia `GET` that matched a route,
+    /// the fallback route included, becomes the previous URL, unless it is
+    /// a prefetch, a Precognition request or a partial reload of the
+    /// component it rendered (deferred props, polling and infinite scroll
+    /// reload the page the visitor is on). Whatever the visit answered
+    /// counts, as Laravel's `shouldStoreCurrentUrl` reads the request alone
+    /// (PAR-048); the session middleware's status rule is for full page
+    /// loads.
     fn store_current_url(&self, facts: &RequestFacts, visit: &Visit) {
         if !self.store_previous_url
             || !facts.is_get
