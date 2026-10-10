@@ -17,6 +17,9 @@ pub mod job;
 pub mod memory;
 pub mod middleware;
 pub mod migrations;
+// The MongoDB driver, failed-job store and batch repository (PAR-186).
+#[cfg(feature = "database-mongodb")]
+pub mod mongodb;
 pub mod null;
 pub mod outcome;
 pub mod redis;
@@ -28,6 +31,11 @@ pub mod sync;
 pub mod testing;
 pub mod worker;
 
+#[cfg(feature = "database-mongodb")]
+pub use self::mongodb::{
+    DEFAULT_MONGO_BATCHES_COLLECTION, DEFAULT_MONGO_FAILED_JOBS_COLLECTION,
+    DEFAULT_MONGO_JOBS_COLLECTION, MongoBatchRepository, MongoFailedJobStore, MongoQueueDriver,
+};
 pub use batch::{
     Batch, BatchCallback, BatchOptions, BatchRepository, DEFAULT_BATCH_SETTLEMENTS_TABLE,
     DEFAULT_BATCHES_TABLE, DatabaseBatchRepository, MemoryBatchRepository, PendingBatch,
@@ -1708,8 +1716,11 @@ pub async fn bootstrap_default() {
 }
 
 /// Read `QUEUE_DRIVER` env and configure the matching driver: `memory`, `sync`,
-/// `null`, `redis`, `database`, `sqs` or `failover`. An unset `QUEUE_DRIVER` is
-/// `memory`. The module `queue::sqs` lists the variables `sqs` reads.
+/// `null`, `redis`, `database`, `sqs`, `failover` or `mongodb`. An unset
+/// `QUEUE_DRIVER` is `memory`. The module `queue::sqs` lists the variables
+/// `sqs` reads. `mongodb` (with the `database-mongodb` feature) runs on the
+/// default MongoDB connection, which the boot registers from `MONGODB_URI`
+/// before the queue.
 ///
 /// A value that names no driver is a boot error in production, where falling
 /// back to an in-memory queue would lose every job at the next restart with a
@@ -1835,16 +1846,16 @@ fn plan_connections(
 }
 
 /// The stored queues a driver built from the environment under `kind` reads
-/// and writes: `redis`, `database` and `sqs` name one each, and `failover` names
+/// and writes: `redis`, `database`, `sqs` and `mongodb` name one each, and `failover` names
 /// those of its inner connections, `failover_inner`. The in-memory kinds
 /// name none, because every driver built from one is a queue of its own.
 fn stored_queues_of(kind: &str, failover_inner: &str) -> Vec<String> {
     match kind {
-        "redis" | "database" | "sqs" => vec![kind.to_owned()],
+        "redis" | "database" | "sqs" | "mongodb" => vec![kind.to_owned()],
         "failover" => failover_inner
             .split(',')
             .map(str::trim)
-            .filter(|inner| matches!(*inner, "redis" | "database" | "sqs"))
+            .filter(|inner| matches!(*inner, "redis" | "database" | "sqs" | "mongodb"))
             .map(str::to_owned)
             .collect(),
         _ => Vec::new(),
@@ -1852,7 +1863,7 @@ fn stored_queues_of(kind: &str, failover_inner: &str) -> Vec<String> {
 }
 
 /// Every name `QUEUE_DRIVER` accepts, for the message a wrong one gets.
-const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, sqs, failover";
+const QUEUE_DRIVER_NAMES: &str = "memory, sync, null, redis, database, sqs, failover, mongodb";
 
 /// What a `QUEUE_DRIVER` that names no driver becomes: a boot error in
 /// production, and outside it a warning and the in-memory driver.
@@ -1974,8 +1985,37 @@ async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>
             "QUEUE_DRIVER=sqs needs the `queue-sqs` feature of suprnova, which this build \
              leaves out",
         )),
+        #[cfg(feature = "database-mongodb")]
+        "mongodb" => Ok(Some(build_mongodb_driver()?)),
+        #[cfg(not(feature = "database-mongodb"))]
+        "mongodb" => Err(FrameworkError::internal(
+            "QUEUE_DRIVER=mongodb needs the `database-mongodb` feature of suprnova, which this \
+             build leaves out",
+        )),
         _ => Ok(None),
     }
+}
+
+/// The `mongodb` queue connection: [`MongoQueueDriver`] on the default
+/// MongoDB connection, with the failed-job store and the batch repository
+/// that go with it.
+///
+/// The failed-job store replaces the one installed, as `database` does: the
+/// `failed_jobs` collection is part of the driver's contract, and a queue
+/// that dead-lettered into nothing would lose its failures. The batch
+/// repository is installed only when none is, so one the application
+/// installed in its bootstrap stays. A collection needs no migration, so
+/// both work from the first job.
+#[cfg(feature = "database-mongodb")]
+fn build_mongodb_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    let connection = crate::mongodb::Mongo::connection().map_err(|e| {
+        FrameworkError::internal(format!(
+            "the `mongodb` queue connection runs on the default MongoDB connection: {e}"
+        ))
+    })?;
+    Queue::set_failed_store(Arc::new(MongoFailedJobStore::new(&connection)));
+    batch::install_repository_if_absent(Arc::new(MongoBatchRepository::new(&connection)))?;
+    Ok(Arc::new(MongoQueueDriver::new(&connection)))
 }
 
 /// Wire a [`FailoverQueueDriver`] from `QUEUE_FAILOVER_CONNECTIONS`.
@@ -2010,7 +2050,7 @@ async fn build_failover_from_env() -> Result<Arc<dyn QueueDriver>, FrameworkErro
         let driver = build_driver_from_env(name).await?.ok_or_else(|| {
             FrameworkError::internal(format!(
                 "QUEUE_FAILOVER_CONNECTIONS names unknown queue connection `{name}`; \
-                 expected one of memory, sync, null, redis, database, sqs"
+                 expected one of memory, sync, null, redis, database, sqs, mongodb"
             ))
         })?;
         drivers.push((name.to_string(), driver));

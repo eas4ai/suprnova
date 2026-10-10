@@ -281,6 +281,10 @@ Configure sessions via environment variables - `SessionConfig::from_env`
 reads them at boot:
 
 ```env
+# Where sessions are kept: database (default) or mongodb. mongodb needs
+# the database-mongodb feature; Config::init refuses any other value.
+SESSION_DRIVER=database
+
 # Lifetime in minutes. Drives both the row TTL and the cookie Max-Age.
 SESSION_LIFETIME=120
 
@@ -303,12 +307,14 @@ SESSION_COOKIE_PREFIX=       # empty | __Secure- | __Host-
 SESSION_PARTITIONED=false    # CHIPS opt-in
 SESSION_EXPIRE_ON_CLOSE=false # true → omit Max-Age, browser drops on close
 
-# Table the database driver reads and writes (default sessions).
+# Table the database driver reads and writes (default sessions), and the
+# collection the mongodb driver does.
 # Config::init refuses a name that is not 1 to 63 ASCII letters, digits,
 # or underscores starting with a letter or underscore.
 SESSION_TABLE=sessions
 
-# Named DB connection for the session store (optional)
+# Named connection for the session store (optional). The mongodb driver
+# reads it as the name of a MongoDB connection.
 SESSION_CONNECTION=sessions
 
 # Remember-me token/cookie lifetime in minutes (default 30 days)
@@ -445,7 +451,12 @@ tracing::info!(
 );
 ```
 
-To use a non-database store - for tests, or for a Redis-backed driver
+`SessionMiddleware::new` and `install` build the store
+`SessionConfig::driver` names: the database driver by default, or, for
+`SESSION_DRIVER=mongodb`, `MongoSessionDriver` over the `sessions`
+collection. See [MongoDB: Session](mongodb.md#session).
+
+To use another store - for tests, or for a Redis-backed driver
 you write yourself - implement `SessionStore` and pass it via
 `with_store`:
 

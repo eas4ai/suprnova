@@ -280,16 +280,165 @@ and SQL models.
 
 ## Queue
 
-This section describes the `mongodb` queue driver, its batch repository, and
-its failed-job store.
+Set `QUEUE_DRIVER=mongodb` to keep queued jobs in MongoDB. The boot builds
+three stores on the default connection:
+
+- `MongoQueueDriver` over the `jobs` collection.
+- `MongoFailedJobStore` over `failed_jobs`, which becomes the failed-job
+  store, as `QUEUE_DRIVER=database` makes its table the store.
+- `MongoBatchRepository` over `job_batches`, which becomes the batch
+  repository unless your bootstrap installed one.
+
+```ini
+QUEUE_DRIVER=mongodb
+MONGODB_URI="mongodb://127.0.0.1:27017"
+MONGODB_DATABASE="shop"
+```
+
+Run workers with `queue:work` as for any other driver. The collections need
+no migration: each store creates its indexes on its first operation.
+
+A job is one document with Laravel's fields: `queue`, `payload`,
+`attempts`, `reserved_at`, `available_at`, and `created_at`, the last three
+as epoch seconds. Two fields of Suprnova's own hold the reservation:
+`token`, which the worker settles the job with, and `reserved_until`, when
+the reservation lapses.
+
+A worker reserves a job with one `findOneAndUpdate`. It picks the earliest
+available job on the worker's queues that no live reservation holds, sets
+the reservation, and adds 1 to `attempts`. The server applies the update to
+one document atomically, so two workers never reserve the same job. A job
+whose worker died is reserved again once `reserved_until` passes, and that
+delivery counts as an attempt.
+
+`available_at` holds whole seconds. A job due when you push it is
+available at once. A delayed job rounds its time up, so a worker never
+reserves it early; it can start up to a second late.
+
+`QUEUE_DRIVER=mongodb` uses the default connection and Laravel's
+collection names. Each store also takes a connection and a collection of
+your choice, for code that drives a store itself, such as a test or a
+worker you start with `run_worker`:
+
+```rust
+use std::sync::Arc;
+use suprnova::{Mongo, MongoBatchRepository, MongoFailedJobStore, MongoQueueDriver};
+
+let reporting = Mongo::connection_named("reporting")?;
+let jobs = Arc::new(MongoQueueDriver::with_collection(&reporting, "report_jobs")?);
+let failed = MongoFailedJobStore::with_collection(&reporting, "report_failed_jobs")?;
+let batches = MongoBatchRepository::new(&reporting);
+```
+
+A batch is one document. Each job that settles updates it once, moving
+`pending_jobs` and `failed_jobs` with `$inc` and adding the job to
+`settled_job_ids`, so jobs that finish at the same moment never lose a
+count and a job delivered twice counts once. The `then`, `catch`, and
+`finally` callbacks run once: the first worker to set `finished_at` runs
+them.
 
 ## Cache
 
-This section describes the `mongodb` cache store and its locks.
+Set `CACHE_DRIVER=mongodb` to keep the cache in MongoDB. The boot builds
+`MongoCache` on the default connection, over the `cache` collection for
+entries and `cache_locks` for locks, with the `CACHE_PREFIX` and
+`CACHE_DEFAULT_TTL` of the other drivers.
+
+```ini
+CACHE_DRIVER=mongodb
+CACHE_PREFIX=shop-cache-
+```
+
+The `Cache` facade works as with any driver:
+
+```rust
+use std::time::Duration;
+use suprnova::Cache;
+
+Cache::put("report:today", &42, Some(Duration::from_secs(60))).await?;
+Cache::increment("visits", 1).await?;
+let added = Cache::add("slot:9", &"taken", Some(Duration::from_secs(30))).await?;
+```
+
+An entry is one document: `_id` (the prefix and the key), `value`,
+`expires_at`, and `tags`. A value that is a whole number is stored as a
+BSON integer, so `increment` adds to it on the server with `$inc` in one
+`findOneAndUpdate`, and two increments at once never lose a step. Any other
+value is stored as its JSON text.
+
+Both collections have a TTL index on `expires_at`, which the store creates
+on its first operation, so the server removes expired entries and locks.
+The server's sweep runs once a minute, so every read also compares
+`expires_at` with the time now and never returns an expired entry.
+
+`Cache::add` is one upsert that matches only an expired entry: it inserts
+a missing key, replaces an expired one, and fails on a live one, so two
+callers never both add. Tags are an array on the entry, and
+`Cache::flush_tags` deletes every entry whose tags hold one of the tags. A
+lock is one document whose `_id` is the key: acquiring it is an upsert that
+fails while another owner's lock is live, and releasing or refreshing it
+checks the owner's token.
+
+To use other collections or another connection, build the store and bind
+it in your bootstrap:
+
+```rust
+use std::sync::Arc;
+use suprnova::{App, CacheConfig, CacheStore, Mongo, MongoCache};
+
+pub async fn register() -> Result<(), suprnova::FrameworkError> {
+    Mongo::init().await?;
+    let store = MongoCache::with_collections(
+        &Mongo::connection()?,
+        &CacheConfig::from_env()?,
+        "app_cache",
+        "app_cache_locks",
+    )?;
+    App::bind::<dyn CacheStore>(Arc::new(store));
+    Ok(())
+}
+```
 
 ## Session
 
-This section describes the `mongodb` session driver.
+Set `SESSION_DRIVER=mongodb` to keep sessions in MongoDB. The session
+middleware then stores them with `MongoSessionDriver`, in the collection
+`SESSION_TABLE` names (`sessions` by default), on the MongoDB connection
+`SESSION_CONNECTION` names or the default one.
+
+```ini
+SESSION_DRIVER=mongodb
+SESSION_LIFETIME=120
+```
+
+Your bootstrap builds the middleware as it does for the database driver:
+
+```rust
+use suprnova::{SessionConfig, SessionMiddleware, global_middleware};
+
+pub async fn register() {
+    global_middleware!(SessionMiddleware::install(SessionConfig::from_env()).await);
+}
+```
+
+The middleware is built before the boot registers the MongoDB connections,
+so the driver looks the connection up on each call.
+
+A session is one document: `session_id`, `user_id` (the default guard's
+user), `guards` (each other guard signed in, with its user), `payload` (the
+session data and the CSRF token), and `last_activity`. The store creates a
+unique index on `session_id` on its first operation.
+
+`destroy_for_user` and the other revocations find sessions by `user_id`
+and `guards`, and delete them one at a time until none is left, so a
+session signed in during the revocation goes too. A session a request
+loaded and a revocation then deleted isn't written back. `gc` deletes the
+sessions whose last activity is older than the lifetime, and the session
+middleware's collector calls it every `SESSION_GC_INTERVAL` seconds.
+
+The two-factor promotion renames the pending session to its new id with
+one update of one document, so the old id stops working and the new one
+holds the session in the same step.
 
 ### Why Suprnova diverges
 
@@ -305,6 +454,27 @@ This section describes the `mongodb` session driver.
   in `config/database.php`. Suprnova reads the default connection from the
   environment and takes named connections and pool options from
   `MongoConfig::builder()`.
+- **Only the worker that holds a job settles it.** Laravel's database
+  queue deletes a finished job by its id, so a worker whose reservation
+  lapsed can delete a job another worker now runs. Suprnova's driver keeps
+  a `token` and a `reserved_until` beside Laravel's fields, and settles a
+  job by its token.
+- **A release doesn't spend an attempt.** Laravel counts each reservation
+  as an attempt and keeps the count when a job is released. Suprnova gives
+  the delivery back, as its other drivers do.
+- **Batch settlements count once.** Laravel's batch repository moves the
+  counters on every settlement, so a job delivered twice counts twice.
+  Suprnova records the settled jobs on the batch and moves the counters in
+  the same update, so a redelivery changes nothing. MongoDB's 16 MiB
+  document limit bounds a batch at about 300,000 jobs.
+- **A chained job's successor is pushed before the acknowledgement.**
+  Without a transaction, which a standalone server lacks, the driver can't
+  enqueue the successor and drop the finished job in one step. The worker
+  pushes first, as it does on Redis, so a crash between the two runs the
+  finished job again rather than losing the rest of the chain.
+- **Sessions are keyed by a `session_id` field, not `_id`.** A document's
+  `_id` can't change, and the two-factor promotion has to give a session a
+  new id atomically, so the id is a field with a unique index.
 
 ## Next
 

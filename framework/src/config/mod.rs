@@ -62,7 +62,8 @@ impl Config {
     /// `.env` file cannot be read or parsed, or when a typed
     /// framework knob (e.g. `SERVER_PORT`, `APP_DEBUG`) is set to a
     /// value that fails to parse, or when a session setting checked at
-    /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`) is invalid, or when a
+    /// boot (`SESSION_COOKIE_PREFIX`, `SESSION_TABLE`, `SESSION_DRIVER`) is
+    /// invalid, or when a
     /// Live limit (`LIVE_MAX_REQUEST_BYTES` and the other `LIVE_*` limit keys)
     /// is not a whole number or breaks its rule, or when a second-factor
     /// lockout key (`TWO_FACTOR_MAX_ATTEMPTS`, `TWO_FACTOR_LOCKOUT_MINUTES`)
@@ -130,6 +131,12 @@ impl Config {
                 "SESSION_TABLE={table:?} is not a valid table name; {}",
                 crate::session::driver::database::SESSION_TABLE_RULE
             )));
+        }
+        // The session driver, checked here for the same reason: the infallible
+        // SessionConfig::from_env falls back to `database` on a value it does
+        // not know, which would keep sessions where the operator did not ask.
+        if let Some(driver) = env::env_optional::<String>("SESSION_DRIVER") {
+            crate::session::SessionDriver::parse(&driver)?;
         }
         // `LARAVEL_SHARED_DATABASE` changes the password hash format and the
         // default queue, so a value that is neither on nor off stops boot

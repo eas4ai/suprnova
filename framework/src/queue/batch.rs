@@ -1339,6 +1339,16 @@ pub(crate) fn ensure_default_repository() -> Result<Arc<dyn BatchRepository>, Fr
     ensure_default_in(&REPO, || Arc::new(MemoryBatchRepository::new()))
 }
 
+/// Install `repo` unless a repository is installed already, as the
+/// `mongodb` queue driver does at boot: a repository the application
+/// installed in its bootstrap stays.
+#[cfg(feature = "database-mongodb")]
+pub(crate) fn install_repository_if_absent(
+    repo: Arc<dyn BatchRepository>,
+) -> Result<(), FrameworkError> {
+    ensure_default_in(&REPO, || repo).map(|_| ())
+}
+
 /// Return the repository in `slot`, installing `make()` when it holds none.
 ///
 /// The check and the install happen under one write lock. Two first

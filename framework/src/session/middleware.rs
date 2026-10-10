@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::config::SessionConfig;
-use super::driver::DatabaseSessionDriver;
 use super::store::{SessionData, SessionMigrationError, SessionStore};
 
 pub(crate) type PendingRememberRevocation = (String, String, String);
@@ -707,8 +706,9 @@ pub struct SessionMiddleware {
 /// [`crate::session::destroy_all_for_user`] (the primitive
 /// [`crate::auth_flows::PasswordReset::complete`] and friends call to
 /// revoke every session belonging to a user) used to construct a fresh
-/// [`DatabaseSessionDriver`] unconditionally, regardless of what store
-/// this middleware was actually configured with. An app running a
+/// [`DatabaseSessionDriver`](super::driver::DatabaseSessionDriver)
+/// unconditionally, regardless of what store this middleware was actually
+/// configured with. An app running a
 /// custom store (Redis, per the `with_store` worked example in
 /// `manual/session.md`) would have its revocation calls silently
 /// operate against the wrong backend and report success while revoking
@@ -739,12 +739,11 @@ fn register_configured_store(store: Arc<dyn SessionStore>) {
 
 impl SessionMiddleware {
     /// Create a new session middleware with the given configuration.
-    /// The database driver reads and writes `config.table_name`.
+    /// The store is the one [`SessionConfig::driver`] names: the database
+    /// driver over `config.table_name` by default, or the MongoDB driver
+    /// over that collection for `SESSION_DRIVER=mongodb`.
     pub fn new(config: SessionConfig) -> Self {
-        let store = Arc::new(DatabaseSessionDriver::with_configured_table(
-            config.lifetime,
-            config.table_name.clone(),
-        ));
+        let store = super::driver::configured_store(&config);
         register_configured_store(store.clone());
         Self { config, store }
     }

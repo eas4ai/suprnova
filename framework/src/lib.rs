@@ -202,6 +202,9 @@ pub use crate::mongodb::{
     DEFAULT_MONGO_CONNECTION, Mongo, MongoConfig, MongoConfigBuilder, MongoConnection,
     MongoConnectionConfig,
 };
+// The MongoDB queue, cache and session stores (PAR-186 to PAR-188).
+#[cfg(feature = "database-mongodb")]
+pub use cache::{DEFAULT_MONGO_CACHE_COLLECTION, DEFAULT_MONGO_CACHE_LOCKS_COLLECTION, MongoCache};
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -246,8 +249,15 @@ pub use magnetar_integration::{
     oauth_transport::ReqwestOAuthTransport,
 };
 pub use magnetar_integration::{Registration, SignInOutcome};
+#[cfg(feature = "database-mongodb")]
+pub use queue::{
+    DEFAULT_MONGO_BATCHES_COLLECTION, DEFAULT_MONGO_FAILED_JOBS_COLLECTION,
+    DEFAULT_MONGO_JOBS_COLLECTION, MongoBatchRepository, MongoFailedJobStore, MongoQueueDriver,
+};
 #[cfg(feature = "magnetar-oauth")]
 pub use secrecy::SecretString;
+#[cfg(feature = "database-mongodb")]
+pub use session::{DEFAULT_MONGO_SESSIONS_COLLECTION, MongoSessionDriver};
 
 // SeaORM type aliasing - Suprnova design principle #4: SeaORM is an
 // implementation detail; consumers reach for `suprnova::*` and never
@@ -542,10 +552,11 @@ pub use seed::{
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
     DatabaseSessionDriver, DestroyedSessions, SessionBlock, SessionConfig, SessionData,
-    SessionGcSupervisor, SessionMiddleware, SessionMigrationError, SessionStore, auth_user_id,
-    clear_auth_user, destroy_all_for_guard_user, destroy_all_for_user, generate_csrf_token,
-    generate_session_id, get_csrf_token, invalidate_session, is_authenticated, is_valid_session_id,
-    regenerate_csrf_token, regenerate_session_id, session, session_mut, set_auth_user,
+    SessionDriver, SessionGcSupervisor, SessionMiddleware, SessionMigrationError, SessionStore,
+    auth_user_id, clear_auth_user, destroy_all_for_guard_user, destroy_all_for_user,
+    generate_csrf_token, generate_session_id, get_csrf_token, invalidate_session, is_authenticated,
+    is_valid_session_id, regenerate_csrf_token, regenerate_session_id, session, session_mut,
+    set_auth_user,
 };
 pub use sse::{EndSignal, SseEvent, StreamedEvent};
 pub use static_files::StaticFiles;

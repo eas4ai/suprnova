@@ -41,9 +41,16 @@
 pub mod config;
 mod events;
 pub mod memory;
+// The MongoDB store (PAR-187), behind `database-mongodb`.
+#[cfg(feature = "database-mongodb")]
+pub mod mongodb;
 pub mod redis;
 pub mod store;
 
+#[cfg(feature = "database-mongodb")]
+pub use self::mongodb::{
+    DEFAULT_MONGO_CACHE_COLLECTION, DEFAULT_MONGO_CACHE_LOCKS_COLLECTION, MongoCache,
+};
 pub use config::{CacheConfig, CacheConfigBuilder, CacheDriver};
 pub use events::{CacheHit, CacheMissed};
 pub use memory::InMemoryCache;
@@ -106,6 +113,9 @@ impl Cache {
     ///   closed** if the command connection cannot answer, so a
     ///   misconfigured production deployment never silently downgrades to
     ///   a per-process cache.
+    /// - `CacheDriver::MongoDb` (with `database-mongodb`) - build a
+    ///   `MongoCache` on the default MongoDB connection, which the boot
+    ///   registers first. Fails when no MongoDB connection is registered.
     ///
     /// A `dyn CacheStore` the application already bound, in its
     /// `bootstrap_fn` or a test, is kept: an app override always wins.
@@ -135,6 +145,8 @@ impl Cache {
                 Duration::from_secs(config.sweep_interval),
             )),
             CacheDriver::Redis => Ok(Arc::new(Self::connect_redis(config).await?)),
+            #[cfg(feature = "database-mongodb")]
+            CacheDriver::MongoDb => Ok(Arc::new(MongoCache::from_config(config)?)),
         }
     }
 
