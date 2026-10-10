@@ -6,12 +6,22 @@
 //! (`App::singleton(AuthManager::new(config))`); the static [`crate::Auth`]
 //! facade reaches it through `App::get`.
 //!
-//! Guard instances are built per resolution rather than cached: a
-//! Suprnova guard is a cheap value object (name + provider handle), and
-//! all per-request state lives in [`crate::auth::request_state`] / the
-//! session, never on the instance. Building fresh each call sidesteps
-//! cache invalidation and keeps the manager `Clone` + `Send + Sync`
-//! without locking guard instances.
+//! Inside a request the manager hands out one instance per guard name, as
+//! Laravel's `AuthManager` keeps the guards it resolved: the first
+//! resolution builds the instance and the request keeps it in
+//! [`crate::auth::request_state`]. Every later resolution in the request -
+//! the test client's sign-in, the auth middleware, `Auth::user()` in the
+//! handler - reaches that instance, so a guard of the application that keeps
+//! its user on the instance (`set_user`) answers each of them with that
+//! user. The next request starts with no instances, so nothing an instance
+//! holds outlives its request. Outside a request each resolution builds a
+//! fresh instance. The built-in guards keep their per-request state in
+//! `request_state` and the session, never on the instance, so for them the
+//! kept instance only saves the build.
+//!
+//! The instance is kept rather than the user recorded beside it because the
+//! instance is what a guard of the application answers from: no store the
+//! manager reads can stand in for state the guard keeps itself.
 //!
 //! `AuthManager` is `Clone`; clones share one provider registry and one
 //! driver registry (each is `Arc<RwLock<…>>`), so `App::get::<AuthManager>()`
@@ -132,11 +142,14 @@ impl AuthManager {
     /// Mirrors Laravel's `Auth::extend($driver, $callback)`.
     ///
     /// Every guard declared with [`crate::GuardConfig::custom`] naming this
-    /// driver resolves through `factory`, called on each resolution with the
-    /// guard's name and the provider its configuration names. Registering
-    /// the same driver twice keeps the last factory. The built-in `session`
-    /// and `token` drivers are never replaced: a factory serves only guards
-    /// declared custom.
+    /// driver resolves through `factory`, called with the guard's name and
+    /// the provider its configuration names. Inside a request it runs on the
+    /// guard's first resolution, and every later resolution in the request
+    /// returns the instance it built (see [`guard`](Self::guard)); outside a
+    /// request it runs on each resolution. Registering the same driver twice
+    /// keeps the last factory, for the next request that builds the guard.
+    /// The built-in `session` and `token` drivers are never replaced: a
+    /// factory serves only guards declared custom.
     ///
     /// A factory error fails the resolution, and so the request that asked
     /// for the guard; it is never read as a guest. A guard that reads a
@@ -393,10 +406,73 @@ impl AuthManager {
     /// Works for every driver (session, token, and custom). For
     /// login/logout/attempt, use [`stateful_guard`](Self::stateful_guard).
     ///
+    /// Inside a request this returns one instance per guard name: the first
+    /// call builds it and every later call in the request returns it, as
+    /// Laravel's `AuthManager::guard` does. A user set on the instance
+    /// ([`Guard::set_user`]) is therefore the user of every resolution in
+    /// the request, whatever the guard keeps it in. Outside a request each
+    /// call builds a fresh instance. A resolution that fails keeps nothing.
+    ///
     /// A custom driver without a registered factory, or a `via_request`
     /// driver without a resolver, is an error naming the guard and the
     /// driver, never a fallback to a built-in driver.
     pub fn guard(&self, name: &str) -> Result<Arc<dyn Guard>, FrameworkError> {
+        if let Some(guard) = request_state::guard_instance(&self.config, name) {
+            return Ok(guard);
+        }
+        let guard = self.build_guard(name)?;
+        Ok(request_state::keep_guard_instance(
+            &self.config,
+            name,
+            guard,
+        ))
+    }
+
+    /// The identifier the guard `name` reports for this request, read without
+    /// waiting on the guard: what the built-in guard's `id()` reports, or the
+    /// user a `via_request` resolver bound. `None` for a guard of
+    /// [`extend`](Self::extend), whose answer only its own `id()` gives, and
+    /// for a name the configuration does not declare.
+    ///
+    /// The synchronous `Auth::id` reads this for the guard in use.
+    pub(crate) fn guard_id_now(&self, name: &str) -> Option<String> {
+        let config = self.config.guard_config(name)?;
+        match &config.driver {
+            GuardDriver::Session => crate::session::middleware::guard_auth_user_id(name),
+            GuardDriver::Token => request_state::bearer_user_id(name),
+            GuardDriver::Custom(driver)
+                if driver.strip_prefix(VIA_REQUEST_PREFIX) == Some(name) =>
+            {
+                request_state::request_guard_user(name).map(|user| user.get_auth_identifier())
+            }
+            GuardDriver::Custom(_) => None,
+        }
+    }
+
+    /// Whether the guard `name` already holds a resolved user this request,
+    /// read without waiting on the guard, by the rule of
+    /// [`guard_id_now`](Self::guard_id_now): `false` for a guard of
+    /// [`extend`](Self::extend) and for an undeclared name.
+    ///
+    /// The synchronous `Auth::has_user` reads this for the guard in use.
+    pub(crate) fn guard_has_user_now(&self, name: &str) -> bool {
+        let Some(config) = self.config.guard_config(name) else {
+            return false;
+        };
+        match &config.driver {
+            GuardDriver::Session => request_state::has_guard_user(name),
+            GuardDriver::Token => request_state::has_bearer_user(name),
+            GuardDriver::Custom(driver)
+                if driver.strip_prefix(VIA_REQUEST_PREFIX) == Some(name) =>
+            {
+                request_state::request_guard_user(name).is_some()
+            }
+            GuardDriver::Custom(_) => false,
+        }
+    }
+
+    /// Build a new instance of the guard `name`, for [`guard`](Self::guard).
+    fn build_guard(&self, name: &str) -> Result<Arc<dyn Guard>, FrameworkError> {
         let config = self.guard_config(name)?;
         let provider = self.provider(&config.provider)?;
         Ok(match &config.driver {
@@ -931,6 +1007,75 @@ mod tests {
             let report = collector::current_report().expect("in scope");
             assert!(report.gate.context.principal_material.is_empty());
             assert!(report.context.overflowed);
+        })
+        .await;
+    }
+
+    /// `manager_with_partner` with a factory that counts its runs.
+    fn counting_partner_manager() -> (AuthManager, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let m = manager_with_partner();
+        let built = Arc::new(AtomicUsize::new(0));
+        let counted = built.clone();
+        m.extend("api_key", move |name, provider| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            partner_factory(name, provider)
+        })
+        .unwrap();
+        (m, built)
+    }
+
+    // Inside a request the manager hands out one instance per guard name,
+    // and each manager its own; outside a request every resolution builds.
+    #[tokio::test]
+    async fn a_request_keeps_one_guard_instance_per_manager_and_name() {
+        use std::sync::atomic::Ordering;
+
+        let (m, built) = counting_partner_manager();
+        let (other, other_built) = counting_partner_manager();
+        assert!(!Arc::ptr_eq(
+            &m.guard("partner").unwrap(),
+            &m.guard("partner").unwrap()
+        ));
+        assert_eq!(built.load(Ordering::SeqCst), 2);
+
+        request_state::scope(async {
+            let first = m.guard("partner").unwrap();
+            assert!(Arc::ptr_eq(&first, &m.guard("partner").unwrap()));
+            // A clone shares the configuration, and so the instance.
+            assert!(Arc::ptr_eq(&first, &m.clone().guard("partner").unwrap()));
+            assert_eq!(built.load(Ordering::SeqCst), 3);
+
+            let theirs = other.guard("partner").unwrap();
+            assert!(!Arc::ptr_eq(&first, &theirs));
+            assert_eq!(other_built.load(Ordering::SeqCst), 1);
+
+            // Clearing every identity of the request forgets the instances.
+            request_state::clear_all_authentication();
+            assert!(!Arc::ptr_eq(&first, &m.guard("partner").unwrap()));
+            assert_eq!(built.load(Ordering::SeqCst), 4);
+        })
+        .await;
+
+        // The next request builds its own.
+        request_state::scope(async {
+            m.guard("partner").unwrap();
+        })
+        .await;
+        assert_eq!(built.load(Ordering::SeqCst), 5);
+    }
+
+    // A resolution that fails keeps nothing: once the driver is registered,
+    // the same request builds the guard.
+    #[tokio::test]
+    async fn a_failed_resolution_keeps_no_instance() {
+        let m = manager_with_partner();
+        request_state::scope(async {
+            assert!(m.guard("partner").is_err());
+            m.extend("api_key", partner_factory).unwrap();
+            let guard = m.guard("partner").expect("the driver is registered now");
+            assert_eq!(guard.id().await.unwrap().as_deref(), Some("api-7"));
         })
         .await;
     }

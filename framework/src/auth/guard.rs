@@ -57,20 +57,55 @@ impl Auth {
     /// Get the authenticated user's ID
     ///
     /// Returns None if not authenticated.
+    ///
+    /// Answers through the guard in use for the request: the configured
+    /// default guard, or the guard a test client signed its user into with
+    /// [`TestClient::acting_as_with_guard`](crate::testing::TestClient::acting_as_with_guard),
+    /// as Laravel's `shouldUse` selects it. This function does not wait, so
+    /// through a guard in use that a driver of [`Auth::extend`] built, which
+    /// only its own `id()` can answer, it returns `None`; ask
+    /// [`user`](Self::user) or the guard instead.
     pub fn id() -> Option<String> {
         crate::render_cache::collector::observe_principal_read();
+        if let Some((manager, guard)) = Self::guard_in_use() {
+            return manager.guard_id_now(&guard);
+        }
         auth_user_id()
     }
 
-    /// Check if a user is currently authenticated
+    /// Check if a user is currently authenticated, through the guard in use
+    /// for the request, by the rule of [`id`](Self::id).
     pub fn check() -> bool {
         crate::render_cache::collector::observe_principal_read();
         Self::id().is_some()
     }
 
-    /// Check if the current user is a guest (not authenticated)
+    /// Check if the current user is a guest (not authenticated), through the
+    /// guard in use for the request, by the rule of [`id`](Self::id).
     pub fn guest() -> bool {
         !Self::check()
+    }
+
+    /// The guard the functions without a guard name read through this
+    /// request when it is not the configured default guard, with the manager
+    /// that resolves it: the guard a test client signed its user into with
+    /// `acting_as_with_guard`. `None` when the configured default guard is in
+    /// use, and without an [`AuthManager`].
+    ///
+    /// Only the reads follow it: `user` and its siblings, `id`, `check`,
+    /// `guest`, `has_user`, the auth and guest middleware without a guard
+    /// name, and the route checks. Every function that signs a user in or
+    /// out acts on the configured default guard.
+    fn guard_in_use() -> Option<(AuthManager, String)> {
+        let guard = request_state::used_guard()?;
+        let manager = App::get::<AuthManager>()?;
+        (guard != manager.default_guard_name()).then_some((manager, guard))
+    }
+
+    /// The name of the guard in use for this request when it is not the
+    /// configured default guard (see [`guard_in_use`](Self::guard_in_use)).
+    pub(crate) fn used_guard() -> Option<String> {
+        Self::guard_in_use().map(|(_, guard)| guard)
     }
 
     /// Establish a session for a known user id - the synchronous session
@@ -872,6 +907,11 @@ impl Auth {
     ///
     /// Returns `None` if not authenticated or the provider cannot find the user.
     ///
+    /// Asks the guard in use for the request: the configured default guard,
+    /// or the guard a test client signed its user into with
+    /// [`TestClient::acting_as_with_guard`](crate::testing::TestClient::acting_as_with_guard),
+    /// as Laravel's `shouldUse` selects it.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -901,6 +941,9 @@ impl Auth {
         // caches the result - so this stays consistent with `Auth::attempt` /
         // `Auth::guard("web").user()`. A configured manager is authoritative:
         // guard/provider resolution errors must not fall back to legacy auth.
+        if let Some((manager, guard)) = Self::guard_in_use() {
+            return manager.guard(&guard)?.user().await;
+        }
         if let Some(manager) = App::get::<AuthManager>() {
             return manager.default_guard()?.user().await;
         }
@@ -1054,7 +1097,7 @@ impl Auth {
     }
 
     /// The user of the route's guard: the guard the last `AuthMiddleware`
-    /// that passed the request on checked, or the default guard, through
+    /// that passed the request on checked, or the guard in use, through
     /// [`user`](Self::user), when that middleware names no guard or none ran.
     ///
     /// Route authorization (`#[authorize]` and `authorize_resource`) checks
@@ -1063,7 +1106,7 @@ impl Auth {
     /// that user is not the one the route authenticated.
     pub(crate) async fn route_user()
     -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
-        match request_state::route_guard() {
+        match Self::route_guard() {
             Some(guard) => Self::guard(&guard)?.user().await,
             None => Self::user().await,
         }
@@ -1072,23 +1115,24 @@ impl Auth {
     /// The identifier of the route's user, by the rule of
     /// [`route_user`](Self::route_user), without a provider lookup: the
     /// route's guard reports it, or [`id`](Self::id) when the route names no
-    /// guard.
+    /// guard and the configured default guard is in use.
     pub(crate) async fn route_user_id() -> Result<Option<String>, crate::error::FrameworkError> {
-        match request_state::route_guard() {
+        match Self::route_guard() {
             Some(guard) => Self::guard(&guard)?.id().await,
             None => Ok(Self::id()),
         }
     }
 
     /// The provider of the route's guard: the provider its configuration
-    /// names, or the default guard's provider when the route names no guard.
+    /// names, or the default guard's provider when the route names no guard
+    /// and the configured default guard is in use.
     ///
     /// A route check asks this provider about the route's user. The default
     /// provider knows the default guard's users, which are not the users of
     /// another guard.
     pub(crate) fn route_user_provider()
     -> Result<Arc<dyn UserProvider>, crate::error::FrameworkError> {
-        match request_state::route_guard() {
+        match Self::route_guard() {
             Some(guard) => Self::manager()?.guard_provider(&guard),
             None => super::active_user_provider(),
         }
@@ -1101,11 +1145,13 @@ impl Auth {
     /// string, such as Live's, are asked about this value.
     ///
     /// The route's guard is the one the last `AuthMiddleware` that passed
-    /// the request on checked. When the route names none, it is the default
-    /// guard: [`id`](Self::id), unchanged, or the user of a default guard of
-    /// the application under its name. `None` when that guard has no user.
+    /// the request on checked. When the route names none, it is the guard in
+    /// use when that is not the configured default guard, and otherwise the
+    /// default guard: [`id`](Self::id), unchanged, or the user of a default
+    /// guard of the application under its name. `None` when that guard has
+    /// no user.
     pub(crate) async fn route_principal() -> Result<Option<String>, crate::error::FrameworkError> {
-        let guard = match request_state::route_guard() {
+        let guard = match Self::route_guard() {
             Some(guard) => guard,
             None => match Self::custom_default_guard() {
                 Some(guard) => guard,
@@ -1121,7 +1167,15 @@ impl Auth {
     /// `None` when that is the default guard, named or not, or when no such
     /// middleware ran.
     pub(crate) fn route_guard_other_than_default() -> Option<String> {
-        request_state::route_guard().filter(|guard| *guard != Self::default_guard_name())
+        Self::route_guard().filter(|guard| *guard != Self::default_guard_name())
+    }
+
+    /// The route's guard by name: the guard the last `AuthMiddleware` that
+    /// passed the request on checked, or, when it named none or none ran, the
+    /// guard in use when that is not the configured default guard. `None`
+    /// means the configured default guard.
+    fn route_guard() -> Option<String> {
+        request_state::route_guard().or_else(Self::used_guard)
     }
 
     /// The principal that the user `id` of the guard `guard_name` stands
@@ -1595,8 +1649,12 @@ impl Auth {
     ///
     /// `true` after a `login`/`once`/`set_user` or a prior `user()` lookup;
     /// `false` when only a session id is present but no user has been fetched.
-    /// Reads the request-scoped state directly (manager-free).
+    /// Reads the request-scoped state directly (manager-free), through the
+    /// guard in use by the rule of [`id`](Self::id).
     pub fn has_user() -> bool {
+        if let Some((manager, guard)) = Self::guard_in_use() {
+            return manager.guard_has_user_now(&guard);
+        }
         request_state::has_current_user()
     }
 
