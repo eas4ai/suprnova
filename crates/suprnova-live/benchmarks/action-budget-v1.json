@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "workload": "A8/16-action-framework",
+  "state_bytes": 8192,
+  "html_bytes": 16384,
+  "warmup_iterations": 50,
+  "measured_samples": 40,
+  "p50_microseconds": 117.04700000000001,
+  "p95_microseconds": 122.309,
+  "stages": [
+    "parse",
+    "verify",
+    "claim",
+    "hydrate",
+    "bind",
+    "dispatch",
+    "successor_classify"
+  ],
+  "excluded": [
+    "application_action_body",
+    "provider_io",
+    "askama_render"
+  ],
+  "profile": "release",
+  "fixture_sha256": "fd9ef40afd3b9318b6cbe593150cfeb7fa6cf946ffec87d0696a778cfda14a1f",
+  "measured_at_unix_ms": 1787374047383,
+  "environment": {
+    "classification": "local_exploratory",
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "selected_cpu_affinity": "0-7",
+    "selected_cpu_count": 8,
+    "memory_bytes": 100993097728,
+    "kernel": "Linux 7.0.0-29-generic",
+    "cpu_governor": "powersave",
+    "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)",
+    "database": "not_used_by_action_framework_benchmark",
+    "provider_versions": {
+      "instance_ledger": "in_process_tier0_v1",
+      "snapshot_key_ring": "in_process_v1"
+    },
+    "dedicated_vcpus_attested": false,
+    "warm_filesystem_cache": true,
+    "loopback_providers": true,
+    "s1_requirements_met": false
+  }
+}
