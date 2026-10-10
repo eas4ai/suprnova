@@ -43,10 +43,10 @@ pub use document::{
     __read_cast_field, __read_field, __resolve_document_route_binding, __serialize_document,
     __write_cast_field, __write_field,
 };
-// The update the model's array operators send, so a test can assert it
-// without a server; not part of the API.
+// The updates the model's array operators and its embedded relations send,
+// so a test can assert them without a server; not part of the API.
 #[doc(hidden)]
-pub use document::__rendered_array_update;
+pub use document::{__rendered_array_update, __rendered_embedded_update};
 pub use events::DocumentObserver;
 pub use facade::Mongo;
 pub use query::{DocumentGroup, DocumentQuery, RenderedFind};

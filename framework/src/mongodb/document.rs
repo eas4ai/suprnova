@@ -976,12 +976,54 @@ pub fn __rendered_array_update<M: DocumentModel, V: Serialize>(
 }
 
 /// Add `{"$set": {updated_at: now}}` to the one-operator `update` when `M`
-/// manages timestamps. Every operator call of the model builds its update
-/// through it, so none of them can leave `updated_at` behind.
+/// manages timestamps. When `update` is a `$set` already, `updated_at`
+/// joins that document, since an update holds one `$set` and a second
+/// would replace the first. Every operator call of the model and of its
+/// embedded relations builds its update through it, so none of them can
+/// leave `updated_at` behind.
 fn set_updated_at<M: DocumentModel>(update: &mut Document, now: ::bson::DateTime) {
-    if let Some((_, updated_at)) = M::TIMESTAMPS {
-        update.insert("$set", one(updated_at, Bson::DateTime(now)));
+    let Some((_, updated_at)) = M::TIMESTAMPS else {
+        return;
+    };
+    match update.get_mut("$set") {
+        Some(Bson::Document(set)) => {
+            set.insert(updated_at, Bson::DateTime(now));
+        }
+        _ => {
+            update.insert("$set", one(updated_at, Bson::DateTime(now)));
+        }
     }
+}
+
+/// The update an embedded relation's call sends for `operator` (`$push`,
+/// `$pull` or `$set`): `{operator: {field: value}}`, and on a parent `P`
+/// with timestamps `updated_at` set in the same update, inside the `$set`
+/// when the operator is `$set`. `save_many` passes `{"$each": [..]}` as
+/// `value`.
+///
+/// **Not part of the public API.** It is `pub` so a test can assert the
+/// update without a server; [`EmbedsMany`] and [`EmbedsOne`] build every
+/// update through it, so the test sees what they send.
+///
+/// # Errors
+///
+/// When `operator` is not `$push`, `$pull` or `$set`; the error names it.
+#[doc(hidden)]
+pub fn __rendered_embedded_update<P: DocumentModel>(
+    operator: &str,
+    field: &str,
+    value: Bson,
+    now: ::bson::DateTime,
+) -> Result<Document, FrameworkError> {
+    if !matches!(operator, "$push" | "$pull" | "$set") {
+        return Err(FrameworkError::internal(format!(
+            "`{operator}` is no embedded-document operator: the embedded relations send \
+             `$push`, `$pull` or `$set`"
+        )));
+    }
+    let mut update = one(operator, one(field, value));
+    set_updated_at::<P>(&mut update, now);
+    Ok(update)
 }
 
 /// Apply `update` to `model`'s document and answer the document after it.
@@ -1274,7 +1316,8 @@ impl<'a, P: DocumentModel, T: Serialize + Sync> EmbedsMany<'a, P, T> {
         }
     }
 
-    /// Append `item` to the array, with `$push`.
+    /// Append `item` to the array, with `$push`, and set the parent's
+    /// `updated_at` in the same write when it has timestamps.
     ///
     /// # Errors
     ///
@@ -1282,56 +1325,58 @@ impl<'a, P: DocumentModel, T: Serialize + Sync> EmbedsMany<'a, P, T> {
     /// parent's document no longer exists.
     pub async fn save(self, item: &T) -> Result<(), FrameworkError> {
         let item = value_to_bson(item, "save")?;
-        *self.parent =
-            write_operator(&*self.parent, one("$push", one(self.field, item)), "save").await?;
+        let update = __rendered_embedded_update::<P>("$push", self.field, item, now_moment())?;
+        *self.parent = write_operator(&*self.parent, update, "save").await?;
         Ok(())
     }
 
     /// Append every item of `items` to the array, in order, with one
-    /// `$push`.
+    /// `$push`, and set the parent's `updated_at` in the same write when it
+    /// has timestamps.
     ///
     /// # Errors
     ///
     /// As [`Self::save`].
     pub async fn save_many(self, items: &[T]) -> Result<(), FrameworkError> {
         let items = value_to_bson(&items, "save_many")?;
-        *self.parent = write_operator(
-            &*self.parent,
-            one("$push", one(self.field, one("$each", items))),
-            "save_many",
-        )
-        .await?;
+        let update = __rendered_embedded_update::<P>(
+            "$push",
+            self.field,
+            Bson::Document(one("$each", items)),
+            now_moment(),
+        )?;
+        *self.parent = write_operator(&*self.parent, update, "save_many").await?;
         Ok(())
     }
 
-    /// Remove every embedded document equal to `item`, with `$pull`.
+    /// Remove every embedded document equal to `item`, with `$pull`, and
+    /// set the parent's `updated_at` in the same write when it has
+    /// timestamps.
     ///
     /// # Errors
     ///
     /// As [`Self::save`].
     pub async fn destroy(self, item: &T) -> Result<(), FrameworkError> {
         let item = value_to_bson(item, "destroy")?;
-        *self.parent = write_operator(
-            &*self.parent,
-            one("$pull", one(self.field, item)),
-            "destroy",
-        )
-        .await?;
+        let update = __rendered_embedded_update::<P>("$pull", self.field, item, now_moment())?;
+        *self.parent = write_operator(&*self.parent, update, "destroy").await?;
         Ok(())
     }
 
-    /// Remove every embedded document.
+    /// Remove every embedded document, and set the parent's `updated_at`
+    /// in the same `$set` when it has timestamps.
     ///
     /// # Errors
     ///
     /// When the write fails or the parent's document no longer exists.
     pub async fn clear(self) -> Result<(), FrameworkError> {
-        *self.parent = write_operator(
-            &*self.parent,
-            one("$set", one(self.field, Bson::Array(Vec::new()))),
-            "clear",
-        )
-        .await?;
+        let update = __rendered_embedded_update::<P>(
+            "$set",
+            self.field,
+            Bson::Array(Vec::new()),
+            now_moment(),
+        )?;
+        *self.parent = write_operator(&*self.parent, update, "clear").await?;
         Ok(())
     }
 }
@@ -1357,7 +1402,9 @@ impl<'a, P: DocumentModel, T: Serialize + Sync> EmbedsOne<'a, P, T> {
         }
     }
 
-    /// Store `item` as the embedded document, replacing the one there.
+    /// Store `item` as the embedded document, replacing the one there, and
+    /// set the parent's `updated_at` in the same `$set` when it has
+    /// timestamps.
     ///
     /// # Errors
     ///
@@ -1365,23 +1412,21 @@ impl<'a, P: DocumentModel, T: Serialize + Sync> EmbedsOne<'a, P, T> {
     /// parent's document no longer exists.
     pub async fn save(self, item: &T) -> Result<(), FrameworkError> {
         let item = value_to_bson(item, "save")?;
-        *self.parent =
-            write_operator(&*self.parent, one("$set", one(self.field, item)), "save").await?;
+        let update = __rendered_embedded_update::<P>("$set", self.field, item, now_moment())?;
+        *self.parent = write_operator(&*self.parent, update, "save").await?;
         Ok(())
     }
 
-    /// Remove the embedded document; the field reads as `None` after.
+    /// Remove the embedded document, and set the parent's `updated_at` in
+    /// the same `$set` when it has timestamps; the field reads as `None`
+    /// after.
     ///
     /// # Errors
     ///
     /// When the write fails or the parent's document no longer exists.
     pub async fn delete(self) -> Result<(), FrameworkError> {
-        *self.parent = write_operator(
-            &*self.parent,
-            one("$set", one(self.field, Bson::Null)),
-            "delete",
-        )
-        .await?;
+        let update = __rendered_embedded_update::<P>("$set", self.field, Bson::Null, now_moment())?;
+        *self.parent = write_operator(&*self.parent, update, "delete").await?;
         Ok(())
     }
 }
