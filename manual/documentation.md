@@ -43,6 +43,7 @@
     - [Console (Artisan)](console.md)
     - [Broadcasting](broadcasting.md)
     - [Cache](cache.md)
+    - [Concurrency](concurrency.md)
     - [Data Objects](data.md)
     - [Events](events.md)
     - [File Storage](filesystem.md)

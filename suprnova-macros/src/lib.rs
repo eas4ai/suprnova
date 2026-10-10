@@ -12,6 +12,7 @@ use proc_macro::TokenStream;
 
 mod authorize;
 mod command;
+mod concurrent_task;
 mod console_derive;
 mod data;
 mod describe;
@@ -874,6 +875,47 @@ pub fn derive_command(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, input: TokenStream) -> TokenStream {
     command::command_impl(attr, input)
+}
+
+/// Register an async fn as a task the `Concurrency` facade can run.
+///
+/// Applied to `async fn name(input: I) -> Result<O, FrameworkError>`, where
+/// `I` and `O` are serde types, or to one with no parameter, whose input is
+/// `()`. The function stays as it is. The macro adds a unit struct named
+/// after it in UpperCamelCase, which a caller passes to
+/// `Task::new::<Struct>(input)`, implements `ConcurrentTask` for it, and
+/// registers the task by name, so the process driver's console binary can
+/// run it from its name alone.
+///
+/// # Attributes
+///
+/// - `name = "..."` (optional) - the registered name; the function's module
+///   path and name otherwise. The binary that calls `Concurrency::run` and
+///   the console binary that runs the task must agree on it.
+/// - `type_name = "..."` (optional) - the struct's name, when the
+///   UpperCamelCase one is taken.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use suprnova::concurrency::{Concurrency, Task};
+/// use suprnova::{FrameworkError, concurrent_task};
+///
+/// #[concurrent_task]
+/// async fn count_rows(table: String) -> Result<u64, FrameworkError> {
+///     // ...
+/// #   Ok(0)
+/// }
+///
+/// let results = Concurrency::run([
+///     Task::new::<CountRows>("users".to_owned()),
+///     Task::new::<CountRows>("orders".to_owned()),
+/// ])
+/// .await?;
+/// ```
+#[proc_macro_attribute]
+pub fn concurrent_task(attr: TokenStream, input: TokenStream) -> TokenStream {
+    concurrent_task::concurrent_task_impl(attr, input)
 }
 
 /// Attribute macro for defining durable workflows

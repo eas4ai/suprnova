@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-type CommandFuture = BoxFuture<'static, Result<(), FrameworkError>>;
+pub(crate) type CommandFuture = BoxFuture<'static, Result<(), FrameworkError>>;
 type Commands = Vec<CommandFuture>;
 #[derive(Default)]
 struct CompletionState {
@@ -41,6 +41,27 @@ pub(super) fn defer(future: CommandFuture) -> Result<(), FrameworkError> {
                 "Bus::dispatch_after_response requires an active HTTP response",
             )
         })
+}
+
+/// Hold `future` until the current response has been written and flushed,
+/// or hand it back when there is no response to wait for: outside a
+/// request, or inside one served without a response writer.
+///
+/// [`defer`] refuses the same cases with an error, which is right for the
+/// bus, where a command dispatched after the response must not run at any
+/// other time. `Concurrency::defer` runs its tasks anyway, through the
+/// handle it returns, so it needs the future back.
+pub(crate) fn try_defer(future: CommandFuture) -> Result<(), CommandFuture> {
+    if WRITER.try_with(|_| ()).is_err() {
+        return Err(future);
+    }
+    let mut held = Some(future);
+    match PENDING.try_with(|pending| pending.borrow_mut().extend(held.take())) {
+        Ok(()) => Ok(()),
+        // Outside the request's scope the closure never ran, so the future
+        // is still held.
+        Err(_) => held.map_or(Ok(()), Err),
+    }
 }
 
 /// Scope one request's pending commands and attach them to its final outgoing body.
