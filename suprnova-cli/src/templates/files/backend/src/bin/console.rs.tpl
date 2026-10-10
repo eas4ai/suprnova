@@ -50,6 +50,8 @@ async fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        // A command that returned `FrameworkError::exit(code)` ends with
+        // its code; every other error ends with 1.
+        Err(error) => ExitCode::from(error.exit_code()),
     }
 }

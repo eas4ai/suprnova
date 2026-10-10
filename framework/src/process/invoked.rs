@@ -941,24 +941,29 @@ impl Real {
 
 impl Drop for InvokedProcess {
     fn drop(&mut self) {
-        if let Inner::Real(real) = &mut self.inner {
-            if !real.finished {
-                if let Some(watchdog) = real.watchdog.take() {
-                    watchdog.abort();
-                }
-                real.signal_all(Signal::Kill);
+        // The fake has nothing to kill or reap; without the testing feature
+        // `Inner` has one variant, so this stays a match rather than an `if let`.
+        let real = match &mut self.inner {
+            Inner::Real(real) => real,
+            #[cfg(any(test, feature = "testing"))]
+            Inner::Fake(_) => return,
+        };
+        if !real.finished {
+            if let Some(watchdog) = real.watchdog.take() {
+                watchdog.abort();
             }
-            // Tokio reaps the program after the drop, without this lock, so a
-            // watchdog that is still running must leave its id alone from
-            // now. The child is dropped here, not with the last holder of
-            // the captured output, so Tokio takes it over at once.
-            let child = {
-                let mut program = real.captured.program();
-                program.released = true;
-                program.child.take()
-            };
-            drop(child);
+            real.signal_all(Signal::Kill);
         }
+        // Tokio reaps the program after the drop, without this lock, so a
+        // watchdog that is still running must leave its id alone from
+        // now. The child is dropped here, not with the last holder of
+        // the captured output, so Tokio takes it over at once.
+        let child = {
+            let mut program = real.captured.program();
+            program.released = true;
+            program.child.take()
+        };
+        drop(child);
     }
 }
 

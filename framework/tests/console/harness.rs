@@ -154,7 +154,12 @@ async fn a_question_the_test_did_not_prepare_fails_the_command() {
     // of the test runner.
     let run = console::test(["harness:purge"]).run().await;
 
-    run.assert_failed().assert_errors_contain("Which table?");
+    // The command fails, and the run names the question: an unexpected
+    // question fails every assertion on the run, `assert_failed` included
+    // (PAR-177), so the exit code is read directly.
+    assert_eq!(run.exit_code(), 1);
+    run.assert_errors_contain("Which table?");
+    assert_eq!(run.unexpected_questions(), ["Which table?"]);
     assert!(
         !run.output().contains("deleted"),
         "a command with no answer must not go on: {}",
@@ -170,8 +175,12 @@ async fn an_answer_is_not_given_to_another_question() {
         .run()
         .await;
 
-    run.assert_failed()
-        .assert_errors_contain("Delete every row of sessions?");
+    assert_eq!(run.exit_code(), 1);
+    run.assert_errors_contain("Delete every row of sessions?");
+    assert_eq!(
+        run.unexpected_questions(),
+        ["Delete every row of sessions?"]
+    );
     assert!(
         !run.output().contains("deleted every row"),
         "the yes was written for `users`, and the command asked about `sessions`"
@@ -186,8 +195,14 @@ async fn a_question_the_command_never_asks_is_reported() {
         .run()
         .await;
 
-    run.assert_successful();
+    // The command succeeds, and the unasked question is an unmet
+    // expectation that fails `assert_successful` (PAR-177).
+    assert_eq!(run.exit_code(), 0);
     assert_eq!(run.unasked_questions(), ["Are you sure?"]);
+    assert_eq!(
+        run.unmet_expectations(),
+        ["the question `Are you sure?` was not asked"]
+    );
 }
 
 #[tokio::test]

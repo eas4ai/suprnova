@@ -89,7 +89,9 @@ async fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        // A command that returned `FrameworkError::exit(code)` ends with
+        // its code; every other error ends with 1.
+        Err(error) => ExitCode::from(error.exit_code()),
     }
 }
 ```
@@ -101,7 +103,9 @@ Two things to notice:
 - **Bootstrap is lazy.** The closure passed to `dispatch_argv_with_init` only runs when clap matches a real registered subcommand. `console --help`, `console --version`, missing-subcommand, and parse-error paths all skip it - so `console --help` works on a fresh checkout that doesn't have `DATABASE_URL` set yet.
 - **A command gets what a queued job gets.** After the closure, `dispatch_argv_with_init` boots the rest of the process the way `queue:work` does: the `#[injectable]` and `#[service]` inventory, the `#[policy]` gates, and the runtime drivers (Cache, Localization, the environment's disks, Queue, RateLimit, Mail). A command can resolve an injectable action, write the cache, or check a policy with no setup of its own. A driver whose backend does not come up is reported on stderr as a warning, and the command still runs: a one-off command often uses none of the drivers, and a mail driver missing its key must not block `db:seed`. A command that does use the broken driver fails when it reaches it. A queue worker refuses to start instead.
 - **Supervisors and queued listeners finish.** After the command returns, the dispatcher cancels the supervisors your bootstrap started and gives them up to five seconds to exit, then waits up to ten seconds for the queued event listeners still running, so an event the command dispatches last is handled before the process exits.
-- **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr - it writes the handler's error message as `error: <message>` (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation; adding a redundant `eprintln!` would double-print.
+- **`main` doesn't print errors.** `dispatch_argv_with_init` owns all user-facing stderr - it writes the handler's error message as `error: <message>` (unless the error is silent, like a clap parse failure that clap already printed) and prints clap's own help / version / parse-error output. `main` is pure `Result → ExitCode` translation: `0` for `Ok`, and `error.exit_code()` for an error, which is the code a command chose with `FrameworkError::exit` and `1` for any other failure. Adding a redundant `eprintln!` would double-print.
+
+A project scaffolded before 4.0.0 maps every error to `ExitCode::FAILURE`. To end with the code a command chose, replace `Err(_) => ExitCode::FAILURE` with `Err(error) => ExitCode::from(error.exit_code())` in `src/bin/console.rs`.
 
 If you want a particular command to skip an expensive bootstrap step entirely, gate the step itself on an env var rather than threading a "lazy bootstrap" flag through the framework.
 
@@ -410,7 +414,7 @@ Laravel Prompts draws its menus with the arrow keys and falls back to plain ques
 
 ## Testing a command
 
-`suprnova::console::test(argv)` runs a command through the dispatcher the console binary uses and collects what it printed. `argv` is what you type after the name of the binary. `.expects_question(question, answer)` prepares an answer, and `.run().await` returns a `ConsoleRun`.
+`suprnova::console::test(argv)` runs a command through the dispatcher the console binary uses and collects what it printed. `argv` is what you type after the name of the binary. `.expects_question(question, answer)` prepares an answer, the other `expects_*` methods state what the command must print, and `.run().await` returns a `ConsoleRun`.
 
 ```rust
 use suprnova::console;
@@ -429,24 +433,83 @@ async fn purge_asks_before_it_deletes() {
 
 The test binary has to link the module that holds your commands. Make sure the crate declares `pub mod commands;` in `src/lib.rs`, and reference the crate from the test. `console::test` runs no bootstrap: `dispatch_argv` has no init closure, so set up the database and the container in the test, as in [Testing](testing.md).
 
+`ConsoleTest` takes these expectations before the run:
+
+| Method | Expects |
+|---|---|
+| `expects_question(question, answer)` | The command asks `question`, and gets `answer`. |
+| `expects_confirmation(question, answer)` | The command asks the `confirm` `question`, and gets yes for `true` and no for `false`. |
+| `expects_choice(question, answer, options)` | The command shows the menu `question` with exactly `options`, and gets `answer`. |
+| `expects_output(line)` | The command prints `line`, exactly, as a whole line. Several calls expect their lines in the order of the calls, with other lines allowed between them. |
+| `expects_output_to_contain(text)` | One write of the command contains `text`. |
+| `doesnt_expect_output_to_contain(text)` | No write of the command contains `text`. |
+
+The output expectations look at the standard output and the standard error alike. A write is one `console::line`, one question, or one message of the console, and a match never spans two writes: `bo` and `om` printed apart don't contain `boom`. A write of several lines gives each of its lines to `expects_output`.
+
 `ConsoleRun` has these methods:
 
 | Method | Returns or asserts |
 |---|---|
 | `output()` | The standard output as a `&str`. Questions are part of it, one line each. |
 | `errors()` | The standard error as a `&str`. The error of a failed command is in it, as `error: <message>`. |
-| `exit_code()` | `0` when the command succeeded, `1` when it failed or its arguments did not parse. Help and the version end with `0`. |
+| `exit_code()` | `0` when the command succeeded, the code a command chose with `FrameworkError::exit`, and `1` when it failed otherwise or its arguments did not parse. Help and the version end with `0`. |
 | `error()` | The `FrameworkError` the run ended with, as an `Option`. |
 | `unasked_questions()` | The questions with a prepared answer that the command did not ask, in the order you gave them. |
-| `assert_successful()`, `assert_failed()` | Assert that the run ended with exit code `0`, or with a failure. |
+| `unexpected_questions()` | The questions the command asked that the test did not expect at that point. |
+| `unmet_expectations()` | One sentence for each expectation the command did not meet. |
+| `assert_successful()` | Assert that the run ended with exit code `0`, asked no unexpected question, and met every expectation. |
+| `assert_failed()` | Assert that the run ended with an exit code other than `0`, and asked no unexpected question. |
+| `assert_exit_code(code)`, `assert_not_exit_code(code)` | Assert that the run ended with `code`, or with any other code, and that it asked no unexpected question and met every expectation. |
 | `assert_output_contains(text)`, `assert_errors_contain(text)` | Assert that a stream contains `text`. |
 | `assert_every_question_was_asked()` | Assert that `unasked_questions()` is empty. |
 
-The assert methods return `&Self`, so you can chain them.
+The assert methods return `&Self`, so you can chain them. A failed assertion lists every problem of the run at once, with both streams.
+
+```rust
+use suprnova::console;
+
+#[tokio::test]
+async fn purge_reports_what_it_deleted() {
+    console::test(["users:purge", "--older-than-days", "30"])
+        .expects_confirmation("Delete users older than 30 days?", true)
+        .expects_output("deleted 12 users")
+        .doesnt_expect_output_to_contain("skipped")
+        .run()
+        .await
+        .assert_successful();
+}
+```
+
+A command ends with an exit code of its own by returning `FrameworkError::exit(code)`, as a Laravel command returns an integer from `handle`. The dispatcher prints nothing for it and doesn't report it, so write the reason first. `FrameworkError::exit(0)` is a success.
+
+```rust
+use suprnova::{FrameworkError, command, console};
+
+#[command(name = "orders:check", description = "Fail when orders are late")]
+pub async fn orders_check(_args: Vec<String>) -> Result<(), FrameworkError> {
+    let late = 3;
+    if late > 0 {
+        console::error(format!("{late} orders are late"));
+        return Err(FrameworkError::exit(2));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_orders_end_with_exit_code_2() {
+    console::test(["orders:check"])
+        .expects_output_to_contain("3 orders are late")
+        .run()
+        .await
+        .assert_exit_code(2);
+}
+```
 
 Help, the version, parse errors and the error of a failed command are collected too, so `console::test(["--help"])` and an argument the command does not take are testable.
 
-Answers are given in order. A question that comes out of order, or one with no prepared answer, makes `ask` return an error and the command fails. An answer that went to another question than the one it was written for would let a test pass while the command deleted something the test never agreed to. For `confirm`, the question is the text without the `[y/N]` hint.
+Answers are given in order. A question that comes out of order, or one with no prepared answer, makes `ask` return an error and the command fails. An answer that went to another question than the one it was written for would let a test pass while the command deleted something the test never agreed to. The run also keeps the question, so every assertion on how the run ended fails and names it, even when the command goes on past the error. For `confirm`, the question is the text without the `[y/N]` hint.
+
+`assert_failed` checks no other expectation. A test of a refusal, such as a menu that offers other options, keeps the answer the command refused, and asserts the failure and the error message. `assert_not_exit_code(0)` checks every expectation.
 
 A prompt of the [Prompts](#prompts) section takes its answer from `expects_question` as well. For a menu, `.expects_choice(question, answer, options)` also checks that the menu offers exactly `options`, in that order, and the command fails when it offers others, so the test notices when the choices change. The answer is typed as a person types it: an option's label, and for `multiselect` the labels separated by commas.
 
@@ -475,6 +538,8 @@ The collection belongs to the task the command runs on. What a task that the com
 ### Why Suprnova diverges
 
 Laravel collects the output of a command in `$this->artisan(...)` and checks it with `expectsOutput` and `expectsQuestion`. Suprnova follows the same shape, but commands are plain Rust functions, so nothing can hook `println!`. A command has to print through `console::line`, `console::error_line`, `console::ask` and `console::confirm` for a test to see it, and a test states its questions in the order the command asks them.
+
+Laravel checks the expectations when the command finishes and fails the test at once. A `ConsoleRun` holds the result instead, and the assert method you call checks it: `assert_successful`, `assert_exit_code` and `assert_not_exit_code` check every expectation, and an unexpected question fails every assertion on the run. A Laravel command writes its error lines to its one output, so the output expectations here read the standard output and the standard error together. `expects_output` matches whole lines, where Laravel matches whole writes.
 
 ## `suprnova make:command`
 
@@ -553,7 +618,7 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 
 ### Treat exit codes as the contract
 
-`FrameworkError` → `ExitCode::FAILURE` is the only failure path. Don't `std::process::exit(custom_code)` from inside a handler - return `Err(...)` and let the binary's `main` translate. Future tooling (CI gates, supervised workers) only has to read the exit code.
+A handler returns `Err(...)` and the binary's `main` translates it: `FrameworkError::exit(code)` ends with `code`, and every other error with `1`. Don't call `std::process::exit` from inside a handler. It skips the drain of supervisors and queued listeners, and a test can't read the code. Tooling such as CI gates and supervised workers reads only the exit code.
 
 ## Reference
 
@@ -577,9 +642,10 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | `suprnova::console::ask_with_default`, `secret`, `select`, `select_keyed`, `multiselect` | The prompts of [Prompts](#prompts). |
 | `suprnova::console::Progress`, `progress(label, items, f)` | A progress bar, and a map behind one. |
 | `suprnova::console::form()`, `Form`, `FormAnswers`, `FormValue` | Several prompts whose answers come back by name. |
-| `suprnova::console::test(argv)`           | Prepare a run of the console for a test. Returns a `ConsoleTest`; `.expects_question(..)` and `.expects_choice(..)` prepare answers and `.run().await` returns a `ConsoleRun`. |
+| `suprnova::console::test(argv)`           | Prepare a run of the console for a test. Returns a `ConsoleTest`; `.expects_question(..)`, `.expects_confirmation(..)` and `.expects_choice(..)` prepare answers, `.expects_output(..)`, `.expects_output_to_contain(..)` and `.doesnt_expect_output_to_contain(..)` state the output, and `.run().await` returns a `ConsoleRun`. |
 | `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
 | `FrameworkError::silent()` / `.is_silent()` | Construct / detect an error that the dispatcher will NOT print to stderr. Used internally to suppress double-prints when clap already wrote a parse error to the terminal. |
+| `FrameworkError::exit(code)` / `.exit_code()` | End a command with exit code `code`, printed and reported nowhere / the code the console binary ends with for an error: the chosen code, or `1`. |
 
 ## Next
 
