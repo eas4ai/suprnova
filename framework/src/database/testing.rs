@@ -51,7 +51,8 @@ use crate::seed::Seeder;
 /// When the `TestDatabase` is dropped, the test container is cleared and
 /// the test's changes are undone: the in-memory database goes with its
 /// connection, the transaction of `refresh` is rolled back, and the
-/// migrations `migrate` ran are rolled back.
+/// migrations `migrate` ran are rolled back, with the migration table when
+/// `migrate` created it.
 ///
 /// # Example
 ///
@@ -260,21 +261,31 @@ impl TestDatabase {
     /// them back when the helper drops, as Laravel's `DatabaseMigrations`
     /// does.
     ///
-    /// The migrations run the way the application's `migrate` command
-    /// runs them, schema dump included, on the connection the helper
-    /// registers. There is no transaction around the test, so another
-    /// connection sees its rows. When the helper drops, it rolls back the
-    /// migrations it ran and no others, on a connection of its own, and the
-    /// next [`Self::refresh`] of the process migrates again. Tables a
-    /// schema dump created stay, as a dump has nothing to roll back. Two
-    /// `migrate` tests on one database must not run at once.
+    /// The helper runs `M`'s pending migrations on the connection it
+    /// registers, each through its `up`. There is no transaction around
+    /// the test, so another connection sees its rows. It never loads a
+    /// schema dump, even into an empty database: a table a dump created has
+    /// no `down` to remove it, so every table the helper creates comes from
+    /// a migration it can roll back.
+    ///
+    /// When the helper drops, it rolls back the migrations it ran and no
+    /// others, on a connection of its own, and drops `M`'s migration table
+    /// when it created it, so the database holds no table the helper
+    /// created. The next [`Self::refresh`] of the process migrates again.
+    /// Two `migrate` tests on one database must not run at once.
+    ///
+    /// A migrator whose migrations were pruned into a schema dump cannot run
+    /// them here; test it with [`Self::refresh`], which loads the dump.
     ///
     /// # Errors
     ///
     /// Returns an error when `DATABASE_URL` is unset or names an in-memory
     /// SQLite database, when the connection cannot be opened, or when a
-    /// migration fails. The migrations that ran before the one that failed
-    /// are rolled back first.
+    /// migration fails, a pruned one included: when no migration had run
+    /// and the project has a schema dump for the engine, the error names
+    /// the dump and points to [`Self::refresh`]. The migrations that ran
+    /// before the one that failed are rolled back first, and the migration
+    /// table is dropped when the helper created it.
     ///
     /// # Panics
     ///
@@ -286,16 +297,29 @@ impl TestDatabase {
         let config = configured_database(HELPER)?;
         let guard = TestContainer::fake();
         let conn = DbConnection::connect(&config).await?;
-        crate::database::schema_dump::load_when_empty::<M>(&config.url, conn.inner(), None).await?;
+        // Read first: reading the pending migrations creates the table.
+        let created_ledger = !has_ledger::<M>(conn.inner()).await?;
         let pending = pending_count::<M>(conn.inner()).await?;
         if let Err(error) = M::up(conn.inner(), None).await {
-            let failed = format!("{HELPER}: a migration failed: {error}");
-            return Err(match roll_back_partial::<M>(conn.inner(), pending).await {
-                Ok(()) => FrameworkError::database(failed),
-                Err(undo) => FrameworkError::database(format!(
-                    "{failed}; the migrations that ran before it could not be rolled back: {undo}"
-                )),
-            });
+            let mut failed = format!("{HELPER}: a migration failed: {error}");
+            let none_applied = usize::try_from(pending).is_ok_and(|n| n == M::migrations().len());
+            if none_applied && let Some(dump) = schema_dump_of(&config.url).await {
+                failed.push_str(&format!(
+                    "; {HELPER} runs every migration through its up and does not load the \
+                     schema dump at {}, so test a migrator whose migrations were pruned into \
+                     the dump with TestDatabase::refresh, which loads it",
+                    dump.display()
+                ));
+            }
+            return Err(
+                match roll_back_partial::<M>(conn.inner(), pending, created_ledger).await {
+                    Ok(()) => FrameworkError::database(failed),
+                    Err(undo) => FrameworkError::database(format!(
+                        "{failed}; the migrations that ran before it could not be rolled back: \
+                         {undo}"
+                    )),
+                },
+            );
         }
         TestContainer::singleton(conn.clone());
         Ok(Self {
@@ -304,6 +328,7 @@ impl TestDatabase {
             _undo: Some(Box::new(AppliedMigrations {
                 url: config.url,
                 count: pending,
+                created_ledger,
                 roll_back: roll_back_with::<M>,
             })),
         })
@@ -588,6 +613,9 @@ impl TransactionState {
 struct AppliedMigrations {
     url: String,
     count: u32,
+    /// Whether the helper created the migration table, which it then drops
+    /// too once the rollback leaves it empty.
+    created_ledger: bool,
     roll_back: RollBackFn,
 }
 
@@ -596,13 +624,19 @@ impl Drop for AppliedMigrations {
         // The tables are gone, or going: the next `refresh` of the
         // process must migrate again, as Laravel resets its state.
         forget_migrations(&self.url);
-        if self.count == 0 {
+        if self.count == 0 && !self.created_ledger {
             return;
         }
-        let (url, count, roll_back) = (self.url.clone(), self.count, self.roll_back);
-        if let Err(error) = on_own_runtime(move || roll_back(url, count)) {
+        let (url, count, created_ledger, roll_back) = (
+            self.url.clone(),
+            self.count,
+            self.created_ledger,
+            self.roll_back,
+        );
+        if let Err(error) = on_own_runtime(move || roll_back(url, count, created_ledger)) {
             let message = format!(
-                "TestDatabase::migrate: the migrations it ran were not rolled back: {error}"
+                "TestDatabase::migrate: the migrations it ran were not rolled back, or the \
+                 migration table it created was not dropped: {error}"
             );
             tracing::error!(target: "suprnova::testing", "{message}");
             fail_the_test(message);
@@ -629,8 +663,9 @@ impl MigrationKey {
 /// Migrates the database at a URL the way the `migrate` command does.
 type MigrateFn = fn(String) -> LocalBoxFuture<'static, Result<(), FrameworkError>>;
 
-/// Rolls back the last migrations of the database at a URL.
-type RollBackFn = fn(String, u32) -> LocalBoxFuture<'static, Result<(), FrameworkError>>;
+/// Rolls back the last migrations of the database at a URL, and drops the
+/// migration table when asked and it records no migration.
+type RollBackFn = fn(String, u32, bool) -> LocalBoxFuture<'static, Result<(), FrameworkError>>;
 
 fn migrate_with<M: MigratorTrait + 'static>(
     url: String,
@@ -645,13 +680,12 @@ fn migrate_with<M: MigratorTrait + 'static>(
 fn roll_back_with<M: MigratorTrait + 'static>(
     url: String,
     count: u32,
+    drop_ledger: bool,
 ) -> LocalBoxFuture<'static, Result<(), FrameworkError>> {
     Box::pin(async move {
         let config = DatabaseConfig::builder().url(url).logging(false).build();
         let conn = DbConnection::connect(&config).await?;
-        M::down(conn.inner(), Some(count))
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))
+        undo_migrations::<M>(conn.inner(), count, drop_ledger).await
     })
 }
 
@@ -768,18 +802,60 @@ async fn pending_count<M: MigratorTrait>(db: &DatabaseConnection) -> Result<u32,
 }
 
 /// Rolls back the migrations that ran of the `pending` ones, after one of
-/// them failed.
+/// them failed, and drops the migration table when `drop_ledger` holds.
 async fn roll_back_partial<M: MigratorTrait>(
     db: &DatabaseConnection,
     pending: u32,
+    drop_ledger: bool,
 ) -> Result<(), FrameworkError> {
     let ran = pending.saturating_sub(pending_count::<M>(db).await?);
-    if ran > 0 {
-        M::down(db, Some(ran))
+    undo_migrations::<M>(db, ran, drop_ledger).await
+}
+
+/// Rolls back the last `count` of `M`'s migrations on `db`, then drops
+/// `M`'s migration table when `drop_ledger` holds and the table records no
+/// migration, so `migrate` leaves no table it created. A table that still
+/// records a migration holds work `migrate` did not do, and stays.
+async fn undo_migrations<M: MigratorTrait>(
+    db: &DatabaseConnection,
+    count: u32,
+    drop_ledger: bool,
+) -> Result<(), FrameworkError> {
+    let failed = |e: sea_orm::DbErr| FrameworkError::database(e.to_string());
+    if count > 0 {
+        M::down(db, Some(count)).await.map_err(failed)?;
+    }
+    if drop_ledger
+        && M::get_migration_models(db)
             .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
+            .map_err(failed)?
+            .is_empty()
+    {
+        M::uninstall(db).await.map_err(failed)?;
     }
     Ok(())
+}
+
+/// Whether `M`'s migration table exists.
+async fn has_ledger<M: MigratorTrait>(db: &DatabaseConnection) -> Result<bool, FrameworkError> {
+    sea_orm_migration::SchemaManager::new(db)
+        .has_table(M::migration_table_name().to_string())
+        .await
+        .map_err(|e| {
+            FrameworkError::database(format!(
+                "TestDatabase::migrate: could not read whether the migration table exists: {e}"
+            ))
+        })
+}
+
+/// The project's schema dump for the engine of the database at `url`, when
+/// there is one. It only adds a hint to a migration's error, so a path that
+/// cannot be worked out gives no hint rather than replace that error.
+async fn schema_dump_of(url: &str) -> Option<std::path::PathBuf> {
+    crate::database::SchemaDump::default_path(url)
+        .await
+        .ok()
+        .filter(|path| path.is_file())
 }
 
 /// Shapes the pool of a test transaction: one connection that stays open,

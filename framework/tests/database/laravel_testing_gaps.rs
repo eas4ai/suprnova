@@ -18,13 +18,14 @@
 //! tests on one database never create the same ledger at once.
 
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::database::{DatabaseConfig, DbConnection};
 use suprnova::testing::TestDatabase;
-use suprnova::{DB, FrameworkError, Seeder, async_trait, seed};
+use suprnova::{DB, FrameworkError, PrunedMigration, SchemaDump, Seeder, async_trait, seed};
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
 
@@ -532,7 +533,8 @@ migrator!(
 /// Falsifier: `migrate` leaves its tables after the helper drops. The
 /// migrations run on the configured database with no transaction around
 /// the test, so another connection sees the rows; dropping the helper
-/// rolls the migrations back, and the table and its ledger row are gone.
+/// rolls the migrations back, and the table and the ledger the helper
+/// created are gone.
 #[tokio::test]
 async fn migrate_rolls_its_migrations_back_when_the_helper_drops() {
     let file = configured_file().await;
@@ -554,7 +556,10 @@ async fn migrate_rolls_its_migrations_back_when_the_helper_drops() {
         !has_table(&outside, "ltg_migrate").await,
         "the helper rolled its migration back when it dropped"
     );
-    assert_eq!(count(outside.inner(), "ltg_migrate_ledger").await, 0);
+    assert!(
+        !has_table(&outside, "ltg_migrate_ledger").await,
+        "the helper dropped the ledger it created"
+    );
 }
 
 static KEPT_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -639,6 +644,229 @@ async fn a_failed_migrate_rolls_back_the_migrations_that_ran() {
         !has_table(&outside, "ltg_partial_first").await,
         "the migration that ran was rolled back"
     );
+    assert!(
+        !has_table(&outside, "ltg_partial_ledger").await,
+        "the ledger the failed migrate created was dropped"
+    );
+}
+
+/// The database directory moved to a new temporary one while the value
+/// lives, so a test can write the schema dump the helpers read, at
+/// `database_path("schema/sqlite-schema.sql")`, without touching the
+/// project's. Declare it after [`configured_file`], whose lock covers it,
+/// so it drops first.
+struct DumpDirectory {
+    previous: PathBuf,
+    dir: tempfile::TempDir,
+}
+
+impl DumpDirectory {
+    fn new() -> Self {
+        let previous = suprnova::database_path("");
+        let dir = tempfile::tempdir().expect("create a temporary database directory");
+        suprnova::use_database_path(dir.path());
+        Self { previous, dir }
+    }
+
+    /// Writes the SQLite dump of `M` where the helpers read it: `M`'s
+    /// migrations run on a database of their own, which is dumped with its
+    /// ledger rows. Returns the dump's path.
+    async fn write<M: MigratorTrait>(&self) -> PathBuf {
+        let source = format!("sqlite://{}", self.dir.path().join("source.db").display());
+        let conn = outside(&source).await;
+        M::up(conn.inner(), None)
+            .await
+            .expect("migrate the database the dump is taken from");
+        let path = suprnova::database_path("schema/sqlite-schema.sql");
+        SchemaDump::dump::<M>(&source, &path)
+            .await
+            .expect("dump the schema and the ledger");
+        path
+    }
+}
+
+impl Drop for DumpDirectory {
+    fn drop(&mut self) {
+        suprnova::use_database_path(&self.previous);
+    }
+}
+
+static DUMPED_RUNS: AtomicUsize = AtomicUsize::new(0);
+migrator!(
+    DumpedMigrator,
+    "ltg_dumped_ledger",
+    [
+        TableMigration {
+            name: "m_ltg_000016_dumped_first",
+            table: "ltg_dumped_first",
+            runs: &DUMPED_RUNS,
+            fail: None,
+        },
+        TableMigration {
+            name: "m_ltg_000017_dumped_second",
+            table: "ltg_dumped_second",
+            runs: &DUMPED_RUNS,
+            fail: None,
+        },
+    ]
+);
+
+/// Falsifier: `migrate` leaves its tables after the helper drops, here on
+/// an empty database beside a schema dump that records every migration of
+/// the migrator. `migrate` does not load the dump: it runs every migration
+/// and rolls every one back, so neither the tables nor the ledger stay, and
+/// a row the test wrote with no transaction around it is gone for the next
+/// test.
+#[tokio::test]
+async fn migrate_beside_a_schema_dump_leaves_no_table_behind() {
+    let file = configured_file().await;
+    let dump = DumpDirectory::new();
+    let path = dump.write::<DumpedMigrator>().await;
+    let sql = std::fs::read_to_string(&path).expect("read the dump");
+    for name in ["m_ltg_000016_dumped_first", "m_ltg_000017_dumped_second"] {
+        assert!(sql.contains(name), "the dump records {name}");
+    }
+
+    let outside = outside(&file.url).await;
+    {
+        let _db = TestDatabase::migrate::<DumpedMigrator>()
+            .await
+            .expect("migrate the empty configured database");
+        insert("ltg_dumped_first", 1, "committed")
+            .await
+            .expect("write a row");
+        assert_eq!(
+            count(outside.inner(), "ltg_dumped_first").await,
+            1,
+            "migrate holds no transaction around the test"
+        );
+    }
+    for table in ["ltg_dumped_first", "ltg_dumped_second", "ltg_dumped_ledger"] {
+        assert!(
+            !has_table(&outside, table).await,
+            "migrate left {table} behind"
+        );
+    }
+
+    let db = TestDatabase::migrate::<DumpedMigrator>()
+        .await
+        .expect("migrate for the next test");
+    assert_eq!(
+        count(db.conn(), "ltg_dumped_first").await,
+        0,
+        "the row the first test wrote is gone"
+    );
+}
+
+static UNDUMPED_RUNS: AtomicUsize = AtomicUsize::new(0);
+migrator!(
+    UndumpedMigrator,
+    "ltg_undumped_ledger",
+    [
+        TableMigration {
+            name: "m_ltg_000018_undumped_first",
+            table: "ltg_undumped_first",
+            runs: &UNDUMPED_RUNS,
+            fail: None,
+        },
+        TableMigration {
+            name: "m_ltg_000019_undumped_second",
+            table: "ltg_undumped_second",
+            runs: &UNDUMPED_RUNS,
+            fail: None,
+        },
+    ]
+);
+
+/// On an empty database with no schema dump, `migrate` runs every
+/// migration and, when the helper drops, rolls every one back and drops the
+/// migration table it created, so the database is as empty as it was.
+#[tokio::test]
+async fn migrate_on_an_empty_database_rolls_back_every_migration() {
+    let file = configured_file().await;
+    let _no_dump = DumpDirectory::new();
+    let outside = outside(&file.url).await;
+    {
+        let _db = TestDatabase::migrate::<UndumpedMigrator>()
+            .await
+            .expect("migrate the empty configured database");
+        assert_eq!(
+            UNDUMPED_RUNS.load(Ordering::SeqCst),
+            2,
+            "every migration ran"
+        );
+        insert("ltg_undumped_first", 1, "a")
+            .await
+            .expect("write a row");
+        insert("ltg_undumped_second", 1, "b")
+            .await
+            .expect("write a row");
+    }
+    for table in [
+        "ltg_undumped_first",
+        "ltg_undumped_second",
+        "ltg_undumped_ledger",
+    ] {
+        assert!(
+            !has_table(&outside, table).await,
+            "migrate left {table} behind"
+        );
+    }
+}
+
+static PRUNED_SOURCE_RUNS: AtomicUsize = AtomicUsize::new(0);
+migrator!(
+    PrunedSourceMigrator,
+    "ltg_pruned_ledger",
+    [TableMigration {
+        name: "m_ltg_000020_pruned",
+        table: "ltg_pruned",
+        runs: &PRUNED_SOURCE_RUNS,
+        fail: None,
+    }]
+);
+migrator!(
+    PrunedMigrator,
+    "ltg_pruned_ledger",
+    [PrunedMigration::new("m_ltg_000020_pruned")]
+);
+
+/// A migrator whose migrations were pruned into a schema dump cannot run
+/// under `migrate`, which does not load the dump: the error names the dump
+/// and points to `refresh`, which loads it, and the failed `migrate` leaves
+/// no table behind.
+#[tokio::test]
+async fn migrate_refuses_a_migrator_pruned_into_a_schema_dump() {
+    let file = configured_file().await;
+    let dump = DumpDirectory::new();
+    let path = dump.write::<PrunedSourceMigrator>().await;
+
+    let error = TestDatabase::migrate::<PrunedMigrator>()
+        .await
+        .err()
+        .expect("a pruned migration cannot run under migrate");
+    let message = error.to_string();
+    assert!(
+        message.contains("was pruned into a schema dump"),
+        "got: {message}"
+    );
+    assert!(message.contains("TestDatabase::refresh"), "got: {message}");
+    assert!(
+        message.contains(&path.display().to_string()),
+        "the error names the dump: {message}"
+    );
+    let outside = outside(&file.url).await;
+    for table in ["ltg_pruned", "ltg_pruned_ledger"] {
+        assert!(
+            !has_table(&outside, table).await,
+            "the failed migrate left {table} behind"
+        );
+    }
+
+    let db = TestDatabase::refresh::<PrunedMigrator>()
+        .await
+        .expect("refresh loads the dump");
+    assert_eq!(count(db.conn(), "ltg_pruned").await, 0);
 }
 
 // ---------------------------------------------------------------------------
