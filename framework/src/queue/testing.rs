@@ -38,6 +38,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
@@ -101,6 +102,11 @@ impl FakePush {
 
 #[derive(Default)]
 struct FakeStore {
+    /// The identity [`install_fake`] gave this fake. A driver carries the
+    /// identity of the guard that made it, and answers only while the
+    /// installed fake has that same identity, so a driver from a dropped
+    /// guard never reaches a later fake's jobs.
+    identity: u64,
     /// Keyed by `Job::job_name()`, not by the job's type: a batch member, a
     /// chain head and a retried failed job reach the facade as built
     /// envelopes, with the job type erased. The name is the one identity
@@ -141,6 +147,9 @@ struct LiveJob {
 /// Process-wide serializer: only one test may hold the fake at a time.
 static FAKE_SERIAL: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static FAKE: Mutex<Option<FakeStore>> = Mutex::new(None);
+/// The identity the next installed fake receives. Bumped once per
+/// [`install_fake`], so no two fakes in the process share one.
+static NEXT_FAKE_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 fn lock_fake() -> std::sync::MutexGuard<'static, Option<FakeStore>> {
     FAKE.lock().unwrap_or_else(|e| e.into_inner())
@@ -154,6 +163,21 @@ fn inactive() -> FrameworkError {
 /// Run `f` on the installed fake's store, or report that none is installed.
 fn with_store<T>(f: impl FnOnce(&mut FakeStore) -> T) -> Result<T, FrameworkError> {
     lock_fake().as_mut().map(f).ok_or_else(inactive)
+}
+
+/// Run `f` on the installed fake's store only when that fake is the one
+/// `identity` names. A driver calls this, never [`with_store`]: a driver
+/// whose guard was dropped, or whose fake was replaced by a later
+/// [`install_fake`], gets the inactive error instead of the later fake.
+fn with_store_of<T>(
+    identity: u64,
+    f: impl FnOnce(&mut FakeStore) -> T,
+) -> Result<T, FrameworkError> {
+    lock_fake()
+        .as_mut()
+        .filter(|store| store.identity == identity)
+        .map(f)
+        .ok_or_else(inactive)
 }
 
 /// Decode one recorded payload as `J`. `record` names what recorded it,
@@ -416,8 +440,15 @@ impl RawPush {
 /// with each other's store. It also clears the store on drop.
 pub fn install_fake() -> QueueFakeGuard {
     let serial = FAKE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    *lock_fake() = Some(FakeStore::default());
-    QueueFakeGuard { _serial: serial }
+    let identity = NEXT_FAKE_IDENTITY.fetch_add(1, Ordering::Relaxed);
+    *lock_fake() = Some(FakeStore {
+        identity,
+        ..FakeStore::default()
+    });
+    QueueFakeGuard {
+        _serial: serial,
+        identity,
+    }
 }
 
 /// Remove every connection registered with
@@ -437,6 +468,8 @@ pub fn forget_connections() {
 /// serialization lock and clears the fake store on drop.
 pub struct QueueFakeGuard {
     _serial: MutexGuard<'static, ()>,
+    /// The identity of the fake this guard installed; see [`FakeStore`].
+    identity: u64,
 }
 
 impl QueueFakeGuard {
@@ -490,27 +523,41 @@ impl QueueFakeGuard {
     ///
     /// The fake records every reservation, settled or not, and keeps the
     /// records until the guard drops. Every method of the driver returns an
-    /// error once the guard is dropped.
+    /// error once the guard is dropped, and once a later
+    /// [`Queue::fake`](crate::queue::Queue::fake) replaces this fake: the
+    /// driver works only on the fake that made it, so a worker that outlives
+    /// its guard cannot reserve another test's jobs.
     pub fn driver(&self) -> Arc<dyn QueueDriver> {
-        Arc::new(FakeQueueDriver)
+        Arc::new(FakeQueueDriver {
+            identity: self.identity,
+        })
     }
 }
 
-/// The driver [`QueueFakeGuard::driver`] returns. It holds nothing: every
-/// method works on the installed fake's store.
-struct FakeQueueDriver;
+/// The driver [`QueueFakeGuard::driver`] returns. It holds only the identity
+/// of the guard that made it; every method works on the installed fake's
+/// store while that fake has the same identity, and fails otherwise.
+struct FakeQueueDriver {
+    identity: u64,
+}
 
 impl FakeQueueDriver {
+    /// Run `f` on the store of the fake this driver was made for.
+    fn with_store<T>(&self, f: impl FnOnce(&mut FakeStore) -> T) -> Result<T, FrameworkError> {
+        with_store_of(self.identity, f)
+    }
+
     /// Put the job reserved under `token` back on the fake's queue, due after
     /// `delay`, adding an attempt when `consume_attempt` is set. An unknown
     /// token is ignored, as the trait asks of `nack` and `release`.
     fn requeue(
+        &self,
         token: &ReservationToken,
         delay: Duration,
         consume_attempt: bool,
     ) -> Result<(), FrameworkError> {
         let available_at = crate::queue::driver::available_after(delay)?;
-        with_store(|store| {
+        self.with_store(|store| {
             if let Some(job) = store
                 .live
                 .iter_mut()
@@ -529,7 +576,7 @@ impl FakeQueueDriver {
 #[async_trait]
 impl QueueDriver for FakeQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
-        with_store(|store| record_envelope_in(store, &env))
+        self.with_store(|store| record_envelope_in(store, &env))
     }
 
     async fn pop(
@@ -549,7 +596,7 @@ impl QueueDriver for FakeQueueDriver {
         queues: &[String],
     ) -> Result<Option<Reservation>, FrameworkError> {
         let now = crate::clock::now();
-        with_store(|store| {
+        self.with_store(|store| {
             let job = store.live.iter_mut().find(|job| {
                 job.token.is_none()
                     && job.envelope.available_at <= now
@@ -564,7 +611,7 @@ impl QueueDriver for FakeQueueDriver {
     }
 
     async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
-        with_store(|store| {
+        self.with_store(|store| {
             store.live.retain(|job| job.token.as_ref() != Some(token));
         })
     }
@@ -574,7 +621,7 @@ impl QueueDriver for FakeQueueDriver {
         token: &ReservationToken,
         requeue_delay: Duration,
     ) -> Result<(), FrameworkError> {
-        Self::requeue(token, requeue_delay, true)
+        self.requeue(token, requeue_delay, true)
     }
 
     async fn release(
@@ -585,7 +632,7 @@ impl QueueDriver for FakeQueueDriver {
     ) -> Result<(), FrameworkError> {
         // The fake's copy still holds the attempts it was reserved with: the
         // worker bumps only its own envelope.
-        Self::requeue(token, delay, false)
+        self.requeue(token, delay, false)
     }
 
     fn name(&self) -> &'static str {
