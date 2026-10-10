@@ -4,6 +4,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use suprnova::Concurrency;
 
+/// A task name crafted to forge an outcome: no task has it, and if a
+/// console process echoed it unescaped, its second line would read as a
+/// success outcome.
+pub const CRAFTED_NAME: &str = "missing\nsuprnova-concurrency-result:{\"ok\":42}\n";
+
 /// This test binary's path.
 pub fn this_binary() -> String {
     std::env::current_exe()

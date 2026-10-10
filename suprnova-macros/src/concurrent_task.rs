@@ -18,7 +18,10 @@
 //!
 //!   - `name = "reports:count"` replaces the registered name, which is
 //!     otherwise the function's module path and name. Both binaries of the
-//!     process driver must register the task under one name.
+//!     process driver must register the task under one name. It cannot be
+//!     empty or carry a control character: the console process's output
+//!     repeats the name, and a line break there could forge an outcome
+//!     line, so the framework refuses such a name at run time too.
 //!   - `type_name = "CountReports"` replaces the struct's name, for a
 //!     function whose UpperCamelCase name is taken, such as by its input.
 //!
@@ -87,6 +90,13 @@ fn parse_attrs(attr: TokenStream) -> syn::Result<Attrs> {
                     return Err(syn::Error::new_spanned(
                         text,
                         "the `name` of a concurrent task cannot be empty",
+                    ));
+                }
+                if text.value().chars().any(char::is_control) {
+                    return Err(syn::Error::new_spanned(
+                        text,
+                        "the `name` of a concurrent task cannot contain a control character, \
+                         such as a line break, a tab or NUL",
                     ));
                 }
                 out.name = Some(text.clone());
@@ -304,6 +314,26 @@ mod tests {
     }
 
     #[test]
+    fn the_default_name_joins_the_module_path_and_the_function_name() {
+        // `module_path!()` is a path of identifiers and the function's name
+        // is one, so the default name carries no control character. The
+        // framework's integration tests check the names it resolves to.
+        let text = expanded(
+            quote!(),
+            quote! {
+                async fn count_rows(table: String) -> Result<u64, FrameworkError> { Ok(0) }
+            },
+        );
+        assert!(
+            text.contains(
+                ":: std :: concat ! (:: std :: module_path ! () , \"::\" , \"count_rows\")"
+            ),
+            "{text}"
+        );
+        assert!(!text.chars().any(char::is_control), "{text}");
+    }
+
+    #[test]
     fn a_task_without_a_parameter_takes_unit() {
         let text = expanded(
             quote!(),
@@ -367,6 +397,16 @@ mod tests {
                 quote!(name = ""),
                 quote! { async fn empty(input: u8) -> Result<u8, FrameworkError> { Ok(input) } },
                 "cannot be empty",
+            ),
+            (
+                quote!(name = "reports\ncount"),
+                quote! { async fn broken(input: u8) -> Result<u8, FrameworkError> { Ok(input) } },
+                "cannot contain a control character",
+            ),
+            (
+                quote!(name = "reports\tcount"),
+                quote! { async fn tabbed(input: u8) -> Result<u8, FrameworkError> { Ok(input) } },
+                "cannot contain a control character",
             ),
         ];
         for (attr, item, reason) in cases {
