@@ -4,7 +4,10 @@
 //! `regenerate_session_id()` issues a new CSRF token as Laravel's
 //! `Session::regenerate` does. And PAR-111's clause for the session layer:
 //! the `500` the session middleware answers a failed write with is
-//! reported through `Exceptions`, once.
+//! reported through `Exceptions`, once. And PAR-188's clause for the SQL
+//! session driver, which the MongoDB driver's read matches: a read that
+//! finds a session idle past the lifetime deletes it only while it is
+//! still idle, so a session another request refreshed in between stays.
 //!
 //! The requests run through a `TestClient` whose registry holds a real
 //! `SessionMiddleware` and `CsrfMiddleware`, the order an application
@@ -16,9 +19,13 @@
 #![cfg(feature = "testing")]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
+use sea_orm_migration::SchemaManager;
 use serde_json::json;
 use serial_test::serial;
 use suprnova::live::testing::{
@@ -26,14 +33,15 @@ use suprnova::live::testing::{
     inspect_request_attestation, register_live_route_for_test,
 };
 use suprnova::logging::current_request_id;
+use suprnova::session::migrations::{SessionUserKey, create_sessions_table};
 use suprnova::session::{
-    SessionConfig, SessionData, SessionMiddleware, SessionStore, new_session_slot_for_test,
-    regenerate_session_id, session, session_mut, session_scope_for_test,
+    DatabaseSessionDriver, SessionConfig, SessionData, SessionMiddleware, SessionStore,
+    new_session_slot_for_test, regenerate_session_id, session, session_mut, session_scope_for_test,
 };
-use suprnova::testing::{TestClient, TestResponse};
+use suprnova::testing::{TestClient, TestClock, TestContainer, TestContainerGuard, TestResponse};
 use suprnova::{
-    App, CsrfMiddleware, Exceptions, FrameworkError, HttpResponse, Method, MiddlewareRegistry,
-    Request, Response, Router, query, routes,
+    App, CsrfMiddleware, DbConnection, Exceptions, FrameworkError, HttpResponse, Method,
+    MiddlewareRegistry, Request, Response, Router, query, routes,
 };
 
 /// A session store keyed by id that remembers which ids it destroyed, so
@@ -691,4 +699,249 @@ async fn a_framework_error_that_becomes_a_500_behind_the_session_is_reported_onc
         ["Internal server error: laravel_http_gaps: the handler failed"],
         "the 5xx block reports the handler's error, and nothing reports it again"
     );
+}
+
+// ---- PAR-188: an expired read deletes only a session still expired -------
+//
+// The SQL session driver reads a row, finds it idle past the lifetime, and
+// deletes it. Another request may load the same session and refresh it
+// between that read and that delete. The tests below run a statement
+// exactly there: the pool runs it on the connection it hands out next after
+// the read's `SELECT`, which is the connection the delete then runs on.
+
+/// Two hours, so a row three hours idle is expired and a row refreshed now
+/// is not.
+const LIFETIME_SECS: i64 = 2 * 60 * 60;
+
+/// A statement to run between the session read's fetch and its delete.
+#[derive(Default)]
+struct BetweenFetchAndDelete {
+    /// The statement, armed by the test and taken when it runs.
+    statement: Mutex<Option<String>>,
+    /// Set when a `SELECT` finishes while a statement is armed: the read's
+    /// fetch.
+    fetched: AtomicBool,
+    /// Set once the statement has run.
+    ran: AtomicBool,
+}
+
+impl BetweenFetchAndDelete {
+    fn arm(&self, statement: String) {
+        self.ran.store(false, Ordering::SeqCst);
+        *self.statement.lock().unwrap() = Some(statement);
+    }
+
+    fn ran(&self) -> bool {
+        self.ran.load(Ordering::SeqCst)
+    }
+}
+
+/// A one-connection in-memory SQLite database holding Laravel's `sessions`
+/// table, registered as the test's database, whose pool runs the statement
+/// `hook` holds between the session read's fetch and its delete.
+async fn sessions_database(
+    hook: &Arc<BetweenFetchAndDelete>,
+) -> (TestContainerGuard, DbConnection) {
+    let on_acquire = Arc::clone(hook);
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .sqlx_logging(false)
+        .map_sqlx_sqlite_before_acquire(move |connection, _| {
+            let hook = Arc::clone(&on_acquire);
+            Box::pin(async move {
+                let statement = if hook.fetched.swap(false, Ordering::SeqCst) {
+                    hook.statement.lock().unwrap().take()
+                } else {
+                    None
+                };
+                if let Some(statement) = statement {
+                    // The test's own statement, built from constants.
+                    sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(statement.as_str()))
+                        .execute(&mut *connection)
+                        .await
+                        .unwrap_or_else(|e| panic!("run {statement:?}: {e}"));
+                    hook.ran.store(true, Ordering::SeqCst);
+                }
+                Ok(true)
+            })
+        });
+    let mut raw = Database::connect(options)
+        .await
+        .expect("open the in-memory database");
+    let on_statement = Arc::clone(hook);
+    raw.set_metric_callback(move |info| {
+        if info.statement.sql.starts_with("SELECT")
+            && on_statement.statement.lock().unwrap().is_some()
+        {
+            on_statement.fetched.store(true, Ordering::SeqCst);
+        }
+    });
+    let connection = DbConnection::from_raw(raw);
+    create_sessions_table(
+        &SchemaManager::new(connection.inner()),
+        "sessions",
+        SessionUserKey::Integer,
+    )
+    .await
+    .expect("create the sessions table");
+    let guard = TestContainer::fake();
+    TestContainer::singleton(connection.clone());
+    (guard, connection)
+}
+
+/// Store a session for user `user_id`, then make it `idle_secs` idle at `now`.
+async fn idle_session(
+    driver: &DatabaseSessionDriver,
+    connection: &DbConnection,
+    id: &str,
+    user_id: &str,
+    now: i64,
+    idle_secs: i64,
+) {
+    let mut stored = SessionData::new(id.to_owned(), format!("csrf-{id}"));
+    stored.user_id = Some(user_id.to_owned());
+    driver.write(&stored).await.expect("write the session");
+    connection
+        .inner()
+        .execute_unprepared(&set_last_activity(id, now - idle_secs))
+        .await
+        .expect("make the session idle");
+}
+
+fn set_last_activity(id: &str, at: i64) -> String {
+    format!("UPDATE sessions SET last_activity = {at} WHERE id = '{id}'")
+}
+
+/// The stored `last_activity` of session `id`, or `None` when its row is gone.
+async fn stored_last_activity(connection: &DbConnection, id: &str) -> Option<i64> {
+    connection
+        .inner()
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT last_activity FROM sessions WHERE id = '{id}'"),
+        ))
+        .await
+        .expect("read the session row")
+        .map(|row| {
+            row.try_get::<i64>("", "last_activity")
+                .expect("epoch seconds")
+        })
+}
+
+/// The race itself: the read sees the session expired, another request
+/// refreshes it before the delete, and the delete leaves it. This request
+/// still answers no session; the next read finds the refreshed one.
+#[tokio::test]
+async fn an_expired_read_keeps_a_session_refreshed_before_its_delete() {
+    let hook = Arc::new(BetweenFetchAndDelete::default());
+    let (_container, connection) = sessions_database(&hook).await;
+    let clock = TestClock::freeze();
+    let now = clock.now().timestamp();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(LIFETIME_SECS as u64));
+    idle_session(&driver, &connection, "refreshed", "7", now, 3 * 60 * 60).await;
+
+    hook.arm(set_last_activity("refreshed", now));
+    let read = driver.read("refreshed").await.expect("read");
+    assert!(
+        hook.ran(),
+        "the refresh ran between the fetch and the delete"
+    );
+    assert!(
+        read.is_none(),
+        "the read saw the session expired, so this request has none"
+    );
+
+    assert_eq!(
+        stored_last_activity(&connection, "refreshed").await,
+        Some(now),
+        "the delete matched a session that was no longer expired"
+    );
+    let next = driver
+        .read("refreshed")
+        .await
+        .expect("read")
+        .expect("the refreshed session is still stored");
+    assert_eq!(next.user_id.as_deref(), Some("7"));
+}
+
+/// The read and the delete agree where expiry starts: a session refreshed to
+/// exactly the lifetime ago is not expired to a read, so the delete leaves
+/// it too.
+#[tokio::test]
+async fn an_expired_read_keeps_a_session_refreshed_to_exactly_the_lifetime_ago() {
+    let hook = Arc::new(BetweenFetchAndDelete::default());
+    let (_container, connection) = sessions_database(&hook).await;
+    let clock = TestClock::freeze();
+    let now = clock.now().timestamp();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(LIFETIME_SECS as u64));
+    idle_session(&driver, &connection, "boundary", "8", now, 3 * 60 * 60).await;
+
+    hook.arm(set_last_activity("boundary", now - LIFETIME_SECS));
+    assert!(driver.read("boundary").await.expect("read").is_none());
+    assert!(
+        hook.ran(),
+        "the refresh ran between the fetch and the delete"
+    );
+
+    assert_eq!(
+        stored_last_activity(&connection, "boundary").await,
+        Some(now - LIFETIME_SECS),
+        "a session exactly the lifetime idle is not expired, so it stays"
+    );
+    assert!(
+        driver.read("boundary").await.expect("read").is_some(),
+        "a read finds the session the delete left"
+    );
+}
+
+/// A session nobody refreshed is still deleted by the read. A delete that
+/// fails does not fail the read: it still answers no session, and the row
+/// is left for garbage collection.
+#[tokio::test]
+async fn an_expired_read_deletes_a_session_still_expired_and_survives_a_failed_delete() {
+    let hook = Arc::new(BetweenFetchAndDelete::default());
+    let (_container, connection) = sessions_database(&hook).await;
+    let clock = TestClock::freeze();
+    let now = clock.now().timestamp();
+    let driver = DatabaseSessionDriver::new(Duration::from_secs(LIFETIME_SECS as u64));
+
+    idle_session(&driver, &connection, "stale", "9", now, 3 * 60 * 60).await;
+    assert!(driver.read("stale").await.expect("read").is_none());
+    assert_eq!(
+        stored_last_activity(&connection, "stale").await,
+        None,
+        "the read deletes a session still expired"
+    );
+
+    // The table moves away between the fetch and the delete, so the delete
+    // fails.
+    idle_session(&driver, &connection, "undeleted", "10", now, 3 * 60 * 60).await;
+    hook.arm("ALTER TABLE sessions RENAME TO sessions_aside".to_owned());
+    let read = driver.read("undeleted").await;
+    assert!(
+        hook.ran(),
+        "the table moved between the fetch and the delete"
+    );
+    assert!(
+        matches!(read, Ok(None)),
+        "a failed delete still answers no session: {read:?}"
+    );
+    connection
+        .inner()
+        .execute_unprepared("ALTER TABLE sessions_aside RENAME TO sessions")
+        .await
+        .expect("move the table back");
+    assert_eq!(
+        stored_last_activity(&connection, "undeleted").await,
+        Some(now - 3 * 60 * 60),
+        "the failed delete left the row"
+    );
+    assert_eq!(
+        driver.gc().await.expect("gc"),
+        1,
+        "garbage collection removes it"
+    );
+    assert_eq!(stored_last_activity(&connection, "undeleted").await, None);
 }
