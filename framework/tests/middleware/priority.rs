@@ -21,7 +21,7 @@ use serial_test::serial;
 use suprnova::http::text;
 use suprnova::middleware::{
     append_middleware_priority, clear_middleware_priority_for_test, into_boxed,
-    prepend_middleware_priority,
+    prepend_middleware_priority, reset_middleware_priority_for_test,
 };
 use suprnova::{Middleware, MiddlewareRegistry, Next, Request, Response, Router, handle_request};
 
@@ -49,7 +49,8 @@ recording_middleware!(BindingsMiddleware, "bindings");
 recording_middleware!(AuditMiddleware, "audit");
 
 /// An empty priority list for the length of one test. The list is
-/// process-wide, so it is emptied again when the test ends, passed or not.
+/// process-wide, so the default list a fresh process starts with is put
+/// back when the test ends, passed or not.
 struct PriorityList;
 
 impl PriorityList {
@@ -62,7 +63,7 @@ impl PriorityList {
 
 impl Drop for PriorityList {
     fn drop(&mut self) {
-        clear_middleware_priority_for_test();
+        reset_middleware_priority_for_test();
     }
 }
 

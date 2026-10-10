@@ -1277,6 +1277,63 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `View::shared` hand values to every checked view through Askama's runtime
   values; a value shared for one request never reaches another request, the
   render cache included.
+- **Inline Markdown.** `Str::inline_markdown` and
+  `MarkdownRenderer::render_inline` render emphasis, code, links and line
+  breaks with no paragraph around them, and keep block markers such as `#`
+  as text; `Str::markdown` renders a whole document as a string.
+- **Markdown input choices.** `MarkdownRenderer` gains
+  `html_input(HtmlInput::Sanitize | Strip | Escape | Allow)`,
+  `allow_unsafe_links` and `autolink`; a renderer that calls none of them
+  renders as before.
+- **Fluent strings.** `Str::of` returns a `Stringable` that chains the `Str`
+  helpers, `markdown` and `inline_markdown`, and converts to and from
+  `String`.
+- **Purpose-bound string encryption.** `Stringable::encrypt`, `encrypt_for`,
+  `decrypt` and `decrypt_for` seal and open a value through `Crypt` under a
+  `CryptPurpose`.
+- **Descending sort.** `Collection::sort_desc` orders `Ord` items from
+  greatest to least and keeps equal items in their order.
+- **Ordered key maps.** `Collection::map_with_keys` collects pairs into an
+  `IndexMap` in the collection's order; a repeated key keeps its first
+  position and its last value.
+- **Dates from text.** `Date::parse`, `Date::parse_in` and `Date::raw_parse`
+  read RFC 3339, dates, date-times, Unix seconds and named relative forms
+  such as `tomorrow 09:30`, `+2 days` and `first day of next month`,
+  reading the framework clock, and refuse other text with a
+  `DateParseError` that names it.
+- **Priority list controls.** `default_middleware_priority`,
+  `set_middleware_priority`, `add_to_middleware_priority_before` and
+  `add_to_middleware_priority_after` read, replace and insert into the
+  middleware priority list.
+- **Value pipelines.** `Pipeline::of(value)` sends any value through steps,
+  with `through`, `pipe`, `pipe_all`, `finally`, `within_transaction`,
+  `then` and `then_return`; a step is a function, an async closure, or a
+  type that implements `PipelineStep`.
+- **Appending several middleware.** The HTTP `Pipeline::pipe_all` appends
+  middleware after those `through` set.
+- **More catalog directories.** `Lang::add_path` merges a directory after
+  `lang/` and `Lang::add_fallback_path` one before it; the translator the
+  framework binds at boot reads every directory registered before then.
+- **Namespaced translations.** `Lang::add_namespace` reads a package's
+  catalogs as `namespace::key`, overridden by
+  `lang/vendor/<namespace>/<locale>/`; the browser catalog holds them as
+  `namespace__key`, and the starter kits' `t()` encodes keys the same way.
+- **Translation sources.** `Lang::loader` answers the directories and
+  namespaces the translator reads, and `FluentTranslator::from_sources`
+  builds a translator from them.
+- **Bindings chosen by environment.** `#[service]` takes
+  `bind(Concrete, env = [...])` entries; at boot the first entry whose
+  pattern matches the environment is bound, and `impl` when none does.
+- **Renamed route parameters.** `#[route_param("name")]` on a handler
+  argument reads the route parameter of that name, and an argument spelled
+  `r#type` reads `type`.
+- **Lazy singletons.** `App::singleton_lazy` and
+  `App::singleton_lazy_if_absent`, and the same on `Container` and
+  `TestContainer`, build a singleton on its first resolve and share it; a
+  factory that resolves its own type gets an error.
+- **AI-assisted development chapter.** The manual shows how an assistant
+  reads it as Markdown and through `llms.txt`, how to install the Suprnova
+  language server, and how to point an assistant at a project.
 
 ### Changed
 
@@ -2173,6 +2230,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   list, so they neither query nor fail; errors a hook adds stay unfiltered.
 - **The CSRF field turns autocomplete off.** `csrf_field()` renders
   `autocomplete="off"`, so a browser does not restore a stale token into it.
+- **A default middleware priority.** The priority list starts as
+  `Precognitive`, `SessionMiddleware`, `AuthMiddleware` and
+  `ThrottleRequestsMiddleware`, so a route that lists `AuthMiddleware`
+  before `SessionMiddleware` loads the session first, and a route-listed
+  `Precognitive` runs before a global `SessionMiddleware`.
+- **`lang/vendor` is not a locale.** The translator skips it as a locale
+  directory; it holds overrides of namespaced catalogs.
+- **`#[service(impl = ...)]` parses.** The named form beginning with `impl`
+  was refused as a keyword; it now registers the implementation.
 
 ### Fixed
 

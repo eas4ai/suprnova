@@ -13,9 +13,10 @@
 //!   canonical examples.
 //! - **`middlewarePriority`** - an ordered list of middleware types. A
 //!   chain is put in the order of the list when it runs, whatever order
-//!   its middleware were registered in. The Laravel kernel ships a built-in
-//!   priority list ensuring `SubstituteBindings` always runs after
-//!   `StartSession`, etc.
+//!   its middleware were registered in. Like the Laravel kernel's built-in
+//!   list, it starts with the framework's order-dependent middleware
+//!   ([`default_middleware_priority`]), so the session is loaded before
+//!   authentication runs whichever was listed first.
 //!
 //! These three registries are intentionally separate from
 //! [`MiddlewareRegistry`] - they're lookup tables, not execution slots.
@@ -26,7 +27,11 @@
 //! them without having to thread a config object through.
 
 use super::{BoxedMiddleware, Middleware, boxed_as};
+use crate::auth::AuthMiddleware;
 use crate::error::FrameworkError;
+use crate::http::precognition::Precognitive;
+use crate::rate_limit::ThrottleRequestsMiddleware;
+use crate::session::SessionMiddleware;
 use std::any::TypeId;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -68,7 +73,8 @@ static ALIAS_REGISTRY: OnceLock<RwLock<AliasMap>> = OnceLock::new();
 static GROUP_REGISTRY: OnceLock<RwLock<GroupMap>> = OnceLock::new();
 
 /// Process-global middleware priority list (TypeIds). Order matters: the
-/// first TypeId is sorted to the front of the chain.
+/// first TypeId is sorted to the front of the chain. It starts as
+/// [`default_middleware_priority`].
 static PRIORITY_REGISTRY: OnceLock<RwLock<Vec<TypeId>>> = OnceLock::new();
 
 fn alias_lock() -> &'static RwLock<AliasMap> {
@@ -80,7 +86,17 @@ fn group_lock() -> &'static RwLock<GroupMap> {
 }
 
 fn priority_lock() -> &'static RwLock<Vec<TypeId>> {
-    PRIORITY_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
+    PRIORITY_REGISTRY.get_or_init(|| RwLock::new(default_middleware_priority()))
+}
+
+/// Write access to the priority list. A poisoned lock is recovered, as the
+/// other registries recover theirs: a panic elsewhere must not stop the
+/// list from being changed.
+fn priority_write() -> std::sync::RwLockWriteGuard<'static, Vec<TypeId>> {
+    match priority_lock().write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
 }
 
 /// Register a named middleware alias.
@@ -607,12 +623,114 @@ pub fn middleware_priority() -> Vec<TypeId> {
 /// Wipe the priority list. Test-only convenience.
 #[doc(hidden)]
 pub fn clear_middleware_priority_for_test() {
-    let lock = priority_lock();
-    let mut guard = match lock.write() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.clear();
+    priority_write().clear();
+}
+
+/// Put the priority list back to [`default_middleware_priority`]. A test
+/// that changed the list calls this when it ends, so the tests after it
+/// in the same process see the list a fresh process starts with.
+#[doc(hidden)]
+pub fn reset_middleware_priority_for_test() {
+    *priority_write() = default_middleware_priority();
+}
+
+/// The priority list a process starts with: [`Precognitive`],
+/// [`SessionMiddleware`], [`AuthMiddleware`] and
+/// [`ThrottleRequestsMiddleware`], first in the list first.
+///
+/// These are the four entries of Laravel's `$middlewarePriority` that
+/// have a Suprnova middleware type, in Laravel's order, so route-listed
+/// framework middleware run in Laravel's order with no application
+/// listing them: a precognitive request is marked before the session
+/// starts, the session is loaded before authentication reads it, and the
+/// user is known before a throttle keys on it.
+///
+/// [`BasicAuthMiddleware`](crate::auth::BasicAuthMiddleware) and
+/// `BearerTokenMiddleware` are left out, as Laravel's list leaves out its
+/// basic-auth middleware: each checks a credential itself, so a throttle
+/// an application lists first keeps counting failed guesses against them.
+///
+/// The list orders global and route middleware together, so a
+/// route-listed `Precognitive` runs before a global `SessionMiddleware`.
+pub fn default_middleware_priority() -> Vec<TypeId> {
+    vec![
+        TypeId::of::<Precognitive>(),
+        TypeId::of::<SessionMiddleware>(),
+        TypeId::of::<AuthMiddleware>(),
+        TypeId::of::<ThrottleRequestsMiddleware>(),
+    ]
+}
+
+/// Replace the priority list with `types`, first in the list first, as
+/// Laravel's `->priority([...])` replaces the kernel's. A type given twice
+/// is kept at its first place. An empty list leaves every chain in the
+/// order its middleware were registered.
+///
+/// ```rust,no_run
+/// use std::any::TypeId;
+/// use suprnova::middleware::set_middleware_priority;
+/// use suprnova::session::SessionMiddleware;
+/// use suprnova::AuthMiddleware;
+///
+/// set_middleware_priority([
+///     TypeId::of::<SessionMiddleware>(),
+///     TypeId::of::<AuthMiddleware>(),
+/// ]);
+/// ```
+pub fn set_middleware_priority<I>(types: I)
+where
+    I: IntoIterator<Item = TypeId>,
+{
+    let mut list: Vec<TypeId> = Vec::new();
+    for type_id in types {
+        if !list.contains(&type_id) {
+            list.push(type_id);
+        }
+    }
+    *priority_write() = list;
+}
+
+/// Insert `M` into the priority list just before `Existing`, as Laravel's
+/// `addToMiddlewarePriorityBefore` does. When `Existing` is not in the
+/// list, `M` is appended; when `M` already is, the list stays as it is.
+pub fn add_to_middleware_priority_before<Existing, M>()
+where
+    Existing: Middleware + 'static,
+    M: Middleware + 'static,
+{
+    insert_relative(TypeId::of::<Existing>(), TypeId::of::<M>(), Side::Before);
+}
+
+/// Insert `M` into the priority list just after `Existing`, as Laravel's
+/// `addToMiddlewarePriorityAfter` does. When `Existing` is not in the
+/// list, `M` is appended; when `M` already is, the list stays as it is.
+pub fn add_to_middleware_priority_after<Existing, M>()
+where
+    Existing: Middleware + 'static,
+    M: Middleware + 'static,
+{
+    insert_relative(TypeId::of::<Existing>(), TypeId::of::<M>(), Side::After);
+}
+
+/// Which side of the existing entry a relative insert goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Before,
+    After,
+}
+
+/// The shared body of the two relative inserts, Laravel's
+/// `addToMiddlewarePriorityRelative`.
+fn insert_relative(existing: TypeId, middleware: TypeId, side: Side) {
+    let mut guard = priority_write();
+    if guard.contains(&middleware) {
+        return;
+    }
+    match guard.iter().position(|listed| *listed == existing) {
+        Some(at) if side == Side::Before => guard.insert(at, middleware),
+        Some(at) => guard.insert(at + 1, middleware),
+        None => guard.push(middleware),
+    }
 }
 
 #[cfg(test)]

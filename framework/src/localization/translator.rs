@@ -1,6 +1,7 @@
 //! The translation seam: one trait, drivers behind it.
 
 use super::locale::Locale;
+use super::sources::TranslationSource;
 use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
 use std::sync::Arc;
@@ -66,6 +67,20 @@ pub trait Translator: Send + Sync {
     /// anything; a driver with no on-disk source (e.g. one backed by a
     /// database or a remote service) can leave the default in place.
     fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
+        Ok(false)
+    }
+
+    /// Read catalogs from `source` as well, from now on. `Lang::add_path`,
+    /// `Lang::add_fallback_path` and `Lang::add_namespace` call this on
+    /// the bound translator, so a source registered after the translator
+    /// was built reaches it too; one registered before reaches it through
+    /// [`Lang::loader`](super::Lang::loader), which the framework builds
+    /// its translator from. Answers whether the driver took the source.
+    ///
+    /// Defaults to `Ok(false)`: a driver with no catalog directories (one
+    /// backed by a database or a remote service) has nothing to read from
+    /// a directory and leaves it.
+    fn add_source(&self, _source: &TranslationSource) -> Result<bool, FrameworkError> {
         Ok(false)
     }
 }

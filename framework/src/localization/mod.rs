@@ -12,6 +12,7 @@ mod functions;
 mod locale;
 mod merge;
 mod middleware;
+mod sources;
 mod translator;
 
 pub use config::{Detect, LocalizationConfig};
@@ -19,6 +20,7 @@ pub use fluent::FluentTranslator;
 pub use format::{DateStyle, ListStyle, RelativeUnit, TimeStyle};
 pub use locale::{Locale, negotiate};
 pub use middleware::LocaleMiddleware;
+pub use sources::{TranslationSource, TranslationSources};
 pub use translator::{CatalogSource, Translator};
 
 use crate::config::Config;
@@ -31,6 +33,7 @@ use chrono::NaiveDateTime;
 use indexmap::IndexMap;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 tokio::task_local! {
@@ -55,6 +58,16 @@ static GLOBAL_LOCALE: OnceLock<RwLock<Option<Locale>>> = OnceLock::new();
 /// `Localization::bootstrap`), [`resolved_config`] falls back to a fresh
 /// `Config::get`/`from_env` read each time - correct, just not memoized.
 static LOCALIZATION_CONFIG: OnceLock<LocalizationConfig> = OnceLock::new();
+
+/// The sources `Lang::add_path`, `Lang::add_fallback_path` and
+/// `Lang::add_namespace` registered, in order. Process-wide, because an
+/// application registers them in its bootstrap, before
+/// [`Localization::bootstrap`] builds the translator from
+/// [`Lang::loader`].
+fn registered_sources() -> &'static RwLock<Vec<TranslationSource>> {
+    static REGISTERED: OnceLock<RwLock<Vec<TranslationSource>>> = OnceLock::new();
+    REGISTERED.get_or_init(|| RwLock::new(Vec::new()))
+}
 
 /// Dedup set for `Lang::get`/`Lang::get_with`'s "translation missing in
 /// current and fallback locale" warning - logged at most once per key
@@ -219,6 +232,11 @@ impl Localization {
     /// A missing `lang/` directory is not an error: `FluentTranslator`
     /// still boots successfully with only the embedded framework
     /// catalogs (English).
+    ///
+    /// The translator reads [`Lang::loader`]: the `lang/` directory and
+    /// every path and namespace the application's bootstrap registered
+    /// with `Lang::add_path`, `Lang::add_fallback_path` and
+    /// `Lang::add_namespace`, which runs before this.
     pub(crate) async fn bootstrap() -> Result<(), FrameworkError> {
         if App::resolve_make::<dyn Translator>().is_ok() {
             return Ok(());
@@ -229,7 +247,7 @@ impl Localization {
             None => LocalizationConfig::from_env()?,
         };
 
-        let translator = FluentTranslator::from_dir(crate::app::paths::lang_path(""), &config)?;
+        let translator = FluentTranslator::from_sources(Lang::loader(), &config)?;
         App::bind::<dyn Translator>(Arc::new(translator));
         // Best-effort: if another task raced us and already set this,
         // keep theirs - both snapshots came from the same config source.
@@ -441,6 +459,105 @@ impl Lang {
             translator.reload().map(|()| true)
         })
         .await
+    }
+
+    /// Add a catalog directory merged after the application's `lang/`
+    /// and every path added before it, so its message wins, as Laravel's
+    /// `Lang::addPath` does. The directory holds `<locale>/*.ftl` files,
+    /// as `lang/` does.
+    ///
+    /// Call it from the application's bootstrap: the translator the
+    /// framework binds at boot is built from [`Lang::loader`]. A path added
+    /// after that reaches the bound translator at once (see
+    /// [`Translator::add_source`]); pages the render cache already holds
+    /// keep their text until [`Lang::reload`] or their TTL.
+    ///
+    /// # Errors
+    ///
+    /// When a translator is bound and its catalogs cannot be rebuilt with
+    /// the path (a malformed `.ftl` file). The path is then not registered
+    /// and the catalogs stay as they were.
+    pub fn add_path(dir: impl Into<PathBuf>) -> Result<(), FrameworkError> {
+        Self::add_source(TranslationSource::Path(dir.into()))
+    }
+
+    /// Add a catalog directory merged before the application's `lang/`,
+    /// so the application's message wins, as Laravel merges the JSON paths
+    /// of `Lang::addJsonPath` before its own. Use it for a package's
+    /// defaults that an application may override. Registered as
+    /// [`add_path`](Self::add_path) is.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_path`](Self::add_path).
+    pub fn add_fallback_path(dir: impl Into<PathBuf>) -> Result<(), FrameworkError> {
+        Self::add_source(TranslationSource::FallbackPath(dir.into()))
+    }
+
+    /// Register a package's catalogs under `namespace`, read as
+    /// `namespace::key`, as Laravel's `Lang::addNamespace` does:
+    /// `Lang::get("courier::bye")` reads `bye` from `dir/<locale>/*.ftl`.
+    /// The application overrides a namespaced message with a file under
+    /// `lang/vendor/<namespace>/<locale>/`. Registering a namespace again
+    /// replaces its directory. Registered as [`add_path`](Self::add_path)
+    /// is.
+    ///
+    /// A Fluent id cannot hold `::`, so the catalog holds `courier::bye` as
+    /// `courier__bye`, and the browser's client encodes a key the same way;
+    /// see [`TranslationSources`].
+    ///
+    /// # Errors
+    ///
+    /// When `namespace` is empty, holds `/`, `\`, `..` or a NUL byte, as
+    /// Laravel's loader refuses such a path segment, or is otherwise not a
+    /// letter followed by letters, digits and `-`, which an encoded Fluent
+    /// id needs. Otherwise as [`add_path`](Self::add_path).
+    pub fn add_namespace(namespace: &str, dir: impl Into<PathBuf>) -> Result<(), FrameworkError> {
+        sources::validate_namespace(namespace)?;
+        Self::add_source(TranslationSource::Namespace {
+            namespace: namespace.to_owned(),
+            dir: dir.into(),
+        })
+    }
+
+    /// The sources the translator reads, as Laravel's `Lang::getLoader`
+    /// answers its loader: the application's `lang/` directory, with every
+    /// path, fallback path and namespace registered so far. The framework
+    /// builds its translator from this at boot.
+    pub fn loader() -> TranslationSources {
+        let registered = registered_sources()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        registered.iter().fold(
+            TranslationSources::new(crate::app::paths::lang_path("")),
+            TranslationSources::with,
+        )
+    }
+
+    /// Forget every registered source. Test-only convenience: the registry
+    /// is process-wide, and a test that registers sources clears them so
+    /// the next test starts without them.
+    #[doc(hidden)]
+    pub fn clear_sources_for_test() {
+        registered_sources()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Hand `source` to the bound translator, if there is one, then
+    /// register it. The registry stays locked while the translator
+    /// rebuilds, so two registrations reach the translator and the
+    /// registry in the same order.
+    fn add_source(source: TranslationSource) -> Result<(), FrameworkError> {
+        let mut registered = registered_sources()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Ok(translator) = App::resolve_make::<dyn Translator>() {
+            translator.add_source(&source)?;
+        }
+        registered.push(source);
+        Ok(())
     }
 
     /// Locales with a loaded catalog. Empty if no `Translator` is bound.

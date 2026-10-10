@@ -9,6 +9,11 @@
 //! - An integer type or `String` is a path value, read from the route
 //!   parameter named after the argument through `FromParam`; an `Option` of
 //!   one is `None` when its optional parameter is absent.
+//! - The parameter an argument reads is the name of its binding, with a
+//!   raw identifier's `r#` dropped (`r#type` reads `type`), or the name
+//!   `#[route_param("name")]` on the argument gives, as Laravel's
+//!   `#[RouteParameter('name')]` does. `#[authorize]` still names the
+//!   argument by its binding.
 //! - Any other type is decided by trait, at compile time, through the
 //!   generated code: a type that implements `RouteBinding` binds from the
 //!   route parameter named after the argument (`post: Post`), and any other
@@ -156,6 +161,13 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         }
     }
 
+    // `#[route_param("name")]` names the route parameter an argument reads.
+    // It is taken off the argument here: nothing else could expand it.
+    let renames = match take_route_params(&mut input_fn) {
+        Ok(renames) => renames,
+        Err(e) => return e.to_compile_error(),
+    };
+
     let fn_vis = &input_fn.vis;
     let fn_name = &input_fn.sig.ident;
     let fn_generics = &input_fn.sig.generics;
@@ -198,7 +210,20 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         } else {
             classify_param_type(&pat_type.ty)
         };
-        let name = extract_param_name(&pat_type.pat);
+        let name = match renames.get(index).cloned().flatten() {
+            Some(renamed) => {
+                if matches!(kind, ArgKind::Request | ArgKind::Generic) {
+                    return syn::Error::new(
+                        renamed.span(),
+                        "#[route_param] names the route parameter an argument reads, and \
+                         this argument reads the request body",
+                    )
+                    .to_compile_error();
+                }
+                Some(renamed.value())
+            }
+            None => extract_param_name(&pat_type.pat),
+        };
         if name.is_none() && (reads_route(&kind) || bound_by_spelling(&pat_type.ty)) {
             return syn::Error::new_spanned(
                 &pat_type.pat,
@@ -253,12 +278,14 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         Ok(checks) => checks,
         Err(e) => return e.to_compile_error(),
     };
+    // A target is found by its Rust identifier, not by the route parameter
+    // it reads, which `#[route_param]` may rename.
     let targets: Vec<usize> = specs
         .iter()
         .filter_map(|spec| match &spec.target {
             Target::Param(name) => args
                 .iter()
-                .find(|arg| arg.name.as_deref() == Some(name.to_string().as_str()))
+                .find(|arg| route_binding(arg.pat).is_some_and(|binding| binding.ident == *name))
                 .map(|arg| arg.index),
             Target::Type(_) => None,
         })
@@ -1004,13 +1031,56 @@ fn authorize_checks(
 }
 
 /// The route parameter an argument reads: the name of its binding (see
-/// [`route_binding`]), or `_` for a wildcard. `None` when the pattern has
-/// no single binding to name it by.
+/// [`route_binding`]) without a raw identifier's `r#`, so `r#type` reads
+/// `type`, or `_` for a wildcard. `None` when the pattern has no single
+/// binding to name it by.
 fn extract_param_name(pat: &Pat) -> Option<String> {
     match pat {
         Pat::Wild(_) => Some("_".to_string()),
-        _ => route_binding(pat).map(|binding| binding.ident.to_string()),
+        _ => route_binding(pat).map(|binding| binding.ident.unraw().to_string()),
     }
+}
+
+/// Take every `#[route_param("name")]` off the function's arguments, and
+/// answer the name each argument's attribute gives, by position. An
+/// argument takes one, holding a non-empty string.
+fn take_route_params(input_fn: &mut ItemFn) -> syn::Result<Vec<Option<syn::LitStr>>> {
+    let mut renames = Vec::with_capacity(input_fn.sig.inputs.len());
+    for param in input_fn.sig.inputs.iter_mut() {
+        let FnArg::Typed(pat_type) = param else {
+            renames.push(None);
+            continue;
+        };
+        let (route_params, others): (Vec<_>, Vec<_>) = std::mem::take(&mut pat_type.attrs)
+            .into_iter()
+            .partition(|attr| attr.path().is_ident("route_param"));
+        pat_type.attrs = others;
+        let mut renamed: Option<syn::LitStr> = None;
+        for attr in &route_params {
+            let name: syn::LitStr = attr.parse_args().map_err(|_| {
+                syn::Error::new_spanned(
+                    attr,
+                    "expected `#[route_param(\"name\")]`: the name of the route parameter \
+                     the argument reads",
+                )
+            })?;
+            if name.value().is_empty() {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "#[route_param] needs the name of a route parameter",
+                ));
+            }
+            if renamed.is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "an argument reads one route parameter: write `#[route_param]` once",
+                ));
+            }
+            renamed = Some(name);
+        }
+        renames.push(renamed);
+    }
+    Ok(renames)
 }
 
 /// The one binding of a parameter pattern: the identifier of `user: T`, or
@@ -1763,6 +1833,101 @@ mod tests {
             "got:\n{out}"
         );
         assert!(!out.contains("Deref"), "got:\n{out}");
+    }
+
+    #[test]
+    fn route_param_names_the_parameter_an_argument_reads() {
+        let out = expansion(quote! {
+            pub async fn show(#[route_param("post")] id: i64) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("path :: < i64 > (\"post\")"), "got:\n{out}");
+        assert!(
+            out.contains("HandlerArg :: path_value (\"post\""),
+            "the record names the renamed parameter; got:\n{out}"
+        );
+        assert!(
+            !out.contains("route_param"),
+            "the attribute is taken off; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn route_param_renames_a_bound_argument_and_an_optional_path_value() {
+        let out = expansion(quote! {
+            pub async fn show(
+                #[route_param("article")] found: Article,
+                #[route_param("page")] number: Option<u32>,
+            ) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains("__bind (& mut __suprnova_input , 0usize , \"article\")"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("optional_path :: < u32 > (\"page\")"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_raw_identifier_reads_the_parameter_without_r_hash() {
+        let out = expansion(quote! {
+            pub async fn show(r#type: String) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(out.contains("path :: < String > (\"type\")"), "got:\n{out}");
+        assert!(out.contains("let r#type : String"), "got:\n{out}");
+    }
+
+    #[test]
+    fn authorize_finds_a_renamed_target_by_its_rust_identifier() {
+        let out = expansion(quote! {
+            #[authorize("update", post)]
+            pub async fn update(#[route_param("article")] post: Post) -> Response { todo!() }
+        });
+        assert!(!out.contains("compile_error"), "got:\n{out}");
+        assert!(
+            out.contains(
+                "__authorize_target :: < Post > (& mut __suprnova_input , 0usize , \"article\""
+            ),
+            "the target binds from the renamed parameter; got:\n{out}"
+        );
+        assert!(
+            out.contains("__authorize_handler (\"update\" , & post)"),
+            "the check names the Rust identifier; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn route_param_misuse_is_a_compile_error() {
+        for (src, message) in [
+            (
+                quote! { pub async fn show(#[route_param("x")] req: Request) -> Response { todo!() } },
+                "reads the request body",
+            ),
+            (
+                quote! { pub async fn show(#[route_param("")] id: i64) -> Response { todo!() } },
+                "needs the name of a route parameter",
+            ),
+            (
+                quote! { pub async fn show(#[route_param(post)] id: i64) -> Response { todo!() } },
+                "expected `#[route_param(\\\"name\\\")]`",
+            ),
+            (
+                quote! {
+                    pub async fn show(#[route_param("a")] #[route_param("b")] id: i64) -> Response {
+                        todo!()
+                    }
+                },
+                "write `#[route_param]` once",
+            ),
+        ] {
+            let out = expansion(src);
+            assert!(out.contains("compile_error"), "got:\n{out}");
+            assert!(out.contains(message), "expected {message:?}; got:\n{out}");
+        }
     }
 
     #[test]

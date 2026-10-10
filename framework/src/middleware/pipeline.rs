@@ -41,6 +41,7 @@
 //! ergonomic builder Laravel users reach for. `then`, `then_return`, and
 //! `finally_with` all funnel through `MiddlewareChain::execute`.
 
+use super::value_pipeline::ValuePipeline;
 use super::{BoxedMiddleware, Middleware, MiddlewareChain, into_boxed};
 use crate::http::{Request, Response};
 use crate::routing::BoxedHandler;
@@ -85,6 +86,18 @@ impl Pipeline {
             passable: None,
             finally: None,
         }
+    }
+
+    /// A pipeline that sends `value`, of any type, through steps rather
+    /// than a request through middleware, as Laravel's `Pipeline::send`
+    /// takes any passable. See [`ValuePipeline`] and its
+    /// [`PipelineStep`](super::PipelineStep)s.
+    pub fn of<T, R>(value: T) -> ValuePipeline<T, R>
+    where
+        T: Send + 'static,
+        R: Send + 'static,
+    {
+        ValuePipeline::new(value)
     }
 
     /// Set the object being sent through the pipeline. Laravel's `send`.
@@ -133,6 +146,18 @@ impl Pipeline {
     /// the list, `pipe` PUSHES onto whatever is already there.
     pub fn pipe<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.pipes.push(into_boxed(middleware));
+        self
+    }
+
+    /// Append several middleware, in order, after those already in the
+    /// pipeline. Where [`through`](Self::through) replaces the list,
+    /// `pipe_all` keeps it, as Laravel's `pipe` does with an array.
+    pub fn pipe_all<I, M>(mut self, middleware: I) -> Self
+    where
+        I: IntoIterator<Item = M>,
+        M: Middleware + 'static,
+    {
+        self.pipes.extend(middleware.into_iter().map(into_boxed));
         self
     }
 

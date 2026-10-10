@@ -111,6 +111,78 @@ The rules:
   also make the [RenderCache](render-cache.md) entries rendered from the
   old text miss; `Translator::reload` alone swaps the catalogs and leaves
   those entries valid until they expire.
+- **`lang/vendor/` is not a locale.** It holds your overrides of a
+  package's namespaced catalogs, described below.
+
+### Catalogs from other directories
+
+A package, or a shared directory of translations, adds catalogs beside
+`lang/` with three calls, made in your bootstrap before the server boots.
+Each directory has the same layout as `lang/`: one subdirectory per
+locale, holding `.ftl` files.
+
+```rust
+use suprnova::Lang;
+
+pub async fn register() {
+    // Merged after lang/: its message wins over yours.
+    Lang::add_path("vendor/acme-billing/lang").expect("billing catalogs");
+    // Merged before lang/: your message wins over its.
+    Lang::add_fallback_path("shared/lang").expect("shared catalogs");
+    // Read as `courier::key`, and overridden by lang/vendor/courier/.
+    Lang::add_namespace("courier", "vendor/courier/lang").expect("courier catalogs");
+}
+```
+
+- **`Lang::add_path(dir)`** adds a directory merged after `lang/`, as
+  Laravel's `Lang::addPath` does. Several added paths merge in the order
+  you add them, a later one's message winning.
+- **`Lang::add_fallback_path(dir)`** adds a directory merged before
+  `lang/`, so your message wins, as Laravel merges the JSON paths of
+  `Lang::addJsonPath` before its own. Use it for a package's defaults.
+- **`Lang::add_namespace(namespace, dir)`** registers a package's
+  catalogs under a namespace, as Laravel's `Lang::addNamespace` does. You
+  read them as `namespace::key`: `Lang::get("courier::bye")`. You override
+  one with a file under `lang/vendor/<namespace>/<locale>/`, which wins
+  over the package's. A namespace is a letter followed by letters, digits
+  and `-`; one that is empty or holds `/`, `\`, `..` or a NUL byte, or any
+  other character, is refused with an error.
+- **`Lang::loader()`** answers the sources the translator reads: `lang/`
+  and every path, fallback path and namespace added so far, as Laravel's
+  `Lang::getLoader` does. The framework builds its translator from it at
+  boot, so the sources you register before then reach it.
+
+A source added after boot reaches the bound translator at once, which
+rebuilds its catalogs; a malformed `.ftl` in it is an error and leaves the
+catalogs as they were. Pages the [RenderCache](render-cache.md) already
+holds keep their text until `Lang::reload().await` or their TTL. To build a
+translator from sources yourself, call
+`FluentTranslator::from_sources(sources, &config)` with a
+`TranslationSources`; `FluentTranslator::from_dir(dir, &config)` still reads
+one directory.
+
+A Fluent message id cannot hold `::`, so a namespaced key is written
+`namespace__key` in a catalog: the message `bye` of the namespace
+`courier` is `courier__bye`, and its term `-brand` is `-courier__brand`.
+The served catalog the browser fetches holds them in that form, and the
+starter kits' `t()` encodes `t("courier::bye")` the same way before it
+looks the key up. Don't give your own messages ids of the form
+`<namespace>__<key>`: they would collide with the namespace's.
+
+### Why Suprnova diverges
+
+- **Namespaced keys are encoded in the catalog.** Laravel keeps a
+  namespace's lines apart and looks `courier::bye` up in them; Fluent ids
+  cannot hold `::`, so here the namespace's messages join the locale's
+  catalog as `courier__bye`, which is also what the browser fetches.
+- **A namespace is an identifier.** Laravel accepts any string as a
+  namespace; here it must be a letter followed by letters, digits and
+  `-`, so it can be part of a Fluent id. Laravel checks a locale and a
+  group before it builds a path from them; here the namespace is checked
+  when you register it.
+- **A fallback path holds `.ftl` catalogs.** Laravel's JSON paths hold
+  `<locale>.json` files; `add_fallback_path` takes a directory with the
+  same layout as `lang/`, merged at the same place in the order.
 
 ## FTL in five minutes
 

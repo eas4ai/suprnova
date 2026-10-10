@@ -36,6 +36,8 @@ mod key_ring;
 pub mod laravel_delta;
 /// Tests observe the agreed data gaps.
 pub mod laravel_gaps;
+/// Tests observe the agreed infrastructure gaps.
+pub mod laravel_infra_gaps;
 pub mod laravel_parity;
 pub mod lazy_loading;
 pub mod locking;

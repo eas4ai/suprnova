@@ -128,6 +128,37 @@ pub async fn show(req: Request) -> Response {
 For typed extraction without the `unwrap_or` dance, see route model
 binding below or `#[handler]` in [Controllers](controllers.md).
 
+### Naming the parameter an argument reads
+
+A `#[handler]` argument reads the route parameter named after it, so
+`id: i64` reads `{id}` and `post: Post` binds from `{post}`. A raw
+identifier drops its `r#`: `r#type: String` reads `{type}`, a name Rust
+reserves as a keyword. To read a parameter under another name, put
+`#[route_param("name")]` on the argument, as Laravel's
+`#[RouteParameter('name')]` does:
+
+```rust
+use suprnova::{handler, text, Response};
+
+// GET /posts/{post}
+#[handler]
+pub async fn show(#[route_param("post")] id: i64) -> Response {
+    text(format!("post {id}"))
+}
+
+// GET /items/{type}
+#[handler]
+pub async fn by_type(r#type: String) -> Response {
+    text(r#type)
+}
+```
+
+`#[route_param]` works on a path value, an optional one and a bound
+model alike. The [startup checks](#startup-checks) read the renamed
+parameter, so `show` on `/posts/{id}` is refused before the first
+request. `#[authorize]` still names the argument by its own name:
+`#[authorize("view", id)]` above.
+
 ### Optional parameters
 
 End a parameter name with `?` to make the segment optional. `/posts/{id?}`
@@ -567,6 +598,10 @@ pub async fn show(id: i64) -> Response {
 - **An enum binds by name.** Rust enums carry no backing value, so a
   variant without `#[route(value = "...")]` binds from its name in snake
   case.
+- **A renamed argument names its parameter with an attribute.** Laravel's
+  `#[RouteParameter('name')]` reads the parameter's value into an
+  argument; `#[route_param("name")]` does the same and also binds a model
+  from it, and the startup checks read the name it gives.
 - **Mistakes stop the server at startup.** Laravel finds a missing
   relationship at request time, as a 500, and injects an empty model for
   an argument the route does not declare. Suprnova refuses those routes,

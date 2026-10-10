@@ -13,7 +13,7 @@
 //! The type could live in the box itself if `BoxedMiddleware` were a struct.
 //! It is a public alias of `Arc<dyn Fn(...)>`, and applications build one by
 //! hand for `.middleware_boxed(...)`, so making it a struct would break
-//! them to serve a list most applications leave empty.
+//! them to serve the priority list.
 //!
 //! The table is written at registration only. [`into_boxed`] itself writes
 //! nothing, because the request path calls it for every request, and a
@@ -215,8 +215,11 @@ fn sweep(table: &mut Table) {
 /// its neighbours. So a middleware registered after `AuthMiddleware` still
 /// runs after it, whatever the list moves in front of it.
 ///
-/// An empty list returns the chain as it was given, which is the cost every
-/// application without a priority list pays: one read of the list.
+/// An empty list, which an application sets with
+/// `set_middleware_priority([])`, returns the chain as it was given after
+/// one read of the list. The list starts with four entries, so a chain of
+/// two or more middleware is otherwise ranked: one lookup of its type for
+/// each middleware.
 pub(crate) fn sort_by_priority(chain: Vec<BoxedMiddleware>) -> Vec<BoxedMiddleware> {
     let priority = super::middleware_priority();
     if priority.is_empty() || chain.len() < 2 {

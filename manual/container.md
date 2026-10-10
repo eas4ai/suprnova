@@ -106,9 +106,9 @@ store.put("hello", b"world").await?;
 bump). Use this for any service shared across threads, especially
 trait objects.
 
-### `App::factory(|| { … })` - built on demand
+### `App::factory(|| { … })` - built on every resolution
 
-When constructing the value should happen at first use (or every time):
+When each resolution should build a new value:
 
 ```rust
 App::factory(|| {
@@ -127,6 +127,40 @@ sentinel value) or use a regular `App::singleton` / `App::bind` after
 constructing the value yourself with `?`. Both invoke the closure
 outside any container lock, so a factory that re-enters the container
 won't deadlock and an expensive constructor won't block other bindings.
+
+### `App::singleton_lazy(|| { … })` - built on first use, then shared
+
+When one value should serve the whole process, but building it is
+costly or reads other bindings, register a lazy singleton. Its factory
+runs at the first resolution, and every resolution after it shares that
+value, as Laravel's `singleton` builds its concrete on first resolve:
+
+```rust
+use std::sync::Arc;
+use suprnova::App;
+
+// Nothing is built at boot.
+App::singleton_lazy(|| Arc::new(SearchIndex::open("/var/lib/search")) as Arc<dyn Search>);
+
+// The first resolution builds it; later ones share the same `Arc`.
+let search = App::make::<dyn Search>().expect("registered at boot");
+```
+
+The value can be a concrete type, resolved with `App::get` or
+`App::resolve`, or an `Arc<dyn Trait>`, resolved with `App::make` or
+`App::resolve_make`. `App::singleton_lazy_if_absent` registers only when
+nothing is bound for the type yet and answers whether it did, as
+Laravel's `singletonIf` does; a binding already there stays, and its
+factory never runs.
+
+The factory runs with no container lock held, so it can resolve other
+bindings. Threads that resolve the type while it is being built wait for
+the value, so the factory runs once. A factory that resolves its own
+type, directly or through other lazy singletons, gets an error that
+names the type instead of waiting for a value it is still building. A
+factory that panics leaves the value unbuilt, so the next resolution
+runs it again. `Container::singleton_lazy` and
+`TestContainer::singleton_lazy` do the same on their containers.
 
 ### `App::scoped` and `App::bind_scoped` - one value per unit of work
 
@@ -291,6 +325,33 @@ by hand in `bootstrap.rs` is kept. Boot doesn't run the generated
 constructor of a type that is already bound, either: a dependency that
 only that constructor reads doesn't have to be registered.
 
+### `#[service]` - registered at boot, chosen by environment
+
+`#[service(impl = Concrete)]` on a trait registers `Concrete::default()`
+when the application boots, unless the application bound the trait
+first. `bind(Concrete, env = [...])` entries choose the implementation by
+environment, as Laravel's `#[Bind]` attribute with `environments` does:
+
+```rust
+use suprnova::service;
+
+#[service(
+    impl = SmtpMailer,
+    bind(LogMailer, env = ["local", "testing"]),
+    bind(SandboxMailer, env = ["staging*"]),
+)]
+pub trait Mailer {
+    fn send(&self, to: &str, body: &str);
+}
+```
+
+At boot, the first entry with a pattern that matches
+`Config::environment()` (`local`, `development`, `staging`, `production`,
+`testing`, or a custom `APP_ENV`) is bound, and `impl` when no entry
+matches. `*` matches any run of characters, and every other character
+matches itself, case included. A trait with `bind` entries and no `impl`
+stays unbound when no entry matches. See [Macros](macros.md#service).
+
 ## Resolving a value
 
 Two read methods, plus their `Result`-returning siblings:
@@ -314,7 +375,8 @@ missing service should surface as a 500 with a proper log, not a panic.
 A [scoped binding](#appscoped-and-appbind_scoped---one-value-per-unit-of-work)
 that cannot resolve is a different error: `resolve` returns
 `FrameworkError::Internal`, and `get` and `make` log a warning and
-return `None`.
+return `None`. So is a lazy singleton whose factory resolves its own
+type.
 
 Membership checks (rarely needed):
 
@@ -343,10 +405,13 @@ pub async fn register() {
     let gateway: Arc<dyn EmailGateway> = Arc::new(RealEmailGateway::new());
     App::bind(gateway);
 
-    // Lazy services (built on first use)
+    // A factory: a new client on every resolution
     App::bind_factory::<dyn HttpClient, _>(|| {
         Arc::new(ReqwestClient::with_timeout(30))
     });
+
+    // A lazy singleton: built on first use, then shared
+    App::singleton_lazy(|| Arc::new(SearchIndex::open("/var/lib/search")) as Arc<dyn Search>);
 }
 ```
 
@@ -474,12 +539,13 @@ async fn order_dispatches_email() {
 ### Lazy expensive construction
 
 ```rust
-// Builds the embedding model on first request, not at boot.
-App::bind_factory::<dyn EmbeddingModel, _>(|| {
+// Builds the embedding model on the first resolution, not at boot, and
+// shares it afterwards.
+App::singleton_lazy(|| {
     Arc::new(
         OnnxEmbedding::load_from_disk("/models/all-mini-lm.onnx")
             .expect("embedding model must load"),
-    )
+    ) as Arc<dyn EmbeddingModel>
 });
 ```
 
@@ -507,6 +573,10 @@ answers both problems:
 - Scoped bindings keep requests apart. `App::scoped` is the Suprnova
   form of Laravel Octane's `scoped()` binding: the container builds
   the value once for one unit of work and drops it when that unit ends.
+
+- `#[service]`'s environment entries are chosen once, at boot. Laravel
+  reads a `#[Bind]` attribute each time it builds the class; a
+  Suprnova binding is installed when the application boots and stays.
 
 The container API is the same as Laravel's; the lookup machinery
 is different because the runtime is different.
