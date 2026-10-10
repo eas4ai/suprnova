@@ -300,6 +300,17 @@ async fn execute(
             .and_then(|registry| registry.entries.get(name).copied())
     }
     .ok_or_else(|| FrameworkError::not_found(format!("no seeder registered for `{name}`")))?;
+    run_function(name, function, params, silent).await
+}
+
+/// Runs the seeder `function` under `name`, with the recursion guard and
+/// the progress lines every seeder call shares.
+async fn run_function(
+    name: &str,
+    function: SeederFn,
+    params: SeederParams,
+    silent: bool,
+) -> Result<(), FrameworkError> {
     let recursive = INVOCATION.with(|state| !state.borrow_mut().running.insert(name.to_owned()));
     if recursive {
         return Err(FrameworkError::bad_request(format!(
@@ -321,6 +332,14 @@ async fn execute(
         ));
     }
     Ok(())
+}
+
+/// Runs the seeder `S` itself, registered or not and without progress
+/// lines, so a test can seed with a seeder it names by its type. The
+/// seeders `S` calls are found in the registry, as for any other call.
+pub(crate) async fn run_type<S: Seeder + 'static>() -> Result<(), FrameworkError> {
+    let function: SeederFn = |params| Box::pin(S::run_with(params));
+    with_invocation(run_function(S::name(), function, SeederParams::new(), true)).await
 }
 
 /// Number of currently-registered seeders. Useful for tests asserting

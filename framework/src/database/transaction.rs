@@ -1956,6 +1956,14 @@ impl DB {
             (tx, state.connection_name.clone())
         } else {
             let conn = DB::connection()?;
+            // Under `TestDatabase::refresh` this BEGIN is a savepoint inside
+            // the test's transaction, where Postgres and MySQL refuse to set
+            // an isolation level. The test transaction's level applies.
+            let isolation_level = if conn.in_test_transaction() {
+                None
+            } else {
+                isolation_level
+            };
             let tx = conn
                 .inner()
                 .begin_with_config(isolation_level, None)

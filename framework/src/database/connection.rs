@@ -23,6 +23,13 @@ use crate::error::FrameworkError;
 #[derive(Clone)]
 pub struct DbConnection {
     inner: Arc<DatabaseConnection>,
+    /// Whether every statement of this connection runs inside one open
+    /// test transaction, the one [`TestDatabase::refresh`] holds. A
+    /// `BEGIN` on it is a savepoint, which cannot change the isolation
+    /// level on Postgres or MySQL.
+    ///
+    /// [`TestDatabase::refresh`]: crate::database::testing::TestDatabase::refresh
+    in_test_transaction: bool,
 }
 
 impl DbConnection {
@@ -43,6 +50,36 @@ impl DbConnection {
     pub(crate) async fn connect_as(
         config: &DatabaseConfig,
         connection_name: &str,
+    ) -> Result<Self, FrameworkError> {
+        Self::connect_with(config, connection_name, |_| {}).await
+    }
+
+    /// Open the pool of a test transaction: `config`'s pool, changed by
+    /// `customize`, which installs the hooks that begin the transaction
+    /// on the pool's one connection. The connection it returns reports
+    /// [`Self::in_test_transaction`].
+    pub(crate) async fn connect_test_transaction(
+        config: &DatabaseConfig,
+        customize: impl FnOnce(&mut ConnectOptions),
+    ) -> Result<Self, FrameworkError> {
+        let mut connection =
+            Self::connect_with(config, crate::database::PRIMARY_CONNECTION_NAME, customize).await?;
+        connection.in_test_transaction = true;
+        Ok(connection)
+    }
+
+    /// Whether every statement of this connection runs inside the open
+    /// transaction of a test, so that a `BEGIN` on it is a savepoint.
+    pub(crate) fn in_test_transaction(&self) -> bool {
+        self.in_test_transaction
+    }
+
+    /// [`Self::connect_as`], with `customize` applied to the pool options
+    /// after the ones `config` sets.
+    async fn connect_with(
+        config: &DatabaseConfig,
+        connection_name: &str,
+        customize: impl FnOnce(&mut ConnectOptions),
     ) -> Result<Self, FrameworkError> {
         // Validate pool config before SeaORM silently accepts a
         // misconfigured `ConnectOptions` (e.g. a zero-sized pool that
@@ -130,6 +167,7 @@ impl DbConnection {
         {
             opt.map_sqlx_mysql_opts(move |options| options.charset(&charset).collation(&collation));
         }
+        customize(&mut opt);
 
         let conn = Database::connect(opt)
             .await
@@ -137,6 +175,7 @@ impl DbConnection {
 
         let result = Self {
             inner: Arc::new(conn),
+            in_test_transaction: false,
         };
         // Fire ConnectionEstablished. The default pool reaches this
         // path with __primary__ semantics; named pools flow through
@@ -168,6 +207,7 @@ impl DbConnection {
     pub fn from_raw(conn: sea_orm::DatabaseConnection) -> Self {
         Self {
             inner: Arc::new(conn),
+            in_test_transaction: false,
         }
     }
 
