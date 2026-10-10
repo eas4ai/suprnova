@@ -115,6 +115,10 @@ async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
 #[serial]
 async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
     let _env = crate::env_lock::lock_env_async().await;
+    // An unset APP_ENV is production, where an unknown driver stops the
+    // boot; this is the fallback a test or development process gets.
+    let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    set_env("APP_ENV", Some("testing"));
     Queue::set_driver(Arc::new(BogusDriver));
     assert_eq!(Queue::driver_name().unwrap(), "bogus");
 

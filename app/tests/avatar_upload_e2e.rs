@@ -21,6 +21,8 @@
 //! takes a global lock; we layer a single `Mutex<()>` on top so the
 //! entire per-test setup happens under one serialised critical section.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -150,6 +152,7 @@ async fn setup_app() -> TestApp {
         suprnova::InMemoryCache::new(),
     ));
     let middleware = Arc::new({
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()
     });

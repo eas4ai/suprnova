@@ -1271,6 +1271,34 @@ mod tests {
         }
     }
 
+    /// Runs the test as a test process: the mock provider verifies nothing
+    /// and refuses to run in production, which an unset `APP_ENV` is. Its
+    /// callers are `#[serial(app_config_env)]`, so no sibling writes the
+    /// variable at the same time; the prior value comes back on drop.
+    struct TestingEnv(Option<String>);
+
+    impl TestingEnv {
+        fn enter() -> Self {
+            let prior = std::env::var("APP_ENV").ok();
+            // SAFETY: the callers serialize on `app_config_env`, the key every
+            // test of this crate that writes `APP_ENV` takes.
+            unsafe { std::env::set_var("APP_ENV", "testing") };
+            Self(prior)
+        }
+    }
+
+    impl Drop for TestingEnv {
+        fn drop(&mut self) {
+            // SAFETY: as in `enter`.
+            unsafe {
+                match &self.0 {
+                    Some(value) => std::env::set_var("APP_ENV", value),
+                    None => std::env::remove_var("APP_ENV"),
+                }
+            }
+        }
+    }
+
     fn register_mock(name: &'static str) -> Arc<MockPaymentProvider> {
         let mock = Arc::new(MockPaymentProvider::new());
         let as_trait: Arc<dyn PaymentProvider> = mock.clone();
@@ -1416,7 +1444,9 @@ mod tests {
     /// event immediately. The extra index deterministically forces that exact
     /// receipt-insert branch without relying on scheduler timing.
     #[tokio::test]
+    #[serial_test::serial(app_config_env)]
     async fn receipt_insert_unique_collision_continues_into_retryable_hydration() {
+        let _env = TestingEnv::enter();
         let provider_name: &'static str = "mock-webhook-receipt-unique-collision";
         let _mock = register_mock(provider_name);
 
@@ -1484,7 +1514,9 @@ mod tests {
     /// A delivery whose hydration fails answers 503 so the provider
     /// retries, and the 503 carries the hydration error as its report.
     #[tokio::test]
+    #[serial_test::serial(app_config_env)]
     async fn a_failed_hydration_reports_its_error_behind_the_503() {
+        let _env = TestingEnv::enter();
         let provider_name: &'static str = "mock-webhook-hydration-report";
         let _mock = register_mock(provider_name);
         let db = TestDatabase::fresh::<PaymentsTestMigrator>()
@@ -1527,7 +1559,9 @@ mod tests {
     /// transaction serializes the apply; the loser observes the winner's commit
     /// and reports a duplicate instead of double-applying.
     #[tokio::test]
+    #[serial_test::serial(app_config_env)]
     async fn concurrent_retries_of_unprocessed_event_process_once() {
+        let _env = TestingEnv::enter();
         let provider_name: &'static str = "mock-webhook-concurrent-retry";
         let _mock = register_mock(provider_name);
 

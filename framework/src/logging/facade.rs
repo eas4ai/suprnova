@@ -1,11 +1,13 @@
 //! The `Log` facade and the channel registry behind it.
 
 use super::channel::{ChannelKind, LogChannel, LogLevel, LogRecord, LogSink, facility_number};
+use super::events::{self, MessageLogged};
 use super::sinks::{
     FileSink, ReportedSink, Rotation, StreamSink, flush_all, register_flushable,
     replace_placeholders,
 };
 use crate::error::FrameworkError;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -13,35 +15,57 @@ use std::sync::{Arc, LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// A driver added with [`Log::extend`].
 type Factory = Arc<dyn Fn(&LogChannel) -> Result<Arc<dyn LogSink>, FrameworkError> + Send + Sync>;
 
-/// Where a resolved channel writes. The standard streams are kept apart
-/// because, as the default channel, `tracing`'s own formatter writes them.
+/// One place a resolved channel writes, with the lowest level it keeps and
+/// whether it replaces `{key}` placeholders. A stack's leaves each keep the
+/// form their own channel chose.
 #[derive(Clone)]
-pub(crate) enum Leaf {
-    Stdout(Option<LogLevel>),
-    Stderr(Option<LogLevel>),
-    Sink(Arc<dyn LogSink>, Option<LogLevel>),
+pub(crate) struct Leaf {
+    to: LeafTo,
+    level: Option<LogLevel>,
+    replace: bool,
+}
+
+/// Where a leaf writes. The standard streams are kept apart because, as the
+/// default channel, `tracing`'s own formatter writes them.
+#[derive(Clone)]
+enum LeafTo {
+    Stdout,
+    Stderr,
+    Sink(Arc<dyn LogSink>),
 }
 
 impl Leaf {
+    fn new(to: LeafTo, channel: &LogChannel) -> Self {
+        Self {
+            to,
+            level: channel.level,
+            replace: channel.replace_placeholders,
+        }
+    }
+
     /// The same leaf, keeping only what both its own lowest level and
     /// `outer`, the level of a stack that lists it, keep.
     fn within(self, outer: Option<LogLevel>) -> Self {
-        let narrowed = |own: Option<LogLevel>| match (own, outer) {
+        let level = match (self.level, outer) {
             (Some(own), Some(outer)) => Some(own.min(outer)),
             (own, None) => own,
             (None, outer) => outer,
         };
-        match self {
-            Leaf::Stdout(level) => Leaf::Stdout(narrowed(level)),
-            Leaf::Stderr(level) => Leaf::Stderr(narrowed(level)),
-            Leaf::Sink(sink, level) => Leaf::Sink(sink, narrowed(level)),
-        }
+        Self { level, ..self }
     }
 
     /// Whether this leaf writes to `sink`.
     fn writes_to(&self, sink: &Arc<dyn LogSink>) -> bool {
-        matches!(self, Leaf::Sink(own, _) if Arc::ptr_eq(own, sink))
+        matches!(&self.to, LeafTo::Sink(own) if Arc::ptr_eq(own, sink))
     }
+}
+
+/// A sink of the default channel other than the standard streams, as the
+/// `tracing` layer writes to it.
+pub(crate) struct ChannelSink {
+    pub(crate) sink: Arc<dyn LogSink>,
+    pub(crate) level: Option<LogLevel>,
+    pub(crate) replace: bool,
 }
 
 #[derive(Default)]
@@ -103,10 +127,16 @@ fn built_in(name: &str) -> Result<Option<LogChannel>, FrameworkError> {
             .filter(|value| !value.is_empty())
     };
     let file = || crate::app::paths::storage_path("logs/suprnova.log");
+    // The file and stream channels keep what `LOG_LEVEL`'s bare level keeps,
+    // as Laravel's take `env('LOG_LEVEL', 'debug')`. `stdout`, the default
+    // channel unless `LOG_CHANNEL` names another, keeps every level the
+    // `tracing` filter lets through, so a target directive more verbose
+    // than the bare level still reaches it.
+    let level = super::config::channel_level;
     Ok(Some(match name {
         "stdout" => LogChannel::stdout(),
-        "stderr" | "errorlog" => LogChannel::stderr(),
-        "single" => LogChannel::single(file()),
+        "stderr" | "errorlog" => LogChannel::stderr().level(level()?),
+        "single" => LogChannel::single(file()).level(level()?),
         "daily" => {
             let days = match var("LOG_DAILY_DAYS") {
                 Some(days) => days.parse::<u32>().map_err(|_| {
@@ -117,11 +147,11 @@ fn built_in(name: &str) -> Result<Option<LogChannel>, FrameworkError> {
                 })?,
                 None => 7,
             };
-            LogChannel::daily(file()).days(days)
+            LogChannel::daily(file()).days(days).level(level()?)
         }
-        "monthly" => LogChannel::monthly(file()),
+        "monthly" => LogChannel::monthly(file()).level(level()?),
         "syslog" => {
-            let mut channel = LogChannel::syslog();
+            let mut channel = LogChannel::syslog().level(level()?);
             if let Some(facility) = var("LOG_SYSLOG_FACILITY") {
                 channel = channel.facility(&facility);
             }
@@ -176,18 +206,21 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
     let file = |path: &std::path::Path, rotation| {
         let sink: Arc<dyn LogSink> = Arc::new(FileSink::new(path.to_path_buf(), rotation));
         register_flushable(&sink);
-        Leaf::Sink(sink, level)
+        Leaf::new(LeafTo::Sink(sink), channel)
     };
     Ok(match &channel.kind {
-        ChannelKind::Stdout => vec![Leaf::Stdout(level)],
-        ChannelKind::Stderr => vec![Leaf::Stderr(level)],
+        ChannelKind::Stdout => vec![Leaf::new(LeafTo::Stdout, channel)],
+        ChannelKind::Stderr => vec![Leaf::new(LeafTo::Stderr, channel)],
         ChannelKind::Single(path) => vec![file(path, Rotation::None)],
         ChannelKind::Daily { path, days } => vec![file(path, Rotation::Daily(*days))],
         ChannelKind::Monthly { path, months } => vec![file(path, Rotation::Monthly(*months))],
         ChannelKind::Null => Vec::new(),
         ChannelKind::Syslog { facility, socket } => {
             let facility = facility_number(facility.as_deref().unwrap_or("user"))?;
-            vec![syslog(facility, socket.clone(), level)?]
+            vec![Leaf::new(
+                LeafTo::Sink(syslog(facility, socket.clone())?),
+                channel,
+            )]
         }
         ChannelKind::Stack(names) => {
             if depth > 8 {
@@ -197,7 +230,7 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
             }
             // The stack's own level applies on top of each channel's, so a
             // stack at `Warning` drops info even in a channel that keeps
-            // every level.
+            // every level. Each channel keeps its own placeholder form.
             let mut leaves = Vec::new();
             for name in names {
                 leaves.extend(
@@ -219,7 +252,7 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
             let sink: Arc<dyn LogSink> = Arc::new(ReportedSink::new(factory(channel)?, driver));
             // A driver may buffer, so it is flushed with the files.
             register_flushable(&sink);
-            vec![Leaf::Sink(sink, level)]
+            vec![Leaf::new(LeafTo::Sink(sink), channel)]
         }
     })
 }
@@ -228,8 +261,7 @@ fn build(channel: &LogChannel, depth: u8) -> Result<Vec<Leaf>, FrameworkError> {
 fn syslog(
     facility: u8,
     socket: Option<std::path::PathBuf>,
-    level: Option<LogLevel>,
-) -> Result<Leaf, FrameworkError> {
+) -> Result<Arc<dyn LogSink>, FrameworkError> {
     use super::sinks::SyslogSink;
     let socket = socket.unwrap_or_else(SyslogSink::default_socket);
     let ident = std::env::var("APP_NAME")
@@ -239,15 +271,14 @@ fn syslog(
     let sink = SyslogSink::new(socket, facility, ident).map_err(|error| {
         FrameworkError::internal(format!("cannot open a syslog socket: {error}"))
     })?;
-    Ok(Leaf::Sink(Arc::new(sink), level))
+    Ok(Arc::new(sink))
 }
 
 #[cfg(not(unix))]
 fn syslog(
     _facility: u8,
     _socket: Option<std::path::PathBuf>,
-    _level: Option<LogLevel>,
-) -> Result<Leaf, FrameworkError> {
+) -> Result<Arc<dyn LogSink>, FrameworkError> {
     Err(FrameworkError::internal(
         "the syslog log channel needs a Unix system with a syslog socket",
     ))
@@ -290,12 +321,12 @@ pub(crate) fn resolves(name: &str) -> Result<(), FrameworkError> {
 }
 
 fn install_default(registry: &mut Registry, name: &str, leaves: Vec<Leaf>) {
-    let stdout = stream_minimum(&leaves, |leaf| match leaf {
-        Leaf::Stdout(level) => Some(*level),
+    let stdout = stream_minimum(&leaves, |leaf| match leaf.to {
+        LeafTo::Stdout => Some(leaf.level),
         _ => None,
     });
-    let stderr = stream_minimum(&leaves, |leaf| match leaf {
-        Leaf::Stderr(level) => Some(*level),
+    let stderr = stream_minimum(&leaves, |leaf| match leaf.to {
+        LeafTo::Stderr => Some(leaf.level),
         _ => None,
     });
     STDOUT_ON.store(stdout.is_some(), Ordering::Relaxed);
@@ -333,7 +364,7 @@ fn take_default_if_unchosen() {
 }
 
 /// The sinks of the default channel that are not the standard streams.
-pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
+pub(crate) fn default_sinks() -> Vec<ChannelSink> {
     take_default_if_unchosen();
     if DEFAULT_FORGOTTEN.swap(false, Ordering::Relaxed) {
         refresh_default();
@@ -341,30 +372,35 @@ pub(crate) fn default_sinks() -> Vec<(Arc<dyn LogSink>, Option<LogLevel>)> {
     read()
         .default_leaves
         .iter()
-        .filter_map(|leaf| match leaf {
-            Leaf::Sink(sink, level) => Some((Arc::clone(sink), *level)),
+        .filter_map(|leaf| match &leaf.to {
+            LeafTo::Sink(sink) => Some(ChannelSink {
+                sink: Arc::clone(sink),
+                level: leaf.level,
+                replace: leaf.replace,
+            }),
             _ => None,
         })
         .collect()
 }
 
-/// Whether a `tracing` event at `level` goes to standard output (or, with
-/// `stderr`, standard error) as part of the default channel.
-pub(crate) fn stream_enabled(stderr: bool, level: &tracing::Level) -> bool {
+/// Whether a record at `level` goes to standard output (or, with `stderr`,
+/// standard error) as part of the default channel.
+pub(crate) fn stream_takes(stderr: bool, level: LogLevel) -> bool {
     take_default_if_unchosen();
     let (on, minimum) = if stderr {
         (&STDERR_ON, &STDERR_MIN)
     } else {
         (&STDOUT_ON, &STDOUT_MIN)
     };
-    on.load(Ordering::Relaxed)
-        && LogLevel::from(*level).severity() <= minimum.load(Ordering::Relaxed)
+    on.load(Ordering::Relaxed) && level.severity() <= minimum.load(Ordering::Relaxed)
 }
 
 /// Check the log variables that are set, whether or not the default
-/// channel uses them: every name `LOG_STACK` lists is a channel,
-/// `LOG_SYSLOG_FACILITY` a facility, and `LOG_DAILY_DAYS` a number.
+/// channel uses them: `LOG_LEVEL`'s bare level is a level, every name
+/// `LOG_STACK` lists is a channel, `LOG_SYSLOG_FACILITY` a facility, and
+/// `LOG_DAILY_DAYS` a number.
 pub(crate) fn validate_environment() -> Result<(), FrameworkError> {
+    super::config::channel_level()?;
     let var = |key: &str| {
         std::env::var(key)
             .ok()
@@ -464,9 +500,7 @@ impl Log {
     ///
     /// When no channel has the name, or its sink cannot be built.
     pub fn channel(name: &str) -> Result<Logger, FrameworkError> {
-        Ok(Logger {
-            leaves: resolve_named(name, 0)?,
-        })
+        Ok(Logger::on(resolve_named(name, 0)?))
     }
 
     /// A logger that writes to each channel named.
@@ -479,7 +513,7 @@ impl Log {
         for name in names {
             leaves.extend(resolve_named(name, 0)?);
         }
-        Ok(Logger { leaves })
+        Ok(Logger::on(leaves))
     }
 
     /// A logger for a channel that has no name, built now.
@@ -489,9 +523,7 @@ impl Log {
     /// When its sink cannot be built: a syslog facility that is not one, a
     /// stack that lists an unknown channel, a driver that does not exist.
     pub fn build(channel: LogChannel) -> Result<Logger, FrameworkError> {
-        Ok(Logger {
-            leaves: build(&channel, 0)?,
-        })
+        Ok(Logger::on(build(&channel, 0)?))
     }
 
     /// The names of the channels resolved so far.
@@ -515,8 +547,8 @@ impl Log {
                 .remove(name)
                 .into_iter()
                 .flatten()
-                .filter_map(|leaf| match leaf {
-                    Leaf::Sink(sink, _) => Some(sink),
+                .filter_map(|leaf| match leaf.to {
+                    LeafTo::Sink(sink) => Some(sink),
                     _ => None,
                 })
                 .collect();
@@ -559,109 +591,435 @@ impl Log {
     pub fn flush() {
         flush_all();
     }
+
+    /// Write `message` at `level` to the default channel, with `context`: a
+    /// JSON object whose values fill the message's `{key}` placeholders and
+    /// are written beside it. Laravel's `Log::log`.
+    ///
+    /// The write is a `tracing` event, so `LOG_LEVEL`'s filter and the
+    /// request's span see it as they see `tracing`'s macros, and it carries
+    /// its PSR-3 level in a field: a file or stack channel writes
+    /// `CRITICAL` for [`critical`](Self::critical), where `tracing` knows
+    /// only `ERROR`. Standard output, written by `tracing`'s own formatter,
+    /// shows the event's `tracing` level with the PSR-3 level and the
+    /// context as fields. With no subscriber installed the write goes
+    /// nowhere, as a `tracing` macro's does.
+    pub fn log(level: LogLevel, message: &str, context: Value) {
+        let mut merged = shared_context();
+        merge_into(&mut merged, context);
+        let context = (!merged.is_empty()).then(|| Value::Object(merged).to_string());
+        emit(level, message, context.as_deref());
+    }
+
+    /// `emergency` on the default channel: the system is unusable.
+    pub fn emergency(message: &str) {
+        Self::log(LogLevel::Emergency, message, Value::Null);
+    }
+
+    /// `alert` on the default channel: action must be taken at once.
+    pub fn alert(message: &str) {
+        Self::log(LogLevel::Alert, message, Value::Null);
+    }
+
+    /// `critical` on the default channel: a critical condition.
+    pub fn critical(message: &str) {
+        Self::log(LogLevel::Critical, message, Value::Null);
+    }
+
+    /// `error` on the default channel.
+    pub fn error(message: &str) {
+        Self::log(LogLevel::Error, message, Value::Null);
+    }
+
+    /// `warning` on the default channel.
+    pub fn warning(message: &str) {
+        Self::log(LogLevel::Warning, message, Value::Null);
+    }
+
+    /// `notice` on the default channel: normal but significant.
+    pub fn notice(message: &str) {
+        Self::log(LogLevel::Notice, message, Value::Null);
+    }
+
+    /// `info` on the default channel.
+    pub fn info(message: &str) {
+        Self::log(LogLevel::Info, message, Value::Null);
+    }
+
+    /// `debug` on the default channel.
+    pub fn debug(message: &str) {
+        Self::log(LogLevel::Debug, message, Value::Null);
+    }
+
+    /// `emergency` on the default channel, with a context.
+    pub fn emergency_with(message: &str, context: Value) {
+        Self::log(LogLevel::Emergency, message, context);
+    }
+
+    /// `alert` on the default channel, with a context.
+    pub fn alert_with(message: &str, context: Value) {
+        Self::log(LogLevel::Alert, message, context);
+    }
+
+    /// `critical` on the default channel, with a context.
+    pub fn critical_with(message: &str, context: Value) {
+        Self::log(LogLevel::Critical, message, context);
+    }
+
+    /// `error` on the default channel, with a context.
+    pub fn error_with(message: &str, context: Value) {
+        Self::log(LogLevel::Error, message, context);
+    }
+
+    /// `warning` on the default channel, with a context.
+    pub fn warning_with(message: &str, context: Value) {
+        Self::log(LogLevel::Warning, message, context);
+    }
+
+    /// `notice` on the default channel, with a context.
+    pub fn notice_with(message: &str, context: Value) {
+        Self::log(LogLevel::Notice, message, context);
+    }
+
+    /// `info` on the default channel, with a context.
+    pub fn info_with(message: &str, context: Value) {
+        Self::log(LogLevel::Info, message, context);
+    }
+
+    /// `debug` on the default channel, with a context.
+    pub fn debug_with(message: &str, context: Value) {
+        Self::log(LogLevel::Debug, message, context);
+    }
+
+    /// Add `context`, a JSON object, to every later write of the current
+    /// [`Context`](crate::context::Context) scope, on every channel, under
+    /// a [`Logger`]'s context and each call's own. Laravel's `shareContext`.
+    ///
+    /// The scope is the one each request and each queued job runs in, so
+    /// one request's context never reaches the lines of another running at
+    /// the same time. Outside a scope it shares nothing, as
+    /// [`Context::add`](crate::context::Context::add) does. A key shared
+    /// again takes the new value. Shared context stays with its scope: a job
+    /// the request dispatches does not carry it.
+    ///
+    /// ```rust,no_run
+    /// use serde_json::json;
+    /// use suprnova::Log;
+    ///
+    /// // In a middleware, once the user is known.
+    /// Log::share_context(json!({ "user_id": 42 }));
+    /// // Every later line of this request carries user_id.
+    /// Log::info("order placed");
+    /// ```
+    pub fn share_context(context: Value) {
+        let mut shared = shared_context();
+        merge_into(&mut shared, context);
+        store_shared_context(shared);
+    }
+
+    /// The context the current scope shares, empty outside a scope.
+    pub fn shared_context() -> Map<String, Value> {
+        shared_context()
+    }
+
+    /// Stop sharing `keys`, or every key for `None`, in the current scope.
+    pub fn without_context(keys: Option<&[&str]>) {
+        let shared = match keys {
+            Some(keys) => {
+                let mut shared = shared_context();
+                for key in keys {
+                    shared.remove(*key);
+                }
+                shared
+            }
+            None => Map::new(),
+        };
+        store_shared_context(shared);
+    }
+
+    /// Stop sharing any context in the current scope. Laravel's
+    /// `flushSharedContext`.
+    pub fn flush_shared_context() {
+        Self::without_context(None);
+    }
+
+    /// Call `callback` for each write that reaches a channel, with the
+    /// write's level, message and context, as Laravel's `Log::listen`
+    /// registers for `MessageLogged`.
+    ///
+    /// The callback runs on the thread that writes, before the write
+    /// returns, so it should be quick. A callback that panics does not fail
+    /// the write, and a write the callback makes itself is not reported to
+    /// it again. Every write is also dispatched as a
+    /// [`MessageLogged`] event; see there for how.
+    pub fn listen(callback: impl Fn(&MessageLogged) + Send + Sync + 'static) {
+        events::listen(Arc::new(callback));
+    }
+}
+
+/// The hidden context key the shared log context lives under. Keeping it in
+/// the current [`Context`](crate::context::Context) scope is what makes it
+/// per request and per job; the hidden bag keeps it out of
+/// `Context::all()`.
+const SHARED_CONTEXT_KEY: &str = "suprnova.log.shared_context";
+
+/// The context the current scope shares.
+///
+/// Read as any JSON value, which always deserializes: a typed read that
+/// failed would log, and this runs inside the `tracing` layer, where that
+/// line would come straight back here.
+fn shared_context() -> Map<String, Value> {
+    match crate::context::Context::hidden_get::<Value>(SHARED_CONTEXT_KEY) {
+        Some(Value::Object(shared)) => shared,
+        _ => Map::new(),
+    }
+}
+
+/// Replace the context the current scope shares. Outside a scope the
+/// context discards it.
+fn store_shared_context(shared: Map<String, Value>) {
+    // Shared log context belongs to the scope it was shared in, as Laravel's
+    // belongs to its process: a job the scope dispatches starts without it.
+    static NOT_CARRIED: std::sync::Once = std::sync::Once::new();
+    NOT_CARRIED.call_once(|| {
+        crate::context::Context::dehydrating(|snapshot| {
+            snapshot.hidden.remove(SHARED_CONTEXT_KEY);
+        });
+    });
+    crate::context::Context::hidden_add(SHARED_CONTEXT_KEY, Value::Object(shared));
+}
+
+/// Merge `context` into `into`, its keys winning: an object's entries, or a
+/// value of another kind under `context`.
+fn merge_into(into: &mut Map<String, Value>, context: Value) {
+    match context {
+        Value::Object(map) => into.extend(map),
+        Value::Null => {}
+        other => {
+            into.insert("context".to_owned(), other);
+        }
+    }
+}
+
+/// A context as the record's text pairs: a string as it is, any other value
+/// as JSON.
+fn as_pairs(context: &Map<String, Value>) -> Vec<(String, String)> {
+    context
+        .iter()
+        .map(|(key, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            (key.clone(), text)
+        })
+        .collect()
+}
+
+/// The `tracing` field a write through [`Log`] carries its PSR-3 level in.
+pub(crate) const LEVEL_FIELD: &str = "suprnova.level";
+
+/// The `tracing` field a write through [`Log`] carries its context in, as a
+/// JSON object.
+pub(crate) const CONTEXT_FIELD: &str = "suprnova.context";
+
+/// One `tracing` event at `level`'s nearest `tracing` level, with the PSR-3
+/// level and the context as fields. `tracing` needs each level at a callsite
+/// of its own.
+fn emit(level: LogLevel, message: &str, context: Option<&str>) {
+    macro_rules! at {
+        ($tracing:expr) => {
+            match context {
+                Some(context) => tracing::event!(
+                    $tracing,
+                    suprnova.level = level.psr_name(),
+                    suprnova.context = context,
+                    "{}",
+                    message
+                ),
+                None => tracing::event!($tracing, suprnova.level = level.psr_name(), "{}", message),
+            }
+        };
+    }
+    match level {
+        LogLevel::Emergency | LogLevel::Alert | LogLevel::Critical | LogLevel::Error => {
+            at!(tracing::Level::ERROR)
+        }
+        LogLevel::Warning => at!(tracing::Level::WARN),
+        LogLevel::Notice | LogLevel::Info => at!(tracing::Level::INFO),
+        LogLevel::Debug => at!(tracing::Level::DEBUG),
+    }
 }
 
 /// A logger for one channel, a stack, or a built channel, from [`Log`].
 #[derive(Clone)]
 pub struct Logger {
     leaves: Vec<Leaf>,
+    context: Map<String, Value>,
 }
 
 impl Logger {
+    fn on(leaves: Vec<Leaf>) -> Self {
+        Self {
+            leaves,
+            context: Map::new(),
+        }
+    }
+
+    /// A logger whose later writes carry `context`, a JSON object, under
+    /// each call's own: a key the call names takes the call's value. The
+    /// logger it came from is unchanged. Laravel's `Logger::withContext`.
+    pub fn with_context(&self, context: Value) -> Logger {
+        let mut logger = self.clone();
+        merge_into(&mut logger.context, context);
+        logger
+    }
+
+    /// A logger without the context `keys` name, or without any for `None`.
+    /// Laravel's `Logger::withoutContext`.
+    pub fn without_context(&self, keys: Option<&[&str]>) -> Logger {
+        let mut logger = self.clone();
+        match keys {
+            Some(keys) => {
+                for key in keys {
+                    logger.context.remove(*key);
+                }
+            }
+            None => logger.context.clear(),
+        }
+        logger
+    }
+
     /// Write `message` at `level`, with `context`: a JSON object whose
-    /// values fill the message's `{key}` placeholders and are written
-    /// beside it.
-    pub fn log(&self, level: LogLevel, message: &str, context: serde_json::Value) {
-        let context: Vec<(String, String)> = match context {
-            serde_json::Value::Object(map) => map
-                .into_iter()
-                .map(|(key, value)| {
-                    let text = match value {
-                        serde_json::Value::String(text) => text,
-                        other => other.to_string(),
-                    };
-                    (key, text)
-                })
-                .collect(),
-            serde_json::Value::Null => Vec::new(),
-            other => vec![("context".to_owned(), other.to_string())],
-        };
-        let record = LogRecord {
+    /// values fill the message's `{key}` placeholders, on each channel that
+    /// replaces them, and are written beside it.
+    ///
+    /// The record carries the scope's shared context
+    /// ([`Log::share_context`]), then the logger's
+    /// ([`with_context`](Self::with_context)), then `context`, a later key
+    /// winning. The write is reported to [`Log::listen`] and dispatched as
+    /// [`MessageLogged`], once, whichever channels keep it.
+    pub fn log(&self, level: LogLevel, message: &str, context: Value) {
+        let mut merged = shared_context();
+        merged.extend(self.context.clone());
+        merge_into(&mut merged, context);
+        let raw = LogRecord {
             time: crate::clock::now(),
             level,
             target: String::new(),
-            message: replace_placeholders(message, &context),
-            context,
+            message: message.to_owned(),
+            context: as_pairs(&merged),
         };
+        let mut replaced: Option<LogRecord> = None;
         for leaf in &self.leaves {
+            if !level.passes(leaf.level) {
+                continue;
+            }
+            let record = if leaf.replace {
+                &*replaced.get_or_insert_with(|| LogRecord {
+                    message: replace_placeholders(&raw.message, &raw.context),
+                    ..raw.clone()
+                })
+            } else {
+                &raw
+            };
             // Every sink reports its own failure once on stderr, a driver's
             // through its `ReportedSink`, so the result is not needed here:
             // logging never fails its caller.
-            let _ = match leaf {
-                Leaf::Stdout(minimum) if level.passes(*minimum) => {
-                    StreamSink::stdout().write(&record)
-                }
-                Leaf::Stderr(minimum) if level.passes(*minimum) => {
-                    StreamSink::stderr().write(&record)
-                }
-                Leaf::Sink(sink, minimum) if level.passes(*minimum) => sink.write(&record),
-                _ => Ok(()),
+            let _ = match &leaf.to {
+                LeafTo::Stdout => StreamSink::stdout().write(record),
+                LeafTo::Stderr => StreamSink::stderr().write(record),
+                LeafTo::Sink(sink) => sink.write(record),
             };
+        }
+        if events::observed() {
+            events::report(MessageLogged::new(level, message.to_owned(), merged));
         }
     }
 
     /// `emergency`: the system is unusable.
     pub fn emergency(&self, message: &str) {
-        self.log(LogLevel::Emergency, message, serde_json::Value::Null);
+        self.log(LogLevel::Emergency, message, Value::Null);
     }
 
     /// `alert`: action must be taken at once.
     pub fn alert(&self, message: &str) {
-        self.log(LogLevel::Alert, message, serde_json::Value::Null);
+        self.log(LogLevel::Alert, message, Value::Null);
     }
 
     /// `critical`: a critical condition.
     pub fn critical(&self, message: &str) {
-        self.log(LogLevel::Critical, message, serde_json::Value::Null);
+        self.log(LogLevel::Critical, message, Value::Null);
     }
 
     /// `error`.
     pub fn error(&self, message: &str) {
-        self.log(LogLevel::Error, message, serde_json::Value::Null);
+        self.log(LogLevel::Error, message, Value::Null);
     }
 
     /// `warning`.
     pub fn warning(&self, message: &str) {
-        self.log(LogLevel::Warning, message, serde_json::Value::Null);
+        self.log(LogLevel::Warning, message, Value::Null);
     }
 
     /// `notice`: normal but significant.
     pub fn notice(&self, message: &str) {
-        self.log(LogLevel::Notice, message, serde_json::Value::Null);
+        self.log(LogLevel::Notice, message, Value::Null);
     }
 
     /// `info`.
     pub fn info(&self, message: &str) {
-        self.log(LogLevel::Info, message, serde_json::Value::Null);
+        self.log(LogLevel::Info, message, Value::Null);
     }
 
     /// `debug`.
     pub fn debug(&self, message: &str) {
-        self.log(LogLevel::Debug, message, serde_json::Value::Null);
+        self.log(LogLevel::Debug, message, Value::Null);
     }
 
-    /// `info` with a context.
-    pub fn info_with(&self, message: &str, context: serde_json::Value) {
-        self.log(LogLevel::Info, message, context);
+    /// `emergency` with a context.
+    pub fn emergency_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Emergency, message, context);
     }
 
-    /// `warning` with a context.
-    pub fn warning_with(&self, message: &str, context: serde_json::Value) {
-        self.log(LogLevel::Warning, message, context);
+    /// `alert` with a context.
+    pub fn alert_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Alert, message, context);
+    }
+
+    /// `critical` with a context.
+    pub fn critical_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Critical, message, context);
     }
 
     /// `error` with a context.
-    pub fn error_with(&self, message: &str, context: serde_json::Value) {
+    pub fn error_with(&self, message: &str, context: Value) {
         self.log(LogLevel::Error, message, context);
     }
+
+    /// `warning` with a context.
+    pub fn warning_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Warning, message, context);
+    }
+
+    /// `notice` with a context.
+    pub fn notice_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Notice, message, context);
+    }
+
+    /// `info` with a context.
+    pub fn info_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Info, message, context);
+    }
+
+    /// `debug` with a context.
+    pub fn debug_with(&self, message: &str, context: Value) {
+        self.log(LogLevel::Debug, message, context);
+    }
+}
+
+/// The context the current scope shares, for the `tracing` layer, which
+/// adds it to every event's record.
+pub(crate) fn scope_shared_context() -> Map<String, Value> {
+    shared_context()
 }

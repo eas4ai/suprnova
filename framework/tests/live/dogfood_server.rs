@@ -7,6 +7,8 @@
 // this file may not be folded into `tests/live/main.rs`.
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
 
@@ -24,6 +26,11 @@ use suprnova::{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn the_real_server_boot_path_serves_a_live_document() {
+    // The server requires APP_KEY outside development, and an unset APP_ENV
+    // is production; this process names itself a test one.
+    let _env = env_lock::lock_env_async().await;
+    let _app_env = env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    env_snapshot::set_env("APP_ENV", Some("testing"));
     fixture();
     let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

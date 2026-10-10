@@ -611,8 +611,22 @@ async fn html_shell_keeps_the_bcp47_casing_of_the_locale() {
     }
 }
 
+/// Run as a test process: `InertiaConfig::new()` serves the Vite dev shell
+/// outside production, and an unset `APP_ENV` is production. The snapshot
+/// restores the variable before the lock goes.
+async fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 #[tokio::test]
 async fn html_shell_for_react_includes_refresh_preamble() {
+    let _env = testing_environment().await;
     let cfg = InertiaConfig::new().frontend(Frontend::React);
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
@@ -629,6 +643,7 @@ async fn html_shell_for_react_includes_refresh_preamble() {
 
 #[tokio::test]
 async fn html_shell_for_svelte_omits_react_preamble() {
+    let _env = testing_environment().await;
     let cfg = InertiaConfig::new().frontend(Frontend::Svelte);
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
@@ -644,6 +659,7 @@ async fn html_shell_for_svelte_omits_react_preamble() {
 
 #[tokio::test]
 async fn html_shell_for_vue_omits_react_preamble() {
+    let _env = testing_environment().await;
     let cfg = InertiaConfig::new().frontend(Frontend::Vue);
     let req = MockReq::new("/home");
     let resp = InertiaResponse::new("Home")
@@ -1790,6 +1806,7 @@ async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
 
 #[tokio::test]
 async fn dev_head_html_escapes_vite_dev_server_and_entry_point() {
+    let _env = testing_environment().await;
     // D20-G regression - ChatGPT MODULE_REVIEW_NOTES ## inertia LOW
     // #1. Dev-server URLs are normally trusted config values, but a
     // misconfigured env / dotfile shouldn't be able to inject markup

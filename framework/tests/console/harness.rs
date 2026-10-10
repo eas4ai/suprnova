@@ -16,6 +16,20 @@ use clap::Parser;
 use serial_test::serial;
 #[cfg(feature = "testing")]
 use suprnova::seed::{self, Seeder};
+
+#[cfg(feature = "testing")]
+use crate::env_snapshot::{EnvSnapshot, set_env};
+
+/// Run as a test process: an unset `APP_ENV` is production, where `db:seed`
+/// asks for `--force`. The snapshot restores the variable before the lock
+/// goes.
+#[cfg(feature = "testing")]
+async fn testing_environment() -> (EnvSnapshot, tokio::sync::MutexGuard<'static, ()>) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = EnvSnapshot::capture(&["APP_ENV"]);
+    set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
 use suprnova::{Command, FrameworkError, TypedCommand, console};
 
 #[derive(Parser, Command, Debug)]
@@ -216,6 +230,7 @@ async fn a_command_that_does_not_exist_fails_on_the_error_stream() {
 #[tokio::test]
 #[serial]
 async fn a_builtin_command_is_read_the_same_way() {
+    let _env = testing_environment().await;
     seed::clear();
     seed::register::<HarnessSeeder>();
 
@@ -242,6 +257,7 @@ async fn a_builtin_command_is_read_the_same_way() {
 #[tokio::test]
 #[serial]
 async fn a_warning_of_a_builtin_command_is_on_the_error_stream() {
+    let _env = testing_environment().await;
     seed::clear();
 
     let run = console::test(["db:seed"]).run().await;

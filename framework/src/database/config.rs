@@ -65,6 +65,8 @@ pub enum UrlSource {
 /// - `DB_ACQUIRE_TIMEOUT` - Seconds to wait for a free connection (default: falls back to `DB_CONNECT_TIMEOUT`)
 /// - `DB_TEST_BEFORE_ACQUIRE` - Ping a connection before handing it out (default: true)
 /// - `DB_PING_AFTER_IDLE` - Ping only after this many idle seconds; setting it disables `DB_TEST_BEFORE_ACQUIRE` (default: unset)
+/// - `DB_CHARSET` - The character set of a MySQL or MariaDB connection and of the tables `Schema::create` makes there (default: utf8mb4)
+/// - `DB_COLLATION` - Their collation (default: utf8mb4_unicode_ci); a `charset` or `collation` parameter in the URL wins
 ///
 /// # Example
 ///
@@ -135,6 +137,73 @@ pub struct DatabaseConfig {
     /// [`Self::validate_for_environment`] to refuse the silent
     /// SQLite fallback in production.
     pub url_source: UrlSource,
+    /// The character set of a MySQL or MariaDB connection: the URL's
+    /// `charset` parameter, else `DB_CHARSET`, else `utf8mb4`, as
+    /// Laravel's `mysql` connection reads it. Each connection sends it
+    /// with [`Self::collation`] when it opens, and `Schema::create` gives
+    /// it to every new table. `None` on a Postgres or SQLite URL, which
+    /// have no such setting.
+    pub charset: Option<String>,
+    /// The collation of a MySQL or MariaDB connection: the URL's
+    /// `collation` parameter, else `DB_COLLATION`, else
+    /// `utf8mb4_unicode_ci`, as Laravel's. A table Suprnova creates then
+    /// compares and sorts text as a table Laravel creates beside it. `None`
+    /// on a Postgres or SQLite URL.
+    pub collation: Option<String>,
+}
+
+/// The character set a MySQL connection uses when neither its URL nor
+/// `DB_CHARSET` names one, as Laravel's `config/database.php`.
+pub(crate) const DEFAULT_MYSQL_CHARSET: &str = "utf8mb4";
+
+/// The collation a MySQL connection uses when neither its URL nor
+/// `DB_COLLATION` names one, as Laravel's `config/database.php`.
+pub(crate) const DEFAULT_MYSQL_COLLATION: &str = "utf8mb4_unicode_ci";
+
+/// The character set and collation for `url`, a MySQL or MariaDB URL: each
+/// from the URL's own parameter, else its variable, else Laravel's default.
+/// `None` for any other URL. `explicit` holds what code set through the
+/// builder, which wins over all three.
+fn mysql_encoding(
+    url: &str,
+    explicit: (Option<String>, Option<String>),
+) -> (Option<String>, Option<String>) {
+    if !is_mysql_url(url) {
+        return (None, None);
+    }
+    let parameter = |name: &str| {
+        url::Url::parse(url).ok().and_then(|parsed| {
+            parsed
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        })
+    };
+    let charset = explicit
+        .0
+        .or_else(|| parameter("charset"))
+        .or_else(|| env_optional("DB_CHARSET"))
+        .unwrap_or_else(|| DEFAULT_MYSQL_CHARSET.to_owned());
+    let collation = explicit
+        .1
+        .or_else(|| parameter("collation"))
+        .or_else(|| env_optional("DB_COLLATION"))
+        .unwrap_or_else(|| DEFAULT_MYSQL_COLLATION.to_owned());
+    (Some(charset), Some(collation))
+}
+
+fn is_mysql_url(url: &str) -> bool {
+    url.starts_with("mysql://") || url.starts_with(MARIADB_SCHEME)
+}
+
+/// Whether `name` can be a character set or collation name: ASCII letters,
+/// digits and underscores. The names reach SQL unquoted, in `SET NAMES` and
+/// in a table's options, so nothing else is let through.
+pub(crate) fn is_encoding_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 impl DatabaseConfig {
@@ -152,10 +221,11 @@ impl DatabaseConfig {
     /// [`Self::validate_for_environment`] uses to refuse the silent
     /// fallback in production.
     pub fn from_env() -> Self {
-        let (url, url_source) = match env_optional("DATABASE_URL") {
+        let (url, url_source) = match env_optional::<String>("DATABASE_URL") {
             Some(u) => (u, UrlSource::Env),
             None => (Self::DEFAULT_SQLITE_URL.to_string(), UrlSource::Default),
         };
+        let (charset, collation) = mysql_encoding(&url, (None, None));
         Self {
             url,
             max_connections: env("DB_MAX_CONNECTIONS", 10),
@@ -168,6 +238,8 @@ impl DatabaseConfig {
             test_before_acquire: env("DB_TEST_BEFORE_ACQUIRE", true),
             ping_after_idle: env_optional("DB_PING_AFTER_IDLE"),
             url_source,
+            charset,
+            collation,
         }
     }
 
@@ -281,6 +353,28 @@ impl DatabaseConfig {
         }
         Ok(())
     }
+
+    /// Refuse a character set or collation that is not a plain name:
+    /// the connection sends both unquoted in `SET NAMES`, so a value with
+    /// anything but letters, digits and underscores would become SQL.
+    /// Called from [`DbConnection::connect`](crate::database::DbConnection)
+    /// beside [`Self::validate_pool`].
+    pub(crate) fn validate_encoding(&self) -> Result<(), FrameworkError> {
+        for (what, value) in [
+            ("charset (DB_CHARSET)", &self.charset),
+            ("collation (DB_COLLATION)", &self.collation),
+        ] {
+            if let Some(name) = value
+                && !is_encoding_name(name)
+            {
+                return Err(FrameworkError::param(format!(
+                    "the database {what} is {name:?}, which is not a name: use letters, \
+                     digits and underscores, such as utf8mb4_unicode_ci",
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -302,6 +396,8 @@ pub struct DatabaseConfigBuilder {
     acquire_timeout: Option<u64>,
     test_before_acquire: Option<bool>,
     ping_after_idle: Option<u64>,
+    charset: Option<String>,
+    collation: Option<String>,
 }
 
 impl DatabaseConfigBuilder {
@@ -369,6 +465,20 @@ impl DatabaseConfigBuilder {
         self
     }
 
+    /// Set the character set of a MySQL or MariaDB connection, over the
+    /// URL's parameter and `DB_CHARSET`. Ignored for Postgres and SQLite.
+    pub fn charset(mut self, name: impl Into<String>) -> Self {
+        self.charset = Some(name.into());
+        self
+    }
+
+    /// Set the collation of a MySQL or MariaDB connection, over the URL's
+    /// parameter and `DB_COLLATION`. Ignored for Postgres and SQLite.
+    pub fn collation(mut self, name: impl Into<String>) -> Self {
+        self.collation = Some(name.into());
+        self
+    }
+
     /// Build the configuration.
     ///
     /// `url`: if [`Self::url`] was called the resulting config
@@ -384,6 +494,7 @@ impl DatabaseConfigBuilder {
             Some(u) => (u, UrlSource::Explicit),
             None => (defaults.url, defaults.url_source),
         };
+        let (charset, collation) = mysql_encoding(&url, (self.charset, self.collation));
         DatabaseConfig {
             url,
             max_connections: self.max_connections.unwrap_or(defaults.max_connections),
@@ -398,6 +509,8 @@ impl DatabaseConfigBuilder {
                 .unwrap_or(defaults.test_before_acquire),
             ping_after_idle: self.ping_after_idle.or(defaults.ping_after_idle),
             url_source,
+            charset,
+            collation,
         }
     }
 }

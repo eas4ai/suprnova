@@ -156,6 +156,19 @@ impl Seeder for Writer {
     }
 }
 
+/// Run as a test process: an unset `APP_ENV` is production, where `db:seed`
+/// asks for `--force`. The snapshot restores the variable before the lock
+/// goes.
+async fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 struct Reset;
 impl Drop for Reset {
     fn drop(&mut self) {
@@ -192,6 +205,7 @@ fn assert_progress(output: &str, names: &[&str]) {
 #[tokio::test]
 #[serial]
 async fn root_calls_in_order_with_parameters_services_and_progress() {
+    let _env = testing_environment().await;
     let _reset = setup();
     let _container = TestContainer::fake();
     TestContainer::bind(std::sync::Arc::new(Service("seed".into())));
@@ -220,6 +234,7 @@ async fn root_calls_in_order_with_parameters_services_and_progress() {
 #[tokio::test]
 #[serial]
 async fn silent_calls_keep_console_output_empty() {
+    let _env = testing_environment().await;
     let _reset = setup();
     seed::register_root::<QuietRoot>().unwrap();
     let run = console::test(["db:seed"]).run().await;
@@ -232,6 +247,7 @@ async fn silent_calls_keep_console_output_empty() {
 #[tokio::test]
 #[serial]
 async fn once_skips_duplicates_and_resets_between_invocations() {
+    let _env = testing_environment().await;
     let _reset = setup();
     seed::register_root::<OnceRoot>().unwrap();
     for _ in 0..2 {
@@ -245,6 +261,7 @@ async fn once_skips_duplicates_and_resets_between_invocations() {
 #[tokio::test]
 #[serial]
 async fn failed_once_can_retry_and_recursive_calls_are_errors() {
+    let _env = testing_environment().await;
     let _reset = setup();
     seed::register::<Retry>();
     seed::register_root::<RetryRoot>().unwrap();
@@ -263,6 +280,7 @@ async fn failed_once_can_retry_and_recursive_calls_are_errors() {
 #[tokio::test]
 #[serial]
 async fn failure_stops_the_list_without_a_done_line_or_later_calls() {
+    let _env = testing_environment().await;
     let _reset = setup();
     seed::register_root::<FailureRoot>().unwrap();
     let run = console::test(["db:seed"]).run().await;
@@ -290,6 +308,7 @@ async fn failure_stops_the_list_without_a_done_line_or_later_calls() {
 #[tokio::test]
 #[serial]
 async fn database_option_routes_only_this_invocation_and_restores_after_failure() {
+    let _env = testing_environment().await;
     let _reset = setup();
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared("CREATE TABLE seed_rows (name TEXT)")

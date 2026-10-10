@@ -18,6 +18,10 @@
 
 mod cases;
 mod catalog;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 mod integer_aggregates;
@@ -39,3 +43,4 @@ mod unsigned_table_reads;
 mod unsigned_table_writes;
 
 pub mod laravel_gaps;
+pub mod laravel_infra_gaps;

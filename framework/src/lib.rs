@@ -152,11 +152,12 @@ pub use authorization::{Authorizable, Gate, GateEvaluated};
 // Its Laravel-spelled home is `suprnova::authorization::Response`.
 pub use authorization::Response as GateResponse;
 pub use cache::{
-    Cache, CacheConfig, CacheStore, ConditionalIncrement, InMemoryCache, LockGuard, RedisCache,
+    Cache, CacheConfig, CacheHit, CacheMissed, CacheStore, ConditionalIncrement, InMemoryCache,
+    LockGuard, RedisCache,
 };
 pub use config::{
-    AppConfig, AppConfigBuilder, Config, Environment, ServerConfig, ServerConfigBuilder, env,
-    env_optional, env_required, try_env_required,
+    AppConfig, AppConfigBuilder, Config, Environment, MergeConfig, ServerConfig,
+    ServerConfigBuilder, env, env_optional, env_required, try_env_required,
 };
 pub use container::{App, Container};
 pub use context::{Context, ContextSnapshot, ContextStore};
@@ -370,7 +371,7 @@ pub use localization::{
     LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator,
     scope_locale,
 };
-pub use logging::{Log, LogChannel, LogLevel, LogRecord, LogSink, Logger};
+pub use logging::{Log, LogChannel, LogLevel, LogRecord, LogSink, Logger, MessageLogged};
 pub use logging::{
     LogConfig, LogFormat, RequestId, RequestIdMiddleware, current_request_id, init_subscriber,
     spawn_with_request_id,

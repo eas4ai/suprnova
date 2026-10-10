@@ -28,7 +28,8 @@ use crate::ui;
 struct FreshContext<'a> {
     /// Where the project's migrations live (`src/migrations` in a real run).
     migrations_dir: &'a Path,
-    /// The raw `APP_ENV` value, echoed verbatim in the confirmation prompt.
+    /// The raw `APP_ENV` value, echoed verbatim in the confirmation prompt,
+    /// or `production` when it is unset.
     app_env: &'a str,
     /// Whether `--force` was passed.
     force: bool,
@@ -123,9 +124,11 @@ fn spawn_migrator(schema_path: Option<&str>) -> Result<(), String> {
 }
 
 pub fn run(force: bool, schema_path: Option<String>) {
-    // Load `.env` so APP_ENV resolves to what the app itself would see.
+    // Load `.env` so APP_ENV resolves to what the app itself would see. An
+    // unset APP_ENV is production, as it is for the framework and for
+    // Laravel, so a project that names no environment meets the guard.
     let _ = dotenvy::dotenv();
-    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "local".to_string());
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "production".to_string());
 
     let ctx = FreshContext {
         migrations_dir: Path::new("src/migrations"),

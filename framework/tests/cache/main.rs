@@ -2,9 +2,14 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod bootstrap_driver;
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod forever_default_ttl;
 pub mod increment_if_below;
 pub mod laravel_facade;
+pub mod laravel_infra_gaps;
 pub mod locks;
 pub mod redis_integration;
 pub mod redis_retry;

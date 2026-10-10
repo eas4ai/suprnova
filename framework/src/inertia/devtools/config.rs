@@ -225,10 +225,11 @@ impl DevToolsConfig {
 /// (`local`, in any case).
 ///
 /// Not [`Config::environment`](crate::config::Config::environment), which
-/// takes an unset `APP_ENV` as `local`: Laravel takes it as production,
-/// and DevTools records requests and serves them without a gate only in an
-/// environment that says it is local. A `.env` file the application loads
-/// counts as set, since `Config::init` puts it in the process environment.
+/// prefers a registered `AppConfig`: DevTools records requests and serves
+/// them without a gate only in an environment the process says is local.
+/// An unset `APP_ENV` is production, as in Laravel, so it never counts. A
+/// `.env` file the application loads counts as set, since `Config::init`
+/// puts it in the process environment.
 pub(crate) fn app_env_names_local() -> bool {
     std::env::var_os("APP_ENV").is_some()
         && crate::config::Environment::detect() == crate::config::Environment::Local

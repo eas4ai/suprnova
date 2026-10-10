@@ -308,6 +308,11 @@ async fn tries_caps_failures_and_timeout_settles_a_stalled_job() {
 #[test]
 #[serial]
 fn cli_accepts_controls_alongside_existing_worker_options() {
+    // An unset APP_ENV is production, whose rate-limit and mail checks stop
+    // the worker's boot; this process names itself a test one.
+    let _env = crate::env_lock::lock_env();
+    let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     suprnova::boot::load_env().expect("pre-runtime configuration");
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -356,6 +361,11 @@ fn cli_accepts_controls_alongside_existing_worker_options() {
 #[test]
 #[serial]
 fn cli_propagates_the_memory_exit_status() {
+    // An unset APP_ENV is production, whose rate-limit and mail checks stop
+    // the worker's boot; this process names itself a test one.
+    let _env = crate::env_lock::lock_env();
+    let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     suprnova::boot::load_env().expect("pre-runtime configuration");
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

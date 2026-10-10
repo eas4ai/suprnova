@@ -1931,6 +1931,8 @@ async fn redis_place_counter_reserves_each_place_once_and_expires() {
     let store = RedisCache::connect(&CacheConfig {
         driver: CacheDriver::Redis,
         url: url.clone(),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix: prefix.clone(),
         default_ttl: 0,
         sweep_interval: 0,

@@ -3,6 +3,8 @@
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod header_read_timeout;
 pub mod health_error_redaction;
 pub mod health_readiness_gate;

@@ -15,6 +15,18 @@ use suprnova::console;
 use suprnova::seed::{self, Seeder};
 use tracing_test::traced_test;
 
+use crate::env_snapshot::{EnvSnapshot, set_env};
+
+/// Run as a test process: an unset `APP_ENV` is production, where `db:seed`
+/// asks for `--force`. Laravel's `phpunit.xml` sets `APP_ENV=testing` the
+/// same way. The snapshot restores the variable before the lock goes.
+async fn testing_environment() -> (EnvSnapshot, tokio::sync::MutexGuard<'static, ()>) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = EnvSnapshot::capture(&["APP_ENV"]);
+    set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 static SEEDER_RAN: AtomicUsize = AtomicUsize::new(0);
 static FAILING_RAN: AtomicUsize = AtomicUsize::new(0);
 
@@ -45,6 +57,7 @@ impl Seeder for FailingSeeder {
 #[tokio::test]
 #[serial]
 async fn db_seed_runs_every_registered_seeder() {
+    let _env = testing_environment().await;
     seed::clear();
     SEEDER_RAN.store(0, Ordering::SeqCst);
     seed::register::<RecordingSeeder>();
@@ -66,6 +79,7 @@ async fn db_seed_runs_every_registered_seeder() {
 #[serial]
 #[traced_test]
 async fn db_seed_on_empty_registry_warns_and_returns_ok() {
+    let _env = testing_environment().await;
     seed::clear();
 
     let argv = vec!["console".to_string(), "db:seed".to_string()];
@@ -82,6 +96,7 @@ async fn db_seed_on_empty_registry_warns_and_returns_ok() {
 #[tokio::test]
 #[serial]
 async fn db_seed_propagates_seeder_errors() {
+    let _env = testing_environment().await;
     seed::clear();
     FAILING_RAN.store(0, Ordering::SeqCst);
     seed::register::<FailingSeeder>();
@@ -128,6 +143,7 @@ impl Seeder for OtherSeeder {
 #[tokio::test]
 #[serial]
 async fn db_seed_class_equals_runs_only_named_seeder() {
+    let _env = testing_environment().await;
     seed::clear();
     SEEDER_RAN.store(0, Ordering::SeqCst);
     OTHER_RAN.store(0, Ordering::SeqCst);
@@ -150,6 +166,7 @@ async fn db_seed_class_equals_runs_only_named_seeder() {
 #[tokio::test]
 #[serial]
 async fn db_seed_class_bare_positional_form_works() {
+    let _env = testing_environment().await;
     seed::clear();
     OTHER_RAN.store(0, Ordering::SeqCst);
 
@@ -169,6 +186,7 @@ async fn db_seed_class_bare_positional_form_works() {
 #[tokio::test]
 #[serial]
 async fn db_seed_class_unknown_returns_not_found_error() {
+    let _env = testing_environment().await;
     seed::clear();
     seed::register::<RecordingSeeder>();
 
@@ -193,6 +211,7 @@ async fn db_seed_class_unknown_returns_not_found_error() {
 #[tokio::test]
 #[serial]
 async fn db_seed_class_on_an_empty_registry_returns_not_found_error() {
+    let _env = testing_environment().await;
     seed::clear();
 
     let argv = vec![
@@ -222,6 +241,7 @@ async fn db_seed_class_on_an_empty_registry_returns_not_found_error() {
 #[tokio::test]
 #[serial]
 async fn targeted_run_reports_progress_and_still_returns_ok() {
+    let _env = testing_environment().await;
     seed::clear();
     OTHER_RAN.store(0, Ordering::SeqCst);
     seed::register::<OtherSeeder>();
@@ -246,6 +266,7 @@ async fn targeted_run_reports_progress_and_still_returns_ok() {
 #[tokio::test]
 #[serial]
 async fn targeted_run_that_fails_still_propagates_the_error() {
+    let _env = testing_environment().await;
     seed::clear();
     FAILING_RAN.store(0, Ordering::SeqCst);
     seed::register::<FailingSeeder>();
@@ -270,6 +291,7 @@ async fn targeted_run_that_fails_still_propagates_the_error() {
 #[tokio::test]
 #[serial]
 async fn an_unknown_targeted_class_still_reports_not_found() {
+    let _env = testing_environment().await;
     // The name is resolved before anything prints, so an unknown class
     // never prints a RUNNING line - the not-found error is the only
     // thing the caller sees, matching Laravel's resolve-then-report

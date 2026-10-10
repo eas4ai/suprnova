@@ -4,8 +4,9 @@
 //! [`Config::get::<T>()`](crate::Config::get) and writers register them at boot.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasher;
+use std::sync::{OnceLock, RwLock, RwLockWriteGuard};
 
 /// Global config repository - stores config instances by type
 static CONFIG_REPOSITORY: OnceLock<RwLock<ConfigRepository>> = OnceLock::new();
@@ -40,6 +41,71 @@ impl ConfigRepository {
     pub fn has<T: Any + 'static>(&self) -> bool {
         self.configs.contains_key(&TypeId::of::<T>())
     }
+
+    /// Register `config` only when no value of its type is registered, and
+    /// answer whether it did. The application registers first and a crate
+    /// registers its defaults after, so the application's value stays.
+    pub fn register_default<T: Any + Send + Sync + 'static>(&mut self, config: T) -> bool {
+        if self.has::<T>() {
+            return false;
+        }
+        self.register(config);
+        true
+    }
+
+    /// Merge `defaults` under the registered value of its type, keeping the
+    /// registered value's entries, or register `defaults` when none is
+    /// registered. See [`MergeConfig`].
+    pub fn merge<T: MergeConfig + Any + Send + Sync + 'static>(&mut self, defaults: T) {
+        match self
+            .configs
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast_mut::<T>())
+        {
+            Some(registered) => registered.merge_defaults(defaults),
+            None => self.register(defaults),
+        }
+    }
+}
+
+/// A configuration value that can take defaults under its own entries.
+///
+/// [`Config::merge`](crate::Config::merge) uses it so a crate that registers
+/// its defaults after the application never overwrites what the application
+/// set, as Laravel's `ServiceProvider::mergeConfigFrom` merges a package's
+/// file under the application's keys. The merge is shallow, as Laravel's
+/// `array_merge` is: a key the registered value holds keeps its whole value.
+///
+/// Implement it for a configuration struct of your own to choose how its
+/// fields merge.
+pub trait MergeConfig {
+    /// Add to `self` the entries only `defaults` has, keeping every entry
+    /// `self` already has.
+    fn merge_defaults(&mut self, defaults: Self);
+}
+
+impl<V, S: BuildHasher> MergeConfig for HashMap<String, V, S> {
+    fn merge_defaults(&mut self, defaults: Self) {
+        for (key, value) in defaults {
+            self.entry(key).or_insert(value);
+        }
+    }
+}
+
+impl<V> MergeConfig for BTreeMap<String, V> {
+    fn merge_defaults(&mut self, defaults: Self) {
+        for (key, value) in defaults {
+            self.entry(key).or_insert(value);
+        }
+    }
+}
+
+impl MergeConfig for serde_json::Map<String, serde_json::Value> {
+    fn merge_defaults(&mut self, defaults: Self) {
+        for (key, value) in defaults {
+            self.entry(key).or_insert(value);
+        }
+    }
 }
 
 impl Default for ConfigRepository {
@@ -63,12 +129,29 @@ pub fn init_repository() -> &'static RwLock<ConfigRepository> {
 /// process lifetime; every `Config::get::<T>()` after that returns None,
 /// and the framework falls back to defaults invisibly.
 pub fn register<T: Any + Send + Sync + 'static>(config: T) {
-    let repo = init_repository();
-    let mut guard = match repo.write() {
+    write_repository().register(config);
+}
+
+/// Register a config in the global repository only when none of its type is
+/// registered, answering whether it did. The check and the write happen
+/// under one write lock, so two callers never both register.
+pub fn register_default<T: Any + Send + Sync + 'static>(config: T) -> bool {
+    write_repository().register_default(config)
+}
+
+/// Merge `defaults` under the registered config of its type, or register
+/// them when none is registered, under one write lock.
+pub fn merge<T: MergeConfig + Any + Send + Sync + 'static>(defaults: T) {
+    write_repository().merge(defaults);
+}
+
+/// The repository's write guard. A poisoned lock is recovered, for the
+/// reason [`register`] gives.
+fn write_repository() -> RwLockWriteGuard<'static, ConfigRepository> {
+    match init_repository().write() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
-    };
-    guard.register(config);
+    }
 }
 
 /// Get a config from the global repository.

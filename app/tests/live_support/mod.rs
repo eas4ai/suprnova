@@ -157,9 +157,9 @@ pub enum CacheBoot {
     /// selects: a database L1 store and a database rebuild coordinator.
     ///
     /// Set on the configuration rather than through the environment
-    /// variable. The variable is read by `std::env::set_var`, which is
-    /// `unsafe` under this edition and is not something a test in this
-    /// application may reach for; the mapping from that variable to these
+    /// variable. The variable is written by `std::env::set_var`, which is
+    /// `unsafe` under this edition, and a test in this application writes
+    /// the environment only once, for `APP_ENV`, in `test_environment`; the mapping from that variable to these
     /// two providers is proven by the framework's own configuration tests
     /// over `RenderCacheConfig::from_source`, and what this boot exists to
     /// prove is the half those cannot: that this application, booted on
@@ -208,6 +208,7 @@ fn unix_now_ms() -> u64 {
 }
 
 async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
+    crate::test_environment::testing();
     let lock = TEST_LOCK.lock().await;
     suprnova::Crypt::init(EncryptionKey::generate());
 

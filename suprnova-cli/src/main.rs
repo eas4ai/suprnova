@@ -406,7 +406,7 @@ enum Commands {
     /// Drop all tables and re-run all migrations
     #[command(name = "migrate:fresh")]
     MigrateFresh {
-        /// Required when APP_ENV is production. Even then the command still
+        /// Required when APP_ENV is production or unset. Even then the command still
         /// asks you to type the environment name at an interactive prompt -
         /// the flag alone will not drop a production database.
         #[arg(long)]

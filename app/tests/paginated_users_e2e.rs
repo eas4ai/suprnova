@@ -16,6 +16,8 @@
 //! All three read the database. They used to serve fixtures, which is
 //! why this harness now seeds one.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -166,6 +168,7 @@ async fn spawn_app_server(max_connections: usize) -> SocketAddr {
         suprnova::InMemoryCache::new(),
     ));
     let middleware = Arc::new({
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         app::bootstrap::register_inertia_shared_data();
         MiddlewareRegistry::from_global()

@@ -34,6 +34,8 @@ async fn store_at(url: &str, prefix: String) -> Arc<dyn CacheStore> {
     let cfg = CacheConfig {
         driver: suprnova::cache::CacheDriver::Redis,
         url: url.to_string(),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix,
         default_ttl: 0,
         sweep_interval: 0,

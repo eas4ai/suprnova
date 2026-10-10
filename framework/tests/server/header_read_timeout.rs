@@ -31,6 +31,11 @@ async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
     {
         return;
     }
+    // The server requires APP_KEY outside development, and an unset APP_ENV
+    // is production; this child names a test process.
+    let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     // Learn a free port by binding ephemeral (`:0`) and reading back the
     // OS-assigned port, then release it immediately so `Server::run` can
     // bind the same address. Small TOCTOU window, but this is the
@@ -47,7 +52,7 @@ async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
     let deadline = Duration::from_millis(300);
 
     let server = Server::from_config(Router::new())
-        .expect("Server::from_config must succeed in a bare local-environment test process")
+        .expect("Server::from_config must succeed in a bare test-environment process")
         .host("127.0.0.1")
         .port(port)
         .header_read_timeout(deadline);

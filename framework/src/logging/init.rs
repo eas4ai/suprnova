@@ -18,8 +18,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// syntax, e.g. `"info,sqlx=warn"`), returning the parse error as a
 /// string on failure. Split out from [`build_env_filter`] so the
 /// validity decision is unit-testable without installing a subscriber.
+///
+/// The PSR-3 names `tracing` does not know (`warning`, `notice`,
+/// `critical`, `alert`, `emergency`) are read as their nearest `tracing`
+/// level first.
 pub(crate) fn parse_env_filter(level: &str) -> Result<EnvFilter, String> {
-    EnvFilter::try_new(level).map_err(|e| e.to_string())
+    EnvFilter::try_new(super::config::tracing_directive(level)).map_err(|e| e.to_string())
 }
 
 /// Build an [`EnvFilter`] from a config string, falling back to `"info"`
@@ -110,6 +114,13 @@ mod tests {
     fn parse_env_filter_accepts_valid_directives() {
         assert!(parse_env_filter("info").is_ok());
         assert!(parse_env_filter("debug,hyper=warn,sqlx=info").is_ok());
+    }
+
+    #[test]
+    fn parse_env_filter_accepts_psr_level_names() {
+        for directive in ["warning", "notice,sqlx=critical", "alert", "emergency"] {
+            assert!(parse_env_filter(directive).is_ok(), "{directive}");
+        }
     }
 
     #[test]

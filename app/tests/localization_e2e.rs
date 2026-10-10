@@ -40,6 +40,8 @@
 //!     Spanish, proving keyed validation messages translate at the
 //!     response boundary without any per-route plumbing.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -108,6 +110,7 @@ async fn spawn_app() -> (SocketAddr, tokio::sync::MutexGuard<'static, ()>) {
 
     bind_translator();
 
+    test_environment::testing();
     app::bootstrap::register_http_stack();
     let router = Arc::new(app::routes::register());
     let middleware = Arc::new(MiddlewareRegistry::from_global());

@@ -1,8 +1,9 @@
 # Redis
 
 The `Redis` facade runs Redis commands of your own: a counter, a leaderboard,
-a lock that outlives a request, a message to another service. The cache, the
-queue, and the rate limiter already talk to Redis through their drivers; the
+a lock that outlives a request, a message to another service. The queue and
+the rate limiter already talk to Redis through their drivers, and the Redis
+cache store runs on this facade's `cache` and `default` connections; the
 facade is for everything else. It is Laravel's `Redis` facade over named
 connections, with typed methods for the common commands and the `redis`
 client underneath.
@@ -78,6 +79,28 @@ connection to the server.
 next `Redis::connection(name)` opens a new one. A name that no `define`
 gave, other than `default` and `cache`, is an error.
 
+### The cache's connections
+
+With `CACHE_DRIVER=redis`, the [cache](cache.md#redis-connections) runs its
+commands on the `cache` connection and takes its locks on `default`, as
+Laravel's cache store does. `REDIS_CACHE_CONNECTION` and
+`REDIS_CACHE_LOCK_CONNECTION` name other connections, and
+`Cache::set_connection(name)` moves the store's later commands to one you
+defined:
+
+```rust
+use suprnova::{Cache, Redis};
+
+pub async fn register() -> Result<(), suprnova::FrameworkError> {
+    Redis::define("cache-replica", "redis://10.0.0.6:6379/1")?;
+    Cache::set_connection("cache-replica")?;
+    Ok(())
+}
+```
+
+`Redis::define("cache", url)` in the bootstrap points the cache at another
+server before the store is built.
+
 ## Key prefixes
 
 You set `REDIS_PREFIX` to prefix every typed key, including keys in
@@ -90,7 +113,9 @@ hash fields, list elements and Pub/Sub channels as given.
 
 You send keys as given through `command`, `execute_raw`, the pipeline's
 `command`, and `client()`. You include the prefix yourself when you access
-typed keys through these methods. You run `scan` with your matching
+typed keys through these methods. The cache store does this for you: its
+keys are the connection's `REDIS_PREFIX`, then `CACHE_PREFIX`, then the
+key you gave. You run `scan` with your matching
 pattern, which receives the prefix, and get the server's full keys,
 prefix included. You also get the full server key in blocking replies.
 You use a raw `DEL` to remove keys returned by `scan`.

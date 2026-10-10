@@ -201,3 +201,86 @@ fn a_missing_migrations_directory_refuses_before_anything_runs() {
     );
     assert!(!text.contains("panicked"), "must NOT panic; got: {text}");
 }
+
+/// An unset `APP_ENV` is production, as Laravel's `config/app.php` reads
+/// `env('APP_ENV', 'production')`: a project whose `.env` names no
+/// environment must meet the production guard.
+mod laravel_infra_gaps {
+    use super::*;
+
+    /// Run `migrate:fresh` with `APP_ENV` removed from the inherited
+    /// environment, so only the project's `.env` can name it.
+    fn run_without_app_env(fx: &Fixture, args: &[&str]) -> Output {
+        let path = format!(
+            "{}:{}",
+            fx.root().join("fakebin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        Command::new(BIN)
+            .arg("migrate:fresh")
+            .args(args)
+            .env_remove("APP_ENV")
+            .env("PATH", path)
+            .env("MIGRATE_FRESH_SENTINEL", fx.sentinel())
+            .current_dir(fx.root())
+            .output()
+            .expect("spawn suprnova binary")
+    }
+
+    #[test]
+    fn an_env_file_without_app_env_refuses_without_force() {
+        let fx = Fixture::new();
+        fs::write(fx.root().join(".env"), "APP_NAME=Shop\n").expect("write .env");
+
+        let out = run_without_app_env(&fx, &[]);
+        let text = combined(&out);
+
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "an unset APP_ENV is production and needs --force; output: {text}"
+        );
+        assert!(
+            !fx.sentinel().exists(),
+            "the migrator was spawned for an unset APP_ENV without --force; output: {text}"
+        );
+        assert!(
+            text.contains("--force") && text.contains("production"),
+            "the refusal must name the environment and what is missing; got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_env_file_without_app_env_still_needs_a_terminal_with_force() {
+        let fx = Fixture::new();
+        fs::write(fx.root().join(".env"), "APP_NAME=Shop\n").expect("write .env");
+
+        let out = run_without_app_env(&fx, &["--force"]);
+        let text = combined(&out);
+
+        assert_eq!(out.status.code(), Some(1), "output: {text}");
+        assert!(
+            !fx.sentinel().exists(),
+            "--force alone must not spawn the migrator for an unset APP_ENV; output: {text}"
+        );
+        assert!(text.contains("terminal"), "got: {text}");
+    }
+
+    /// The control: the same project with `APP_ENV=local` in its `.env`
+    /// runs, so the refusal above comes from the missing name, not from a
+    /// `.env` the command failed to read.
+    #[test]
+    fn an_env_file_that_names_local_runs_the_migrator() {
+        let fx = Fixture::new();
+        fs::write(fx.root().join(".env"), "APP_NAME=Shop\nAPP_ENV=local\n").expect("write .env");
+
+        let out = run_without_app_env(&fx, &[]);
+        let text = combined(&out);
+
+        assert_eq!(out.status.code(), Some(0), "output: {text}");
+        assert!(
+            fx.sentinel().exists(),
+            "APP_ENV=local in .env must run the migrator; output: {text}"
+        );
+    }
+}

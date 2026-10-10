@@ -306,6 +306,9 @@ fn a_schedule_without_single_server_tasks_is_never_blocked() {
 /// instead.
 #[test]
 fn outside_production_a_memory_cache_is_allowed() {
+    let _env = crate::env_lock::lock_env();
+    let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     let mut schedule = Schedule::new();
     let task = schedule
         .call(|| async { Ok(()) })
@@ -314,8 +317,8 @@ fn outside_production_a_memory_cache_is_allowed() {
         .on_one_server();
     schedule.add(task);
 
-    // The suite runs with APP_ENV unset or `testing`; neither is
-    // production, so this is the non-production branch.
+    // APP_ENV names a test process above (an unset one is production), so
+    // this is the non-production branch.
     assert!(
         schedule.validate_single_server_locking().is_ok(),
         "blocking dev loops would make the feature unusable locally"

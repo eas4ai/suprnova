@@ -107,6 +107,12 @@
 //! `.use_current()` and `.after(column)`; a modifier on a column type it
 //! does not apply to makes the migration fail.
 //!
+//! On MySQL and MariaDB a new table takes the configured character set and
+//! collation (`DB_CHARSET` and `DB_COLLATION`, `utf8mb4` and
+//! `utf8mb4_unicode_ci` by default), or the ones its blueprint names with
+//! `t.charset(name)` and `t.collation(name)`; the other databases ignore
+//! both, and `Schema::table` refuses them.
+//!
 //! `timestamps()` and `soft_deletes()` create string columns, because that
 //! is the storage a `#[suprnova::model]` uses for a `DateTime<Utc>` field
 //! with no declared cast. Their documentation gives the reason.
@@ -178,7 +184,33 @@ pub use blueprint::Blueprint;
 pub use column::ColumnBuilder;
 pub use foreign::{ForeignBuilder, ForeignIdBuilder};
 
-use plan::{Step, plan_alter, plan_create};
+use plan::{Step, TableEncoding, plan_alter, plan_create};
+
+/// The character set and collation a new table takes on `backend` when its
+/// blueprint names none: on MySQL, the registered `DatabaseConfig`'s, or the
+/// environment's (the `DATABASE_URL` parameters, `DB_CHARSET` and
+/// `DB_COLLATION`), with Laravel's `utf8mb4` and `utf8mb4_unicode_ci`
+/// otherwise; nothing on the other backends.
+///
+/// The configuration is read, not the connection: the migrator opens its own
+/// connection from `DATABASE_URL`, and a table has to take the configured
+/// collation whichever connection creates it.
+pub(crate) fn table_encoding(backend: DbBackend) -> TableEncoding {
+    if backend != DbBackend::MySql {
+        return TableEncoding::default();
+    }
+    let config = crate::Config::get::<crate::DatabaseConfig>()
+        .unwrap_or_else(crate::DatabaseConfig::from_env);
+    let charset = config.charset.or_else(|| {
+        crate::config::env_optional("DB_CHARSET")
+            .or_else(|| Some(crate::database::config::DEFAULT_MYSQL_CHARSET.to_owned()))
+    });
+    let collation = config.collation.or_else(|| {
+        crate::config::env_optional("DB_COLLATION")
+            .or_else(|| Some(crate::database::config::DEFAULT_MYSQL_COLLATION.to_owned()))
+    });
+    TableEncoding { charset, collation }
+}
 
 /// The identifier SeaQuery quotes for `name`. `Alias` carries an arbitrary
 /// string, which is what a table or column named at run time needs.
@@ -275,6 +307,12 @@ impl Schema {
     /// records: the table first (foreign keys inline), then one statement
     /// per index.
     ///
+    /// On MySQL and MariaDB the table takes the character set and collation
+    /// its blueprint names with [`Blueprint::charset`] and
+    /// [`Blueprint::collation`], or else the configured ones (`DB_CHARSET`
+    /// and `DB_COLLATION`, `utf8mb4` and `utf8mb4_unicode_ci` by default), as
+    /// Laravel's schema grammar gives every new table.
+    ///
     /// The closure only records. The description is checked for the mistakes
     /// the builder can see (a duplicate column, an index over a column the
     /// table does not declare, an operation that belongs to
@@ -291,7 +329,8 @@ impl Schema {
         let steps = {
             let mut blueprint = Blueprint::new(table);
             define(&mut blueprint);
-            plan_create(&blueprint, manager.get_database_backend())?
+            let backend = manager.get_database_backend();
+            plan_create(&blueprint, backend, &table_encoding(backend))?
         };
         run(manager, steps).await
     }
@@ -318,7 +357,8 @@ impl Schema {
         let steps = {
             let mut blueprint = Blueprint::new(table);
             define(&mut blueprint);
-            plan_create(&blueprint, manager.get_database_backend())?
+            let backend = manager.get_database_backend();
+            plan_create(&blueprint, backend, &table_encoding(backend))?
         };
         let connection = manager.get_connection();
         if !crate::database::catalog::table_exists(connection, table).await? {

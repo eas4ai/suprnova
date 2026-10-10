@@ -52,10 +52,11 @@ fn write_lang(dir: &std::path::Path, locale: &str, file: &str, ftl: &str) {
 ///
 /// Returns the backing `TempDir` - the caller must keep it alive for
 /// as long as the binding is in use. `LocaleMiddleware` calls
-/// `reload_if_stale()` on every request in the (default, unset
-/// `APP_ENV`) `Local` environment; if the directory were dropped
-/// (deleted) before the request ran, that reload would see a missing
-/// catalog tree and silently empty the bound translator's catalogs.
+/// `reload_if_stale()` on every request in the `Local` and `Development`
+/// environments (an unset `APP_ENV` is production, where it does not); if
+/// the directory were dropped (deleted) before the request ran, that
+/// reload would see a missing catalog tree and silently empty the bound
+/// translator's catalogs.
 fn bind_translator() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     write_lang(tmp.path(), "en", "app.ftl", "greet = Hello\n");
