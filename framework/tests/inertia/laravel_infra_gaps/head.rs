@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use suprnova::head::{
-    HeadBuilder, ImageType, Media, OgMedia, OgType, OpenGraph, Schema, TwitterCard, TwitterCardType,
+    HeadBuilder, ImageType, LinkTag, Media, OgMedia, OgType, OpenGraph, Schema, TwitterCard,
+    TwitterCardType,
 };
 use suprnova::testing::{TestClient, TestContainer, TestResponse};
 use suprnova::{
@@ -79,12 +80,20 @@ mod routes {
         page(&request, "Layered").await
     }
 
+    /// A server-rendered page: no `with_head` on its route and no Inertia
+    /// render, so nothing but the request itself gives the canonical URL.
+    async fn server_rendered(_request: Request) -> Response {
+        Head::canonical();
+        Ok(HttpResponse::html(Head::render_html()))
+    }
+
     routes! {
         get!("/about", about),
         get!("/plain", plain),
         get!("/titled", titled),
         get!("/hostile", hostile),
         get!("/canonical", canonical),
+        get!("/server-rendered", server_rendered),
         get!("/route-head", about).with_head(|head| head
             .title("Route title")
             .description("Route description")),
@@ -496,6 +505,43 @@ async fn canonical_names_the_request_url_over_https() {
     );
 }
 
+#[tokio::test]
+async fn canonical_names_the_request_url_on_a_server_rendered_route() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "canonical_names_the_request_url_on_a_server_rendered_route",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::config::Config::register(
+        suprnova::config::AppConfig::builder()
+            .url("http://example.test")
+            .build(),
+    );
+    let _container = TestContainer::fake();
+    let response = client()
+        .get("/server-rendered?page=2")
+        .header("Accept", "text/html")
+        .send()
+        .await;
+    response.assert_ok();
+    let html = response.body_text();
+    assert!(
+        html.contains(
+            "<link data-inertia=\"canonical\" rel=\"canonical\" href=\"https://example.test/server-rendered\">"
+        ),
+        "the request's URL without its query, over https: {html}"
+    );
+
+    // Outside any request there is no URL to name, so no canonical link
+    // renders.
+    Head::defaults(|head| head.canonical());
+    let outside = Head::render_html();
+    assert!(!outside.contains("canonical"), "{outside}");
+}
+
 // ---- PAR-161: the metadata beyond the title -------------------------------------
 
 #[test]
@@ -731,6 +777,101 @@ fn performance_and_discovery_links_render() {
     ] {
         assert!(html.contains(expected), "{expected} in {html}");
     }
+}
+
+#[test]
+fn a_link_attribute_name_cannot_inject_markup() {
+    let hostile = || {
+        HeadBuilder::new().link_tag(
+            LinkTag::new("alternate", "/x").attribute("x><script>alert(1)</script><link x", "v"),
+        )
+    };
+    let html = hostile().render_html();
+    assert!(!html.contains("<script"), "{html}");
+    assert_eq!(html.matches("<link").count(), 1, "{html}");
+    assert!(
+        html.contains("<link data-inertia=\"link:alternate:/x\" rel=\"alternate\" href=\"/x\">"),
+        "the link renders without the invalid attribute: {html}"
+    );
+    let data = hostile().to_array();
+    let attributes = data[0]["attributes"]
+        .as_object()
+        .expect("the link's attributes");
+    assert_eq!(
+        attributes
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["href", "rel"]),
+        "{data}"
+    );
+
+    for name in [
+        "",
+        "1x",
+        "-x",
+        "a b",
+        "a\"b",
+        "a'b",
+        "a>b",
+        "a/b",
+        "a=b",
+        "a\tb",
+        "a\u{7f}b",
+        "\u{e9}t\u{e9}",
+    ] {
+        let html = HeadBuilder::new()
+            .link_tag(LinkTag::new("alternate", "/x").attribute(name, "v"))
+            .render_html();
+        assert!(!html.contains("=\"v\""), "{name:?} was written: {html}");
+    }
+
+    let valid = HeadBuilder::new()
+        .link_tag(
+            LinkTag::new("alternate", "/fr")
+                .attribute("hreflang", "fr")
+                .attribute("data-x.y_z:w2", "1"),
+        )
+        .render_html();
+    assert!(
+        valid.contains("rel=\"alternate\" href=\"/fr\" hreflang=\"fr\" data-x.y_z:w2=\"1\">"),
+        "{valid}"
+    );
+}
+
+#[test]
+fn try_attribute_refuses_an_invalid_name_with_the_reason() {
+    let error = LinkTag::new("alternate", "/x")
+        .try_attribute("x><script>alert(1)</script><link x", "v")
+        .expect_err("an invalid attribute name is refused");
+    assert!(
+        error
+            .message()
+            .contains("is not a valid HTML attribute name"),
+        "{error}"
+    );
+    assert!(error.message().contains("may hold only"), "{error}");
+    for (name, reason) in [
+        ("", "empty"),
+        ("1x", "start with an ASCII letter"),
+        ("a b", "may hold only"),
+        ("a=b", "may hold only"),
+    ] {
+        let error = LinkTag::new("alternate", "/x")
+            .try_attribute(name, "v")
+            .expect_err("an invalid attribute name is refused");
+        assert!(error.message().contains(reason), "{name:?}: {error}");
+    }
+
+    let link = LinkTag::new("alternate", "/fr")
+        .try_attribute("hreflang", "fr")
+        .and_then(|link| link.try_attribute("hreflang", "fr-CA"))
+        .expect("a valid name is kept");
+    let html = HeadBuilder::new().link_tag(link).render_html();
+    assert!(
+        html.contains("href=\"/fr\" hreflang=\"fr-CA\">"),
+        "a later value replaces the earlier one: {html}"
+    );
 }
 
 #[test]

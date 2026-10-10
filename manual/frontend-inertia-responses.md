@@ -2134,7 +2134,10 @@ them by hand.
 `name` otherwise; `meta_for(name, content, media)` adds a media query, and
 `meta_tag(MetaTag::new(..).property(true))` chooses the attribute.
 `link(rel, href)` and `link_tag(LinkTag::new(rel, href).attribute(..))`
-write a `<link>`. `schema(...)` adds a JSON-LD object, written as its own
+write a `<link>`. An attribute name has to be a valid HTML attribute name:
+an ASCII letter, then letters, digits, `-`, `_`, `:` or `.`. `attribute`
+drops an invalid name and logs a warning; `try_attribute` refuses it with
+the reason. `schema(...)` adds a JSON-LD object, written as its own
 `<script type="application/ld+json">` element:
 
 ```rust

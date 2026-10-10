@@ -387,8 +387,9 @@ struct Resolved {
 impl Resolved {
     /// The current request's head. `status` is the error status the
     /// response is rendered for, ahead of [`Head::status`]'s; `url` gives
-    /// the request's URL, ahead of the one a route layer recorded, and is
-    /// called only when a canonical link needs it.
+    /// the request's URL, ahead of the one a route layer recorded and the
+    /// one the request's visit holds, and is called only when a canonical
+    /// link needs it.
     fn current(status: Option<u16>, url: Option<&dyn Fn() -> String>) -> Self {
         let config = application_value::<HeadConfig>(false);
         let config = config
@@ -434,17 +435,20 @@ impl Resolved {
                 .as_ref()
                 .is_some_and(|canonical| canonical.url.is_none())
         });
+        // The visit the server scopes around every dispatched request gives
+        // the URL on any route, so a server-rendered page that declares no
+        // `with_head` and renders no Inertia response still names itself.
         let request_url = needs_url
             .then(|| {
                 url.map(|url| url())
                     .or_else(|| request.as_ref().and_then(|request| request.url.clone()))
+                    .or_else(crate::inertia::visit::request_url)
             })
             .flatten();
         if needs_url && request_url.is_none() {
             tracing::warn!(
-                "Head::canonical() names the request's URL, which is not known outside an \
-                 Inertia render or a route that declares with_head; give the URL with \
-                 canonical_url"
+                "Head::canonical() names the request's URL, which is not known outside a \
+                 request; give the URL with canonical_url"
             );
         }
         Self {
