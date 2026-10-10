@@ -19,6 +19,7 @@ the long form.
 | `describe!` + `test!` | Jest-shaped grouping macros, paired with `expect!` for named failure output |
 | `expect!` | Fluent assertion macro with typed matchers (equality, option, result, string, vec, ordering) |
 | `TestDatabase::fresh` / `sqlite_memory` | In-memory SQLite + container registration, with or without your migrator |
+| `TestDatabase::refresh` / `refresh_lazily` / `migrate` | The database `DATABASE_URL` names, with each test in a rolled-back transaction or its migrations rolled back - see [Database Tests](database-testing.md#tests-on-the-configured-database) |
 | `TestContainer::fake` / `scope` / `spawn` | Thread-local or task-local DI overrides, hermetic across parallel tests |
 | `install_test_encryption_key[ring]` | Deterministic `APP_KEY` for tests that touch encrypted casts or signed payloads |
 | `TestClock` | Freeze and move the clock the framework reads, without a sleep - see [Moving the clock](#moving-the-clock) |
@@ -126,8 +127,24 @@ async fn create_user_with_isolated_schema(db: TestDatabase) {
 }
 ```
 
+Two more keys choose the database and seed it:
+
+| Key | Effect |
+| --- | --- |
+| `refresh` | Builds the database with `TestDatabase::refresh` instead of `fresh`: the database `DATABASE_URL` names, migrated once per process, with the test in a transaction that rolls back |
+| `seed = Path` | Runs that seeder after the migrations and before the body, as Laravel's `#[Seeder]` attribute does |
+| `seed` | Runs the root seeder, as a bare `db:seed` and Laravel's `#[Seed]` attribute do |
+
+```rust
+#[suprnova_test(refresh, seed = crate::seeders::UsersSeeder)]
+async fn lists_seeded_users(db: TestDatabase) {
+    // DATABASE_URL's database, migrated, seeded, inside a transaction.
+    assert_eq!(User::query().count().await.unwrap(), 50);
+}
+```
+
 Unknown keys are a compile error (typo `migrtor = …` won't silently
-keep the default migrator).
+keep the default migrator), and so is a key given twice.
 
 ## `describe!` and `test!` - when grouping helps
 
@@ -619,7 +636,7 @@ matcher is a build error, not a flaky test.
 | `#[suprnova_test]` attribute macro | `suprnova-macros/src/suprnova_test.rs` |
 | `describe!` / `test!` proc-macros | `suprnova-macros/src/describe.rs`, `test_macro.rs` |
 | `expect!` macro + `Expect<T>` matchers | `framework/src/lib.rs` (macro), `framework/src/testing/expect.rs` (impls) |
-| `TestDatabase::fresh` / `sqlite_memory` / helpers | `framework/src/database/testing.rs` |
+| `TestDatabase::fresh` / `sqlite_memory` / `refresh` / `refresh_lazily` / `migrate` / `seed` / helpers | `framework/src/database/testing.rs` |
 | `test_database!` macro | `framework/src/database/testing.rs` |
 | `TestContainer` + `TestContainerGuard` | `framework/src/container/testing.rs` |
 | `install_test_encryption_key[ring]` | `framework/src/testing/mod.rs` |

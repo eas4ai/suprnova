@@ -10,7 +10,9 @@ in, and when an in-memory SQLite is and isn't enough.
 ## The two constructors
 
 Every database test starts by building a `TestDatabase`. Two
-constructors, two intents.
+constructors build an in-memory SQLite database, with two intents.
+Three more run the test on the database `DATABASE_URL` names; see
+[Tests on the configured database](#tests-on-the-configured-database).
 
 ### `TestDatabase::fresh::<Migrator>()`
 
@@ -108,18 +110,169 @@ for most in tests, so test files don't have to pull in
 
 The bindings are `Vec<sea_orm::Value>` - the same shape the
 production query path uses. The connection's backend (SQLite for
-both constructors) is supplied for you, so a `?` placeholder is
-correct.
+both in-memory constructors) is supplied for you, so a `?` placeholder
+is correct there.
+
+## Tests on the configured database
+
+`fresh` gives every test a private in-memory SQLite database. When
+your suite must run on the engine you deploy to, three constructors
+run the test on the database `DATABASE_URL` names instead. They are
+Laravel's three database traits:
+
+| Constructor | Laravel trait | What it does |
+| --- | --- | --- |
+| `TestDatabase::refresh::<M>()` | `RefreshDatabase` | Migrates the database once per test process, then holds each test in a transaction that it rolls back when the helper drops |
+| `TestDatabase::refresh_lazily::<M>()` | `LazilyRefreshDatabase` | Does what `refresh` does on the first query, so a test that never touches the database never migrates it |
+| `TestDatabase::migrate::<M>()` | `DatabaseMigrations` | Runs the migrations with no transaction around the test, and rolls them back when the helper drops |
+
+```rust
+use suprnova::testing::TestDatabase;
+use crate::migrations::Migrator;
+
+// DATABASE_URL=postgres://app:secret@127.0.0.1/app_test cargo test
+#[tokio::test]
+async fn orders_are_numbered_per_customer() {
+    let db = TestDatabase::refresh::<Migrator>().await.unwrap();
+
+    let order = Order::create(attrs! { customer_id: 1 }).await.unwrap();
+    assert_eq!(order.number, 1);
+    // The row is gone when `db` drops, so the next test starts empty.
+}
+```
+
+`DATABASE_URL` is required. When it's unset, the three constructors
+return an error instead of falling back to the development database
+`./database.db`. When it names an in-memory SQLite database, they
+return an error that points you to `fresh`, which is the in-memory
+helper.
+
+### How `refresh` holds a test
+
+The first `refresh` of a test process for a database and a migrator
+migrates that database the way your application's `migrate` command
+does: it loads the schema dump into a database that has run no
+migration, then runs the pending migrations. The other `refresh` calls
+of the process don't migrate again. A test that starts while that
+migration runs waits for it, so parallel tests share one migration. A
+migration that fails is an error of `refresh` and isn't remembered, so
+the next `refresh` tries again.
+
+Then the helper opens a pool of one connection, begins a transaction
+on it, and registers it in the test container. Every query of the test
+runs in that transaction: through `DB::connection()`, a model, a
+factory, a seeder, `db.conn()`, the database session driver, and a
+database queue driver. The queue driver takes its connection when it's
+built, so build it after the helper. The `jobs`, `failed_jobs`, and
+`sessions` rows these drivers write roll back with the test.
+
+A `DB::transaction` inside the test is a savepoint of the test
+transaction. It commits or rolls back its own work, and its
+after-commit callbacks, `Job::after_commit()` pushes included, run
+when it commits. When the helper drops, its pool closes and the
+database discards the transaction, so a row one test writes is gone
+for the next.
+
+Keep these limits in mind:
+
+- The pool holds one connection, as under `fresh`. Code that holds a
+  transaction of its own (`DB::begin_transaction`) and runs a query
+  outside it waits for the connection until the acquire timeout.
+- A statement that ends the transaction itself defeats the rollback:
+  DDL on MySQL commits implicitly, and so does a raw `COMMIT`. Create
+  tables in migrations, not in the test body.
+- Test processes that share a Postgres or MySQL database don't see
+  each other's rows, but two tests that insert the same unique key
+  wait for each other. SQLite allows one writer, so tests that share a
+  SQLite file wait for each other's writes, up to the busy timeout.
+  Give parallel test processes their own file.
+- A transaction that asks for an isolation level, as the render cache
+  asks for `REPEATABLE READ`, runs at the level of the test
+  transaction, since a savepoint can't change it.
+
+### `refresh_lazily`
+
+`refresh_lazily` registers its connection at once and does the work of
+`refresh` on the first query, the first transaction, or the first
+seeder: it begins the transaction, migrates, and then runs the query.
+
+A migration that fails on that first query can't fail the query from
+inside the pool. The query runs on the database as it is, which usually
+fails on a missing table, and dropping the helper fails the test with
+the migration's error.
+
+### `migrate`
+
+`migrate` runs the migrations, schema dump included, on the connection
+it registers. There's no transaction around the test, so another
+connection sees its rows. When the helper drops, it rolls back the
+migrations it ran and no others, and the next `refresh` of the process
+migrates again. Use it for a test whose code must see committed rows
+from a second connection.
+
+When a migration fails, `migrate` rolls back the migrations that ran
+before it and returns the error. When the rollback on drop fails, the
+drop panics, so a test can't pass while it leaves its tables behind.
+Tables that a schema dump created stay, since a dump has nothing to
+roll back. Two `migrate` tests on one database must not run at once.
+
+### Seed before the body
+
+`seed::<S>()` runs the seeder `S` on the test database and hands the
+helper back, so it chains after any constructor. `seed_root()` runs
+the root seeder, as a bare `db:seed` does: the seeder registered with
+`seed::register_root`, or every registered seeder in order when there
+is no root. `seed_root()` returns an error when no seeder is
+registered, instead of seeding nothing.
+
+```rust
+let db = TestDatabase::refresh::<Migrator>()
+    .await
+    .unwrap()
+    .seed::<UsersSeeder>()
+    .await
+    .unwrap();
+
+assert_eq!(User::query().count().await.unwrap(), 50);
+```
+
+`S` runs whether or not it's registered; the seeders it calls are
+found in the registry. Under `refresh`, the seeded rows belong to the
+test transaction and are gone for the next test.
+[`#[suprnova_test]`](testing.md#suprnova_test---when-you-want-the-sugar)
+takes the same choices as keys: `refresh`, `seed`, and `seed = Path`.
+
+### Why Suprnova diverges
+
+- Laravel's `RefreshDatabase` runs `migrate:fresh` once per process,
+  which drops every table first. `refresh` runs the pending migrations
+  only. Dropping tables isn't safe when several test processes share
+  one database, and a migrated database stays valid between runs. To
+  start from empty tables, run `migrate:fresh` on the test database
+  before the run.
+- Laravel's `#[Seed]` seeds once per process, inside `migrate:fresh`,
+  and the rows stay committed. `seed` runs in each test, inside its
+  transaction, so a seeder that inserts rows doesn't add them again on
+  every run of a database that keeps its tables.
+- Laravel keeps one in-memory PDO per process, so `RefreshDatabase`
+  works with `:memory:`. A Suprnova in-memory database belongs to one
+  pool, so `refresh` needs a database that outlives a connection, and
+  `fresh` is the in-memory helper.
+- Laravel counts the test transaction in `DB::transactionLevel()`.
+  `DB::transaction_level()` doesn't, because the test transaction sits
+  below the framework's own transactions.
 
 ## How isolation actually works
 
-The fresh-database-per-test model is the isolation mechanism. Each
-call to `fresh()` or `sqlite_memory()` opens a new `sqlite::memory:`
+For `fresh` and `sqlite_memory`, the fresh-database-per-test model is
+the isolation mechanism. Each call opens a new `sqlite::memory:`
 connection, which under SQLite is an entirely separate database
 instance - no shared schema, no shared rows, no other test can see
-into it. There is no transaction wrapper, no `RefreshDatabase` trait
-to opt into and no rollback to remember: the *next* test gets a
-clean empty DB because it builds its own.
+into it. There is no transaction wrapper and no rollback to remember:
+the *next* test gets a clean empty DB because it builds its own. The
+constructors that run on `DATABASE_URL` isolate tests with a
+transaction instead; see
+[How `refresh` holds a test](#how-refresh-holds-a-test).
 
 When the `TestDatabase` value drops, three things happen, in this
 order:
@@ -134,15 +287,18 @@ order:
    test still depends on - the standing trap that prompted the
    refcount.)
 3. The SQLite connection itself drops, which destroys the in-memory
-   database.
+   database. For `refresh` and `refresh_lazily`, this step closes the
+   test's connection and the database discards its transaction; for
+   `migrate`, it rolls the migrations back.
 
 Because state is rebuilt rather than rolled back, the isolation is
 stronger than `BEGIN`/`ROLLBACK` wrapping: there is no committed
 state to mistakenly survive, no nested transaction quirks, no
 sequence-counter drift between tests. The cost is that you pay for
 running the migrator once per test (negligible for SQLite with most
-schemas; if it becomes a real cost, see "Sharing a migrated database
-across tests" below).
+schemas; if it becomes a real cost, `refresh` migrates a file or
+server database once per process - see
+[Tests on the configured database](#tests-on-the-configured-database)).
 
 ## Why the pool is pinned to one connection
 
@@ -218,9 +374,11 @@ factory surface (states, sequences, `with`-relations, `count`,
 
 ## Seeders in tests
 
-Seeders are functions you've registered with the framework's
+The shortest form is `seed::<S>()` on the test database, which runs
+`S` before the test body; see [Seed before the body](#seed-before-the-body).
+Seeders are also functions you've registered with the framework's
 seeder registry under a stable name. Two patterns for driving them
-from tests, one for each axis of intent.
+from tests by name, one for each axis of intent.
 
 ### Run a single seeder by name
 
@@ -311,7 +469,8 @@ between the two.
 two reasons:
 
 - **Each test gets its own `sqlite::memory:` connection.** Tests do
-  not share DB state.
+  not share DB state. Under `refresh`, each test gets its own
+  connection and transaction on the shared database instead.
 - **The bound connection lives in the thread-local
   `TestContainer`.** Tests do not share container bindings.
 
@@ -375,10 +534,8 @@ task-local / thread-local / global layering.
 
 ## SQLite in-memory vs a real Postgres / MySQL / MariaDB
 
-`TestDatabase` is intentionally SQLite-only. The driver is hardcoded
-to `sqlite::memory:`; there is no `TestDatabase::postgres()`,
-`fresh_with_url()`, or env-driven variant. For the overwhelming
-majority of test surface - model CRUD, query builder shape, cast
+`fresh` and `sqlite_memory` are SQLite-only: the driver is
+`sqlite::memory:`. For the overwhelming majority of test surface - model CRUD, query builder shape, cast
 round-trips, relationship loading, observer firing order, soft-delete
 semantics - SQLite in-memory is the right tool: zero setup, zero
 network, milliseconds per test, perfect isolation, no external
@@ -403,8 +560,12 @@ There are four cases where SQLite in-memory isn't enough:
    actually work on the real DB we deploy to?" tests, gated to
    CI, are worth keeping even when the unit-test layer is SQLite.
 
-For all four cases the pattern is the same: step outside
-`TestDatabase` entirely, build a `DbConnection` against an
+For all four cases, point `DATABASE_URL` at that engine and build the
+test database with `refresh`, or with `migrate` when the code under
+test must see committed rows from a second connection; see
+[Tests on the configured database](#tests-on-the-configured-database).
+For a driver-level test that needs no migrator, or a second database
+beside the primary, build a `DbConnection` against an
 operator-supplied `DATABASE_URL`-style env var, env-gate the test
 so it skips when the var is absent, and mark it `#[serial]` so two
 of them don't fight over the shared real database. The
@@ -512,6 +673,8 @@ returns that same connection directly.
   `test!`, fakes.
 - [Database](database.md#testing) - the surface-level testing
   section that introduces `TestDatabase`.
+- [Migrations](migrations.md) - the `migrate` command and schema dumps
+  that `refresh` and `migrate` run.
 - [Eloquent → Factories](eloquent-factories.md) - factory definition
   syntax, states, sequences, relations.
 - [Seeding](seeding.md) - seeder authoring, ordering, idempotency.

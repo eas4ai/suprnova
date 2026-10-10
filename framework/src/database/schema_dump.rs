@@ -435,8 +435,9 @@ impl Engine {
 
 /// Loads the dump `schema` names, or the engine's default one, when `M`'s
 /// ledger records no migration; an empty ledger table is dropped first,
-/// since the dump creates it.
-async fn load_when_empty<M: MigratorTrait>(
+/// since the dump creates it. `TestDatabase::migrate` calls it on the
+/// connection it registers, before it runs the migrations there.
+pub(crate) async fn load_when_empty<M: MigratorTrait>(
     url: &str,
     db: &DatabaseConnection,
     schema: Option<&Path>,
