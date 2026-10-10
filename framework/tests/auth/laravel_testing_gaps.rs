@@ -4,6 +4,11 @@
 //! through the named guard, as Laravel's `actingAs` does. No test writes a
 //! middleware to sign the user in.
 //!
+//! `acting_as_with_guard` also makes the named guard the guard in use for
+//! every request the client sends, as Laravel's `actingAs($user, $guard)`
+//! calls `shouldUse`: `Auth::user()`, `Auth::id()`, `Auth::check()` and the
+//! auth middleware without a guard name answer through it.
+//!
 //! The provider of every guard here knows nobody, so a request that
 //! answers as the user got that user from `acting_as`, never from a lookup.
 //! Requests run inside a `TestContainer` scope, so the scope's
@@ -13,14 +18,14 @@
 //! register one in the global container.
 
 use std::any::Any;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use suprnova::http::text;
 use suprnova::testing::{TestClient, TestContainer};
 use suprnova::{
-    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, FrameworkError, GuardConfig,
-    MiddlewareRegistry, Request, Response, Router, UserProvider,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, Credentials, FrameworkError,
+    Guard, GuardConfig, MiddlewareRegistry, Request, Response, Router, UserProvider,
 };
 
 /// The user the tests act as.
@@ -77,6 +82,17 @@ async fn me(_request: Request) -> Response {
     text(format!("user={user:?} member={member:?}"))
 }
 
+/// Answers what the facade without a guard name reports: `Auth::user()`,
+/// `Auth::id()` and `Auth::check()`.
+async fn facade(_request: Request) -> Response {
+    let user = Auth::user().await?.map(|user| user.get_auth_identifier());
+    text(format!(
+        "user={user:?} id={:?} check={}",
+        Auth::id(),
+        Auth::check()
+    ))
+}
+
 /// Answers the user the guard `X-Guard` names sees.
 async fn guard_user(request: Request) -> Response {
     let guard = request.header("x-guard").unwrap_or("web").to_owned();
@@ -87,7 +103,9 @@ async fn guard_user(request: Request) -> Response {
 /// A client whose `/me` route sits behind the default guard's auth
 /// middleware, `/login-first` behind the one that redirects to the login
 /// page, `/admin` and `/api` behind those guards' middleware, and `/guards`
-/// behind none. `reached` counts the requests a handler answered.
+/// behind none. `/admin-facade` and `/api-facade` answer [`facade`] behind
+/// those guards' middleware, `/facade` behind none. `reached` counts the
+/// requests a handler answered.
 fn client(reached: &Arc<AtomicUsize>) -> TestClient {
     let router = Router::new()
         .get("/me", counted(reached, me))
@@ -98,7 +116,12 @@ fn client(reached: &Arc<AtomicUsize>) -> TestClient {
         .middleware(AuthMiddleware::new().for_guard("admin"))
         .get("/api", counted(reached, guard_user))
         .middleware(AuthMiddleware::new().for_guard("api"))
-        .get("/guards", counted(reached, guard_user));
+        .get("/guards", counted(reached, guard_user))
+        .get("/admin-facade", counted(reached, facade))
+        .middleware(AuthMiddleware::new().for_guard("admin"))
+        .get("/api-facade", counted(reached, facade))
+        .middleware(AuthMiddleware::new().for_guard("api"))
+        .get("/facade", counted(reached, facade));
     TestClient::new(router, MiddlewareRegistry::new())
 }
 
@@ -207,11 +230,18 @@ async fn acting_as_with_guard_signs_the_user_into_the_named_token_guard_only() {
             .assert_see(r#"Some("7")"#);
         assert_eq!(user_of(&client, "api").await, r#"Some("7")"#);
 
-        // The default guard has no user: its route refuses, and it names
-        // nobody.
-        client.get("/me").send().await.assert_status(401);
+        // The configured default guard and the other guards hold no user.
+        // The auth middleware without a guard name asks the guard in use,
+        // so the default route answers as the user, as Laravel's `auth`
+        // middleware does after `shouldUse('api')`.
         assert_eq!(user_of(&client, "web").await, "None");
         assert_eq!(user_of(&client, "admin").await, "None");
+        client
+            .get("/me")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(r#"user=Some("7") member=Some("7")"#);
     })
     .await;
 }
@@ -231,10 +261,17 @@ async fn acting_as_with_guard_signs_the_user_into_the_named_session_guard_only()
             .assert_ok()
             .assert_see(r#"Some("9")"#);
 
-        client.get("/me").send().await.assert_status(401);
+        // Another named guard's route refuses: only `admin` holds the user.
         client.get("/api").send().await.assert_status(401);
         assert_eq!(user_of(&client, "web").await, "None");
         assert_eq!(user_of(&client, "api").await, "None");
+        // The default route asks the guard in use.
+        client
+            .get("/me")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(r#"user=Some("9") member=Some("9")"#);
     })
     .await;
 }
@@ -252,6 +289,181 @@ async fn acting_as_with_the_default_guard_name_is_acting_as() {
             .await
             .assert_ok()
             .assert_see(r#"user=Some("7")"#);
+    })
+    .await;
+}
+
+/// What the facade without a guard name reports for `user`.
+fn signed_in_as(id: &str) -> String {
+    format!(r#"user=Some("{id}") id=Some("{id}") check=true"#)
+}
+
+/// What the facade without a guard name reports for a guest.
+const GUEST: &str = "user=None id=None check=false";
+
+#[tokio::test]
+async fn acting_as_with_guard_makes_the_named_guard_the_guard_the_facade_answers_through() {
+    TestContainer::scope(async {
+        install_manager();
+        let reached = Arc::new(AtomicUsize::new(0));
+        let guest = client(&reached);
+
+        // The token guard: behind its middleware and behind none, the
+        // handler's `Auth::user()`, `Auth::id()` and `Auth::check()` answer
+        // through it.
+        let api = guest.clone().acting_as_with_guard(&Member::new("7"), "api");
+        for path in ["/api-facade", "/facade"] {
+            api.get(path)
+                .send()
+                .await
+                .assert_ok()
+                .assert_see(&signed_in_as("7"));
+        }
+
+        // A session guard the same way.
+        let admin = guest
+            .clone()
+            .acting_as_with_guard(&Member::new("9"), "admin");
+        for path in ["/admin-facade", "/facade"] {
+            admin
+                .get(path)
+                .send()
+                .await
+                .assert_ok()
+                .assert_see(&signed_in_as("9"));
+        }
+
+        // The configured default guard itself still holds nobody.
+        assert_eq!(user_of(&api, "web").await, "None");
+        assert_eq!(user_of(&admin, "web").await, "None");
+
+        // The choice of guard belongs to the requests of the client that made
+        // it: a client on the same application that acts as nobody is a guest.
+        guest.get("/api-facade").send().await.assert_status(401);
+        guest.get("/admin-facade").send().await.assert_status(401);
+        guest
+            .get("/facade")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(GUEST);
+    })
+    .await;
+}
+
+/// A guard of the application that keeps its user on the instance, in a
+/// plain mutex, as a valid [`Guard`] may: a user set on one instance is the
+/// user of that instance alone.
+#[derive(Default)]
+struct InstanceGuard {
+    user: Mutex<Option<Arc<dyn Authenticatable>>>,
+}
+
+impl InstanceGuard {
+    fn held(&self) -> Option<Arc<dyn Authenticatable>> {
+        self.user
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Guard for InstanceGuard {
+    async fn user(&self) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok(self.held())
+    }
+
+    async fn id(&self) -> Result<Option<String>, FrameworkError> {
+        Ok(self.held().map(|user| user.get_auth_identifier()))
+    }
+
+    async fn validate(&self, _credentials: &Credentials) -> Result<bool, FrameworkError> {
+        Ok(false)
+    }
+
+    async fn set_user(&self, user: Arc<dyn Authenticatable>) {
+        *self.user.lock().unwrap_or_else(PoisonError::into_inner) = Some(user);
+    }
+
+    async fn has_user(&self) -> bool {
+        self.held().is_some()
+    }
+}
+
+/// Declares `partner`, a guard of the `instance` driver over the `users`
+/// provider, next to the conventional guards, with `default` as the default
+/// guard. The driver's factory builds a fresh [`InstanceGuard`] each time it
+/// runs and counts its runs in the returned counter.
+fn install_instance_guard(default: &str) -> Arc<AtomicUsize> {
+    let entry = GuardConfig::custom("instance", "users");
+    let config = AuthConfig::new(default).guard("partner", entry);
+    TestContainer::singleton(AuthManager::new(config));
+    Auth::register_provider("users", Arc::new(Nobody)).unwrap();
+    let built = Arc::new(AtomicUsize::new(0));
+    let counted = built.clone();
+    Auth::extend("instance", move |_name, _provider| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(InstanceGuard::default()) as Arc<dyn Guard>)
+    })
+    .unwrap();
+    built
+}
+
+#[tokio::test]
+async fn acting_as_reaches_a_custom_default_guard_that_keeps_its_user_on_the_instance() {
+    TestContainer::scope(async {
+        let built = install_instance_guard("partner");
+        let reached = Arc::new(AtomicUsize::new(0));
+        let guest = client(&reached);
+        let client = guest.clone().acting_as(&Member::new("7"));
+
+        for request in 1..=2 {
+            client
+                .get("/me")
+                .send()
+                .await
+                .assert_ok()
+                .assert_see(r#"user=Some("7") member=Some("7")"#);
+            // The client, the auth middleware and the handler's two reads
+            // each ask the manager for the guard; the request builds it once
+            // and every one of them reaches the instance holding the user.
+            assert_eq!(built.load(Ordering::SeqCst), request);
+        }
+
+        // Another client on the same application acts as nobody: its request
+        // gets an instance of its own, which holds nobody.
+        guest.get("/me").send().await.assert_status(401);
+        assert_eq!(built.load(Ordering::SeqCst), 3);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn acting_as_with_guard_reaches_a_custom_guard_that_keeps_its_user_on_the_instance() {
+    TestContainer::scope(async {
+        install_instance_guard("web");
+        let reached = Arc::new(AtomicUsize::new(0));
+        let client = client(&reached).acting_as_with_guard(&Member::new("7"), "partner");
+
+        // `Auth::user()` asks the guard in use. `Auth::id()` and
+        // `Auth::check()` cannot wait on a guard of the application, so they
+        // report nobody rather than another guard's user.
+        client
+            .get("/facade")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(r#"user=Some("7") id=None check=false"#);
+        // The auth middleware without a guard name asks the guard in use.
+        client
+            .get("/me")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(r#"user=Some("7") member=Some("7")"#);
+        assert_eq!(user_of(&client, "partner").await, r#"Some("7")"#);
+        assert_eq!(user_of(&client, "web").await, "None");
     })
     .await;
 }

@@ -25,7 +25,9 @@
 //! `withHeaders` and `actingAs` do. The user is set on the guard at the
 //! start of each request, through a middleware the client puts in front
 //! of the registry's own, so every middleware and handler downstream sees
-//! it.
+//! it. The auth manager keeps one instance per guard for the request, so
+//! the instance the user was set on is the one every later resolution
+//! reaches.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -200,8 +202,15 @@ impl TestClient {
     /// [`Self::acting_as`] through the guard named `guard`, as Laravel's
     /// `actingAs($user, $guard)` does: a route behind
     /// `AuthMiddleware::new().for_guard(guard)` answers as the user, and
-    /// `Auth::guard(guard)` reports the user. The default guard gets no
-    /// user unless `guard` is its name.
+    /// `Auth::guard(guard)` reports the user.
+    ///
+    /// The named guard is also the guard in use for every request the
+    /// client sends, as `actingAs` calls `shouldUse($guard)`: [`Auth::user`],
+    /// [`Auth::id`], [`Auth::check`] and the auth middleware without a guard
+    /// name answer through it. The choice belongs to this client's requests;
+    /// the application's configured default guard is unchanged, holds no
+    /// user unless `guard` is its name, and is still the guard that the
+    /// functions signing a user in or out act on.
     ///
     /// A guard the application did not register fails every request with
     /// an error naming it before any middleware or handler runs, so the
@@ -474,8 +483,13 @@ struct ActingAs {
 
 impl ActingAs {
     /// Set the user on the guard, as Laravel's `actingAs` calls
-    /// `setUser` on it. Without an [`AuthManager`] the only guard is the
-    /// default one, which [`Auth::set_user`] serves.
+    /// `setUser` on it, and make a named guard the guard in use for the
+    /// request, as it calls `shouldUse`. Without an [`AuthManager`] the only
+    /// guard is the default one, which [`Auth::set_user`] serves.
+    ///
+    /// The manager keeps the instance the user is set on for the rest of
+    /// the request, so a guard that keeps its user on the instance answers
+    /// the middleware and the handler with it.
     ///
     /// # Errors
     ///
@@ -509,6 +523,9 @@ impl ActingAs {
             )
         })?;
         guard.set_user(user).await;
+        if self.guard.is_some() {
+            crate::auth::request_state::set_used_guard(&name);
+        }
         Ok(())
     }
 }

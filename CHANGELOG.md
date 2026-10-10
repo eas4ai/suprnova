@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A guard in use per request.** `TestClient::acting_as_with_guard` selects
+  the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
+  auth middleware without a guard name answer through for that request, as
+  Laravel's `actingAs` with a guard calls `shouldUse`; the configured default
+  guard is untouched outside that request.
+- **One guard instance per request.** Inside a request the auth manager builds
+  one instance per guard name and keeps it, so a custom guard's factory runs
+  once per request and a guard may keep its user on the instance.
 - **Factory record batches.** `create_many` accepts a count or per-record
   attribute maps, with each map overriding the factory definition.
 - **Custom ULID lengths.** `ulid_with_length` and the `length` modifier
