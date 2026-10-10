@@ -474,7 +474,9 @@ async fn render_page(
         .collect();
 
     let status = http.status_code();
-    let mut page = InertiaResponse::new(component.clone());
+    // The document head takes the metadata `Head::errors` registered for
+    // this status (PAR-160).
+    let mut page = InertiaResponse::new(component.clone()).head_status(status);
     for (key, value) in props {
         page = page.prop(key, Prop::eager(value));
     }

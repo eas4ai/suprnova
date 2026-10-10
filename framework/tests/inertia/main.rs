@@ -15,6 +15,7 @@ pub mod flash_session;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
 pub mod inertia;
+pub mod laravel_infra_gaps;
 pub mod location;
 pub mod merge_paths;
 pub mod middleware;

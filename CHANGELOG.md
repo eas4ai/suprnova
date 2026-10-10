@@ -1234,6 +1234,50 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   a request inside a fake that no stub answers reach the network when its URL
   matches.
 
+- **Vite tags for any page.** `Vite::tags(entries)`, `Vite::to_html()` and
+  `InertiaConfig::vite_tags(entries)` render the build manifest's scripts,
+  stylesheets and preloads for any number of entry points, each file once and
+  every stylesheet before the first script, under the public root; a missing
+  manifest is an error that names its path, and a missing entry one that
+  names the entry.
+- **Entry points beside `entry_point`.** `InertiaConfig::entry_points` adds
+  entries, such as a stylesheet entry, that the Inertia document and
+  `Vite::to_html()` load with the main one.
+- **The hot file, readable.** `InertiaConfig::hot_file`, `Vite::hot_file`,
+  `Vite::is_running_hot` and `Vite::dev_server_url` answer the hot file's
+  path, whether it exists and the dev server URL it holds; production never
+  reads it.
+- **The document head.** `Head` resolves the title (with an inherited prefix
+  or suffix), description, canonical URL and robots directives from the
+  defaults, route groups and routes (`with_head`), run-time calls and error
+  statuses (`Head::errors`), field by field; `Head::render_html` renders the
+  escaped tags and `Head::to_array` returns them as data.
+- **The head on Inertia pages.** Every Inertia response that a head layer
+  sets something for shares the head as a `head` prop of keyed tags, left out
+  of partial reloads and renamed with `Head::inertia`; the first visit writes
+  the tags once, deduplicated against the SSR head, and `Head::inertia_globals`
+  adds tags for the first visit only.
+- **Head metadata beyond the title.** Open Graph values and media, X cards
+  filled from the page, theme colors, application metadata and icons, `pwa`,
+  resource hints, locale alternates, feeds, pagination links, custom meta and
+  link tags, and JSON-LD schemas with breadcrumb and FAQ builders.
+- **Precognition answers from any error bag.**
+  `Precognition::after_validation(&request, errors)` answers a precognitive
+  request with `204` or `422`, and passes an ordinary one or fails it with the
+  ordinary validation error.
+- **The Precognition selection in hooks.** `Precognition::should_validate(field)`
+  answers whether a precognitive request listed the field while a form
+  request's, a data object's or a multipart form's after-validation hooks run.
+- **Fallible CSRF helpers.** `try_csrf_token()` and `try_csrf_field()` return
+  an error that names the missing session.
+- **Raw cookies.** `Cookie::raw(name, value)` writes its value without
+  percent-encoding, and refuses a name that is not an RFC 6265 token or a value
+  byte outside cookie-octet; `Cookie::is_raw` tells the two forms apart.
+- **Shared view data.** `View::share`, `View::share_for_request` and
+  `View::shared` hand values to every checked view through Askama's runtime
+  values; a value shared for one request never reaches another request, the
+  render cache included.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -2116,6 +2160,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   include the `Content-Type` a JSON, form or multipart body sets, the user
   agent, and the headers global middleware adds, and the recorded URL has its
   base URL, URL parameters and query applied.
+
+- **Development pages load an existing build when no hot file exists.** In
+  development the Vite tags point at the dev server only while the hot file
+  exists, and at the manifest's files while it does not and a manifest exists.
+  A frontend that declares no `@inertiajs/vite` and holds a manifest from an
+  earlier build now loads that build instead of the dev server: declare
+  `@inertiajs/vite`, as every starter kit does, or delete the stale build.
+- **Database rules in hooks follow the Precognition selection.**
+  `AsyncRule::check_async`, `Exists::check_value` and `Exists::check_each`
+  (selected under `<field>.*`) skip a field a precognitive request did not
+  list, so they neither query nor fail; errors a hook adds stay unfiltered.
+- **The CSRF field turns autocomplete off.** `csrf_field()` renders
+  `autocomplete="off"`, so a browser does not restore a stale token into it.
 
 ### Fixed
 

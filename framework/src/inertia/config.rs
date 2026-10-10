@@ -240,6 +240,12 @@ pub struct InertiaConfig {
     pub vite_dev_server: String,
     /// Vite entry point. Defaults to the frontend's standard entry.
     pub entry_point: String,
+    /// Entry points loaded beside [`entry_point`](Self::entry_point), such
+    /// as a stylesheet entry (`src/app.css`) or a second script. The
+    /// Inertia shell and [`Vite::to_html`](crate::Vite::to_html) write the
+    /// tags of all of them. Empty by default; add to it with
+    /// [`entry_points`](Self::entry_points).
+    pub extra_entry_points: Vec<String>,
     /// Asset version source for cache busting / version-mismatch
     /// detection. Defaults to [`VersionResolver::Manifest`], hashing
     /// [`manifest_path`](Self::manifest_path), with the
@@ -285,12 +291,14 @@ pub struct InertiaConfig {
     /// `public/assets/.vite/manifest.json`, matching the framework's
     /// scaffolded `vite.config.ts` (`outDir: '../public/assets'`).
     ///
-    /// When the file exists, `render_prod_head` resolves the entry
-    /// point to its hashed output + CSS + transitively-imported
-    /// chunks (for `modulepreload`). When it's missing the framework
-    /// falls back to the legacy hardcoded `/{assets_base_url}/main.js`
-    /// path and emits a `tracing::warn!` so the gap is visible in
-    /// production logs.
+    /// When the file exists, the asset tags resolve each entry point to
+    /// its hashed output + CSS + transitively-imported chunks (for
+    /// `modulepreload`). When it's missing the production shell falls
+    /// back to the legacy hardcoded `/{assets_base_url}/main.js` path and
+    /// emits a `tracing::warn!` so the gap is visible in production logs,
+    /// and [`vite_tags`](Self::vite_tags) returns an error naming the
+    /// path. In development the manifest is used while no hot file exists
+    /// (see [`SsrConfig::hot_file`]).
     pub manifest_path: PathBuf,
     /// URL prefix under which the Vite build assets are served (e.g.
     /// `/assets`). Combined with the manifest entry's `file` field to
@@ -549,6 +557,10 @@ pub struct SsrConfig {
     /// writes while it runs Vite for a frontend that declares the Inertia
     /// Vite plugin (`@inertiajs/vite`), and removes when Vite stops. Set it
     /// with [`InertiaConfig::ssr_hot_file`].
+    ///
+    /// In development it decides the asset tags too: they point at the dev
+    /// server while the file exists and at the build manifest's files
+    /// while it does not and a manifest exists. Production never reads it.
     pub hot_file: PathBuf,
     /// Where SSR is dispatched in hot mode, at `/__inertia_ssr`: Laravel's
     /// `inertia.ssr.hot_url`. The Vite dev server renders the page from
@@ -725,6 +737,7 @@ impl Default for InertiaConfig {
         Self {
             vite_dev_server: vite_dev_server_from_env(),
             entry_point: frontend.default_entry_point().to_string(),
+            extra_entry_points: Vec::new(),
             // Hash of the build manifest, not a literal: an app that
             // never remembers to bump a hardcoded string serves stale
             // bundles to long-lived clients forever. Falls back to the
@@ -788,6 +801,82 @@ impl InertiaConfig {
     pub fn entry_point(mut self, entry: impl Into<String>) -> Self {
         self.entry_point = entry.into();
         self
+    }
+
+    /// Add entry points loaded beside [`entry_point`](Self::entry_point),
+    /// as the entry points Laravel's `@vite` directive names: a stylesheet
+    /// entry, or a script every page needs. The Inertia shell and
+    /// [`Vite::to_html`](crate::Vite::to_html) write the tags of every
+    /// configured entry point, and each must be in the build's manifest.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new().entry_points(["src/app.css"]);
+    /// # let _ = cfg;
+    /// ```
+    pub fn entry_points<I, S>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_entry_points
+            .extend(entries.into_iter().map(Into::into));
+        self
+    }
+
+    /// The configured entry points in order, `entry_point` first, each
+    /// once.
+    pub(crate) fn configured_entry_points(&self) -> Vec<&str> {
+        let mut entries = vec![self.entry_point.as_str()];
+        for entry in &self.extra_entry_points {
+            if !entries.contains(&entry.as_str()) {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
+    /// The `<script>` and `<link>` tags that load `entry_points`, for a
+    /// page the Inertia shell does not write: an Askama view, an error
+    /// page. Laravel's `Vite::__invoke`.
+    ///
+    /// With the build manifest, each entry's script, its stylesheets and a
+    /// `modulepreload` for each imported chunk, deduplicated across the
+    /// entries, every stylesheet before the first script, and each URL
+    /// under [`assets_base_url`](Self::assets_base_url) with the public
+    /// root in front, as the Inertia shell writes them. In development the
+    /// tags point at the Vite dev server instead while the
+    /// [`hot_file`](Self::hot_file) exists, or when no manifest exists;
+    /// production never reads the hot file.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{FrameworkError, InertiaConfig};
+    ///
+    /// fn admin_assets(config: &InertiaConfig) -> Result<String, FrameworkError> {
+    ///     config.vite_tags(["src/admin.ts", "src/admin.css"])
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the manifest's path when the tags need the
+    /// manifest and it does not exist or cannot be parsed, and an error
+    /// naming the entry when the manifest lacks one, as Laravel throws.
+    pub fn vite_tags<I, S>(&self, entry_points: I) -> Result<String, crate::FrameworkError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let entries: Vec<S> = entry_points.into_iter().collect();
+        let entries: Vec<&str> = entries.iter().map(AsRef::as_ref).collect();
+        super::vite::tags(self, &entries).map_err(|error| error.into_framework_error(self))
+    }
+
+    /// The Vite hot file's path, the one [`ssr_hot_file`](Self::ssr_hot_file)
+    /// sets: `public/hot` by default. Laravel's `Vite::hotFile`.
+    pub fn hot_file(&self) -> &std::path::Path {
+        &self.ssr.hot_file
     }
 
     /// Set a static asset version string. For dynamic versions
@@ -1073,7 +1162,7 @@ impl InertiaConfig {
     /// The dev server's URL from the hot file, or `None` when there is no
     /// hot file: its trimmed content, or the configured dev server URL when
     /// it is empty or cannot be read.
-    fn hot_file_url(&self) -> Option<String> {
+    pub(crate) fn hot_file_url(&self) -> Option<String> {
         let path = &self.ssr.hot_file;
         if !path.is_file() {
             return None;

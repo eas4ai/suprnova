@@ -75,6 +75,21 @@ impl ViewRenderer {
         assets: AssetSet,
         mounts: Vec<MountMetadata>,
     ) -> Result<DocumentRender, ViewError> {
+        self.render_document_with_values(view, template, response, assets, mounts, &())
+    }
+
+    /// Renders one complete document as [`Self::render_document`] does,
+    /// with host-supplied runtime values the template reads through
+    /// Askama's `value` filter (see [`ViewTemplate::render_view_with_values`]).
+    pub fn render_document_with_values<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        response: DocumentResponseIntent,
+        assets: AssetSet,
+        mounts: Vec<MountMetadata>,
+        values: &dyn askama::Values,
+    ) -> Result<DocumentRender, ViewError> {
         self.validate_common_metadata(&view, &assets)?;
         if mounts.len() > self.limits.max_mounts() {
             return Err(ViewError::at(ViewErrorKind::TooManyMounts, &view));
@@ -85,7 +100,7 @@ impl ViewRenderer {
         {
             return Err(ViewError::at(ViewErrorKind::InvalidMountMetadata, &view));
         }
-        let body = self.render_body(&view, template)?;
+        let body = self.render_body(&view, template, values)?;
         let text = std::str::from_utf8(&body)
             .map_err(|_| ViewError::at(ViewErrorKind::TemplateRenderFailed, &view))?;
         let inspection = island::inspect_html(text);
@@ -109,7 +124,21 @@ impl ViewRenderer {
         assets: AssetSet,
         children: Vec<ChildMount>,
     ) -> Result<IslandRender, ViewError> {
-        let body = self.render_body(&view, template)?;
+        self.render_island_with_values(view, template, assets, children, &())
+    }
+
+    /// Renders one island as [`Self::render_island`] does, with
+    /// host-supplied runtime values the template reads through Askama's
+    /// `value` filter.
+    pub fn render_island_with_values<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        assets: AssetSet,
+        children: Vec<ChildMount>,
+        values: &dyn askama::Values,
+    ) -> Result<IslandRender, ViewError> {
+        let body = self.render_body(&view, template, values)?;
         self.validate_island_output(
             view,
             IslandRender {
@@ -128,7 +157,7 @@ impl ViewRenderer {
         assets: AssetSet,
         children: Vec<ChildMount>,
     ) -> Result<IslandRender, ViewError> {
-        let body = self.render_body(&view, template)?;
+        let body = self.render_body(&view, template, &())?;
         let output = IslandRender {
             body,
             assets,
@@ -231,6 +260,7 @@ impl ViewRenderer {
         &self,
         view: &ViewName,
         template: &T,
+        values: &dyn askama::Values,
     ) -> Result<Bytes, ViewError> {
         let mut output = BoundedOutput::new(self.limits.max_body_bytes());
         let overflow = |output: &BoundedOutput| {
@@ -243,7 +273,7 @@ impl ViewRenderer {
                 },
             )
         };
-        if let Err(failure) = template.render_view(&mut output) {
+        if let Err(failure) = template.render_view_with_values(&mut output, values) {
             if output.overflowed {
                 return Err(overflow(&output));
             }

@@ -73,6 +73,18 @@ enum GroupMethod {
 }
 
 impl GroupBuilder {
+    /// Set the document head metadata of every route in this group, the
+    /// group layer of [`Head`](crate::Head): a route's own metadata and the
+    /// request's run-time calls win over it, field by field. A nested
+    /// group's metadata wins over its parent's. Laravel Head's
+    /// `Route::withHead(...)->group(...)`.
+    pub fn with_head(
+        self,
+        f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
+    ) -> Self {
+        self.middleware(crate::view::head::HeadLayer::group(f))
+    }
+
     /// Apply middleware to all routes in this group
     ///
     /// # Example

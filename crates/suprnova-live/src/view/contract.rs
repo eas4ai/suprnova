@@ -126,6 +126,19 @@ mod sealed {
 pub trait ViewTemplate: sealed::Sealed {
     /// Writes template output into a framework-owned bounded buffer.
     fn render_view(&self, output: &mut dyn fmt::Write) -> Result<(), TemplateFailure>;
+
+    /// Writes template output with host-supplied runtime values, which the
+    /// template reads with Askama's `value` filter.
+    ///
+    /// The host decides what the values are (Suprnova passes the data an
+    /// application shares with every view); the engine only hands them to
+    /// the template. A template that reads a value the host did not supply
+    /// fails with [`TemplateFailure::MissingData`].
+    fn render_view_with_values(
+        &self,
+        output: &mut dyn fmt::Write,
+        values: &dyn askama::Values,
+    ) -> Result<(), TemplateFailure>;
 }
 
 impl<T> ViewTemplate for T
@@ -133,11 +146,25 @@ where
     T: Template,
 {
     fn render_view(&self, output: &mut dyn fmt::Write) -> Result<(), TemplateFailure> {
-        self.render_into(output).map_err(|error| match error {
-            askama::Error::ValueMissing => TemplateFailure::MissingData,
-            askama::Error::ValueType => TemplateFailure::InvalidData,
-            _ => TemplateFailure::Failed,
-        })
+        self.render_into(output).map_err(template_failure)
+    }
+
+    fn render_view_with_values(
+        &self,
+        output: &mut dyn fmt::Write,
+        values: &dyn askama::Values,
+    ) -> Result<(), TemplateFailure> {
+        self.render_into_with_values(output, values)
+            .map_err(template_failure)
+    }
+}
+
+/// The redacted class of an Askama render failure.
+fn template_failure(error: askama::Error) -> TemplateFailure {
+    match error {
+        askama::Error::ValueMissing => TemplateFailure::MissingData,
+        askama::Error::ValueType => TemplateFailure::InvalidData,
+        _ => TemplateFailure::Failed,
     }
 }
 
