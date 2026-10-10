@@ -3452,3 +3452,49 @@ Falsifier: a session written then read back lacks its payload; `destroy_for_user
 Mechanism: `par-laravel-gaps-mongodb`.
 Rationale: the rulings log's scope ("the queue, cache, session and batch stores it documents"); the trait `SessionStore` (framework/src/session/store.rs) beside the database driver (framework/src/session/driver/database.rs).
 Status: Agreed 2026-10-10
+
+## Laravel API gaps: concurrency
+
+The `Concurrency` facade the developer confirmed on 2026-10-07 17:17
+("Yes"): run several tasks at once and read their results, or defer them
+past the response, with drivers behind one trait: Tokio tasks by default,
+a process driver that runs each task in the console binary for the
+isolation Tokio tasks lack, and a sync driver that runs them in sequence
+for tests, as Laravel's `Concurrency` facade runs closures through its
+`process`, `fork` and `sync` drivers. Because a Rust closure cannot cross
+a process boundary, a task is a named, registered function with
+serializable input and output; the tokio and sync drivers run the same
+tasks in-process.
+
+[PAR-189] The framework MUST offer a `Concurrency` facade with
+`run(tasks)` answering each task's result in order and `run_named(tasks)`
+answering them by key, `with_timeout(duration)` ending a task that
+outlives it with an error naming the task, and `driver(name)` picking a
+driver for one call, over a `ConcurrencyDriver` trait with three
+drivers: `tokio` (the default) spawning each task on the runtime,
+`process` running each task in a fresh console binary through the
+`Process` facade (a hidden `concurrency:run` console command the
+framework registers executes one task by name from its serialized
+input), and `sync` awaiting them one after another; `CONCURRENCY_DRIVER`
+MUST select the default; a task is an `async fn` marked
+`#[suprnova::concurrent_task]`, registered at compile time, with
+`serde` input and output, and the process driver MUST fail a task name
+the binary does not know with an error naming it, as Laravel's
+`Concurrency::run` answers results in order or by key, `driver` picks
+`process`, `fork` or `sync`, and its timeout ends a task.
+Falsifier: two tasks that each sleep one second finish `run` in two seconds or more on the `tokio` or `process` driver, or in under two seconds on `sync`; `run_named` loses a key or answers the wrong task's result under it; a task that sleeps ten seconds under `with_timeout(1s)` on the `process` driver is still running three seconds later or the error does not name the task; `CONCURRENCY_DRIVER=sync` leaves the default on `tokio`; or the process driver accepts an unregistered task name.
+Mechanism: `par-laravel-gaps-concurrency`.
+Rationale: `reference/docs-13.x/concurrency.md` and `reference/framework-13.35.0/src/Illuminate/Concurrency/` (`ConcurrencyManager::driver`, `ProcessDriver::run`, `SyncDriver::run`); the developer's word of 2026-10-07 17:17 names the drivers: Tokio by default, a process driver for isolation, and sync. The `fork` driver has no Rust counterpart; the process driver is the isolating one.
+Status: Agreed 2026-10-10
+
+[PAR-190] `Concurrency::defer(tasks)` MUST return at once and run the
+tasks after the current response has been sent (through the framework's
+run-after-response facility), on the selected driver, discarding their
+results and logging a failure without failing the request; outside a
+request it MUST run them when the returned handle is awaited or
+dropped, as Laravel's `Concurrency::defer` runs the closures after the
+response through `defer`.
+Falsifier: a handler calling `Concurrency::defer([task])` answers only after the task ran; the task has not run two seconds after the client received the response; a failing deferred task turns the response into an error; or a deferred call outside a request never runs the task.
+Mechanism: `par-laravel-gaps-concurrency`.
+Rationale: `reference/docs-13.x/concurrency.md` ("Deferring Concurrent Tasks"); the bus module's after-response facility (framework/src/bus/after_response.rs) is the hook.
+Status: Agreed 2026-10-10

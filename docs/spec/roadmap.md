@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-mongodb
+Current: laravel-gaps-concurrency
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -963,6 +963,26 @@ Requirements: PAR-182, PAR-183, PAR-184, PAR-185, PAR-186, PAR-187, PAR-188
    `par-laravel-gaps-mongodb` (the `mongodb` test binary under the
    feature). Done when it passes on a committed tree, the manual
    passages are in place, and the review is recorded.
+
+## laravel-gaps-concurrency
+
+Requirements: PAR-189, PAR-190
+
+50. laravel-gaps-concurrency - the sixteenth of the parity rounds the
+   developer ordered on 2026-10-07 (17:35), the `docs:concurrency` row he
+   confirmed at 17:17: a `Concurrency` facade with `run`, `run_named`,
+   `with_timeout`, `driver` and `defer` over a `ConcurrencyDriver` trait
+   with the `tokio` (default), `process` and `sync` drivers, tasks being
+   registered `#[suprnova::concurrent_task]` functions with serde input
+   and output, grouped into PAR-189 and PAR-190. Delivery: the facade,
+   trait, drivers and the hidden `concurrency:run` console command in
+   `framework/src/concurrency/`; the task macro in `suprnova-macros/`; a
+   `concurrency` test binary under `framework/tests/concurrency/`; the
+   manual chapter `manual/concurrency.md` linked from
+   `manual/documentation.md`; the changelog. Mechanisms:
+   `par-laravel-gaps-concurrency` (the `concurrency` test binary). Done
+   when it passes on a committed tree, the manual passages are in place,
+   and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
