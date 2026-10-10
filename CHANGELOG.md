@@ -2846,6 +2846,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as the erased trait object, and carried no user identifier. The endpoints
   now check the user as `Gate::inspect_current` and `#[authorize]` do: the
   event carries the user's own type name and identifier.
+- **A CLI built between two releases pins the framework commit it was
+  built from.** `suprnova new` pinned a new project's `suprnova` dependency
+  at `v<CLI version>` even when the CLI was built from a later commit, as
+  on `main` between two releases, whose templates already used API the
+  last tag lacked (`DevToolsConfig`, `InertiaConfig::devtools`,
+  `Inertia::flash`), so the scaffold failed `cargo check` until the next
+  release. The CLI's build script now records the commit it is built from
+  and whether that commit is the release `v<version>`: a release build
+  still pins `tag = "v<version>"`, any other build pins
+  `rev = "<commit hash>"`, and a build where git cannot tell pins the tag.
+  `templates::framework_pin` returns the choice, and
+  `templates::cargo_toml_pinned` and `templates::api::cargo_toml_pinned`
+  render a manifest with a pin you give.
+- **What the script scan learns from member writes does not depend on
+  statement order.** A script may read back a name it writes on the global
+  object (`window[key] = value`), a member a class writes on `this` is the
+  instance's own, and a name a script writes on an object of its own may
+  be its method rather than a browser API's. The scan traced a computed
+  key's name during its first walk, while a name the walk had not reached
+  yet resolved where the walk stood and a function's calls counted only
+  once reached, so the same script was admitted in one statement order and
+  refused in another, and a read of a global name nothing wrote could
+  pass. The scan now settles those names after the first walk has met
+  every name and every call. It never admitted `eval`, `Worker` or another
+  property refused by name.
 
 ## 3.2.1 - 2026-10-05
 

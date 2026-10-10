@@ -63,10 +63,10 @@ fn scaffold(tmp: &Path) -> PathBuf {
     tmp.join(PROJECT)
 }
 
-/// Point every `suprnova = { git = ..., tag = ... }` line at the in-tree
-/// framework, keeping the feature shape the template chose, and add the
-/// HTTP crates the in-process client needs, pinned to the versions the
-/// workspace lockfile resolves.
+/// Point every `suprnova = { git = ..., tag = ... }` line, or its `rev =`
+/// form, at the in-tree framework, keeping the feature shape the template
+/// chose, and add the HTTP crates the in-process client needs, pinned to
+/// the versions the workspace lockfile resolves.
 fn patch_manifest(project: &Path) {
     let manifest_path = project.join("Cargo.toml");
     let original = fs::read_to_string(&manifest_path).expect("read scaffolded Cargo.toml");
@@ -77,8 +77,11 @@ fn patch_manifest(project: &Path) {
     for line in original.lines() {
         if line.trim_start().starts_with("suprnova = ") {
             let (before, rest) = line.split_once("git = ").expect("a git source");
-            let (_, after_tag) = rest.split_once("tag = ").expect("a tag");
-            let (_, tail) = after_tag[1..].split_once('"').expect("a closing quote");
+            let (_, after_pin) = rest
+                .split_once("tag = ")
+                .or_else(|| rest.split_once("rev = "))
+                .expect("a tag or rev pin");
+            let (_, tail) = after_pin[1..].split_once('"').expect("a closing quote");
             rewritten.push_str(&format!(
                 "{before}path = \"{}\"{tail}\n",
                 framework.display()

@@ -16,7 +16,8 @@ pub struct TableInfo {
 
 // Backend templates
 
-/// The git tag generated projects pin their `suprnova` dependency to.
+/// The release tag of this CLI's version, `v<version>`: the git tag a new
+/// project pins its `suprnova` dependency to when the CLI is a release.
 ///
 /// Derived from the running CLI's own version rather than written into the
 /// templates, because a hardcoded tag has no mechanism that forces it to
@@ -24,12 +25,88 @@ pub struct TableInfo {
 /// releases, handing every new user a stale framework. `suprnova-cli`
 /// inherits `version.workspace = true` and every release is tagged
 /// `v<workspace version>`, so this is always the tag of the release that
-/// shipped this binary.
+/// shipped this binary. [`framework_pin`] writes it into a new project
+/// unless the build recorded a commit that is not that release (PAR-080).
 pub fn framework_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The commit a CLI was built from, as its build script recorded it from
+/// git (PAR-080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildCommit<'a> {
+    /// The commit's full hash.
+    pub sha: &'a str,
+    /// Whether the commit is the release `v<version>` of the CLI.
+    pub tagged: bool,
+}
+
+/// The commit this CLI was built from, or `None` when git could not tell
+/// at build time: no git, or sources outside a repository of their own.
+pub fn recorded_build_commit() -> Option<BuildCommit<'static>> {
+    let sha = option_env!("SUPRNOVA_CLI_BUILD_COMMIT")?;
+    let tagged = match option_env!("SUPRNOVA_CLI_BUILD_TAGGED")? {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    Some(BuildCommit { sha, tagged })
+}
+
+/// Where a new project's `suprnova` git dependency points (PAR-080).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameworkPin {
+    /// A release tag, `v<version>`: what a released CLI pins.
+    Tag(String),
+    /// A commit hash: what a CLI built between two releases pins, because
+    /// its templates may already use API the last tag does not have.
+    Rev(String),
+}
+
+impl FrameworkPin {
+    /// The pin a CLI whose release tag is `release_tag` writes when built
+    /// from `commit`: the commit when it is not that release, and the tag
+    /// when it is or when the build recorded no commit. Taking the facts as
+    /// arguments lets a test choose the pin of a tagged and of an untagged
+    /// build.
+    pub fn choose(release_tag: &str, commit: Option<BuildCommit<'_>>) -> Self {
+        match commit {
+            Some(BuildCommit { sha, tagged: false }) => FrameworkPin::Rev(sha.to_owned()),
+            _ => FrameworkPin::Tag(release_tag.to_owned()),
+        }
+    }
+}
+
+impl std::fmt::Display for FrameworkPin {
+    /// Writes the pin as the key and value of a Cargo git dependency:
+    /// `tag = "v3.2.1"` or `rev = "<hash>"`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameworkPin::Tag(tag) => write!(formatter, "tag = \"{tag}\""),
+            FrameworkPin::Rev(rev) => write!(formatter, "rev = \"{rev}\""),
+        }
+    }
+}
+
+/// The pin this build of the CLI writes into a new project's manifest.
+pub fn framework_pin() -> FrameworkPin {
+    FrameworkPin::choose(&framework_tag(), recorded_build_commit())
+}
+
+/// The backend's `Cargo.toml`, pinning the framework where this build of
+/// the CLI chooses ([`framework_pin`]).
 pub fn cargo_toml(package_name: &str, description: &str, author: &str) -> String {
+    cargo_toml_pinned(package_name, description, author, &framework_pin())
+}
+
+/// [`cargo_toml`] with the framework pin given, so a test can render the
+/// manifest a tagged and an untagged build write (PAR-080).
+pub fn cargo_toml_pinned(
+    package_name: &str,
+    description: &str,
+    author: &str,
+    pin: &FrameworkPin,
+) -> String {
     let authors_line = if author.is_empty() {
         String::new()
     } else {
@@ -41,7 +118,7 @@ pub fn cargo_toml(package_name: &str, description: &str, author: &str) -> String
         package_name = package_name,
         description = description,
         authors_line = authors_line,
-        framework_tag = framework_tag()
+        framework_pin = pin
     )
 }
 
@@ -1218,11 +1295,23 @@ pub fn scaffold_frontend(
 // ============================================================================
 
 pub mod api {
+    /// The API starter's `Cargo.toml`, pinning the framework where this
+    /// build of the CLI chooses ([`super::framework_pin`]).
     pub fn cargo_toml(package_name: &str, project_name: &str) -> String {
+        cargo_toml_pinned(package_name, project_name, &super::framework_pin())
+    }
+
+    /// [`cargo_toml`] with the framework pin given, so a test can render the
+    /// manifest a tagged and an untagged build write (PAR-080).
+    pub fn cargo_toml_pinned(
+        package_name: &str,
+        project_name: &str,
+        pin: &super::FrameworkPin,
+    ) -> String {
         include_str!("files/api/Cargo.toml.tpl")
             .replace("{package_name}", package_name)
             .replace("{project_name}", project_name)
-            .replace("{framework_tag}", &super::framework_tag())
+            .replace("{framework_pin}", &pin.to_string())
     }
     pub fn main_rs(package_name: &str, project_name: &str) -> String {
         include_str!("files/api/src/main.rs.tpl")

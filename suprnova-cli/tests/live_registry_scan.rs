@@ -1706,6 +1706,167 @@ fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
     );
 }
 
+/// The `script-global` findings of a scan, by message, sorted: what a
+/// scan refuses about globals, without the lines that move when the
+/// statements do.
+fn global_refusals(report: &ScanReport) -> Vec<String> {
+    let mut messages: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.check == "script-global")
+        .map(|finding| finding.message.clone())
+        .collect();
+    messages.sort();
+    messages
+}
+
+/// REG-032: the globals of a script's own, the names a computed write on
+/// the global object traces to, do not depend on the order of the
+/// script's statements. Each pair is one script in two orders: the write
+/// before the names and calls its key traces through, and after them. The
+/// key resolves to the binding each name has where it is written, so a
+/// name the writing function shadows does not stand in for it, and it
+/// takes every value the function's calls pass, wherever the calls stand.
+/// In both orders the traced name reads back, a read of a global name
+/// nothing writes is refused, and the scan makes the same findings.
+#[test]
+fn reg_032_the_globals_a_script_writes_do_not_depend_on_statement_order() {
+    // (the write first, the write last, the name written, a name nothing writes)
+    let pairs: &[(&str, &str, &str, &str)] = &[
+        (
+            "export function put() {\n  const name = \"AcmeShadow\";\n  window[key] = 1;\n}\nconst name = \"AcmeState\";\nconst key = name;\nexport const state = window.AcmeState;\nexport const shadow = window.AcmeShadow;\n",
+            "const name = \"AcmeState\";\nconst key = name;\nexport function put() {\n  const name = \"AcmeShadow\";\n  window[key] = 1;\n}\nexport const state = window.AcmeState;\nexport const shadow = window.AcmeShadow;\n",
+            "AcmeState",
+            "AcmeShadow",
+        ),
+        (
+            "function put(key) {\n  window[key] = 1;\n}\nput(\"AcmeState\");\nexport const state = window.AcmeState;\nexport const other = window.AcmeOther;\n",
+            "put(\"AcmeState\");\nfunction put(key) {\n  window[key] = 1;\n}\nexport const state = window.AcmeState;\nexport const other = window.AcmeOther;\n",
+            "AcmeState",
+            "AcmeOther",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (write_first, write_last, written, unlisted) in pairs {
+        let mut refusals = Vec::new();
+        for script in [write_first, write_last] {
+            let report = scan_widget_script(script);
+            let refused = |name: &str| {
+                report.findings.iter().any(|finding| {
+                    finding.check == "script-global"
+                        && finding.message.contains(&format!("`{name}`"))
+                })
+            };
+            if refused(written) {
+                failures.push(format!(
+                    "{script:?}: the read of `{written}`, which the script writes, is refused; got [{}]",
+                    report
+                        .findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
+            if !refused(unlisted) {
+                failures.push(format!(
+                    "{script:?}: the read of `{unlisted}`, which nothing writes, is admitted; got [{}]",
+                    report
+                        .findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
+            refusals.push((report.accepted(), global_refusals(&report)));
+        }
+        if refusals[0] != refusals[1] {
+            failures.push(format!(
+                "{write_first:?} and {write_last:?} differ only in order, but the scans differ: {:?} against {:?}",
+                refusals[0], refusals[1]
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Every finding of a scan as its check and message, sorted: the verdict
+/// without the lines that move when the statements do.
+fn order_free_findings(report: &ScanReport) -> (bool, Vec<(String, String)>) {
+    let mut findings: Vec<(String, String)> = report
+        .findings
+        .iter()
+        .map(|finding| (finding.check.to_string(), finding.message.clone()))
+        .collect();
+    findings.sort();
+    (report.accepted(), findings)
+}
+
+/// REG-032: what the first walk learns from the members a script writes
+/// does not depend on the order of its statements. A member name the
+/// script defines on an object of its own makes a call of that name
+/// possibly the script's (so `xs.map(Number)` hands `Number` on), a member
+/// a class writes on `this` is the instance's own (so writing a member of
+/// it changes no built-in), and a member written with a value that is not
+/// a function is no method of the script's. Each pair is one script with
+/// the write before its use and after it, its key traced through a later
+/// call or a later name; both orders get the same findings and the same
+/// verdict.
+#[test]
+fn reg_032_what_a_script_writes_on_its_members_does_not_depend_on_statement_order() {
+    // (the write's facts traced last, traced first, admitted)
+    let pairs: &[(&str, &str, bool)] = &[
+        (
+            "function define(o, key) {\n  o[key] = () => [];\n}\ndefine({}, \"map\");\nexport const clean = (xs) => xs.map(Number);\n",
+            "define({}, \"map\");\nfunction define(o, key) {\n  o[key] = () => [];\n}\nexport const clean = (xs) => xs.map(Number);\n",
+            false,
+        ),
+        (
+            "export class Box {\n  open() {\n    const name = \"other\";\n    this[key] = {};\n    this.map.label = \"x\";\n  }\n}\nconst name = \"map\";\nconst key = name;\n",
+            "const name = \"map\";\nconst key = name;\nexport class Box {\n  open() {\n    const name = \"other\";\n    this[key] = {};\n    this.map.label = \"x\";\n  }\n}\n",
+            true,
+        ),
+        (
+            "const o = { run() {\n  return 1;\n} };\nexport function go() {\n  return o.run();\n}\no.run = 2;\n",
+            "const o = { run() {\n  return 1;\n} };\no.run = 2;\nexport function go() {\n  return o.run();\n}\n",
+            false,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (traced_last, traced_first, admitted) in pairs {
+        let scans: Vec<(bool, Vec<(String, String)>)> = [traced_last, traced_first]
+            .iter()
+            .map(|script| order_free_findings(&scan_widget_script(script)))
+            .collect();
+        for (script, (accepted, findings)) in [traced_last, traced_first].iter().zip(&scans) {
+            if accepted != admitted {
+                failures.push(format!(
+                    "{script:?}: expected {}, got {findings:?}",
+                    if *admitted { "admitted" } else { "refused" }
+                ));
+            }
+        }
+        if scans[0] != scans[1] {
+            failures.push(format!(
+                "{traced_last:?} and {traced_first:?} differ only in order, but the scans differ: {:?} against {:?}",
+                scans[0], scans[1]
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// The admitted fixtures, under `accepted/`, that pin what the built-in
 /// rule leaves open (REG-032): writes to the script's own objects and
 /// functions, and the writes an ordinary component makes on the page, its

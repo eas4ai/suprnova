@@ -2,7 +2,10 @@
 //! same scopes, so every binding gets the same identity both times: the
 //! first pass records what each binding is assigned and where each
 //! function is called; the second checks every call, member access and
-//! assignment against those facts and the lists in `lists.rs`.
+//! assignment against those facts and the lists in `lists.rs`. The names a
+//! script writes on members, of the global object, of its classes'
+//! instances and of its own objects, are settled between the two, once the
+//! first pass has met every name and every call.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -79,7 +82,14 @@ pub(super) struct Facts<'a> {
     pub tainted: BTreeSet<&'a str>,
     /// The globals of the script's own: names it writes on the global
     /// object that no browser property may hold, which it may read back.
+    /// They are settled from [`Self::member_writes`] after the first walk,
+    /// so they do not depend on the order of the script's statements
+    /// (REG-032).
     pub written_globals: BTreeSet<String>,
+    /// Every member the script writes, in the order the first walk meets
+    /// them. A computed key's name is traced only once that walk has met
+    /// every name and every call (REG-032).
+    pub member_writes: Vec<MemberWrite<'a>>,
     /// The binding each name the walk resolved had where it is written, by
     /// the name's offset, or `None` for a global: a value followed from
     /// elsewhere names these bindings, not the ones the same names have
@@ -90,16 +100,32 @@ pub(super) struct Facts<'a> {
     pub this_class: HashMap<u32, u32>,
     /// Every member name a class the script defines gives its instances or
     /// itself, by the offset of the class: its methods, fields and
-    /// accessors, and each name its code writes on `this`.
+    /// accessors, and each name its code writes on `this`, which is settled
+    /// from [`Self::member_writes`] after the first walk.
     pub class_members: HashMap<u32, BTreeSet<String>>,
     /// Every property name the script defines on an object of its own: an
     /// object literal's key, a class member, a name it writes on a member.
-    /// A method of that name may be the script's, not a browser API's.
+    /// A method of that name may be the script's, not a browser API's. The
+    /// names written on members are settled from [`Self::member_writes`]
+    /// after the first walk.
     pub defined_names: BTreeSet<String>,
     /// The `arguments` binding of each function, by the function's offset:
     /// a function that reads it receives arguments its parameters do not
     /// name.
     pub arguments_of: HashMap<u32, Bid>,
+}
+
+/// A member the script writes, as the first walk meets it: the facts that
+/// need no tracing, kept until every name the key may trace through has its
+/// binding and every function its calls (REG-032).
+pub(super) struct MemberWrite<'a> {
+    /// The member written.
+    pub member: &'a MemberExpression<'a>,
+    /// The class whose instance the write is on, by the class's offset,
+    /// when the member is written on `this` inside a class.
+    pub class: Option<u32>,
+    /// Whether the member is written on one of the global object's names.
+    pub global: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -563,6 +589,48 @@ impl<'a, 'c> Walker<'a, 'c> {
             self.statement(statement);
         }
         self.scopes.pop();
+        if self.phase == Phase::Collect {
+            self.settle_member_writes();
+        }
+    }
+
+    /// Settles what the members the first walk saw written make of their
+    /// names (REG-032): a name defined on an object of the script's own, a
+    /// member of the instance of the class that writes it on `this`, and a
+    /// global of the script's own. It runs once that walk has met every
+    /// name and every call, so a computed key traces through the binding
+    /// each name has where it is written and through every call of a
+    /// parameter's function, wherever those stand in the script. While the
+    /// walk is still under way, a name it has not reached resolves where
+    /// the walk stands and a call it has not reached is missing, so these
+    /// sets would depend on the order of the statements. Only a write on
+    /// the global object's name makes a global: a write through an
+    /// expression that may yield the global object, such as
+    /// `(c ? window : o).x = v`, may land on another object. A name the
+    /// browser may already define there is never the script's own.
+    fn settle_member_writes(&mut self) {
+        let settled: Vec<(String, Option<u32>, bool)> = self
+            .facts
+            .member_writes
+            .iter()
+            .filter_map(|write| {
+                self.member_name(write.member)
+                    .map(|name| (name, write.class, write.global))
+            })
+            .collect();
+        for (name, class, global) in settled {
+            if global && claimable_global(&name) {
+                self.facts.written_globals.insert(name.clone());
+            }
+            if let Some(class) = class {
+                self.facts
+                    .class_members
+                    .entry(class)
+                    .or_default()
+                    .insert(name.clone());
+            }
+            self.facts.defined_names.insert(name);
+        }
     }
 
     fn block(&mut self, statements: &'a [Statement<'a>]) {
@@ -1421,7 +1489,7 @@ impl<'a, 'c> Walker<'a, 'c> {
 
     /// The name a member expression reads, when the scan can know it: a
     /// static name, or a computed key that traces to one constant.
-    fn member_name(&mut self, member: &'a MemberExpression<'a>) -> Option<String> {
+    fn member_name(&self, member: &MemberExpression<'a>) -> Option<String> {
         match member {
             MemberExpression::StaticMemberExpression(member) => {
                 Some(member.property.name.to_string())
@@ -1754,6 +1822,9 @@ impl<'a, 'c> Walker<'a, 'c> {
             other => {
                 if let Some(member) = other.as_member_expression() {
                     self.member_access(member, true);
+                    if self.phase == Phase::Collect {
+                        self.record_write(member, value);
+                    }
                     // Every member write reaches this arm: an assignment of
                     // any operator, `++` or `--`, a destructuring target and
                     // a `for` loop's target (REG-032).
@@ -1769,17 +1840,16 @@ impl<'a, 'c> Walker<'a, 'c> {
                             self.builtin_write(member, member.span(), "assigning");
                         }
                     }
-                    if let Some(name) = self.member_name(member) {
-                        if opaque && checked_write(&name) {
-                            self.refuse(
-                                "script-property",
-                                member.span(),
-                                format!("`{name}` is written with a value the scan cannot check"),
-                            );
-                        }
-                        if self.phase == Phase::Collect {
-                            self.record_write(member, &name, value);
-                        }
+                    if opaque
+                        && self.check()
+                        && let Some(name) = self.member_name(member)
+                        && checked_write(&name)
+                    {
+                        self.refuse(
+                            "script-property",
+                            member.span(),
+                            format!("`{name}` is written with a value the scan cannot check"),
+                        );
                     }
                 } else {
                     self.refuse(
@@ -1832,26 +1902,26 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
     }
 
+    /// Records a member write in the first walk. What its name makes of the
+    /// member waits for [`Self::settle_member_writes`], because a computed
+    /// key may trace through a name or a call the walk has not reached; a
+    /// static or private name is recorded at once as a method or as data.
     fn record_write(
         &mut self,
         member: &'a MemberExpression<'a>,
-        name: &str,
         value: Option<&'a Expression<'a>>,
     ) {
-        // Only a write on the global object's name makes a global of the
-        // script's own, which later reads may name; a write through an
-        // expression that may yield it (`(c ? window : o).x = v`) may
-        // land on another object. A name the browser may already define
-        // there is never the script's own (REG-032).
-        if self.names_global_object(member.object()) && claimable_global(name) {
-            self.facts.written_globals.insert(name.to_string());
-        }
-        self.facts.defined_names.insert(name.to_string());
-        if matches!(unparen(member.object()), Expression::ThisExpression(_))
-            && let Some(class) = self.classes.last().copied()
-        {
-            self.class_member(class, name.to_string());
-        }
+        let on_this = matches!(unparen(member.object()), Expression::ThisExpression(_));
+        let write = MemberWrite {
+            member,
+            class: if on_this {
+                self.classes.last().map(|class| class.span.start)
+            } else {
+                None
+            },
+            global: self.names_global_object(member.object()),
+        };
+        self.facts.member_writes.push(write);
         let callable = value.is_some_and(is_function_expression);
         if let MemberExpression::PrivateFieldExpression(private) = member {
             if callable {
@@ -1865,7 +1935,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         }
         if let MemberExpression::StaticMemberExpression(static_member) = member {
             let name = static_member.property.name.as_str();
-            if callable && matches!(unparen(member.object()), Expression::ThisExpression(_)) {
+            if callable && on_this {
                 self.instance_method(name);
             } else if !callable {
                 self.facts.tainted.insert(name);
