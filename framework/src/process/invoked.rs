@@ -55,8 +55,8 @@ struct Target {
 
 impl Target {
     /// Send `signal` to the program and everything it started. The caller
-    /// holds the `released` lock and has seen it unset (see
-    /// `Captured::released`): once the program is reaped its id - and, for a
+    /// holds the `program` lock and has seen `released` unset (see
+    /// `Program::released`): once the program is reaped its id - and, for a
     /// group, the group's id, which is the same number - may belong to
     /// another process.
     ///
@@ -89,7 +89,6 @@ impl Target {
 }
 
 struct Real {
-    child: tokio::process::Child,
     target: Target,
     captured: Arc<Captured>,
     readers: Vec<JoinHandle<()>>,
@@ -107,15 +106,34 @@ struct Captured {
     /// timeout checks.
     callback: Mutex<Option<OutputCallback>>,
     changed: Notify,
+    /// Notified each time an output stream closes. Only the watchdog waits
+    /// on it, so a notification meant for the owner on `changed` is never
+    /// taken by the watchdog instead.
+    closed: Notify,
+    /// The program, where both the owner and the watchdog can reap it.
+    program: Mutex<Program>,
+}
+
+/// The program and whether its id is still ours, behind one lock.
+///
+/// The watchdog reaps a program it killed when nothing waits on it, so the
+/// child cannot belong to the owner alone. Keeping it beside `released`
+/// means no one can reap it without the lock that every signal is sent
+/// under.
+struct Program {
+    /// `None` once the process was dropped and the child handed to Tokio
+    /// to reap, or while a wait that cannot hold the lock has it (see
+    /// `wait_lent`).
+    child: Option<tokio::process::Child>,
     /// Set once the program's id is no longer ours to signal: it has been
     /// reaped, or the process was dropped and Tokio reaps it later.
     ///
     /// A signal is sent only with this lock held and the flag unset, and on
     /// Unix the reap happens with the lock held too, in the step that sets
-    /// the flag (see `reap`). So the owner cannot reap between a watchdog's
+    /// the flag (see `try_reap`). So no one can reap between a watchdog's
     /// check and its kill, which would send the kill to an id another
     /// process may have taken.
-    released: Mutex<bool>,
+    released: bool,
 }
 
 struct CapturedState {
@@ -178,8 +196,8 @@ impl Captured {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn released(&self) -> MutexGuard<'_, bool> {
-        self.released
+    fn program(&self) -> MutexGuard<'_, Program> {
+        self.program
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -388,6 +406,8 @@ impl InvokedProcess {
             pid: child.id(),
             reach,
         };
+        let (stdout, stderr, stdin) =
+            (child.stdout.take(), child.stderr.take(), child.stdin.take());
         let now = Instant::now();
         let captured = Arc::new(Captured {
             state: Mutex::new(CapturedState {
@@ -405,11 +425,15 @@ impl InvokedProcess {
             }),
             callback: Mutex::new(callback),
             changed: Notify::new(),
-            released: Mutex::new(false),
+            closed: Notify::new(),
+            program: Mutex::new(Program {
+                child: Some(child),
+                released: false,
+            }),
         });
 
         let mut readers = Vec::new();
-        if let Some(stdout) = child.stdout.take() {
+        if let Some(stdout) = stdout {
             captured.lock().open_streams += 1;
             readers.push(tokio::spawn(read_stream(
                 stdout,
@@ -417,7 +441,7 @@ impl InvokedProcess {
                 Arc::clone(&captured),
             )));
         }
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = stderr {
             captured.lock().open_streams += 1;
             readers.push(tokio::spawn(read_stream(
                 stderr,
@@ -425,7 +449,7 @@ impl InvokedProcess {
                 Arc::clone(&captured),
             )));
         }
-        if let (Some(mut stdin), Some(input)) = (child.stdin.take(), pending.input) {
+        if let (Some(mut stdin), Some(input)) = (stdin, pending.input) {
             // A process that exits without reading all of its input closes
             // the pipe; the write error that leaves is not the process's.
             tokio::spawn(async move {
@@ -439,7 +463,6 @@ impl InvokedProcess {
         Ok(Self {
             command,
             inner: Inner::Real(Box::new(Real {
-                child,
                 target,
                 captured,
                 readers,
@@ -480,7 +503,7 @@ impl InvokedProcess {
                 if !real.may_reap() {
                     return !real.exited_unreaped();
                 }
-                match try_reap(&mut real.child, &real.captured) {
+                match try_reap(&real.captured) {
                     Ok(Some(status)) => {
                         real.record(status);
                         false
@@ -545,18 +568,24 @@ impl InvokedProcess {
     /// cannot send the signal.
     pub fn signal(&self, signal: Signal) -> Result<(), ProcessError> {
         match &self.inner {
-            Inner::Real(real) => match real.target.pid {
-                Some(pid) if real.status.is_none() && !real.exited_unreaped() => {
-                    send_signal(pid, false, signal).map_err(|message| ProcessError::Signal {
+            Inner::Real(real) => {
+                // Held through the signal: the watchdog may reap a program it
+                // killed, and the id must not be freed between the check and
+                // the signal.
+                let program = real.captured.program();
+                match real.target.pid {
+                    Some(pid) if !program.released && !real.exited_unreaped() => {
+                        send_signal(pid, false, signal).map_err(|message| ProcessError::Signal {
+                            command: self.command.clone(),
+                            message,
+                        })
+                    }
+                    _ => Err(ProcessError::Signal {
                         command: self.command.clone(),
-                        message,
-                    })
+                        message: "the process has exited".into(),
+                    }),
                 }
-                _ => Err(ProcessError::Signal {
-                    command: self.command.clone(),
-                    message: "the process has exited".into(),
-                }),
-            },
+            }
             #[cfg(any(test, feature = "testing"))]
             Inner::Fake(fake) => {
                 fake.signal(signal);
@@ -662,7 +691,7 @@ impl InvokedProcess {
             }
             let reap_now = real.status.is_none() && real.may_reap();
             tokio::select! {
-                status = reap(&mut real.child, &real.captured), if reap_now => {
+                status = reap(&real.captured), if reap_now => {
                     real.record(status.map_err(|source| ProcessError::Io {
                         command: command.clone(),
                         source,
@@ -771,13 +800,14 @@ impl Real {
     fn signal_all(&mut self, signal: Signal) {
         #[cfg(test)]
         reap_race::owner_waiting(self.target.pid);
-        let released = self.captured.released();
-        if !*released {
+        let mut program = self.captured.program();
+        if !program.released {
             self.target.send_all(signal);
-        }
-        drop(released);
-        if signal == Signal::Kill && self.status.is_none() {
-            let _ = self.child.start_kill();
+            if signal == Signal::Kill
+                && let Some(child) = program.child.as_mut()
+            {
+                let _ = child.start_kill();
+            }
         }
     }
 
@@ -805,7 +835,7 @@ impl Real {
             }
             let reap_now = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = reap(&mut self.child, &self.captured), if reap_now => {
+                status = reap(&self.captured), if reap_now => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -825,7 +855,7 @@ impl Real {
             watchdog.abort();
         }
         if self.status.is_none() {
-            let status = reap(&mut self.child, &self.captured)
+            let status = reap(&self.captured)
                 .await
                 .map_err(|source| ProcessError::Io {
                     command: command.to_owned(),
@@ -867,7 +897,7 @@ impl Real {
             }
             let reap_now = self.status.is_none() && self.may_reap();
             tokio::select! {
-                status = reap(&mut self.child, &self.captured), if reap_now => {
+                status = reap(&self.captured), if reap_now => {
                     self.record(status.map_err(|source| ProcessError::Io {
                         command: command.to_owned(),
                         source,
@@ -911,32 +941,84 @@ impl Real {
 
 impl Drop for InvokedProcess {
     fn drop(&mut self) {
-        if let Inner::Real(real) = &mut self.inner
-            && !real.finished
-        {
-            if let Some(watchdog) = real.watchdog.take() {
-                watchdog.abort();
+        if let Inner::Real(real) = &mut self.inner {
+            if !real.finished {
+                if let Some(watchdog) = real.watchdog.take() {
+                    watchdog.abort();
+                }
+                real.signal_all(Signal::Kill);
             }
-            real.signal_all(Signal::Kill);
             // Tokio reaps the program after the drop, without this lock, so a
-            // watchdog that is still running must leave its id alone from now.
-            *real.captured.released() = true;
+            // watchdog that is still running must leave its id alone from
+            // now. The child is dropped here, not with the last holder of
+            // the captured output, so Tokio takes it over at once.
+            let child = {
+                let mut program = real.captured.program();
+                program.released = true;
+                program.child.take()
+            };
+            drop(child);
         }
     }
 }
 
 /// Reap the program if it has exited, and mark its id released in the same
-/// step, under the `released` lock: a signal sent under that lock reaches
+/// step, under the `program` lock: a signal sent under that lock reaches
 /// the program, or its group, while the id is still pinned.
-fn try_reap(
-    child: &mut tokio::process::Child,
-    captured: &Captured,
-) -> std::io::Result<Option<ExitStatus>> {
-    let mut released = captured.released();
+///
+/// Tokio keeps the status it collected, so when the watchdog has reaped the
+/// program, the owner's next call here answers with the same status.
+fn try_reap(captured: &Captured) -> std::io::Result<Option<ExitStatus>> {
+    let mut program = captured.program();
+    let Some(child) = program.child.as_mut() else {
+        return Err(handed_off());
+    };
     let status = child.try_wait()?;
     if status.is_some() {
-        *released = true;
+        program.released = true;
     }
+    Ok(status)
+}
+
+/// The error for a reap that finds the child gone from its slot: the
+/// process was dropped and Tokio reaps it, or a wait that cannot hold the
+/// lock has it.
+fn handed_off() -> std::io::Error {
+    std::io::Error::other("the program is being reaped elsewhere")
+}
+
+/// The child, taken out of its slot for a wait that holds it across an
+/// await, where the lock cannot be held. It goes back however the wait
+/// ends, a cancelled one included.
+struct Lent<'a> {
+    captured: &'a Captured,
+    child: Option<tokio::process::Child>,
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            self.captured.program().child = Some(child);
+        }
+    }
+}
+
+/// Wait for the program to exit the way Tokio does, then mark its id
+/// released. Tokio collects the exit with no lock held, so this serves only
+/// where that leaves no window: Windows, which keeps the id while the
+/// handle is open, and a Unix runtime that is shutting down.
+async fn wait_lent(captured: &Captured) -> std::io::Result<ExitStatus> {
+    let mut lent = Lent {
+        captured,
+        child: captured.program().child.take(),
+    };
+    let status = match lent.child.as_mut() {
+        Some(child) => child.wait().await,
+        None => Err(handed_off()),
+    };
+    drop(lent);
+    let status = status?;
+    captured.program().released = true;
     Ok(status)
 }
 
@@ -948,22 +1030,17 @@ fn try_reap(
 /// land after the reap. The listener is in place before the first look, so
 /// an exit between a look and the wait still wakes it.
 #[cfg(unix)]
-async fn reap(
-    child: &mut tokio::process::Child,
-    captured: &Captured,
-) -> std::io::Result<ExitStatus> {
+async fn reap(captured: &Captured) -> std::io::Result<ExitStatus> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut exits = signal(SignalKind::child())?;
     loop {
-        if let Some(status) = try_reap(child, captured)? {
+        if let Some(status) = try_reap(captured)? {
             return Ok(status);
         }
         if exits.recv().await.is_none() {
             // The runtime is shutting down and no more exits will be
             // reported; wait the way Tokio does instead.
-            let status = child.wait().await?;
-            *captured.released() = true;
-            return Ok(status);
+            return wait_lent(captured).await;
         }
     }
 }
@@ -972,17 +1049,14 @@ async fn reap(
 /// for as long as its handle is open, and the handle lives as long as the
 /// child, so there is no window to close.
 #[cfg(not(unix))]
-async fn reap(
-    child: &mut tokio::process::Child,
-    captured: &Captured,
-) -> std::io::Result<ExitStatus> {
-    let status = child.wait().await?;
-    *captured.released() = true;
-    Ok(status)
+async fn reap(captured: &Captured) -> std::io::Result<ExitStatus> {
+    wait_lent(captured).await
 }
 
 /// Kill the process, with everything it started, when a timeout passes,
-/// whether or not anything waits on it.
+/// whether or not anything waits on it. On Unix it then reaps the killed
+/// program, so the program does not stay behind as a zombie, which still
+/// holds its id, until something waits on it.
 async fn watchdog(captured: Arc<Captured>, target: Target) {
     loop {
         let deadline = {
@@ -1007,16 +1081,45 @@ async fn watchdog(captured: Arc<Captured>, target: Target) {
         if expired {
             // Checked and sent under one hold of the lock the reap takes, so
             // the program cannot be reaped in between.
-            let released = captured.released();
-            if !*released {
-                #[cfg(test)]
-                reap_race::watchdog_parked(target.pid);
-                target.send_all(Signal::Kill);
-                #[cfg(test)]
-                reap_race::watchdog_sent(target.pid);
+            {
+                let program = captured.program();
+                if !program.released {
+                    #[cfg(test)]
+                    reap_race::watchdog_parked(target.pid);
+                    target.send_all(Signal::Kill);
+                    #[cfg(test)]
+                    reap_race::watchdog_sent(target.pid);
+                }
             }
-            drop(released);
             captured.changed.notify_one();
+            #[cfg(unix)]
+            reap_killed(&captured).await;
+            return;
+        }
+    }
+}
+
+/// Reap a program the watchdog killed, once its output has closed.
+///
+/// Not before: a process that left the group may still hold the output,
+/// and only the unreaped program keeps the group's id from being handed to
+/// another process while the group may still be signalled (see
+/// `Real::may_reap`). An owner that waits reaps the same way, under the
+/// same lock, and whichever reaps second gets the status Tokio kept. A
+/// reap that fails is left to the owner, whose own reap reports it.
+#[cfg(unix)]
+async fn reap_killed(captured: &Captured) {
+    use tokio::signal::unix::{SignalKind, signal};
+    while captured.lock().open_streams > 0 {
+        captured.closed.notified().await;
+    }
+    // Listening before the first look, so an exit between a look and the
+    // wait still wakes it.
+    let Ok(mut exits) = signal(SignalKind::child()) else {
+        return;
+    };
+    while let Ok(None) = try_reap(captured) {
+        if exits.recv().await.is_none() {
             return;
         }
     }
@@ -1031,6 +1134,7 @@ impl Drop for StreamClosed {
         state.open_streams = state.open_streams.saturating_sub(1);
         drop(state);
         self.0.changed.notify_one();
+        self.0.closed.notify_one();
     }
 }
 
