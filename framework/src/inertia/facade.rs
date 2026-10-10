@@ -253,6 +253,27 @@ impl Inertia {
         crate::App::inertia_registry().share_provider(provider);
     }
 
+    /// Share a *once* prop - Laravel's `Inertia::shareOnce($key, fn () => ...)`.
+    /// The resolver runs on the first page that needs the value and the
+    /// client keeps it across navigations, naming what it holds in
+    /// `X-Inertia-Except-Once-Props`; the returned
+    /// [`SharedOnceProp`](crate::inertia::SharedOnceProp) takes the options
+    /// any once prop takes (`as_key`, `until`, `fresh`, `once_with`), as
+    /// Laravel's returned `OnceProp` does. The same registration as
+    /// [`App::inertia_share_once`](crate::App::inertia_share_once).
+    #[track_caller]
+    pub fn share_once<F, Fut, V>(
+        key: impl Into<String>,
+        resolver: F,
+    ) -> crate::inertia::SharedOnceProp
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<V, FrameworkError>> + Send + 'static,
+        V: serde::Serialize + 'static,
+    {
+        crate::App::inertia_registry().share_once(key, resolver)
+    }
+
     /// Read a shared value back - Laravel's `Inertia::getShared($key,
     /// $default)`. A dotted key walks into nested values (a numeric segment
     /// indexes a list); `default` comes back when nothing is shared there.
