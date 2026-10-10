@@ -311,6 +311,30 @@ A test that uses the process driver needs a console binary that registers
 its tasks. `Process::fake()` fakes the driver's console processes as it
 fakes every other process.
 
+A faked console process answers the way a real one does. The outcome is one
+line on standard output: `suprnova-concurrency-result:`, the run's token, a
+colon and `{"ok":<value>}` or `{"error":"<message>"}`, and the process exits
+with code 0 for a success. The driver gives each console process its own
+token in `SUPRNOVA_CONCURRENCY_TOKEN` and takes no outcome line without it,
+so a fixed `Process::result(..)` can't answer a task. A closure reads the
+token from the pending process:
+
+```rust
+use suprnova::{PendingProcess, Process};
+
+fake.when("*concurrency:run*", |pending: &PendingProcess| {
+    let token = pending
+        .environment()
+        .iter()
+        .find(|(key, _)| key.as_str() == "SUPRNOVA_CONCURRENCY_TOKEN")
+        .and_then(|(_, value)| value.clone())
+        .unwrap_or_default();
+    Process::result(format!("suprnova-concurrency-result:{token}:{{\"ok\":42}}\n"))
+});
+```
+
+Most tests don't need the fake: the `sync` driver runs the task itself.
+
 ### Why Suprnova diverges
 
 - **A task is a registered function, not a closure.** Laravel serializes
