@@ -288,6 +288,48 @@ async fn a_started_process_is_killed_at_its_timeout_though_nothing_waits() {
     assert!(matches!(error, ProcessError::TimedOut { .. }), "{error:?}");
 }
 
+/// The program a timeout killed is reaped though nothing looks at it, not
+/// `running` and not `wait`. Unreaped, it stays a zombie, which keeps its
+/// id and still answers `kill -0`.
+#[tokio::test]
+#[serial]
+async fn a_timed_out_process_is_reaped_though_nothing_looks_at_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let mut process = Process::command(sh(&format!("printf before; {}", parent_and_child(&file))))
+        .timeout(Duration::from_secs(1))
+        .start()
+        .unwrap();
+    let pids = pids_in(&file, 2).await;
+
+    assert!(
+        all_gone(&pids, Duration::from_secs(4)).await,
+        "the shell or its sleep is still there: {pids:?}"
+    );
+    assert!(!process.running());
+    let refused = process
+        .signal(Signal::Term)
+        .expect_err("a reaped program is not signalled");
+    assert!(
+        matches!(refused, ProcessError::Signal { .. }),
+        "{refused:?}"
+    );
+    let error = process.wait().await.expect_err("the timeout passed");
+    let ProcessError::TimedOut {
+        timeout, result, ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*timeout, Duration::from_secs(1));
+    assert_eq!(
+        result.output(),
+        "before",
+        "the output before the kill is kept"
+    );
+    assert!(error.to_string().contains("sh -c"), "{error}");
+}
+
 #[tokio::test]
 #[serial]
 async fn wait_until_survives_bytes_that_are_not_utf8() {
