@@ -23,7 +23,9 @@ use serde::Serialize;
 /// - `Queue::fake()`'s projection (`queue::testing::pending_jobs` /
 ///   `delayed_jobs`) never records a dispatch timestamp distinct from
 ///   `available_at`, so `created_at` is always `None` there; `id` is still
-///   populated because the fake stamps one on every recorded push.
+///   populated because the fake stamps one on every recorded push. A
+///   reservation the fake recorded (`Queue::reserved_jobs` under the fake)
+///   is built from the envelope a worker reserved, so it carries both.
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectedJob {
     /// Envelope id, when the source could recover one.
@@ -33,9 +35,10 @@ pub struct InspectedJob {
     pub queue: Option<String>,
     /// Job type name (`Job::job_name()`).
     pub name: String,
-    /// Delivery attempts recorded against this envelope. Always `0` under
-    /// `Queue::fake()`, since nothing ever runs (and therefore nothing is
-    /// ever retried) under the fake.
+    /// Delivery attempts recorded against this envelope. Always `0` in the
+    /// fake's pending and delayed listings, since a recorded push never
+    /// runs; a reservation the fake recorded carries the attempts its
+    /// envelope had when a worker reserved it.
     pub attempts: u32,
     /// Typed handler payload as JSON.
     pub payload: serde_json::Value,

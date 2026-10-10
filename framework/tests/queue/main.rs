@@ -30,6 +30,7 @@ pub mod introspection;
 mod laravel_delta;
 pub mod laravel_http_gaps;
 pub mod laravel_infra_gaps;
+pub mod laravel_testing_gaps;
 pub mod lifecycle;
 pub mod memory;
 pub mod middleware_pipeline;

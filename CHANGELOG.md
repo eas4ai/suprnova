@@ -1380,6 +1380,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form.
 - **Log level names.** `LogLevel::parse` reads the eight PSR-3 names and
   `warn` and `trace`, and `LOG_LEVEL` accepts the PSR-3 names.
+- **Typed queued mailables in the mail fake.** `MailFake::queued_of::<M>()`
+  and `queued_where::<M>(filter)` rebuild queued mailables as `M`, and
+  `assert_queued_mailable::<M>` and `assert_not_queued_mailable::<M>` assert
+  on them; a payload that does not rebuild fails the call, and the `try_*`
+  forms return the error.
+- **Fallible typed pushes in the queue fake.** `queue::testing::try_pushed::<J>()`
+  returns the decode error that `pushed::<J>()` now panics with.
+- **Workers on the queue fake.** `QueueFakeGuard::driver()` returns a driver
+  a worker reserves the recorded jobs from, and `queue::testing::reserved::<J>()`
+  and `try_reserved::<J>()` return each reservation typed.
 
 ### Changed
 
@@ -2316,6 +2326,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `daily`, `monthly`, `stderr`, `errorlog` and `syslog` keep only records at
   or above it, `debug` when it names none, and a bare level that is no level
   fails the boot.
+- **`queue::testing::pushed::<J>()` fails on a payload that does not decode.**
+  It panics, naming the job and the decode error, where it left the push out,
+  so `assert_not_pushed` no longer passes over a push it cannot read.
+- **`Queue::reserved_jobs` under `Queue::fake()` answers the fake.** It lists
+  the reservations workers made from the fake instead of reading the
+  installed driver.
 
 ### Fixed
 
