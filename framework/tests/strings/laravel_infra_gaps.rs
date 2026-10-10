@@ -105,12 +105,87 @@ fn inline_markdown_keeps_a_character_the_renderer_marks_lines_with() {
     assert_eq!(html, text);
 }
 
+/// Every Unicode space separator except U+0020 and U+00A0: each is a space
+/// that the renderer could mark lines with, so a text holding all of them
+/// leaves it none it does not hold.
+const EVERY_RARE_SPACE: &str = "\u{3000}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{202F}\u{205F}\u{1680}";
+
 #[test]
-fn text_holding_every_line_marker_renders_as_escaped_text() {
-    let markers = "\u{3000}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{202F}\u{205F}\u{1680}";
-    let text = format!("**bold** <b>x</b> {markers}");
+fn text_holding_every_rare_space_still_converts_inline_syntax() {
+    let text = format!("**bold** <b>x</b> {EVERY_RARE_SPACE}");
     let html = Str::inline_markdown(&text, &MarkdownRenderer::default()).unwrap();
-    assert_eq!(html, format!("**bold** &lt;b&gt;x&lt;/b&gt; {markers}"));
+    assert_eq!(html, format!("<strong>bold</strong> x {EVERY_RARE_SPACE}"));
+    let escape = MarkdownRenderer::default().html_input(HtmlInput::Escape);
+    let escaped = Str::inline_markdown(&text, &escape).unwrap();
+    assert_eq!(
+        escaped,
+        format!("<strong>bold</strong> &lt;b&gt;x&lt;/b&gt; {EVERY_RARE_SPACE}")
+    );
+}
+
+#[test]
+fn emphasis_beside_an_ideographic_space_parses_as_beside_any_space() {
+    // `_` closes only before whitespace or punctuation, and `*` followed by
+    // whitespace opens nothing, so U+3000 must stay a space to the parser.
+    let text = format!("{EVERY_RARE_SPACE}_a_\u{3000}x\u{3000}*\u{3000}b*");
+    let html = Str::inline_markdown(&text, &MarkdownRenderer::default()).unwrap();
+    assert_eq!(
+        html,
+        format!("{EVERY_RARE_SPACE}<em>a</em>\u{3000}x\u{3000}*\u{3000}b*")
+    );
+}
+
+#[test]
+fn an_ideographic_space_in_code_and_in_a_link_url_comes_through() {
+    let text = format!("`a\u{3000}b` [x](https://example.com/\u{3000}) {EVERY_RARE_SPACE}");
+    let html = Str::inline_markdown(&text, &MarkdownRenderer::default()).unwrap();
+    assert!(html.starts_with("<code>a\u{3000}b</code> <a "), "{html}");
+    assert!(
+        html.contains("href=\"https://example.com/%E3%80%80\""),
+        "{html}"
+    );
+    assert!(
+        html.ends_with(&format!(">x</a> {EVERY_RARE_SPACE}")),
+        "{html}"
+    );
+}
+
+#[test]
+fn ideographic_spaces_at_line_starts_and_in_runs_round_trip() {
+    let text = "\u{3000}a\n\u{3000}\u{3000}b\u{3000}\u{3000}\u{3000}";
+    let html = Str::inline_markdown(text, &MarkdownRenderer::default()).unwrap();
+    assert_eq!(html, text);
+}
+
+#[test]
+fn a_character_reference_to_an_ideographic_space_renders_the_space() {
+    let renderer = MarkdownRenderer::default();
+    assert_eq!(
+        Str::inline_markdown("a&#x3000;b&#12288;c", &renderer).unwrap(),
+        "a\u{3000}b\u{3000}c"
+    );
+    // A reference stays as written in a code span and after a backslash.
+    assert_eq!(
+        Str::inline_markdown("`&#x3000;` and \\&#12288;", &renderer).unwrap(),
+        "<code>&amp;#x3000;</code> and &amp;#12288;"
+    );
+    // Reference text the caller wrote is never read as a replaced one.
+    assert_eq!(
+        Str::inline_markdown("&#x3000;a &amp;#57345; `&#57346;`", &renderer).unwrap(),
+        "\u{3000}a &amp;#57345; <code>&amp;#57346;</code>"
+    );
+    let link = Str::inline_markdown("[x](https://example.com/&#x3000;)", &renderer).unwrap();
+    assert!(
+        link.contains("href=\"https://example.com/%E3%80%80\""),
+        "{link}"
+    );
+}
+
+#[test]
+fn a_link_url_on_the_next_line_keeps_its_text() {
+    let html =
+        Str::inline_markdown("[x](\nhttps://example.com)", &MarkdownRenderer::default()).unwrap();
+    assert!(html.contains("href=\"https://example.com\""), "{html}");
 }
 
 #[test]
