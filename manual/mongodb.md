@@ -451,13 +451,14 @@ server and reloads the model from the result.
 
 ### Array and counter operators
 
-These calls change one field on the server and reload the model:
+These calls change one field on the server and reload the model. On a model
+with timestamps, every call also sets `updated_at` in the same write:
 
 | Call | Operator |
 |---|---|
-| `push(field, value)` | `$push`: append `value` |
-| `push_unique(field, value)` | `$addToSet`: append unless present |
-| `pull(field, value)` | `$pull`: remove every equal element |
+| `push(field, value)` | `$push`: append `value`, and set `updated_at` |
+| `push_unique(field, value)` | `$addToSet`: append unless present, and set `updated_at` |
+| `pull(field, value)` | `$pull`: remove every equal element, and set `updated_at` |
 | `increment(field, by)` | `$inc`, and set `updated_at` |
 | `decrement(field, by)` | `$inc` with `-by`, and set `updated_at` |
 

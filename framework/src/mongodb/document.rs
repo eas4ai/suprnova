@@ -598,7 +598,8 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
 
     /// Append `value` to the array `field` with `$push`, and reload the
     /// model from the result. `field` may be a dotted path into an
-    /// embedded document.
+    /// embedded document. On a model with timestamps, the same write sets
+    /// `updated_at`.
     ///
     /// # Errors
     ///
@@ -609,14 +610,14 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     where
         V: Serialize + Send + Sync,
     {
-        let value = value_to_bson(&value, "push")?;
-        let field = writable_field::<Self>(field, "push")?;
-        *self = write_operator(self, one("$push", one(field, value)), "push").await?;
+        let update = __rendered_array_update::<Self, V>("$push", field, &value, now_moment())?;
+        *self = write_operator(self, update, "push").await?;
         Ok(())
     }
 
     /// Append `value` to the array `field` unless it holds it already, with
-    /// `$addToSet`, as Laravel's `push($field, $value, true)`.
+    /// `$addToSet`, as Laravel's `push($field, $value, true)`. Sets
+    /// `updated_at` as [`Self::push`] does.
     ///
     /// # Errors
     ///
@@ -625,14 +626,13 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     where
         V: Serialize + Send + Sync,
     {
-        let value = value_to_bson(&value, "push_unique")?;
-        let field = writable_field::<Self>(field, "push_unique")?;
-        *self = write_operator(self, one("$addToSet", one(field, value)), "push_unique").await?;
+        let update = __rendered_array_update::<Self, V>("$addToSet", field, &value, now_moment())?;
+        *self = write_operator(self, update, "push_unique").await?;
         Ok(())
     }
 
     /// Remove every element equal to `value` from the array `field`, with
-    /// `$pull`.
+    /// `$pull`. Sets `updated_at` as [`Self::push`] does.
     ///
     /// # Errors
     ///
@@ -641,9 +641,8 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     where
         V: Serialize + Send + Sync,
     {
-        let value = value_to_bson(&value, "pull")?;
-        let field = writable_field::<Self>(field, "pull")?;
-        *self = write_operator(self, one("$pull", one(field, value)), "pull").await?;
+        let update = __rendered_array_update::<Self, V>("$pull", field, &value, now_moment())?;
+        *self = write_operator(self, update, "pull").await?;
         Ok(())
     }
 
@@ -761,7 +760,11 @@ pub(crate) fn one(key: impl Into<String>, value: impl Into<Bson>) -> Document {
 }
 
 fn now() -> Bson {
-    Bson::DateTime(::bson::DateTime::now())
+    Bson::DateTime(now_moment())
+}
+
+fn now_moment() -> ::bson::DateTime {
+    ::bson::DateTime::now()
 }
 
 /// The last segment of `M`'s path, for messages.
@@ -933,6 +936,54 @@ pub(crate) fn negate(value: Bson, call: &str) -> Result<Bson, FrameworkError> {
     })
 }
 
+/// The update `push`, `push_unique` and `pull` send for `operator`
+/// (`$push`, `$addToSet` or `$pull`): `{operator: {field: value}}`, and on
+/// a model with timestamps `{"$set": {updated_at: now}}` in the same
+/// update, so the write that changes the array advances `updated_at`.
+///
+/// **Not part of the public API.** It is `pub` so a test can assert the
+/// update without a server; the model's array operators call it, so the
+/// test sees what they send.
+///
+/// # Errors
+///
+/// When `operator` is no array operator, when `value` has no BSON form,
+/// and when `field` is no field of `M` or is the key. Each error names
+/// the call the operator belongs to.
+#[doc(hidden)]
+pub fn __rendered_array_update<M: DocumentModel, V: Serialize>(
+    operator: &str,
+    field: &str,
+    value: &V,
+    now: ::bson::DateTime,
+) -> Result<Document, FrameworkError> {
+    let call = match operator {
+        "$push" => "push",
+        "$addToSet" => "push_unique",
+        "$pull" => "pull",
+        other => {
+            return Err(FrameworkError::internal(format!(
+                "`{other}` is no array operator: the array calls send `$push`, `$addToSet` \
+                 or `$pull`"
+            )));
+        }
+    };
+    let value = value_to_bson(value, call)?;
+    let field = writable_field::<M>(field, call)?;
+    let mut update = one(operator, one(field, value));
+    set_updated_at::<M>(&mut update, now);
+    Ok(update)
+}
+
+/// Add `{"$set": {updated_at: now}}` to the one-operator `update` when `M`
+/// manages timestamps. Every operator call of the model builds its update
+/// through it, so none of them can leave `updated_at` behind.
+fn set_updated_at<M: DocumentModel>(update: &mut Document, now: ::bson::DateTime) {
+    if let Some((_, updated_at)) = M::TIMESTAMPS {
+        update.insert("$set", one(updated_at, Bson::DateTime(now)));
+    }
+}
+
 /// Apply `update` to `model`'s document and answer the document after it.
 async fn write_operator<M: DocumentModel>(
     model: &M,
@@ -969,9 +1020,7 @@ async fn increment_by<M: DocumentModel>(
         call,
     )?;
     let mut update = one("$inc", one(field, amount));
-    if let Some((_, updated_at)) = M::TIMESTAMPS {
-        update.insert("$set", one(updated_at, now()));
-    }
+    set_updated_at::<M>(&mut update, now_moment());
     *model = write_operator(model, update, call).await?;
     events::updated(&previous, model).await?;
     Ok(())
