@@ -72,6 +72,11 @@ pub(crate) fn valid_session_table(name: &str) -> bool {
 /// marker, so a session a Laravel application on the same database wrote
 /// is left to Laravel's own lifetime.
 ///
+/// A [`read`](SessionStore::read) of a session idle past the lifetime
+/// answers none and deletes the row, but only while the row is still idle
+/// past the lifetime: another request may refresh the session between the
+/// read and the delete, and that session stays.
+///
 /// The queries are sea-query statements over the table name held at run
 /// time, so a configured table name works like the default one.
 /// [`CreateSessionsTable`](crate::session::migrations::CreateSessionsTable)
@@ -393,6 +398,19 @@ impl DatabaseSessionDriver {
             .and_where(Expr::col(SessionColumn::Id).eq(id))
             .to_owned()
     }
+
+    /// `DELETE` of the row whose id is `id` while its last activity is
+    /// older than `cutoff`, which is `now` minus the lifetime: the rule the
+    /// read's expiry check applies, so a row whose last activity is the
+    /// cutoff or later, such as one another request refreshed since the
+    /// read, does not match.
+    fn delete_expired_by_id(&self, id: &str, cutoff: i64) -> DeleteStatement {
+        Query::delete()
+            .from_table(self.table())
+            .and_where(Expr::col(SessionColumn::Id).eq(id))
+            .and_where(Expr::col(SessionColumn::LastActivity).lt(cutoff))
+            .to_owned()
+    }
 }
 
 #[async_trait]
@@ -428,17 +446,23 @@ impl SessionStore for DatabaseSessionDriver {
         // against a far-future stored time, which reads as still active
         // (fail closed) rather than wrapping.
         let now = crate::clock::now().timestamp();
-        let expiry = session
-            .last_activity
-            .saturating_add(self.lifetime_secs_capped());
+        let lifetime = self.lifetime_secs_capped();
+        let expiry = session.last_activity.saturating_add(lifetime);
 
         if now > expiry {
-            // Session expired, clean it up. The read already answers
-            // "no session"; a failed delete only leaves the row for
-            // `gc`, so it is logged and not returned.
-            if let Err(error) = self.destroy(id).await {
+            // Session expired, clean it up. The delete matches the row only
+            // while its last activity is still older than `now` minus the
+            // lifetime, the same rule as the check above: between the fetch
+            // and this delete, another request may have loaded the session
+            // and refreshed it, and deleting it then would lose that write
+            // and leave the session gone for later reads. A delete that
+            // matches nothing is that case, so this request still answers
+            // no session. A failed delete only leaves the row for `gc`, so
+            // it is logged and not returned.
+            let delete = self.delete_expired_by_id(id, now.saturating_sub(lifetime));
+            if let Err(error) = db.inner().execute(&delete).await {
                 tracing::warn!(
-                    error = %error,
+                    error = %database_error(error),
                     "expired session row could not be deleted; garbage collection will remove it"
                 );
             }

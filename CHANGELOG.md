@@ -2945,6 +2945,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   anywhere in it, and a key the chain passes to `.defer(..)`,
   `.defer_with(..)` or `.optional(..)` after it gives the struct is
   optional in the struct's interface.
+- **A database session read keeps a session another request refreshed.**
+  `DatabaseSessionDriver::read` found a row idle past the lifetime and then
+  deleted it by id alone, so a request that loaded and refreshed the same
+  session between that read and the delete lost its write, and the next
+  read found no session. The delete now matches the row only while its
+  `last_activity` is still older than the lifetime, as the MongoDB driver's
+  does; the read that saw it expired still answers no session (PAR-188).
+- **The Laravel-database tests run each SQLite test on one connection.**
+  The fixture's SQLite pool held up to four connections, and sqlx returns a
+  released connection to the pool on a spawned task, so a test that awaited
+  every statement in turn still spread the fixture, the migrator's
+  `CREATE TABLE` and a model's first write over connections the runtime
+  chose. `kit_scaffold_notes_belong_to_laravels_users_sqlite`, whose first
+  write goes to a table the migrator created, could run that write on a
+  connection other than the one that created the table. The SQLite fixture
+  now holds one connection, and that test checks it (PAR-080).
 
 ## 3.2.1 - 2026-10-05
 
