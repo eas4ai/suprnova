@@ -91,6 +91,7 @@
     - [Migrations](migrations.md)
     - [Seeding](seeding.md)
     - [Running on a Laravel Database](laravel-database.md)
+    - [MongoDB](mongodb.md)
 - ## Eloquent ORM
     - [Getting Started](eloquent.md)
     - [Relationships](eloquent-relationships.md)

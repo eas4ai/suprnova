@@ -2180,6 +2180,19 @@ impl From<opendal::Error> for FrameworkError {
     }
 }
 
+// Implement From<mongodb::error::Error> so a driver operation on a collection
+// the `Mongo` facade answered propagates through `?` in code that returns
+// `FrameworkError`: a server that is down then fails the first query as a
+// `FrameworkError`, the way `Mongo::ping` does. The driver's error stays the
+// source, so `external_source` can downcast it to read its kind and labels.
+#[cfg(feature = "database-mongodb")]
+impl From<::mongodb::error::Error> for FrameworkError {
+    #[track_caller]
+    fn from(error: ::mongodb::error::Error) -> Self {
+        Self::from_external_with(format!("MongoDB: {}", error.kind), error)
+    }
+}
+
 // Implement From<RenderCacheError> so a route builder that declares a
 // RenderCache policy (`FreshnessPolicy::new(..)?`, `..build()?`) propagates
 // through `?` in application route registration, which already returns
