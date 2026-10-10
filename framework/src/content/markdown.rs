@@ -1,5 +1,6 @@
 //! Markdown to sanitized HTML rendering.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -215,46 +216,51 @@ impl MarkdownRenderer {
     ///
     /// Comrak has no inlines-only mode, so this makes one. Leading spaces
     /// and tabs are removed from each line, as CommonMark removes them
-    /// from a paragraph's lines, and each line then starts with a marker:
-    /// a Unicode space the text does not hold, chosen from U+1680,
-    /// U+2000 to U+200A, U+202F, U+205F and U+3000. A line that starts
-    /// with a marker starts no block and is never blank, so the whole text
-    /// parses as one paragraph and every block marker (`#`, `>`, `-`,
-    /// `1.`, a fence, an indent, a setext underline) stays text. Because
-    /// the marker is whitespace, emphasis at the start of a line parses
-    /// as it does at a line start. The paragraph's children are rendered
-    /// without the paragraph, and the markers are removed from the
-    /// output. Tables, task lists, footnotes and front matter, which are
-    /// blocks, are off. Lines stay separated by a line break, and a blank
-    /// line between two lines stays in the output. In the unlikely case
-    /// that the text holds every one of those spaces, it is rendered as
-    /// escaped text with no Markdown.
+    /// from a paragraph's lines, and each line then starts with a marker,
+    /// the ideographic space U+3000. A line that starts with the marker
+    /// starts no block and is never blank, so the whole text parses as one
+    /// paragraph and every block marker (`#`, `>`, `-`, `1.`, a fence, an
+    /// indent, a setext underline) stays text. Because the marker is
+    /// whitespace, emphasis at the start of a line parses as it does at a
+    /// line start. The paragraph's children are rendered without the
+    /// paragraph. Tables, task lists, footnotes and front matter, which
+    /// are blocks, are off. Lines stay separated by a line break, and a
+    /// blank line between two lines stays in the output.
+    ///
+    /// The text can hold U+3000 too, so the markers are kept apart from
+    /// it. Before the lines are marked, each U+3000 in the text is written
+    /// twice, which keeps it whitespace to the parser, and each numeric
+    /// character reference to it (`&#x3000;`, `&#12288;`) is replaced by a
+    /// reference to a character that the text neither holds nor
+    /// references, taken from the private-use area first. In the parsed
+    /// tree, before the HTML policy and the renderer run, a run of U+3000
+    /// of odd length loses the one marker it holds and is then halved,
+    /// each of those stand-in characters becomes U+3000 again, and a
+    /// replaced reference that stays text, as in a code span, gets back
+    /// the spelling the caller wrote. Link URLs and titles are restored in
+    /// the tree as well, so the link checks see, and the renderer
+    /// percent-encodes, the caller's URL. Close to a million characters
+    /// can stand in; a text that holds or references every one of them
+    /// leaves none free, its references to U+3000 then stay as written,
+    /// and a space one of them renders can be lost.
     ///
     /// Raw HTML, unsafe links, autolinks and the sanitizer follow the
     /// same choices as [`render`](Self::render).
     pub fn render_inline(&self, markdown: &str) -> ContentResult<String> {
-        let Some(marker) = INLINE_LINE_MARKERS
-            .iter()
-            .copied()
-            .find(|candidate| !markdown.contains(*candidate))
-        else {
-            return Ok(escape_text(markdown));
-        };
-
         let policy = self.policy();
         let options = comrak_options(&self.options, &policy, self.autolink, Scope::Inline);
         let arena = Arena::new();
-        let marked = mark_lines(markdown, marker);
-        let root = parse_document(&arena, &marked, &options);
+        let source = InlineSource::new(markdown);
+        let root = parse_document(&arena, &source.marked, &options);
+        source.restore(root);
         apply_policy(root, &policy);
         unwrap_paragraphs(root);
 
         let rendered = format_root(root, &options, &Plugins::default())?;
-        let unmarked: String = rendered.chars().filter(|c| *c != marker).collect();
         Ok(if policy.sanitize {
-            sanitize_html(&unmarked)
+            sanitize_html(&rendered)
         } else {
-            unmarked
+            rendered
         })
     }
 
@@ -300,14 +306,170 @@ impl Default for MarkdownRenderer {
     }
 }
 
-/// The spaces [`MarkdownRenderer::render_inline`] can mark lines with.
-/// Each is Unicode whitespace, so emphasis next to it parses as it does
-/// at a line start, and each is more than one byte, so the block parser,
-/// which reads only ASCII spaces and tabs as indentation, sees text.
-const INLINE_LINE_MARKERS: [char; 15] = [
-    '\u{3000}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
-    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{1680}',
-];
+/// The space [`MarkdownRenderer::render_inline`] starts every line with.
+/// It is Unicode whitespace, so emphasis next to it parses as it does at
+/// a line start, and it is more than one byte, so the block parser, which
+/// reads only ASCII spaces and tabs as indentation, sees text. No named
+/// character reference stands for it, so only numeric ones can name it.
+const INLINE_LINE_MARKER: char = '\u{3000}';
+
+/// The text [`MarkdownRenderer::render_inline`] parses, and what it takes
+/// to turn the parsed tree back into the caller's text.
+struct InlineSource {
+    /// The caller's text with each U+3000 doubled, each numeric reference
+    /// to U+3000 replaced, and every line marked.
+    marked: String,
+    /// Each spelling of a reference to U+3000 in the caller's text, with
+    /// the stand-in character its replacement names.
+    references: Vec<(String, char)>,
+}
+
+impl InlineSource {
+    /// Write `markdown` the way the parser is given it.
+    fn new(markdown: &str) -> Self {
+        let taken = held_or_referenced(markdown);
+        let mut free = placeholder_candidates().filter(|candidate| !taken.contains(candidate));
+        let mut references: Vec<(String, char)> = Vec::new();
+        let mut escaped = String::with_capacity(markdown.len() + 16);
+        let mut at = 0;
+        while let Some(c) = markdown[at..].chars().next() {
+            if c == '&'
+                && let Some((length, code_point)) = numeric_reference(&markdown[at + 1..])
+                && code_point == u32::from(INLINE_LINE_MARKER)
+            {
+                let spelling = &markdown[at..at + 1 + length];
+                let known = references
+                    .iter()
+                    .find(|(written, _)| written == spelling)
+                    .map(|(_, placeholder)| *placeholder);
+                let placeholder = known.or_else(|| {
+                    let placeholder = free.next()?;
+                    references.push((spelling.to_owned(), placeholder));
+                    Some(placeholder)
+                });
+                match placeholder {
+                    Some(placeholder) => escaped.push_str(&placeholder_reference(placeholder)),
+                    None => escaped.push_str(spelling),
+                }
+                at += 1 + length;
+                continue;
+            }
+            escaped.push(c);
+            if c == INLINE_LINE_MARKER {
+                escaped.push(c);
+            }
+            at += c.len_utf8();
+        }
+        Self {
+            marked: mark_lines(&escaped),
+            references,
+        }
+    }
+
+    /// Turn every text, code span, raw HTML, math, link URL and link title
+    /// in the parsed tree back into the caller's text.
+    fn restore<'a>(&self, root: &'a AstNode<'a>) {
+        for node in root.descendants() {
+            let mut data = node.data.borrow_mut();
+            match &mut data.value {
+                NodeValue::Text(text) => *text = self.restore_text(text).into(),
+                NodeValue::Code(code) => code.literal = self.restore_text(&code.literal),
+                NodeValue::HtmlInline(html) => *html = self.restore_text(html),
+                NodeValue::Math(math) => math.literal = self.restore_text(&math.literal),
+                NodeValue::Link(link) | NodeValue::Image(link) => {
+                    link.url = self.restore_text(&link.url);
+                    link.title = self.restore_text(&link.title);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `text` from the parsed tree as the caller wrote it. A marker starts
+    /// each line and never shares a run of U+3000 with another marker,
+    /// because a line ending, or the space a code span turns it into,
+    /// stands between them; every other U+3000 in a run was doubled. So a
+    /// run of odd length holds one marker, and half of the rest is the
+    /// caller's.
+    fn restore_text(&self, text: &str) -> String {
+        let mut restored = String::with_capacity(text.len());
+        let mut run = 0;
+        for c in text.chars() {
+            if c == INLINE_LINE_MARKER {
+                run += 1;
+                continue;
+            }
+            restored.extend(std::iter::repeat_n(INLINE_LINE_MARKER, run / 2));
+            run = 0;
+            if self
+                .references
+                .iter()
+                .any(|(_, placeholder)| *placeholder == c)
+            {
+                restored.push(INLINE_LINE_MARKER);
+            } else {
+                restored.push(c);
+            }
+        }
+        restored.extend(std::iter::repeat_n(INLINE_LINE_MARKER, run / 2));
+        for (spelling, placeholder) in &self.references {
+            restored = restored.replace(&placeholder_reference(*placeholder), spelling);
+        }
+        restored
+    }
+}
+
+/// The stand-in characters a replaced reference can name: the private-use
+/// area of the Basic Multilingual Plane, then every code point from
+/// U+20000 on.
+/// No named character reference stands for any of them, and none reaches
+/// the output, because each is turned back before rendering. U+E000 is
+/// left out because Comrak reads a reference to it as U+FFFD.
+fn placeholder_candidates() -> impl Iterator<Item = char> {
+    ('\u{E001}'..='\u{F8FF}').chain('\u{20000}'..='\u{10FFFD}')
+}
+
+/// The decimal numeric character reference to `placeholder`.
+fn placeholder_reference(placeholder: char) -> String {
+    format!("&#{};", u32::from(placeholder))
+}
+
+/// Every character `markdown` holds or names through a numeric character
+/// reference. A reference's digits count with or without an `&` in front,
+/// because `&amp;#57345;` and `\&#57345;` render as a reference's text,
+/// which must never be mistaken for a replaced one.
+fn held_or_referenced(markdown: &str) -> HashSet<char> {
+    let mut taken: HashSet<char> = markdown.chars().collect();
+    for (at, _) in markdown.match_indices('#') {
+        if let Some((_, code_point)) = numeric_reference(&markdown[at..])
+            && let Some(c) = char::from_u32(code_point)
+        {
+            taken.insert(c);
+        }
+    }
+    taken
+}
+
+/// The length and code point of the numeric character reference that
+/// `text`, the text after an `&`, starts with, read as Comrak reads one:
+/// `#` and one to seven decimal digits, or `#x` or `#X` and one to six
+/// hexadecimal digits, then `;`.
+fn numeric_reference(text: &str) -> Option<(usize, u32)> {
+    let after_hash = text.strip_prefix('#')?;
+    let (prefix, radix, most_digits) = match after_hash.as_bytes().first() {
+        Some(b'x' | b'X') => (2, 16, 6),
+        _ => (1, 10, 7),
+    };
+    let digits = text[prefix..]
+        .chars()
+        .take_while(|c| c.is_digit(radix))
+        .count();
+    if digits == 0 || digits > most_digits || text.as_bytes().get(prefix + digits) != Some(&b';') {
+        return None;
+    }
+    let code_point = u32::from_str_radix(&text[prefix..prefix + digits], radix).ok()?;
+    Some((prefix + digits + 1, code_point))
+}
 
 /// What one render does with raw HTML, links and the sanitizer.
 struct RenderPolicy {
@@ -401,16 +563,16 @@ fn unwrap_paragraphs<'a>(root: &'a AstNode<'a>) {
     }
 }
 
-/// Start each line of `markdown` with `marker`, after removing the
-/// line's leading spaces and tabs. A line ends at `\n`, `\r\n` or `\r`,
-/// as CommonMark's lines do, and a line ending at the very end of the
-/// text starts no new line.
-fn mark_lines(markdown: &str, marker: char) -> String {
+/// Start each line of `markdown` with [`INLINE_LINE_MARKER`], after
+/// removing the line's leading spaces and tabs. A line ends at `\n`,
+/// `\r\n` or `\r`, as CommonMark's lines do, and a line ending at the very
+/// end of the text starts no new line.
+fn mark_lines(markdown: &str) -> String {
     let mut marked = String::with_capacity(markdown.len() + 16);
     let mut rest = markdown;
     loop {
         let line = rest.trim_start_matches([' ', '\t']);
-        marked.push(marker);
+        marked.push(INLINE_LINE_MARKER);
         let Some(at) = line.find(['\n', '\r']) else {
             marked.push_str(line);
             return marked;
@@ -422,14 +584,6 @@ fn mark_lines(markdown: &str, marker: char) -> String {
             return marked;
         }
     }
-}
-
-/// `text` with the characters HTML gives meaning to escaped.
-fn escape_text(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 /// Write the parsed tree as HTML. A write into a `String` fails only when
