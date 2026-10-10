@@ -150,7 +150,14 @@ fn append_segments(path: &str, segments: &[&str]) -> String {
 /// `//evil.example/x` stays a path on the `APP_URL` origin, as it does in
 /// [`full`].
 pub fn current(request: &Request) -> String {
-    on_app_origin(&format!("{}{}", request.public_root(), request.path()))
+    current_at(&request.public_root(), request.path())
+}
+
+/// [`current`] from a request's public root and path, for code that kept
+/// those two facts after the request itself was handed on, such as the
+/// visit a handler runs in.
+pub(crate) fn current_at(root: &str, path: &str) -> String {
+    on_app_origin(&format!("{root}{path}"))
 }
 
 /// The current request's public root, path and query string: the URL the
