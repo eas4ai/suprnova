@@ -21,9 +21,11 @@
 //! the destination storage in 64 KiB chunks via `opendal::Operator::writer` -
 //! true streaming, not a final-write of a buffered blob.
 //!
-//! Body is consumed exactly once per request. The derive macro
-//! dispatches by `#[field("name")]` so multiple files + text fields
-//! in one handler share the same parse.
+//! Body is consumed exactly once per request. The derive macro routes
+//! each part to the field its name addresses, by `#[field("name")]` and by
+//! bracketed and indexed names read as a form request reads them
+//! (`photos[0]`, `user[name]`), so multiple files + text fields in one
+//! handler share the same parse.
 //!
 //! # Failures
 //!
@@ -226,7 +228,9 @@ pub struct MultipartLimits<'a> {
     /// with HTTP 413 before it is read - so the (ceiling + 1)-th part
     /// never allocates. Like the other two ceilings it bounds the whole
     /// request, so it answers 413 rather than a field error. Names absent
-    /// from this list are bounded only by `max_parts`.
+    /// from this list are bounded only by `max_parts`. Under
+    /// [`parse_multipart_for_fields`] the key is the name in a field's
+    /// `#[field(...)]`, and every part routed to the field counts.
     pub per_field_max_counts: &'a [(&'a str, usize)],
 }
 
@@ -563,10 +567,12 @@ struct BodyBudget<'a> {
 /// Updates `*budget.used` after each chunk and short-circuits with a 413 if
 /// the running total exceeds `budget.cap`, or if a text part crosses
 /// `spill_threshold`. Validators see the bounded sniff buffer + current
-/// accumulated size and may also short-circuit. Each chunk of a file part
-/// the validators let through also feeds an [`ImageSizeProbe`], which reads
-/// an image's width and height wherever its header sits, holding a few
-/// bytes at a time.
+/// accumulated size and may also short-circuit: `check_as` is the name
+/// they are called with, the part's own or the field it goes to, and
+/// `None` skips them (see [`Checked`]). Each chunk of a file part the
+/// validators let through also feeds an [`ImageSizeProbe`], which reads an
+/// image's width and height wherever its header sits, holding a few bytes
+/// at a time.
 async fn collect_part<F>(
     field: &mut multer::Field<'_>,
     name: &str,
@@ -574,7 +580,7 @@ async fn collect_part<F>(
     spill_threshold: usize,
     budget: &mut BodyBudget<'_>,
     is_text: bool,
-    check_chunks: bool,
+    check_as: Option<&str>,
 ) -> Result<Collected, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
@@ -671,8 +677,8 @@ where
         // Returning here reads no further chunk, and drops the spill file
         // this part was writing. Only for a part the caller checks: see
         // [`Checked`].
-        if check_chunks {
-            per_field_validator(name, &sniff, size)?;
+        if let Some(check_as) = check_as {
+            per_field_validator(check_as, &sniff, size)?;
         }
 
         // After the validators, so a chunk that ends the part's read is
@@ -763,7 +769,9 @@ pub async fn parse_multipart_streaming_with_limits<F>(
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
-    parse_parts(req, limits, Checked::EveryPart, per_field_validator).await
+    parse_parts(req, limits, Checked::EveryPart, per_field_validator)
+        .await
+        .map(|(payload, _)| payload)
 }
 
 /// The parse `#[derive(MultipartRequest)]` runs: as
@@ -794,6 +802,201 @@ where
         per_file_validator,
     )
     .await
+    .map(|(payload, _)| payload)
+}
+
+/// The parse `#[derive(MultipartRequest)]` runs: each part goes to the
+/// field among `fields` its name addresses, read as a form request reads
+/// it (see [`PartField`]), so the Inertia client's `photos[0]` and
+/// `user[name]` reach the fields declared as `photos[]` and `user.name`.
+///
+/// `per_file_validator` is called with the name in the field's
+/// `#[field(...)]`, for a file part that goes to a file field only. A
+/// field that holds one file takes the first part that does not leave the
+/// file out, and every later part for it is skipped, neither checked nor
+/// kept. A `max_count` in `limits.per_field_max_counts`, keyed by the name
+/// in `#[field(...)]`, counts every part that goes to the field, whatever
+/// name it was sent under.
+///
+/// # Errors
+///
+/// As [`parse_multipart_streaming_with_limits`]. A file the validator
+/// refuses goes under the field's input name, a trailing `[]` replaced by
+/// the element's index.
+#[doc(hidden)]
+pub async fn parse_multipart_for_fields<F>(
+    req: crate::http::Request,
+    limits: MultipartLimits<'_>,
+    fields: &[PartField<'_>],
+    per_file_validator: F,
+) -> Result<RoutedPayload, FrameworkError>
+where
+    F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
+{
+    let (payload, routes) = parse_parts(
+        req,
+        limits,
+        Checked::Fields {
+            router: PartRouter::new(fields),
+        },
+        per_file_validator,
+    )
+    .await?;
+    Ok(RoutedPayload { payload, routes })
+}
+
+/// A multipart body parsed for a `#[derive(MultipartRequest)]` struct by
+/// [`parse_multipart_for_fields`]: the parts kept, and the field each one
+/// goes to.
+#[doc(hidden)]
+pub struct RoutedPayload {
+    /// The parts kept, in the order they were sent.
+    pub payload: MultipartPayload,
+    /// The route of each part of `payload`, at the same position: the
+    /// field it goes to, or `None` for a part no field takes.
+    pub routes: Vec<Option<PartRoute>>,
+}
+
+/// What a field of a `#[derive(MultipartRequest)]` struct holds, which
+/// decides the names that reach it: a list takes indexed and `[]` names,
+/// a field that holds one value takes the rest.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartFieldKind {
+    /// One file: `UploadedFile<V>` or `Option<UploadedFile<V>>`.
+    OneFile,
+    /// A list of files: `Vec<UploadedFile<V>>`.
+    Files,
+    /// One text value: `T` or `Option<T>`.
+    OneText,
+    /// A list of text values: `Vec<T>` or `Vec<Option<T>>`.
+    Texts,
+}
+
+impl PartFieldKind {
+    fn is_list(self) -> bool {
+        matches!(self, Self::Files | Self::Texts)
+    }
+
+    fn is_file(self) -> bool {
+        matches!(self, Self::OneFile | Self::Files)
+    }
+}
+
+/// One field of a `#[derive(MultipartRequest)]` struct, as the parser
+/// routes parts to it.
+///
+/// A part goes to the field whose `#[field(...)]` name it is sent under,
+/// as before. Otherwise the part's name and the field's are read as a form
+/// request reads bracketed and indexed names, and a part goes to the field
+/// whose name reads as the same place: `user[name]` to `user.name` or
+/// `user[name]`, and `photos[0]` or `photos[]` to the list `photos[]` or
+/// `photos`. A name that reads as a list element goes to a list only, and
+/// any other name to a field that holds one value only.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct PartField<'a> {
+    /// The name in the field's `#[field(...)]`.
+    pub name: &'a str,
+    /// What the field holds.
+    pub kind: PartFieldKind,
+}
+
+/// Where one part goes: a field, and the part's place in it.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartRoute {
+    /// The field's position among the fields given to
+    /// [`parse_multipart_for_fields`].
+    pub field: usize,
+    /// In a list, the element's index: the one its name gives (`photos[3]`
+    /// is `3`), or for `[]` and the field's own name the index after the
+    /// highest the list holds, as PHP appends. In a field that holds one
+    /// value, how many parts went to the field before this one.
+    pub index: i64,
+}
+
+/// Routes the parts of one body to the fields of one struct, in the order
+/// the parts arrive, keeping the index each list appends at next.
+struct PartRouter<'a> {
+    fields: &'a [PartField<'a>],
+    /// The place each field's name reads as: for a list, the path its
+    /// elements are under; for a field that holds one value, its path, or
+    /// `None` when its name reads as a list element or as no place, which
+    /// only a part sent under that exact name reaches.
+    paths: Vec<Option<String>>,
+    /// Per field: for a list, where `[]` appends next; for a field that
+    /// holds one value, how many parts went to it.
+    next: Vec<NextIndex>,
+}
+
+/// The index a list's `[]` takes next, as PHP keeps it.
+#[derive(Debug, Clone, Copy)]
+enum NextIndex {
+    /// The list holds no index yet: `[]` takes `0`.
+    Empty,
+    /// One past the highest index the list holds.
+    At(i64),
+    /// The list holds the highest index an `i64` holds, so `[]` has no
+    /// index to take and PHP drops the part.
+    Full,
+}
+
+impl<'a> PartRouter<'a> {
+    fn new(fields: &'a [PartField<'a>]) -> Self {
+        let paths = fields
+            .iter()
+            .map(|field| {
+                let path = crate::http::input::name_path(field.name)?;
+                (field.kind.is_list() || path.element.is_none()).then_some(path.path)
+            })
+            .collect();
+        Self {
+            fields,
+            paths,
+            next: vec![NextIndex::Empty; fields.len()],
+        }
+    }
+
+    /// The route of a part sent under `name` and the field it names, or
+    /// `None` when no field takes it.
+    fn route(&mut self, name: &str) -> Option<(PartRoute, PartField<'a>)> {
+        if let Some(field) = self.fields.iter().position(|field| field.name == name) {
+            return self.place(field, None);
+        }
+        let read = crate::http::input::name_path(name)?;
+        let field = self
+            .fields
+            .iter()
+            .zip(&self.paths)
+            .position(|(field, path)| {
+                field.kind.is_list() == read.element.is_some()
+                    && path.as_deref() == Some(read.path.as_str())
+            })?;
+        self.place(field, read.element.flatten())
+    }
+
+    /// The part's place in `field`: `index` when its name gives one, else
+    /// the next one.
+    fn place(&mut self, field: usize, index: Option<i64>) -> Option<(PartRoute, PartField<'a>)> {
+        let next = self.next.get_mut(field)?;
+        let declared = *self.fields.get(field)?;
+        let list = declared.kind.is_list();
+        let index = match (index, *next) {
+            (Some(index), _) => index,
+            (None, NextIndex::Empty) => 0,
+            (None, NextIndex::At(at)) => at,
+            // A field that holds one value counts on; a full list drops it.
+            (None, NextIndex::Full) if !list => i64::MAX,
+            (None, NextIndex::Full) => return None,
+        };
+        *next = match (*next, index.checked_add(1)) {
+            (NextIndex::Full, _) | (_, None) => NextIndex::Full,
+            (NextIndex::At(at), Some(_)) if index < at => NextIndex::At(at),
+            (_, Some(after)) => NextIndex::At(after),
+        };
+        Some((PartRoute { field, index }, declared))
+    }
 }
 
 /// Which parts the chunk validator is called for.
@@ -807,14 +1010,22 @@ enum Checked<'a> {
         /// The wire names of the fields that hold one file.
         single_files: &'a [&'a str],
     },
+    /// The file parts that go to a file field, each checked under the
+    /// field's name (see [`parse_multipart_for_fields`]).
+    Fields {
+        /// Routes each part to its field.
+        router: PartRouter<'a>,
+    },
 }
 
+/// The parse behind every public parser: the parts kept, and under
+/// [`Checked::Fields`] the route of each, at the same position.
 async fn parse_parts<F>(
     req: crate::http::Request,
     limits: MultipartLimits<'_>,
-    checked: Checked<'_>,
+    mut checked: Checked<'_>,
     mut per_field_validator: F,
-) -> Result<MultipartPayload, FrameworkError>
+) -> Result<(MultipartPayload, Vec<Option<PartRoute>>), FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
@@ -933,6 +1144,7 @@ where
     let mut multipart = Multipart::new(counted, boundary);
 
     let mut payload = MultipartPayload::default();
+    let mut routes: Vec<Option<PartRoute>> = Vec::new();
     let mut total_bytes: usize = 0;
 
     // Per-field count ceilings (`max_count`) enforced during streaming.
@@ -945,10 +1157,16 @@ where
     let mut seen_for: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut part_count: usize = 0;
     // Under `Checked::TakenFiles`, whether each field that holds one file
-    // has taken its part, by its position in `single_files`.
-    let mut file_taken = match &checked {
-        Checked::EveryPart => Vec::new(),
-        Checked::TakenFiles { single_files } => vec![false; single_files.len()],
+    // has taken its part, by its position in `single_files`; under
+    // `Checked::Fields`, by the field's position. `Checked::Fields` also
+    // counts the parts each field took, for its `max_count`.
+    let (mut file_taken, mut field_parts) = match &checked {
+        Checked::EveryPart => (Vec::new(), Vec::new()),
+        Checked::TakenFiles { single_files } => (vec![false; single_files.len()], Vec::new()),
+        Checked::Fields { router } => (
+            vec![false; router.fields.len()],
+            vec![0usize; router.fields.len()],
+        ),
     };
 
     while let Some(mut field) = multipart
@@ -987,9 +1205,11 @@ where
             }
         };
 
-        // Per-field `max_count`: reject the (ceiling + 1)-th part carrying
-        // this name before it is read, so the extra part never allocates.
-        if let Some(&cap) = cap_for.get(name.as_str())
+        // Per-field `max_count` by wire name, for the parsers that see the
+        // wire name alone: reject the (ceiling + 1)-th part carrying this
+        // name before it is read, so the extra part never allocates.
+        if !matches!(checked, Checked::Fields { .. })
+            && let Some(&cap) = cap_for.get(name.as_str())
             && index >= cap
         {
             return Err(FrameworkError::Domain {
@@ -998,18 +1218,52 @@ where
             });
         }
 
-        // Which chunks the validator sees, and, for a field that holds one
-        // file, skip a part once the field has taken one: multer passes over
-        // the part's bytes, which still count toward the raw byte cap.
-        let (check_chunks, single_file) = match &checked {
-            Checked::EveryPart => (true, None),
+        // Which chunks the validator sees, under which name, and, for a
+        // field that holds one file, skip a part once the field has taken
+        // one: multer passes over the part's bytes, which still count
+        // toward the raw byte cap. Under `Checked::Fields` a part is checked
+        // and counted by the field it goes to, whatever name it was sent
+        // under, and a refusal is named by the field and the element.
+        let (check_as, single_file, route, routed_name) = match &mut checked {
+            Checked::EveryPart => (Some(name.as_str()), None, None, None),
             Checked::TakenFiles { single_files } => {
                 let single_file = single_files.iter().position(|single| *single == name);
                 if single_file.is_some_and(|at| file_taken.get(at).copied().unwrap_or(false)) {
                     continue;
                 }
-                (file_name.is_some(), single_file)
+                (
+                    file_name.is_some().then_some(name.as_str()),
+                    single_file,
+                    None,
+                    None,
+                )
             }
+            Checked::Fields { router } => match router.route(&name) {
+                Some((route, field)) => {
+                    if let Some(parts) = field_parts.get_mut(route.field) {
+                        *parts += 1;
+                        if let Some(&cap) = cap_for.get(field.name)
+                            && *parts > cap
+                        {
+                            return Err(FrameworkError::Domain {
+                                message: format!("field '{}' exceeds max_count {cap}", field.name),
+                                status_code: 413,
+                            });
+                        }
+                    }
+                    let one_file = field.kind == PartFieldKind::OneFile;
+                    if one_file && file_taken.get(route.field).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    (
+                        (file_name.is_some() && field.kind.is_file()).then_some(field.name),
+                        one_file.then_some(route.field),
+                        Some(route),
+                        Some(field.name),
+                    )
+                }
+                None => (None, None, None, None),
+            },
         };
 
         // Classification: presence of `filename=` in Content-Disposition
@@ -1027,14 +1281,18 @@ where
                 raw_cap_tripped: &raw_cap_tripped,
             },
             file_name.is_none(),
-            check_chunks,
+            check_as,
         )
         .await
         {
             Ok(collected) => collected,
             Err(FrameworkError::InvalidUpload(message)) => {
                 let mut errors = ValidationErrors::new();
-                errors.add(field_error_key(&name, Some(index)), *message);
+                let key = match (routed_name, route) {
+                    (Some(field), Some(route)) => element_error_key(field, Some(route.index)),
+                    _ => field_error_key(&name, Some(index)),
+                };
+                errors.add(key, *message);
                 let input = if target.is_some() {
                     crate::Request::multipart_old_input(&payload)?
                 } else {
@@ -1077,10 +1335,13 @@ where
         }
 
         payload.fields.push((name, value));
+        if matches!(checked, Checked::Fields { .. }) {
+            routes.push(route);
+        }
     }
 
     report.parsed(&payload.fields);
-    Ok(payload)
+    Ok((payload, routes))
 }
 
 /// Stream the body of `req` into a `MultipartPayload`, invoking
@@ -1241,6 +1502,19 @@ pub trait MultipartRequestHooks {
 /// field, the name without its `[]`.
 #[doc(hidden)]
 pub fn field_error_key(name: &str, index: Option<usize>) -> String {
+    key_at(name, index)
+}
+
+/// As [`field_error_key`], with the index a part's name gave it, which can
+/// be any integer PHP reads as an array key: `photos[-1]` fails as
+/// `photos.-1`, as Laravel names it.
+#[doc(hidden)]
+pub fn element_error_key(name: &str, index: Option<i64>) -> String {
+    key_at(name, index)
+}
+
+/// The key [`field_error_key`] and [`element_error_key`] describe.
+fn key_at<I: std::fmt::Display>(name: &str, index: Option<I>) -> String {
     match (name.strip_suffix("[]"), index) {
         (Some(base), Some(index)) => format!("{base}.{index}"),
         (Some(base), None) => base.to_string(),
@@ -1337,7 +1611,23 @@ pub fn add_field_failure(
     index: Option<usize>,
     failure: FieldFailure,
 ) {
-    let key = field_error_key(name, index);
+    file_failure(errors, key_at(name, index), failure);
+}
+
+/// As [`add_field_failure`], with the index a part's name gave it (see
+/// [`element_error_key`]).
+#[doc(hidden)]
+pub fn add_field_failure_at(
+    errors: &mut ValidationErrors,
+    name: &str,
+    index: Option<i64>,
+    failure: FieldFailure,
+) {
+    file_failure(errors, key_at(name, index), failure);
+}
+
+/// File `failure` under `key`, with the message that names it.
+fn file_failure(errors: &mut ValidationErrors, key: String, failure: FieldFailure) {
     let message = failure.message(&key);
     errors.add(key, message);
 }
@@ -1385,12 +1675,36 @@ pub fn take_file<V: UploadValidator>(
     index: usize,
     errors: &mut ValidationErrors,
 ) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
+    take_file_under(validator, value, || key_at(name, Some(index)), errors)
+}
+
+/// As [`take_file`], with the index a part's name gave it (see
+/// [`element_error_key`]).
+#[doc(hidden)]
+pub fn take_file_at<V: UploadValidator>(
+    validator: &V,
+    value: MultipartValue,
+    name: &str,
+    index: i64,
+    errors: &mut ValidationErrors,
+) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
+    take_file_under(validator, value, || key_at(name, Some(index)), errors)
+}
+
+/// What [`take_file`] does, filing a failure under the key `key` makes,
+/// which runs only when the part fails.
+fn take_file_under<V: UploadValidator>(
+    validator: &V,
+    value: MultipartValue,
+    key: impl FnOnce() -> String,
+    errors: &mut ValidationErrors,
+) -> Result<Taken<UploadedFile<V>>, FrameworkError> {
     if leaves_file_out(&value) {
         return Ok(Taken::Absent);
     }
     match value {
         MultipartValue::Text(_) | MultipartValue::NonUtf8Text(_) => {
-            add_field_failure(errors, name, Some(index), FieldFailure::File);
+            file_failure(errors, key(), FieldFailure::File);
             Ok(Taken::Invalid)
         }
         MultipartValue::File {
@@ -1416,7 +1730,7 @@ pub fn take_file<V: UploadValidator>(
                 }
             })),
             Err(FrameworkError::InvalidUpload(message)) => {
-                errors.add(field_error_key(name, Some(index)), *message);
+                errors.add(key(), *message);
                 Ok(Taken::Invalid)
             }
             Err(other) => Err(other),
@@ -1443,24 +1757,43 @@ pub fn take_text<T>(
     parse: fn(&str) -> Option<T>,
     errors: &mut ValidationErrors,
 ) -> Taken<T> {
-    match value {
-        MultipartValue::Text(text) if text.is_empty() => Taken::Absent,
+    take_text_under(value, || key_at(name, Some(index)), failure, parse, errors)
+}
+
+/// As [`take_text`], with the index a part's name gave it (see
+/// [`element_error_key`]).
+#[doc(hidden)]
+pub fn take_text_at<T>(
+    value: MultipartValue,
+    name: &str,
+    index: i64,
+    failure: FieldFailure,
+    parse: fn(&str) -> Option<T>,
+    errors: &mut ValidationErrors,
+) -> Taken<T> {
+    take_text_under(value, || key_at(name, Some(index)), failure, parse, errors)
+}
+
+/// What [`take_text`] does, filing a failure under the key `key` makes,
+/// which runs only when the part fails.
+fn take_text_under<T>(
+    value: MultipartValue,
+    key: impl FnOnce() -> String,
+    failure: FieldFailure,
+    parse: fn(&str) -> Option<T>,
+    errors: &mut ValidationErrors,
+) -> Taken<T> {
+    let failure = match value {
+        MultipartValue::Text(text) if text.is_empty() => return Taken::Absent,
         MultipartValue::Text(text) => match parse(&text) {
-            Some(parsed) => Taken::Value(parsed),
-            None => {
-                add_field_failure(errors, name, Some(index), failure);
-                Taken::Invalid
-            }
+            Some(parsed) => return Taken::Value(parsed),
+            None => failure,
         },
-        MultipartValue::NonUtf8Text(_) => {
-            add_field_failure(errors, name, Some(index), failure);
-            Taken::Invalid
-        }
-        MultipartValue::File { .. } => {
-            add_field_failure(errors, name, Some(index), FieldFailure::String);
-            Taken::Invalid
-        }
-    }
+        MultipartValue::NonUtf8Text(_) => failure,
+        MultipartValue::File { .. } => FieldFailure::String,
+    };
+    file_failure(errors, key(), failure);
+    Taken::Invalid
 }
 
 /// Read a text field through its type's `FromStr`.
@@ -1542,6 +1875,74 @@ mod key_tests {
             Taken::Absent
         ));
         assert!(errors.is_empty(), "{errors}");
+    }
+
+    #[test]
+    fn inp_a_part_goes_to_the_field_its_name_addresses() {
+        let fields = [
+            PartField {
+                name: "user.name",
+                kind: PartFieldKind::OneText,
+            },
+            PartField {
+                name: "photos[]",
+                kind: PartFieldKind::Files,
+            },
+            PartField {
+                name: "tags",
+                kind: PartFieldKind::Texts,
+            },
+            PartField {
+                name: "x[]",
+                kind: PartFieldKind::OneText,
+            },
+        ];
+        let mut router = PartRouter::new(&fields);
+        let mut route = |name: &str| {
+            router
+                .route(name)
+                .map(|(route, _)| (route.field, route.index))
+        };
+
+        // A field that holds one value counts the parts it takes.
+        assert_eq!(route("user[name]"), Some((0, 0)));
+        assert_eq!(route("user.name"), Some((0, 1)));
+        // A list takes indexed names and appends after the highest index.
+        assert_eq!(route("photos[3]"), Some((1, 3)));
+        assert_eq!(route("photos[]"), Some((1, 4)));
+        assert_eq!(route("photos[1]"), Some((1, 1)));
+        assert_eq!(route("photos[]"), Some((1, 5)));
+        assert_eq!(route("photos[-2]"), Some((1, -2)));
+        // A list declared without brackets takes its own name as an append.
+        assert_eq!(route("tags"), Some((2, 0)));
+        assert_eq!(route("tags[]"), Some((2, 1)));
+        // A field whose name reads as a list element takes that exact name
+        // only.
+        assert_eq!(route("x[]"), Some((3, 0)));
+        assert_eq!(route("x[0]"), None);
+        // An element never fills a field that holds one value, nor a value a
+        // list.
+        assert_eq!(route("user[name][]"), None);
+        assert_eq!(route("photos"), None);
+        assert_eq!(route("photos[0][caption]"), None);
+        assert_eq!(route("[photos]"), None);
+        assert_eq!(route("other"), None);
+
+        // A list holding the highest index has no index left for `[]`.
+        assert_eq!(route("photos[9223372036854775807]"), Some((1, i64::MAX)));
+        assert_eq!(route("photos[]"), None);
+        assert_eq!(route("photos[7]"), Some((1, 7)));
+    }
+
+    #[test]
+    fn inp_an_element_key_takes_any_index_php_reads() {
+        assert_eq!(element_error_key("photos[]", Some(-1)), "photos.-1");
+        assert_eq!(
+            element_error_key("photos[]", Some(i64::MAX)),
+            "photos.9223372036854775807"
+        );
+        assert_eq!(element_error_key("photos", Some(3)), "photos");
+        assert_eq!(element_error_key("photos[]", None), "photos");
     }
 
     #[test]

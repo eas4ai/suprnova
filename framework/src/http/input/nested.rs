@@ -338,6 +338,58 @@ fn set_path<'a>(place: &mut Node<'a>, keys: Vec<Option<Cow<'a, str>>>, value: No
     }
 }
 
+/// Where a part's name puts its value, read as [`Nested::insert`] reads
+/// the name: the dotted path of its base and the keys before the last, and
+/// what the last key says. The multipart extractor routes a part to a
+/// field by it, so `photos[0]` fills the list declared as `photos[]` and
+/// `user[name]` the field declared as `user.name`, as a form request reads
+/// them.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NamePath {
+    /// `user.name` for `user[name]`, `photos` for `photos[0]` and
+    /// `photos[]`, and the name itself for a plain name.
+    pub(crate) path: String,
+    /// `None` when the name puts one value at `path`; `Some(index)` when it
+    /// puts an element in the list at `path`, under `index` for `[3]` and
+    /// after the highest index the list holds for `[]` (`Some(None)`).
+    pub(crate) element: Option<Option<i64>>,
+}
+
+/// The [`NamePath`] of `name`, or `None` when the name holds no fixed
+/// place: a name PHP drops (nothing before the first bracket, or nested
+/// more than 64 levels), or one that appends before its last key
+/// (`items[][name]`), which makes a new element each time it is sent.
+pub(crate) fn name_path(name: &str) -> Option<NamePath> {
+    let (base, keys) = match split(Cow::Borrowed(name)) {
+        Split::Dropped | Split::TooDeep(_) => return None,
+        Split::Plain(base) => {
+            return Some(NamePath {
+                path: base.into_owned(),
+                element: None,
+            });
+        }
+        Split::Nested { base, keys } => (base, keys),
+    };
+    let (last, before) = keys.split_last()?;
+    let mut path = base.into_owned();
+    for key in before {
+        path.push('.');
+        path.push_str(key.as_deref()?);
+    }
+    let element = match last {
+        None => Some(None),
+        Some(key) => match php_integer(key) {
+            Some(index) => Some(Some(index)),
+            None => {
+                path.push('.');
+                path.push_str(key);
+                None
+            }
+        },
+    };
+    Some(NamePath { path, element })
+}
+
 /// What a name says about where its value goes.
 enum Split<'a> {
     /// No variable: the name, or the part before its first bracket, is
@@ -512,6 +564,33 @@ mod tests {
         ] {
             assert_eq!(php_integer(text), index, "{text:?}");
         }
+    }
+
+    #[test]
+    fn inp_a_name_path_names_the_place_the_form_reader_puts_a_value() {
+        let path = |name: &str| name_path(name).map(|path| (path.path, path.element));
+        assert_eq!(path("title"), Some(("title".into(), None)));
+        assert_eq!(path("  user.name"), Some(("user.name".into(), None)));
+        assert_eq!(path("user[name]"), Some(("user.name".into(), None)));
+        assert_eq!(path("photos[]"), Some(("photos".into(), Some(None))));
+        assert_eq!(path("photos[ ]"), Some(("photos".into(), Some(None))));
+        assert_eq!(path("photos[3]"), Some(("photos".into(), Some(Some(3)))));
+        assert_eq!(path("photos[-1]"), Some(("photos".into(), Some(Some(-1)))));
+        assert_eq!(path("photos[01]"), Some(("photos.01".into(), None)));
+        assert_eq!(
+            path("user[tags][2]"),
+            Some(("user.tags".into(), Some(Some(2))))
+        );
+        assert_eq!(
+            path("photos[0][caption]"),
+            Some(("photos.0.caption".into(), None))
+        );
+        // A bracket that never closes is part of a plain name.
+        assert_eq!(path("a[x"), Some(("a[x".into(), None)));
+        assert_eq!(path("items[][name]"), None);
+        assert_eq!(path("[tags]"), None);
+        assert_eq!(path(""), None);
+        assert_eq!(path(&format!("a{}", "[b]".repeat(65))), None);
     }
 
     #[test]

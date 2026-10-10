@@ -707,3 +707,210 @@ async fn inp_a_file_field_reads_only_a_multipart_body() {
     .await;
     assert_eq!(reply.status, 422, "{}", reply.text());
 }
+
+// ── The multipart request derive ──
+
+/// A streaming upload request whose fields Inertia fills with indexed and
+/// bracketed names: `photos[0]`, `tags[1]`, `user[name]`, `user[avatar]`.
+#[derive(suprnova::MultipartRequest)]
+struct Trip {
+    #[field("title")]
+    title: String,
+    #[field("user.name")]
+    name: String,
+    #[field("user.avatar")]
+    avatar: Option<UploadedFile>,
+    #[field("photos[]")]
+    photos: Vec<UploadedFile>,
+    #[field("tags[]")]
+    tags: Vec<String>,
+}
+
+/// A route that reads a `Trip` and echoes its fields and its files' names.
+fn trip_route() -> Router {
+    Router::new()
+        .post("/trip", |req: Request| async move {
+            let trip = <Trip as suprnova::FromRequest>::from_request(req).await?;
+            Ok(HttpResponse::json(json!({
+                "title": trip.title,
+                "name": trip.name,
+                "avatar": trip.avatar.as_ref().map(|avatar| avatar.file_name.clone()),
+                "photos": trip.photos.iter().map(|photo| photo.file_name.clone()).collect::<Vec<_>>(),
+                "tags": trip.tags,
+            })))
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_reads_indexed_and_bracketed_part_names() {
+    // Inertia's default (`forceIndicesArrayFormatInFormData`): lists with
+    // indexes, objects with brackets. An indexed list reads in index order.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("user[avatar]", Some("me.png"), b"avatar"),
+            ("photos[1]", Some("b.png"), b"second"),
+            ("photos[0]", Some("a.png"), b"first"),
+            ("tags[0]", None, b"a"),
+            ("tags[1]", None, b"b"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(
+        reply.json(),
+        json!({
+            "title": "Trip",
+            "name": "Ada",
+            "avatar": "me.png",
+            "photos": ["a.png", "b.png"],
+            "tags": ["a", "b"],
+        })
+    );
+
+    // A name sent as the field declares it still reads as it did, and `[]`
+    // appends after the highest index the list holds.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user.name", None, b"Ada"),
+            ("photos[]", Some("a.png"), b"first"),
+            ("photos[]", Some("b.png"), b"second"),
+            ("tags[3]", None, b"d"),
+            ("tags[]", None, b"e"),
+            ("tags[0]", None, b"a"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(
+        reply.json(),
+        json!({
+            "title": "Trip",
+            "name": "Ada",
+            "avatar": null,
+            "photos": ["a.png", "b.png"],
+            "tags": ["a", "d", "e"],
+        })
+    );
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_names_a_failure_by_the_index_it_was_sent_under() {
+    // A text part where a file belongs, sent as `photos[3]`, fails as
+    // `photos.3`; a nested field left out is required under its path; a
+    // later part at an index replaces the earlier one, as PHP keeps it.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("photos[0]", Some("a.png"), b"first"),
+            ("photos[3]", None, b"not a file"),
+            ("tags[1]", None, b"x"),
+            ("tags[1]", None, b"y"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["photos.3", "user.name"]);
+    let body = reply.json();
+    assert_eq!(
+        body["errors"]["photos.3"][0],
+        "The photos.3 field must be a file."
+    );
+
+    // A part whose name reads as no field's is left alone: an object
+    // under a list element, and a name with nothing before its bracket.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("photos[0][caption]", None, b"x"),
+            ("[tags]", None, b"x"),
+            ("tags[1]", None, b"x"),
+            ("tags[1]", None, b"y"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["photos"], json!([]));
+    assert_eq!(reply.json()["tags"], json!(["y"]));
+}
+
+/// A list of small files with a count ceiling.
+#[derive(suprnova::MultipartRequest)]
+struct Scans {
+    #[field("scans[]", max_count = 2)]
+    scans: Vec<UploadedFile<MaxSize<8>>>,
+}
+
+fn scans_route() -> Router {
+    Router::new()
+        .post("/scans", |req: Request| async move {
+            let scans = <Scans as suprnova::FromRequest>::from_request(req).await?;
+            Ok(HttpResponse::json(json!({ "scans": scans.scans.len() })))
+        })
+        .into()
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_checks_indexed_parts_as_the_list_they_fill() {
+    let reply = send(
+        scans_route(),
+        "POST",
+        "/scans",
+        Some(&multipart()),
+        multipart_body(&[
+            ("scans[0]", Some("a.bin"), b"a"),
+            ("scans[1]", Some("b.bin"), b"b"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json(), json!({ "scans": 2 }));
+
+    // The file check that runs as the body streams sees an indexed part,
+    // and names its refusal by the index.
+    let reply = send(
+        scans_route(),
+        "POST",
+        "/scans",
+        Some(&multipart()),
+        multipart_body(&[("scans[2]", Some("c.bin"), b"more than eight bytes")]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["scans.2"]);
+
+    // `max_count` counts every part the list takes, whatever its index.
+    let reply = send(
+        scans_route(),
+        "POST",
+        "/scans",
+        Some(&multipart()),
+        multipart_body(&[
+            ("scans[0]", Some("a.bin"), b"a"),
+            ("scans[1]", Some("b.bin"), b"b"),
+            ("scans[2]", Some("c.bin"), b"c"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 413, "{}", reply.text());
+}

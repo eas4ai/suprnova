@@ -2923,6 +2923,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   pass. The scan now settles those names after the first walk has met
   every name and every call. It never admitted `eval`, `Worker` or another
   property refused by name.
+- **`#[derive(MultipartRequest)]` reads indexed and bracketed part names.**
+  The derive matched a part's name to `#[field(...)]` letter for letter, so
+  the Inertia client's `photos[0]` and `photos[1]` never reached a
+  `#[field("photos[]")]` list and `user[name]` never reached a field, while
+  a form request read them as nested data (PAR-055). A part now goes to the
+  field its name addresses, read as a form request reads it: `photos[0]` and
+  `photos[]` fill the list declared as `photos[]` or `photos`, in index
+  order, and `user[name]` fills the field declared as `user.name`. A name
+  sent exactly as declared still matches. A failure is named by the index
+  the part was sent under (`photos.3`), and `max_count` and the file checks
+  that run while the body streams apply to every part the field takes,
+  whatever name it was sent under.
+- **`suprnova generate-types` pairs a page built with the builder.** A page
+  whose chain starts with `Inertia::paginate(..)` got no `Pages` entry,
+  however its chain gave the props struct, and a field the chain deferred
+  or marked optional was written as required, though the first response
+  leaves it out (PAR-068). The component named in the first call of a
+  chain (`InertiaResponse::new`, `Inertia::paginate`, `Inertia::data`,
+  `Inertia::try_data`) now pairs with the struct `.with_data(..)` gives
+  anywhere in it, and a key the chain passes to `.defer(..)`,
+  `.defer_with(..)` or `.optional(..)` after it gives the struct is
+  optional in the struct's interface.
 
 ## 3.2.1 - 2026-10-05
 
