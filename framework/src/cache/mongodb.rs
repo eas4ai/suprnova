@@ -262,6 +262,17 @@ impl MongoCache {
         doc! { "cache": rendered(entries), "cache_locks": rendered(locks) }
     }
 
+    /// The `_id` condition that scopes a query to this store's prefix, or
+    /// an empty document when the prefix is empty. One helper for `flush`
+    /// and tag flushes, so both keep the same boundary.
+    fn within_prefix(&self) -> Document {
+        if self.prefix.is_empty() {
+            doc! {}
+        } else {
+            doc! { "_id": { "$regex": format!("^{}", regex_literal(&self.prefix)) } }
+        }
+    }
+
     /// The whole entry a write of `value` under `key` with `tags` stores.
     fn entry(
         &self,
@@ -348,10 +359,14 @@ impl MongoCache {
         doc! { "filter": filter, "update": update, "upsert": ceiling > 0 }
     }
 
-    /// The delete a flush of `tags` sends.
+    /// The delete a flush of `tags` sends. It is scoped to the store's
+    /// prefix, so a store never removes another store's entry that shares
+    /// the tag.
     #[doc(hidden)]
     pub fn rendered_flush_tags(&self, tags: &[&str]) -> Document {
-        doc! { "filter": { "tags": { "$in": tags.to_vec() } } }
+        let mut filter = doc! { "tags": { "$in": tags.to_vec() } };
+        filter.extend(self.within_prefix());
+        doc! { "filter": filter }
     }
 
     /// The upsert an acquire of the lock `key` for `owner` sends: it takes
@@ -581,13 +596,8 @@ impl CacheStore for MongoCache {
     /// stay.
     async fn flush(&self) -> Result<(), FrameworkError> {
         self.ready().await?;
-        let filter = if self.prefix.is_empty() {
-            doc! {}
-        } else {
-            doc! { "_id": { "$regex": format!("^{}", regex_literal(&self.prefix)) } }
-        };
         self.entries
-            .delete_many(filter)
+            .delete_many(self.within_prefix())
             .await
             .map_err(|error| store_error(STORE, "flush", error))?;
         Ok(())
@@ -663,8 +673,10 @@ impl CacheStore for MongoCache {
         .await
     }
 
-    /// One delete of every entry whose current tags hold any of `tags`. An
-    /// untagged write cleared the entry's tags, so it is not removed.
+    /// One delete of every entry whose current tags hold any of `tags`. The
+    /// flush is scoped to the store's prefix, so another store's entry with
+    /// the same tag stays. An untagged write cleared the entry's tags, so
+    /// it is not removed.
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
         if tags.is_empty() {
             return Ok(());

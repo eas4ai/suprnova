@@ -197,7 +197,10 @@ async fn add_increment_tags_and_locks_render_one_atomic_operation_each() {
     );
     assert_eq!(
         store.rendered_flush_tags(&["users"]),
-        doc! { "filter": { "tags": { "$in": ["users"] } } }
+        doc! { "filter": {
+            "tags": { "$in": ["users"] },
+            "_id": { "$regex": "^app:" },
+        } }
     );
 
     let lock = store.rendered_acquire_lock("job", "token-1", Duration::from_secs(10), now);
@@ -213,6 +216,40 @@ async fn add_increment_tags_and_locks_render_one_atomic_operation_each() {
         } }
     );
     assert!(lock.get_bool("upsert").unwrap());
+}
+
+#[tokio::test]
+async fn a_flush_of_tags_stays_within_the_store_prefix() {
+    // Two stores over one collection must not delete each other's entries
+    // (the flush is scoped to the configured prefix, as `flush` is).
+    let connection = unreachable().await;
+    let one = MongoCache::new(&connection, &config("one:"));
+    assert_eq!(
+        one.rendered_flush_tags(&["a"]),
+        doc! { "filter": {
+            "tags": { "$in": ["a"] },
+            "_id": { "$regex": "^one:" },
+        } }
+    );
+
+    let dotted = MongoCache::new(&connection, &config("a.b|c:"));
+    assert_eq!(
+        dotted.rendered_flush_tags(&["a"]),
+        doc! { "filter": {
+            "tags": { "$in": ["a"] },
+            "_id": { "$regex": r"^a\.b\|c:" },
+        } },
+        "the prefix is matched character for character"
+    );
+}
+
+#[tokio::test]
+async fn a_flush_of_tags_with_no_prefix_matches_the_tags_alone() {
+    let store = MongoCache::new(&unreachable().await, &config(""));
+    assert_eq!(
+        store.rendered_flush_tags(&["a", "b"]),
+        doc! { "filter": { "tags": { "$in": ["a", "b"] } } }
+    );
 }
 
 #[tokio::test]
@@ -499,6 +536,25 @@ async fn mongodb_flush_tags_removes_every_entry_with_the_tag_and_no_other() {
         store.get_raw("retagged").await.unwrap().as_deref(),
         Some("5"),
         "an untagged write cleared the tag"
+    );
+    cleanup(&connection, &names).await;
+}
+
+#[tokio::test]
+#[ignore = "needs MONGODB_TEST_URL"]
+async fn mongodb_flush_tags_stays_within_the_store_prefix() {
+    let (one, connection, names) = store_on_server("one:").await;
+    let two = MongoCache::with_collections(&connection, &config("two:"), &names[0], &names[1])
+        .expect("valid names");
+    one.tagged_put_raw(&["a"], "k", "1", None).await.unwrap();
+    two.tagged_put_raw(&["a"], "k", "2", None).await.unwrap();
+
+    one.flush_tags(&["a"]).await.expect("flush");
+    assert_eq!(one.get_raw("k").await.unwrap(), None, "one's entry went");
+    assert_eq!(
+        two.get_raw("k").await.unwrap().as_deref(),
+        Some("2"),
+        "two's entry with the same tag stays"
     );
     cleanup(&connection, &names).await;
 }
