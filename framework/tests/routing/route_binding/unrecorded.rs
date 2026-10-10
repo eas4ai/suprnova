@@ -641,6 +641,7 @@ async fn bind_004_each_instantiation_of_a_generic_handler_plans_its_own_argument
 
 #[tokio::test]
 async fn bind_007_a_missing_handlers_request_time_refusal_names_it_as_such() {
+    let _env = super::testing_environment_async().await;
     // Only the generic `missing()` handler binds `user`, and the binder for
     // it returns a `String`: the route starts, and the miss answers the
     // refusal, naming the `missing()` handler.

@@ -283,7 +283,8 @@ struct DebugOff {
 
 /// Turn debug mode off for one test, which must also be `#[serial]`.
 ///
-/// With debug on - the default when `APP_ENV` is unset, as here - a 5xx
+/// With debug on - the default when `APP_ENV` names a development
+/// environment, and so whenever a test process names one - a 5xx
 /// sent to an Inertia visit or a browser becomes the development error
 /// page instead of the app's Inertia error page (PAR-012). The tests that
 /// take this are about what production serves.

@@ -30,13 +30,16 @@ static LOADED_KEYS: Mutex<Option<std::collections::HashMap<String, String>>> = M
 /// Environment type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum Environment {
-    /// Local developer machine (`APP_ENV=local`). The default when `APP_ENV` is unset.
+    /// Local developer machine (`APP_ENV=local`).
     Local,
     /// Development / staging-adjacent environment for the developer's own services (`APP_ENV=development|dev`).
     Development,
     /// Pre-production staging environment (`APP_ENV=staging|stage`).
     Staging,
     /// Live production environment (`APP_ENV=production|prod`). Enables the strictest safety defaults.
+    /// The default when `APP_ENV` is unset, as Laravel's `config/app.php` reads
+    /// `env('APP_ENV', 'production')`, so a deployment that forgets to name its
+    /// environment runs every production check and keeps debug off.
     Production,
     /// Automated-test environment (`APP_ENV=testing|test`). Recognized by the test harness.
     Testing,
@@ -45,7 +48,12 @@ pub enum Environment {
 }
 
 impl Environment {
-    /// Detect environment from `APP_ENV` or default to `Local`.
+    /// Detect environment from `APP_ENV`, or `Production` when it is unset.
+    ///
+    /// An unset `APP_ENV` is production, as in Laravel, so a deployment
+    /// that forgets to name its environment fails closed: debug stays off
+    /// and every production check runs. A developer machine names its
+    /// environment, as the scaffold's `.env` does with `APP_ENV=local`.
     ///
     /// Matching is case-insensitive and accepts a small set of common
     /// aliases so an operator's `APP_ENV=Production`, `APP_ENV=PROD`,
@@ -69,18 +77,26 @@ impl Environment {
     /// change which file loads for a real custom environment
     /// (e.g. `APP_ENV=QA` must continue to load `.env.QA`).
     pub fn detect() -> Self {
-        let raw = match std::env::var("APP_ENV").ok() {
-            None => return Self::Local,
-            Some(s) => s,
-        };
-        match raw.to_lowercase().as_str() {
+        Self::detect_explicit().unwrap_or(Self::Production)
+    }
+
+    /// The environment `APP_ENV` names, or `None` when it is unset.
+    ///
+    /// [`detect`](Self::detect) answers for an unset `APP_ENV` too, so it
+    /// cannot tell a process that named its environment from one that did
+    /// not. The `.env` loader needs the difference: it loads an environment
+    /// file only for an environment that was named, as Laravel's
+    /// `LoadEnvironmentVariables` does. Matching is as `detect`'s.
+    pub fn detect_explicit() -> Option<Self> {
+        let raw = std::env::var("APP_ENV").ok()?;
+        Some(match raw.to_lowercase().as_str() {
             "production" | "prod" => Self::Production,
             "staging" | "stage" | "stg" => Self::Staging,
             "development" | "dev" => Self::Development,
             "testing" | "test" => Self::Testing,
             "local" => Self::Local,
             _ => Self::Custom(raw),
-        }
+        })
     }
 
     /// Get the .env file suffix for this environment
@@ -145,7 +161,10 @@ impl std::fmt::Display for Environment {
 /// 3. Re-detect `APP_ENV` now that base `.env` has been merged.
 /// 4. Load `.env.local`, `.env.{env}`, `.env.{env}.local` in
 ///    least-to-most-specific order using `from_path_override` so each
-///    later file wins over earlier files.
+///    later file wins over earlier files. With `APP_ENV` unset, the
+///    environment is production but no `.env.{env}` file loads, as
+///    Laravel's `LoadEnvironmentVariables` picks an environment file only
+///    for a set `APP_ENV`; `.env.local` still loads.
 /// 5. Re-apply the system-env snapshot last so real system values
 ///    survive any file that tried to override them, and record every
 ///    key newly introduced for the next-call cleanup.
@@ -259,8 +278,9 @@ fn load_env_files(project_root: &Path) -> Result<Environment, FrameworkError> {
 
     // Phase 3: re-detect APP_ENV now that base `.env` has merged in.
     // Detecting before the base load would skip `.env.production`
-    // when `APP_ENV=production` was set only in `.env`.
-    let env = Environment::detect();
+    // when `APP_ENV=production` was set only in `.env`. An unset
+    // `APP_ENV` is production, but names no environment file to load.
+    let named = Environment::detect_explicit();
 
     // Phase 4: load environment-specific files in least-to-most-
     // specific order, using `from_path_override` so each later file
@@ -268,7 +288,7 @@ fn load_env_files(project_root: &Path) -> Result<Environment, FrameworkError> {
     // system env - we restore that in phase 5.
     load_env_file(&project_root.join(".env.local"), true)?;
 
-    if let Some(suffix) = env.env_file_suffix() {
+    if let Some(suffix) = named.as_ref().and_then(Environment::env_file_suffix) {
         let path = project_root.join(format!(".env.{}", suffix));
         load_env_file(&path, true)?;
 
@@ -276,7 +296,7 @@ fn load_env_files(project_root: &Path) -> Result<Environment, FrameworkError> {
         load_env_file(&path, true)?;
     }
 
-    Ok(env)
+    Ok(named.unwrap_or(Environment::Production))
 }
 
 /// Refuse to write the process environment where it may not be sound.
@@ -584,7 +604,7 @@ mod tests {
             assert_eq!(Environment::detect(), Environment::Local);
         });
         with_app_env(None, || {
-            assert_eq!(Environment::detect(), Environment::Local);
+            assert_eq!(Environment::detect(), Environment::Production);
         });
     }
 

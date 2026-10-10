@@ -13,6 +13,8 @@
 //! registrations. We mirror the lock pattern from
 //! `app/tests/avatar_upload_e2e.rs`.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -115,6 +117,7 @@ async fn setup_app() -> TestApp {
         suprnova::InMemoryCache::new(),
     ));
     let middleware = Arc::new({
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()
     });

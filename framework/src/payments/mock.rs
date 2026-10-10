@@ -682,11 +682,6 @@ mod tests {
                 );
             });
         }
-        // Unset APP_ENV defaults to Local - also permissive.
-        with_app_env(None, || {
-            let ctx = empty_ctx(&headers, b"{}");
-            assert!(provider.verify(&ctx).is_ok());
-        });
     }
 
     #[test]
@@ -706,6 +701,11 @@ mod tests {
                 );
             });
         }
+        // An unset APP_ENV is production - refused too.
+        with_app_env(None, || {
+            let ctx = empty_ctx(&headers, b"{}");
+            assert!(provider.verify(&ctx).is_err());
+        });
     }
 
     fn one_off_request(price_ref: &str) -> StartSessionRequest {

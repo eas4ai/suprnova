@@ -48,7 +48,8 @@ fn a_registered_production_config_refuses_with_app_env_unset_child() {
     }
     let _env = crate::env_lock::lock_env();
     let _restore = EnvSnapshot::capture(&["APP_ENV"]);
-    // Unset APP_ENV detects as Local, the permissive answer the old guard read.
+    // Unset APP_ENV detects as production too; the registered config alone
+    // used to make the server production while APP_ENV read as permissive.
     set_env("APP_ENV", None);
     register_app_config(Environment::Production);
     assert!(Config::is_production(), "the server boots as production");
@@ -112,21 +113,24 @@ fn a_registered_local_config_still_refuses_with_app_env_production_child() {
     );
 }
 
+/// Both readers name a development environment. An unset `APP_ENV` is
+/// production, so the process names its environment, as a developer's
+/// `.env` does.
 #[test]
-fn a_registered_development_config_accepts_with_app_env_unset() {
+fn a_registered_development_config_accepts_with_app_env_development() {
     crate::own_process::run_alone(
-        "mock_environment::a_registered_development_config_accepts_with_app_env_unset_child",
+        "mock_environment::a_registered_development_config_accepts_with_app_env_development_child",
     );
 }
 
 #[test]
-fn a_registered_development_config_accepts_with_app_env_unset_child() {
+fn a_registered_development_config_accepts_with_app_env_development_child() {
     if !crate::own_process::is_child() {
         return;
     }
     let _env = crate::env_lock::lock_env();
     let _restore = EnvSnapshot::capture(&["APP_ENV"]);
-    set_env("APP_ENV", None);
+    set_env("APP_ENV", Some("development"));
     register_app_config(Environment::Development);
 
     verify_unsigned().expect("the mock stays usable in a development environment");

@@ -18,6 +18,8 @@
 //! `handle_request`, so the assertion covers the actual middleware wiring
 //! rather than a hand-assembled approximation of it.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -102,6 +104,7 @@ async fn spawn_app() -> TestApp {
         suprnova::InMemoryCache::new(),
     ));
     let middleware = Arc::new({
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()
     });

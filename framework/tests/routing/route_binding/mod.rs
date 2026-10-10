@@ -36,6 +36,31 @@ pub mod trashed;
 pub mod unrecorded;
 pub mod urls;
 
+/// Run as a test process, for a test that reads a refusal's detail or
+/// boots a server: an unset `APP_ENV` is production, where the error body
+/// leaves the detail out and the boot asks for `APP_KEY` first. The
+/// snapshot restores the variable before the lock goes.
+pub fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env();
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
+/// [`testing_environment`] for an async test.
+pub async fn testing_environment_async() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 /// Serve `router` through `handle_request` on a loopback socket. The
 /// connections run inside the test's container scope, so a database the
 /// test installed is the one the handlers read.

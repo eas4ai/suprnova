@@ -226,4 +226,29 @@ pub trait CacheStore: Send + Sync {
     fn locks_are_shared(&self) -> bool {
         false
     }
+
+    /// The store's name, as the [`CacheHit`](super::CacheHit) and
+    /// [`CacheMissed`](super::CacheMissed) events carry it: the driver,
+    /// `memory` or `redis`, for the built-in stores. A store of your own
+    /// answers `custom` unless it names itself.
+    fn name(&self) -> &str {
+        "custom"
+    }
+
+    /// Run the store's later commands on the Redis facade connection
+    /// `name`, as Laravel's `RedisStore::setConnection` does. Locks stay on
+    /// the lock connection.
+    ///
+    /// # Errors
+    ///
+    /// The default answers an error: a store without a Redis connection
+    /// has nothing to move, and saying so beats ignoring the call. The
+    /// Redis store errors when no connection has the name.
+    fn set_connection(&self, name: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal(format!(
+            "the cache store '{}' has no Redis connection, so it cannot move to the \
+             connection '{name}': set_connection needs CACHE_DRIVER=redis",
+            self.name()
+        )))
+    }
 }

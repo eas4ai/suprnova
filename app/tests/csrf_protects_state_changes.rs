@@ -16,6 +16,8 @@
 //! app test - not CSRF, not sessions, not the feature context. These
 //! tests stand the stack up for real.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -68,6 +70,7 @@ async fn setup_app() -> TestApp {
     // The real chain, not a hand-written mirror of it: `register_http_stack`
     // is the same function `bootstrap::register` calls, so a middleware
     // dropped from the app is dropped from these tests too.
+    test_environment::testing();
     app::bootstrap::register_http_stack();
 
     let router = Arc::new(app::routes::register());

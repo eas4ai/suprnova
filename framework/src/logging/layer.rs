@@ -3,18 +3,21 @@
 
 use super::channel::{LogLevel, LogRecord};
 use super::config::{LogConfig, LogFormat};
+use super::events::{self, MessageLogged};
 use super::facade::{
-    configured_default, default_sinks, resolves, set_default, stream_enabled, validate_environment,
+    CONTEXT_FIELD, LEVEL_FIELD, configured_default, default_sinks, resolves, scope_shared_context,
+    set_default, stream_takes, validate_environment,
 };
 use super::init::build_env_filter;
 use super::sinks::{replace_placeholders, set_format, write_in};
 use crate::error::FrameworkError;
-use tracing::Subscriber;
+use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
+use tracing::subscriber::Interest;
+use tracing::{Metadata, Subscriber};
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::fmt;
-use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::layer::{Context, Filter, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 /// Check the log settings of the environment and make the channel
@@ -80,11 +83,11 @@ pub(crate) fn output_layers<S>(config: &LogConfig) -> Vec<Box<dyn Layer<S> + Sen
 where
     S: Subscriber + for<'a> LookupSpan<'a> + Send + Sync,
 {
-    // A dynamic filter, so a callsite's interest is never cached: the
-    // default channel can move with `Log::set_default_channel`, and each
-    // event asks again whether the stream is in it.
-    let stdout_on = dynamic_filter_fn(|meta, _| stream_enabled(false, meta.level()));
-    let stderr_on = dynamic_filter_fn(|meta, _| stream_enabled(true, meta.level()));
+    // A filter whose interest is never cached: the default channel can move
+    // with `Log::set_default_channel`, and each event asks again whether the
+    // stream is in it, at the event's PSR-3 level.
+    let stdout_on = StreamFilter { stderr: false };
+    let stderr_on = StreamFilter { stderr: true };
     let (stdout, stderr): (
         Box<dyn Layer<S> + Send + Sync>,
         Box<dyn Layer<S> + Send + Sync>,
@@ -158,10 +161,67 @@ pub fn build_subscriber(
     Ok(registry.with(layers))
 }
 
+/// Whether an event goes to standard output, or standard error, as part of
+/// the default channel: at its PSR-3 level, which a write through
+/// [`Log`](super::Log) carries in a field and a `tracing` macro takes from
+/// its `tracing` level.
+struct StreamFilter {
+    stderr: bool,
+}
+
+impl<S> Filter<S> for StreamFilter {
+    /// For a callsite, whether any event of its level could go: an `ERROR`
+    /// one may carry `critical`, `alert` or `emergency`, an `INFO` one
+    /// `notice`. [`event_enabled`](Filter::event_enabled) then decides.
+    fn enabled(&self, meta: &Metadata<'_>, _: &Context<'_, S>) -> bool {
+        let level = if meta.is_event() {
+            LogLevel::most_severe_for(*meta.level())
+        } else {
+            LogLevel::from(*meta.level())
+        };
+        stream_takes(self.stderr, level)
+    }
+
+    fn callsite_enabled(&self, _: &'static Metadata<'static>) -> Interest {
+        Interest::sometimes()
+    }
+
+    fn event_enabled(&self, event: &tracing::Event<'_>, _: &Context<'_, S>) -> bool {
+        stream_takes(self.stderr, event_level(event))
+    }
+}
+
+/// The PSR-3 level of `event`: the level field of a write through
+/// [`Log`](super::Log), or the one its `tracing` level maps to.
+fn event_level(event: &tracing::Event<'_>) -> LogLevel {
+    let tracing_level = *event.metadata().level();
+    if event.metadata().fields().field(LEVEL_FIELD).is_none() {
+        return LogLevel::from(tracing_level);
+    }
+    let mut found = LevelField(None);
+    event.record(&mut found);
+    found.0.unwrap_or_else(|| LogLevel::from(tracing_level))
+}
+
+/// Reads the level field of a write through [`Log`](super::Log).
+struct LevelField(Option<LogLevel>);
+
+impl Visit for LevelField {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == LEVEL_FIELD {
+            self.0 = LogLevel::from_psr_name(value);
+        }
+    }
+
+    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+}
+
 /// Writes each event to the default channel's sinks other than the
 /// standard streams: files, syslog, the application's drivers. An event's
 /// record carries the fields of the spans it is in, the request span's
-/// `request_id` among them, as the stdout formatter shows them.
+/// `request_id` among them, as the stdout formatter shows them, and the
+/// context the current scope shares. Each event that reaches the layer is
+/// reported as [`MessageLogged`] when something observes it.
 struct ChannelLayer {
     /// The format of the file lines this subscriber writes.
     format: LogFormat,
@@ -214,11 +274,12 @@ where
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         let sinks = default_sinks();
-        if sinks.is_empty() {
+        let observed = events::observed();
+        if sinks.is_empty() && !observed {
             return;
         }
-        let level = LogLevel::from(*event.metadata().level());
-        if !sinks.iter().any(|(_, minimum)| level.passes(*minimum)) {
+        let level = event_level(event);
+        if !observed && !sinks.iter().any(|sink| level.passes(sink.level)) {
             return;
         }
         let mut fields = Fields::default();
@@ -245,30 +306,76 @@ where
             inherited.append(&mut fields.context);
             fields.context = inherited;
         }
-        let record = LogRecord {
+        // The context the scope shares, under the event's own and its
+        // spans'.
+        let shared = scope_shared_context();
+        for (key, value) in &shared {
+            if !fields.context.iter().any(|(name, _)| name == key) {
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                fields.context.push((key.clone(), text));
+                fields.typed.entry(key.clone()).or_insert(value.clone());
+            }
+        }
+        // A write through `Log` reads as one made through a `Logger`: no
+        // target, as Laravel's lines have none.
+        let target = if fields.level.is_some() {
+            String::new()
+        } else {
+            event.metadata().target().to_owned()
+        };
+        let raw = LogRecord {
             time: crate::clock::now(),
             level,
-            target: event.metadata().target().to_owned(),
-            message: replace_placeholders(&fields.message, &fields.context),
+            target,
+            message: fields.message,
             context: fields.context,
         };
+        let mut replaced: Option<LogRecord> = None;
         write_in(self.format, || {
-            for (sink, minimum) in sinks {
-                if level.passes(minimum) {
-                    // Each sink reports its own failure once on stderr, a
-                    // driver's through its `ReportedSink`.
-                    let _ = sink.write(&record);
+            for sink in &sinks {
+                if !level.passes(sink.level) {
+                    continue;
                 }
+                let record = if sink.replace {
+                    &*replaced.get_or_insert_with(|| LogRecord {
+                        message: replace_placeholders(&raw.message, &raw.context),
+                        ..raw.clone()
+                    })
+                } else {
+                    &raw
+                };
+                // Each sink reports its own failure once on stderr, a
+                // driver's through its `ReportedSink`.
+                let _ = sink.sink.write(record);
             }
         });
+        if observed {
+            let mut context: Map<String, Value> = raw
+                .context
+                .iter()
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect();
+            // The values a write through `Log` gave keep their JSON type.
+            context.extend(fields.typed);
+            events::report(MessageLogged::new(level, raw.message, context));
+        }
     }
 }
 
-/// An event's message and its other fields, as text.
+/// An event's message and its other fields, as text. A write through
+/// [`Log`](super::Log) carries its level and its context in two fields of
+/// its own: the level is kept apart, and the context, a JSON object, becomes
+/// the record's fields, its values also kept with their JSON type for
+/// [`MessageLogged`].
 #[derive(Default)]
 struct Fields {
     message: String,
     context: Vec<(String, String)>,
+    level: Option<LogLevel>,
+    typed: Map<String, Value>,
 }
 
 impl Fields {
@@ -283,7 +390,22 @@ impl Fields {
 
 impl Visit for Fields {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.push(field, value.to_owned());
+        match field.name() {
+            LEVEL_FIELD => self.level = LogLevel::from_psr_name(value),
+            CONTEXT_FIELD => {
+                if let Ok(Value::Object(context)) = serde_json::from_str::<Value>(value) {
+                    for (key, value) in context {
+                        let text = match &value {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        self.context.push((key.clone(), text));
+                        self.typed.insert(key, value);
+                    }
+                }
+            }
+            _ => self.push(field, value.to_owned()),
+        }
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {

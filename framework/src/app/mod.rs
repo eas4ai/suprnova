@@ -1575,11 +1575,19 @@ where
             .map_err(|e| failed(format!("suprnova: server exited with error: {e}")))
     }
 
+    /// The connection the migrate commands run on. It is opened through
+    /// the framework's own pool builder, not a bare SeaORM connect, so it
+    /// carries the pool settings and, on MySQL and MariaDB, sends the
+    /// configured character set and collation when it opens (PAR-135): a
+    /// migration that compares or inserts text then uses the same
+    /// collation as the application's connection and the tables it makes.
     async fn get_database_connection() -> Result<sea_orm::DatabaseConnection, FrameworkError> {
-        let database_url = Self::database_url()?;
-        sea_orm::Database::connect(crate::database::config::driver_url(&database_url).as_ref())
+        Self::database_url()?;
+        let config = crate::database::DatabaseConfig::from_env();
+        let connection = crate::database::DbConnection::connect(&config)
             .await
-            .map_err(|e| failed(format!("suprnova: failed to connect to the database: {e}")))
+            .map_err(|e| failed(format!("suprnova: failed to connect to the database: {e}")))?;
+        Ok(connection.inner().clone())
     }
 
     /// `DATABASE_URL`, with a SQLite file created when it does not exist
@@ -2719,7 +2727,13 @@ mod worker_boot_order_tests {
     #[tokio::test]
     #[serial]
     async fn worker_boot_runs_app_bootstrap_before_the_env_drivers() {
-        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+        // An unset APP_ENV is production, whose mail and rate-limit checks
+        // would refuse the default drivers; these tests name a test process.
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
+            ("QUEUE_DRIVER", "database"),
+            ("QUEUE_DB_TABLE", "jobs"),
+        ]);
 
         let bootstrap: BootstrapFn = Box::new(|| {
             Box::pin(async {
@@ -2758,7 +2772,7 @@ mod worker_boot_order_tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("worker.log");
         let name = "bootstrap-defined-log-channel";
-        let _env = EnvGuard::set(&[("LOG_CHANNEL", name)]);
+        let _env = EnvGuard::set(&[("APP_ENV", "testing"), ("LOG_CHANNEL", name)]);
         let bootstrap: BootstrapFn = Box::new(move || {
             let path = path.clone();
             Box::pin(async move {
@@ -2792,6 +2806,7 @@ mod worker_boot_order_tests {
     async fn worker_boot_registers_the_environment_disks_before_the_queue() {
         let _storage = crate::filesystem::Storage::fake();
         let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
             ("QUEUE_DRIVER", "sqs"),
             (
                 "SQS_PREFIX",
@@ -2904,7 +2919,13 @@ mod worker_boot_order_tests {
         crate::queue::Queue::set_driver(std::sync::Arc::new(
             crate::queue::memory::MemoryQueueDriver::new(),
         ));
-        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+        // An unset APP_ENV is production, whose mail and rate-limit checks
+        // would refuse the default drivers; these tests name a test process.
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
+            ("QUEUE_DRIVER", "database"),
+            ("QUEUE_DB_TABLE", "jobs"),
+        ]);
         let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ran = std::sync::Arc::clone(&hook_ran);
         let bootstrap: BootstrapFn = Box::new(move || {

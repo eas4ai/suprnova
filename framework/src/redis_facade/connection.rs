@@ -217,6 +217,20 @@ impl RedisConnection {
         &self.inner.name
     }
 
+    /// The prefix the connection's commands put before each key,
+    /// `REDIS_PREFIX` when it was resolved. [`client`](Self::client) sends
+    /// keys as given, so code that runs commands through it, the cache
+    /// store among them, adds this prefix itself.
+    pub(crate) fn prefix(&self) -> &str {
+        &self.inner.prefix
+    }
+
+    /// Where the connection connects, `host:port` or a socket path, without
+    /// its credentials, for messages that have to say where.
+    pub(crate) fn endpoint(&self) -> String {
+        self.inner.client.get_connection_info().addr().to_string()
+    }
+
     /// The underlying `redis` client's connection, for what the facade does
     /// not cover. It is the connection this one's commands use.
     ///

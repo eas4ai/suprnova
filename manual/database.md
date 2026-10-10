@@ -48,6 +48,53 @@ each named connection and read replica, the migrator, and
 answers `MariaDB` for a `mariadb://` URL and `MySQL` for a `mysql://` one,
 so a MariaDB server reached through `mysql://` reports as MySQL.
 
+### Character set and collation
+
+On a `mysql://` or `mariadb://` URL, `DatabaseConfig` carries a character
+set and a collation, as Laravel's `mysql` connection does: `DB_CHARSET`,
+`utf8mb4` by default, and `DB_COLLATION`, `utf8mb4_unicode_ci` by default.
+A `charset` or `collation` parameter in the URL wins over the variables,
+and the builder's `charset` and `collation` win over both. On a Postgres or
+SQLite URL both are `None`.
+
+Every connection the pool opens, the default one and each named one, sends
+`SET NAMES <charset> COLLATE <collation>`, and every table
+`Schema::create` makes takes them as its defaults unless its blueprint
+names its own:
+
+```rust
+use suprnova::schema::Schema;
+
+Schema::create(manager, "api_tokens", |t| {
+    t.id();
+    t.string("token").unique();
+    // Compare tokens byte by byte.
+    t.collation("utf8mb4_bin");
+})
+.await?;
+```
+
+```bash
+DATABASE_URL=mysql://app:secret@db.internal/shop?collation=utf8mb4_general_ci
+```
+
+A table Suprnova creates then compares and sorts text the way a table
+Laravel creates beside it does. Only letters, digits and underscores make
+a name; anything else fails the connection or the migration, since the
+names reach SQL unquoted.
+
+**Tables created before you upgraded keep the server's default
+collation**, `utf8mb4_0900_ai_ci` on MySQL 8, and MySQL refuses to compare
+string columns of two collations ("Illegal mix of collations"). If your
+tables use the server's default, keep it by setting `DB_COLLATION` to that
+collation:
+
+```bash
+DB_COLLATION=utf8mb4_0900_ai_ci
+```
+
+`SHOW TABLE STATUS` lists each table's collation.
+
 ### Pool liveness
 
 A NAT gateway, a load balancer, or a firewall will silently drop a TCP
@@ -918,5 +965,5 @@ callbacks and the query log aren't process-wide inside a test: see
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` / `charset` / `collation` | `config/database.php` |
 | `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |

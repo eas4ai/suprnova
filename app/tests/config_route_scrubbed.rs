@@ -17,6 +17,8 @@
 //! `postgres://sn_user:sn_pass@sn-host:5432/sn_db` makes regressions
 //! visible.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -105,6 +107,7 @@ async fn spawn(accepts: usize) -> SocketAddr {
         .expect("migrate sqlite::memory:");
     suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
 
+    test_environment::testing();
     app::bootstrap::register_http_stack();
     let middleware = Arc::new(MiddlewareRegistry::from_global());
 

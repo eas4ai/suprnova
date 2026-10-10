@@ -393,6 +393,7 @@ where
 
 #[test]
 fn bind_004_a_refusal_is_an_error_from_the_boot_path() {
+    let _env = super::testing_environment();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

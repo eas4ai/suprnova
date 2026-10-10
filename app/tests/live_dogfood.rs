@@ -4,6 +4,7 @@
 //! production artifact delivery.
 
 mod live_support;
+mod test_environment;
 
 use hyper::{Method, StatusCode};
 use live_support::{

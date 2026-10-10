@@ -14,6 +14,8 @@
 //! (`api_user_routes_are_behind_an_auth_gate`). The scaffold got the fix.
 //! The dogfood, which is the other thing people copy, did not.
 
+mod test_environment;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,6 +42,7 @@ async fn spawn_app() -> SocketAddr {
         suprnova::InMemoryCache::new(),
     ));
     let middleware = Arc::new({
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         MiddlewareRegistry::from_global()
     });

@@ -145,6 +145,7 @@ fn bind_003_an_associated_handler_reading_an_undeclared_parameter_is_refused() {
 
 #[test]
 fn bind_003_an_associated_handler_refused_at_startup_stops_the_boot() {
+    let _env = super::testing_environment();
     let router: Router = Router::new().get("/users/{user}", AsPosts::by_id).into();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Server::from_config(router)));

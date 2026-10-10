@@ -99,10 +99,11 @@ fn system_env_app_env_selects_environment_file() {
 }
 
 #[test]
-fn no_app_env_defaults_to_local() {
-    // Backwards compatibility: when APP_ENV is unset and no .env exists
-    // anywhere, the loader returns Local. We preserve this so existing
-    // local-dev workflows that rely on `cargo run` keep working.
+fn no_app_env_defaults_to_production() {
+    // When APP_ENV is unset and no .env exists anywhere, the loader
+    // returns Production, as Laravel's `env('APP_ENV', 'production')`
+    // does: a deployment that names no environment fails closed. A
+    // developer machine names its environment in `.env`.
     let _env = crate::env_lock::lock_env();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
@@ -111,7 +112,7 @@ fn no_app_env_defaults_to_local() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = load_dotenv(tmp.path()).expect("load_dotenv");
 
-    assert_eq!(env, Environment::Local);
+    assert_eq!(env, Environment::Production);
 }
 
 #[test]

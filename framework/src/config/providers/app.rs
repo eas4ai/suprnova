@@ -37,9 +37,10 @@ impl AppConfig {
     /// `APP_DEBUG` is environment-aware: if the variable is set, its
     /// explicit value wins; if unset, the default is derived from
     /// `APP_ENV` - `true` in local/development/testing, `false`
-    /// otherwise (including production and any unrecognized
-    /// environment). This keeps local zero-config DX while making
-    /// production fail-safe.
+    /// otherwise (including production, an unset `APP_ENV`, which is
+    /// production, and any unrecognized environment). A developer
+    /// machine that names its environment keeps loud errors, and a
+    /// deployment that names none fails safe.
     ///
     /// This helper is lenient - a typo in `APP_DEBUG` falls back to
     /// the environment-derived default (with a `tracing::warn!`).

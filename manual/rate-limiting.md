@@ -558,7 +558,7 @@ The driver SPI is configured via environment variables; the Cache-backed facade 
 | `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | Production fail-closed override | unset |
 | `RATE_LIMIT_REDIS_URL` | Redis driver | `redis://127.0.0.1:6379` |
 | `RATE_LIMIT_PREFIX` | Redis key prefix | `suprnova:` |
-| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md)) | various |
+| `CACHE_DRIVER` / `REDIS_URL` / `CACHE_DEFAULT_TTL` / `REDIS_PREFIX` / `CACHE_PREFIX` | Cache-backed `RateLimiter` facade (see [`Cache`](cache.md)) | various |
 
 ## Migration from Laravel
 

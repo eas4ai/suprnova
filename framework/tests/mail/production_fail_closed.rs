@@ -419,7 +419,9 @@ async fn an_encrypted_mode_without_credentials_names_the_credentials() {
 #[serial]
 async fn development_smtp_still_boots_against_a_local_catcher() {
     let _env = crate::env_lock::lock_env_async().await;
-    for app_env in [None, Some("local"), Some("development"), Some("testing")] {
+    // An unset APP_ENV is production, so each process here names its
+    // environment.
+    for app_env in [Some("local"), Some("development"), Some("testing")] {
         let _guard = EnvGuard::take();
         if let Some(v) = app_env {
             set("APP_ENV", v);
@@ -461,7 +463,14 @@ async fn an_unrecognised_encryption_value_fails_outside_production_too() {
 #[serial]
 async fn non_production_boot_is_unchanged() {
     let _env = crate::env_lock::lock_env_async().await;
-    for app_env in [None, Some("local"), Some("development"), Some("staging")] {
+    // An unset APP_ENV is production, so each process here names its
+    // environment.
+    for app_env in [
+        Some("testing"),
+        Some("local"),
+        Some("development"),
+        Some("staging"),
+    ] {
         let _guard = EnvGuard::take();
         if let Some(v) = app_env {
             set("APP_ENV", v);

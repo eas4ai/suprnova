@@ -37,6 +37,20 @@ use suprnova::payments::{
 use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router};
 
+/// Run as a test process: the mock provider verifies nothing and refuses to
+/// run in production, which an unset `APP_ENV` is. Laravel's `phpunit.xml`
+/// sets `APP_ENV=testing` the same way. The snapshot restores the variable
+/// before the lock goes.
+async fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 // ── migrator ──────────────────────────────────────────────────────────────────
 
 struct PaymentsTestMigrator;
@@ -213,6 +227,7 @@ impl CustomerStore for BlankEventIdProvider {
 ///   - DB: exactly one row in `payments_webhook_events` with matching fields.
 #[tokio::test]
 async fn duplicate_webhook_deduped_and_returns_ok() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-idem-dedup";
     let mock = register_mock(provider_name);
 

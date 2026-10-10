@@ -31,6 +31,7 @@ pub mod typed;
 pub use env::__reset_loaded_keys_for_tests;
 pub use env::{Environment, env, env_optional, env_required, load_dotenv, try_env_required};
 pub use providers::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
+pub use repository::MergeConfig;
 
 use std::path::Path;
 
@@ -188,6 +189,64 @@ impl Config {
         repository::register(config);
     }
 
+    /// Register a config struct only when none of its type is registered,
+    /// and answer whether it did.
+    ///
+    /// A crate calls it for its own configuration, so an application that
+    /// registered a value first keeps it, whatever order the two run in.
+    /// [`Config::register`] replaces the value instead. The check and the
+    /// write happen under one write of the repository, so two callers never
+    /// both register.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::Config;
+    ///
+    /// #[derive(Clone)]
+    /// struct BillingConfig {
+    ///     currency: String,
+    /// }
+    ///
+    /// // The application's bootstrap.
+    /// Config::register(BillingConfig { currency: "EUR".to_string() });
+    /// // The billing crate's defaults, registered later, change nothing.
+    /// let registered = Config::register_default(BillingConfig { currency: "USD".to_string() });
+    /// assert!(!registered);
+    /// ```
+    pub fn register_default<T: std::any::Any + Send + Sync + 'static>(config: T) -> bool {
+        repository::register_default(config)
+    }
+
+    /// Merge `defaults` into the registered config of its type, keeping
+    /// every entry the registered value has and adding the entries only
+    /// `defaults` has, or register `defaults` when none of its type is
+    /// registered.
+    ///
+    /// This is Laravel's `mergeConfigFrom`: a crate ships its defaults and
+    /// the application's values win, whichever registers first. The merge
+    /// is shallow, and the check and the write happen under one write of
+    /// the repository. `HashMap<String, V>`, `BTreeMap<String, V>` and
+    /// `serde_json::Map<String, Value>` merge by key; implement
+    /// [`MergeConfig`] for a type of your own.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::collections::BTreeMap;
+    /// use suprnova::Config;
+    ///
+    /// Config::register(BTreeMap::from([("driver".to_string(), "s3".to_string())]));
+    /// Config::merge(BTreeMap::from([
+    ///     ("driver".to_string(), "local".to_string()),
+    ///     ("root".to_string(), "storage".to_string()),
+    /// ]));
+    /// // driver = s3 (the application's), root = storage (the default).
+    /// ```
+    pub fn merge<T: MergeConfig + std::any::Any + Send + Sync + 'static>(defaults: T) {
+        repository::merge(defaults);
+    }
+
     /// Check if a config type is registered
     pub fn has<T: std::any::Any + 'static>() -> bool {
         repository::has::<T>()
@@ -196,7 +255,8 @@ impl Config {
     /// Get the current environment
     ///
     /// Returns the environment from AppConfig if initialized,
-    /// otherwise detects from the APP_ENV environment variable.
+    /// otherwise detects from the APP_ENV environment variable, which
+    /// reads as production when it is unset.
     pub fn environment() -> Environment {
         Config::get::<AppConfig>()
             .map(|c| c.environment)
@@ -219,9 +279,10 @@ impl Config {
     /// otherwise we fall back to `AppConfig::from_env()`, which reads
     /// `APP_DEBUG` and - if that env var is also unset - applies the
     /// env-aware default (true in Local/Development/Testing, false
-    /// elsewhere). This keeps loud-by-default DX on the
-    /// repository-not-yet-seeded boot/test path while staying fail-closed
-    /// in production-shaped environments. The previous fallback was a
+    /// elsewhere, an unset `APP_ENV` included, since it is production).
+    /// This keeps loud errors on the repository-not-yet-seeded boot/test
+    /// path of a process that names a development environment while
+    /// staying fail-closed everywhere else. The previous fallback was a
     /// hardcoded `true`, which silently leaked `debug_message` bodies
     /// from the JSON error renderers on uninitialized paths.
     pub fn is_debug() -> bool {

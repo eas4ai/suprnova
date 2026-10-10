@@ -24,6 +24,7 @@
 //! either way, and the anonymous run is the honest one to measure.
 
 mod live_support;
+mod test_environment;
 
 use hyper::{Method, StatusCode};
 use live_support::{

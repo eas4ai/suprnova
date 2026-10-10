@@ -3,6 +3,7 @@
 //! membership, and polling through the ordinary fresh render.
 
 mod live_support;
+mod test_environment;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
