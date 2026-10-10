@@ -53,3 +53,30 @@ fn heading_ids_stay_unique_when_a_title_looks_like_a_suffixed_duplicate() {
         }
     }
 }
+
+/// The output of a renderer that calls none of the builder calls
+/// (`html_input`, `allow_unsafe_links`, `autolink`), pinned from the
+/// renderer as it was before those calls existed (comrak 0.52.0 and
+/// ammonia 4.1.4). Raw HTML, an unsafe
+/// link and a bare URL each keep today's treatment.
+#[test]
+fn a_renderer_without_builder_calls_renders_todays_output() {
+    let markdown = "Hello <b>bold</b> and [link](javascript:alert(1)) at https://example.com\n\n<div onclick=\"x()\">block</div>\n\n# Title\n";
+
+    let safe = MarkdownRenderer::default().render(markdown).unwrap();
+    assert_eq!(
+        safe.html,
+        "<p>Hello bold and <a href=\"\" rel=\"noopener noreferrer\">link</a> at https://example.com</p>\n\n<h1 id=\"title\">Title</h1>"
+    );
+
+    let raw = MarkdownRenderer::new(suprnova::content::MarkdownOptions {
+        unsafe_html: true,
+        ..Default::default()
+    })
+    .render(markdown)
+    .unwrap();
+    assert_eq!(
+        raw.html,
+        "<p>Hello <b>bold</b> and <a href=\"javascript:alert(1)\">link</a> at https://example.com</p>\n<div onclick=\"x()\">block</div>\n<h1 id=\"title\">Title</h1>"
+    );
+}

@@ -29,14 +29,17 @@ mod identity;
 mod pipeline;
 mod registry;
 mod terminable;
+mod value_pipeline;
 
 pub use aliases::{
     MiddlewareArgumentsFactory, MiddlewareFactory, MiddlewareResolveError,
+    add_to_middleware_priority_after, add_to_middleware_priority_before,
     append_middleware_priority, clear_middleware_alias, clear_middleware_group,
-    has_middleware_alias, has_middleware_group, middleware_priority, prepend_middleware_priority,
-    register_middleware_alias, register_middleware_alias_with_args, register_middleware_group,
-    registered_middleware_aliases, registered_middleware_groups, resolve_middleware_alias,
-    resolve_middleware_group, resolve_named_middleware, try_resolve_middleware_alias,
+    default_middleware_priority, has_middleware_alias, has_middleware_group, middleware_priority,
+    prepend_middleware_priority, register_middleware_alias, register_middleware_alias_with_args,
+    register_middleware_group, registered_middleware_aliases, registered_middleware_groups,
+    resolve_middleware_alias, resolve_middleware_group, resolve_named_middleware,
+    set_middleware_priority, try_resolve_middleware_alias,
 };
 pub use chain::MiddlewareChain;
 pub use pipeline::Pipeline;
@@ -49,11 +52,12 @@ pub use terminable::{
     registered_terminables, terminable_count,
 };
 pub(crate) use terminable::{drain_terminations, spawn_termination};
+pub use value_pipeline::{PipelineFuture, PipelineNext, PipelineStep, ValuePipeline};
 
 #[doc(hidden)]
 pub use aliases::{
     clear_all_middleware_aliases_for_test, clear_all_middleware_groups_for_test,
-    clear_middleware_priority_for_test,
+    clear_middleware_priority_for_test, reset_middleware_priority_for_test,
 };
 #[doc(hidden)]
 pub use registry::clear_global_middleware_for_test;

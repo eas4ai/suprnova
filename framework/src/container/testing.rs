@@ -279,6 +279,31 @@ impl TestContainer {
         });
     }
 
+    /// Register a fake lazy singleton for testing: `factory` runs at the
+    /// first resolution and every resolution shares the value, as
+    /// [`App::singleton_lazy`](crate::App::singleton_lazy) does.
+    ///
+    /// Writes to the active scope - see [`TestContainer::singleton`] for
+    /// the precedence rules.
+    pub fn singleton_lazy<T, F>(factory: F)
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        // Recover in place on a poisoned task-local lock - see
+        // [`TestContainer::singleton`] for the rationale.
+        if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
+            let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+            c.singleton_lazy(factory);
+            return;
+        }
+        TEST_CONTAINER.with(|c| {
+            if let Some(ref mut container) = *c.borrow_mut() {
+                container.singleton_lazy(factory);
+            }
+        });
+    }
+
     /// Bind a fake trait implementation for testing.
     ///
     /// Writes to the active scope - see [`TestContainer::singleton`] for

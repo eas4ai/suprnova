@@ -384,6 +384,27 @@ pub fn redirect(input: TokenStream) -> TokenStream {
 /// // Resolve
 /// let client: Arc<dyn HttpClient> = App::make::<dyn HttpClient>().unwrap();
 /// ```
+///
+/// # Registering an implementation at boot
+///
+/// `#[service(impl = Concrete)]` (or `#[service(Concrete)]`) binds
+/// `Concrete::default()` when the application boots, unless the
+/// application bound the trait first. `fake = Fake` adds
+/// `<dyn Trait>::fake()` for tests.
+///
+/// `bind(Concrete, env = ["pattern", ...])` entries choose the
+/// implementation by environment, as Laravel's `#[Bind]` attribute with
+/// `environments` does: the first entry with a pattern that matches
+/// `Config::environment()` (`local`, `testing`, `production`, ...) is
+/// bound, `*` matching any run of characters, and `impl` when no entry
+/// matches. Without `impl`, the trait stays unbound when no entry matches.
+///
+/// ```rust,ignore
+/// #[service(impl = SmtpMailer, bind(LogMailer, env = ["local", "testing"]))]
+/// pub trait Mailer {
+///     fn send(&self, to: &str, body: &str);
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn service(attr: TokenStream, input: TokenStream) -> TokenStream {
     service::service_impl(attr, input)
@@ -552,6 +573,22 @@ pub fn domain_error(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// #[handler]
 /// pub async fn health_check() -> Response {
 ///     json_response!({ "status": "ok" })
+/// }
+/// ```
+///
+/// ## Naming the route parameter an argument reads:
+///
+/// An argument reads the route parameter named after its binding, with a
+/// raw identifier's `r#` dropped, so `r#type: String` reads `{type}`.
+/// `#[route_param("name")]` names another parameter, as Laravel's
+/// `#[RouteParameter('name')]` does; `#[authorize]` still names the
+/// argument by its binding.
+///
+/// ```rust,ignore
+/// // GET /posts/{post}
+/// #[handler]
+/// pub async fn show(#[route_param("post")] id: i64) -> Response {
+///     json_response!({ "id": id })
 /// }
 /// ```
 ///

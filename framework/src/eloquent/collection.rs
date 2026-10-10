@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 
+use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -145,8 +146,23 @@ impl<T> Collection<T> {
     }
 
     /// Project every item into a `(K, V)` pair and collect into a
-    /// `HashMap<K, V>`. Laravel's `mapWithKeys`.
+    /// `HashMap<K, V>`, which keeps no order. A later pair with a repeated
+    /// key overwrites the earlier one. [`map_with_keys`](Self::map_with_keys)
+    /// is Laravel's ordered `mapWithKeys`.
     pub fn map_to_map<K, V, F>(self, f: F) -> HashMap<K, V>
+    where
+        K: Eq + Hash,
+        F: FnMut(T) -> (K, V),
+    {
+        self.0.into_iter().map(f).collect()
+    }
+
+    /// Project every item into a `(K, V)` pair and collect the pairs into
+    /// an [`IndexMap`] in the collection's order. A repeated key keeps the
+    /// position of its first pair and the value of its last, as Laravel's
+    /// `mapWithKeys` writes an ordered PHP array. Use
+    /// [`map_to_map`](Self::map_to_map) when the order does not matter.
+    pub fn map_with_keys<K, V, F>(self, f: F) -> IndexMap<K, V>
     where
         K: Eq + Hash,
         F: FnMut(T) -> (K, V),
@@ -231,6 +247,18 @@ impl<T> Collection<T> {
         F: FnMut(&T, &T) -> std::cmp::Ordering,
     {
         self.0.sort_by(cmp);
+        self
+    }
+
+    /// Sort from greatest to least, then return self. Equal items keep
+    /// their order, as Laravel's `sortDesc` does with PHP's stable sort:
+    /// the comparison is reversed rather than the sorted result, which
+    /// would reverse equal items too.
+    pub fn sort_desc(mut self) -> Self
+    where
+        T: Ord,
+    {
+        self.0.sort_by(|a, b| b.cmp(a));
         self
     }
 

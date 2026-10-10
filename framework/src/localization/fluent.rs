@@ -1,23 +1,27 @@
 //! [`FluentTranslator`], the Fluent-backed [`Translator`] driver.
 //!
-//! Loads `lang/<locale>/*.ftl` catalogs from disk and builds each
-//! locale's served catalog as a fold through `super::merge`'s AST-level
-//! merge, lowest priority first: the framework's embedded `en`
-//! validation catalog for `en`/`en-*` locales sits at the bottom; the
-//! locale's configured fallback parent chain, if any
-//! (`LocalizationConfig::parents`, walked recursively) is merged as an
-//! override of that; the locale's own app files, in filename order, are
-//! merged as the final override on top. Each step only replaces the ids
-//! it defines and leaves everything else untouched - see
-//! `super::merge`'s module doc for the override contract. The result is
-//! one flattened resource per locale, resolved ahead of time rather
-//! than walked key by key at request time, serialized once, and
-//! compiled into a single Fluent bundle; `reload()` rebuilds the whole
-//! map and swaps it in atomically.
+//! Loads `<dir>/<locale>/*.ftl` catalogs from disk, from the directories
+//! its [`TranslationSources`] name, and builds each locale's served
+//! catalog as a fold through `super::merge`'s AST-level merge, lowest
+//! priority first: the framework's embedded `en` validation catalog for
+//! `en`/`en-*` locales sits at the bottom; the locale's configured
+//! fallback parent chain, if any (`LocalizationConfig::parents`, walked
+//! recursively) is merged as an override of that; the locale's files from
+//! the fallback paths, the application's directory and the added paths,
+//! each in filename order, are merged on top in that order; and each
+//! namespace's files, then its `vendor` overrides, are merged last under
+//! their encoded ids (`courier__bye` for `courier::bye`; see
+//! `super::sources`). Each step only replaces the ids it defines and
+//! leaves everything else untouched - see `super::merge`'s module doc for
+//! the override contract. The result is one flattened resource per
+//! locale, resolved ahead of time rather than walked key by key at
+//! request time, serialized once, and compiled into a single Fluent
+//! bundle; `reload()` rebuilds the whole map and swaps it in atomically.
 
 use super::config::LocalizationConfig;
 use super::functions;
 use super::locale::Locale;
+use super::sources::{TranslationSource, TranslationSources, catalog_id, namespaced_id};
 use super::translator::{CatalogSource, Translator};
 use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
@@ -60,7 +64,10 @@ struct LocaleCatalog {
 ///
 /// `lang/<locale>/*.ftl` on disk is the app's catalog tree: each
 /// immediate subdirectory whose name parses as a [`Locale`] contributes
-/// one locale. A locale's served catalog is chain-flattened ahead of
+/// one locale, except `vendor`, which holds the application's overrides of
+/// namespaced catalogs. [`from_sources`](Self::from_sources) adds further
+/// directories and namespaces (see [`TranslationSources`]). A locale's
+/// served catalog is chain-flattened ahead of
 /// time: the embedded framework catalog for `en`/`en-*` at the bottom,
 /// overridden by its configured fallback parent
 /// (`LocalizationConfig::parents`), overridden in turn by its own
@@ -69,7 +76,7 @@ struct LocaleCatalog {
 /// Fluent attribute syntax (`key.attr`) is not resolved by
 /// [`Translator::translate`].
 pub struct FluentTranslator {
-    dir: PathBuf,
+    sources: RwLock<TranslationSources>,
     config: LocalizationConfig,
     inner: RwLock<HashMap<Locale, LocaleCatalog>>,
     /// Path → mtime for every `.ftl` file under a locale directory, as of
@@ -96,8 +103,9 @@ impl std::fmt::Debug for FluentTranslator {
             .keys()
             .map(Locale::as_str)
             .collect();
+        let sources = self.sources.read().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("FluentTranslator")
-            .field("dir", &self.dir)
+            .field("sources", &*sources)
             .field("locales", &locales)
             .finish()
     }
@@ -115,19 +123,44 @@ impl FluentTranslator {
         dir: impl AsRef<Path>,
         config: &LocalizationConfig,
     ) -> Result<Self, FrameworkError> {
-        let dir = dir.as_ref();
+        Self::from_sources(TranslationSources::new(dir.as_ref()), config)
+    }
+
+    /// Load every locale from every directory `sources` names, merged with
+    /// the framework's embedded catalogs, as Laravel's `FileLoader` reads
+    /// its paths and namespaces. The application's directory, the added
+    /// paths and the fallback paths are read as [`from_dir`](Self::from_dir)
+    /// reads its one directory, and each namespace's directory the same
+    /// way, its ids encoded as [`TranslationSources`] says. This is how the
+    /// framework builds the translator it binds at boot, from
+    /// [`Lang::loader`](super::Lang::loader).
+    ///
+    /// A missing directory is not an error. A malformed `.ftl` file fails
+    /// loudly, naming the offending file.
+    pub fn from_sources(
+        sources: TranslationSources,
+        config: &LocalizationConfig,
+    ) -> Result<Self, FrameworkError> {
         // The snapshot is taken before the files are read, never after: an
         // edit landing between the two must leave the snapshot older than
         // the file, so the next `reload_if_stale` reads it.
-        let snapshot = mtime_snapshot(dir);
-        let inner = load_all(dir, config)?;
+        let snapshot = sources_snapshot(&sources);
+        let inner = load_all(&sources, config)?;
         Ok(Self {
-            dir: dir.to_path_buf(),
+            sources: RwLock::new(sources),
             config: config.clone(),
             inner: RwLock::new(inner),
             snapshot: RwLock::new(snapshot),
             reloading: Mutex::new(()),
         })
+    }
+
+    /// The sources this translator reads.
+    pub fn sources(&self) -> TranslationSources {
+        self.sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Re-read catalogs from disk if the set of `.ftl` files under the
@@ -140,13 +173,13 @@ impl FluentTranslator {
     /// [`Lang::reload`](super::Lang::reload) explicitly (e.g. on a deploy
     /// hook) instead of polling.
     pub fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
-        if !self.is_stale(&mtime_snapshot(&self.dir)) {
+        if !self.is_stale(&sources_snapshot(&self.sources())) {
             return Ok(false);
         }
         let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
         // Checked again under the lock: a reload that held it may have read
         // this change already.
-        let current = mtime_snapshot(&self.dir);
+        let current = sources_snapshot(&self.sources());
         if !self.is_stale(&current) {
             return Ok(false);
         }
@@ -170,9 +203,12 @@ impl Translator for FluentTranslator {
         let catalog = map.get(locale).ok_or_else(|| {
             FrameworkError::param(format!("no catalog loaded for locale `{locale}`"))
         })?;
-        let message = catalog.bundle.get_message(key).ok_or_else(|| {
-            FrameworkError::param(format!("`{key}` is not defined in the `{locale}` catalog"))
-        })?;
+        let message = catalog
+            .bundle
+            .get_message(&catalog_id(key))
+            .ok_or_else(|| {
+                FrameworkError::param(format!("`{key}` is not defined in the `{locale}` catalog"))
+            })?;
         let pattern = message.value().ok_or_else(|| {
             FrameworkError::param(format!("`{key}` in the `{locale}` catalog has no value"))
         })?;
@@ -218,7 +254,7 @@ impl Translator for FluentTranslator {
         let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
         map.get(locale).is_some_and(|c| {
             c.bundle
-                .get_message(key)
+                .get_message(&catalog_id(key))
                 .is_some_and(|message| message.value().is_some())
         })
     }
@@ -253,6 +289,20 @@ impl Translator for FluentTranslator {
     fn reload_if_stale(&self) -> Result<bool, FrameworkError> {
         self.reload_if_stale()
     }
+
+    /// Add `source` to the sources and rebuild every catalog. When the
+    /// rebuild fails (a malformed `.ftl` file in the new source), the
+    /// translator keeps its sources and catalogs and answers the error.
+    fn add_source(&self, source: &TranslationSource) -> Result<bool, FrameworkError> {
+        let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        let next = self.sources().with(source);
+        let snapshot = sources_snapshot(&next);
+        let rebuilt = load_all(&next, &self.config)?;
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = rebuilt;
+        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
+        *self.sources.write().unwrap_or_else(|e| e.into_inner()) = next;
+        Ok(true)
+    }
 }
 
 impl FluentTranslator {
@@ -261,7 +311,7 @@ impl FluentTranslator {
     /// concurrent edit or reload can land in, which the tests drive.
     fn reload_observing(&self, after_read: impl FnOnce()) -> Result<(), FrameworkError> {
         let _reloading = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
-        self.rebuild(mtime_snapshot(&self.dir), after_read)
+        self.rebuild(sources_snapshot(&self.sources()), after_read)
     }
 
     /// Read every catalog and publish it with `snapshot`, which the caller
@@ -271,7 +321,7 @@ impl FluentTranslator {
         snapshot: BTreeMap<PathBuf, SystemTime>,
         after_read: impl FnOnce(),
     ) -> Result<(), FrameworkError> {
-        let rebuilt = load_all(&self.dir, &self.config)?;
+        let rebuilt = load_all(&self.sources(), &self.config)?;
         after_read();
         {
             let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -285,57 +335,145 @@ impl FluentTranslator {
     }
 }
 
-/// Load and compile every locale under `dir` into a fresh map. `en`
-/// always exists in the result, even with an empty/missing `dir`,
+/// One catalog file: where it came from, for error messages, and its text.
+struct CatalogFile {
+    origin: String,
+    text: String,
+}
+
+/// The files that make up one locale's catalog, beside its parent chain.
+#[derive(Default)]
+struct LocaleFiles {
+    /// Plain catalogs, lowest priority first: the fallback paths, the
+    /// application's directory, then the added paths.
+    plain: Vec<CatalogFile>,
+    /// Namespaced catalogs by namespace, each lowest priority first: the
+    /// package's files, then its `vendor` overrides.
+    namespaced: Vec<(String, Vec<CatalogFile>)>,
+}
+
+impl LocaleFiles {
+    fn namespace(&mut self, namespace: &str) -> &mut Vec<CatalogFile> {
+        let at = match self
+            .namespaced
+            .iter()
+            .position(|(name, _)| name == namespace)
+        {
+            Some(at) => at,
+            None => {
+                self.namespaced.push((namespace.to_owned(), Vec::new()));
+                self.namespaced.len() - 1
+            }
+        };
+        &mut self.namespaced[at].1
+    }
+}
+
+/// Read `dir`'s locale subdirectories: each one whose name parses as a
+/// [`Locale`], with its `*.ftl` files in filename order. A missing `dir`
+/// reads as empty. `vendor` is skipped: it holds namespace overrides, not a
+/// locale. `label` names `dir` in warnings and errors (`lang` for the
+/// application's directory).
+fn read_locale_dirs(
+    dir: &Path,
+    label: &str,
+) -> Result<Vec<(Locale, Vec<CatalogFile>)>, FrameworkError> {
+    let mut found = Vec::new();
+    if !dir.is_dir() {
+        return Ok(found);
+    }
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| FrameworkError::param(format!("lang dir `{}`: {e}", dir.display())))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == "vendor" {
+            continue;
+        }
+        let locale = match Locale::parse(&name_str) {
+            Ok(locale) => locale,
+            Err(_) => {
+                tracing::warn!(
+                    "{label}/{name_str}: directory name is not a valid BCP-47 locale, skipping"
+                );
+                continue;
+            }
+        };
+
+        let mut ftl_files: Vec<PathBuf> = fs::read_dir(entry.path())
+            .map_err(|e| FrameworkError::param(format!("{label}/{locale}: {e}")))?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("ftl"))
+            .collect();
+        ftl_files.sort();
+
+        let mut files = Vec::with_capacity(ftl_files.len());
+        for path in ftl_files {
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let origin = format!("{label}/{locale}/{filename}");
+            let text = fs::read_to_string(&path)
+                .map_err(|e| FrameworkError::param(format!("{origin}: {e}")))?;
+            files.push(CatalogFile { origin, text });
+        }
+        found.push((locale, files));
+    }
+    Ok(found)
+}
+
+/// Load and compile every locale the sources hold into a fresh map. `en`
+/// always exists in the result, even with empty or missing directories,
 /// because the embedded framework catalog alone must let a fresh app
 /// boot. Every locale named as a fallback child in `config.parents`
 /// also exists in the result even without its own directory - it
 /// inherits everything from its parent chain instead.
 fn load_all(
-    dir: &Path,
+    sources: &TranslationSources,
     config: &LocalizationConfig,
 ) -> Result<HashMap<Locale, LocaleCatalog>, FrameworkError> {
-    let mut files_by_locale: HashMap<Locale, Vec<(String, String)>> = HashMap::new();
+    let mut files_by_locale: HashMap<Locale, LocaleFiles> = HashMap::new();
     files_by_locale.entry(Locale::parse("en")?).or_default();
 
-    if dir.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(dir)
-            .map_err(|e| FrameworkError::param(format!("lang dir `{}`: {e}", dir.display())))?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_dir())
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in entries {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            let locale = match Locale::parse(&name_str) {
-                Ok(locale) => locale,
-                Err(_) => {
-                    tracing::warn!(
-                        "lang/{name_str}: directory name is not a valid BCP-47 locale, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            let mut ftl_files: Vec<PathBuf> = fs::read_dir(entry.path())
-                .map_err(|e| FrameworkError::param(format!("lang/{locale}: {e}")))?
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("ftl"))
-                .collect();
-            ftl_files.sort();
-
-            let bucket = files_by_locale.entry(locale.clone()).or_default();
-            for path in ftl_files {
-                let filename = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let text = fs::read_to_string(&path)
-                    .map_err(|e| FrameworkError::param(format!("lang/{locale}/{filename}: {e}")))?;
-                bucket.push((filename, text));
+    let plain = sources
+        .fallback_paths()
+        .iter()
+        .map(|dir| (dir.clone(), dir.display().to_string()))
+        .chain(std::iter::once((
+            sources.dir().to_path_buf(),
+            "lang".to_owned(),
+        )))
+        .chain(
+            sources
+                .paths()
+                .iter()
+                .map(|dir| (dir.clone(), dir.display().to_string())),
+        );
+    for (dir, label) in plain {
+        for (locale, files) in read_locale_dirs(&dir, &label)? {
+            files_by_locale
+                .entry(locale)
+                .or_default()
+                .plain
+                .extend(files);
+        }
+    }
+    for (namespace, dir) in sources.namespaces() {
+        let layers = std::iter::once(dir.clone()).chain(sources.vendor_dirs(namespace));
+        for layer in layers {
+            for (locale, files) in read_locale_dirs(&layer, &layer.display().to_string())? {
+                files_by_locale
+                    .entry(locale)
+                    .or_default()
+                    .namespace(namespace)
+                    .extend(files);
             }
         }
     }
@@ -368,7 +506,9 @@ fn load_all(
         if warned_parents.contains(parent) {
             continue;
         }
-        let has_nonempty_files = files_by_locale.get(parent).is_some_and(|f| !f.is_empty());
+        let has_nonempty_files = files_by_locale
+            .get(parent)
+            .is_some_and(|f| !f.plain.is_empty() || !f.namespaced.is_empty());
         let has_own_parent = config.parents.contains_key(parent);
         // `en`/`en-*` always contributes the embedded validation catalog
         // (see `catalog_ast`) even with zero app files of its own, so it
@@ -406,7 +546,7 @@ fn load_all(
 /// before ever calling this, so there is no cycle left to loop on.
 fn catalog_ast(
     locale: &Locale,
-    files_by_locale: &HashMap<Locale, Vec<(String, String)>>,
+    files_by_locale: &HashMap<Locale, LocaleFiles>,
     config: &LocalizationConfig,
     memo: &mut HashMap<Locale, FtlResource<String>>,
 ) -> Result<FtlResource<String>, FrameworkError> {
@@ -442,13 +582,19 @@ fn catalog_ast(
         let parent_ast = catalog_ast(parent, files_by_locale, config, memo)?;
         ast = super::merge::merge(&ast, &parent_ast);
     }
-    for (filename, text) in files_by_locale
-        .get(locale)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-    {
-        let file_ast = super::merge::parse_strict(text, &format!("lang/{locale}/{filename}"))?;
-        ast = super::merge::merge(&ast, &file_ast);
+    if let Some(files) = files_by_locale.get(locale) {
+        for file in &files.plain {
+            let file_ast = super::merge::parse_strict(&file.text, &file.origin)?;
+            ast = super::merge::merge(&ast, &file_ast);
+        }
+        for (namespace, namespace_files) in &files.namespaced {
+            let mut namespace_ast = super::merge::empty();
+            for file in namespace_files {
+                let file_ast = super::merge::parse_strict(&file.text, &file.origin)?;
+                namespace_ast = super::merge::merge(&namespace_ast, &file_ast);
+            }
+            ast = super::merge::merge(&ast, &namespaced_ast(namespace, &namespace_ast));
+        }
     }
     memo.insert(locale.clone(), ast.clone());
     Ok(ast)
@@ -552,8 +698,59 @@ struct RuntimeCatalog {
 /// their name without the `-`, functions by their call name.
 #[derive(Default)]
 struct Renames {
+    messages: HashMap<String, String>,
     terms: HashMap<String, String>,
     functions: HashMap<String, String>,
+}
+
+/// `ast`, a namespace's merged catalog, with every message and term it
+/// defines renamed to its encoded id (`bye` to `courier__bye`, `-brand`
+/// to `-courier__brand`), and every reference to one of them renamed the
+/// same way, so the namespace's messages keep resolving each other.
+fn namespaced_ast(namespace: &str, ast: &FtlResource<String>) -> FtlResource<String> {
+    let mut renames = Renames::default();
+    for entry in &ast.body {
+        match entry {
+            Entry::Message(message) => {
+                let name = message.id.name.clone();
+                let id = namespaced_id(namespace, &name);
+                renames.messages.insert(name, id);
+            }
+            Entry::Term(term) => {
+                let name = term.id.name.clone();
+                let id = namespaced_id(namespace, &name);
+                renames.terms.insert(name, id);
+            }
+            _ => {}
+        }
+    }
+    let mut renamed = ast.clone();
+    for entry in &mut renamed.body {
+        match entry {
+            Entry::Message(message) => {
+                if let Some(name) = renames.messages.get(&message.id.name) {
+                    message.id.name = name.clone();
+                }
+                if let Some(value) = &mut message.value {
+                    rename_in_pattern(value, &renames);
+                }
+                for attribute in &mut message.attributes {
+                    rename_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            Entry::Term(term) => {
+                if let Some(name) = renames.terms.get(&term.id.name) {
+                    term.id.name = name.clone();
+                }
+                rename_in_pattern(&mut term.value, &renames);
+                for attribute in &mut term.attributes {
+                    rename_in_pattern(&mut attribute.value, &renames);
+                }
+            }
+            _ => {}
+        }
+    }
+    renamed
 }
 
 /// The catalog the runtime bundle compiles, when it must differ from the
@@ -696,9 +893,13 @@ fn rename_in_inline(inline: &mut InlineExpression<String>, renames: &Renames) {
         InlineExpression::Placeable { expression } => {
             rename_in_expression(expression, renames);
         }
+        InlineExpression::MessageReference { id, .. } => {
+            if let Some(name) = renames.messages.get(&id.name) {
+                id.name = name.clone();
+            }
+        }
         InlineExpression::StringLiteral { .. }
         | InlineExpression::NumberLiteral { .. }
-        | InlineExpression::MessageReference { .. }
         | InlineExpression::VariableReference { .. } => {}
     }
 }
@@ -748,6 +949,16 @@ fn mtime_snapshot(dir: &Path) -> BTreeMap<PathBuf, SystemTime> {
                 files.insert(file_path, modified);
             }
         }
+    }
+    files
+}
+
+/// [`mtime_snapshot`] over every directory `sources` reads, so an edit in
+/// an added path, a namespace or a `vendor` override is seen too.
+fn sources_snapshot(sources: &TranslationSources) -> BTreeMap<PathBuf, SystemTime> {
+    let mut files = BTreeMap::new();
+    for dir in sources.watched_dirs() {
+        files.extend(mtime_snapshot(&dir));
     }
     files
 }

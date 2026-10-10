@@ -1,5 +1,7 @@
 //! `Str`: the string helpers worth having from Laravel's `Str`, by the
-//! developer's ruling a subset, not the whole `Stringable`.
+//! developer's ruling of 2026-10-01 a subset, not the whole of Laravel's
+//! `Str` and `Stringable`. [`Stringable`], made by [`Str::of`], chains
+//! that subset.
 //!
 //! Every count is in characters, never bytes, so a multibyte value is never
 //! cut inside a character.
@@ -9,8 +11,12 @@ mod ascii_map;
 mod inflector;
 mod inflector_additional_rules;
 mod inflector_rules;
+mod stringable;
 
 use inflector::{Tongue, upper_first};
+pub use stringable::Stringable;
+
+use crate::content::{ContentResult, MarkdownRenderer};
 
 /// The words Laravel's `Pluralizer` never pluralizes.
 const UNCOUNTABLE: &[&str] = &["recommended", "related"];
@@ -27,6 +33,29 @@ const UNCOUNTABLE: &[&str] = &["recommended", "related"];
 pub struct Str;
 
 impl Str {
+    /// `value` as a [`Stringable`], whose methods chain these helpers, as
+    /// Laravel's `Str::of` starts a fluent string.
+    pub fn of(value: impl Into<String>) -> Stringable {
+        Stringable::new(value)
+    }
+
+    /// `value` rendered as a whole Markdown document by `renderer`, as
+    /// Laravel's `Str::markdown` converts it through CommonMark. The
+    /// renderer decides raw HTML, unsafe links and autolinks; the default
+    /// renderer sanitizes its output. The HTML is
+    /// [`MarkdownRenderer::render`]'s, without the extracted metadata.
+    pub fn markdown(value: &str, renderer: &MarkdownRenderer) -> ContentResult<String> {
+        renderer.render(value).map(|rendered| rendered.html)
+    }
+
+    /// `value`'s inline Markdown rendered by `renderer`, with no block
+    /// around it and block markers such as `#` or `-` kept as text, as
+    /// Laravel's `Str::inlineMarkdown` converts it.
+    /// [`MarkdownRenderer::render_inline`] says how.
+    pub fn inline_markdown(value: &str, renderer: &MarkdownRenderer) -> ContentResult<String> {
+        renderer.render_inline(value)
+    }
+
     /// A URL slug: the title spelled in ASCII as Laravel spells it, lower
     /// case, `@` written as `at`, and each run of other characters between
     /// letters and digits made one `separator`. `Œuvre d'art` becomes

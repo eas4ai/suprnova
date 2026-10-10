@@ -279,7 +279,7 @@ where
     ContainerScope::new().run(fut)
 }
 
-/// Why a scoped binding could not be resolved.
+/// Why a scoped binding, or a lazy singleton, could not be resolved.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ScopedError {
     /// No container scope is active on the current task.
@@ -291,6 +291,13 @@ pub(crate) enum ScopedError {
     /// being built by a factory that, directly or through others, waits
     /// for this resolution.
     Cycle {
+        /// The requested type, as `std::any::type_name` spells it.
+        type_name: &'static str,
+    },
+    /// A lazy singleton was resolved on the thread that is building it:
+    /// its factory asked for its own value, directly or through the
+    /// factories of other lazy singletons.
+    LazyCycle {
         /// The requested type, as `std::any::type_name` spells it.
         type_name: &'static str,
     },
@@ -313,6 +320,12 @@ impl fmt::Display for ScopedError {
                  while being built, by its own factory or through the factories of other \
                  scoped bindings, in this task or in another task that shares the scope"
             ),
+            Self::LazyCycle { type_name } => write!(
+                f,
+                "`{type_name}` is a lazy singleton in a dependency cycle: it was resolved \
+                 while its factory was building it, by that factory or through the \
+                 factories of other lazy singletons"
+            ),
         }
     }
 }
@@ -324,12 +337,13 @@ impl From<ScopedError> for crate::error::FrameworkError {
     }
 }
 
-/// Collapse a scoped-resolution error to `None` for the resolvers that
-/// return an `Option`, and log it: the `Option` cannot carry the reason,
-/// and a silent `None` would hide a caller's mistake.
+/// Collapse a resolution error of a scoped binding or a lazy singleton to
+/// `None` for the resolvers that return an `Option`, and log it: the
+/// `Option` cannot carry the reason, and a silent `None` would hide a
+/// caller's mistake.
 pub(crate) fn or_log<T>(result: Result<Option<T>, ScopedError>) -> Option<T> {
     result.unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "scoped binding could not be resolved");
+        tracing::warn!(error = %error, "binding could not be resolved");
         None
     })
 }

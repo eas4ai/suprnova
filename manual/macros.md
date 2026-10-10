@@ -86,6 +86,25 @@ pub async fn store(form: CreateUserRequest) -> Response {
 A `Request`-shaped first parameter is still accepted as the
 identity case. See [Controllers](controllers.md).
 
+An argument that reads the path reads the route parameter named after
+it: `id: i64` reads `{id}`, and a raw identifier drops its `r#`, so
+`r#type: String` reads `{type}`. You name another parameter with
+`#[route_param("name")]`, as Laravel's `#[RouteParameter('name')]` does:
+
+```rust
+use suprnova::{handler, json_response, Response};
+
+// GET /posts/{post}
+#[handler]
+pub async fn show(#[route_param("post")] id: i64) -> Response {
+    json_response!({ "id": id })
+}
+```
+
+The router's startup check reads the renamed parameter, so a path that
+does not declare `{post}` is refused before the first request.
+`#[authorize]` still names the argument by its own name (`id` here).
+
 ### `#[request]` and `#[derive(FormRequest)]`
 
 `#[request]` is the recommended way to declare a validated request
@@ -498,6 +517,20 @@ pub trait HttpClient {
 
 // App::bind::<dyn HttpClient>(Arc::new(RealHttpClient::new()));
 // let client = App::make::<dyn HttpClient>()?;
+```
+
+`#[service(impl = Concrete)]` also registers `Concrete::default()` at
+boot, and `fake = Fake` adds `<dyn Trait>::fake()` for tests.
+`bind(Concrete, env = [...])` entries choose the implementation by
+environment, as Laravel's `#[Bind]` attribute with `environments` does:
+the first entry with a pattern that matches the environment is bound,
+`*` matching any run of characters, and `impl` when none matches.
+
+```rust
+#[service(impl = SmtpMailer, bind(LogMailer, env = ["local", "testing"]))]
+pub trait Mailer {
+    fn send(&self, to: &str, body: &str);
+}
 ```
 
 See [Service Container](container.md).

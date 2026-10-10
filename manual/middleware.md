@@ -407,6 +407,75 @@ your codebase.
 | `then_with(req, dst)` | - | - | Override the passable inline |
 | `then_return()` | `thenReturn()` | - | Run the chain, return a 204 No Content |
 | `finally_with(F)` | `finally($callback)` | `on_finally(F)` | Run after the destination resolves |
+| `pipe_all(iter)` | `pipe([$pipes])` | - | Append several middleware, keeping the list `through` set |
+
+### Sending any value through steps
+
+Laravel's pipeline sends any value, not only a request. `Pipeline::of(value)`
+does the same: it returns a pipeline over a value of any type, whose steps
+receive the value and the rest of the pipeline. A step passes the value on
+with `next(value).await`, and stops the pipeline by answering an error:
+
+```rust
+use suprnova::{FrameworkError, Pipeline};
+use suprnova::middleware::{PipelineFuture, PipelineNext};
+
+fn add_tax(total: i64, next: PipelineNext<i64>) -> PipelineFuture<i64> {
+    next(total * 120 / 100)
+}
+
+fn refuse_negative(total: i64, next: PipelineNext<i64>) -> PipelineFuture<i64> {
+    if total < 0 {
+        return Box::pin(async { Err(FrameworkError::internal("negative total")) });
+    }
+    next(total)
+}
+
+let total = Pipeline::of(1_000)
+    .through([refuse_negative, add_tax])
+    .then_return()
+    .await?;
+assert_eq!(total, 1_200);
+```
+
+A step is anything that implements `PipelineStep`: a function of the shape
+above, an `async fn (value, next) -> Result<_, FrameworkError>`, an
+`async move` closure, or a type with a `handle` method when the step holds
+settings. A closure names the types of its parameters:
+
+```rust
+let total = Pipeline::of(10)
+    .pipe(|total: i64, next: PipelineNext<i64>| async move { next(total + 5).await })
+    .then_return()
+    .await?;
+```
+
+| Method | Laravel | Purpose |
+|---|---|---|
+| `Pipeline::of(value)` | `send($passable)` | Start a pipeline over `value` |
+| `through(steps)` | `through($pipes)` | Set the steps, replacing earlier ones |
+| `pipe(step)` | `pipe($pipe)` | Append one step |
+| `pipe_all(steps)` | `pipe([$pipes])` | Append several steps, in order |
+| `finally(f)` | `finally($callback)` | Run `f` when the pipeline ends, failed or not |
+| `within_transaction()` | `withinTransaction()` | Run the steps and the destination in one database transaction |
+| `then(destination)` | `then($destination)` | Run the steps around the destination and answer its result |
+| `then_return()` | `thenReturn()` | Run the steps and answer the value |
+
+`then` lets the destination answer another type, and each step sees that
+result on the way back:
+
+```rust
+let receipt: String = Pipeline::of(1_000)
+    .pipe(add_tax)
+    .then(|total| async move { Ok(format!("total: {total}")) })
+    .await?;
+```
+
+With `within_transaction()`, an error from any step or the destination
+rolls back every database write they made, as
+[`DB::transaction`](database.md) does. `finally` runs after the
+transaction ends, and also when the pipeline's future is dropped before
+it finishes.
 
 ## Terminable middleware - post-response hooks
 
@@ -540,26 +609,78 @@ mirroring Laravel's reassignable kernel array.
 
 ## Middleware priority
 
-`prepend_middleware_priority::<M>()` / `append_middleware_priority::<M>()`
-register a `TypeId` in the process-global priority list - the Suprnova
-analogue of Laravel's `Kernel::$middlewarePriority`. The list gives
-order-dependent middleware a safe order when global, group and route
-registrations interleave. `MiddlewareChain::execute` applies it each time
-a chain runs, so the order holds for a matched route, the fallback, an
-unrouted request and a WebSocket upgrade alike.
+The priority list is the Suprnova analogue of Laravel's
+`Kernel::$middlewarePriority`: a process-global list of middleware types
+that gives order-dependent middleware a safe order when global, group and
+route registrations interleave. `MiddlewareChain::execute` applies it each
+time a chain runs, so the order holds for a matched route, the fallback,
+an unrouted request and a WebSocket upgrade alike.
+
+The list starts with the framework's order-dependent middleware, the four
+entries of Laravel's list that have a Suprnova type, in Laravel's order:
+
+1. `Precognitive`
+2. `SessionMiddleware`
+3. `AuthMiddleware`
+4. `ThrottleRequestsMiddleware`
+
+`default_middleware_priority()` answers that list. So a route that lists
+`AuthMiddleware` before `SessionMiddleware` still loads the session first,
+and a signed-in user is not refused:
 
 ```rust
-use suprnova::middleware::append_middleware_priority;
+use suprnova::{AuthMiddleware, Router, SessionMiddleware};
 
-// SessionMiddleware always runs before AuthMiddleware regardless of
-// the order they were registered.
-append_middleware_priority::<SessionMiddleware>();
-append_middleware_priority::<AuthMiddleware>();
+// The session runs first, whatever order the route lists them in.
+let router = Router::new()
+    .get("/account", account)
+    .middleware(AuthMiddleware::new())
+    .middleware(SessionMiddleware::new(session_config));
 ```
 
-`append_middleware_priority` puts a type at the end of the list and
-`prepend_middleware_priority` puts it in front of every type the list
-holds. Adding a type the list already holds does nothing.
+`BasicAuthMiddleware` and `BearerTokenMiddleware` are not in the default
+list. Each checks a credential itself, so a throttle you list before one
+of them keeps counting failed guesses against it, as Laravel's list leaves
+out its basic-auth middleware. An `AuthMiddleware` is in the list, so it
+moves in front of a `ThrottleRequestsMiddleware` you list first. That
+includes an `AuthMiddleware` whose guard is an `Auth::via_request`
+resolver, which checks a credential, as Laravel's `Authenticate` moves
+with a `viaRequest` guard. To keep a throttle in front of such a guard,
+replace the list with `set_middleware_priority`, putting
+`ThrottleRequestsMiddleware` before `AuthMiddleware` or leaving it out.
+
+You change the list at boot:
+
+```rust
+use std::any::TypeId;
+use suprnova::middleware::{
+    add_to_middleware_priority_after, add_to_middleware_priority_before,
+    append_middleware_priority, set_middleware_priority,
+};
+
+// Replace the whole list, as Laravel's `->priority([...])` does.
+set_middleware_priority([
+    TypeId::of::<SessionMiddleware>(),
+    TypeId::of::<AuthMiddleware>(),
+]);
+
+// Insert relative to an entry, as `addToMiddlewarePriorityBefore` and
+// `addToMiddlewarePriorityAfter` do.
+add_to_middleware_priority_before::<AuthMiddleware, TenantMiddleware>();
+add_to_middleware_priority_after::<AuthMiddleware, AuditMiddleware>();
+
+// Add at either end.
+append_middleware_priority::<CacheHeaders>();
+```
+
+`add_to_middleware_priority_before::<Existing, M>()` puts `M` just before
+`Existing`, and `add_to_middleware_priority_after` just after it. When
+`Existing` is not in the list, `M` is appended. When `M` is already in the
+list, nothing changes. `append_middleware_priority` puts a type at the end
+of the list and `prepend_middleware_priority` puts it in front of every
+type the list holds; adding a type the list already holds does nothing.
+`set_middleware_priority([])` empties the list, which leaves every chain in
+registration order.
 
 ### What moves
 
@@ -574,6 +695,10 @@ middleware it was registered after. If you register `CacheHeaders` after
 when the list moves `SessionMiddleware` in front of `AuthMiddleware`.
 
 An empty list leaves the chain in registration order.
+
+The list orders global and route middleware together. A route-listed
+`Precognitive` therefore runs before a global `SessionMiddleware`, so a
+precognitive request is marked before the session starts, as in Laravel.
 
 ### What the list sees
 
@@ -652,6 +777,11 @@ synchronisation point on the global middleware list and re-allocate
 - The chain itself is composed by nesting `Arc<dyn Fn>` closures, so
   per-request work is one `Arc::clone` per layer rather than a fresh
   allocation.
+
+The priority list orders global middleware too. Laravel's
+`$middlewarePriority` sorts the middleware of a route and leaves the
+global stack as registered; Suprnova sorts the whole chain, so a route's
+`Precognitive` moves in front of a global `SessionMiddleware`.
 
 Leaving middleware out by name diverges too. Laravel resolves an alias
 to its class and compares class names, so `withoutMiddleware('json')`
