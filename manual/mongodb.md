@@ -1058,8 +1058,8 @@ The server's sweep runs once a minute, so every read also compares
 `Cache::add` is one upsert that matches only an expired entry: it inserts
 a missing key, replaces an expired one, and fails on a live one, so two
 callers never both add. Tags are an array on the entry, and
-`Cache::flush_tags` deletes every entry whose tags hold one of the tags. A
-lock is one document whose `_id` is the key: acquiring it is an upsert that
+`Cache::flush_tags` deletes every entry under the store's prefix whose tags
+hold one of the tags. A lock is one document whose `_id` is the key: acquiring it is an upsert that
 fails while another owner's lock is live, and releasing or refreshing it
 checks the owner's token.
 
