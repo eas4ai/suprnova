@@ -5,11 +5,14 @@
 //! over the application's values; `View::shared` answers what a render
 //! sees. The application's values belong to the container, so
 //! `TestContainer` isolates them, and a request's values never reach
-//! another request, through the render cache neither.
+//! another request, through the render cache neither: not through a
+//! template's `value` filter, and not through `View::shared`.
 
+use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use suprnova::render_cache::collector::{self, Collector};
 use suprnova::render_cache::config::RenderCacheConfig;
 use suprnova::render_cache::registry::GroupPolicy;
 use suprnova::render_cache::{
@@ -21,8 +24,8 @@ use suprnova::view::{
     AssetSet, DocumentResponseIntent, RenderLimits, ViewName, ViewRenderer, document_response,
 };
 use suprnova::{
-    App, ConnectionTrait, FrameworkError, HttpResponse, MiddlewareRegistry, Request, Response,
-    Router, View,
+    App, ConnectionTrait, FrameworkError, HttpResponse, Middleware, MiddlewareRegistry, Next,
+    Request, Response, Router, View,
 };
 
 #[suprnova::view(path = "live/shared-values.html")]
@@ -167,6 +170,54 @@ async fn a_request_value_wins_over_the_application_value() {
     );
 }
 
+/// What `View::shared` answers for `key` as a `T` inside a render cache
+/// collector scope, and whether the render cache could still store the
+/// page afterwards.
+async fn shared_under_the_render_cache<T: Any + Clone + Send + Sync>(
+    key: &str,
+) -> (Option<T>, bool) {
+    Collector::scope(async {
+        let value = View::shared::<T>(key).map(|value| T::clone(&value));
+        let report = collector::current_report().expect("a collector scope");
+        (value, report.storable().is_some())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn shared_stops_the_render_cache_storing_a_page_only_for_a_request_value() {
+    let _container = TestContainer::fake();
+    View::share("app_name", "Acme".to_owned());
+    View::share("viewer", "everyone".to_owned());
+    App::run_scoped(async {
+        assert_eq!(
+            shared_under_the_render_cache::<String>("viewer").await,
+            (Some("everyone".to_owned()), true),
+            "the application's value is the same for every request: the page can be stored"
+        );
+
+        View::share_for_request("viewer", "alice".to_owned()).expect("a container scope");
+        assert_eq!(
+            shared_under_the_render_cache::<String>("viewer").await,
+            (Some("alice".to_owned()), false),
+            "the request's value names no cache key: the page must not be stored"
+        );
+        assert_eq!(
+            shared_under_the_render_cache::<String>("app_name").await,
+            (Some("Acme".to_owned()), true),
+            "a key only the application shared still answers without a mark"
+        );
+
+        View::share_for_request("viewer", 7_u32).expect("a container scope");
+        assert_eq!(
+            shared_under_the_render_cache::<String>("viewer").await,
+            (None, false),
+            "a request value of another type still decides the answer"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_request_value_never_reaches_another_request() {
     let _container = TestContainer::fake();
@@ -228,6 +279,29 @@ async fn render_cache_database() -> tempfile::TempDir {
     tempdir
 }
 
+/// A client for `router` with the render cache in front of `path`, under a
+/// public shared policy: a stored page is served to every visitor.
+async fn render_cached_client(router: Router, path: &str) -> TestClient {
+    let policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("a freshness"))
+        .build()
+        .expect("a policy");
+    let router = router
+        .try_render_cache(path, GroupPolicy::from(policy))
+        .expect("attach the policy");
+    let mut config = RenderCacheConfig::from_env().expect("a RenderCache configuration");
+    config.enabled = true;
+    config.l1 = L1Config::Disabled;
+    config.coordinator = CoordinatorConfig::Local {
+        lease_ms: 30_000,
+        max_waiters: 128,
+    };
+    let router = RenderCache::install(router, config)
+        .await
+        .expect("install the RenderCache");
+    TestClient::new(router, MiddlewareRegistry::from_global())
+}
+
 #[tokio::test]
 async fn a_request_value_never_reaches_another_request_through_the_render_cache() {
     if crate::own_process_async::delegate(
@@ -245,24 +319,7 @@ async fn a_request_value_never_reaches_another_request_through_the_render_cache(
     let _container = TestContainer::fake();
     let _database = render_cache_database().await;
 
-    let policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
-        .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("a freshness"))
-        .build()
-        .expect("a policy");
-    let router = page_router()
-        .try_render_cache("/page", GroupPolicy::from(policy))
-        .expect("attach the policy");
-    let mut config = RenderCacheConfig::from_env().expect("a RenderCache configuration");
-    config.enabled = true;
-    config.l1 = L1Config::Disabled;
-    config.coordinator = CoordinatorConfig::Local {
-        lease_ms: 30_000,
-        max_waiters: 128,
-    };
-    let router = RenderCache::install(router, config)
-        .await
-        .expect("install the RenderCache");
-    let client = TestClient::new(router, MiddlewareRegistry::from_global());
+    let client = render_cached_client(page_router(), "/page").await;
     RENDERS.store(0, Ordering::SeqCst);
 
     // The render read alice's request value, so it is not stored.
@@ -287,5 +344,107 @@ async fn a_request_value_never_reaches_another_request_through_the_render_cache(
         RENDERS.load(Ordering::SeqCst),
         2,
         "the third request is a hit"
+    );
+}
+
+/// A middleware that shares the `X-Viewer` header for the request, the way
+/// an application shares the signed-in user with its views.
+struct SharesViewer;
+
+#[async_trait::async_trait]
+impl Middleware for SharesViewer {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        if let Some(viewer) = request.header("X-Viewer") {
+            View::share_for_request("viewer", viewer.to_owned())?;
+        }
+        next(request).await
+    }
+}
+
+/// A handler that forms its body from `View::shared` alone. No template
+/// reads the shared value, so the getter is the only read the render cache
+/// can see.
+async fn viewer_page(_request: Request) -> Response {
+    VIEWER_RENDERS.fetch_add(1, Ordering::SeqCst);
+    let viewer = View::shared::<String>("viewer")
+        .map_or_else(|| "nobody".to_owned(), |viewer| viewer.as_str().to_owned());
+    Ok(HttpResponse::html(format!("<p id=\"viewer\">{viewer}</p>")))
+}
+
+static VIEWER_RENDERS: AtomicUsize = AtomicUsize::new(0);
+
+fn viewer_router() -> Router {
+    Router::new()
+        .get("/viewer", viewer_page)
+        .middleware(SharesViewer)
+        .into()
+}
+
+#[tokio::test]
+async fn a_request_value_read_through_shared_never_reaches_another_request_through_the_render_cache()
+ {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "a_request_value_read_through_shared_never_reaches_another_request_through_the_render_cache",
+    )
+    .await
+    {
+        return;
+    }
+    // The render cache derives its signing keys from the application key.
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    App::init();
+    suprnova::middleware::clear_global_middleware_for_test();
+    let _container = TestContainer::fake();
+    let _database = render_cache_database().await;
+    View::share("viewer", "everyone".to_owned());
+
+    let client = render_cached_client(viewer_router(), "/viewer").await;
+    VIEWER_RENDERS.store(0, Ordering::SeqCst);
+
+    // The body came from alice's request value, so the page is not stored.
+    let alice = client
+        .get("/viewer")
+        .header("X-Viewer", "alice")
+        .send()
+        .await;
+    assert!(
+        alice.body_text().contains("<p id=\"viewer\">alice</p>"),
+        "{}",
+        alice.body_text()
+    );
+    assert_eq!(VIEWER_RENDERS.load(Ordering::SeqCst), 1);
+
+    // The next visitor gets a render of their own, never alice's page.
+    let bob = client.get("/viewer").header("X-Viewer", "bob").send().await;
+    assert!(
+        bob.body_text().contains("<p id=\"viewer\">bob</p>"),
+        "{}",
+        bob.body_text()
+    );
+    assert_eq!(VIEWER_RENDERS.load(Ordering::SeqCst), 2);
+
+    // A visitor without a value of their own reads the application's, which
+    // is the same for everyone: that page is stored and served, so the cache
+    // is in front of the route.
+    let everyone = client.get("/viewer").send().await;
+    assert!(
+        everyone
+            .body_text()
+            .contains("<p id=\"viewer\">everyone</p>"),
+        "{}",
+        everyone.body_text()
+    );
+    assert_eq!(VIEWER_RENDERS.load(Ordering::SeqCst), 3);
+    let cached = client.get("/viewer").send().await;
+    assert!(
+        cached.body_text().contains("<p id=\"viewer\">everyone</p>"),
+        "{}",
+        cached.body_text()
+    );
+    assert_eq!(
+        VIEWER_RENDERS.load(Ordering::SeqCst),
+        3,
+        "the fourth request is a hit"
     );
 }
