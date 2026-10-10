@@ -231,6 +231,124 @@ async fn without_a_transaction_the_write_of_a_failed_pipeline_stays() {
     assert_eq!(note_count().await, 1);
 }
 
+type Seen = Arc<Mutex<Vec<(&'static str, usize)>>>;
+
+/// A step that records the transaction level in the synchronous part of
+/// `handle`, before it builds a future, and passes the value on at once.
+/// Work a step does there runs when the pipeline calls the step, not when
+/// the future is polled, so it shows where the pipeline calls each step.
+struct LevelProbe {
+    label: &'static str,
+    seen: Seen,
+}
+
+impl PipelineStep<i32> for LevelProbe {
+    fn handle(&self, value: i32, next: PipelineNext<i32>) -> PipelineFuture<i32> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((self.label, DB::transaction_level()));
+        next(value)
+    }
+}
+
+fn probe(label: &'static str, seen: &Seen) -> LevelProbe {
+    LevelProbe {
+        label,
+        seen: seen.clone(),
+    }
+}
+
+/// Run a probe step for each of `labels` and a destination that records
+/// the transaction level before it builds its future, in a transaction or
+/// not, and answer the outcome and the level each one saw.
+async fn run_probes(
+    labels: &[&'static str],
+    within_transaction: bool,
+) -> (Result<i32, FrameworkError>, Vec<(&'static str, usize)>) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let mut pipeline = Pipeline::of(7).through(labels.iter().map(|label| probe(label, &seen)));
+    if within_transaction {
+        pipeline = pipeline.within_transaction();
+    }
+    let at_destination = seen.clone();
+    let outcome = pipeline
+        .then(move |value| {
+            at_destination
+                .lock()
+                .unwrap()
+                .push(("destination", DB::transaction_level()));
+            async move { Ok(value) }
+        })
+        .await;
+    let seen = seen.lock().unwrap().clone();
+    (outcome, seen)
+}
+
+#[tokio::test]
+#[serial]
+async fn within_transaction_calls_every_step_and_the_destination_inside_the_transaction() {
+    let _db = notes_database().await;
+    let (outcome, seen) = run_probes(&["first", "second"], true).await;
+    assert_eq!(outcome.unwrap(), 7);
+    assert_eq!(
+        seen,
+        [("first", 1), ("second", 1), ("destination", 1)],
+        "a step or the destination ran before the transaction began"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn within_transaction_calls_the_destination_of_a_pipeline_without_steps_inside_it() {
+    let _db = notes_database().await;
+    let (outcome, seen) = run_probes(&[], true).await;
+    assert_eq!(outcome.unwrap(), 7);
+    assert_eq!(seen, [("destination", 1)]);
+}
+
+#[tokio::test]
+#[serial]
+async fn without_a_transaction_steps_and_the_destination_see_no_transaction() {
+    let _db = notes_database().await;
+    let (outcome, seen) = run_probes(&["first", "second"], false).await;
+    assert_eq!(outcome.unwrap(), 7);
+    assert_eq!(seen, [("first", 0), ("second", 0), ("destination", 0)]);
+}
+
+#[tokio::test]
+#[serial]
+async fn within_transaction_calls_no_step_when_the_transaction_cannot_begin() {
+    // The listener registers in the test container `notes_database` opens,
+    // so it refuses only this test's transactions.
+    let _db = notes_database().await;
+    DB::before_starting_transaction(|| Err(FrameworkError::domain("begin refused", 409)));
+    let finally_ran = Arc::new(AtomicBool::new(false));
+    let finished = finally_ran.clone();
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let at_destination = seen.clone();
+    let outcome = Pipeline::of(7)
+        .through([probe("first", &seen), probe("second", &seen)])
+        .within_transaction()
+        .finally(move || finished.store(true, Ordering::SeqCst))
+        .then(move |value| {
+            at_destination
+                .lock()
+                .unwrap()
+                .push(("destination", DB::transaction_level()));
+            async move { Ok(value) }
+        })
+        .await;
+    let error = outcome.unwrap_err();
+    assert_eq!(error.status_code(), 409);
+    assert!(error.to_string().contains("begin refused"));
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a step or the destination ran although the transaction never began"
+    );
+    assert!(finally_ran.load(Ordering::SeqCst), "finally was skipped");
+}
+
 // --- The HTTP pipeline's pipe_all ------------------------------------------
 
 static HTTP_RAN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());

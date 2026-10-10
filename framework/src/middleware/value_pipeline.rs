@@ -147,7 +147,10 @@ where
     /// Run the steps and the destination in one database transaction on
     /// the default connection, as Laravel's `withinTransaction`. An error
     /// from any step or the destination rolls back every write they made;
-    /// see [`DB::transaction`].
+    /// see [`DB::transaction`]. The first step is called only after the
+    /// transaction begins, so even the part of a step that runs before it
+    /// builds its future sees the transaction, and no step runs when the
+    /// transaction cannot begin.
     pub fn within_transaction(mut self) -> Self {
         self.within_transaction = true;
         self
@@ -169,11 +172,15 @@ where
         let _finally = Finally(self.finally);
         let steps: Arc<[Arc<dyn PipelineStep<T, R>>]> = self.steps.into();
         let destination: PipelineNext<T, R> = Box::new(move |value| Box::pin(destination(value)));
-        let run = run_from(steps, 0, self.value, destination);
+        let value = self.value;
         if self.within_transaction {
-            DB::transaction(move |_tx| run).await
+            // `run_from` calls the first step at once, and a step that calls
+            // `next` before it returns calls the later steps and the
+            // destination too. The transaction calls this closure after
+            // `BEGIN`, inside its scope, so none of that runs outside it.
+            DB::transaction(move |_tx| run_from(steps, 0, value, destination)).await
         } else {
-            run.await
+            run_from(steps, 0, value, destination).await
         }
     }
 }
