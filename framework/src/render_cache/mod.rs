@@ -82,7 +82,7 @@ pub use suprnova_live::render_cache::{
 /// implements, and the generations it reads.
 pub use suprnova_live::render_cache::{GenerationLedger, GenerationSet};
 /// The rebuild lease contract the SQL and Redis lease stores in
-/// [`providers`](crate::render_cache::providers) implement, and what an
+/// [`providers`] implement, and what an
 /// acquisition attempt answers.
 pub use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
 /// The failure every RenderCache contract reports, and its closed
@@ -94,13 +94,13 @@ pub use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 pub use suprnova_live::render_cache::{RenderKey, Segment, ShellIsland, SlotFailurePolicy};
 
 /// The provider contract every L1 store implements:
-/// [`L1Provider`](crate::render_cache::L1Provider), the file store, the SQL
+/// [`L1Provider`], the file store, the SQL
 /// and Redis stores, and a store of the application's own, with the fence,
 /// outcome, entry and inspection its methods take and return. This
 /// `StoreInspection` is one store's own count;
 /// [`RenderCache::store_inspection`](crate::render_cache::RenderCache::store_inspection)
 /// answers the framework's
-/// [`StoreInspection`](crate::render_cache::StoreInspection), which adds the
+/// [`render_cache::StoreInspection`](crate::render_cache::StoreInspection), which adds the
 /// authority epoch.
 pub mod store {
     pub use suprnova_live::render_cache::store::{

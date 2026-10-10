@@ -23,7 +23,7 @@
 
 //! Language overrides from voku/portable-ascii 2.1.1.
 //! Only replacements that differ from the shared ASCII map are listed.
-//! Source: https://github.com/voku/portable-ascii/tree/2.1.1/src/voku/helper/data
+//! Source: <https://github.com/voku/portable-ascii/tree/2.1.1/src/voku/helper/data>
 
 /// A language map, sorted by language and then by replacement key.
 pub(super) const MAPS: &[(&str, &[(&str, &str)])] = &[

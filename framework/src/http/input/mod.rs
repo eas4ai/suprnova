@@ -39,6 +39,7 @@ use crate::validation::message::ValidationMessage;
 pub(crate) use form::parse_form_input;
 pub(crate) use json::json_field_failures;
 pub(crate) use multipart::parse_multipart_input;
+pub(crate) use nested::name_path;
 pub(crate) use precognitive::parse_precognitive;
 
 use placeholder::Skeleton;

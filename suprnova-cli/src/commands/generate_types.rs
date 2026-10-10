@@ -695,6 +695,7 @@ impl SourceScan {
 
         let mut conflicts = Vec::new();
         self.assign_components(&mut structs, &mut conflicts);
+        self.assign_absent_fields(&mut structs);
         self.assign_roles(&mut structs, &mut conflicts);
         for s in &structs {
             if GENERATED_DECLARATIONS.contains(&s.name.as_str()) {
@@ -775,6 +776,25 @@ impl SourceScan {
         }
     }
 
+    /// Mark each field a render site leaves out of the first response as
+    /// one that may be absent, so its key is optional: the chain that gives
+    /// the struct defers the field's key or marks it optional after it.
+    fn assign_absent_fields(&self, structs: &mut [InertiaPropsStruct]) {
+        for (_, site) in &self.renders {
+            let Some(name) = &site.props else {
+                continue;
+            };
+            let Some(s) = structs.iter_mut().find(|s| s.name == *name) else {
+                continue;
+            };
+            for field in &mut s.fields {
+                if field.in_output && site.absent.contains(&field.name) {
+                    field.may_be_absent = true;
+                }
+            }
+        }
+    }
+
     /// Give the struct `Inertia::share_data` is given the shared role, and
     /// check that one struct at most holds each role.
     fn assign_roles(&self, structs: &mut [InertiaPropsStruct], conflicts: &mut Vec<String>) {
@@ -818,18 +838,25 @@ pub(crate) struct RenderSite {
     /// The struct the page's props are, when the call names one; checked
     /// against the scanned structs later.
     pub(crate) props: Option<String>,
+    /// The keys the chain defers (`defer`, `defer_with`) or marks
+    /// `optional` after it gives `props`, so the first response leaves them
+    /// out. A key given as anything but a string literal is not read.
+    pub(crate) absent: BTreeSet<String>,
 }
 
 /// Finds the calls that render an Inertia page and the struct a page's
 /// props are, and the struct `Inertia::share_data` shares.
 ///
 /// A page is rendered by `inertia_response!(req, "Name", props)`, by
-/// `InertiaResponse::new("Name")` (whose chain may add a struct with
-/// `.with_data(..)` or `.try_with_data(..)`), and by the facade's
+/// `InertiaResponse::new("Name")`, and by the facade's
 /// `Inertia::data("Name", dto)`, `Inertia::try_data` and
-/// `Inertia::paginate`. Props are a struct when the expression is a struct
-/// literal, a call through the struct's path (`Props::new(..)`), a bare
-/// path that may name a unit struct, or a local name that holds one.
+/// `Inertia::paginate`. A method chain that starts with one of the last
+/// four pairs the component with the struct `.with_data(..)` or
+/// `.try_with_data(..)` is given anywhere in it, or `dto`; a key it defers
+/// or marks optional after that is absent from the first response. Props
+/// are a struct when the expression is a struct literal, a call through
+/// the struct's path (`Props::new(..)`), a bare path that may name a unit
+/// struct, or a local name that holds one.
 ///
 /// A local name holds a struct when a `let` or a parameter declares it
 /// (`let props: HomeProps = ..`, `props: HomeProps`) or when its `let`
@@ -1063,9 +1090,11 @@ impl InertiaCallVisitor {
         }
     }
 
-    /// Record an `InertiaResponse::new(..)` chain whose outermost call is
-    /// `top`, and visit what the chain's calls are given. `false` when
-    /// `top` is not such a chain.
+    /// Record a page built by a method chain whose outermost call is `top`
+    /// and whose first call renders a page (`InertiaResponse::new`,
+    /// `Inertia::paginate`, `Inertia::data` or `Inertia::try_data`), and
+    /// visit what the chain's calls are given. `false` when `top` is not
+    /// such a chain.
     fn visit_response_chain(&mut self, top: &syn::ExprMethodCall) -> bool {
         let mut calls = vec![top];
         let mut receiver = &*top.receiver;
@@ -1082,16 +1111,42 @@ impl InertiaCallVisitor {
                 _ => return false,
             }
         };
-        if last_two_segments(&root.func) != Some(("InertiaResponse".to_string(), "new".to_string()))
-        {
+        let Some((owner, function)) = last_two_segments(&root.func) else {
             return false;
+        };
+        let mut structs: BTreeSet<String> = BTreeSet::new();
+        match (owner.as_str(), function.as_str()) {
+            ("InertiaResponse", "new") | ("Inertia", "paginate") => {}
+            ("Inertia", "data" | "try_data") => {
+                structs.extend(
+                    root.args
+                        .iter()
+                        .nth(1)
+                        .and_then(|arg| self.props_struct(arg)),
+                );
+            }
+            _ => return false,
         }
 
-        let structs: BTreeSet<String> = calls
-            .iter()
-            .filter(|call| call.method == "with_data" || call.method == "try_with_data")
-            .filter_map(|call| call.args.first().and_then(|arg| self.props_struct(arg)))
-            .collect();
+        // The calls in source order: a key deferred before the struct is
+        // given is sent with the struct, and one deferred after it is not.
+        let mut absent: BTreeSet<String> = BTreeSet::new();
+        for call in calls.iter().rev() {
+            let method = call.method.to_string();
+            let first = call.args.first();
+            match method.as_str() {
+                "with_data" | "try_with_data" => {
+                    if let Some(name) = first.and_then(|arg| self.props_struct(arg)) {
+                        structs.insert(name);
+                        absent.clear();
+                    }
+                }
+                "defer" | "defer_with" | "optional" => {
+                    absent.extend(first.and_then(string_literal));
+                }
+                _ => {}
+            }
+        }
         // A page built from two structs has no one interface to name.
         let props = match structs.len() {
             1 => structs.into_iter().next(),
@@ -1100,6 +1155,7 @@ impl InertiaCallVisitor {
         self.renders.push(RenderSite {
             component: component_literal(root.args.first()),
             props,
+            absent,
         });
 
         for arg in &root.args {
@@ -1128,6 +1184,7 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
                     self.renders.push(RenderSite {
                         component: component_literal(node.args.first()),
                         props: None,
+                        absent: BTreeSet::new(),
                     });
                 }
                 ("Inertia", "data" | "try_data") => self.renders.push(RenderSite {
@@ -1137,6 +1194,7 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
                         .iter()
                         .nth(1)
                         .and_then(|arg| self.props_struct(arg)),
+                    absent: BTreeSet::new(),
                 }),
                 ("Inertia", "share_data") => {
                     if let Some(name) = node.args.first().and_then(|arg| self.props_struct(arg)) {
@@ -1161,6 +1219,7 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
             self.renders.push(RenderSite {
                 component: string_literal(&component),
                 props,
+                absent: BTreeSet::new(),
             });
         }
         syn::visit::visit_macro(self, node);
