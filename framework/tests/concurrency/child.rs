@@ -5,8 +5,9 @@ use suprnova::console;
 /// In a test run, checks that the framework registers `concurrency:run`
 /// and keeps it out of the console's help. Started by the process driver,
 /// with `concurrency:run <task>` among its arguments, it dispatches that
-/// command as an application's console binary does and exits with the
-/// command's code, before libtest writes anything more.
+/// command as an application's console binary does, writes the lines a
+/// task left for after the command, and exits with the command's code,
+/// before libtest writes anything more.
 #[tokio::test]
 async fn entry() {
     let arguments: Vec<String> = std::env::args().collect();
@@ -21,6 +22,9 @@ async fn entry() {
             Ok(()) => 0,
             Err(error) => i32::from(error.exit_code()),
         };
+        // What an application's logging writes during the console's
+        // shutdown, after the command wrote its outcome.
+        crate::tasks::write_lines_left_for_after_the_command();
         std::process::exit(code);
     }
 

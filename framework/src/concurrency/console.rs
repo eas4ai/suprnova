@@ -8,6 +8,14 @@
 //! the outcome as one marked line on its standard output, which the
 //! driver reads back, and ends with exit code 1 when the task fails.
 //!
+//! The driver passes a random token for the run in
+//! `SUPRNOVA_CONCURRENCY_TOKEN`, and the command writes it into the outcome
+//! line, after the marker. The application's logging shares standard output
+//! with the outcome, so text it logs, before the outcome line or after it,
+//! can read as an outcome; the driver takes only the line with its run's
+//! token, which no logged text knows. Without the variable, as when someone
+//! runs the command by hand, the line carries no token.
+//!
 //! The command refuses a task name that is empty or carries a control
 //! character before it looks the name up. The console reports a failed
 //! command through the application's logging, which can share standard
@@ -21,7 +29,7 @@
 //! are, with an `inventory::submit!` of a [`CommandEntry`], so every
 //! console binary that links the framework has it.
 
-use super::process::{Envelope, RESULT_MARKER, RUN_COMMAND};
+use super::process::{Envelope, RESULT_MARKER, RUN_COMMAND, TOKEN_ENV};
 use super::task;
 use crate::console::CommandEntry;
 use crate::error::FrameworkError;
@@ -110,21 +118,34 @@ async fn execute(name: &str) -> Result<Value, FrameworkError> {
     }
 }
 
-/// Write the outcome as one marked line. The line starts on a line of its
-/// own, whatever the task wrote before it.
+/// Write the outcome as one marked line, with the run's token when the
+/// driver passed one. The line starts on a line of its own, whatever the
+/// task wrote before it.
 fn write_outcome(envelope: &Envelope) -> Result<(), FrameworkError> {
     let json = serde_json::to_string(envelope).map_err(|error| {
         FrameworkError::internal(format!(
             "the outcome of a concurrent task could not be serialized: {error}"
         ))
     })?;
+    let line = match passed_token() {
+        Some(token) => format!("\n{RESULT_MARKER}{token}:{json}\n"),
+        None => format!("\n{RESULT_MARKER}{json}\n"),
+    };
     let mut stdout = std::io::stdout().lock();
     stdout
-        .write_all(format!("\n{RESULT_MARKER}{json}\n").as_bytes())
+        .write_all(line.as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|error| {
             FrameworkError::internal(format!(
                 "the outcome of a concurrent task could not be written to standard output: {error}"
             ))
         })
+}
+
+/// The token the driver passed for this run, or `None` when the variable is
+/// unset, empty or not UTF-8, as when someone runs the command by hand.
+fn passed_token() -> Option<String> {
+    std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
 }

@@ -209,3 +209,46 @@ pub async fn forge_success_then_exit() -> Result<(), FrameworkError> {
     }
     std::process::exit(3)
 }
+
+/// A line that reads as a success outcome with no token, as text an
+/// application logs to standard output could.
+pub const FORGED_UNTOKENED: &str = "suprnova-concurrency-result:{\"ok\":\"forged\"}";
+
+/// A line that reads as a success outcome carrying a token of another run.
+pub const FORGED_OTHER_TOKEN: &str = "suprnova-concurrency-result:00000000000000000000000000000000:{\"ok\":\"forged-with-another-token\"}";
+
+/// Lines a task left for the console to write once its command has
+/// returned, after the outcome line. An application's console does that
+/// when its logging writes to standard output during the shutdown drain,
+/// as a queued listener still running at the end of a command can.
+static AFTER_THE_COMMAND: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Write the lines tasks left for after the command on standard output,
+/// in the order they were left. `child::entry` calls it once the command
+/// has returned, so the lines always come after the outcome line.
+pub fn write_lines_left_for_after_the_command() {
+    let lines = std::mem::take(
+        &mut *AFTER_THE_COMMAND
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    );
+    let mut stdout = std::io::stdout().lock();
+    for line in lines {
+        stdout
+            .write_all(format!("{line}\n").as_bytes())
+            .expect("the line is written");
+    }
+    stdout.flush().expect("standard output is flushed");
+}
+
+/// Answers `genuine`, and leaves two lines that read as success outcomes
+/// for the console to write after its own outcome line: one with the token
+/// of another run, then one with no token at all.
+#[concurrent_task]
+pub async fn answer_then_log_forged_outcomes() -> Result<String, FrameworkError> {
+    AFTER_THE_COMMAND
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .extend([FORGED_OTHER_TOKEN.to_owned(), FORGED_UNTOKENED.to_owned()]);
+    Ok("genuine".to_owned())
+}
