@@ -248,7 +248,9 @@ Log::listen(|event: &MessageLogged| {
 
 A listener added with `EventFacade::listen::<MessageLogged, _>` runs on a
 task spawned on the current runtime, since logging is synchronous and the
-dispatcher is not; outside a runtime only the callbacks hear the write.
+dispatcher is not. A write made outside any runtime, on a plain
+`std::thread` for example, sends its task to a small runtime that runs on
+a thread of its own, so the listener hears that write too.
 Under `EventFacade::fake()` the write is recorded before it returns. A
 callback that panics or a listener that fails never fails the write, and
 the lines the dispatcher and the listeners log while a `MessageLogged` is

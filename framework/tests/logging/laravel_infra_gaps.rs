@@ -607,8 +607,8 @@ fn the_dispatchers_own_logging_does_not_dispatch_message_logged_again() {
 #[test]
 fn a_write_outside_a_runtime_neither_blocks_nor_panics() {
     let marker = unique("no-runtime");
-    // A real listener makes the event observed; with no runtime to spawn
-    // on, the write still returns.
+    // A real listener makes the event observed, and it fails; a write made
+    // outside any runtime still returns at once.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -618,6 +618,110 @@ fn a_write_outside_a_runtime_neither_blocks_nor_panics() {
     drop(runtime);
 
     Log::channel("null").expect("null").info(&marker);
+}
+
+#[test]
+fn a_write_outside_a_runtime_reaches_the_dispatchers_listeners() {
+    let marker = unique("outside-runtime");
+    let marked = Arc::new(AtomicUsize::new(0));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(EventFacade::listen::<MessageLogged, _>(Arc::new(
+        CountingListener {
+            marker: marker.clone(),
+            marked: Arc::clone(&marked),
+            dispatcher_lines: Arc::new(AtomicUsize::new(0)),
+        },
+    )));
+    drop(runtime);
+
+    let written = marker.clone();
+    std::thread::spawn(move || {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the writing thread has no runtime"
+        );
+        Log::channel("null")
+            .expect("the null channel")
+            .info(&written);
+    })
+    .join()
+    .expect("the write returns without panicking");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while marked.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Room for a second dispatch of the same write, which must not come.
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        marked.load(Ordering::SeqCst),
+        1,
+        "a write made outside any runtime reaches the dispatcher's listener once"
+    );
+}
+
+/// In a child: the server's subscriber at `debug`, so the dispatcher's own
+/// lines on the thread that dispatches a write made outside any runtime
+/// reach the layer; then a channel write and a facade write from a thread
+/// with no runtime, beside a listener that fails.
+#[test]
+fn child_writes_outside_a_runtime_under_the_servers_subscriber() {
+    if !is_child() {
+        return;
+    }
+    as_the_server(|| {
+        let marker = unique("outside-runtime-server");
+        let marked = Arc::new(AtomicUsize::new(0));
+        let dispatcher_lines = Arc::new(AtomicUsize::new(0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            EventFacade::listen::<MessageLogged, _>(Arc::new(CountingListener {
+                marker: marker.clone(),
+                marked: Arc::clone(&marked),
+                dispatcher_lines: Arc::clone(&dispatcher_lines),
+            }))
+            .await;
+            EventFacade::listen::<MessageLogged, _>(Arc::new(FailingListener)).await;
+        });
+        drop(runtime);
+
+        let written = marker.clone();
+        std::thread::spawn(move || {
+            Log::channel("null").expect("null").info(&written);
+            Log::info(&written);
+        })
+        .join()
+        .expect("a failing listener does not fail the write");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while marked.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Room for any dispatch the dispatcher's own lines would start.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            marked.load(Ordering::SeqCst),
+            2,
+            "each write outside a runtime reaches the listener once"
+        );
+        assert_eq!(
+            dispatcher_lines.load(Ordering::SeqCst),
+            0,
+            "the dispatcher's own logging dispatched MessageLogged again"
+        );
+    });
+}
+
+#[test]
+fn a_write_outside_a_runtime_does_not_dispatch_the_dispatchers_lines() {
+    run_child(
+        "laravel_infra_gaps::child_writes_outside_a_runtime_under_the_servers_subscriber",
+        &[("LOG_CHANNEL", "null"), ("LOG_LEVEL", "debug")],
+    );
 }
 
 // ---- PAR-139: the bare level of LOG_LEVEL ---------------------------------------
