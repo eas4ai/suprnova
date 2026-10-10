@@ -1,0 +1,2646 @@
+#![cfg(all(feature = "queue-sqs", feature = "testing"))]
+
+//! The SQS queue driver (PAR-018, PAR-019, PAR-020), driven against an
+//! in-process server that speaks the AWS JSON 1.0 protocol of SQS.
+//!
+//! The fake keeps its own clock in whole seconds, which a test moves with
+//! [`fake::FakeSqs::advance`], so delays and visibility timeouts are
+//! observable without sleeping. The driver reads the framework clock, which
+//! the delay tests freeze and move with `TestClock`. The fake refuses a
+//! request whose Signature Version 4 signature it cannot reproduce, so every
+//! test also checks the signing.
+
+use serial_test::serial;
+use sha2::Digest;
+use std::time::Duration;
+use suprnova::Storage;
+use suprnova::filesystem::testing::StorageFakeGuard;
+use suprnova::queue::driver::QueueDriver;
+use suprnova::queue::envelope::Envelope;
+use suprnova::queue::{Queue, bootstrap_from_env};
+use suprnova::testing::TestClock;
+use suprnova::{SqsConfig, SqsCredentials, SqsOverflow, SqsQueueDriver};
+
+use crate::env_lock::lock_env_async;
+use crate::env_snapshot::{EnvSnapshot, set_env};
+
+use fake::FakeSqs;
+
+const PREFIX: &str = "https://sqs.us-east-1.amazonaws.com/123456789012";
+
+/// Every variable these tests set, restored when the snapshot drops.
+const VARIABLES: &[&str] = &[
+    "APP_ENV",
+    "QUEUE_DRIVER",
+    "QUEUE_CONNECTIONS",
+    "QUEUE_FAILOVER_CONNECTIONS",
+    "SQS_PREFIX",
+    "SQS_QUEUE",
+    "SQS_SUFFIX",
+    "SQS_ENDPOINT",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_EC2_METADATA_DISABLED",
+    "SQS_WAIT_TIME_SECONDS",
+    "SQS_OVERFLOW_ENABLED",
+    "SQS_OVERFLOW_ALWAYS",
+    "SQS_OVERFLOW_DISK",
+    "SQS_OVERFLOW_STORE",
+    "SQS_OVERFLOW_DELETE_AFTER_PROCESSING",
+    "SQS_OVERFLOW_FLUSH_ON_CLEAR",
+    "FILESYSTEM_DISK",
+];
+
+fn url(name: &str) -> String {
+    format!("{PREFIX}/{name}")
+}
+
+/// Point the driver at `fake` with static keys, `SQS_QUEUE=default`, and
+/// nothing else set.
+fn configure(fake: &FakeSqs) {
+    for name in VARIABLES {
+        set_env(name, None);
+    }
+    set_env("AWS_EC2_METADATA_DISABLED", Some("true"));
+    set_env("SQS_PREFIX", Some(PREFIX));
+    set_env("SQS_QUEUE", Some("default"));
+    set_env("SQS_ENDPOINT", Some(&fake.endpoint));
+    set_env("AWS_DEFAULT_REGION", Some("us-east-1"));
+    set_env("AWS_ACCESS_KEY_ID", Some("AKIDSUPRNOVATEST"));
+    set_env("AWS_SECRET_ACCESS_KEY", Some(fake::SECRET));
+}
+
+fn envelope(queue: Option<&str>) -> Envelope {
+    let now = suprnova::clock::now();
+    Envelope {
+        schema_version: suprnova::queue::CURRENT_SCHEMA_VERSION,
+        id: uuid::Uuid::new_v4(),
+        job_name: "sqs-probe".into(),
+        queue: queue.map(str::to_owned),
+        payload: serde_json::json!({ "order": 42 }),
+        dispatched_at: now,
+        available_at: now,
+        attempts: 0,
+        max_tries: 5,
+        backoff: suprnova::queue::BackoffSchedule::default(),
+        timeout_secs: None,
+        fail_on_timeout: false,
+        idempotency_key: None,
+        message_group: None,
+        deduplication_id: None,
+        unique_lock_owner: None,
+        debounce_id: None,
+        debounce_owner: None,
+        batch_id: None,
+        chain_remaining: Vec::new(),
+        context: None,
+    }
+}
+
+/// An envelope whose payload alone is 2 MiB, over SQS's 1 MiB limit.
+fn large_envelope() -> Envelope {
+    let mut env = envelope(None);
+    env.payload = serde_json::json!({ "blob": "x".repeat(2 * 1024 * 1024) });
+    env
+}
+
+const VISIBILITY: Duration = Duration::from_secs(30);
+
+fn driver() -> SqsQueueDriver {
+    SqsQueueDriver::from_env().expect("the SQS driver builds from the environment")
+}
+
+/// Hold the env lock, snapshot the variables, start a fake with the named
+/// queues and configure the driver against it.
+macro_rules! setup {
+    ($($queue:expr),* $(,)?) => {{
+        let env = lock_env_async().await;
+        let restore = EnvSnapshot::capture(VARIABLES);
+        let fake = FakeSqs::start(&[$(&url($queue)),*]).await;
+        configure(&fake);
+        (env, restore, fake)
+    }};
+}
+
+// PAR-018: the driver.
+
+#[tokio::test]
+async fn a_pushed_job_is_received_and_an_acknowledged_job_is_gone() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    let sent = envelope(None);
+
+    driver.push(sent.clone()).await.unwrap();
+    assert_eq!(
+        fake.messages(&url("default")).len(),
+        1,
+        "the push reached SQS_QUEUE"
+    );
+
+    let reservation = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("the pushed job is received");
+    assert_eq!(reservation.envelope.id, sent.id);
+    assert_eq!(reservation.envelope.payload, sent.payload);
+    assert_eq!(reservation.envelope.attempts, 0);
+
+    driver.ack(&reservation.token).await.unwrap();
+    fake.advance(60);
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "an acknowledged job is not received again"
+    );
+    assert!(
+        fake.messages(&url("default")).is_empty(),
+        "the acknowledgement deleted it"
+    );
+}
+
+#[tokio::test]
+async fn a_pop_hides_the_job_for_the_visibility_timeout() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let first = driver.pop(VISIBILITY).await.unwrap().expect("received");
+    let receive = fake
+        .last("AmazonSQS.ReceiveMessage")
+        .expect("a receive was sent");
+    assert_eq!(
+        receive["VisibilityTimeout"], 30,
+        "the worker's visibility timeout"
+    );
+    assert_eq!(receive["MaxNumberOfMessages"], 1, "one message per pop");
+    assert_eq!(
+        receive["WaitTimeSeconds"], 1,
+        "a one-second long poll by default"
+    );
+
+    fake.advance(29);
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "hidden for 30 seconds"
+    );
+    fake.advance(1);
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("visible again");
+    assert_eq!(again.envelope.id, first.envelope.id);
+    assert_eq!(
+        again.envelope.attempts, 1,
+        "an expired reservation counts an attempt"
+    );
+}
+
+#[tokio::test]
+async fn a_job_names_its_queue_and_a_worker_without_a_list_receives_from_sqs_queue() {
+    let (_env, _restore, fake) = setup!("default", "emails");
+    let driver = driver();
+
+    driver.push(envelope(Some("emails"))).await.unwrap();
+    assert_eq!(
+        fake.messages(&url("emails")).len(),
+        1,
+        "the job went to its queue"
+    );
+    assert!(fake.messages(&url("default")).is_empty());
+
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "a worker with no --queue receives from SQS_QUEUE only"
+    );
+    let reservation = driver
+        .pop_from(VISIBILITY, &["emails".to_owned()])
+        .await
+        .unwrap()
+        .expect("a worker with --queue=emails receives it");
+    assert_eq!(reservation.envelope.queue.as_deref(), Some("emails"));
+}
+
+#[tokio::test]
+async fn a_worker_receives_from_the_queues_it_names_in_order() {
+    let (_env, _restore, fake) = setup!("default", "emails", "billing");
+    let driver = driver();
+    let default_job = envelope(None);
+    let emails_job = envelope(Some("emails"));
+    let billing_job = envelope(Some("billing"));
+    driver.push(default_job.clone()).await.unwrap();
+    driver.push(emails_job.clone()).await.unwrap();
+    driver.push(billing_job.clone()).await.unwrap();
+
+    let list = ["billing".to_owned(), "emails".to_owned()];
+    let first = driver.pop_from(VISIBILITY, &list).await.unwrap().unwrap();
+    assert_eq!(first.envelope.id, billing_job.id, "billing is named first");
+    let second = driver.pop_from(VISIBILITY, &list).await.unwrap().unwrap();
+    assert_eq!(second.envelope.id, emails_job.id);
+    assert!(
+        driver.pop_from(VISIBILITY, &list).await.unwrap().is_none(),
+        "a worker with --queue=billing,emails never receives from SQS_QUEUE"
+    );
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+    assert!(
+        fake.urls_received_from()
+            .iter()
+            .all(|u| u != &url("default")),
+        "no receive was sent to SQS_QUEUE"
+    );
+}
+
+#[tokio::test]
+async fn a_job_delayed_twenty_minutes_is_not_received_before_its_time() {
+    let (_env, _restore, fake) = setup!("default");
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut delayed = envelope(None);
+    delayed.available_at = suprnova::clock::now() + chrono::Duration::minutes(20);
+
+    driver.push(delayed.clone()).await.unwrap();
+    for (_, delay) in fake.sends() {
+        assert!(
+            delay.unwrap_or(0) <= 900,
+            "SQS refuses DelaySeconds over 900"
+        );
+    }
+
+    // Fifteen minutes on, SQS shows the message, but its time has not come.
+    fake.advance(900);
+    clock.advance(chrono::Duration::minutes(15));
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+
+    fake.advance(299);
+    clock.advance(chrono::Duration::seconds(299));
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "one second early"
+    );
+
+    fake.advance(1);
+    clock.advance(chrono::Duration::seconds(1));
+    let reservation = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("received once twenty minutes have passed");
+    assert_eq!(reservation.envelope.id, delayed.id);
+    assert_eq!(
+        reservation.envelope.attempts, 0,
+        "waiting out a delay is not an attempt"
+    );
+}
+
+#[tokio::test]
+async fn a_nack_counts_one_attempt_after_the_requeue_delay() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(first.envelope.attempts, 0);
+    driver
+        .nack(&first.token, Duration::from_secs(45))
+        .await
+        .unwrap();
+
+    fake.advance(44);
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "the requeue delay holds"
+    );
+    fake.advance(1);
+    let second = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 45 seconds");
+    assert_eq!(second.envelope.id, first.envelope.id);
+    assert_eq!(second.envelope.attempts, 1, "a nack counts one attempt");
+}
+
+#[tokio::test]
+async fn a_release_returns_the_job_with_the_same_attempts() {
+    let (_env, _restore, fake) = setup!("default");
+    let clock = TestClock::freeze();
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.nack(&first.token, Duration::ZERO).await.unwrap();
+    let second = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(second.envelope.attempts, 1);
+
+    // The worker bumps attempts on its own copy before it runs the job.
+    let mut running = second.envelope.clone();
+    running.attempts += 1;
+    driver
+        .release(&second.token, &running, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    fake.advance(9);
+    clock.advance(chrono::Duration::seconds(9));
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "the release delay holds"
+    );
+    fake.advance(1);
+    clock.advance(chrono::Duration::seconds(1));
+    let third = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 10 seconds");
+    assert_eq!(third.envelope.id, first.envelope.id);
+    assert_eq!(third.envelope.attempts, 1, "a release counts no attempt");
+    assert_eq!(
+        fake.messages(&url("default")).len(),
+        1,
+        "one copy of the job"
+    );
+}
+
+/// A nack or release delayed past every date the clock can hold is an
+/// error naming the delay, not a panic in the date arithmetic of the copy
+/// the driver sends, and not a copy available at once.
+#[tokio::test]
+async fn a_requeue_delay_too_long_for_a_date_is_an_error() {
+    let (_env, _restore, _fake) = setup!("default");
+    let driver = std::sync::Arc::new(driver());
+    let million_years = Duration::from_secs(1_000_000 * 365 * 86_400);
+    for delay in [million_years, Duration::MAX] {
+        driver.push(envelope(None)).await.unwrap();
+        let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        let (nacking, token) = (driver.clone(), held.token.clone());
+        let nacked = tokio::spawn(async move { nacking.nack(&token, delay).await }).await;
+        let (releasing, token, running) =
+            (driver.clone(), held.token.clone(), held.envelope.clone());
+        let released =
+            tokio::spawn(async move { releasing.release(&token, &running, delay).await }).await;
+        for (call, outcome) in [("nack", &nacked), ("release", &released)] {
+            assert!(
+                matches!(outcome, Ok(Err(error)) if error.to_string().contains("delay")),
+                "a {call} delayed {delay:?} must return an error, got {outcome:?}"
+            );
+        }
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn size_reports_the_counts_sqs_keeps_and_clear_purges_the_queue() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(None)).await.unwrap();
+    let mut later = envelope(None);
+    later.available_at = suprnova::clock::now() + chrono::Duration::seconds(120);
+    driver.push(later).await.unwrap();
+    let _held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+
+    assert_eq!(driver.size(None).await.unwrap(), 3);
+    assert_eq!(driver.pending_size(None).await.unwrap(), 1);
+    assert_eq!(driver.reserved_size(None).await.unwrap(), 1);
+    assert_eq!(driver.delayed_size(None).await.unwrap(), 1);
+
+    assert_eq!(
+        driver.clear(None).await.unwrap(),
+        3,
+        "clear returns the count it held"
+    );
+    assert!(
+        fake.messages(&url("default")).is_empty(),
+        "clear purged the queue"
+    );
+}
+
+#[tokio::test]
+async fn bulk_push_sends_each_queue_in_batches_of_ten_in_order() {
+    let (_env, _restore, fake) = setup!("default", "emails");
+    let driver = driver();
+    let mut jobs: Vec<Envelope> = (0..12).map(|_| envelope(None)).collect();
+    jobs.insert(5, envelope(Some("emails")));
+    let order: Vec<uuid::Uuid> = jobs
+        .iter()
+        .filter(|job| job.queue.is_none())
+        .map(|job| job.id)
+        .collect();
+
+    driver.bulk_push(jobs).await.unwrap();
+
+    let batches: Vec<(String, usize)> = fake
+        .requests()
+        .into_iter()
+        .filter(|request| request.target == "AmazonSQS.SendMessageBatch")
+        .map(|request| {
+            (
+                request.body["QueueUrl"].as_str().unwrap().to_owned(),
+                request.body["Entries"].as_array().unwrap().len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        batches,
+        [
+            (url("default"), 10),
+            (url("default"), 2),
+            (url("emails"), 1)
+        ],
+        "ten to a batch, one queue to a request"
+    );
+    let mut received = Vec::new();
+    while let Some(reservation) = driver.pop(VISIBILITY).await.unwrap() {
+        received.push(reservation.envelope.id);
+    }
+    assert_eq!(received, order, "every job arrives, in the order given");
+}
+
+// PAR-019: configuration and boot.
+
+#[tokio::test]
+async fn the_queue_url_is_built_from_prefix_queue_and_suffix() {
+    let (_env, _restore, fake) = setup!("jobs-prod", "emails-prod", "other");
+    set_env("SQS_QUEUE", Some("jobs"));
+    set_env("SQS_SUFFIX", Some("-prod"));
+    let driver = driver();
+
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("emails"))).await.unwrap();
+    driver.push(envelope(Some("emails-prod"))).await.unwrap();
+    driver.push(envelope(Some(&url("other")))).await.unwrap();
+
+    let urls: Vec<String> = fake.sends().into_iter().map(|(url, _)| url).collect();
+    assert_eq!(
+        urls,
+        [
+            format!("{PREFIX}/jobs-prod"),
+            format!("{PREFIX}/emails-prod"),
+            format!("{PREFIX}/emails-prod"),
+            format!("{PREFIX}/other"),
+        ],
+        "prefix, name and suffix, the suffix once, and a URL as it is"
+    );
+}
+
+#[tokio::test]
+async fn requests_are_signed_for_sqs_in_the_region() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("AWS_DEFAULT_REGION", Some("eu-west-2"));
+    set_env("AWS_SESSION_TOKEN", Some("suprnova-session-token"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let request = fake.requests().pop().expect("a request reached the fake");
+    let authorization = request.authorization.expect("the request is signed");
+    assert!(
+        authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIDSUPRNOVATEST/"),
+        "Signature Version 4 with the access key: {authorization}"
+    );
+    assert!(
+        authorization.contains("/eu-west-2/sqs/aws4_request"),
+        "scoped to the region and sqs: {authorization}"
+    );
+    assert!(authorization.contains("Signature="), "{authorization}");
+    assert_eq!(
+        request.security_token.as_deref(),
+        Some("suprnova-session-token")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn boot_fails_without_a_region() {
+    let (_env, _restore, fake) = setup!("default");
+    let _ = fake;
+    set_env("QUEUE_DRIVER", Some("sqs"));
+    set_env("AWS_DEFAULT_REGION", None);
+
+    let error = bootstrap_from_env()
+        .await
+        .expect_err("no region is a boot error");
+    assert!(error.to_string().contains("AWS_DEFAULT_REGION"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn the_region_falls_back_to_aws_region() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("AWS_DEFAULT_REGION", None);
+    set_env("AWS_REGION", Some("ap-south-1"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let authorization = fake.requests().pop().unwrap().authorization.unwrap();
+    assert!(
+        authorization.contains("/ap-south-1/sqs/aws4_request"),
+        "{authorization}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn boot_fails_with_a_plain_queue_name_and_no_prefix() {
+    let (_env, _restore, _fake) = setup!("default");
+    set_env("QUEUE_DRIVER", Some("sqs"));
+    set_env("SQS_PREFIX", None);
+
+    let error = bootstrap_from_env()
+        .await
+        .expect_err("no prefix is a boot error");
+    assert!(error.to_string().contains("SQS_PREFIX"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_queue_url_needs_no_prefix() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("SQS_PREFIX", None);
+    set_env("SQS_QUEUE", Some(&url("default")));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn boot_accepts_a_fifo_queue_and_sends_default_attributes() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("QUEUE_DRIVER", Some("sqs"));
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    bootstrap_from_env().await.unwrap();
+    let mut sent = envelope(None);
+    sent.available_at += chrono::Duration::seconds(60);
+    let digest = hex::encode(sha2::Sha256::digest(sent.to_json().unwrap().as_bytes()));
+    Queue::driver().unwrap().push(sent).await.unwrap();
+    let request = fake.last("AmazonSQS.SendMessage").unwrap();
+    assert_eq!(request["MessageGroupId"], "default");
+    assert_eq!(request["MessageDeduplicationId"], digest);
+    assert!(request.get("DelaySeconds").is_none());
+    let message = fake.messages(&url("jobs.fifo")).remove(0);
+    assert_eq!(message.group.as_deref(), Some("default"));
+    assert_eq!(message.deduplication_id.as_deref(), Some(digest.as_str()));
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_driver_sqs_registers_the_sqs_driver() {
+    let (_env, _restore, _fake) = setup!("default");
+    set_env("QUEUE_DRIVER", Some("sqs"));
+
+    bootstrap_from_env().await.expect("QUEUE_DRIVER=sqs boots");
+    assert_eq!(Queue::driver_name().unwrap(), "sqs");
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_connections_and_failover_accept_sqs() {
+    let (_env, _restore, _fake) = setup!("default");
+    set_env("QUEUE_DRIVER", Some("memory"));
+    set_env("QUEUE_CONNECTIONS", Some("sqs"));
+    bootstrap_from_env()
+        .await
+        .expect("QUEUE_CONNECTIONS=sqs boots");
+    assert_eq!(Queue::connection("sqs").unwrap().name(), "sqs");
+
+    set_env("QUEUE_CONNECTIONS", None);
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", Some("sqs,memory"));
+    bootstrap_from_env()
+        .await
+        .expect("an sqs failover connection boots");
+}
+
+// PAR-020: overflow of large payloads to a disk.
+
+/// Overflow on, onto a memory disk named `overflow`.
+fn overflow_on() -> StorageFakeGuard {
+    let guard = Storage::fake();
+    Storage::register_memory("overflow");
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_DISK", Some("overflow"));
+    guard
+}
+
+async fn stored_payloads() -> usize {
+    Storage::disk("overflow")
+        .unwrap()
+        .list_with("/")
+        .recursive(true)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.metadata().is_file())
+        .count()
+}
+
+#[tokio::test]
+async fn with_overflow_a_large_job_is_stored_on_the_disk_and_sent_as_a_pointer() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+    let sent = large_envelope();
+
+    driver.push(sent.clone()).await.unwrap();
+    let message = fake.messages(&url("default")).pop().unwrap();
+    assert!(message.body.len() < 1024, "SQS got a pointer, not the job");
+    assert!(message.body.contains("@pointer"), "{}", message.body);
+    assert_eq!(stored_payloads().await, 1);
+
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(reservation.envelope.id, sent.id);
+    assert_eq!(
+        reservation.envelope.payload, sent.payload,
+        "the pop returns the job"
+    );
+
+    driver.ack(&reservation.token).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "the acknowledgement deleted the payload"
+    );
+}
+
+#[tokio::test]
+async fn delete_after_processing_off_keeps_the_stored_payload() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_DELETE_AFTER_PROCESSING", Some("false"));
+    let driver = driver();
+
+    driver.push(large_envelope()).await.unwrap();
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&reservation.token).await.unwrap();
+    assert_eq!(stored_payloads().await, 1);
+}
+
+#[tokio::test]
+async fn overflow_always_stores_every_job() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    let driver = driver();
+    let sent = envelope(None);
+
+    driver.push(sent.clone()).await.unwrap();
+    assert!(
+        fake.messages(&url("default"))
+            .pop()
+            .unwrap()
+            .body
+            .contains("@pointer")
+    );
+    assert_eq!(stored_payloads().await, 1);
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+#[tokio::test]
+async fn flush_on_clear_deletes_the_stored_payloads() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let driver = driver();
+
+    driver.push(large_envelope()).await.unwrap();
+    driver.push(large_envelope()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+    driver.clear(None).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "clear deleted the stored payloads"
+    );
+}
+
+/// Two queues with one name, in two accounts (or regions), overflowing onto
+/// one disk. Clearing one must not delete the payloads of the other, whose
+/// messages still point at them.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_a_same_named_queue_elsewhere() {
+    let first = "https://sqs.us-east-1.amazonaws.com/111111111111/default";
+    let second = "https://sqs.us-east-1.amazonaws.com/222222222222/default";
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let fake = FakeSqs::start(&[first, second]).await;
+    configure(&fake);
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    set_env("SQS_PREFIX", None);
+    set_env("SQS_QUEUE", Some(first));
+    let cleared = driver();
+    set_env("SQS_QUEUE", Some(second));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    let sent = large_envelope();
+    other.push(sent.clone()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear(None).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the cleared queue's payload is gone"
+    );
+    let reservation = other
+        .pop(VISIBILITY)
+        .await
+        .expect("the other queue's job can still be read")
+        .expect("and it is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// Sol review of DRIVERS-063: the directory's digest covered the queue URL
+/// alone. Two services that answer to one queue URL from different
+/// endpoints, such as two ElasticMQ instances, overflowed into one
+/// directory, and clearing one deleted the payloads of the other.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_at_another_endpoint() {
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let first = FakeSqs::start(&[&url("default")]).await;
+    let second = FakeSqs::start(&[&url("default")]).await;
+    configure(&first);
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let cleared = driver();
+    set_env("SQS_ENDPOINT", Some(&second.endpoint));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    let sent = large_envelope();
+    other.push(sent.clone()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear(None).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the payload of the cleared endpoint's queue is gone"
+    );
+    let reservation = other
+        .pop(VISIBILITY)
+        .await
+        .expect("the other endpoint's job can still be read")
+        .expect("and it is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// The region half: LocalStack keeps one queue per region behind one
+/// endpoint and one queue URL, so the region names the queue too.
+#[tokio::test]
+async fn flush_on_clear_keeps_the_payloads_of_the_same_queue_url_in_another_region() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let cleared = driver();
+    set_env("AWS_DEFAULT_REGION", Some("eu-west-1"));
+    let other = driver();
+
+    cleared.push(large_envelope()).await.unwrap();
+    other.push(large_envelope()).await.unwrap();
+    assert_eq!(stored_payloads().await, 2);
+
+    cleared.clear(None).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "only the payload of the cleared region's queue is gone"
+    );
+}
+
+#[tokio::test]
+async fn clear_keeps_the_stored_payloads_without_flush_on_clear() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    driver.push(large_envelope()).await.unwrap();
+    driver.clear(None).await.unwrap();
+    assert_eq!(stored_payloads().await, 1);
+}
+
+#[tokio::test]
+async fn without_overflow_a_push_over_the_limit_fails_naming_the_limit() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+
+    let error = driver
+        .push(large_envelope())
+        .await
+        .expect_err("a job over 1 MiB is refused without overflow");
+    let text = error.to_string();
+    assert!(text.contains("1 MiB"), "{text}");
+    assert!(text.contains("SQS_OVERFLOW_ENABLED"), "{text}");
+    assert!(fake.messages(&url("default")).is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn boot_fails_with_overflow_on_and_no_disk_under_the_name() {
+    let (_env, _restore, _fake) = setup!("default");
+    let _storage = Storage::fake();
+    set_env("QUEUE_DRIVER", Some("sqs"));
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_DISK", Some("payloads"));
+
+    let error = bootstrap_from_env()
+        .await
+        .expect_err("overflow onto a disk that is not registered");
+    assert!(error.to_string().contains("payloads"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn overflow_uses_the_default_disk_when_none_is_named() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = Storage::fake();
+    Storage::register_memory("overflow");
+    Storage::set_default_disk("overflow");
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    let driver = driver();
+
+    driver.push(large_envelope()).await.unwrap();
+    assert!(
+        fake.messages(&url("default"))
+            .pop()
+            .unwrap()
+            .body
+            .contains("@pointer")
+    );
+    assert_eq!(stored_payloads().await, 1);
+}
+
+// Review fixes: settlement past SQS's limits, the request layer, and the
+// overflow payloads a copy leaves behind.
+
+#[tokio::test]
+async fn a_nack_longer_than_the_twelve_hours_left_holds_and_counts_one_attempt() {
+    let (_env, _restore, fake) = setup!("default");
+    let clock = TestClock::freeze();
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // The job ran for two minutes, so less than 12 hours of hiding is left.
+    fake.advance(120);
+    clock.advance(chrono::Duration::seconds(120));
+    let twelve_hours = 12 * 3600;
+    driver
+        .nack(&first.token, Duration::from_secs(twelve_hours))
+        .await
+        .expect("a nack of 12 hours is accepted");
+
+    let mut waited = 0;
+    while waited + 900 < twelve_hours {
+        fake.advance(900);
+        clock.advance(chrono::Duration::seconds(900));
+        waited += 900;
+        assert!(
+            driver.pop(VISIBILITY).await.unwrap().is_none(),
+            "back {waited} seconds into a 12-hour requeue delay"
+        );
+    }
+    fake.advance(twelve_hours - waited);
+    clock.advance(chrono::Duration::seconds((twelve_hours - waited) as i64));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 12 hours");
+    assert_eq!(again.envelope.id, first.envelope.id);
+    assert_eq!(again.envelope.attempts, 1, "the nack counted one attempt");
+}
+
+/// MEM-003: a reservation keeps the message body rather than a decoded
+/// envelope, so the nack that sends a copy decodes the body again; for an
+/// overflow message that reads the payload back from the disk.
+#[tokio::test]
+async fn a_nack_longer_than_the_twelve_hours_left_copies_an_overflow_job_whole() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let sent = large_envelope();
+    driver.push(sent.clone()).await.unwrap();
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // Within the reservation, so the original message and its payload
+    // are deleted once the copy is sent.
+    fake.advance(20);
+    clock.advance(chrono::Duration::seconds(20));
+    let twelve_hours = 12 * 3600;
+    driver
+        .nack(&first.token, Duration::from_secs(twelve_hours))
+        .await
+        .expect("a nack of 12 hours is accepted");
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "the copy's payload replaced the original's"
+    );
+
+    fake.advance(twelve_hours);
+    clock.advance(chrono::Duration::seconds(twelve_hours as i64));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after 12 hours");
+    assert_eq!(again.envelope.id, sent.id);
+    assert_eq!(
+        again.envelope.payload, sent.payload,
+        "the copy is the whole job"
+    );
+    assert_eq!(again.envelope.attempts, 1, "the nack counted one attempt");
+}
+
+#[tokio::test]
+async fn a_settlement_after_the_reservation_expired_keeps_the_overflow_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let clock = TestClock::freeze();
+    let first_worker = driver();
+    let second_worker = driver();
+    let sent = large_envelope();
+    first_worker.push(sent.clone()).await.unwrap();
+    let first = first_worker.pop(VISIBILITY).await.unwrap().unwrap();
+
+    // The first worker outlives its reservation, and SQS hands the job on.
+    fake.advance(31);
+    clock.advance(chrono::Duration::seconds(31));
+    let second = second_worker
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("redelivered");
+    first_worker.ack(&first.token).await.unwrap();
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "a late ack must not delete the payload the message still points at"
+    );
+
+    second_worker
+        .nack(&second.token, Duration::ZERO)
+        .await
+        .unwrap();
+    let third = second_worker
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("the job is still there");
+    assert_eq!(third.envelope.payload, sent.payload, "and still readable");
+}
+
+#[tokio::test]
+async fn a_refused_send_deletes_its_payload_and_an_unanswered_one_keeps_it() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#InvalidParameterValue","message":"refused"}"#,
+    );
+    driver
+        .push(large_envelope())
+        .await
+        .expect_err("SQS refused the send");
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "no message points at the payload"
+    );
+
+    fake.script("AmazonSQS.SendMessage", 200, "<html>not sqs</html>");
+    let error = driver
+        .push(large_envelope())
+        .await
+        .expect_err("a reply that is not SQS's fails the push");
+    assert!(error.to_string().contains("SQS_ENDPOINT"), "{error}");
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "whatever answered may have taken the message, so its payload stays"
+    );
+}
+
+/// SQS took the message on the first try but the reply was lost; the next
+/// tries are refused. The message that try left in SQS points at the
+/// payload, so the payload must stay and the job must still run.
+#[tokio::test]
+async fn a_refusal_after_an_unanswered_send_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.sends().len(), 3, "three tries");
+    assert_eq!(
+        fake.messages(&url("default")).len(),
+        1,
+        "the first try left a message in SQS"
+    );
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "that message points at the payload, so the payload stays"
+    );
+    let reservation = driver
+        .pop(VISIBILITY)
+        .await
+        .expect("the message can be read")
+        .expect("the message is there");
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+/// SQS took the first try but the reply was lost, and took the retry too:
+/// two messages carry the job. Each must point at a payload of its own, so
+/// acknowledging one does not leave the other unreadable.
+#[tokio::test]
+async fn a_send_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    let sent = large_envelope();
+    driver
+        .push(sent.clone())
+        .await
+        .expect("the retry was answered");
+    let messages = fake.messages(&url("default"));
+    assert_eq!(messages.len(), 2, "both tries left a message");
+    assert_ne!(
+        messages[0].body, messages[1].body,
+        "the two messages point at different payloads"
+    );
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(
+        stored_payloads().await,
+        0,
+        "each acknowledgement deleted its own payload"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_taken_twice_gives_each_message_its_own_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect("the retry was answered");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+
+    for _ in 0..2 {
+        let reservation = driver
+            .pop(VISIBILITY)
+            .await
+            .expect("each copy can be read")
+            .expect("each copy is there");
+        assert_eq!(reservation.envelope.payload, sent.payload);
+        driver.ack(&reservation.token).await.unwrap();
+    }
+    assert_eq!(stored_payloads().await, 0);
+}
+
+/// A fault of the service (5xx) does not say SQS did not take the message,
+/// so a send that ends in one keeps its payload. Each retry after a fault
+/// carries a copy of its own, so each of the three tries keeps the payload
+/// it carried.
+#[tokio::test]
+async fn a_send_that_ends_in_a_service_fault_keeps_the_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+    for _ in 0..3 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            500,
+            r#"{"__type":"com.amazonaws.sqs#InternalError","message":"oops"}"#,
+        );
+    }
+    driver
+        .push(large_envelope())
+        .await
+        .expect_err("three faults");
+    assert_eq!(stored_payloads().await, 3);
+}
+
+/// The batch form of the same sequence: the first `SendMessageBatch` was
+/// taken and its reply lost, the second rejects an entry. That entry may be
+/// in SQS from the first try, so its payload stays.
+#[tokio::test]
+async fn a_batch_entry_rejected_after_an_unanswered_batch_keeps_its_payload() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    fake.script(
+        "AmazonSQS.SendMessageBatch",
+        200,
+        r#"{"Successful":[],"Failed":[{"Id":"0","Code":"InternalError","Message":"oops","SenderFault":false}]}"#,
+    );
+    let sent = large_envelope();
+    driver
+        .bulk_push(vec![sent.clone()])
+        .await
+        .expect_err("the entry was rejected on the last try");
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+    assert_eq!(stored_payloads().await, 1);
+    let reservation = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(reservation.envelope.payload, sent.payload);
+}
+
+#[tokio::test]
+async fn a_batch_refused_after_an_unanswered_batch_keeps_its_payloads() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    let driver = driver();
+
+    fake.script_accept_then_drop("AmazonSQS.SendMessageBatch");
+    for _ in 0..2 {
+        fake.script(
+            "AmazonSQS.SendMessageBatch",
+            400,
+            r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+        );
+    }
+    driver
+        .bulk_push(vec![large_envelope(), large_envelope()])
+        .await
+        .expect_err("the last try was refused");
+    assert_eq!(fake.messages(&url("default")).len(), 2);
+    assert_eq!(stored_payloads().await, 2);
+}
+
+#[tokio::test]
+async fn a_delay_sent_on_keeps_one_payload_with_delete_after_processing_off() {
+    let (_env, _restore, fake) = setup!("default");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_DELETE_AFTER_PROCESSING", Some("false"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut delayed = large_envelope();
+    delayed.available_at = suprnova::clock::now() + chrono::Duration::minutes(40);
+    driver.push(delayed).await.unwrap();
+
+    for _ in 0..2 {
+        fake.advance(900);
+        clock.advance(chrono::Duration::minutes(15));
+        assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    }
+    assert_eq!(
+        stored_payloads().await,
+        1,
+        "each copy sent on replaces the payload of the one it supersedes"
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_request_is_tried_again() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#RequestThrottled","message":"slow down"}"#,
+    );
+
+    driver
+        .push(envelope(None))
+        .await
+        .expect("the second try succeeds");
+    assert_eq!(fake.sends().len(), 2, "one throttled try, one that landed");
+    assert_eq!(fake.messages(&url("default")).len(), 1, "one message");
+}
+
+#[tokio::test]
+async fn a_service_that_keeps_failing_fails_the_push_after_three_tries() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    for _ in 0..3 {
+        fake.script(
+            "AmazonSQS.SendMessage",
+            503,
+            r#"{"__type":"com.amazonaws.sqs#ServiceUnavailable","message":"down"}"#,
+        );
+    }
+
+    let error = driver.push(envelope(None)).await.expect_err("three faults");
+    assert!(error.to_string().contains("ServiceUnavailable"), "{error}");
+    assert_eq!(fake.sends().len(), 3);
+}
+
+#[tokio::test]
+async fn a_size_with_no_counts_in_the_reply_is_an_error() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    fake.script("AmazonSQS.GetQueueAttributes", 200, "{}");
+
+    assert!(
+        driver.size(None).await.is_err(),
+        "a reply without the counts is not an empty queue"
+    );
+}
+
+#[tokio::test]
+async fn a_receive_waits_for_the_configured_seconds() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("SQS_WAIT_TIME_SECONDS", Some("5"));
+    let driver = driver();
+
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    let receive = fake.last("AmazonSQS.ReceiveMessage").unwrap();
+    assert_eq!(receive["WaitTimeSeconds"], 5);
+}
+
+#[tokio::test]
+async fn a_driver_built_from_a_config_reaches_its_queue() {
+    let (_env, _restore, fake) = setup!("billing");
+    for name in VARIABLES {
+        set_env(name, None);
+    }
+    set_env("AWS_EC2_METADATA_DISABLED", Some("true"));
+    let mut config = SqsConfig::new("us-east-1", "billing");
+    config.prefix = Some(PREFIX.to_owned());
+    config.endpoint = Some(fake.endpoint.clone());
+    config.credentials = Some(SqsCredentials {
+        access_key_id: "AKIDSUPRNOVATEST".into(),
+        secret_access_key: fake::SECRET.into(),
+        session_token: None,
+    });
+    assert!(SqsOverflow::default().delete_after_processing);
+    let driver = SqsQueueDriver::new(config).expect("a driver from code");
+
+    driver.push(envelope(None)).await.unwrap();
+    assert_eq!(fake.messages(&url("billing")).len(), 1);
+}
+
+#[tokio::test]
+async fn call_sends_any_sqs_action() {
+    let (_env, _restore, fake) = setup!("default");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+
+    let reply = driver
+        .call(
+            "GetQueueAttributes",
+            serde_json::json!({
+                "QueueUrl": url("default"),
+                "AttributeNames": ["ApproximateNumberOfMessages"],
+            }),
+        )
+        .await
+        .expect("a signed request to any action");
+    assert_eq!(reply["Attributes"]["ApproximateNumberOfMessages"], "1");
+
+    let error = driver
+        .call(
+            "NoSuchAction",
+            serde_json::json!({ "QueueUrl": url("default") }),
+        )
+        .await
+        .expect_err("SQS refuses an action it does not know");
+    assert!(error.to_string().contains("InvalidAction"), "{error}");
+    assert_eq!(fake.messages(&url("default")).len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_signed_with_another_secret_is_refused() {
+    let (_env, _restore, fake) = setup!("default");
+    set_env("AWS_SECRET_ACCESS_KEY", Some("not-the-secret"));
+    let driver = driver();
+
+    let error = driver
+        .push(envelope(None))
+        .await
+        .expect_err("the fake checks every signature");
+    assert!(
+        error.to_string().contains("SignatureDoesNotMatch"),
+        "{error}"
+    );
+    assert!(fake.messages(&url("default")).is_empty());
+}
+
+// A live endpoint, for checking the wire format against a real
+// SQS-compatible server. Run it with the two queues created:
+//
+//     SQS_LIVE_ENDPOINT=http://127.0.0.1:9324 \
+//     SQS_LIVE_PREFIX=http://localhost:9324/000000000000 \
+//     cargo nextest run -p suprnova --test queue --run-ignored only \
+//         -E 'test(/^sqs::live_/)'
+//
+// with `suprnova-live` and `suprnova-emails` under the prefix.
+
+#[tokio::test]
+#[ignore = "needs an SQS-compatible endpoint: set SQS_LIVE_ENDPOINT and SQS_LIVE_PREFIX"]
+async fn live_round_trip_against_an_sqs_endpoint() {
+    let _env = lock_env_async().await;
+    let _restore = EnvSnapshot::capture(VARIABLES);
+    let endpoint = std::env::var("SQS_LIVE_ENDPOINT").expect("SQS_LIVE_ENDPOINT");
+    let prefix = std::env::var("SQS_LIVE_PREFIX").expect("SQS_LIVE_PREFIX");
+    for name in VARIABLES {
+        set_env(name, None);
+    }
+    set_env("AWS_EC2_METADATA_DISABLED", Some("true"));
+    set_env("SQS_ENDPOINT", Some(&endpoint));
+    set_env("SQS_PREFIX", Some(&prefix));
+    set_env("SQS_QUEUE", Some("suprnova-live"));
+    set_env("AWS_DEFAULT_REGION", Some("us-east-1"));
+    set_env("AWS_ACCESS_KEY_ID", Some("AKIDSUPRNOVALIVE"));
+    set_env("AWS_SECRET_ACCESS_KEY", Some("suprnova-live-secret"));
+    let driver = driver();
+    driver.clear(None).await.expect("PurgeQueue");
+
+    let sent = envelope(None);
+    driver.push(sent.clone()).await.expect("SendMessage");
+    let first = driver
+        .pop(VISIBILITY)
+        .await
+        .expect("ReceiveMessage")
+        .expect("received");
+    assert_eq!(first.envelope.id, sent.id);
+    assert_eq!(first.envelope.attempts, 0);
+    driver
+        .nack(&first.token, Duration::ZERO)
+        .await
+        .expect("ChangeMessageVisibility");
+    let second = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after the nack");
+    assert_eq!(
+        second.envelope.attempts, 1,
+        "ApproximateReceiveCount counts the nack"
+    );
+    driver
+        .release(&second.token, &second.envelope, Duration::from_secs(1))
+        .await
+        .expect("release");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let third = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("back after the release");
+    assert_eq!(third.envelope.attempts, 1, "a release counts no attempt");
+    driver.ack(&third.token).await.expect("DeleteMessage");
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+
+    driver
+        .push(envelope(Some("suprnova-emails")))
+        .await
+        .unwrap();
+    let routed = driver
+        .pop_from(VISIBILITY, &["suprnova-emails".to_owned()])
+        .await
+        .unwrap()
+        .expect("received from the queue it names");
+    driver.ack(&routed.token).await.unwrap();
+
+    let mut later = envelope(None);
+    later.available_at = suprnova::clock::now() + chrono::Duration::seconds(2);
+    driver.push(later.clone()).await.unwrap();
+    driver.push(envelope(None)).await.unwrap();
+    assert_eq!(driver.size(None).await.expect("GetQueueAttributes"), 2);
+    assert_eq!(driver.delayed_size(None).await.unwrap(), 1);
+    assert_eq!(driver.clear(None).await.unwrap(), 2);
+    assert_eq!(driver.size(None).await.unwrap(), 0);
+
+    driver
+        .bulk_push((0..12).map(|_| envelope(None)).collect())
+        .await
+        .expect("SendMessageBatch");
+    assert_eq!(driver.size(None).await.unwrap(), 12);
+    assert_eq!(driver.clear(None).await.unwrap(), 12);
+
+    driver.push(later.clone()).await.unwrap();
+    assert!(
+        driver.pop(VISIBILITY).await.unwrap().is_none(),
+        "the delay holds"
+    );
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let delayed = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("received after the delay");
+    assert_eq!(delayed.envelope.id, later.id);
+    driver.ack(&delayed.token).await.unwrap();
+}
+
+/// A server for the AWS JSON 1.0 protocol of SQS: the eight actions the
+/// driver sends, against standard queues created up front. It checks the
+/// Signature Version 4 signature of every request against [`fake::SECRET`],
+/// and holds a message hidden for at most 12 hours from its receive, as SQS
+/// does. A delete on a receipt handle that is not the latest one succeeds
+/// and deletes nothing, which AWS documents SQS may do.
+mod fake {
+    use hmac::digest::KeyInit;
+    use hmac::{Hmac, Mac};
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::{Bytes, Incoming};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    /// The secret key every test signs with.
+    pub const SECRET: &str = "suprnova-test-secret";
+
+    /// SQS's limit on one message body.
+    const MAX_BODY: usize = 1024 * 1024;
+
+    /// The longest SQS hides a message, counted from its receive.
+    const MAX_VISIBILITY: u64 = 43_200;
+
+    /// The scripted status that acts on the request and then drops the
+    /// connection without a reply. No HTTP status is zero.
+    const ACCEPT_THEN_DROP: u16 = 0;
+
+    #[derive(Clone, Debug)]
+    pub struct Message {
+        pub id: String,
+        pub body: String,
+        pub group: Option<String>,
+        pub deduplication_id: Option<String>,
+        pub visible_at: u64,
+        pub receive_count: u32,
+        received_at: u64,
+        receipts: Vec<String>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Request {
+        pub target: String,
+        pub authorization: Option<String>,
+        pub security_token: Option<String>,
+        pub body: Value,
+    }
+
+    #[derive(Default)]
+    struct State {
+        now: u64,
+        next: u64,
+        queues: HashMap<String, Vec<Message>>,
+        requests: Vec<Request>,
+        deduplicated: HashMap<(String, String), (u64, String)>,
+        /// Canned replies, by target, answered before the queue is touched.
+        script: HashMap<String, VecDeque<(u16, String)>>,
+    }
+
+    #[derive(Clone)]
+    pub struct FakeSqs {
+        state: Arc<Mutex<State>>,
+        pub endpoint: String,
+    }
+
+    impl FakeSqs {
+        pub async fn start(queues: &[&str]) -> Self {
+            let state = Arc::new(Mutex::new(State::default()));
+            for queue in queues {
+                state
+                    .lock()
+                    .unwrap()
+                    .queues
+                    .insert((*queue).to_owned(), Vec::new());
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let shared = Arc::clone(&state);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let state = Arc::clone(&shared);
+                    tokio::spawn(async move {
+                        let service = service_fn(move |request: hyper::Request<Incoming>| {
+                            let state = Arc::clone(&state);
+                            async move {
+                                // No response: hyper closes the connection
+                                // without writing one.
+                                serve(&state, request).await.ok_or_else(|| {
+                                    std::io::Error::other("the reply was dropped on purpose")
+                                })
+                            }
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            });
+            Self { state, endpoint }
+        }
+
+        /// Move the fake's clock on by `seconds`.
+        pub fn advance(&self, seconds: u64) {
+            self.state.lock().unwrap().now += seconds;
+        }
+
+        /// Act on the next request for `target` as SQS would, then close the
+        /// connection without a reply: SQS took the message and the answer
+        /// was lost, which the driver sees as no answer.
+        pub fn script_accept_then_drop(&self, target: &str) {
+            self.script(target, ACCEPT_THEN_DROP, "");
+        }
+
+        /// Answer the next request for `target` with `status` and `body`.
+        pub fn script(&self, target: &str, status: u16, body: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .script
+                .entry(target.to_owned())
+                .or_default()
+                .push_back((status, body.to_owned()));
+        }
+
+        /// The messages a queue holds, visible or not.
+        pub fn messages(&self, queue_url: &str) -> Vec<Message> {
+            self.state
+                .lock()
+                .unwrap()
+                .queues
+                .get(queue_url)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        pub fn requests(&self) -> Vec<Request> {
+            self.state.lock().unwrap().requests.clone()
+        }
+
+        /// The body of the last request for `target`.
+        pub fn last(&self, target: &str) -> Option<Value> {
+            self.requests()
+                .into_iter()
+                .rev()
+                .find(|request| request.target == target)
+                .map(|request| request.body)
+        }
+
+        /// Each `SendMessage`, as its queue URL and its `DelaySeconds`.
+        pub fn sends(&self) -> Vec<(String, Option<u64>)> {
+            self.requests()
+                .into_iter()
+                .filter(|request| request.target == "AmazonSQS.SendMessage")
+                .map(|request| {
+                    (
+                        request.body["QueueUrl"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        request.body["DelaySeconds"].as_u64(),
+                    )
+                })
+                .collect()
+        }
+
+        /// The queue URL of each `ReceiveMessage`.
+        pub fn urls_received_from(&self) -> Vec<String> {
+            self.requests()
+                .into_iter()
+                .filter(|request| request.target == "AmazonSQS.ReceiveMessage")
+                .map(|request| {
+                    request.body["QueueUrl"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        }
+    }
+
+    async fn serve(
+        state: &Mutex<State>,
+        request: hyper::Request<Incoming>,
+    ) -> Option<hyper::Response<Full<Bytes>>> {
+        let method = request.method().as_str().to_owned();
+        let path = request.uri().path().to_owned();
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        let headers: Vec<(String, String)> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    value.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let target = header("x-amz-target").unwrap_or_default();
+        let content_type = header("content-type").unwrap_or_default();
+        let bytes = request.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let signature = verify_signature(&method, &path, &query, &headers, &bytes, SECRET);
+
+        let mut state = state.lock().unwrap();
+        state.requests.push(Request {
+            target: target.clone(),
+            authorization: header("authorization"),
+            security_token: header("x-amz-security-token"),
+            body: body.clone(),
+        });
+        let scripted = state.script.get_mut(&target).and_then(VecDeque::pop_front);
+        if matches!(scripted, Some((ACCEPT_THEN_DROP, _))) {
+            let _ = act(&mut state, &target, &body);
+            return None;
+        }
+        let (status, reply) = if let Some((status, reply)) = scripted {
+            (status, reply)
+        } else if let Err(reason) = signature {
+            let (_, reply) = error("SignatureDoesNotMatch", &reason);
+            (403, reply.to_string())
+        } else if content_type != "application/x-amz-json-1.0" {
+            let (status, reply) = error(
+                "InvalidParameterValue",
+                "expected application/x-amz-json-1.0",
+            );
+            (status, reply.to_string())
+        } else {
+            let (status, reply) = act(&mut state, &target, &body);
+            (status, reply.to_string())
+        };
+        Some(
+            hyper::Response::builder()
+                .status(status)
+                .header("content-type", "application/x-amz-json-1.0")
+                .body(Full::new(Bytes::from(reply)))
+                .unwrap(),
+        )
+    }
+
+    fn hmac(key: &[u8], data: &str) -> Vec<u8> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(data.as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Recompute the Signature Version 4 signature of a request from
+    /// `secret` and compare it with the one it carries.
+    pub fn verify_signature(
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        secret: &str,
+    ) -> Result<(), String> {
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let authorization = header("authorization").ok_or("no Authorization header")?;
+        let fields = authorization
+            .strip_prefix("AWS4-HMAC-SHA256 ")
+            .ok_or("not AWS4-HMAC-SHA256")?;
+        let field = |name: &str| {
+            fields
+                .split(',')
+                .map(str::trim)
+                .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                .ok_or(format!("no {name} in Authorization"))
+        };
+        let credential = field("Credential")?;
+        let signed_headers = field("SignedHeaders")?;
+        let signature = field("Signature")?;
+        let scope = credential
+            .split_once('/')
+            .map(|(_, scope)| scope)
+            .ok_or("no scope")?;
+        let mut parts = scope.split('/');
+        let (date, region, service) = (
+            parts.next().ok_or("no date")?,
+            parts.next().ok_or("no region")?,
+            parts.next().ok_or("no service")?,
+        );
+        let signed: Vec<&str> = signed_headers.split(';').collect();
+        for required in ["host", "x-amz-date", "x-amz-content-sha256", "x-amz-target"] {
+            if !signed.contains(&required) {
+                return Err(format!("{required} is not signed"));
+            }
+        }
+        let payload_hash = header("x-amz-content-sha256").ok_or("no x-amz-content-sha256")?;
+        if payload_hash != hex::encode(Sha256::digest(body)) {
+            return Err("x-amz-content-sha256 is not the hash of the body".into());
+        }
+        let mut canonical_headers = String::new();
+        for name in &signed {
+            let value = header(name).ok_or(format!("signed header {name} is missing"))?;
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            canonical_headers.push_str(&format!("{name}:{value}\n"));
+        }
+        let canonical = format!(
+            "{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+        let amz_date = header("x-amz-date").ok_or("no x-amz-date")?;
+        let to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            hex::encode(Sha256::digest(canonical.as_bytes()))
+        );
+        let key = hmac(format!("AWS4{secret}").as_bytes(), date);
+        let key = hmac(&key, region);
+        let key = hmac(&key, service);
+        let key = hmac(&key, "aws4_request");
+        let expected = hex::encode(hmac(&key, &to_sign));
+        if expected == signature {
+            Ok(())
+        } else {
+            Err("the signature does not match".into())
+        }
+    }
+
+    fn error(code: &str, message: &str) -> (u16, Value) {
+        (
+            400,
+            json!({ "__type": format!("com.amazonaws.sqs#{code}"), "message": message }),
+        )
+    }
+
+    fn act(state: &mut State, target: &str, body: &Value) -> (u16, Value) {
+        let url = body["QueueUrl"].as_str().unwrap_or_default().to_owned();
+        if !state.queues.contains_key(&url) {
+            return error("QueueDoesNotExist", "The specified queue does not exist.");
+        }
+        let now = state.now;
+        let send = |state: &mut State, text: &str, delay: u64, attributes: &Value| {
+            let deduplication_id = attributes["MessageDeduplicationId"].as_str();
+            if url.ends_with(".fifo") {
+                let key = (url.clone(), deduplication_id.unwrap().to_owned());
+                if let Some((sent_at, id)) = state.deduplicated.get(&key)
+                    && now - sent_at < 300
+                {
+                    return id.clone();
+                }
+                state
+                    .deduplicated
+                    .insert(key, (now, format!("message-{}", state.next + 1)));
+            }
+            state.next += 1;
+            let id = format!("message-{}", state.next);
+            state.queues.get_mut(&url).unwrap().push(Message {
+                id: id.clone(),
+                body: text.to_owned(),
+                group: attributes["MessageGroupId"].as_str().map(str::to_owned),
+                deduplication_id: attributes["MessageDeduplicationId"]
+                    .as_str()
+                    .map(str::to_owned),
+                visible_at: now + delay,
+                receive_count: 0,
+                received_at: 0,
+                receipts: Vec::new(),
+            });
+            id
+        };
+        match target {
+            "AmazonSQS.SendMessage" => {
+                let Some(text) = body["MessageBody"].as_str() else {
+                    return error("MissingParameter", "MessageBody");
+                };
+                if text.len() > MAX_BODY {
+                    return error("InvalidParameterValue", "message too long");
+                }
+                let delay = body["DelaySeconds"].as_u64().unwrap_or(0);
+                if delay > 900 {
+                    return error("InvalidParameterValue", "DelaySeconds over 900");
+                }
+                if url.ends_with(".fifo")
+                    && (body.get("DelaySeconds").is_some()
+                        || body["MessageGroupId"].as_str().is_none_or(str::is_empty)
+                        || body["MessageDeduplicationId"]
+                            .as_str()
+                            .is_none_or(str::is_empty))
+                {
+                    return error(
+                        "InvalidParameterValue",
+                        "FIFO attributes missing or per-message delay set",
+                    );
+                }
+                let id = send(state, text, delay, body);
+                (200, json!({ "MessageId": id, "MD5OfMessageBody": "" }))
+            }
+            "AmazonSQS.SendMessageBatch" => {
+                let entries = body["Entries"].as_array().cloned().unwrap_or_default();
+                let total: usize = entries
+                    .iter()
+                    .map(|entry| entry["MessageBody"].as_str().map_or(0, str::len))
+                    .sum();
+                if entries.is_empty() || entries.len() > 10 {
+                    return error("TooManyEntriesInBatchRequest", "1 to 10 entries");
+                }
+                if total > MAX_BODY {
+                    return error("BatchRequestTooLong", "batch over 1 MiB");
+                }
+                let mut successful = Vec::new();
+                for entry in entries {
+                    let delay = entry["DelaySeconds"].as_u64().unwrap_or(0);
+                    if delay > 900 {
+                        return error("InvalidParameterValue", "DelaySeconds over 900");
+                    }
+                    let text = entry["MessageBody"].as_str().unwrap_or_default();
+                    if url.ends_with(".fifo")
+                        && (entry.get("DelaySeconds").is_some()
+                            || entry["MessageGroupId"].as_str().is_none_or(str::is_empty)
+                            || entry["MessageDeduplicationId"]
+                                .as_str()
+                                .is_none_or(str::is_empty))
+                    {
+                        return error(
+                            "InvalidParameterValue",
+                            "FIFO batch attributes missing or delay set",
+                        );
+                    }
+                    let id = send(state, text, delay, &entry);
+                    successful.push(json!({ "Id": entry["Id"], "MessageId": id }));
+                }
+                (200, json!({ "Successful": successful, "Failed": [] }))
+            }
+            "AmazonSQS.ReceiveMessage" => {
+                let visibility = body["VisibilityTimeout"].as_u64().unwrap_or(30);
+                state.next += 1;
+                let receipt = format!("receipt-{}", state.next);
+                let queue = state.queues.get_mut(&url).unwrap();
+                let Some(message) = queue.iter_mut().find(|m| m.visible_at <= now) else {
+                    return (200, json!({}));
+                };
+                message.receive_count += 1;
+                message.received_at = now;
+                message.visible_at = now + visibility;
+                message.receipts.push(receipt.clone());
+                (
+                    200,
+                    json!({ "Messages": [{
+                        "MessageId": message.id,
+                        "ReceiptHandle": receipt,
+                        "Body": message.body,
+                        "Attributes": {
+                            "ApproximateReceiveCount": message.receive_count.to_string()
+                        }
+                    }] }),
+                )
+            }
+            "AmazonSQS.DeleteMessage" => {
+                let receipt = body["ReceiptHandle"].as_str().unwrap_or_default();
+                let queue = state.queues.get_mut(&url).unwrap();
+                queue.retain(|m| m.receipts.last().is_none_or(|latest| latest != receipt));
+                (200, json!({}))
+            }
+            "AmazonSQS.ChangeMessageVisibility" => {
+                let receipt = body["ReceiptHandle"].as_str().unwrap_or_default();
+                let timeout = body["VisibilityTimeout"].as_u64().unwrap_or(0);
+                let queue = state.queues.get_mut(&url).unwrap();
+                let Some(message) = queue
+                    .iter_mut()
+                    .find(|m| m.receipts.last().is_some_and(|r| r == receipt))
+                else {
+                    return error("ReceiptHandleIsInvalid", "unknown receipt handle");
+                };
+                if now + timeout > message.received_at + MAX_VISIBILITY {
+                    return error(
+                        "InvalidParameterValue",
+                        &format!(
+                            "Value {timeout} for parameter VisibilityTimeout is invalid. Reason: \
+                             Total VisibilityTimeout for the message is beyond the limit [43200 \
+                             seconds]"
+                        ),
+                    );
+                }
+                message.visible_at = now + timeout;
+                (200, json!({}))
+            }
+            "AmazonSQS.GetQueueAttributes" => {
+                let queue = &state.queues[&url];
+                let visible = queue.iter().filter(|m| m.visible_at <= now).count();
+                let in_flight = queue
+                    .iter()
+                    .filter(|m| m.visible_at > now && m.receive_count > 0)
+                    .count();
+                let delayed = queue
+                    .iter()
+                    .filter(|m| m.visible_at > now && m.receive_count == 0)
+                    .count();
+                (
+                    200,
+                    json!({ "Attributes": {
+                        "ApproximateNumberOfMessages": visible.to_string(),
+                        "ApproximateNumberOfMessagesNotVisible": in_flight.to_string(),
+                        "ApproximateNumberOfMessagesDelayed": delayed.to_string(),
+                    } }),
+                )
+            }
+            "AmazonSQS.PurgeQueue" => {
+                state.queues.get_mut(&url).unwrap().clear();
+                (200, json!({}))
+            }
+            other => error("InvalidAction", &format!("unknown action {other}")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn named_counts_and_clear_use_only_the_selected_sqs_queue() {
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let mut delayed = envelope(Some("reports"));
+    delayed.available_at += chrono::Duration::seconds(60);
+    driver.push(delayed).await.unwrap();
+    let held = driver
+        .pop_from(VISIBILITY, &["reports".into()])
+        .await
+        .unwrap()
+        .unwrap();
+    let default = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(driver.size(Some("reports")).await.unwrap(), 2);
+    assert_eq!(driver.pending_size(Some("reports")).await.unwrap(), 0);
+    assert_eq!(driver.delayed_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(driver.reserved_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(driver.size(None).await.unwrap(), 1);
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 2);
+    assert!(fake.messages(&url("reports")).is_empty());
+    assert_eq!(driver.size(None).await.unwrap(), 1);
+    driver
+        .release(&held.token, &held.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(driver.size(Some("reports")).await.unwrap(), 0);
+    driver
+        .release(&default.token, &default.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(driver.pending_size(None).await.unwrap(), 1);
+    driver.ack(&held.token).await.unwrap();
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 0);
+    let error = driver.size(Some("missing")).await.unwrap_err();
+    assert!(error.to_string().contains("QueueDoesNotExist"));
+    assert!(driver.clear(Some("missing")).await.is_err());
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct FifoJob {
+    group: String,
+    id: String,
+}
+#[suprnova::async_trait]
+impl suprnova::Job for FifoJob {
+    fn job_name() -> &'static str {
+        "fifo-job"
+    }
+    fn message_group(&self) -> Option<String> {
+        Some(self.group.clone())
+    }
+    fn deduplication_id(&self) -> Option<String> {
+        Some(self.id.clone())
+    }
+    async fn handle(self) -> Result<(), suprnova::FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn fifo_metadata_survives_typed_and_chained_and_bulk_dispatch() {
+    let (_env, _restore, fake) = setup!("jobs-test.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    set_env("SQS_SUFFIX", Some("-test"));
+    Queue::set_driver(std::sync::Arc::new(driver()));
+    let job = FifoJob {
+        group: "orders".into(),
+        id: "order-42".into(),
+    };
+    Queue::push(job.clone()).await.unwrap();
+    fake.advance(300);
+    Queue::chain()
+        .add(job.clone())
+        .unwrap()
+        .dispatch()
+        .await
+        .unwrap();
+    fake.advance(300);
+    Queue::bulk(vec![job]).await.unwrap();
+    let messages = fake.messages(&url("jobs-test.fifo"));
+    assert_eq!(messages.len(), 3);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.group.as_deref() == Some("orders")
+                && message.deduplication_id.as_deref() == Some("order-42"))
+    );
+    let batch = fake.last("AmazonSQS.SendMessageBatch").unwrap();
+    assert!(batch["Entries"][0].get("DelaySeconds").is_none());
+}
+
+fn cache_overflow_on() -> std::sync::Arc<suprnova::cache::InMemoryCache> {
+    let store = std::sync::Arc::new(suprnova::cache::InMemoryCache::new());
+    suprnova::Cache::register_store("redis", store.clone()).unwrap();
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_STORE", Some("redis"));
+    set_env("SQS_OVERFLOW_DISK", Some("unregistered-disk"));
+    store
+}
+
+fn pointer(message: &fake::Message) -> String {
+    serde_json::from_str::<serde_json::Value>(&message.body).unwrap()["@pointer"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn cache_overflow_round_trips_large_jobs_and_ack_deletes_the_payload() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    let driver = driver();
+    let sent = large_envelope();
+    driver.push(sent.clone()).await.unwrap();
+    let path = pointer(&fake.messages(&url("default"))[0]);
+    assert!(store.get_raw(&path).await.unwrap().is_some());
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    assert_eq!(held.envelope.payload, sent.payload);
+    driver.ack(&held.token).await.unwrap();
+    assert!(store.get_raw(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cache_clear_flushes_only_the_selected_queues_tag() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    store.put_raw("unrelated", "value", None).await.unwrap();
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let default_path = pointer(&fake.messages(&url("default"))[0]);
+    let reports_path = pointer(&fake.messages(&url("reports"))[0]);
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 1);
+    assert!(store.get_raw(&reports_path).await.unwrap().is_none());
+    assert!(store.get_raw(&default_path).await.unwrap().is_some());
+    assert_eq!(
+        store.get_raw("unrelated").await.unwrap().as_deref(),
+        Some("value")
+    );
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&held.token).await.unwrap();
+}
+
+#[tokio::test]
+async fn cache_overflow_retention_flags_and_missing_payloads_are_observable() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_DELETE_AFTER_PROCESSING", Some("false"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let path = pointer(&fake.messages(&url("default"))[0]);
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&held.token).await.unwrap();
+    assert!(store.get_raw(&path).await.unwrap().is_some());
+    driver.push(envelope(None)).await.unwrap();
+    let path2 = pointer(&fake.messages(&url("default"))[0]);
+    driver.clear(None).await.unwrap();
+    assert!(store.get_raw(&path2).await.unwrap().is_some());
+    driver.push(envelope(None)).await.unwrap();
+    let missing = pointer(&fake.messages(&url("default"))[0]);
+    store.forget(&missing).await.unwrap();
+    assert!(
+        driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("missing from cache")
+    );
+}
+
+#[tokio::test]
+async fn an_unregistered_cache_store_is_a_boot_error_and_empty_names_are_refused() {
+    let (_env, _restore, _fake) = setup!("default");
+    set_env("SQS_OVERFLOW_ENABLED", Some("true"));
+    set_env("SQS_OVERFLOW_STORE", Some("sqs-no-such-store"));
+    let error = SqsQueueDriver::from_env().err().unwrap();
+    assert!(error.to_string().contains("SQS_OVERFLOW_STORE"));
+    assert!(error.to_string().contains("sqs-no-such-store"));
+    assert!(
+        suprnova::Cache::register_store(
+            "",
+            std::sync::Arc::new(suprnova::cache::InMemoryCache::new())
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cache_send_retries_keep_independent_overflow_payloads() {
+    use suprnova::cache::CacheStore;
+    let (_env, _restore, fake) = setup!("default");
+    let store = cache_overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    let messages = fake.messages(&url("default"));
+    assert_eq!(messages.len(), 2);
+    let paths: Vec<_> = messages.iter().map(pointer).collect();
+    assert_ne!(paths[0], paths[1]);
+    let first = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&first.token).await.unwrap();
+    assert!(store.get_raw(&paths[0]).await.unwrap().is_none());
+    assert!(store.get_raw(&paths[1]).await.unwrap().is_some());
+    let second = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver.ack(&second.token).await.unwrap();
+    assert!(store.get_raw(&paths[1]).await.unwrap().is_none());
+}
+
+async fn named_driver_contract(driver: &dyn QueueDriver) {
+    for queue in [None, Some("reports")] {
+        driver.push(envelope(queue)).await.unwrap();
+        driver.push(envelope(queue)).await.unwrap();
+        let mut delayed = envelope(queue);
+        delayed.available_at += chrono::Duration::minutes(1);
+        driver.push(delayed).await.unwrap();
+        driver
+            .pop_from(VISIBILITY, &[queue.unwrap_or("default").into()])
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for queue in ["default", "reports"] {
+        assert_eq!(driver.size(Some(queue)).await.unwrap(), 3);
+        assert_eq!(driver.pending_size(Some(queue)).await.unwrap(), 1);
+        assert_eq!(driver.reserved_size(Some(queue)).await.unwrap(), 1);
+        assert_eq!(driver.delayed_size(Some(queue)).await.unwrap(), 1);
+    }
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 3);
+    assert_eq!(driver.size(Some("default")).await.unwrap(), 3);
+    assert_eq!(driver.clear(Some("missing")).await.unwrap(), 0);
+    assert_eq!(driver.clear(None).await.unwrap(), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn memory_database_failover_sync_and_null_accept_named_statistics_and_clear() {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+    use std::sync::Arc;
+    use suprnova::queue::{
+        DatabaseQueueDriver, FailoverQueueDriver, MemoryQueueDriver, NullQueueDriver,
+        SyncQueueDriver,
+    };
+    named_driver_contract(&MemoryQueueDriver::new()).await;
+    let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    suprnova::queue::migrations::CreateJobsTable
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
+    named_driver_contract(&DatabaseQueueDriver::new(db, "jobs".into()).unwrap()).await;
+    named_driver_contract(
+        &FailoverQueueDriver::new(vec![("memory".into(), Arc::new(MemoryQueueDriver::new()))])
+            .unwrap(),
+    )
+    .await;
+    for driver in [
+        Arc::new(SyncQueueDriver::new()) as Arc<dyn QueueDriver>,
+        Arc::new(NullQueueDriver::new()),
+    ] {
+        assert_eq!(driver.size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.pending_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.delayed_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.reserved_size(Some("reports")).await.unwrap(), 0);
+        assert_eq!(driver.clear(Some("reports")).await.unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn disk_overflow_clear_of_another_queue_keeps_the_default_payload() {
+    let (_env, _restore, fake) = setup!("default", "reports");
+    let _storage = overflow_on();
+    set_env("SQS_OVERFLOW_ALWAYS", Some("true"));
+    set_env("SQS_OVERFLOW_FLUSH_ON_CLEAR", Some("true"));
+    let driver = driver();
+    driver.push(envelope(None)).await.unwrap();
+    driver.push(envelope(Some("reports"))).await.unwrap();
+    let disk = Storage::disk("overflow").unwrap();
+    let default = pointer(&fake.messages(&url("default"))[0]);
+    let reports = pointer(&fake.messages(&url("reports"))[0]);
+    driver.clear(Some("reports")).await.unwrap();
+    assert!(disk.exists(&default).await.unwrap());
+    assert!(!disk.exists(&reports).await.unwrap());
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn named_redis_counts_cover_other_consumers_and_clear_preserves_their_queue() {
+    use suprnova::queue::RedisQueueDriver;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    let server = suprnova::Process::command([
+        "redis-server",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        &port,
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--dir",
+        dir.path().to_str().unwrap(),
+    ])
+    .start()
+    .unwrap();
+    let address = format!("redis://127.0.0.1:{port}");
+    let started = std::time::Instant::now();
+    let first = loop {
+        match RedisQueueDriver::connect(
+            &address,
+            "named-test",
+            "workers",
+            "first",
+            Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(driver) => break driver,
+            Err(error) => {
+                assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+    };
+    let second = RedisQueueDriver::connect(
+        &address,
+        "named-test",
+        "workers",
+        "second",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let foreign = RedisQueueDriver::connect(
+        &address,
+        "named-test",
+        "other-workers",
+        "foreign",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    first.push(envelope(None)).await.unwrap();
+    let default = second.pop(VISIBILITY).await.unwrap().unwrap();
+    first.push(envelope(Some("reports"))).await.unwrap();
+    let reports = first.pop(VISIBILITY).await.unwrap().unwrap();
+    let foreign_default = foreign.pop(VISIBILITY).await.unwrap().unwrap();
+    let foreign_reports = foreign.pop(VISIBILITY).await.unwrap().unwrap();
+    // Cross a scan page with jobs for another queue and delayed entries.
+    for _ in 0..129 {
+        first.push(envelope(None)).await.unwrap();
+        let mut delayed = envelope(Some("reports"));
+        delayed.available_at += chrono::Duration::minutes(1);
+        first.push(delayed).await.unwrap();
+    }
+    assert_eq!(first.reserved_size(Some("default")).await.unwrap(), 1);
+    assert_eq!(second.reserved_size(Some("reports")).await.unwrap(), 1);
+    assert_eq!(first.pending_size(Some("default")).await.unwrap(), 129);
+    assert_eq!(first.delayed_size(Some("reports")).await.unwrap(), 129);
+    assert_eq!(first.size(Some("reports")).await.unwrap(), 130);
+    assert_eq!(second.clear(Some("reports")).await.unwrap(), 130);
+    assert_eq!(first.size(Some("default")).await.unwrap(), 130);
+    first.nack(&reports.token, Duration::ZERO).await.unwrap();
+    foreign
+        .nack(&foreign_reports.token, Duration::ZERO)
+        .await
+        .unwrap();
+    foreign.ack(&foreign_default.token).await.unwrap();
+    assert_eq!(first.size(Some("reports")).await.unwrap(), 0);
+    second.ack(&default.token).await.unwrap();
+    assert_eq!(first.reserved_size(Some("default")).await.unwrap(), 0);
+    assert_eq!(first.clear(Some("missing")).await.unwrap(), 0);
+    first.clear(None).await.unwrap();
+    server.stop(Duration::from_secs(1), None).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_a_named_memory_queue_removes_its_delayed_timer_before_id_reuse() {
+    let driver = suprnova::queue::MemoryQueueDriver::new();
+    let mut removed = envelope(Some("reports"));
+    removed.available_at += chrono::Duration::seconds(10);
+    driver.push(removed.clone()).await.unwrap();
+    let mut survivor = envelope(None);
+    survivor.available_at += chrono::Duration::seconds(10);
+    driver.push(survivor).await.unwrap();
+    assert_eq!(driver.clear(Some("reports")).await.unwrap(), 1);
+    removed.available_at += chrono::Duration::seconds(20);
+    driver.push(removed).await.unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["reports".into()])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["default".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::time::advance(Duration::from_secs(20)).await;
+    assert!(
+        driver
+            .pop_from(VISIBILITY, &["reports".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn fifo_refused_metadata_returns_an_error_and_standard_queues_omit_fifo_attributes() {
+    let (_env, _restore, fake) = setup!("default", "jobs.fifo");
+    let driver = driver();
+    for (group, id) in [("", "order-42"), ("orders", "")] {
+        let mut job = envelope(Some("jobs.fifo"));
+        job.message_group = Some(group.into());
+        job.deduplication_id = Some(id.into());
+        let error = driver.push(job).await.unwrap_err();
+        assert!(error.to_string().contains("InvalidParameterValue"));
+        assert!(fake.messages(&url("jobs.fifo")).is_empty());
+    }
+    let link = suprnova::ChainLink::from_job(FifoJob {
+        group: "orders".into(),
+        id: "order-42".into(),
+    })
+    .unwrap();
+    let encoded = serde_json::to_string(&link).unwrap();
+    let decoded: suprnova::ChainLink = serde_json::from_str(&encoded).unwrap();
+    let reified = decoded.to_envelope();
+    assert_eq!(reified.message_group.as_deref(), Some("orders"));
+    assert_eq!(reified.deduplication_id.as_deref(), Some("order-42"));
+    let mut job = envelope(None);
+    job.message_group = Some("orders".into());
+    job.deduplication_id = Some("order-42".into());
+    job.available_at += chrono::Duration::seconds(60);
+    driver.push(job).await.unwrap();
+    let request = fake.last("AmazonSQS.SendMessage").unwrap();
+    assert!(request.get("MessageGroupId").is_none());
+    assert!(request.get("MessageDeduplicationId").is_none());
+    assert!(
+        request["DelaySeconds"]
+            .as_u64()
+            .is_some_and(|delay| delay > 0)
+    );
+}
+
+#[tokio::test]
+async fn fifo_delayed_jobs_survive_resends_with_default_and_explicit_ids() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    for explicit in [None, Some("order-42")] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit.map(str::to_owned);
+        job.available_at += chrono::Duration::minutes(20);
+        driver.push(job.clone()).await.unwrap();
+        for seconds in [0, 1, 1198] {
+            fake.advance(seconds);
+            clock.advance(chrono::Duration::seconds(seconds as i64));
+            assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+        }
+        fake.advance(1);
+        clock.advance(chrono::Duration::seconds(1));
+        let held = driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap()
+            .expect("delayed FIFO job survives forwarding");
+        assert_eq!(held.envelope.id, job.id);
+        assert_eq!(held.envelope.attempts, 0);
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_released_jobs_return_with_default_and_explicit_ids() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    for explicit in [None, Some("x".repeat(128))] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit;
+        driver.push(job.clone()).await.unwrap();
+        let mut held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        for delay in [10, 0, 0] {
+            driver
+                .release(&held.token, &held.envelope, Duration::from_secs(delay))
+                .await
+                .unwrap();
+            if delay > 0 {
+                fake.advance(delay - 1);
+                clock.advance(chrono::Duration::seconds((delay - 1) as i64));
+                assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+                fake.advance(1);
+                clock.advance(chrono::Duration::seconds(1));
+            }
+            held = driver
+                .pop(VISIBILITY)
+                .await
+                .unwrap()
+                .expect("released FIFO job returns");
+            assert_eq!(held.envelope.id, job.id);
+            assert_eq!(held.envelope.attempts, 0);
+        }
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_unchanged_pushes_deduplicate_even_after_deletion() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let driver = driver();
+    for explicit in [None, Some("order-42")] {
+        let mut job = envelope(None);
+        job.deduplication_id = explicit.map(str::to_owned);
+        driver.push(job.clone()).await.unwrap();
+        driver.bulk_push(vec![job.clone()]).await.unwrap();
+        let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+        driver.ack(&held.token).await.unwrap();
+        driver.push(job.clone()).await.unwrap();
+        fake.advance(299);
+        assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+        fake.advance(1);
+        driver.push(job.clone()).await.unwrap();
+        let held = driver
+            .pop(VISIBILITY)
+            .await
+            .unwrap()
+            .expect("deduplication expires after five minutes");
+        assert_eq!(held.envelope.id, job.id);
+        driver.ack(&held.token).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fifo_long_nacks_return_with_one_more_attempt() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    driver
+        .nack(&held.token, Duration::from_secs(43_200))
+        .await
+        .unwrap();
+    fake.advance(43_200);
+    clock.advance(chrono::Duration::seconds(43_200));
+    let held = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("long FIFO nack returns");
+    assert_eq!(held.envelope.id, job.id);
+    assert_eq!(held.envelope.attempts, 1);
+    driver.ack(&held.token).await.unwrap();
+}
+
+#[tokio::test]
+async fn fifo_transport_retries_keep_the_same_deduplication_id() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    fake.script_accept_then_drop("AmazonSQS.SendMessage");
+    driver
+        .release(&held.token, &held.envelope, Duration::ZERO)
+        .await
+        .unwrap();
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("the resend is delivered once");
+    assert_eq!(again.envelope.id, job.id);
+    driver.ack(&again.token).await.unwrap();
+    assert!(driver.pop(VISIBILITY).await.unwrap().is_none());
+    let sends: Vec<_> = fake
+        .requests()
+        .into_iter()
+        .filter(|request| request.target == "AmazonSQS.SendMessage")
+        .collect();
+    assert_eq!(sends.len(), 4);
+    assert_eq!(sends[0].body["MessageDeduplicationId"], "order-42");
+    assert_eq!(
+        sends[0].body["MessageDeduplicationId"],
+        sends[1].body["MessageDeduplicationId"]
+    );
+    assert_eq!(
+        sends[2].body["MessageDeduplicationId"],
+        sends[3].body["MessageDeduplicationId"]
+    );
+    assert_ne!(
+        sends[0].body["MessageDeduplicationId"],
+        sends[2].body["MessageDeduplicationId"]
+    );
+}
+
+#[tokio::test]
+async fn fifo_refused_resends_leave_the_original_job_deliverable() {
+    let (_env, _restore, fake) = setup!("jobs.fifo");
+    set_env("SQS_QUEUE", Some("jobs.fifo"));
+    let clock = TestClock::freeze();
+    let driver = driver();
+    let mut job = envelope(None);
+    job.deduplication_id = Some("order-42".into());
+    driver.push(job.clone()).await.unwrap();
+    let held = driver.pop(VISIBILITY).await.unwrap().unwrap();
+    fake.script(
+        "AmazonSQS.SendMessage",
+        400,
+        r#"{"__type":"com.amazonaws.sqs#InvalidParameterValue","message":"refused"}"#,
+    );
+    assert!(
+        driver
+            .release(&held.token, &held.envelope, Duration::ZERO)
+            .await
+            .is_err()
+    );
+    fake.advance(30);
+    clock.advance(chrono::Duration::seconds(30));
+    let again = driver
+        .pop(VISIBILITY)
+        .await
+        .unwrap()
+        .expect("a refused resend must not delete the original");
+    assert_eq!(again.envelope.id, job.id);
+    driver.ack(&again.token).await.unwrap();
+}
