@@ -1,7 +1,8 @@
 # Strings
 
 `Str` holds the string helpers worth carrying over from Laravel: slugs,
-masks, limits, excerpts, and plural and singular forms. For case
+masks, limits, excerpts, plural and singular forms, and Markdown.
+`Str::of` wraps a value in a `Stringable` that chains them. For case
 conversions, use the `heck` crate; for everything else, `std::str` and
 `regex`. Every count here is in characters, never bytes, so a multibyte
 value is never cut inside a character.
@@ -139,6 +140,95 @@ categories of a Fluent message instead; see
 [Localization](localization.md). `Str::plural` is for words in your own
 code, such as a table or a label built from a model's name.
 
+## Markdown
+
+`Str::markdown(value, &renderer)` renders a whole Markdown document to
+HTML, and `Str::inline_markdown(value, &renderer)` renders the inline
+syntax only: emphasis, code, links and line breaks, with no paragraph
+around it and block markers such as `#`, `>` or `-` kept as text. You
+pass the `MarkdownRenderer` (from `suprnova::content`) that decides what
+raw HTML and links may do:
+
+```rust
+use suprnova::Str;
+use suprnova::content::MarkdownRenderer;
+
+let renderer = MarkdownRenderer::default();
+let title = Str::inline_markdown("**Laravel** _rocks_", &renderer)?;
+assert_eq!(title, "<strong>Laravel</strong> <em>rocks</em>");
+assert_eq!(Str::inline_markdown("# Title", &renderer)?, "# Title");
+let page = Str::markdown("# Laravel\n\nA *framework*.", &renderer)?;
+assert!(page.contains("<p>A <em>framework</em>.</p>"));
+# Ok::<(), suprnova::content::ContentError>(())
+```
+
+The default renderer drops raw HTML and sanitizes its output, so
+`<script>` never reaches the page. You choose otherwise with the
+renderer's builder calls, which hold Laravel's CommonMark options:
+
+```rust
+use suprnova::Str;
+use suprnova::content::{HtmlInput, MarkdownRenderer};
+
+let renderer = MarkdownRenderer::default()
+    .html_input(HtmlInput::Strip)
+    .allow_unsafe_links(false)
+    .autolink(true);
+let html = Str::inline_markdown("Inject: <script>alert(\"XSS\");</script>", &renderer)?;
+assert_eq!(html, "Inject: alert(&quot;XSS&quot;);");
+# Ok::<(), suprnova::content::ContentError>(())
+```
+
+- `html_input(HtmlInput::Sanitize)` keeps raw HTML and passes the output
+  through the sanitizer, which keeps safe tags such as `<b>` and removes
+  scripts, event handlers and unsafe URLs. `HtmlInput::Strip` removes raw
+  HTML tags and keeps the text between them. `HtmlInput::Escape` shows raw
+  HTML as text. `HtmlInput::Allow` passes it through: use it only for
+  Markdown you trust.
+- `allow_unsafe_links(true)` lets a Markdown link point at a
+  `javascript:`, `vbscript:`, `file:` or `data:` URL. The sanitizer still
+  removes such URLs, so it takes effect with `Strip`, `Escape` or `Allow`.
+- `autolink(true)` turns bare URLs and email addresses into links.
+
+A renderer that calls none of them renders as it always has: sanitized,
+unless `MarkdownOptions::unsafe_html` is on.
+
+## Fluent strings
+
+`Str::of(value)` returns a `Stringable`, whose methods are the `Str`
+helpers, so you chain them as Laravel's `Str::of($value)->...` chains:
+
+```rust
+use suprnova::Str;
+
+let slug = Str::of("Blog Post").limit(4, "").slug("-");
+assert_eq!(slug.to_string(), "blog");
+let label: String = Str::of("comment").plural(3).into();
+assert_eq!(label, "comments");
+```
+
+A `Stringable` converts from and into `String`, compares with `&str`, and
+displays as its value. Next to the `Str` helpers it has `markdown`,
+`inline_markdown`, and encryption through [`Crypt`](encryption.md):
+`encrypt(purpose)`, `encrypt_for(purpose, context)`, `decrypt(purpose)`
+and `decrypt_for(purpose, context)`. Every encryption names a
+`CryptPurpose`, and a value sealed for one purpose does not open under
+another:
+
+```rust
+use suprnova::{CryptPurpose, Str};
+
+let sealed = Str::of("ssn-123").encrypt(CryptPurpose::Cast)?;
+let opened = sealed.clone().decrypt(CryptPurpose::Cast)?;
+assert_eq!(opened, "ssn-123");
+assert!(sealed.decrypt(CryptPurpose::Cursor).is_err());
+# Ok::<(), suprnova::FrameworkError>(())
+```
+
+`CryptPurpose::Cookie` is refused by `encrypt` and `decrypt`: a cookie
+value is bound to its cookie's name, so you encrypt it with
+`encrypt_for(CryptPurpose::Cookie, name)`.
+
 ### Why Suprnova diverges
 
 - **The language follows the locale.** Laravel sets the plural language
@@ -150,11 +240,19 @@ code, such as a table or a label built from a model's name.
 - **Counts are characters.** Laravel's `limit` counts display width, two
   for a wide East Asian character, and its word-preserving form also
   strips HTML tags.
-- **A subset.** There is no fluent `Stringable`; case conversions come
-  from `heck`.
+- **A subset.** `Stringable` chains the helpers `Str` keeps, not every
+  method of Laravel's `Stringable`; case conversions come from `heck`.
+- **Markdown is sanitized by default.** Laravel's `Str::markdown` lets raw
+  HTML through unless you pass `html_input`; here the default renderer
+  drops it and sanitizes the output, and you opt into raw HTML with
+  `HtmlInput::Allow`. The inline form keeps each line break of the text.
+- **Every encryption names a purpose.** Laravel's `Stringable::encrypt`
+  takes none; here `encrypt` takes a `CryptPurpose`, so a value encrypted
+  for one use cannot be decrypted as another.
 
 ## Next
 
 - [Localization](localization.md) - percentages, abbreviated numbers, and
   the rest of the locale-aware formatting
+- [Dates](dates.md) - reading a date or a time from text
 - [Validation](validation.md) - rules for the strings your users send

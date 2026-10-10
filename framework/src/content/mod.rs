@@ -9,5 +9,5 @@ pub use docs::{
 };
 pub use headings::{Heading, slugify_heading};
 pub use markdown::{
-    ContentError, ContentResult, MarkdownOptions, MarkdownRenderer, RenderedMarkdown,
+    ContentError, ContentResult, HtmlInput, MarkdownOptions, MarkdownRenderer, RenderedMarkdown,
 };

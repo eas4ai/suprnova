@@ -17,6 +17,8 @@ mod own_process_async;
 pub mod assertable_inertia;
 pub mod clock;
 pub mod clock_reads;
+/// Tests observe the agreed infrastructure gaps.
+pub mod laravel_infra_gaps;
 pub mod precognition;
 pub mod registry_clears;
 pub mod request_diagnostics;

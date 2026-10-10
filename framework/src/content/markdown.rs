@@ -5,10 +5,11 @@ use std::sync::Mutex;
 
 use ammonia::Builder as SanitizerBuilder;
 use comrak::adapters::{HeadingAdapter, HeadingMeta};
+use comrak::html::dangerous_url;
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::options::Plugins;
 use comrak::plugins::syntect::SyntectAdapter;
-use comrak::{Arena, Options, markdown_to_html_with_plugins, parse_document};
+use comrak::{Arena, Options, format_html_with_plugins, parse_document};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -87,16 +88,57 @@ pub struct RenderedMarkdown {
     pub headings: Vec<Heading>,
 }
 
+/// How a renderer treats raw HTML written in the Markdown, as the
+/// `html_input` option of Laravel's CommonMark converter does.
+///
+/// A renderer that never calls [`MarkdownRenderer::html_input`] keeps
+/// the treatment it has always had: when
+/// [`MarkdownOptions::unsafe_html`] is off, the parser drops raw HTML and
+/// the sanitizer cleans the rest of the output; when it is on, raw HTML
+/// passes through.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HtmlInput {
+    /// Keep raw HTML, then pass the whole output through the sanitizer,
+    /// which keeps safe tags and attributes and removes scripts, event
+    /// handlers and URLs with a scheme it does not allow. Use it to let
+    /// users write some HTML, as Laravel's documentation advises running
+    /// the output through an HTML purifier.
+    Sanitize,
+    /// Remove raw HTML. An inline tag goes and the text between an
+    /// opening and a closing tag stays; an HTML block goes whole.
+    Strip,
+    /// Show raw HTML as text, escaped.
+    Escape,
+    /// Pass raw HTML through as written. Use it only for Markdown you
+    /// trust, because a `<script>` in the text reaches the page.
+    Allow,
+}
+
 /// Shared Markdown renderer for application pages, docs, and articles.
+///
+/// The builder calls [`html_input`](Self::html_input),
+/// [`allow_unsafe_links`](Self::allow_unsafe_links) and
+/// [`autolink`](Self::autolink) hold the choices Laravel passes to
+/// CommonMark as options. They are fields of the renderer rather than of
+/// [`MarkdownOptions`], whose fields are public, so code that builds
+/// `MarkdownOptions` as a struct literal keeps compiling.
 #[derive(Clone, Debug)]
 pub struct MarkdownRenderer {
     options: MarkdownOptions,
+    html_input: Option<HtmlInput>,
+    allow_unsafe_links: Option<bool>,
+    autolink: bool,
 }
 
 impl MarkdownRenderer {
     /// Create a renderer from explicit options.
     pub fn new(options: MarkdownOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            html_input: None,
+            allow_unsafe_links: None,
+            autolink: false,
+        }
     }
 
     /// Return the options used by this renderer.
@@ -104,11 +146,44 @@ impl MarkdownRenderer {
         &self.options
     }
 
+    /// Choose how raw HTML in the Markdown is treated; see [`HtmlInput`].
+    /// Without this call the renderer follows
+    /// [`MarkdownOptions::unsafe_html`].
+    pub fn html_input(mut self, mode: HtmlInput) -> Self {
+        self.html_input = Some(mode);
+        self
+    }
+
+    /// Choose whether a Markdown link or image may point at a
+    /// `javascript:`, `vbscript:`, `file:` or `data:` URL (a `data:`
+    /// image in PNG, GIF, JPEG or WebP is always allowed). A refused URL
+    /// is rendered as an empty `href` or `src`. Without this call unsafe
+    /// URLs are allowed only when [`MarkdownOptions::unsafe_html`] is on.
+    ///
+    /// The sanitizer removes unsafe URLs whatever this says, so `true`
+    /// takes effect only with [`HtmlInput::Strip`], [`HtmlInput::Escape`]
+    /// or [`HtmlInput::Allow`], or with `unsafe_html` on. URLs inside raw
+    /// HTML follow [`html_input`](Self::html_input), not this call.
+    pub fn allow_unsafe_links(mut self, allow: bool) -> Self {
+        self.allow_unsafe_links = Some(allow);
+        self
+    }
+
+    /// Turn bare `http://`, `https://` and `www.` URLs and email
+    /// addresses into links, as GitHub-flavored Markdown does. Off by
+    /// default, as it has always been here.
+    pub fn autolink(mut self, on: bool) -> Self {
+        self.autolink = on;
+        self
+    }
+
     /// Render a Markdown document to HTML and extracted metadata.
     pub fn render(&self, markdown: &str) -> ContentResult<RenderedMarkdown> {
-        let options = comrak_options(&self.options);
+        let policy = self.policy();
+        let options = comrak_options(&self.options, &policy, self.autolink, Scope::Document);
         let arena = Arena::new();
         let root = parse_document(&arena, markdown, &options);
+        apply_policy(root, &policy);
         let (headings, plain_text) = extract_metadata(root, &self.options.heading_anchor_prefix);
         let excerpt = excerpt_from_plain_text(&plain_text);
 
@@ -118,11 +193,11 @@ impl MarkdownRenderer {
         plugins.render.codefence_syntax_highlighter = Some(&syntax_highlighter);
         plugins.render.heading_adapter = Some(&heading_adapter);
 
-        let rendered = markdown_to_html_with_plugins(markdown, &options, &plugins);
-        let html = if self.options.unsafe_html {
-            rendered
-        } else {
+        let rendered = format_root(root, &options, &plugins)?;
+        let html = if policy.sanitize {
             sanitize_html(&rendered)
+        } else {
+            rendered
         };
 
         Ok(RenderedMarkdown {
@@ -132,6 +207,91 @@ impl MarkdownRenderer {
             headings,
         })
     }
+
+    /// Render Markdown's inline syntax only (emphasis, code spans,
+    /// links, images, raw inline HTML, line breaks), with no paragraph
+    /// around it, as Laravel's `Str::inlineMarkdown` does through
+    /// CommonMark's inlines-only extension.
+    ///
+    /// Comrak has no inlines-only mode, so this makes one. Leading spaces
+    /// and tabs are removed from each line, as CommonMark removes them
+    /// from a paragraph's lines, and each line then starts with a marker:
+    /// a Unicode space the text does not hold, chosen from U+1680,
+    /// U+2000 to U+200A, U+202F, U+205F and U+3000. A line that starts
+    /// with a marker starts no block and is never blank, so the whole text
+    /// parses as one paragraph and every block marker (`#`, `>`, `-`,
+    /// `1.`, a fence, an indent, a setext underline) stays text. Because
+    /// the marker is whitespace, emphasis at the start of a line parses
+    /// as it does at a line start. The paragraph's children are rendered
+    /// without the paragraph, and the markers are removed from the
+    /// output. Tables, task lists, footnotes and front matter, which are
+    /// blocks, are off. Lines stay separated by a line break, and a blank
+    /// line between two lines stays in the output. In the unlikely case
+    /// that the text holds every one of those spaces, it is rendered as
+    /// escaped text with no Markdown.
+    ///
+    /// Raw HTML, unsafe links, autolinks and the sanitizer follow the
+    /// same choices as [`render`](Self::render).
+    pub fn render_inline(&self, markdown: &str) -> ContentResult<String> {
+        let Some(marker) = INLINE_LINE_MARKERS
+            .iter()
+            .copied()
+            .find(|candidate| !markdown.contains(*candidate))
+        else {
+            return Ok(escape_text(markdown));
+        };
+
+        let policy = self.policy();
+        let options = comrak_options(&self.options, &policy, self.autolink, Scope::Inline);
+        let arena = Arena::new();
+        let marked = mark_lines(markdown, marker);
+        let root = parse_document(&arena, &marked, &options);
+        apply_policy(root, &policy);
+        unwrap_paragraphs(root);
+
+        let rendered = format_root(root, &options, &Plugins::default())?;
+        let unmarked: String = rendered.chars().filter(|c| *c != marker).collect();
+        Ok(if policy.sanitize {
+            sanitize_html(&unmarked)
+        } else {
+            unmarked
+        })
+    }
+
+    /// Resolve the options and the builder calls into what one render
+    /// does.
+    fn policy(&self) -> RenderPolicy {
+        let unsafe_links = self.allow_unsafe_links.unwrap_or(self.options.unsafe_html);
+        match self.html_input {
+            // The output this renderer has always produced: the parser
+            // drops raw HTML and refuses unsafe URLs, and the sanitizer
+            // cleans what is left.
+            None if !self.options.unsafe_html => RenderPolicy {
+                parser_drops_raw_html: true,
+                escape_raw_html: false,
+                tagfilter: true,
+                strip_raw_html: false,
+                refuse_unsafe_links: false,
+                sanitize: true,
+            },
+            None => RenderPolicy {
+                parser_drops_raw_html: false,
+                escape_raw_html: false,
+                tagfilter: false,
+                strip_raw_html: false,
+                refuse_unsafe_links: !unsafe_links,
+                sanitize: false,
+            },
+            Some(mode) => RenderPolicy {
+                parser_drops_raw_html: false,
+                escape_raw_html: mode == HtmlInput::Escape,
+                tagfilter: mode == HtmlInput::Sanitize,
+                strip_raw_html: mode == HtmlInput::Strip,
+                refuse_unsafe_links: !unsafe_links,
+                sanitize: mode == HtmlInput::Sanitize,
+            },
+        }
+    }
 }
 
 impl Default for MarkdownRenderer {
@@ -140,18 +300,152 @@ impl Default for MarkdownRenderer {
     }
 }
 
-fn comrak_options(render_options: &MarkdownOptions) -> Options<'static> {
+/// The spaces [`MarkdownRenderer::render_inline`] can mark lines with.
+/// Each is Unicode whitespace, so emphasis next to it parses as it does
+/// at a line start, and each is more than one byte, so the block parser,
+/// which reads only ASCII spaces and tabs as indentation, sees text.
+const INLINE_LINE_MARKERS: [char; 15] = [
+    '\u{3000}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
+    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{1680}',
+];
+
+/// What one render does with raw HTML, links and the sanitizer.
+struct RenderPolicy {
+    /// Comrak's own safe mode: raw HTML becomes a comment the sanitizer
+    /// removes, and unsafe URLs become empty.
+    parser_drops_raw_html: bool,
+    /// Comrak writes raw HTML escaped.
+    escape_raw_html: bool,
+    /// GitHub's tag filter, which disables a few dangerous tags.
+    tagfilter: bool,
+    /// Raw HTML nodes are removed from the tree before rendering.
+    strip_raw_html: bool,
+    /// Unsafe link and image URLs are emptied in the tree.
+    refuse_unsafe_links: bool,
+    /// The output passes through the sanitizer.
+    sanitize: bool,
+}
+
+/// Whether the parser reads a whole document or the inline text of
+/// [`MarkdownRenderer::render_inline`].
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Scope {
+    Document,
+    Inline,
+}
+
+fn comrak_options(
+    render_options: &MarkdownOptions,
+    policy: &RenderPolicy,
+    autolink: bool,
+    scope: Scope,
+) -> Options<'static> {
     let mut options = Options::default();
+    let document = scope == Scope::Document;
     options.extension.strikethrough = true;
-    options.extension.table = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
-    options.extension.front_matter_delimiter = Some("---".to_owned());
-    options.extension.tagfilter = !render_options.unsafe_html;
+    options.extension.table = document;
+    options.extension.tasklist = document;
+    options.extension.footnotes = document;
+    options.extension.front_matter_delimiter = document.then(|| "---".to_owned());
+    options.extension.autolink = autolink;
+    options.extension.tagfilter = policy.tagfilter;
     options.extension.math_code = render_options.render_math;
     options.extension.math_dollars = render_options.render_math;
-    options.render.r#unsafe = render_options.unsafe_html;
+    options.render.r#unsafe = !policy.parser_drops_raw_html;
+    options.render.escape = policy.escape_raw_html;
     options
+}
+
+/// Remove raw HTML and empty unsafe URLs in the parsed tree, as the
+/// policy asks.
+fn apply_policy<'a>(root: &'a AstNode<'a>, policy: &RenderPolicy) {
+    if !policy.strip_raw_html && !policy.refuse_unsafe_links {
+        return;
+    }
+    let nodes: Vec<&'a AstNode<'a>> = root.descendants().collect();
+    for node in nodes {
+        let is_raw_html = matches!(
+            node.data.borrow().value,
+            NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_)
+        );
+        if is_raw_html {
+            if policy.strip_raw_html {
+                node.detach();
+            }
+            continue;
+        }
+        if policy.refuse_unsafe_links
+            && let NodeValue::Link(link) | NodeValue::Image(link) =
+                &mut node.data.borrow_mut().value
+            && dangerous_url(&link.url)
+        {
+            link.url.clear();
+        }
+    }
+}
+
+/// Move each paragraph's children up to the document and remove the
+/// paragraph, so inline content renders with no `<p>` around it. A line
+/// break stands between two paragraphs, though marked lines make one.
+fn unwrap_paragraphs<'a>(root: &'a AstNode<'a>) {
+    let blocks: Vec<&'a AstNode<'a>> = root.children().collect();
+    for block in blocks {
+        if !matches!(block.data.borrow().value, NodeValue::Paragraph) {
+            continue;
+        }
+        let inlines: Vec<&'a AstNode<'a>> = block.children().collect();
+        for inline in inlines {
+            block.insert_before(inline);
+        }
+        block.detach();
+    }
+}
+
+/// Start each line of `markdown` with `marker`, after removing the
+/// line's leading spaces and tabs. A line ends at `\n`, `\r\n` or `\r`,
+/// as CommonMark's lines do, and a line ending at the very end of the
+/// text starts no new line.
+fn mark_lines(markdown: &str, marker: char) -> String {
+    let mut marked = String::with_capacity(markdown.len() + 16);
+    let mut rest = markdown;
+    loop {
+        let line = rest.trim_start_matches([' ', '\t']);
+        marked.push(marker);
+        let Some(at) = line.find(['\n', '\r']) else {
+            marked.push_str(line);
+            return marked;
+        };
+        let ending = if line[at..].starts_with("\r\n") { 2 } else { 1 };
+        marked.push_str(&line[..at + ending]);
+        rest = &line[at + ending..];
+        if rest.is_empty() {
+            return marked;
+        }
+    }
+}
+
+/// `text` with the characters HTML gives meaning to escaped.
+fn escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Write the parsed tree as HTML. A write into a `String` fails only when
+/// a render plugin fails.
+fn format_root<'a>(
+    root: &'a AstNode<'a>,
+    options: &Options<'_>,
+    plugins: &Plugins<'_>,
+) -> ContentResult<String> {
+    let mut out = String::new();
+    format_html_with_plugins(root, options, &mut out, plugins).map_err(|_| {
+        ContentError::Io(std::io::Error::other(
+            "writing the rendered Markdown as HTML failed",
+        ))
+    })?;
+    Ok(out)
 }
 
 fn sanitize_html(html: &str) -> String {

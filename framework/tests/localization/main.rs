@@ -6,6 +6,8 @@ pub mod catalog_route;
 mod config_guard;
 pub mod fallback_chain;
 pub mod format;
+/// Tests observe the agreed infrastructure gaps.
+pub mod laravel_infra_gaps;
 pub mod middleware;
 pub mod translate;
 pub mod validation;

@@ -13,6 +13,14 @@ import { ref, type Ref } from 'vue'
 import { FluentBundle, FluentResource } from '@fluent/bundle'
 import type { MessageKey } from '../types/lang-keys'
 
+/**
+ * A package's key, `namespace::key`, registered on the server with
+ * `Lang::add_namespace`. A Fluent id cannot hold `::`, so the served
+ * catalog holds `courier::bye` as `courier__bye`, and `t()` looks it up
+ * the same way.
+ */
+export type NamespacedKey = `${string}::${string}`
+
 /** Shape of the `lang` prop shared by the framework's `LocaleShare`. */
 export interface LangShare {
   locale: string
@@ -92,12 +100,15 @@ export async function initLang(page: LangPage): Promise<void> {
  * app, or a fetch failure) or `key` has no entry, returns `key` itself -
  * a missing translation should be visibly wrong, never a crashed page.
  */
-export function t(key: MessageKey, args?: Record<string, string | number>): string {
+export function t(
+  key: MessageKey | NamespacedKey,
+  args?: Record<string, string | number>,
+): string {
   void catalogVersion.value // reactive dependency for template/computed callers
   if (!bundle) {
     return key
   }
-  const message = bundle.getMessage(key)
+  const message = bundle.getMessage(key.replace('::', '__'))
   if (!message?.value) {
     return key
   }

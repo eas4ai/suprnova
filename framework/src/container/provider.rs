@@ -57,6 +57,7 @@
 //! (genuine missing or cyclic dependency - returned as a structured error
 //! naming the failing entry).
 
+use crate::config::Config;
 use crate::error::FrameworkError;
 
 /// Entry for inventory-collected service bindings (trait → impl)
@@ -73,6 +74,34 @@ pub struct ServiceBindingEntry {
     pub register: fn() -> Result<(), String>,
     /// Service name for debugging/logging
     pub name: &'static str,
+}
+
+/// Entry for inventory-collected service bindings chosen by the
+/// environment: `#[service(impl = Real, bind(Fake, env = ["testing"]))]`.
+///
+/// A type of its own beside [`ServiceBindingEntry`], whose fields
+/// applications may build as a struct literal, so adding fields to it
+/// would break them. At boot, the first choice with an environment
+/// pattern that matches [`Config::environment`] registers, and the
+/// fallback (the `impl` type) when none matches, as Laravel's `#[Bind]`
+/// attribute with `environments` picks a concrete type.
+pub struct EnvironmentServiceBindingEntry {
+    /// Service name for debugging/logging
+    pub name: &'static str,
+    /// The `bind(...)` entries, in the order written.
+    pub choices: &'static [EnvironmentBinding],
+    /// Registers the `impl` type when no choice matches; `None` when the
+    /// service names no `impl`, which then stays unbound.
+    pub fallback: Option<fn() -> Result<(), String>>,
+}
+
+/// One `bind(Concrete, env = [...])` entry of an
+/// [`EnvironmentServiceBindingEntry`].
+pub struct EnvironmentBinding {
+    /// The environment patterns, `*` matching any run of characters.
+    pub environments: &'static [&'static str],
+    /// Registers the entry's concrete type.
+    pub register: fn() -> Result<(), String>,
 }
 
 /// Entry for inventory-collected singleton registrations (concrete types)
@@ -97,22 +126,71 @@ inventory::collect!(ServiceBindingEntry);
 // Inventory collection for auto-registered singletons
 inventory::collect!(SingletonEntry);
 
+// Inventory collection for service bindings chosen by the environment
+inventory::collect!(EnvironmentServiceBindingEntry);
+
 /// Register all service bindings from inventory.
 ///
 /// Services have no inter-service dependencies (each just installs a
 /// `Default::default()` concrete impl), so a single pass is sufficient.
-/// Any error is wrapped into a `FrameworkError::internal` naming the
-/// failing entry and returned immediately.
+/// A service with `bind(...)` entries registers the first entry whose
+/// environment patterns match [`Config::environment`], or its `impl` when
+/// none matches. Any error is wrapped into a `FrameworkError::internal`
+/// naming the failing entry and returned immediately.
 pub fn register_service_bindings() -> Result<(), FrameworkError> {
+    let failed = |name: &str, reason: String| {
+        FrameworkError::internal(format!("service `{name}` failed to register: {reason}"))
+    };
     for entry in inventory::iter::<ServiceBindingEntry> {
-        (entry.register)().map_err(|reason| {
-            FrameworkError::internal(format!(
-                "service `{}` failed to register: {reason}",
-                entry.name
-            ))
-        })?;
+        (entry.register)().map_err(|reason| failed(entry.name, reason))?;
+    }
+    let environment = Config::environment().to_string();
+    for entry in inventory::iter::<EnvironmentServiceBindingEntry> {
+        let chosen = entry
+            .choices
+            .iter()
+            .find(|choice| {
+                choice
+                    .environments
+                    .iter()
+                    .any(|pattern| environment_matches(pattern, &environment))
+            })
+            .map(|choice| choice.register)
+            .or(entry.fallback);
+        if let Some(register) = chosen {
+            register().map_err(|reason| failed(entry.name, reason))?;
+        }
     }
     Ok(())
+}
+
+/// Whether `environment` matches `pattern`, where `*` matches any run of
+/// characters, the empty run included, and every other character matches
+/// itself, case included, as Laravel's `Str::is` matches an environment
+/// name.
+fn environment_matches(pattern: &str, environment: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = environment.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    // The last `*` seen, and the text position it was tried against.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p, t));
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == text[t] {
+            p += 1;
+            t += 1;
+        } else if let Some((star_at, tried)) = star {
+            // Let the `*` take one more character and try again.
+            p = star_at + 1;
+            t = tried + 1;
+            star = Some((star_at, tried + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
 }
 
 /// Register all singleton entries from inventory.
@@ -191,4 +269,25 @@ pub fn bootstrap() -> Result<(), FrameworkError> {
     register_service_bindings()?;
     register_singletons()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::environment_matches;
+
+    #[test]
+    fn a_star_matches_any_run_and_other_characters_match_themselves() {
+        assert!(environment_matches("testing", "testing"));
+        assert!(!environment_matches("testing", "Testing"));
+        assert!(environment_matches("*", "production"));
+        assert!(environment_matches("*", ""));
+        assert!(environment_matches("stag*", "staging"));
+        assert!(environment_matches("stag*", "stag"));
+        assert!(environment_matches("*-eu", "qa-eu"));
+        assert!(environment_matches("qa-*-1", "qa-eu-west-1"));
+        assert!(environment_matches("a*b*c", "aXbYbZc"));
+        assert!(!environment_matches("local", "localhost"));
+        assert!(!environment_matches("stag*", "prestaging"));
+        assert!(!environment_matches("a*b", "acd"));
+    }
 }

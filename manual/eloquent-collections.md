@@ -145,6 +145,7 @@ let kept = nums.clone()
 
 ```rust
 use std::collections::HashMap;
+use suprnova::indexmap::IndexMap;
 
 // Bucket items by closure-derived key.
 let by_parity: HashMap<bool, Collection<i32>> =
@@ -158,6 +159,13 @@ let by_value: HashMap<i32, i32> =
 let sorted_desc: Collection<i32> =
     nums.clone().sort_with(|a, b| b.cmp(a));
 
+// Sort `Ord` items from greatest to least; equal items keep their order.
+let greatest_first: Collection<i32> = nums.clone().sort_desc();
+
+// Project every item into a key and a value, in the collection's order.
+let labels: IndexMap<i32, String> =
+    nums.clone().map_with_keys(|n| (n, format!("n={n}")));
+
 // Deduplicate by closure-derived key.
 let unique_mod3: Collection<i32> =
     nums.clone().unique_by(|n| n % 3);
@@ -165,6 +173,23 @@ let unique_mod3: Collection<i32> =
 // Project every item by closure into a new collection.
 let strs: Collection<String> =
     nums.pluck_by(|n| n.to_string());
+```
+
+`sort_desc` is Laravel's `sortDesc`: a stable sort with the comparison
+reversed, so two items that compare equal stay in the order they had,
+as PHP's sort keeps them. `map_with_keys` is Laravel's `mapWithKeys`: it
+collects into an `IndexMap` (re-exported as `suprnova::indexmap`) in the
+collection's order, and a repeated key keeps the position of its first
+pair and the value of its last. `map_to_map` collects the same pairs
+into a `HashMap`, which keeps no order:
+
+```rust
+use suprnova::indexmap::IndexMap;
+
+let pairs = Collection::from_vec(vec![("a", 1), ("b", 2), ("a", 3)]);
+let mapped: IndexMap<&str, i32> = pairs.map_with_keys(|(key, value)| (key, value));
+assert_eq!(mapped.keys().copied().collect::<Vec<_>>(), ["a", "b"]);
+assert_eq!(mapped["a"], 3);
 ```
 
 The `*_with` / `*_by` suffix is the universal "this method takes a
@@ -440,7 +465,7 @@ The methods split cleanly into two contracts:
 | Takes | Methods |
 |---|---|
 | `&self` (borrow) | `len`, `is_empty`, `is_not_empty`, `first`, `last`, `first_where`, `last_where`, `contains_where`, `random`, `find`, `find_model`, `find_many`, `find_or`, `as_slice`, `pluck_by`, `pluck`, `pluck_keyed`, `group_by`, `key_by`, `sum`, `avg`, `min`, `max`, `to_array`, `to_json` |
-| `self` (consume) | `map`, `filter`, `reject`, `each`, `reduce`, `chunk`, `take`, `skip`, `slice`, `reverse`, `shuffle`, `random_n`, `unique`, `unique_models`, `diff_models`, `unique_by`, `sort_with`, `sort_by`, `sort_by_desc`, `where_eq`, `where_in`, `where_not_in`, `concat`, `merge`, `diff`, `intersect`, `group_by_with`, `key_by_with`, `map_to_map` |
+| `self` (consume) | `map`, `filter`, `reject`, `each`, `reduce`, `chunk`, `take`, `skip`, `slice`, `reverse`, `shuffle`, `random_n`, `unique`, `unique_models`, `diff_models`, `unique_by`, `sort_with`, `sort_desc`, `sort_by`, `sort_by_desc`, `where_eq`, `where_in`, `where_not_in`, `concat`, `merge`, `diff`, `intersect`, `group_by_with`, `key_by_with`, `map_to_map`, `map_with_keys` |
 | `&mut self` | `load`, `load_missing`, `load_with` |
 
 If you want to keep the collection after a consuming call, `.clone()`

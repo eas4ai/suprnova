@@ -59,6 +59,7 @@ pub mod crypto;
 pub mod csrf;
 pub mod data;
 pub mod database;
+pub mod date;
 pub mod eloquent;
 pub mod error;
 pub mod events;
@@ -366,6 +367,7 @@ pub use inertia::{
 };
 // The Inertia DevTools server support (PAR-071 to PAR-075), on its own line
 // so the list above stays stable.
+pub use date::{Date, DateParseError};
 pub use inertia::{DevToolsConfig, DevToolsMiddleware};
 // The Vite asset tags of PAR-159, on its own line so the lists above stay
 // stable.
@@ -379,8 +381,8 @@ pub use laravel::{LaravelDatabase, SHARED_DATABASE_ENV, SHARED_DEFAULT_QUEUE};
 #[cfg(feature = "localization")]
 pub use localization::{
     CatalogSource, DateStyle, Detect, FluentTranslator, Lang, ListStyle, Locale, LocaleMiddleware,
-    LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, Translator,
-    scope_locale,
+    LocaleShare, Localization, LocalizationConfig, RelativeUnit, TimeStyle, TranslationSource,
+    TranslationSources, Translator, scope_locale,
 };
 pub use logging::{Log, LogChannel, LogLevel, LogRecord, LogSink, Logger};
 pub use logging::{
@@ -389,13 +391,16 @@ pub use logging::{
 };
 pub use middleware::{
     Middleware, MiddlewareFactory, MiddlewareFuture, MiddlewareRegistry, MiddlewareResolveError,
-    Next, Pipeline, Terminable, TerminationSnapshot, append_middleware_priority,
-    clear_middleware_alias, clear_middleware_group, dispatch_termination, get_global_middleware,
+    Next, Pipeline, PipelineFuture, PipelineNext, PipelineStep, Terminable, TerminationSnapshot,
+    ValuePipeline, add_to_middleware_priority_after, add_to_middleware_priority_before,
+    append_middleware_priority, clear_middleware_alias, clear_middleware_group,
+    default_middleware_priority, dispatch_termination, get_global_middleware,
     global_middleware_count, has_global_middleware, has_middleware_alias, has_middleware_group,
     has_terminable, middleware_priority, prepend_global_middleware, prepend_middleware_priority,
     register_global_middleware, register_middleware_alias, register_middleware_group,
     register_terminable, registered_middleware_aliases, registered_middleware_groups,
-    registered_terminables, resolve_middleware_alias, resolve_middleware_group, terminable_count,
+    registered_terminables, resolve_middleware_alias, resolve_middleware_group,
+    set_middleware_priority, terminable_count,
 };
 pub use pagination::{
     Cursor, CursorDirection, CursorPaginator, IntoInertiaScroll, LengthAwarePaginator, PageLink,
@@ -498,7 +503,7 @@ pub use routing::{
     verify_signature_ignoring,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
-pub use strings::Str;
+pub use strings::{Str, Stringable};
 pub use view::{Head, head};
 // chrono-tz escape hatch, same principle as the opendal block above:
 // `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`

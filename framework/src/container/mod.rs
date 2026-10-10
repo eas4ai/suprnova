@@ -73,6 +73,7 @@
 //! # }
 //! ```
 
+mod lazy;
 pub mod provider;
 pub(crate) mod scope;
 pub mod testing;
@@ -179,6 +180,10 @@ enum Binding {
     /// Scoped factory - runs at the first resolution inside a container
     /// scope; the scope keeps the value and drops it when it ends
     Scoped(Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync>),
+
+    /// Lazy singleton - its factory runs at the first resolution and every
+    /// resolution shares the value
+    Lazy(Arc<lazy::LazySingleton>),
 }
 
 impl Binding {
@@ -203,6 +208,7 @@ impl Binding {
                     scope::resolve(TypeId::of::<T>(), std::any::type_name::<T>(), &**factory)?;
                 arc.downcast_ref::<T>().cloned()
             }
+            Binding::Lazy(lazy) => lazy.resolve()?.downcast_ref::<T>().cloned(),
         })
     }
 
@@ -226,6 +232,7 @@ impl Binding {
                 )?;
                 arc.downcast_ref::<Arc<T>>().cloned()
             }
+            Binding::Lazy(lazy) => lazy.resolve()?.downcast_ref::<Arc<T>>().cloned(),
         })
     }
 }
@@ -363,6 +370,33 @@ impl Container {
         true
     }
 
+    /// Register a lazy singleton: `factory` runs at the first resolution,
+    /// and every resolution after it shares the value. See
+    /// [`App::singleton_lazy`].
+    pub fn singleton_lazy<T, F>(&mut self, factory: F)
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        self.bindings
+            .insert(TypeId::of::<T>(), lazy_binding::<T, F>(factory));
+    }
+
+    /// [`Container::singleton_lazy`] only if nothing is registered for `T`.
+    /// Returns whether it registered; see [`App::singleton_lazy_if_absent`].
+    pub fn singleton_lazy_if_absent<T, F>(&mut self, factory: F) -> bool
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<T>();
+        if self.bindings.contains_key(&type_id) {
+            return false;
+        }
+        self.bindings.insert(type_id, lazy_binding::<T, F>(factory));
+        true
+    }
+
     /// Bind a trait object to a factory
     ///
     /// # Example
@@ -496,6 +530,20 @@ impl Default for Container {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The binding of a lazy singleton of `T` built by `factory`.
+fn lazy_binding<T, F>(factory: F) -> Binding
+where
+    T: Any + Send + Sync + 'static,
+    F: Fn() -> T + Send + Sync + 'static,
+{
+    let factory: lazy::LazyFactory =
+        Arc::new(move || Arc::new(factory()) as Arc<dyn Any + Send + Sync>);
+    Binding::Lazy(Arc::new(lazy::LazySingleton::new(
+        std::any::type_name::<T>(),
+        factory,
+    )))
 }
 
 /// The query observation of the active test container: the task-local
@@ -708,6 +756,69 @@ impl App {
         // again under the write lock, so a value installed meanwhile wins.
         let instance = construct()?;
         Ok(Self::singleton_if_absent(instance))
+    }
+
+    /// Register a lazy singleton: `factory` runs at the first resolution
+    /// of `T`, and every resolution after it shares that value, as
+    /// Laravel's `singleton` builds its concrete on first resolve.
+    ///
+    /// Use it for a service that is costly to build or that reads other
+    /// bindings, so it is built only when something asks for it and after
+    /// the bindings it reads are registered. [`App::singleton`] takes a
+    /// value already built; [`App::factory`] builds a new one on every
+    /// resolution.
+    ///
+    /// `T` may be a concrete type, resolved with [`App::get`], or an
+    /// `Arc<dyn Trait>`, resolved with [`App::make`]:
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use suprnova::App;
+    /// # trait Mailer: Send + Sync {}
+    /// # struct SmtpMailer;
+    /// # impl SmtpMailer { fn connect() -> Self { SmtpMailer } }
+    /// # impl Mailer for SmtpMailer {}
+    /// App::singleton_lazy(|| Arc::new(SmtpMailer::connect()) as Arc<dyn Mailer>);
+    ///
+    /// // Built here, on the first resolution, and shared afterwards.
+    /// let mailer = App::make::<dyn Mailer>().unwrap();
+    /// # let _ = mailer;
+    /// ```
+    ///
+    /// `factory` runs with no container lock held, so it may resolve other
+    /// bindings. Threads that resolve `T` while it is being built wait for
+    /// the value, so `factory` runs once. A factory that resolves `T`
+    /// itself, directly or through other lazy singletons, gets an error
+    /// that names the type ([`App::resolve`] returns it, [`App::get`] logs
+    /// it and returns `None`) instead of waiting for a value it is still
+    /// building. A factory must not block on another thread that resolves
+    /// `T`, which would wait for it. A factory that panics leaves `T`
+    /// unbuilt, so the next resolution runs it again.
+    ///
+    /// Last write wins, as for every binding: a later `singleton`,
+    /// `factory` or `singleton_lazy` call for `T` replaces this one.
+    pub fn singleton_lazy<T, F>(factory: F)
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.singleton_lazy(factory);
+    }
+
+    /// [`App::singleton_lazy`] only if nothing is registered for `T` yet,
+    /// as Laravel's `singletonIf`. Returns whether it registered. A
+    /// binding already there, lazy or built, stays, and `factory` never
+    /// runs.
+    pub fn singleton_lazy_if_absent<T, F>(factory: F) -> bool
+    where
+        T: Any + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
+        let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
+        let mut c = container.write().unwrap_or_else(|e| e.into_inner());
+        c.singleton_lazy_if_absent(factory)
     }
 
     /// Bind a trait object to a factory.
