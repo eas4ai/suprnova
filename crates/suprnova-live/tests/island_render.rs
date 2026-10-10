@@ -1,9 +1,16 @@
 //! Island rendering authority and boundary tests.
 
+mod component_support;
+
+use std::any::Any;
+use std::sync::Arc;
+
 use askama::Template;
 use bytes::Bytes;
 
-use suprnova_live::identity::ViewName;
+use suprnova_live::component::RenderContext;
+use suprnova_live::component::generated::render_component_view;
+use suprnova_live::identity::{InstanceId, Revision, UnixMillis, ViewName};
 use suprnova_live::view::{AssetSet, IslandRender, RenderLimits, ViewErrorKind, ViewRenderer};
 
 #[derive(Template)]
@@ -28,6 +35,29 @@ struct DirectiveTemplate;
 #[template(source = "<button>{{ content }}</button>", ext = "html")]
 struct ComponentFragmentTemplate<'a> {
     content: &'a str,
+}
+
+/// A component fragment that shows the host's `app_name` value when there
+/// is one and a fallback when there is none.
+#[derive(Template)]
+#[template(
+    source = r#"<p>{% if let Ok(name) = "app_name"|value::<String> %}{{ name }}{% else %}no app name{% endif %}</p>"#,
+    ext = "html"
+)]
+struct SharedNameFragment;
+
+/// A component fragment that requires the host's `app_name` value.
+#[derive(Template)]
+#[template(source = r#"<p>{{ ("app_name"|value::<String>)? }}</p>"#, ext = "html")]
+struct RequiredNameFragment;
+
+/// Host runtime values holding one `app_name` entry.
+struct AppName<T>(T);
+
+impl<T: Any> askama::Values for AppName<T> {
+    fn get_value<'a>(&'a self, key: &str) -> Option<&'a dyn Any> {
+        (key == "app_name").then_some(&self.0 as &dyn Any)
+    }
 }
 
 fn view(name: &str) -> ViewName {
@@ -151,4 +181,101 @@ fn component_templates_render_checked_fragments_before_engine_root_assembly() {
             .windows(23)
             .any(|bytes| bytes == b"data-suprnova-live-root")
     );
+}
+
+#[test]
+fn component_fragments_read_the_runtime_values_the_host_supplies() {
+    let rendered = renderer()
+        .render_component_fragment_with_values(
+            view("tests/component-fragment.html"),
+            &SharedNameFragment,
+            AssetSet::empty(),
+            Vec::new(),
+            &AppName(String::from("Acme <&>")),
+        )
+        .expect("component fragment with host values");
+
+    assert_eq!(
+        rendered.body,
+        Bytes::from_static(b"<p>Acme &#60;&#38;&#62;</p>"),
+        "a host value reaches the template, escaped"
+    );
+}
+
+#[test]
+fn component_fragments_receive_no_runtime_values_by_default() {
+    let rendered = renderer()
+        .render_component_fragment(
+            view("tests/component-fragment.html"),
+            &SharedNameFragment,
+            AssetSet::empty(),
+            Vec::new(),
+        )
+        .expect("component fragment without host values");
+
+    assert_eq!(rendered.body, Bytes::from_static(b"<p>no app name</p>"));
+}
+
+#[test]
+fn a_component_fragment_that_requires_a_missing_or_mistyped_value_fails() {
+    let missing = renderer()
+        .render_component_fragment(
+            view("tests/component-fragment.html"),
+            &RequiredNameFragment,
+            AssetSet::empty(),
+            Vec::new(),
+        )
+        .expect_err("no host value");
+    assert_eq!(missing.kind(), ViewErrorKind::MissingViewData);
+
+    let mistyped = renderer()
+        .render_component_fragment_with_values(
+            view("tests/component-fragment.html"),
+            &RequiredNameFragment,
+            AssetSet::empty(),
+            Vec::new(),
+            &AppName(7_u32),
+        )
+        .expect_err("a host value of another type");
+    assert_eq!(mistyped.kind(), ViewErrorKind::InvalidViewData);
+}
+
+#[test]
+fn generated_component_views_read_the_view_values_the_host_installed() {
+    let request = component_support::trusted_context_with_view_values(Arc::new(AppName(
+        String::from("Acme"),
+    )));
+    let instance =
+        InstanceId::from_bytes(&component_support::bytes::<16>(0x20)).expect("instance identity");
+    let instanced = RenderContext::new(
+        &request,
+        &instance,
+        Revision::new(0),
+        UnixMillis::new(2_000),
+    );
+    let rendered = render_component_view(
+        &instanced,
+        component_support::metadata(),
+        &SharedNameFragment,
+    )
+    .expect("instanced component view");
+    assert_eq!(rendered.body, Bytes::from_static(b"<p>Acme</p>"));
+
+    // A public seed reads the same values: a host installs only values it
+    // shows every visitor.
+    let seed = RenderContext::for_public_seed(&request, Revision::new(0), UnixMillis::new(2_000));
+    let rendered = render_component_view(&seed, component_support::metadata(), &SharedNameFragment)
+        .expect("public seed component view");
+    assert_eq!(rendered.body, Bytes::from_static(b"<p>Acme</p>"));
+
+    // A host that installs no values gives the view none.
+    let plain = component_support::trusted_context();
+    let instanced = RenderContext::new(&plain, &instance, Revision::new(0), UnixMillis::new(2_000));
+    let rendered = render_component_view(
+        &instanced,
+        component_support::metadata(),
+        &SharedNameFragment,
+    )
+    .expect("component view without host values");
+    assert_eq!(rendered.body, Bytes::from_static(b"<p>no app name</p>"));
 }

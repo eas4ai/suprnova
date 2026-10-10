@@ -370,7 +370,8 @@ where
 
 /// Renders one generated Askama component view through bounded engine
 /// validation, under the host's configured render limits when the context
-/// carries them and the engine's defaults otherwise.
+/// carries them and the engine's defaults otherwise. The view reads the
+/// runtime values the host installed on the request's capabilities.
 #[doc(hidden)]
 pub fn render_component_view<T: ViewTemplate + ?Sized>(
     context: &RenderContext<'_>,
@@ -383,11 +384,12 @@ pub fn render_component_view<T: ViewTemplate + ?Sized>(
             .unwrap_or_else(crate::view::RenderLimits::standard),
     )
     .and_then(|renderer| {
-        renderer.render_component_fragment(
+        renderer.render_component_fragment_with_values(
             metadata.view().clone(),
             template,
             AssetSet::empty(),
             Vec::new(),
+            context.view_values(),
         )
     })
     .map_err(|_| ComponentError::contract_failure())
