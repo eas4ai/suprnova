@@ -565,8 +565,9 @@ async fn inp_cursor_paginator_on_its_first_page_reports_current_page_one() {
 #[tokio::test]
 async fn inp_cursor_paginator_past_its_first_page_reads_the_requests_cursor() {
     // Laravel resolves the current cursor from the request under the
-    // paginator's cursor name; `cursor_paginate` builds a paginator that
-    // does not carry it.
+    // paginator's cursor name. A paginator built by hand, with no
+    // `with_current_cursor`, reads it there too; `cursor_paginate` and
+    // `Pagination::cursor` record the cursor they were fetched with.
     let _query = suprnova::Context::test_query_guard("after", "current-token");
     let paginator = suprnova::CursorPaginator::new(
         vec![json!({ "id": 2 })],

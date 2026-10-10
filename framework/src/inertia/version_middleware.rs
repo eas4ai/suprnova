@@ -147,9 +147,9 @@ impl Middleware for InertiaVersionMiddleware {
 /// the page `url`'s is (PAR-056). A request that names no host keeps the
 /// root-relative URL rather than inventing one.
 fn absolute_location(request: &Request) -> String {
-    let path = crate::routing::root::prefixed(&super::query_string::normalize_path_and_query(
-        request.path_and_query(),
-    ));
+    let path = crate::routing::root::prefixed(
+        &crate::http::query_string::normalize_path_and_query(request.path_and_query()),
+    );
     match request.scheme_and_http_host() {
         Some(origin) => format!("{origin}{path}"),
         None => path,

@@ -228,6 +228,7 @@ pub struct Paginator<T> {
     pub per_page: u64,
     pub has_more: bool,          // was there an extra row past per_page?
     pub path: Option<String>,
+    pub page_name: Option<String>, // query key of the page; "page" when None
 }
 ```
 
@@ -251,7 +252,23 @@ JSON, with `with_path("/api/users")`, on page 2:
 
 `next_page_url` is `null` when `has_more` is `false`, and `prev_page_url`
 is `null` on the first page. `from` and `to` are `null` for a page with no
-rows. `path` is omitted when unset. The page key is always `page`.
+rows. `path` is omitted when unset.
+
+`simple_paginate(n)` reads the page from `?page=N`. To give a listing its
+own key, as `paginate_using` does for the length-aware paginator, call
+`simple_paginate_using`:
+
+```rust
+let comments: Paginator<Comment> = Comment::query()
+    .order_by_desc("id")
+    .simple_paginate_using("comments_page", 25)
+    .await?;
+
+comments.url_for_page(2);  // "?comments_page=2"
+```
+
+It reads the page from `?comments_page=N` and sets `page_name`, so the
+page URLs and the Inertia scroll metadata's `pageName` use the same key.
 
 The trick is in the SQL. `simple_paginate(20)` issues `LIMIT 21`, looks
 at whether the 21st row came back, sets `has_more` from that, and
@@ -281,9 +298,11 @@ let page: CursorPaginator<User> = User::query()
 pub struct CursorPaginator<T> {
     pub data: Vec<T>,
     pub per_page: u64,
-    pub next_cursor: Option<String>,  // None on the last page
-    pub prev_cursor: Option<String>,  // None on the first page
+    pub next_cursor: Option<String>,    // None on the last page
+    pub prev_cursor: Option<String>,    // None on the first page
     pub path: Option<String>,
+    pub cursor_name: Option<String>,    // query key of the cursor; "cursor" when None
+    pub current_cursor: Option<String>, // the cursor this page was fetched with
 }
 ```
 
@@ -321,7 +340,8 @@ then reverses the page back), fetches `LIMIT n+1` rows, and re-emits
 `next_cursor` / `prev_cursor` as the page's neighbours exist. It's
 bidirectional - the client can walk forward and back without losing
 its position. With no `order_by`, the filter is `pk > boundary ASC` for
-`next` and `pk < boundary DESC` for `prev`.
+`next` and `pk < boundary DESC` for `prev`. The page keeps the cursor it
+was fetched with in `current_cursor`, and `None` on the first page.
 
 `cursor_paginate` keeps your query's order, as Laravel's
 `cursorPaginate` does. A descending order walks downward, so a list that
@@ -586,15 +606,15 @@ All three paginators work here - `LengthAwarePaginator`, `Paginator`, and
 `CursorPaginator`. The metadata page-name comes from the paginator
 itself, and it is the query parameter the paginator reads: the name a
 `LengthAwarePaginator` got from `paginate_using` or `with_page_name`
-(`"page"` by default), the name a `Paginator` got from `with_page_name`
-(`"page"` by default), and the name a `CursorPaginator` got from
+(`"page"` by default), the name a `Paginator` got from
+`simple_paginate_using` or `with_page_name` (`"page"` by default), and the name a `CursorPaginator` got from
 `with_cursor_name` (`"cursor"` by default). The client receives the rows
 under the chosen prop key plus a `ScrollMetadata` descriptor with
 `current_page`, `next_page` and `previous_page`: page numbers for the
 offset paginators, and for a cursor paginator `1` on its first page,
-else the cursor the page was fetched with (`Pagination::cursor` records
-it; `with_current_cursor` sets it by hand), else the request's cursor
-parameter. The `useInfiniteScroll` and `WhenVisible` Inertia helpers
+else the cursor the page was fetched with (`cursor_paginate` and
+`Pagination::cursor` record it; `with_current_cursor` sets it by hand),
+else the request's cursor parameter. The `useInfiniteScroll` and `WhenVisible` Inertia helpers
 consume it for infinite scroll.
 
 Each paginator builds that descriptor through `ProvidesScrollMetadata` -
@@ -763,7 +783,7 @@ when the UI is infinite scroll.
 | `Paginator<T>` (simple) | `framework/src/pagination/simple.rs` |
 | `CursorPaginator<T>`, `Cursor`, `CursorDirection`, `encode_value`, `decode_value` | `framework/src/pagination/cursor.rs` |
 | `IntoInertiaScroll` bridge | `framework/src/pagination/inertia.rs` |
-| `Builder::paginate` / `simple_paginate` / `cursor_paginate` | `framework/src/eloquent/builder.rs` |
+| `Builder::paginate` / `simple_paginate` / `simple_paginate_using` / `cursor_paginate` | `framework/src/eloquent/builder.rs` |
 | `Inertia::paginate`, `InertiaResponse::paginate` | `framework/src/inertia/facade.rs`, `framework/src/inertia/response.rs` |
 | `Resource::paginated`, `JsonApi::paginated` | `framework/src/resources/response.rs` |
 

@@ -252,7 +252,8 @@ async fn indt_sensitive_keys_headers_and_query_values_are_redacted_before_storag
         "[REDACTED]"
     );
     let url = entry["__meta"]["url"].as_str().unwrap();
-    assert!(url.ends_with("/login?token=%5BREDACTED%5D&page=2"), "{url}");
+    // The entry URL is `full_url()`, its query sorted by key (PAR-056).
+    assert!(url.ends_with("/login?page=2&token=%5BREDACTED%5D"), "{url}");
     let index = std::fs::read_to_string(dir.path().join("_meta.json")).unwrap();
     assert!(!index.contains("token=abc"), "{index}");
 

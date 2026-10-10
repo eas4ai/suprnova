@@ -13,6 +13,7 @@ pub(crate) mod file_response;
 mod form_request;
 mod input;
 pub mod precognition;
+pub(crate) mod query_string;
 mod request;
 mod response;
 mod trusted_hosts;

@@ -2058,7 +2058,12 @@ impl SessionMiddleware {
             .unwrap_or(false);
         // The URL the browser asked for, public root included, so
         // `Redirect::back` sends it back under the same root (PFX-004).
-        let current_url = crate::routing::url::current_path_and_query(request);
+        // The query is normalised, as Laravel's `StartSession` stores
+        // `$request->fullUrl()`, so the session holds the spelling the
+        // Inertia middleware records for an Inertia visit (PAR-056).
+        let current_url = crate::http::query_string::normalize_path_and_query(
+            crate::routing::url::current_path_and_query(request),
+        );
 
         PreviousUrlCandidate {
             is_get,
