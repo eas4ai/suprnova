@@ -5671,6 +5671,34 @@ where
         ))
     }
 
+    /// The clause `where_relation` and its kin add for `relation`. On a
+    /// `MorphTo` the related row lives in one of several owner tables, so
+    /// the comparison goes to the morph engine as a condition on every
+    /// owner type the relation declares, the clause
+    /// `where_has_morph(relation, "*", ..)` renders for it. Every other
+    /// kind renders the comparison inline in the correlated `EXISTS`.
+    fn relation_predicate_term(&self, relation: &str, predicate: RelationPredicate) -> WhereTerm {
+        match Self::morph_to_relation(relation) {
+            Some(relation_entry) => {
+                let RelationPredicate { column, op, value } = predicate;
+                self.morph_presence(
+                    relation,
+                    relation_entry,
+                    relation_entry.morph_targets,
+                    Existence::Has,
+                    vec![WhereTerm::Op(column, op, value)],
+                )
+            }
+            None => WhereTerm::Exists(Box::new(self.build_exists_spec_for(
+                relation,
+                Existence::Has,
+                None,
+                Vec::new(),
+                Some(predicate),
+            ))),
+        }
+    }
+
     /// Keep a constrained eager query's limit per parent instead of per batch.
     #[doc(hidden)]
     pub fn __eager_limit(mut self, foreign_key: &str) -> Self {
@@ -5853,29 +5881,34 @@ where
     /// `where_has::<R, _>(rel, |q| q.filter(col, val))` without the
     /// typed closure - the column constraint renders inline in the
     /// EXISTS subquery body.
+    ///
+    /// On a `MorphTo` relation the condition runs against every owner
+    /// type the relation declares, as Laravel's `whereRelation` reaches
+    /// `hasMorph($relation, ['*'])` through `whereHas`: a row matches when
+    /// its type column names a declared owner and that owner's row, under
+    /// the owner's own scopes, satisfies the condition. Each owner's table
+    /// must have the column.
     pub fn where_relation(
         mut self,
         relation: &str,
         col: impl IntoColumn,
         val: impl IntoVal,
     ) -> Self {
-        let spec = self.build_exists_spec_for(
+        let term = self.relation_predicate_term(
             relation,
-            Existence::Has,
-            None,
-            Vec::new(),
-            Some(RelationPredicate {
+            RelationPredicate {
                 column: col.col_name(),
                 op: "=".to_string(),
                 value: val.into_val(),
-            }),
+            },
         );
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self.where_terms.push(term);
         self
     }
 
     /// Like [`Self::where_relation`] but takes an explicit comparison
-    /// operator (`>`, `<=`, `!=`, ...).
+    /// operator (`>`, `<=`, `!=`, ...). It follows `where_relation` on a
+    /// `MorphTo` relation too.
     pub fn where_relation_op(
         mut self,
         relation: &str,
@@ -5883,41 +5916,35 @@ where
         op: &str,
         val: impl IntoVal,
     ) -> Self {
-        let spec = self.build_exists_spec_for(
+        let term = self.relation_predicate_term(
             relation,
-            Existence::Has,
-            None,
-            Vec::new(),
-            Some(RelationPredicate {
+            RelationPredicate {
                 column: col.col_name(),
                 op: op.to_string(),
                 value: val.into_val(),
-            }),
+            },
         );
-        self.where_terms.push(WhereTerm::Exists(Box::new(spec)));
+        self.where_terms.push(term);
         self
     }
 
-    /// `OR ...` form of [`Self::where_relation`].
+    /// `OR ...` form of [`Self::where_relation`], which it follows on a
+    /// `MorphTo` relation too.
     pub fn or_where_relation(
         mut self,
         relation: &str,
         col: impl IntoColumn,
         val: impl IntoVal,
     ) -> Self {
-        let spec = self.build_exists_spec_for(
+        let term = self.relation_predicate_term(
             relation,
-            Existence::Has,
-            None,
-            Vec::new(),
-            Some(RelationPredicate {
+            RelationPredicate {
                 column: col.col_name(),
                 op: "=".to_string(),
                 value: val.into_val(),
-            }),
+            },
         );
-        let new = WhereTerm::Exists(Box::new(spec));
-        self.merge_or_term(new);
+        self.merge_or_term(term);
         self
     }
 
@@ -6890,25 +6917,31 @@ where
         ))
     }
 
-    /// Cursor paginate - opaque-cursor keyset pagination over the
-    /// model's primary key.
+    /// Cursor paginate - opaque-cursor keyset pagination over the query's
+    /// ordered columns, or the model's primary key when the query sets no
+    /// order.
     ///
     /// Bidirectional, matching Laravel's `cursorPaginate()` and the
     /// [`Pagination::cursor`](crate::pagination::Pagination::cursor)
     /// facade. Reads the current cursor from `?cursor=<opaque>`, decodes
-    /// its direction, and walks forward (`pk > boundary`, ASC) or
-    /// backward (`pk < boundary`, DESC then reversed to ASC). Emits both
-    /// `next_cursor` and `prev_cursor` as the page's neighbours exist, so
-    /// a client can page in either direction. Cursors are encrypted+MACd
-    /// via `CursorPaginator::encode_value` so they can't be forged.
+    /// its direction, and walks forward past the boundary in the query's
+    /// order, or backward (the order reversed, then the page reversed back).
+    /// Emits both `next_cursor` and `prev_cursor` as the page's neighbours
+    /// exist, so a client can page in either direction. Cursors are
+    /// encrypted+MACd via `CursorPaginator::encode_value` so they can't be
+    /// forged.
     ///
-    /// Multiple ordered columns keep their directions and each contributes
-    /// a named cursor boundary. The primary key breaks ties when absent.
-    /// Zero or one explicit order retains the ascending primary-key walk.
-    /// Select non-null ordered columns so the keyset can advance. An `OFFSET`
-    /// positions the first page only, the one requested without a
-    /// cursor; every later page starts at its cursor, so the offset
-    /// never skips rows between two pages.
+    /// The query's orderings are kept, as Laravel's `cursorPaginate`
+    /// honours `orderBy`: each ordered column keeps its direction and
+    /// contributes a named cursor boundary, so a descending order walks
+    /// downward and `latest()` pages newest first. The primary key,
+    /// ascending, breaks ties when no ordering names it. A query with no
+    /// order walks the primary key ascending. An ordering the cursor cannot
+    /// carry (`order_by_raw`, `in_random_order`) fails the call rather than
+    /// being dropped. Select non-null ordered columns so the keyset can
+    /// advance. An `OFFSET` positions the first page only, the one
+    /// requested without a cursor; every later page starts at its cursor,
+    /// so the offset never skips rows between two pages.
     ///
     /// On a union the cursor bounds the rows of the whole union, written
     /// as a derived table, and the order is the union's; the first query
@@ -6918,6 +6951,8 @@ where
     ///
     /// - `per_page == 0` → `FrameworkError::param("per_page")` (400).
     /// - Invalid / tampered cursor → `FrameworkError::ParamParse`.
+    /// - An ordering that is not a column, or a cursor that lacks one of
+    ///   the ordered columns → `FrameworkError::bad_request` (400).
     pub async fn cursor_paginate(
         self,
         per_page: u64,
@@ -6980,8 +7015,13 @@ where
         })
     }
 
+    /// The columns `cursor_paginate` orders by and puts in the cursor, each
+    /// with `true` for ascending: the query's orderings in their own
+    /// directions, or the primary key ascending when there are none, with
+    /// the primary key appended when no ordering names it, so ties keep a
+    /// stable final order.
     fn cursor_orders(&self) -> Result<Vec<(String, bool)>, FrameworkError> {
-        let mut orders: Vec<(String, bool)> = if self.orders.len() > 1 {
+        let mut orders: Vec<(String, bool)> = if !self.orders.is_empty() {
             self.orders
                 .iter()
                 .map(|order| match order {

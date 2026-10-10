@@ -2746,8 +2746,9 @@ let page: CursorPaginator<User> = User::query()
 ```
 
 Cursors are **encrypted and authenticated** via `CursorPaginator::encode_value` -
-they encode the keyset boundary (the model's primary key) plus a
-direction tag, AES-256-GCM-sealed with the framework's `APP_KEY`.
+they encode the keyset boundary (each ordered column's value, the
+model's primary key among them) plus a direction tag, AES-256-GCM-sealed
+with the framework's `APP_KEY`.
 Tampering produces a 400 ParamParse error; the cursor is opaque to
 the client and unforgeable without the key.
 
@@ -2757,9 +2758,13 @@ The next request passes the cursor through `?cursor=<opaque>`:
 GET /api/users?cursor=eyJ0IjoiQmlnSW50IiwidiI6MTAwLCJkIjoibmV4dCJ9...
 ```
 
-Cursor pagination **replaces** any existing `ORDER BY` on the
-builder - a stable PK ASC order is required for `gt(boundary)` to
-slice deterministically.
+Cursor pagination keeps the builder's `ORDER BY`, as Laravel's
+`cursorPaginate` does: `latest()` pages newest first, and a descending
+order walks downward. The primary key, ascending, breaks ties when no
+order names it, and a builder with no order walks the primary key
+ascending. An order the cursor cannot carry (`order_by_raw`,
+`in_random_order`) returns a 400 error. See
+[Pagination](pagination.md#how-cursors-work-on-the-wire).
 
 **JSON shape:**
 
@@ -3501,6 +3506,11 @@ The auto-detect is conservative: if the struct has only one of the
 two columns, the macro errors out so a typo
 (`craeted_at`) doesn't silently disable timestamps. Set
 `timestamps = false` to opt out entirely.
+
+A struct with neither column gets no timestamps by default. If you ask
+for them with `timestamps = true` (or the bare `timestamps` flag), the
+build fails and the error names both columns, as
+`#[suprnova::document]` does, so a model never silently writes none.
 
 ### Disabling auto-timestamps
 
