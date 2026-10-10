@@ -1,0 +1,16 @@
+{#
+  suprnova.card - a grouped surface with an explicit heading (DATA-001).
+  A card is an article or a section labeled by its own heading; actions
+  are real links or buttons in the actions row, and the card never wraps
+  itself in one link.
+#}
+{% macro card(id, heading, level=2, kind="article") %}
+{% if kind == "section" %}<section class="sn-card" id="{{ id }}" aria-labelledby="{{ id }}-title">{% else %}<article class="sn-card" id="{{ id }}" aria-labelledby="{{ id }}-title">{% endif %}
+{% if level == 3 %}<h3 class="sn-card-title" id="{{ id }}-title">{{ heading }}</h3>{% else %}<h2 class="sn-card-title" id="{{ id }}-title">{{ heading }}</h2>{% endif %}
+{{ caller() }}
+{% if kind == "section" %}</section>{% else %}</article>{% endif %}
+{% endmacro %}
+
+{% macro card_actions(label="Actions") %}
+<div class="sn-card-actions" role="group" aria-label="{{ label }}">{{ caller() }}</div>
+{% endmacro %}

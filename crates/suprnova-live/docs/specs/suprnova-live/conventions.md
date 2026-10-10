@@ -1,0 +1,732 @@
+# Suprnova Live -- Conventions
+
+Status: Normative
+Last revised: 2026-09-10
+
+## Authority and application
+
+These conventions govern Suprnova Live design, implementation, generated code,
+browser assets, component-library artifacts, tests, references, and
+documentation. The machine production coding standard and any future
+repository-local `BEST_PRACTICES.md` remain authoritative. A repository-local
+`BEST_PRACTICES.md` overrides the machine copy.
+
+`crates/suprnova-live/` is the internal Suprnova Live engine subtree, not a
+specification-only repository or a third-party crate. It keeps implementation
+beside the normative `docs/specs/suprnova-live/` set and
+`scripts/check-specs.mjs`; those files, browser sources and artifacts, fixtures,
+tests, benchmarks, and implementation documents are one maintained authority.
+The former `/home/shawn/workspace2/suprnova-live` checkout is immutable
+historical provenance only. Its large `reference/` catalog and optional
+`suprnova-live.zip` Fable handoff export remain non-normative historical
+artifacts and do not become a parallel current contract. The active iteration
+contract named under Completeness and scope authorizes coherent changes in an
+isolated Suprnova worktree while unrelated Suprnova and Magnetar work remains
+untouched.
+
+## Implementation standards
+
+### Completeness and scope
+
+- The active implementation contract is [`iterations/006.md`](iterations/006.md).
+  Closed contracts remain historical evidence; preliminary sequencing in an
+  older contract does not override the active confirmed boundary.
+- Implement the active iteration contract completely. Do not substitute an
+  MVP, placeholder, TODO, empty adapter, unverified scaffold, or narrower
+  behavior for an agreed capability.
+- A change owns its whole contract: implementation, public facade, macro/checker
+  metadata, browser behavior, tests, documentation, generated templates,
+  reference impact, and migration note where applicable.
+- Attractive adjacent work is not implicit scope. Record it through
+  `/next-iteration` after Stage 6 rather than coupling it to the current change.
+- Existing unrelated work in Suprnova, Magnetar, or this workspace is preserved.
+  Never rewrite, revert, reformat, or commit another contributor's changes merely
+  to simplify Live work.
+
+### Rust safety and API design
+
+- Public application-facing APIs live under `suprnova::live` or
+  `suprnova::view`; consumers never import `suprnova-live` directly.
+- The internal engine crate does not depend on the `suprnova` facade. Framework
+  services enter through narrow adapter traits and typed contexts to prevent a
+  crate cycle and make conformance fixtures independent.
+- Public operations return typed `Result` values and preserve causal errors.
+  Panics are limited to proven internal invariants in tests or unreachable
+  generated states; hostile input, provider failure, and application mistakes
+  are never panic paths.
+- Production code contains no `unsafe`; the engine crate keeps
+  `#![forbid(unsafe_code)]`. The `suprnova-live` package lint is `deny`
+  rather than `forbid` for one recorded reason: `benches/render_cache_budget.rs`
+  allows `unsafe` with a written reason for the counting global allocator that
+  measures the Complete L0 allocation budget, and that benchmark holds the only
+  `unsafe` in the subtree. A later proposal requiring `unsafe` needs a
+  separately approved, documented safety case and cannot enter as an
+  implementation convenience.
+- Public items have useful rustdoc because `suprnova` denies missing docs and
+  broken or private intra-doc links.
+- Clippy warnings are reviewed and resolved, but commands and gates do not use
+  blanket `-D warnings`. An intentional lint suppression uses the narrowest
+  practical scope and `#[allow(clippy::lint_name, reason = "why this is safe")]`.
+  Crate-wide or category-wide allowances require a dated specification decision.
+- Prefer owned immutable values and explicit state transitions. Interior
+  mutability, global state, and dynamic typing require a demonstrated boundary
+  need and tests for lifecycle and concurrency.
+
+### Errors and diagnostics
+
+- `LiveError` and subordinate enums distinguish protocol, validation,
+  authentication, authorization, CSRF, snapshot, revision, render, morph,
+  provider, cache, upload, compatibility, and internal failures.
+- Error conversion preserves a stable machine category, safe recovery
+  instruction, source context, and causal chain. Do not flatten errors to strings
+  or use status codes as the only taxonomy.
+- Production messages contain no snapshot bytes, signatures, cookies, tokens,
+  transient models, private HTML, SQL values, stack traces, or policy internals.
+- Developer diagnostics point to the Rust declaration, template path and source
+  region, directive, component, island, lifecycle phase, and correlation ID when
+  available.
+
+### Async execution and concurrency
+
+- Tokio tasks are structured and cancellation-aware. Detached tasks require an
+  explicit owner, shutdown path, bounded queue, and observability.
+- Never hold a blocking mutex, database transaction, provider lease, or mutable
+  component borrow across an unrelated `.await`.
+- Every queue, batch, upload, body, parser, recursion depth, retry, lease,
+  connection, and diagnostic buffer has a configured bound.
+- Timeouts and cancellation do not imply rollback of an external effect.
+  Transaction, idempotency, outbox, and delivery semantics remain explicit.
+- The instance-ledger contract guarantees at most one committed accepted
+  outcome per base revision. Action bodies are safe to invoke again before
+  commit and must not claim exactly-once external behavior.
+
+### Rendering and templates
+
+- Routes and components render through `suprnova::view`. Askama is the normative
+  checked grammar, but Askama-specific types do not leak into handler or
+  component signatures unless the facade explicitly owns the wrapper.
+- Templates are external `.html` files. They contain presentation conditions,
+  loops, includes, layouts, semantic markup, and declarative attributes, not
+  authorization decisions, database access, or arbitrary JavaScript.
+- Escaping is default. Trusted HTML uses one explicit audited type and cannot be
+  constructed from untrusted text through a convenience conversion.
+- A render is deterministic for declared inputs and dependency generations.
+  Locale, time, randomness, feature state, configuration, assets, and identity
+  that affect bytes enter the render context and dependency/variance machinery.
+- A failed render publishes no partial document, island, snapshot, cache entry,
+  header set, or success outcome.
+
+### State, protocol, and cryptography
+
+- Component fields are private to the server unless generated metadata marks
+  them model-bindable. Locked, server-only, computed, and transient categories
+  are distinct types or metadata states, not naming conventions.
+- Protocol structs use `serde` with explicit field names, deny duplicate or
+  unknown required fields as specified, and reject unbounded collections before
+  expensive allocation.
+- Public JSON field names use `snake_case`. Rust uses the same semantic names;
+  TypeScript adapters may expose idiomatic local names only behind generated
+  codecs and conformance fixtures.
+- Signed snapshot bodies use the versioned canonical JSON profile. Do not sign
+  `serde_json` output whose order or numeric representation is incidental.
+- Snapshot keys are derived per purpose and version with HKDF-SHA-256 and sign
+  with HMAC-SHA-256. Verification uses explicit key IDs, bounded rotation
+  windows, and constant-time comparison.
+- Known snapshot extensions use exact registered canonical schemas and hard
+  independent byte/cardinality/depth bounds; unknown well-formed namespaced
+  extensions follow the owning snapshot version's compatibility rule. Public
+  seeds never inherit instance-only extension authority.
+- Child-parameter envelope versions have separate schema discriminators, typed
+  verified values, and cryptographic purposes. A verifier never reinterprets an
+  older envelope as a newer exact-binding contract.
+- Authorization reads use provider contracts designed for correctness and
+  linearized with their mutations. Broad diagnostic inspection and
+  browser-carried snapshots never substitute for those reads.
+- Protocol, snapshot, directive, view metadata, and cache-entry fixtures are
+  consumed by both Rust and TypeScript tests. A handwritten duplicate schema is
+  not a second source of truth.
+- Iteration 004 conformance lives in `fixtures/v4/`. Upload protocol v1 and
+  asynchronous envelope/subscription protocol v1 remain independently
+  versioned while interoperating with Live update protocols v1/v2. The feature
+  registry ABI is `suprnova.live.features.v1`; its checked capabilities are
+  `uploads@1` and `async@1` against compatible core `>=0.1.0 <0.2.0`.
+
+### RenderCache and providers
+
+- RenderCache is separate from the generic application cache. It stores typed
+  Complete or Composite representations and proof metadata, never arbitrary
+  handler values masquerading as a response.
+- `RenderStore`, `LiveInstanceLedger`, `RebuildCoordinator`, and
+  `GenerationLedger` remain independent traits. A provider implements only the
+  capabilities it can prove.
+- Tier 0 is the behavioral reference. Tier 1 and Tier 2 reuse the same semantic
+  suite and add topology-specific CAS, lease, fencing, eviction, partition, and
+  failure fixtures.
+- Generation truth is database-authoritative at every tier. Hints, memory, Redis,
+  Memcached, files, and blob stores may accelerate observation but do not become
+  correctness authority.
+- Cache keys and metrics contain stable purpose-specific digests, never raw
+  cookies, session IDs, principal secrets, arbitrary URLs, or high-cardinality
+  values.
+- Complete hot hits retain shared immutable bytes through response construction.
+  A full-body clone, handler call, template render, or database query on that path
+  is a performance defect unless the owning spec explicitly requires it.
+
+### Browser runtime
+
+- Runtime source is strict TypeScript targeting ES2020 and is built into
+  deterministic versioned ESM and classic-script artifacts with source maps kept
+  out of production responses by default.
+- Asset manifest schema v2 records engine `0.1.0`, runtime contract version 1,
+  Live protocol versions 1/2, snapshot version 1, and exact `core@1`,
+  `stimulus@1`, `uploads@1`, and `async@1` ESM/classic roles. A version change
+  updates generated contracts, fixtures, compatibility checks, and this record
+  together.
+- The universal core and optional Stimulus/upload/async ESM/classic feature
+  pairs are selected only through trusted rendered roles and the typed asset
+  manifest. Optional loading deduplicates and registers through the core
+  lifecycle rather than starting another runtime or accepting element-selected
+  artifact URLs. A bundler may import equivalent optional package exports.
+- Application developers can use the shipped runtime without Node, npm, a
+  bundler, Stimulus, or a client component framework. Bundler integration is an
+  optional delivery choice for the same artifact and protocol.
+- The core runtime owns `live:` parsing, local signals, scheduling, transport,
+  response ordering, registered effects, and the Suprnova morph adapter.
+  Neither Stimulus nor Suprnova's bridge/continuity implementation is present in
+  core. The separately shipped adapter loads only when an application chooses
+  custom controllers and still requires an application-supplied `Application`.
+- Event handling is delegated where semantics permit. Island, controller,
+  observer, listener, timer, and upload resources connect and dispose exactly
+  once.
+- No `eval`, `new Function`, server-returned script, inline expression language,
+  or monkey-patch of private Idiomorph/Stimulus state is permitted.
+- DOM writes use semantic platform APIs, preserve trusted types/CSP contracts,
+  and pass oldest-supported plus current-browser fixtures.
+
+### Components and accessibility
+
+- Official components begin with semantic native HTML. Custom behavior is added
+  only where the native element cannot satisfy the specified interaction.
+- Component presentation uses Tailwind CSS 4 utilities and versioned semantic
+  theme tokens. Raw palette values and component-private design constants do not
+  become public theme APIs.
+- Each component documents anatomy, variants, sizes, states, keys, Live/local
+  ownership, keyboard behavior, accessible name/description, focus behavior,
+  reduced motion, and morph continuity.
+- WCAG 2.2 AA is the baseline. Automated accessibility checks do not replace
+  manual keyboard and assistive-technology review for critical components.
+
+### Observability and performance
+
+- Use Suprnova tracing and metrics facilities. Spans and metrics correlate work
+  through bounded identifiers and never record payload bodies or secrets.
+- Fast paths have named workloads, explicit provider work, allocation/copy
+  expectations, p50/p95 data, and checked-in baselines. Hello-world throughput
+  alone cannot substantiate a performance claim.
+- Benchmark changes run correctness and security assertions beside performance
+  measurements. A faster path that weakens coherence, privacy, authorization,
+  revision, or recovery semantics fails.
+- Architecture performance budget v1 in `00-overview.md` is release-blocking.
+  Budget revision and implementation optimization are separate changes unless
+  the developer explicitly approves them together.
+- An artifact with no absolute transfer ceiling still has mechanical drift
+  control. Its reviewed artifact-size baseline uses a closed, append-only,
+  version-controlled history with a source commit plus a decision record that
+  both strictly predate the baseline-append commit, artifact hashes, rationale,
+  and deterministic measurement method. Stored hashes authenticate the exact
+  historical artifact; a changed current-candidate hash does not fail by itself.
+  The immutable Task 6 anchor cannot be overwritten, deleted, or collapsed, and
+  the current candidate is never an implicit or automatically written baseline.
+  More than the approved drift threshold requires an explicit reviewed baseline
+  decision in a prior immutable change; it is not an absolute size veto.
+
+### Testing strategy
+
+- Unit tests own pure codecs, keys, state machines, parsers, classification, and
+  provider primitives. Property and fuzz tests own external parsers and
+  canonical round trips.
+- Macro UI tests own valid/invalid declarations and source diagnostics.
+  Golden fixtures are small, reviewed, and updated only with an explained
+  contract change.
+- Integration tests own middleware ordering, sessions, CSRF, authorization,
+  transactions, ORM generations, real providers, rendering, CLI scaffolds, and
+  dogfood application flows.
+- Browser tests own DOM identity, forms, selection, IME, focus, controllers,
+  signals, transitions, uploads, offline/retry, history, bfcache, CSP,
+  accessibility, and old/new runtime compatibility.
+- Production-build test hooks declare a 30-second timeout and build into unique
+  temporary output roots. Tests that must mutate the shared deterministic
+  `dist/` set instead share one cross-process production-build lock. Other tests
+  keep their normal timeout; concurrent processes may not compare half-built
+  artifacts.
+- Concurrency tests use deterministic barriers, injected clocks, and controlled
+  providers rather than sleep-based probability.
+- Every defect receives a failing regression test at the lowest layer that can
+  prove it, plus a higher-level test when the failure crossed a subsystem
+  boundary.
+
+### Production build shape
+
+- A documented production build shape SHALL exist in which the framework's
+  `testing` feature is off, and the framework, the CLI scaffold's generated
+  application, and the dogfood application SHALL build and boot in it.
+- Every test seam SHALL be absent from a binary built that way, checked by a
+  build assertion or a test rather than by reading the source.
+- The default build and every `_for_test` consumer SHALL stay unchanged, so
+  day-to-day verification is not narrowed by the new shape, and the feature
+  matrix step SHALL cover the testing-off build of the framework crate.
+
+### Documentation and translation parity
+
+- Inline-code-span parity SHALL hold across the whole manual: the six mirrors
+  SHALL agree with the English chapter for every chapter rather than for a
+  listed subset of them.
+- The parity rule's tokenizer SHALL treat a quoted backtick as quoted text, so
+  that only real drift is reported, and every real drift SHALL be fixed by
+  translation rather than by narrowing the rule.
+- The ratchet list of span-checked sources SHALL be retired once every source
+  is covered, and the translation lock SHALL be restamped for every chapter
+  that changed.
+
+## Naming and organization
+
+### Integrated development layout
+
+```text
+suprnova/
+  Cargo.toml
+  crates/suprnova-live/      # sole maintained Live authority
+    Cargo.toml
+    docs/specs/suprnova-live/
+    docs/implementation/
+    scripts/
+      check-specs.mjs
+      gate.sh
+    src/
+      component/
+      state/
+      snapshot/
+      protocol/
+      render/
+      render_cache/
+      providers/
+      testing/
+    browser/
+      src/
+      tests/
+      package.json
+      package-lock.json
+    components/
+      templates/
+      styles/
+      catalog/
+    fixtures/
+    benches/
+      render_cache_budget.rs
+  framework/src/live/
+  framework/benches/
+    render_cache_workloads.rs
+  suprnova-macros/src/live/
+  suprnova-cli/src/commands/live/
+  suprnova-cli/src/templates/files/live/
+  app/
+  manual/
+```
+
+The internal crate may split a module only when it has a coherent owned
+contract; directory count is not a goal. Shared helpers live with their owning
+domain unless two independent domains require the same stable abstraction.
+
+The top level of `docs/specs/suprnova-live/` is closed to the 26 numbered
+specifications plus `conventions.md`, `glossary.md`, and `ux.md`. Supplemental
+normative material, such as a threat model, lives in a named subdirectory and is
+linked from the numbered specification that owns its requirements; adding it
+also requires extending the checker and any present handoff archive contract
+deliberately.
+
+Iteration contracts live in `iterations/NNN.md`. The checker validates their
+numeric name, project/iteration title, scope-contract status, agreed ISO date,
+required sections, links, text hygiene, and exact bytes in any present handoff
+archive. Capture for a future decision lives under `iterations/next/` and does
+not become the current contract until promoted through `/next-iteration`.
+
+### Rust and generated names
+
+- Crates and modules use `snake_case`; types and traits use `UpperCamelCase`;
+  functions, fields, actions, and events use `snake_case`; constants use
+  `SCREAMING_SNAKE_CASE`.
+- Public framework types prefer the `Live` or `Render` qualifier only when the
+  unqualified term would collide with an existing Suprnova concept.
+- Procedural attributes use concise lower-case names such as `#[live]`,
+  `#[action]`, `#[model]`, `#[locked]`, and `#[server_only]`. Their generated
+  contract identities are fully qualified and versioned.
+- Standalone Live macro expansion names only final `::suprnova::live` and
+  `::suprnova::live::__private` paths. A dev-only facade fixture supplies those
+  exact paths to macro UI tests; production expansion never names the
+  development engine or macro packages.
+- Error variants name the violated contract rather than the current
+  implementation, for example `SnapshotExpired` rather than `HmacFailed` when
+  expiry is the public outcome.
+- Test names describe observable behavior and expected outcome. Avoid issue
+  numbers or implementation function names as the only explanation.
+
+### Templates, directives, and components
+
+- Application Live templates use `.html` and reside in the conventional
+  application view tree selected by `suprnova::view`; generated examples use a
+  `live/` subdirectory without making that path part of component identity.
+- `live:` directive names and modifiers use lower-case kebab form. Public action,
+  field, event, and effect values map to generated stable names; arbitrary Rust
+  paths never appear in HTML.
+- DOM keys are stable logical identities, not list indices, random render values,
+  timestamps, database display text, or mutable labels.
+- Official component names describe semantic roles. Variant names describe
+  purpose or emphasis rather than hard-coded color, pixel value, or current
+  visual appearance.
+- Theme tokens use Tailwind CSS 4 namespaces where they intentionally generate
+  utilities and `--suprnova-*` semantic CSS variables for component roles that
+  must remain stable across palettes.
+
+### Protocol, cache, and storage names
+
+- Media types, endpoint metadata, protocol fields, snapshot forms, cache entry
+  kinds, generation keys, and provider capabilities use versioned constants from
+  one Rust source of truth and generated TypeScript fixtures.
+- Provider keys begin with a versioned purpose namespace and hash unbounded or
+  sensitive dimensions. Key construction has golden tests and never depends on
+  debug formatting.
+- Database objects use the `suprnova_live_` or `suprnova_render_` prefix and
+  reversible timestamped migrations. Migration names state the durable contract,
+  not the backing product.
+- Telemetry names begin with `suprnova.live.` or `suprnova.render_cache.` and use
+  bounded enumerated attributes.
+
+## Dependency and version policy
+
+- Cargo and npm lockfiles are ground truth for exact transitive versions.
+  Overview versions identify intentional architecture lines, not an alternative
+  dependency inventory.
+- Askama, Idiomorph, Stimulus, Tailwind CSS, `imagesize`, canonicalization, and
+  cryptographic changes require upstream changelog/license/security review plus
+  Live conformance, artifact/dependency-size, fuzz, and migration evidence as
+  applicable.
+- Idiomorph is vendored or locked into the shipped runtime artifact. Application
+  package resolution cannot silently replace it with an incompatible version.
+- The oldest supported browser matrix moves only in a dated normative revision.
+  Optional APIs remain feature-detected even when all current browsers implement
+  them.
+- Rust MSRV follows the Suprnova workspace. Runtime TypeScript and npm versions
+  are pinned in the internal browser package and updated deliberately.
+
+## Verification commands
+
+Commands below are run from the named repository root. A check is reported as
+passing only when that exact command ran successfully. Heavy Cargo commands are
+never run concurrently with another build in the Suprnova tree.
+
+### Integrated specification subtree
+
+From the Suprnova workspace root, per documentation change:
+
+```bash
+node crates/suprnova-live/scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-implementation-docs.mjs
+git diff --check
+```
+
+Before a documentation commit:
+
+```bash
+node crates/suprnova-live/scripts/check-specs.mjs
+node crates/suprnova-live/scripts/check-implementation-docs.mjs
+git diff --check
+git status --short
+```
+
+A locally installed Same Page Stop hook may supplement these commands; it never
+replaces the explicit structural check.
+
+The former standalone Fable ZIP is historical provenance. Do not regenerate or
+use it as current specification authority.
+
+### Integrated Live subtree: `crates/suprnova-live/`
+
+From the Suprnova workspace root, while iterating on Rust:
+
+```bash
+CARGO_INCREMENTAL=0 cargo check -p suprnova-live --all-targets --all-features
+CARGO_INCREMENTAL=0 cargo test -p suprnova-live <test-filter>
+```
+
+After a coherent Live task:
+
+```bash
+CARGO_INCREMENTAL=0 cargo fmt \
+  -p suprnova-live -p suprnova-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support -- --check
+CARGO_INCREMENTAL=0 cargo clippy \
+  -p suprnova-live -p suprnova-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features
+CARGO_INCREMENTAL=0 cargo test \
+  -p suprnova-live -p suprnova-macros \
+  -p suprnova-live-macro-fixture -p suprnova-live-test-support \
+  --all-targets --all-features --no-fail-fast
+```
+
+Before any push from the integrated workspace:
+
+```bash
+SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/gate.sh
+```
+
+Before a release or when upload/provider/stream/resource-budget behavior changes:
+
+```bash
+SUPRNOVA_LIVE_RELEASE=1 CARGO_INCREMENTAL=0 crates/suprnova-live/scripts/gate.sh
+```
+
+When a task changes the public framework integration as well as the engine:
+
+```bash
+CARGO_INCREMENTAL=0 cargo check -p suprnova-live -p suprnova
+CARGO_INCREMENTAL=0 cargo test -p suprnova-live <test-filter>
+CARGO_INCREMENTAL=0 cargo test -p suprnova --test <affected-live-file>
+CARGO_INCREMENTAL=0 cargo test -p suprnova-macros
+CARGO_INCREMENTAL=0 cargo test -p suprnova-cli --test template_drift
+```
+
+After a public API or generated-template change:
+
+```bash
+CARGO_INCREMENTAL=0 cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored
+```
+
+### Browser runtime: `crates/suprnova-live/browser/`
+
+Dependency installation after checkout or lockfile change:
+
+```bash
+npm --prefix crates/suprnova-live/browser ci
+```
+
+Per runtime task:
+
+```bash
+npm --prefix crates/suprnova-live/browser run format:check
+npm --prefix crates/suprnova-live/browser run lint
+npm --prefix crates/suprnova-live/browser run typecheck
+npm --prefix crates/suprnova-live/browser test
+npm --prefix crates/suprnova-live/browser run test:browser
+npm --prefix crates/suprnova-live/browser run build
+```
+
+`build` must reproduce checked artifacts byte-for-byte from the lockfile and
+source, and it prints the exact raw and Brotli bytes of every artifact. No
+artifact has a byte ceiling.
+
+### Provider and browser matrix checks
+
+Provider conformance, oldest-browser, current-browser, accessibility, and CSP
+matrix commands shall be wired into `crates/suprnova-live/scripts/gate.sh` or a
+script it invokes before the corresponding implementation can be called
+complete. Benchmark commands are on-demand tools and are not wired into the
+gate. Tests
+requiring Redis, Memcached, PostgreSQL, MySQL/MariaDB, or a real browser remain
+explicit and unattended; credentials are never embedded in commands or
+fixtures.
+
+## Decisions and revisions
+
+- 2026-09-10 -- Delivered the Documentation and translation parity rule:
+  inline-code-span parity now holds across the whole manual, and the ratchet
+  is gone. `_compare_shapes` in `scripts/check-manual-structure.py` compares
+  code spans for every chapter and all six mirrors unconditionally;
+  `SPAN_CHECKED_SOURCES` and its seven-chapter allowlist no longer exist. The
+  corpus started this plan at 1,591 span problems across 68 of 111 chapters;
+  958 of them traced to one malformed construct in `manual/seeding.md` (a
+  backslash-escaped backtick inside a single-backtick span, which CommonMark
+  does not honor), leaving 633 genuine translation drifts after that fix and
+  the paragraph-bounding tokenizer change. Paragraph-bounding itself cleared
+  none of that count: on this corpus every amplified problem came through the
+  seeding.md construct, so bounding is containment against a future
+  mis-nesting, not a fix for anything reported here. A block-quote handling
+  fix in the checker's tokenizer cleared 8 more problems the corpus never
+  really had; the remaining 625 were fixed by translation across five
+  batches. The whole manual and all six mirrors now report zero span
+  problems, and `test_the_real_manual_tree_reports_no_problems` runs the
+  checker over the real `manual/` tree so a future regression fails the
+  suite and not only the gate.
+- 2026-09-09 -- Delivered the production build shape rule: `app/Cargo.toml`
+  and the CLI scaffold's Rust and API templates split the framework
+  dependency into a production entry (`default-features = false` plus the
+  nine non-`testing` defaults) and a `[dev-dependencies]` entry
+  (`features = ["testing"]`), so the shape holds by construction rather
+  than by discipline. `framework/tests/fixtures/testing-off-probe/` is a
+  separate-workspace probe crate that proves every named test seam is
+  absent from that shape by failing to compile without `testing` and
+  compiling with it, `scripts/check-feature-matrix.sh` gained a matching
+  production-shape profile, and `scripts/check-production-build.sh`
+  builds the dogfood binary in that shape, runs its migrations, and
+  answers one request; the monorepo gate gained the matching
+  `production-build` step, recorded as the Production build shape rule.
+- 2026-09-08 -- Advanced the active contract to iteration 006, the sweep of
+  every staged capture; iteration 005 closed with its definition of done met.
+  The authority statement now names the active contract rather than one
+  iteration, so it does not go stale at the next advance.
+- 2026-09-08 -- Promoted `test-seams-in-ordinary-builds.md` from
+  `iterations/next/` into iteration 006: a documented production build shape
+  with the framework `testing` feature off, in which no test seam is present
+  in the binary, recorded as the Production build shape rule.
+- 2026-09-08 -- Promoted `whole-manual-inline-span-parity.md` from
+  `iterations/next/` into iteration 006: inline-code-span parity across every
+  manual chapter, with the tokenizer corrected and the ratchet list retired,
+  recorded as the Documentation and translation parity rule.
+- 2026-09-07 -- Scoped the no-`unsafe` rule so the Complete L0 allocation
+  budget can be measured. The engine crate root SHALL keep
+  `#![forbid(unsafe_code)]`; the package lint becomes `deny` so that exactly
+  one benchmark target, `benches/render_cache_budget.rs`, MAY allow `unsafe`
+  with a written reason for the counting global allocator that budget needs.
+  That benchmark holds the only `unsafe` in the subtree, and a later proposal
+  requiring `unsafe` still needs its own approved safety case. The module
+  layout gains `framework/benches/render_cache_workloads.rs`, the host-level
+  RenderCache benchmark, which contains no `unsafe`. Rejected leaving the
+  package lint at `forbid` and measuring allocations from outside the
+  process, which cannot see them, and rejected a separate crate for the
+  allocator, which would add a workspace member to hold one forwarding
+  allocator used by one benchmark.
+- 2026-09-01 -- Benchmark and artifact budgets are on-demand tools, not gate
+  phases; `scripts/gate.sh` verifies correctness and security only. Dedicated
+  S1 and B1 qualification is release-checklist work outside Iteration 005, and
+  the artifact size history that raised the historical-baseline question was
+  deleted with the artifact budget script, so the release blockers named in
+  the 2026-08-31 entry no longer apply.
+- 2026-09-01 -- Registered the exact bounded composition-lineage extension,
+  child-parameter-v2 purpose/schema separation, and linearizable ledger
+  authorization-read rules. Preserved snapshot-v1 unknown-extension
+  compatibility and historical child-parameter-v1 conformance without granting
+  either stronger authority by reinterpretation.
+- 2026-08-31 -- Established the integrated `crates/suprnova-live/` subtree as
+  the sole maintained product, specification, checker, browser, fixture, test,
+  benchmark, and implementation-document authority. The former standalone
+  checkout is immutable historical provenance; its reference catalog and Fable
+  ZIP remain non-normative. Updated commands to run from the Suprnova root with
+  explicit Live package and browser paths. This cutover does not claim the
+  public facade, routes, providers, CLI, or RenderCache complete, and the
+  outstanding Iteration 004 release qualification remains blocking.
+- 2026-08-30 -- Advanced the active contract to iteration 005 for the atomic
+  Suprnova workspace cutover and the complete RenderCache foundation assigned by
+  iteration 004. The committed engine, browser, fixtures, tests, specs, checker,
+  and implementation documentation move together; after cutover the integrated
+  subtree is the sole maintained authority. Outstanding iteration-004 release
+  qualification remains visible and cannot be converted into success by the
+  repository move.
+- 2026-08-29 -- Recorded the completed Iteration 004 artifact and protocol
+  facts: fixture corpus v4, upload and async protocol v1, feature-registry ABI
+  v1, asset-manifest schema v2, runtime contract v1, and optional capabilities
+  `uploads@1`/`async@1` alongside `core@1`/`stimulus@1`. These are standalone
+  development and conformance contracts, not Suprnova route, provider, scanner,
+  storage, or broadcaster integration.
+- 2026-08-26 -- Appended the reviewed Task 7 measurements in a separate commit
+  after their producing code and policy decision became immutable at
+  `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`. The checker verifies strict source
+  ancestry, the decision marker in that source commit, and every valid prior
+  history prefix; it cannot self-approve a candidate or rewrite provenance.
+- 2026-08-26 -- Corrected reviewed-baseline provenance to require a strictly
+  prior immutable source commit and decision record before a later append. A
+  candidate hash change alone is not drift; exact stored hashes authenticate
+  historical reviewed artifacts, while the 15-percent size rule reports only
+  unreviewed growth. The circular Task 7 entry was withdrawn, Task 6 remains
+  active during the two-commit correction, and correctness-driven growth has no
+  absolute transfer veto.
+- 2026-08-26 -- Previously advanced the async artifact baseline through an
+  explicit independent Task 7 review. The measurements and rationale remain
+  review evidence, but the newer decision corrects its circular provenance.
+  The closed schema retains the immutable Task 6 anchor and continues to treat
+  15 percent as an alert between valid reviewed baselines.
+  Production-build hooks use isolated temporary output roots and an explicit
+  30-second timeout; only tests that must mutate shared `dist/` bytes serialize
+  behind the cross-process lock, rather than inflating unrelated test limits.
+- 2026-08-26 -- Removed the async artifacts' arbitrary 16 KiB total-size
+  ceiling. Exact ESM/classic Brotli measurement remains mandatory; a separate
+  closed-provenance Task 6 baseline gates only unreviewed growth greater than 15
+  percent, and no command automatically writes or derives that baseline from the
+  current candidate.
+- 2026-08-26 -- Ordinary clean-checkout browser budgets always reproduce and
+  hash the production artifacts and enforce each role's approved absolute or
+  reviewed-drift policy without requiring ignored local benchmark evidence.
+  Explicit binding mode and release mode require a fresh artifact-matched
+  candidate with at least three independent runs and compare it only with the
+  prior approved performance baseline.
+- 2026-08-25 -- Separated the approved binding browser benchmark from ignored
+  candidate measurements. In explicit binding or release mode, the current
+  production artifact is measured into a distinct candidate file and compared
+  with the prior approved baseline under the 15-percent confirmation policy; an
+  artifact hash mismatch is reported rather than "fixed" by self-baselining.
+  The runner rejects identical baseline/output paths, and replacing the binding
+  baseline requires explicit approval plus independent evidence.
+- 2026-08-24 -- Approved exact `imagesize` 0.15.0 with default features disabled
+  and only PNG/JPEG/GIF/WebP dimension probes enabled. The 2026-08-24 provenance
+  review recorded MIT licensing, no normal transitive dependencies, upstream
+  source/docs, and no matching RustSec advisory found at review time; lockfile,
+  license inventory, MSRV, hostile-regression, and dedicated fuzz checks remain
+  required before acceptance.
+- 2026-08-24 -- Split Iteration 004 performance execution by purpose: ordinary
+  unattended gates run reduced deterministic workload proofs, while explicit
+  release mode runs the full qualified `U4/16`, `E100/1K`, and `R100` matrices.
+  Both paths remain mechanical and release mode cannot silently substitute smoke
+  evidence for pinned `S1`/`B1` qualification.
+- 2026-08-24 -- Replaced the arbitrary absolute core-runtime transfer cap with
+  deterministic ESM/classic size reporting and exact-artifact benchmark
+  rebaselining. Optional artifact ceilings remain enforced; a future core ceiling
+  requires completed functionality, evidence, and explicit maintenance headroom.
+- 2026-08-24 -- Clarified that a Stimulus-free universal core excludes both the
+  third-party package and Suprnova's optional bridge implementation. Added the
+  trusted Stimulus adapter role, unchanged boot contract, and ESM/classic
+  no-bundler parity to the deterministic artifact convention.
+- 2026-08-23 -- Advanced the active contract to iteration 004 as one complete
+  standalone upload and asynchronous-update foundation across specs 08 and 14.
+  Kept upload and event protocols distinct over shared bounded-resource
+  lifecycle machinery; split upload/async into manifest-selected optional
+  ESM/classic artifacts to preserve a small universal core; required
+  provider, continuity, adversarial, and hard resource-budget evidence; and
+  retained storage/broadcast framework adapters for the later atomic Suprnova
+  integration.
+- 2026-08-22 -- Advanced the active contract to iteration 003 as one complete
+  standalone browser interaction runtime across specs 09 through 13. Retained
+  vertical implementation milestones inside the single contract; rejected both
+  splitting a coherent runtime into artificial numbered partial products and
+  calling a bootstrap-only shell complete. `agent-browser` and DevTools MCP may
+  assist exploratory diagnosis, while committed Playwright, shared-fixture, and
+  benchmark evidence remain the completion authority.
+- 2026-08-21 -- Locked standalone macro expansion to final
+  `::suprnova::live` paths and required a dev-only facade fixture, preventing
+  successful development builds from concealing public integration drift.
+- 2026-08-21 -- Advanced the active contract to iteration 002 and kept its
+  server-component kernel standalone. Conformance host adapters are test
+  apparatus, not actual Suprnova integration; the latter waits for the atomic
+  code/spec/checker move.
+- 2026-08-21 -- Added checked nested iteration contracts to the structural and
+  optional handoff-archive gates; `iterations/NNN.md` is normative scope while
+  `iterations/next/` remains unconfirmed capture.
+- 2026-08-21 -- Applied the house warning policy: Clippy findings are reviewed
+  without blanket `-D warnings`, and intentional suppressions are scoped and
+  reasoned rather than hidden by broad allowances.
+- 2026-08-21 -- Reserved the top-level spec directory for the checked canonical
+  set; supplemental normative documents live in linked subdirectories and must
+  be added to the checker/archive contract deliberately.
+- 2026-08-21 -- Kept iteration 001 development, normative specifications, and
+  the checker colocated in this dedicated workspace. Migration into Suprnova is
+  triggered only by a material integration/testing/coherence blocker and then
+  moves code, specs, and checker together; reference sources and the optional
+  Fable handoff ZIP remain non-normative development artifacts.
+- 2026-08-21 -- Established one internal engine crate with public framework,
+  macro, CLI, dogfood, and browser/component integration points; rejected
+  application dependencies on internal crates.
+- 2026-08-21 -- Chose strict TypeScript and reproducible npm scripts for runtime
+  contribution while shipping prebuilt artifacts so application adoption needs
+  no JavaScript toolchain.
+- 2026-08-21 -- Made Tier 0 the provider semantic reference and the architecture
+  budgets release-blocking rather than advisory.
+- 2026-08-21 -- Mirrored Suprnova's no-unsafe, documented-public-API, typed-error,
+  targeted-test, full-gate, and non-concurrent-build rules.
