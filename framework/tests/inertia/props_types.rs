@@ -409,6 +409,34 @@ async fn inp_share_once_options_reach_only_the_share_they_were_chained_on() {
     assert!(page["onceProps"].get("stale").is_none(), "{page}");
 }
 
+#[tokio::test]
+async fn inp_the_inertia_facade_shares_a_once_prop_taking_its_options() {
+    // Laravel's `Inertia::shareOnce(...)` on the facade returns the same
+    // `OnceProp` as the container helper, so the options chain on it too.
+    let _guard = suprnova::testing::TestContainer::fake();
+    let _clock = suprnova::testing::TestClock::travel_to(render_moment());
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    suprnova::Inertia::share_once("plans", counted_rates(calls.clone()))
+        .as_key(PlanKey::Pro)
+        .until(60)
+        .fresh(true);
+
+    let req = MockReq::new("/")
+        .inertia()
+        .header("X-Inertia-Except-Once-Props", "plan-pro");
+    let page = page_of(InertiaResponse::new("Billing"), &req).await;
+
+    assert_eq!(
+        page["onceProps"]["plan-pro"],
+        json!({ "prop": "plans", "expiresAt": (1_800_000_000_i64 + 60) * 1000 })
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "fresh(true) resolves despite the client's claim"
+    );
+}
+
 // ---- PAR-052: scroll props ----
 
 /// Page facts for a second page of posts.

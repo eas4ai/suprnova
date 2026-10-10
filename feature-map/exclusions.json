@@ -2,8 +2,8 @@
  "build_time_env": {
   "CARGO_MANIFEST_DIR": [
    "suprnova-cli/src/templates/files/library/preview/counter_test.rs.tpl:29",
-   "suprnova-macros/src/inertia.rs:411",
-   "suprnova-macros/src/package_settings.rs:79",
+   "suprnova-macros/src/inertia.rs:504",
+   "suprnova-macros/src/package_settings.rs:84",
    "suprnova-macros/src/redirect.rs:59"
   ],
   "CARGO_PKG_NAME": [
@@ -58,8 +58,14 @@
    "suprnova-cli/src/registry/scan/contract.rs:183"
   ],
   "SCREAMING_SNAKE_CASE": [
-   "suprnova-cli/src/commands/generate_types.rs:316",
+   "suprnova-cli/src/commands/generate_types.rs:358",
    "suprnova-macros/src/serde_attrs.rs:33"
+  ],
+  "SUPRNOVA_CLI_BUILD_COMMIT": [
+   "suprnova-cli/src/templates/mod.rs:47"
+  ],
+  "SUPRNOVA_CLI_BUILD_TAGGED": [
+   "suprnova-cli/src/templates/mod.rs:48"
   ],
   "TIMEOUT_SECS": [
    "framework/src/broadcasting/pusher/config.rs:253"
@@ -71,10 +77,10 @@
    "framework/src/vector/mariadb.rs:160"
   ],
   "VERIFY_CA": [
-   "framework/src/database/schema_dump.rs:1002"
+   "framework/src/database/schema_dump.rs:1045"
   ],
   "VERIFY_IDENTITY": [
-   "framework/src/database/schema_dump.rs:1002"
+   "framework/src/database/schema_dump.rs:1045"
   ]
  },
  "rust_items_not_extracted": [
@@ -82,6 +88,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 302,
- "source_rev": "ebf2afcf3"
+ "sibling_reexports_folded_into_aliases": 340,
+ "source_rev": "13fb20e0d"
 }
