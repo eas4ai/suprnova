@@ -617,3 +617,7 @@ path = "tests/live/assets.rs"
 [[test]]
 name = "live_async_backpressure"
 path = "tests/live/async_backpressure.rs"
+
+[[test]]
+name = "concurrency"
+path = "tests/concurrency/main.rs"
