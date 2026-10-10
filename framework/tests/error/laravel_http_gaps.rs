@@ -438,6 +438,249 @@ async fn a_console_command_that_returns_err_reaches_the_callbacks() {
     );
 }
 
+// A console command whose boot fails is reported as Laravel's console
+// kernel reports a failure of its bootstrap. Each test runs alone in a child
+// process (see `own_process`): a failed boot stops the process-wide
+// supervisors, and `Application::run_with_args` needs the configuration
+// loaded before the runtime, which writes process-wide state.
+
+/// A log channel nothing defines: `LOG_CHANNEL` naming it fails the
+/// framework's boot after the application's bootstrap ran.
+const MISSING_CHANNEL: &str = "laravel-http-gaps-no-such-channel";
+
+/// What the bootstraps below panic with, as `DB::init().await.expect(..)`
+/// panics when the database does not answer.
+const REFUSED: &str = "ledger database 14 refused the connection";
+
+/// The panic of a bootstrap whose database does not answer.
+fn refuse_the_connection() {
+    panic!("{REFUSED}");
+}
+
+/// Holds the env lock and sets `pairs` until dropped. The snapshot is
+/// declared first, so it is restored before the lock is released.
+struct ChildEnv {
+    _env: EnvSnapshot,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+fn child_env(pairs: &[(&'static str, &str)]) -> ChildEnv {
+    let lock = crate::env_lock::lock_env();
+    let keys: Vec<&'static str> = pairs.iter().map(|(key, _)| *key).collect();
+    let snapshot = EnvSnapshot::capture(&keys);
+    for (key, value) in pairs {
+        set_env(key, Some(value));
+    }
+    ChildEnv {
+        _env: snapshot,
+        _lock: lock,
+    }
+}
+
+/// Run `body` as `Application::run` runs: the configuration loaded before
+/// the runtime exists, then `body` on a runtime of its own.
+fn with_loaded_configuration<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
+    suprnova::boot::load_env().expect("the configuration loads before the runtime");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(body());
+}
+
+#[test]
+fn a_console_command_whose_framework_boot_fails_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::a_console_command_whose_framework_boot_fails_reaches_the_callbacks_child",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_console_command_whose_framework_boot_fails_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _mode = page_mode(false, None).await;
+    let _isolated = Isolated::new();
+    let _vars = EnvSnapshot::capture(&["APP_ENV", "LOG_CHANNEL"]);
+    set_env("APP_ENV", Some("testing"));
+    set_env("LOG_CHANNEL", Some(MISSING_CHANNEL));
+    let seen = Seen::default();
+    let record = seen.clone();
+
+    let result = suprnova::console::dispatch_argv_with_init(
+        vec![
+            "console".to_string(),
+            "laravel-http-gaps:close-ledger".to_string(),
+        ],
+        move || async move {
+            Exceptions::reportable(move |error: &FrameworkError| record.push(error.to_string()));
+        },
+    )
+    .await;
+
+    let error = result.expect_err("a console whose boot fails runs no command");
+    assert!(error.to_string().contains(MISSING_CHANNEL), "{error}");
+    assert!(
+        seen.contains(MISSING_CHANNEL),
+        "the boot failure must reach the callbacks the bootstrap registered; they saw {:?}",
+        seen.all()
+    );
+    assert!(
+        !seen.contains("console run 8"),
+        "the command must not run after its boot failed; the callbacks saw {:?}",
+        seen.all()
+    );
+}
+
+#[test]
+fn a_console_bootstrap_that_panics_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::a_console_bootstrap_that_panics_reaches_the_callbacks_child",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_console_bootstrap_that_panics_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _mode = page_mode(false, None).await;
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+
+    let result = suprnova::console::dispatch_argv_with_init(
+        vec![
+            "console".to_string(),
+            "laravel-http-gaps:close-ledger".to_string(),
+        ],
+        move || async move {
+            Exceptions::reportable(move |error: &FrameworkError| record.push(error.to_string()));
+            refuse_the_connection();
+        },
+    )
+    .await;
+
+    let error = result.expect_err("a console whose bootstrap panics runs no command");
+    assert!(error.to_string().contains(REFUSED), "{error}");
+    assert!(
+        seen.contains(REFUSED),
+        "the bootstrap's panic must reach the callbacks it registered first; they saw {:?}",
+        seen.all()
+    );
+    assert!(!seen.contains("console run 8"), "{:?}", seen.all());
+}
+
+#[test]
+fn an_application_command_whose_framework_boot_fails_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::an_application_command_whose_framework_boot_fails_reaches_the_callbacks_child",
+    );
+}
+
+#[test]
+#[serial]
+fn an_application_command_whose_framework_boot_fails_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = child_env(&[("APP_ENV", "testing"), ("LOG_CHANNEL", MISSING_CHANNEL)]);
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+    with_loaded_configuration(|| async move {
+        let error = suprnova::Application::new()
+            .bootstrap(move || async move {
+                Exceptions::reportable(move |error: &FrameworkError| {
+                    record.push(error.to_string())
+                });
+            })
+            .run_with_args(["app", "schedule:list"])
+            .await
+            .expect_err("a command whose boot fails does not run");
+        assert!(error.to_string().contains(MISSING_CHANNEL), "{error}");
+    });
+    assert!(
+        seen.contains(MISSING_CHANNEL),
+        "the boot failure must reach the callbacks the bootstrap registered; they saw {:?}",
+        seen.all()
+    );
+}
+
+#[test]
+fn an_application_bootstrap_that_panics_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::an_application_bootstrap_that_panics_reaches_the_callbacks_child",
+    );
+}
+
+#[test]
+#[serial]
+fn an_application_bootstrap_that_panics_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = child_env(&[("APP_ENV", "testing")]);
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+    with_loaded_configuration(|| async move {
+        let error = suprnova::Application::new()
+            .bootstrap(move || async move {
+                Exceptions::reportable(move |error: &FrameworkError| {
+                    record.push(error.to_string())
+                });
+                refuse_the_connection();
+            })
+            .run_with_args(["app", "schedule:list"])
+            .await
+            .expect_err("a command whose bootstrap panics does not run");
+        assert!(error.to_string().contains(REFUSED), "{error}");
+    });
+    assert!(
+        seen.contains(REFUSED),
+        "the bootstrap's panic must reach the callbacks it registered first; they saw {:?}",
+        seen.all()
+    );
+}
+
+/// An application command that fails on its own is reported too, as the
+/// console's commands are: here before its boot, so the callback is
+/// registered by the test.
+#[test]
+fn an_application_command_that_fails_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::an_application_command_that_fails_reaches_the_callbacks_child",
+    );
+}
+
+#[test]
+#[serial]
+fn an_application_command_that_fails_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = child_env(&[("APP_ENV", "testing")]);
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+    Exceptions::reportable(move |error: &FrameworkError| record.push(error.to_string()));
+    with_loaded_configuration(|| async {
+        suprnova::Application::new()
+            .run_with_args(["app", "schedule:list", "--timezone", "Mars/Ledger_Crater"])
+            .await
+            .expect_err("an unknown zone fails the command");
+    });
+    assert!(
+        seen.contains("Mars/Ledger_Crater"),
+        "the command's own error must reach the callbacks; they saw {:?}",
+        seen.all()
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn should_stop_retries_answers_for_dont_retry_and_dont_retry_when() {

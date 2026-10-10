@@ -71,7 +71,54 @@ use crate::lock;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
-static DRIVER: RwLock<Option<Arc<dyn QueueDriver>>> = RwLock::new(None);
+/// The default connection's driver, and who installed it.
+static DRIVER: RwLock<Option<DefaultDriver>> = RwLock::new(None);
+
+/// The default connection's driver with who installed it: the boot's
+/// [`bootstrap_from_env`] replaces a driver the environment installed, and
+/// keeps one the application installed (PAR-017).
+struct DefaultDriver {
+    driver: Arc<dyn QueueDriver>,
+    installed_by: Installer,
+}
+
+/// Who installed the default connection's driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Installer {
+    /// [`Queue::set_driver`]: the application, whose driver the boot keeps.
+    Application,
+    /// [`bootstrap_from_env`] or [`bootstrap_default`], whose driver the
+    /// next [`bootstrap_from_env`] replaces.
+    Environment,
+}
+
+/// Put `driver` in the default connection's slot.
+fn install_driver(driver: Arc<dyn QueueDriver>, installed_by: Installer) {
+    // The slot is a single `Option`; the critical section is a single
+    // assignment. Recover in place on poison so a panic in some other
+    // registry user doesn't kill the boot path for every future caller -
+    // matches the framework's hot-registry convention (data::registry,
+    // payments registry).
+    *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = Some(DefaultDriver {
+        driver,
+        installed_by,
+    });
+}
+
+/// Empty the default connection's slot. [`testing::forget_driver`] calls
+/// it.
+pub(crate) fn forget_driver() {
+    *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The driver the application installed with [`Queue::set_driver`], when
+/// the default connection has one.
+fn application_driver() -> Result<Option<Arc<dyn QueueDriver>>, FrameworkError> {
+    Ok(lock::read(&DRIVER, "queue driver registry")?
+        .as_ref()
+        .filter(|installed| installed.installed_by == Installer::Application)
+        .map(|installed| Arc::clone(&installed.driver)))
+}
 
 /// Name of the default queue connection, the one [`Queue::set_driver`]
 /// installs. Carried in queue lifecycle events, and the name a job selects
@@ -1604,13 +1651,15 @@ impl Queue {
 
     /// Replace the registered driver. Primarily for boot-time wiring;
     /// in tests prefer `testing::install_fake()`.
+    ///
+    /// The driver you install here is the application's, and the boot keeps
+    /// it: [`bootstrap_from_env`], which the server and the worker commands
+    /// run after your `bootstrap`, does not replace it with the driver
+    /// `QUEUE_DRIVER` names. Install one in `bootstrap` when the default
+    /// connection needs runtime configuration the environment cannot
+    /// express, such as a failover chain over drivers you build yourself.
     pub fn set_driver(driver: Arc<dyn QueueDriver>) {
-        // The driver registry is a single-slot `Option<Arc<dyn QueueDriver>>`;
-        // the critical section is a single assignment. Recover in place
-        // on poison so a panic in some other registry user doesn't kill
-        // the boot path for every future caller - matches the framework's
-        // hot-registry convention (data::registry, payments registry).
-        *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = Some(driver);
+        install_driver(driver, Installer::Application);
     }
 
     /// Return the default connection's driver `name()` for observability (admin,
@@ -1642,7 +1691,8 @@ impl Queue {
 
 pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
     lock::read(&DRIVER, "queue driver registry")?
-        .clone()
+        .as_ref()
+        .map(|installed| Arc::clone(&installed.driver))
         .ok_or_else(|| {
             FrameworkError::internal(
                 "queue driver not initialized; call Queue::set_driver(...) or install a test fake",
@@ -1712,7 +1762,10 @@ pub async fn bootstrap_default() {
     {
         return;
     }
-    Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
+    install_driver(
+        Arc::new(memory::MemoryQueueDriver::new()),
+        Installer::Environment,
+    );
 }
 
 /// Read `QUEUE_DRIVER` env and configure the matching driver: `memory`, `sync`,
@@ -1742,13 +1795,24 @@ pub async fn bootstrap_default() {
 /// already in use is refused. See [`Queue::register_connection`] for what a
 /// job does with a connection name.
 ///
-/// Unlike [`bootstrap_default`], this call **always replaces** the registered
-/// driver - long-running processes (workers, tests) that re-invoke
-/// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
-/// Redis/database boot) will pick up the new driver instead of being pinned to
-/// the first one installed. A connection the application registered itself
-/// is left alone unless `QUEUE_CONNECTIONS` names it.
+/// A driver the application installed with [`Queue::set_driver`] is kept,
+/// and `QUEUE_DRIVER` is not read then: the application's bootstrap runs
+/// before the boot calls this, and what it installed is what it meant, as
+/// a disk the bootstrap registers under the environment disk's name is kept
+/// by `filesystem::bootstrap_from_env`. The connections `QUEUE_CONNECTIONS`
+/// lists are registered beside it, and none of them is a second name for
+/// it.
+///
+/// A driver the environment installed, by an earlier call or by
+/// [`bootstrap_default`], is replaced: a long-running process (a worker, a
+/// test) that calls `bootstrap_from_env` again after `QUEUE_DRIVER` changes
+/// (or after an earlier Redis/database boot) picks up the new driver instead
+/// of being pinned to the first one installed. A connection the application
+/// registered itself is left alone unless `QUEUE_CONNECTIONS` names it.
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
+    if application_driver()?.is_some() {
+        return register_connections_from_env(None).await;
+    }
     let requested = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
     let driver = match requested.as_str() {
         "failover" => build_failover_from_env().await?,
@@ -1762,12 +1826,13 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             None => unknown_driver(other, crate::config::Environment::detect().is_production())?,
         },
     };
-    Queue::set_driver(Arc::clone(&driver));
-    register_connections_from_env(&requested, driver).await
+    install_driver(Arc::clone(&driver), Installer::Environment);
+    register_connections_from_env(Some((&requested, driver))).await
 }
 
-/// Register the connections `QUEUE_CONNECTIONS` lists. `default_kind` is the
-/// value of `QUEUE_DRIVER` and `default` the driver it built.
+/// Register the connections `QUEUE_CONNECTIONS` lists. `default` is the
+/// value of `QUEUE_DRIVER` and the driver it built, and `None` when the
+/// default connection is a driver the application installed.
 ///
 /// A name this build does not know is an error everywhere, as it is inside
 /// `QUEUE_FAILOVER_CONNECTIONS`: a typo that quietly became an in-memory
@@ -1784,16 +1849,27 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
 /// entry that names `QUEUE_DRIVER` itself: that is the default connection
 /// under a second name, and it keeps the default's label.
 async fn register_connections_from_env(
-    default_kind: &str,
-    default: Arc<dyn QueueDriver>,
+    default: Option<(&str, Arc<dyn QueueDriver>)>,
 ) -> Result<(), FrameworkError> {
     let Ok(listed) = std::env::var("QUEUE_CONNECTIONS") else {
         return Ok(());
     };
     let failover_inner = std::env::var("QUEUE_FAILOVER_CONNECTIONS").unwrap_or_default();
+    // An empty kind names no driver: with the application's driver as the
+    // default connection, no entry is a second name for it, and the
+    // environment has put no queue in use.
+    let default_kind = default.as_ref().map_or("", |(kind, _)| *kind);
+    // The default connection's driver, for an entry that names
+    // `QUEUE_DRIVER` itself.
+    let second_name = |name: &str| {
+        default
+            .as_ref()
+            .filter(|(kind, _)| *kind == name)
+            .map(|(_, driver)| Arc::clone(driver))
+    };
     for name in plan_connections(default_kind, &listed, &failover_inner)? {
-        let driver = if name == default_kind {
-            Arc::clone(&default)
+        let driver = if let Some(driver) = second_name(&name) {
+            driver
         } else if name == "failover" {
             build_failover_from_env().await?
         } else {

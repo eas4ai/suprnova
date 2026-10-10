@@ -355,10 +355,10 @@ impl Commands {
             | Commands::MigrateFresh { .. }
             | Commands::SchemaDump { .. } => ProcessBoot::Migrations,
             Commands::ScheduleList { .. }
-            | Commands::ScheduleInterrupt
             | Commands::SsrStart { .. }
             | Commands::SsrStop { .. }
             | Commands::SsrCheck => ProcessBoot::Core,
+            Commands::ScheduleInterrupt => ProcessBoot::Interrupt,
             Commands::Down { .. } | Commands::Up => ProcessBoot::Maintenance,
             Commands::Serve { .. }
             | Commands::WebRun { .. }
@@ -1223,6 +1223,12 @@ where
     /// error naming the status, where [`Self::run`] exits with it. `--help`
     /// and `--version` print what they print and return `Ok(())`.
     ///
+    /// A failure after the argv parse and the boot precondition is reported
+    /// through [`Exceptions::report`](crate::Exceptions::report) before it
+    /// is returned, as [`Self::run`] reports it before it prints it: the
+    /// command's own error, and a boot that fails, a `bootstrap` hook that
+    /// panics included. A silent error is not reported.
+    ///
     /// # Errors
     ///
     /// Returns [`FrameworkError`] for every failure [`Self::run`] exits
@@ -1531,6 +1537,15 @@ where
                     .map(|code| status = code)
             }
         };
+        // Laravel's console kernel reports what a command throws, a failure
+        // of its bootstrap included, before it renders it (PAR-111), as the
+        // console binary's dispatcher does. `report` passes over the silent
+        // sentinel of a command that printed its own failure. Before the
+        // drain below, so the queued listeners a reporter starts are
+        // awaited too.
+        if let Err(e) = &result {
+            crate::error::Exceptions::report(e);
+        }
         if let (Err(e), Failures::Print) = (&result, failures)
             && !e.is_silent()
         {
@@ -2286,11 +2301,11 @@ where
     /// subset of the boot again.
     /// The hook runs first: `QUEUE_DRIVER=database` resolves its connection
     /// out of the `DB` the hook initialized, and a log channel the hook
-    /// defines can be `LOG_CHANNEL`. A bootstrap that installs a driver by
-    /// hand is overridden by the environment in exactly the same way under
-    /// `serve` and under `queue:work`; the storage disk of the environment
-    /// is the one that gives way, so a disk the bootstrap registered under
-    /// its name is kept.
+    /// defines can be `LOG_CHANNEL`. What the hook installs by hand is kept
+    /// in exactly the same way under `serve` and under `queue:work`: a
+    /// queue driver it installed with `Queue::set_driver`, a cache store it
+    /// bound, a disk it registered under the environment disk's name. A
+    /// panic in the hook is the boot's error.
     async fn boot_process(
         boot: ProcessBoot,
         bootstrap_fn: Option<BootstrapFn>,
@@ -2299,7 +2314,7 @@ where
             return Ok(());
         }
         if let Some(bootstrap_fn) = bootstrap_fn {
-            bootstrap_fn().await;
+            process_boot::run_hook(bootstrap_fn()).await?;
         }
         process_boot::boot_after_hook(boot).await
     }
@@ -2461,10 +2476,14 @@ where
         command: SsrCommand,
     ) -> Result<i32, FrameworkError> {
         let name = command.name();
-        Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
-        process_boot::boot_after_hook(boot)
-            .await
-            .map_err(|e| failed(format!("suprnova: {name} bootstrap error: {e}")))?;
+        let booted =
+            match process_boot::run_hook(Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn))
+                .await
+            {
+                Ok(()) => process_boot::boot_after_hook(boot).await,
+                Err(e) => Err(e),
+            };
+        booted.map_err(|e| failed(format!("suprnova: {name} bootstrap error: {e}")))?;
         let Some(inertia) = crate::App::inertia_registry().installed_config() else {
             return Err(failed(format!(
                 "suprnova: {name} reads the Inertia configuration, and none is installed. \
@@ -2743,6 +2762,9 @@ mod worker_boot_order_tests {
             ("QUEUE_DRIVER", "database"),
             ("QUEUE_DB_TABLE", "jobs"),
         ]);
+        // A driver an earlier test installed with `Queue::set_driver` is the
+        // application's, which the boot keeps.
+        crate::queue::forget_driver();
 
         let bootstrap: BootstrapFn = Box::new(|| {
             Box::pin(async {
@@ -2833,6 +2855,9 @@ mod worker_boot_order_tests {
             ("S3_ACCESS_KEY", "suprnova-test-key"),
             ("S3_SECRET_KEY", "suprnova-test-secret"),
         ]);
+        // A driver an earlier test installed with `Queue::set_driver` is the
+        // application's, which the boot keeps.
+        crate::queue::forget_driver();
 
         Application::<NoMigrator>::boot_process(ProcessBoot::Work, None)
             .await
@@ -2925,9 +2950,12 @@ mod worker_boot_order_tests {
             .expect("the argv parses")
             .command
             .expect("the argv names a subcommand");
-        crate::queue::Queue::set_driver(std::sync::Arc::new(
-            crate::queue::memory::MemoryQueueDriver::new(),
-        ));
+        // The memory driver, installed as the environment installs it: a
+        // boot that builds the drivers replaces it, and one that does not
+        // leaves it. A driver installed with `Queue::set_driver` would be
+        // the application's, which the boot keeps.
+        crate::queue::forget_driver();
+        crate::queue::bootstrap_default().await;
         // An unset APP_ENV is production, whose mail and rate-limit checks
         // would refuse the default drivers; these tests name a test process.
         let _env = EnvGuard::set(&[

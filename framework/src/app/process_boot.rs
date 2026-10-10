@@ -18,6 +18,7 @@
 //! the [`ProcessBoot`] value they pass.
 
 use crate::container::App;
+use std::future::Future;
 
 /// The error a process boot returns; every step's own error converts into it.
 pub(crate) type BootError = Box<dyn std::error::Error + Send + Sync>;
@@ -39,6 +40,12 @@ pub(crate) enum ProcessBoot {
     /// The core only: `schedule:list`, which builds the schedule the
     /// daemon would run and prints it.
     Core,
+    /// The core and the cache store, with the MongoDB connections it may
+    /// run on (with `database-mongodb`): `schedule:interrupt`, which writes
+    /// its mark through the cache the schedulers read. A store the
+    /// application's bootstrap bound is kept. A store that does not come up
+    /// stops the boot, since the command has nothing else to do.
+    Interrupt,
     /// The core and the drivers maintenance mode reads: the cache when
     /// `MAINTENANCE_DRIVER=cache`, with the MongoDB connections it may run
     /// on (with `database-mongodb`), and localization. `down` and `up`.
@@ -81,11 +88,43 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
     crate::authorization::init_policies();
     match boot {
         ProcessBoot::Migrations | ProcessBoot::Core => {}
+        ProcessBoot::Interrupt => bootstrap_cache_store()
+            .await
+            .map_err(|e| format!("cache bootstrap failed: {e}"))?,
         ProcessBoot::Maintenance => bootstrap_maintenance_drivers().await?,
         ProcessBoot::Work => bootstrap_runtime_drivers(false).await?,
         ProcessBoot::Console => bootstrap_runtime_drivers(true).await?,
     }
     Ok(())
+}
+
+/// Run the application's `bootstrap` hook, with a panic in it turned into
+/// the boot's error.
+///
+/// A bootstrap returns nothing, so a failure in it ends in a panic: the
+/// scaffold's `DB::init().await.expect(..)` panics when the database does
+/// not answer. Laravel's console kernel reports a failure of its bootstrap
+/// through the exception handler (PAR-111). Unwinding past the command, the
+/// panic reached no `Exceptions::reportable` callback and skipped the drain
+/// of the supervisors the hook had started. Caught here, it is reported,
+/// printed and drained as every boot failure is. The panic hook has already
+/// written the panic's message and location to stderr.
+///
+/// # Errors
+///
+/// When `hook` panics, with the panic's message.
+pub(crate) async fn run_hook<F: Future<Output = ()>>(hook: F) -> Result<(), BootError> {
+    use futures::FutureExt as _;
+    std::panic::AssertUnwindSafe(hook)
+        .catch_unwind()
+        .await
+        .map_err(|payload| {
+            format!(
+                "the bootstrap panicked: {}",
+                crate::server::panic_payload_message(&payload)
+            )
+            .into()
+        })
 }
 
 /// How long the end of a booted process waits for the supervisors its
@@ -165,22 +204,31 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
     Ok(())
 }
 
+/// The cache store, after the MongoDB connections it may run on.
+///
+/// With `database-mongodb`, `CACHE_DRIVER=mongodb` builds its store on the
+/// default connection, and finds none unless the boot registered it first.
+/// A store the application bound is kept, and so are the connections it
+/// registered.
+async fn bootstrap_cache_store() -> Result<(), BootError> {
+    #[cfg(feature = "database-mongodb")]
+    crate::mongodb::Mongo::bootstrap().await?;
+    crate::cache::Cache::bootstrap().await?;
+    Ok(())
+}
+
 /// The drivers `down` and `up` read.
 ///
 /// The cache only when the cache driver holds the maintenance state. The
 /// localization always: the commands print user-facing status text, and a
 /// custom driver may call `Lang::get`.
 ///
-/// With `database-mongodb`, the MongoDB connections come before the cache,
-/// as in [`bootstrap_runtime_drivers`]: `CACHE_DRIVER=mongodb` builds its
-/// store on the default connection, and finds none unless the boot
-/// registered it. They come only with the cache, so `down` on the file
-/// driver never reads `MONGODB_URI`.
+/// With `database-mongodb`, the MongoDB connections come before the cache
+/// ([`bootstrap_cache_store`]). They come only with the cache, so `down` on
+/// the file driver never reads `MONGODB_URI`.
 async fn bootstrap_maintenance_drivers() -> Result<(), BootError> {
     if std::env::var("MAINTENANCE_DRIVER").as_deref() == Ok("cache") {
-        #[cfg(feature = "database-mongodb")]
-        crate::mongodb::Mongo::bootstrap().await?;
-        crate::cache::Cache::bootstrap()
+        bootstrap_cache_store()
             .await
             .map_err(|e| format!("maintenance (cache driver) bootstrap failed: {e}"))?;
     }
@@ -264,6 +312,37 @@ mod mongodb_boot_tests {
         boot_after_hook(ProcessBoot::Maintenance)
             .await
             .unwrap_or_else(|error| panic!("the maintenance boot failed: {error}"));
+        let store = crate::cache::Cache::store().expect("the cache store resolves");
+        assert_eq!(store.name(), "mongodb");
+        let database = crate::mongodb::Mongo::database().expect("the connection is registered");
+        assert_eq!(database.name(), "suprnova_boot");
+    }
+
+    /// `schedule:interrupt` with a MongoDB cache: the boot registers the
+    /// connection from `MONGODB_URI` before it builds the cache the mark is
+    /// written to, as the maintenance boot does. The command used to boot
+    /// no cache store at all.
+    #[test]
+    #[serial]
+    fn interrupt_boot_registers_mongodb_before_a_mongodb_cache() {
+        run_child(
+            "app::process_boot::mongodb_boot_tests::interrupt_cache_on_mongodb_child",
+            &[
+                ("MONGODB_URI", UNREACHABLE_URI),
+                ("MONGODB_DATABASE", "suprnova_boot"),
+                ("CACHE_DRIVER", "mongodb"),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_cache_on_mongodb_child() {
+        if std::env::var_os(CHILD_MODE).is_none() {
+            return;
+        }
+        boot_after_hook(ProcessBoot::Interrupt)
+            .await
+            .unwrap_or_else(|error| panic!("the interrupt boot failed: {error}"));
         let store = crate::cache::Cache::store().expect("the cache store resolves");
         assert_eq!(store.name(), "mongodb");
         let database = crate::mongodb::Mongo::database().expect("the connection is registered");
