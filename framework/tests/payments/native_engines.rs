@@ -415,6 +415,12 @@ async fn mirrors_create_read_update() {
 }
 
 async fn live_payments(env: &str, provider_name: &'static str) {
+    // The mock provider accepts its unsigned webhooks only in a local,
+    // development or testing environment, and an unset APP_ENV is production
+    // (PAR-136), so each live test names its environment for its own duration.
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     let (guard, database) = connect_live(env).await;
     fresh_payments_schema(&database).await;
     {
@@ -730,6 +736,9 @@ async fn receipt_writes_advance_in_their_transaction(
 }
 
 async fn live_payments_generations(env: &str, provider_name: &'static str) {
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     let (guard, database) = connect_live(env).await;
     fresh_payments_schema(&database).await;
     hydration_advances_generations_in_its_transaction(&database, provider_name).await;
@@ -750,6 +759,9 @@ async fn mysql_payments_hydration_advances_generations_in_its_transaction() {
 }
 
 async fn live_receipt_generations(env: &str, provider_name: &'static str) {
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
     let (guard, database) = connect_live(env).await;
     fresh_payments_schema(&database).await;
     receipt_writes_advance_in_their_transaction(&database, provider_name).await;
