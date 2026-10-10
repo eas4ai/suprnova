@@ -384,13 +384,7 @@ impl ConsoleRun {
     /// checks them.
     #[track_caller]
     pub fn assert_failed(&self) -> &Self {
-        let unexpected = self.unexpected_problems();
-        assert!(
-            unexpected.is_empty(),
-            "{}\n{}",
-            unexpected.join("\n"),
-            self.streams()
-        );
+        self.assert_no_unexpected_question();
         assert!(
             self.exit_code() != 0,
             "the command succeeded and was expected to fail.\n--- output ---\n{}",
@@ -449,8 +443,14 @@ impl ConsoleRun {
     }
 
     /// Assert that the standard output contains `text`.
+    ///
+    /// A question the test did not expect fails it first, naming the
+    /// question, as it fails every other assertion on the run: a text
+    /// that the output holds does not show that the run went as the test
+    /// stated.
     #[track_caller]
     pub fn assert_output_contains(&self, text: &str) -> &Self {
+        self.assert_no_unexpected_question();
         assert!(
             self.output.contains(text),
             "the output does not contain `{text}`.\n--- output ---\n{}",
@@ -460,8 +460,12 @@ impl ConsoleRun {
     }
 
     /// Assert that the standard error contains `text`.
+    ///
+    /// A question the test did not expect fails it first, naming the
+    /// question, as it fails every other assertion on the run.
     #[track_caller]
     pub fn assert_errors_contain(&self, text: &str) -> &Self {
+        self.assert_no_unexpected_question();
         assert!(
             self.errors.contains(text),
             "the errors do not contain `{text}`.\n--- errors ---\n{}",
@@ -472,14 +476,34 @@ impl ConsoleRun {
 
     /// Assert that the command asked every question the test prepared an
     /// answer for.
+    ///
+    /// A question the test did not expect fails it first, naming the
+    /// question, as it fails every other assertion on the run.
     #[track_caller]
     pub fn assert_every_question_was_asked(&self) -> &Self {
+        self.assert_no_unexpected_question();
         assert!(
             self.unasked.is_empty(),
             "the command did not ask: {:?}",
             self.unasked
         );
         self
+    }
+
+    /// Fails at the questions the test did not expect, naming each one
+    /// with both streams. The assertions that check one stream, the list
+    /// of asked questions or the failure call it first, so none of them
+    /// can pass on a run the test did not state. The exit-code assertions
+    /// fold the same message into their own list of problems.
+    #[track_caller]
+    fn assert_no_unexpected_question(&self) {
+        let unexpected = self.unexpected_problems();
+        assert!(
+            unexpected.is_empty(),
+            "{}\n{}",
+            unexpected.join("\n"),
+            self.streams()
+        );
     }
 
     /// One line for each question the test did not expect.
