@@ -183,7 +183,9 @@ pub use database::{
     RouteColumn, RouteParam, SchemaDump, StoredDateTime, Transaction, TransactionBeginning,
     TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource, WhereIn,
 };
-pub use database::{QueryExpression, RawExpression, UpdateAttrs, UpdateValue};
+pub use database::{
+    FullTextMode, FullTextOptions, QueryExpression, RawExpression, UpdateAttrs, UpdateValue,
+};
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -517,7 +519,7 @@ pub use ::chrono_tz;
 pub use ::chrono_tz::Tz;
 /// Exposes migration defaults and the schema builder without colliding with SeaORM's `Schema`.
 pub use schema::Schema as MigrationSchema;
-pub use schema::{Blueprint, ColumnBuilder};
+pub use schema::{Blueprint, ColumnBuilder, FullTextIndexBuilder};
 pub use seed::{
     Seeder, SeederParams, call, call_once, call_silent, call_with, register_root, run_root,
 };

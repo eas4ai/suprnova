@@ -589,6 +589,53 @@ The builder refuses a name longer than 63 bytes for an index or a foreign key,
 on every backend. It is the limit Postgres keeps, so a migration that runs on
 one backend runs on all three.
 
+### Full-text indexes
+
+`t.full_text(&["title", "body"])` creates the index that
+[`where_full_text`](database.md#full-text-search) searches, named
+`{table}_{columns}_fulltext`:
+
+```rust
+Schema::create(manager, "articles", |t| {
+    t.id();
+    t.string("title");
+    t.text("body");
+    t.full_text(&["title", "body"]);
+})
+.await
+```
+
+Each engine gets its own index:
+
+| Engine | Statement |
+| --- | --- |
+| MySQL and MariaDB | ``CREATE FULLTEXT INDEX `articles_title_body_fulltext` ON `articles` (`title`, `body`)`` |
+| Postgres | `CREATE INDEX "articles_title_body_fulltext" ON "articles" USING gin ((to_tsvector('english', "title") \|\| to_tsvector('english', "body")))` |
+| SQLite | an error that names SQLite and `full_text`, before any statement runs |
+
+The Postgres index stores the same `to_tsvector` expression the search
+reads, so Postgres answers the search from the index. Laravel writes the
+same statements, so an index a Laravel migration created serves a Suprnova
+query too.
+
+- `.language("french")` builds the Postgres index with another text search
+  configuration. The default is `english`. A search uses the index only when
+  it names the same language with `FullTextOptions::language`. MySQL and
+  MariaDB ignore the language.
+- The language is written into the SQL, so a name with anything but letters,
+  digits, and `_` (and an optional `schema.` prefix) fails the migration on
+  every backend.
+- `t.drop_full_text(&["title", "body"])` drops the index over those columns
+  in `Schema::table`. To drop a full-text index with another name, use
+  `drop_index(name)`.
+
+```rust
+Schema::table(manager, "articles", |t| {
+    t.drop_full_text(&["title", "body"]);
+})
+.await
+```
+
 ### Altering a table
 
 `Schema::table` accepts:
@@ -596,6 +643,7 @@ one backend runs on all three.
 - new columns of any type, with the same modifiers
 - `rename_column(from, to)` and `drop_column(name)`
 - `index`, `unique` and `drop_index(name)`
+- `full_text(&[..])` and `drop_full_text(&[..])`, on Postgres and MySQL
 - `foreign_id(..).constrained(..)`, `foreign(column)` and `drop_foreign(name)`
 - `drop_constrained_foreign_id(column)`, which drops the key
   `{table}_{column}_foreign` and then the column. A key `.name(..)` named has
@@ -614,8 +662,8 @@ Schema::table(manager, "posts", |t| {
 
 It runs the operations in the order you write them, each as its own statement.
 Changing the type of an existing column is not supported. `rename_column`,
-`drop_column`, `drop_index` and `drop_foreign` belong to `Schema::table`:
-`Schema::create` returns an error if its closure records one.
+`drop_column`, `drop_index`, `drop_full_text` and `drop_foreign` belong to
+`Schema::table`: `Schema::create` returns an error if its closure records one.
 
 The builder checks the description for the mistakes it can see before it runs
 the first statement: a duplicate column, an index over a column the table does
@@ -637,6 +685,8 @@ statement of the call, for:
 - Adding a primary key column, or a primary key.
 - Adding a `NOT NULL` column with no default.
 - Adding a column with `.use_current()`.
+- Creating or dropping a full-text index. `Schema::create` refuses
+  `full_text` on SQLite too. SQLite has no `FULLTEXT` or `GIN` index.
 
 The errors read:
 
@@ -666,6 +716,10 @@ that an index, a unique constraint or a foreign key covers: record the
   for Laravel's `ulid(name, length)`. Rust has no optional arguments.
 - `use_current()` together with `.default(..)` fails the migration. Laravel
   lets `useCurrent` win silently.
+- `drop_full_text` takes the index's columns. Laravel's `dropFullText` takes
+  the columns or the index name; for a name, use `drop_index(name)`.
+- A full-text language that is not a plain name fails the migration. Laravel
+  writes it into the statement as given.
 
 ### Both styles in one Migrator
 

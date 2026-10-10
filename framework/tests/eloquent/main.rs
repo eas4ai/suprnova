@@ -39,6 +39,8 @@ pub mod laravel_gaps;
 /// Tests observe the agreed infrastructure gaps.
 pub mod laravel_infra_gaps;
 pub mod laravel_parity;
+/// Tests observe the agreed testing gaps: full-text search on the model builder.
+pub mod laravel_testing_gaps;
 pub mod lazy_loading;
 pub mod locking;
 pub mod macro_hygiene;

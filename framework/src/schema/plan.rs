@@ -14,7 +14,7 @@ use sea_orm::sea_query::{
 };
 use sea_orm::{DbBackend, DbErr};
 
-use super::blueprint::{Blueprint, Command, IndexSpec};
+use super::blueprint::{Blueprint, Command, FullTextSpec, IndexSpec, full_text_name};
 use super::column::ColumnKind;
 use super::foreign::ForeignSpec;
 use super::{quote_ident, quote_table, sea_ident, sea_table};
@@ -34,7 +34,8 @@ pub(crate) enum Step {
     CreateForeignKey(ForeignKeyCreateStatement),
     DropForeignKey(ForeignKeyDropStatement),
     /// A statement sea-query cannot build: adding a primary key to an
-    /// existing table. Its identifiers are quoted by [`quote_ident`].
+    /// existing table, or a full-text index. Its identifiers are quoted by
+    /// [`quote_ident`].
     Raw(String),
 }
 
@@ -186,12 +187,23 @@ fn index_statement(
 }
 
 fn check_index(table: &str, spec: &IndexSpec, seen: &mut HashSet<String>) -> Result<String, DbErr> {
-    if spec.columns.is_empty() || spec.columns.iter().any(String::is_empty) {
+    check_named_index(table, &spec.columns, spec.name(table), seen)
+}
+
+/// Checks an index over `columns` called `name`: it has named columns, a
+/// name Postgres keeps whole, and a name no other index or key of the
+/// closure has. Returns the name.
+fn check_named_index(
+    table: &str,
+    columns: &[String],
+    name: String,
+    seen: &mut HashSet<String>,
+) -> Result<String, DbErr> {
+    if columns.is_empty() || columns.iter().any(String::is_empty) {
         return Err(refuse(format!(
             "schema: cannot create an index on table `{table}` without named columns"
         )));
     }
-    let name = spec.name(table);
     check_name_length(table, &name, "index")?;
     if !seen.insert(name.clone()) {
         return Err(refuse(format!(
@@ -199,6 +211,71 @@ fn check_index(table: &str, spec: &IndexSpec, seen: &mut HashSet<String>) -> Res
         )));
     }
     Ok(name)
+}
+
+/// The refusal of a full-text operation on SQLite, which has neither a
+/// `FULLTEXT` index nor a `GIN` one. `call` is the blueprint method.
+fn sqlite_full_text_refusal(table: &str, call: &str, columns: &[String]) -> DbErr {
+    refuse(format!(
+        "schema: {call}({columns:?}) on table `{table}` is not supported on SQLite: SQLite has no FULLTEXT or GIN index; run full-text search on MySQL, MariaDB or Postgres, or create an FTS5 virtual table with SeaORM's SchemaManager"
+    ))
+}
+
+/// Checks a full-text index for `backend` and returns its name: SQLite
+/// refuses it, and otherwise it is checked as any index, with a language
+/// that must be a plain name, since it is written into the SQL.
+fn check_full_text(
+    table: &str,
+    spec: &FullTextSpec,
+    backend: DbBackend,
+    seen: &mut HashSet<String>,
+) -> Result<String, DbErr> {
+    if backend == DbBackend::Sqlite {
+        return Err(sqlite_full_text_refusal(table, "full_text", &spec.columns));
+    }
+    let name = check_named_index(
+        table,
+        &spec.columns,
+        full_text_name(table, &spec.columns),
+        seen,
+    )?;
+    if let Some(language) = &spec.language {
+        crate::database::full_text::check_language(language).map_err(|reason| {
+            refuse(format!(
+                "schema: the full-text index `{name}` on table `{table}` cannot be created: {reason}"
+            ))
+        })?;
+    }
+    Ok(name)
+}
+
+/// `CREATE FULLTEXT INDEX` on MySQL and MariaDB, and on Postgres
+/// `CREATE INDEX .. USING gin` over the `to_tsvector` document
+/// `where_full_text` searches, as Laravel's grammars write them. sea-query
+/// has no expression index, so the builder writes the statement itself.
+fn full_text_sql(backend: DbBackend, table: &str, name: &str, spec: &FullTextSpec) -> String {
+    let index = quote_ident(backend, name);
+    let on = quote_table(backend, table);
+    if backend == DbBackend::Postgres {
+        let language = spec
+            .language
+            .as_deref()
+            .unwrap_or(crate::database::full_text::DEFAULT_LANGUAGE);
+        let document = crate::database::full_text::postgres_document(
+            spec.columns.iter().map(String::as_str),
+            language,
+            |column| quote_ident(backend, column),
+        );
+        format!("CREATE INDEX {index} ON {on} USING gin (({document}))")
+    } else {
+        let columns = spec
+            .columns
+            .iter()
+            .map(|column| quote_ident(backend, column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("CREATE FULLTEXT INDEX {index} ON {on} ({columns})")
+    }
 }
 
 /// Returns the referenced table of `foreign`, or the error for a foreign key
@@ -383,7 +460,13 @@ pub(crate) fn plan_create(
             }
             Command::AddIndex(spec) => {
                 let name = check_index(table, spec, &mut seen_names)?;
-                indexes.push(index_statement(backend, table, &name, spec));
+                indexes.push(Step::CreateIndex(index_statement(
+                    backend, table, &name, spec,
+                )));
+            }
+            Command::AddFullText(spec) => {
+                let name = check_full_text(table, spec, backend, &mut seen_names)?;
+                indexes.push(Step::Raw(full_text_sql(backend, table, &name, spec)));
             }
             Command::AddForeign(position) => {
                 let Some(foreign) = blueprint.foreigns().get(*position) else {
@@ -413,6 +496,10 @@ pub(crate) fn plan_create(
             }
             Command::DropColumn(name) => return Err(only_in_table(table, "drop_column", name)),
             Command::DropIndex(name) => return Err(only_in_table(table, "drop_index", name)),
+            Command::DropFullText(columns) => {
+                let name = full_text_name(table, columns);
+                return Err(only_in_table(table, "drop_full_text", &name));
+            }
             Command::DropForeign(name) => return Err(only_in_table(table, "drop_foreign", name)),
         }
     }
@@ -422,14 +509,16 @@ pub(crate) fn plan_create(
         )));
     }
     for command in blueprint.commands() {
-        if let Command::AddIndex(spec) = command {
-            for column in &spec.columns {
-                if !seen_columns.contains(column) {
-                    return Err(refuse(format!(
-                        "schema: the index `{}` on table `{table}` names the column `{column}`, which the table does not declare; check the spelling or declare the column",
-                        spec.name(table)
-                    )));
-                }
+        let (name, columns) = match command {
+            Command::AddIndex(spec) => (spec.name(table), &spec.columns),
+            Command::AddFullText(spec) => (full_text_name(table, &spec.columns), &spec.columns),
+            _ => continue,
+        };
+        for column in columns {
+            if !seen_columns.contains(column) {
+                return Err(refuse(format!(
+                    "schema: the index `{name}` on table `{table}` names the column `{column}`, which the table does not declare; check the spelling or declare the column"
+                )));
             }
         }
     }
@@ -456,7 +545,7 @@ pub(crate) fn plan_create(
         create.primary_key(&mut key);
     }
     let mut steps = vec![Step::CreateTable(create)];
-    steps.extend(indexes.into_iter().map(Step::CreateIndex));
+    steps.extend(indexes);
     Ok(steps)
 }
 
@@ -520,6 +609,17 @@ fn refuse_sqlite_foreign_keys(blueprint: &Blueprint) -> Result<(), DbErr> {
         }
     }
     Ok(())
+}
+
+/// `DROP INDEX` for the index `name` on `table`, as `drop_index` and
+/// `drop_full_text` drop it: `DROP INDEX name ON table` on MySQL, `DROP INDEX
+/// name` on Postgres.
+fn drop_index_statement(backend: DbBackend, table: &str, name: &str) -> IndexDropStatement {
+    let mut statement = Index::drop();
+    statement
+        .name(constraint_name(backend, name))
+        .table(sea_table(table));
+    statement
 }
 
 /// Plans `Schema::table`: every alteration as its own statement, in the
@@ -631,11 +731,23 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
                         "schema: cannot drop an index with an empty name from table `{table}`"
                     )));
                 }
-                let mut statement = Index::drop();
-                statement
-                    .name(constraint_name(backend, name))
-                    .table(sea_table(table));
-                steps.push(Step::DropIndex(statement));
+                steps.push(Step::DropIndex(drop_index_statement(backend, table, name)));
+            }
+            Command::AddFullText(spec) => {
+                let name = check_full_text(table, spec, backend, &mut seen_names)?;
+                steps.push(Step::Raw(full_text_sql(backend, table, &name, spec)));
+            }
+            Command::DropFullText(columns) => {
+                if sqlite {
+                    return Err(sqlite_full_text_refusal(table, "drop_full_text", columns));
+                }
+                if columns.is_empty() || columns.iter().any(String::is_empty) {
+                    return Err(refuse(format!(
+                        "schema: drop_full_text on table `{table}` names no columns; name the columns of the full-text index"
+                    )));
+                }
+                let name = full_text_name(table, columns);
+                steps.push(Step::DropIndex(drop_index_statement(backend, table, &name)));
             }
             Command::AddForeign(position) => {
                 let Some(foreign) = blueprint.foreigns().get(*position) else {

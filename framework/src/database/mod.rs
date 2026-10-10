@@ -65,6 +65,10 @@ pub mod db_facade;
 pub mod dynamic_row;
 pub mod events;
 pub mod expression;
+// Full-text search: the options both query builders take and the SQL each
+// engine writes, shared with the schema builder's full-text index.
+// Internal; its public types re-export below.
+pub(crate) mod full_text;
 pub mod identifier;
 // Internal: the framework's own migrations create their indexes through
 // here, so `up` can run over a schema that already exists on every backend.
@@ -143,6 +147,7 @@ pub use events::{
     TransactionBeginning, TransactionCommitted, TransactionRolledBack,
 };
 pub use expression::{QueryExpression, RawExpression, UpdateAttrs, UpdateValue};
+pub use full_text::{FullTextMode, FullTextOptions};
 pub use identifier::{validate_identifier, validate_sql_operator};
 pub use model::{EntityExt, EntityExtMut};
 pub use monitor::ConnectionCount;

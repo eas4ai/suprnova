@@ -323,6 +323,95 @@ operators (`=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`,
 `ILIKE`, `NOT ILIKE`, `IS`, `IS NOT`). Violations error at the I/O
 boundary before the SQL string is rendered.
 
+## Full-text search
+
+`where_full_text(columns, text)` searches one or more text columns for
+words, on `DB::table` and on the Eloquent builder. `or_where_full_text`
+adds the search with `OR`. The text is a bound parameter, so it can come
+from the request:
+
+```rust
+use suprnova::DB;
+
+let rows = DB::table("articles")
+    .where_full_text(["title", "body"], "query builder")
+    .get()
+    .await?;
+
+let search = request.query_param("q").unwrap_or_default();
+let posts = Post::query()
+    .filter("status", "draft")
+    .or_where_full_text(["title", "body"], search)
+    .get()
+    .await?;
+```
+
+The Eloquent builder also takes the Rust names `filter_full_text` and
+`or_filter_full_text`.
+
+Each engine writes its own search:
+
+| Engine | SQL |
+| --- | --- |
+| MySQL and MariaDB | `MATCH (title, body) AGAINST (? IN NATURAL LANGUAGE MODE)` |
+| Postgres | `(to_tsvector('english', title) \|\| to_tsvector('english', body)) @@ plainto_tsquery('english', ?)` |
+| SQLite | an error that names SQLite and the call, before any I/O |
+
+MySQL and MariaDB need a `FULLTEXT` index over exactly the columns you
+search, or the query fails. Postgres runs the search without an index, and
+answers it from a `GIN` index over the same `to_tsvector` expression when
+one exists. `Blueprint::full_text` creates the right index on each engine;
+see [Full-text indexes](migrations.md#full-text-indexes).
+
+### Search options
+
+The `_with` methods take a `FullTextOptions`: the mode, the Postgres
+language, and MySQL's query expansion. They are the options array of
+Laravel's `whereFullText`:
+
+```rust
+use suprnova::{DB, FullTextMode, FullTextOptions};
+
+let rows = DB::table("articles")
+    .where_full_text_with(
+        ["title", "body"],
+        "\"query builder\" -php",
+        FullTextOptions::new()
+            .mode(FullTextMode::Websearch)
+            .language("english"),
+    )
+    .get()
+    .await?;
+```
+
+Each mode renders on the engine that has it. On the other engine the text
+is read as natural language, as Laravel does:
+
+| Mode | MySQL and MariaDB | Postgres |
+| --- | --- | --- |
+| `FullTextMode::NaturalLanguage` (the default) | `IN NATURAL LANGUAGE MODE` | `plainto_tsquery` |
+| `FullTextMode::Boolean` | `IN BOOLEAN MODE` | `plainto_tsquery` |
+| `FullTextMode::Websearch` | `IN NATURAL LANGUAGE MODE` | `websearch_to_tsquery` |
+
+- `.language(name)` names the Postgres text search configuration, such as
+  `simple` or `french`. The default is `english`. Use the language the
+  `GIN` index was built with, or Postgres can't use the index. MySQL and
+  MariaDB ignore it.
+- `.expanded()` adds `WITH QUERY EXPANSION` in natural-language mode on
+  MySQL and MariaDB. Boolean mode and Postgres ignore it.
+
+### Why Suprnova diverges
+
+- Laravel replaces a language it doesn't know with `english`. Suprnova
+  takes any plain name (letters, digits, and `_`, with an optional
+  `schema.` prefix), so a text search configuration you created works.
+  Anything else is an error before the query runs, because the name is
+  written into the SQL.
+- An empty column list is an error. Laravel writes `MATCH ()`, which the
+  database refuses.
+- Rust has no optional arguments, so the options go to the `_with` forms
+  instead of a third argument.
+
 ## Transactions
 
 Three entry points, each with the `QueryExecuted` /
@@ -953,6 +1042,7 @@ callbacks and the query log aren't process-wide inside a test: see
 | --- | --- |
 | `DB::init` / `DB::init_with` / `DB::connection` / `DB::is_connected` / `DB::get` | `DB::connection()` |
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
+| `where_full_text` / `or_where_full_text` / `where_full_text_with` / `or_where_full_text_with` / `FullTextOptions` / `FullTextMode` | `whereFullText` / `orWhereFullText` |
 | `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
 | `DB::transaction_level()` / `DB::before_starting_transaction(listener)` | `transactionLevel` / `beforeStartingTransaction` |
