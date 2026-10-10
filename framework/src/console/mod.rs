@@ -277,6 +277,14 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// listeners still running (up to ten), because the console's runtime ends
 /// when `main` returns and would cut them off.
 ///
+/// A boot that fails - a `lazy_init` that panics, as a bootstrap whose
+/// `DB::init().await.expect(..)` finds no database does, or a framework boot
+/// that returns an error - runs no command. It is reported through
+/// [`Exceptions::report`](crate::Exceptions::report), as Laravel's console
+/// kernel reports a failure of its bootstrap, so the callbacks the
+/// bootstrap registered before it failed see it; then it is printed and
+/// returned.
+///
 /// None of it runs unless clap matches a real registered subcommand -
 /// help, version, missing-subcommand, and parse-error paths all skip
 /// it, so `console --help` doesn't require `DATABASE_URL` to be set.
@@ -325,17 +333,27 @@ where
                 // inline, an application's bootstrap nests its whole state
                 // machine inside this one, and a deep one pushes the
                 // console's `main` past rustc's query depth limit in a
-                // release build.
-                Box::pin(boot()).await;
-                if let Err(e) = crate::app::process_boot::boot_after_hook(
-                    crate::app::process_boot::ProcessBoot::Console,
-                )
-                .await
-                {
+                // release build. A panic in it is the boot's error.
+                let booted = match crate::app::process_boot::run_hook(Box::pin(boot())).await {
+                    Ok(()) => {
+                        crate::app::process_boot::boot_after_hook(
+                            crate::app::process_boot::ProcessBoot::Console,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = booted {
+                    let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
+                    // Laravel's console kernel reports a failure of its
+                    // bootstrap through the handler, as it reports what a
+                    // command throws (PAR-111). The bootstrap ran first, so
+                    // the callbacks it registered see it. Before the drain,
+                    // so the queued listeners a reporter starts are awaited.
+                    crate::error::Exceptions::report(&error);
                     // The bootstrap already ran and may have started
                     // supervisors: they are drained as after a command.
                     crate::app::process_boot::finish_process().await;
-                    let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
                     // Written past the verbosity: `-q` silences the
                     // command, and never the reason it did not run.
                     io::write_errors(&format!("error: {}\n", error.message()));

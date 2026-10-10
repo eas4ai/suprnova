@@ -259,3 +259,147 @@ fn interrupt_command_writes_the_mark() {
             );
         });
 }
+
+/// Set in the child processes the `schedule:interrupt` boot tests below
+/// start; unset, a child test does nothing.
+const INTERRUPT_BOOT_CHILD: &str = "SUPRNOVA_D1_INTERRUPT_BOOT_CHILD";
+
+/// Run the test `name` of this module in a process of its own, with `env`
+/// set, and return its output.
+///
+/// The command boots the process-wide container and binds a cache store
+/// in it, which would stay behind for every later test in a shared
+/// process. The child gets its variables through the command, so this
+/// process's environment is never written.
+fn run_interrupt_boot_child(name: &str, env: &[(&str, &str)]) -> std::process::Output {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .args(["--exact", &format!("laravel_delta::{name}"), "--nocapture"])
+        .env(INTERRUPT_BOOT_CHILD, "1")
+        .env("APP_ENV", "testing");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("child");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "the child filter matched no test; stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    output
+}
+
+/// Fail unless the child `output` passed.
+fn assert_child_passed(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The body of a child test: the configuration loaded before the runtime,
+/// as `#[suprnova::main]` loads it, then `body` on a fresh runtime.
+fn in_interrupt_boot_child<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
+    suprnova::boot::load_env().expect("configuration before runtime");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(body());
+}
+
+/// `schedule:interrupt` in a process whose bootstrap binds no cache store:
+/// the command's boot binds the store `CACHE_DRIVER` names and writes the
+/// mark to it. The command used to boot no store and fail with
+/// `ServiceNotFound` whatever the driver.
+#[test]
+fn interrupt_command_without_a_bound_store_boots_the_cache_and_writes_the_mark() {
+    if std::env::var_os(INTERRUPT_BOOT_CHILD).is_none() {
+        assert_child_passed(&run_interrupt_boot_child(
+            "interrupt_command_without_a_bound_store_boots_the_cache_and_writes_the_mark",
+            &[("CACHE_DRIVER", "memory")],
+        ));
+        return;
+    }
+    in_interrupt_boot_child(|| async {
+        assert!(
+            !suprnova::Cache::is_initialized(),
+            "the child starts with no cache store bound"
+        );
+        let start = chrono::Utc::now() - chrono::Duration::seconds(1);
+        suprnova::Application::new()
+            .run_with_args(["app", "schedule:interrupt"])
+            .await
+            .expect("schedule:interrupt boots its cache store");
+        assert!(
+            Schedule::has_been_interrupted_since(start)
+                .await
+                .expect("the mark is read back"),
+            "the command wrote no mark"
+        );
+    });
+}
+
+/// A store the application's bootstrap binds is the one the mark goes to:
+/// the boot keeps it and reads no cache variable. `CACHE_DRIVER=redis` at
+/// an address nothing listens on would stop the boot if it were read.
+#[test]
+fn interrupt_command_writes_to_the_store_the_bootstrap_binds() {
+    if std::env::var_os(INTERRUPT_BOOT_CHILD).is_none() {
+        assert_child_passed(&run_interrupt_boot_child(
+            "interrupt_command_writes_to_the_store_the_bootstrap_binds",
+            &[
+                ("CACHE_DRIVER", "redis"),
+                ("REDIS_URL", "redis://127.0.0.1:1"),
+            ],
+        ));
+        return;
+    }
+    in_interrupt_boot_child(|| async {
+        let store = Arc::new(InMemoryCache::new());
+        let bound = Arc::clone(&store);
+        suprnova::Application::new()
+            .bootstrap(move || async move {
+                suprnova::App::bind::<dyn CacheStore>(bound);
+            })
+            .run_with_args(["app", "schedule:interrupt"])
+            .await
+            .expect("schedule:interrupt keeps the bootstrap's store");
+        assert!(
+            store
+                .has("suprnova:schedule:interrupt")
+                .await
+                .expect("the store answers"),
+            "the mark did not reach the store the bootstrap bound"
+        );
+    });
+}
+
+/// A cache the environment cannot build stops `schedule:interrupt` with an
+/// error that names the variable, before anything is written.
+#[test]
+fn interrupt_command_with_an_unknown_cache_driver_fails_naming_cache_driver() {
+    if std::env::var_os(INTERRUPT_BOOT_CHILD).is_none() {
+        assert_child_passed(&run_interrupt_boot_child(
+            "interrupt_command_with_an_unknown_cache_driver_fails_naming_cache_driver",
+            &[("CACHE_DRIVER", "not-a-cache-driver")],
+        ));
+        return;
+    }
+    in_interrupt_boot_child(|| async {
+        let error = suprnova::Application::new()
+            .run_with_args(["app", "schedule:interrupt"])
+            .await
+            .expect_err("an unknown cache driver stops the command");
+        assert!(
+            error.message().contains("CACHE_DRIVER"),
+            "the error names CACHE_DRIVER: {error}"
+        );
+        assert!(
+            !matches!(error, FrameworkError::ServiceNotFound { .. }),
+            "the boot built no store and the command ran anyway: {error}"
+        );
+    });
+}

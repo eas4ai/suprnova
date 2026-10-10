@@ -17,6 +17,10 @@ use suprnova::Storage;
 use suprnova::filesystem::testing::StorageFakeGuard;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::envelope::Envelope;
+// A driver an earlier test installed with `Queue::set_driver` is the
+// application's, which `bootstrap_from_env` keeps; a test that boots the
+// queue from the environment empties the slot first.
+use suprnova::queue::testing::forget_driver;
 use suprnova::queue::{Queue, bootstrap_from_env};
 use suprnova::testing::TestClock;
 use suprnova::{SqsConfig, SqsCredentials, SqsOverflow, SqsQueueDriver};
@@ -523,6 +527,7 @@ async fn boot_fails_without_a_region() {
     set_env("QUEUE_DRIVER", Some("sqs"));
     set_env("AWS_DEFAULT_REGION", None);
 
+    forget_driver();
     let error = bootstrap_from_env()
         .await
         .expect_err("no region is a boot error");
@@ -552,6 +557,7 @@ async fn boot_fails_with_a_plain_queue_name_and_no_prefix() {
     set_env("QUEUE_DRIVER", Some("sqs"));
     set_env("SQS_PREFIX", None);
 
+    forget_driver();
     let error = bootstrap_from_env()
         .await
         .expect_err("no prefix is a boot error");
@@ -575,6 +581,7 @@ async fn boot_accepts_a_fifo_queue_and_sends_default_attributes() {
     let (_env, _restore, fake) = setup!("jobs.fifo");
     set_env("QUEUE_DRIVER", Some("sqs"));
     set_env("SQS_QUEUE", Some("jobs.fifo"));
+    forget_driver();
     bootstrap_from_env().await.unwrap();
     let mut sent = envelope(None);
     sent.available_at += chrono::Duration::seconds(60);
@@ -595,6 +602,7 @@ async fn queue_driver_sqs_registers_the_sqs_driver() {
     let (_env, _restore, _fake) = setup!("default");
     set_env("QUEUE_DRIVER", Some("sqs"));
 
+    forget_driver();
     bootstrap_from_env().await.expect("QUEUE_DRIVER=sqs boots");
     assert_eq!(Queue::driver_name().unwrap(), "sqs");
 }
@@ -605,6 +613,7 @@ async fn queue_connections_and_failover_accept_sqs() {
     let (_env, _restore, _fake) = setup!("default");
     set_env("QUEUE_DRIVER", Some("memory"));
     set_env("QUEUE_CONNECTIONS", Some("sqs"));
+    forget_driver();
     bootstrap_from_env()
         .await
         .expect("QUEUE_CONNECTIONS=sqs boots");
@@ -613,6 +622,7 @@ async fn queue_connections_and_failover_accept_sqs() {
     set_env("QUEUE_CONNECTIONS", None);
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("sqs,memory"));
+    forget_driver();
     bootstrap_from_env()
         .await
         .expect("an sqs failover connection boots");
@@ -853,6 +863,7 @@ async fn boot_fails_with_overflow_on_and_no_disk_under_the_name() {
     set_env("SQS_OVERFLOW_ENABLED", Some("true"));
     set_env("SQS_OVERFLOW_DISK", Some("payloads"));
 
+    forget_driver();
     let error = bootstrap_from_env()
         .await
         .expect_err("overflow onto a disk that is not registered");

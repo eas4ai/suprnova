@@ -2794,6 +2794,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   breaks the HTTP/1 framing, and asserted on the mismatch in a debug
   build. The header is now dropped when the tag is added, and the server
   sends the tagged document's length (DT-02, DT-10).
+- **A console command whose boot fails is reported.** A failure before the
+  handler ran left `Exceptions::report` unreached: a bootstrap that
+  panicked, as `DB::init().await.expect(..)` panics when the database does
+  not answer, and a framework boot that returned an error, such as a log
+  channel nothing defines. The console dispatcher and the application
+  binary's commands now catch a panic in the bootstrap, report the
+  failure, so the callbacks the bootstrap registered before it failed see
+  it, and then print it and stop the supervisors, as Laravel's console
+  kernel reports a failure of its bootstrap. The application binary's
+  commands also report their own errors now, as the console's do; a silent
+  error is still not reported (PAR-111).
+- **`schedule:interrupt` boots the cache it writes its mark to.** The
+  command booted no cache store, so in a real process it failed with
+  `ServiceNotFound` whatever `CACHE_DRIVER` named, unless the bootstrap
+  bound a store. It now boots the store `CACHE_DRIVER` names, after the
+  MongoDB connections with `database-mongodb`, and keeps a store the
+  bootstrap bound (PAR-089).
+- **A queue driver installed in the bootstrap survives the boot.** The
+  server and the worker commands ran `queue::bootstrap_from_env` after the
+  application's bootstrap, and it replaced the driver `Queue::set_driver`
+  had installed with the one `QUEUE_DRIVER` names, so the manual's
+  failover example did not hold. `bootstrap_from_env` now keeps a driver
+  the application installed and does not read `QUEUE_DRIVER` then; it
+  still registers the `QUEUE_CONNECTIONS` entries beside it, and still
+  replaces a driver an earlier call installed. A test that boots the queue
+  from the environment empties the slot first with the new
+  `queue::testing::forget_driver` (PAR-017).
 
 ## 3.2.1 - 2026-10-05
 

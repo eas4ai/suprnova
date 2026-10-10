@@ -94,6 +94,15 @@ driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. T
 server boot path calls one of these for you - most apps only configure via
 env.
 
+A driver you install with `Queue::set_driver` in your `bootstrap` wins. The
+server and the worker commands boot the queue after your `bootstrap`, keep
+that driver, and don't read `QUEUE_DRIVER`. They still register the
+connections `QUEUE_CONNECTIONS` lists beside it. A driver that an earlier
+`bootstrap_from_env` call installed is replaced when you call it again, so
+a process picks up a changed `QUEUE_DRIVER`. In a test that boots the queue
+from the environment, call `suprnova::queue::testing::forget_driver()`
+first to empty the slot a driver from an earlier test may hold.
+
 `QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database`, `sqs`,
 `failover` and `mongodb`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
 `null` selects `NullQueueDriver`. A value that names no driver is a boot
@@ -460,6 +469,9 @@ pub async fn register() -> Result<(), FrameworkError> {
     Ok(())
 }
 ```
+
+The server and `queue:work` keep the driver you install in `bootstrap`, so
+both run on this failover driver whatever `QUEUE_DRIVER` says.
 
 The `String` on each entry is the connection label reported on the
 `QueueFailedOver` event. It isn't derived from the driver type, because

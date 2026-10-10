@@ -1,47 +1,30 @@
-//! `bootstrap_from_env` must always replace the registered driver - even when
-//! the requested driver is `memory` or unknown. The earlier implementation
-//! delegated those branches to `bootstrap_default`, which short-circuits if a
-//! driver is already wired, pinning a long-running process to whatever booted
-//! first (Redis/database/etc.) and silently ignoring later `QUEUE_DRIVER`
-//! changes.
+//! `bootstrap_from_env` must replace a driver the environment installed -
+//! even when the requested driver is `memory` or unknown. The earlier
+//! implementation delegated those branches to `bootstrap_default`, which
+//! short-circuits if a driver is already wired, pinning a long-running process
+//! to whatever booted first (Redis/database/etc.) and silently ignoring later
+//! `QUEUE_DRIVER` changes.
+//!
+//! A driver installed with `Queue::set_driver` is the application's, and
+//! `bootstrap_from_env` keeps it (PAR-017, tested in `laravel_delta`). The
+//! slot is process-wide, so every test here starts from an empty one with
+//! `testing::forget_driver`.
 
-use async_trait::async_trait;
 use serial_test::serial;
-use std::sync::Arc;
 use std::time::Duration;
-use suprnova::FrameworkError;
-use suprnova::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use suprnova::queue::envelope::Envelope;
+use suprnova::queue::testing::forget_driver;
 use suprnova::queue::{Queue, bootstrap_from_env};
 
-/// A driver that names itself "bogus" so the swap is observable; every
-/// non-`name` method returns or no-ops in a harmless way.
-struct BogusDriver;
-
-#[async_trait]
-impl QueueDriver for BogusDriver {
-    async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
-        Ok(())
-    }
-    async fn pop(
-        &self,
-        _visibility_timeout: Duration,
-    ) -> Result<Option<Reservation>, FrameworkError> {
-        Ok(None)
-    }
-    async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
-        Ok(())
-    }
-    async fn nack(
-        &self,
-        _token: &ReservationToken,
-        _requeue_delay: Duration,
-    ) -> Result<(), FrameworkError> {
-        Ok(())
-    }
-    fn name(&self) -> &'static str {
-        "bogus"
-    }
+/// Install the driver `QUEUE_DRIVER=name` selects, as an earlier boot of the
+/// process would have, starting from an empty slot.
+async fn boot_from_env(name: &str) {
+    forget_driver();
+    set_env("QUEUE_DRIVER", Some(name));
+    bootstrap_from_env()
+        .await
+        .unwrap_or_else(|e| panic!("QUEUE_DRIVER={name} boots: {e}"));
+    assert_eq!(Queue::driver_name().unwrap(), name);
 }
 
 /// A minimal immediately-available envelope, for the boot paths that prove a
@@ -87,8 +70,7 @@ fn set_env(key: &str, value: Option<&str>) {
 #[serial]
 async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
     let _env = crate::env_lock::lock_env_async().await;
-    Queue::set_driver(Arc::new(BogusDriver));
-    assert_eq!(Queue::driver_name().unwrap(), "bogus");
+    boot_from_env("sync").await;
 
     set_env("QUEUE_DRIVER", Some("memory"));
     bootstrap_from_env().await.unwrap();
@@ -103,8 +85,7 @@ async fn bootstrap_from_env_memory_branch_replaces_an_existing_driver() {
 #[serial]
 async fn bootstrap_from_env_unset_falls_back_to_a_fresh_memory_driver() {
     let _env = crate::env_lock::lock_env_async().await;
-    Queue::set_driver(Arc::new(BogusDriver));
-    assert_eq!(Queue::driver_name().unwrap(), "bogus");
+    boot_from_env("sync").await;
 
     set_env("QUEUE_DRIVER", None);
     bootstrap_from_env().await.unwrap();
@@ -119,8 +100,7 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
     // boot; this is the fallback a test or development process gets.
     let _app_env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
     set_env("APP_ENV", Some("testing"));
-    Queue::set_driver(Arc::new(BogusDriver));
-    assert_eq!(Queue::driver_name().unwrap(), "bogus");
+    boot_from_env("sync").await;
 
     set_env("QUEUE_DRIVER", Some("definitely-not-a-real-driver"));
     bootstrap_from_env().await.unwrap();
@@ -143,7 +123,7 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
 async fn bootstrap_from_env_installs_the_sync_and_null_drivers() {
     let _env = crate::env_lock::lock_env_async().await;
     for name in ["sync", "null"] {
-        Queue::set_driver(Arc::new(BogusDriver));
+        forget_driver();
         set_env("QUEUE_DRIVER", Some(name));
         let result = bootstrap_from_env().await;
         set_env("QUEUE_DRIVER", None);
@@ -159,7 +139,7 @@ async fn bootstrap_from_env_installs_the_sync_and_null_drivers() {
 #[serial]
 async fn production_refuses_an_unknown_queue_driver() {
     let _env = crate::env_lock::lock_env_async().await;
-    Queue::set_driver(Arc::new(BogusDriver));
+    boot_from_env("sync").await;
     set_env("APP_ENV", Some("production"));
     set_env("QUEUE_DRIVER", Some("redsi"));
     let result = bootstrap_from_env().await;
@@ -175,7 +155,7 @@ async fn production_refuses_an_unknown_queue_driver() {
     );
     assert_eq!(
         Queue::driver_name().unwrap(),
-        "bogus",
+        "sync",
         "a refused boot leaves the installed driver alone"
     );
 }
@@ -242,7 +222,7 @@ async fn the_database_driver_binds_a_failed_jobs_store_child() {
 #[serial]
 async fn failover_wires_a_driver_over_the_listed_connections() {
     let _env = crate::env_lock::lock_env_async().await;
-    Queue::set_driver(Arc::new(BogusDriver));
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory, memory"));
     let result = bootstrap_from_env().await;
@@ -273,6 +253,7 @@ async fn failover_wires_a_driver_over_the_listed_connections() {
 #[serial]
 async fn failover_without_a_connection_list_is_a_boot_error() {
     let _env = crate::env_lock::lock_env_async().await;
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", None);
     let result = bootstrap_from_env().await;
@@ -289,6 +270,7 @@ async fn failover_without_a_connection_list_is_a_boot_error() {
 #[serial]
 async fn failover_with_a_blank_connection_list_is_a_boot_error() {
     let _env = crate::env_lock::lock_env_async().await;
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("   "));
     let result = bootstrap_from_env().await;
@@ -306,6 +288,7 @@ async fn failover_with_a_blank_connection_list_is_a_boot_error() {
 #[serial]
 async fn failover_rejects_a_nested_failover_connection() {
     let _env = crate::env_lock::lock_env_async().await;
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,failover"));
     let result = bootstrap_from_env().await;
@@ -326,6 +309,7 @@ async fn failover_rejects_a_nested_failover_connection() {
 #[serial]
 async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() {
     let _env = crate::env_lock::lock_env_async().await;
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("failover"));
     set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,redsi"));
     let result = bootstrap_from_env().await;
@@ -344,6 +328,7 @@ async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() 
 async fn queue_connections_registers_one_connection_per_entry() {
     let _env = crate::env_lock::lock_env_async().await;
     suprnova::queue::testing::forget_connections();
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("memory"));
     set_env("QUEUE_CONNECTIONS", Some("null, memory"));
     let booted = bootstrap_from_env().await;
@@ -369,6 +354,7 @@ async fn queue_connections_registers_one_connection_per_entry() {
 async fn queue_connections_refuses_a_name_that_is_no_driver() {
     let _env = crate::env_lock::lock_env_async().await;
     suprnova::queue::testing::forget_connections();
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("memory"));
     set_env("QUEUE_CONNECTIONS", Some("redsi"));
     let booted = bootstrap_from_env().await;
@@ -388,6 +374,7 @@ async fn queue_connections_refuses_a_name_that_is_no_driver() {
 async fn without_queue_connections_no_connection_is_registered() {
     let _env = crate::env_lock::lock_env_async().await;
     suprnova::queue::testing::forget_connections();
+    forget_driver();
     set_env("QUEUE_DRIVER", Some("memory"));
     set_env("QUEUE_CONNECTIONS", None);
     bootstrap_from_env().await.unwrap();

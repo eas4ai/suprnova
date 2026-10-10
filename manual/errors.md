@@ -574,7 +574,13 @@ reported:
 - Every failed attempt of a queued job: a handler that returns `Err` or
   panics, an attempt that runs past its timeout, and an error
   `FailOnException` fails the job for.
-- Every error a console command returns.
+- Every error a console command returns, and every failure of the boot
+  before it runs: a `bootstrap` that panics, such as one whose
+  `DB::init().await.expect(..)` finds no database, a log channel nothing
+  defines, or a service the container cannot build. This covers the
+  console binary's commands and the application binary's (`queue:work`,
+  `schedule:interrupt`, `down` and the others). The callbacks your
+  `bootstrap` registered before it failed see the failure.
 - Every error you pass to `Exceptions::report`.
 
 A report runs your callbacks in the order you registered them. Then it

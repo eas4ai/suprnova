@@ -9,5 +9,7 @@ mod env_lock;
 mod env_snapshot;
 pub mod external;
 pub mod laravel_http_gaps;
+#[path = "../support/own_process.rs"]
+mod own_process;
 pub mod panic_response_contract;
 pub mod responses;
