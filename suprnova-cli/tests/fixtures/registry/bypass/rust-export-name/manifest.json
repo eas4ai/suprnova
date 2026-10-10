@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-export-name",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

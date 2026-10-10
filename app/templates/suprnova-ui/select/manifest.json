@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.select",
+  "version": 1,
+  "root": "suprnova-ui/select",
+  "files": [
+    "select.html",
+    "select.css"
+  ],
+  "elements": []
+}
