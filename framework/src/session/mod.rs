@@ -48,8 +48,12 @@ pub mod migrations;
 pub mod store;
 
 pub use blocking::SessionBlock;
-pub use config::{MAX_SESSION_LIFETIME_MINUTES, MAX_SESSION_LIFETIME_SECS, SessionConfig};
+pub use config::{
+    MAX_SESSION_LIFETIME_MINUTES, MAX_SESSION_LIFETIME_SECS, SessionConfig, SessionDriver,
+};
 pub use driver::DatabaseSessionDriver;
+#[cfg(feature = "database-mongodb")]
+pub use driver::{DEFAULT_MONGO_SESSIONS_COLLECTION, MongoSessionDriver};
 pub use middleware::{
     SessionGcMetrics, SessionGcSupervisor, SessionMiddleware, auth_user_id, clear_auth_user,
     clear_two_factor_pending, clear_two_factor_pending_remember, generate_csrf_token,
@@ -90,12 +94,12 @@ pub use store::{
 /// store they were built with via [`crate::container::App::bind_if_absent`]
 /// (see `session::middleware::register_configured_store`), so this
 /// resolves the *actually configured* store from the container first.
-/// The `DatabaseSessionDriver` construction below only fires when
-/// nothing is registered - e.g. a test or embedder that drives session
-/// state without ever constructing a `SessionMiddleware` - preserving
-/// the original default-driver behaviour for that case. It revokes in
-/// the table `SESSION_TABLE` names, the one `SessionMiddleware` would
-/// have used.
+/// The store construction below only fires when nothing is registered -
+/// e.g. a test or embedder that drives session state without ever
+/// constructing a `SessionMiddleware` - preserving the original
+/// default-driver behaviour for that case. It builds the store
+/// `SESSION_DRIVER` names over the table `SESSION_TABLE` names, the one
+/// `SessionMiddleware` would have used.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
     destroy_all_for_guard_user(&crate::auth::Auth::default_guard_name(), user_id).await
 }
@@ -127,11 +131,10 @@ pub async fn destroy_all_for_guard_user(
     let destroyed = match crate::container::App::make::<dyn SessionStore>() {
         Some(store) => store.destroy_guard_sessions(guard, user_id).await?,
         None => {
-            let driver = driver::DatabaseSessionDriver::with_configured_table(
-                std::time::Duration::from_secs(0),
-                SessionConfig::from_env().table_name,
-            );
-            driver.destroy_guard_sessions(guard, user_id).await?
+            let config = SessionConfig::from_env().lifetime(std::time::Duration::from_secs(0));
+            driver::configured_store(&config)
+                .destroy_guard_sessions(guard, user_id)
+                .await?
         }
     };
     // Every Live membership the destroyed sessions opened ends with them on

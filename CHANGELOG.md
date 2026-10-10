@@ -16,6 +16,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `collection::<T>` and `ping` reach it. A missing or malformed URI is an
   error naming `MONGODB_URI`, and an unreachable server fails the first call
   that needs it with a `FrameworkError`.
+- **MongoDB queue.** With `database-mongodb`, `QUEUE_DRIVER=mongodb` keeps
+  jobs in a `jobs` collection (`MongoQueueDriver`), reserving each with one
+  atomic `findOneAndUpdate`, and brings `MongoFailedJobStore` over
+  `failed_jobs` and `MongoBatchRepository` over `job_batches`, whose
+  settlements move the counters with `$inc` in one update and count a
+  redelivered job once.
+- **MongoDB cache.** With `database-mongodb`, `CACHE_DRIVER=mongodb` selects
+  `MongoCache` over the `cache` and `cache_locks` collections, with TTL
+  indexes on the expiry, atomic `add` and counters, tags, and locks shared
+  by every process.
+- **MongoDB sessions.** `SESSION_DRIVER` selects the session store:
+  `database` (the default) or, with `database-mongodb`, `mongodb`, which
+  keeps sessions in a `sessions` collection (`MongoSessionDriver`) and
+  promotes a two-factor session with one atomic update. `Config::init`
+  refuses an unknown `SESSION_DRIVER`.
 - **A guard in use per request.** `TestClient::acting_as_with_guard` selects
   the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
   auth middleware without a guard name answer through for that request, as

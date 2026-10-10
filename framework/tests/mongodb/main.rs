@@ -14,10 +14,14 @@
 //! MongoDB environment it needs (see `support::run_alone_with`). No test
 //! changes its own environment.
 
+pub mod cache;
 pub mod configuration;
 pub mod connection;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 #[path = "../support/own_process.rs"]
 mod own_process;
+pub mod queue;
+pub mod session;
+pub mod store_support;
 pub mod support;

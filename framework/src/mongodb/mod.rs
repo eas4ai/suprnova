@@ -17,6 +17,8 @@
 mod config;
 mod connection;
 mod facade;
+// The helpers the MongoDB queue, cache and session stores share.
+pub(crate) mod stores;
 
 pub use config::{
     DEFAULT_MONGO_CONNECTION, MongoConfig, MongoConfigBuilder, MongoConnectionConfig,

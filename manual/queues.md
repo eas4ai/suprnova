@@ -76,7 +76,7 @@ fire identically for inserts from a queue handler. `queue:work --connection
 
 ## Drivers
 
-Six drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
+Seven drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 `Queue::set_driver(...)` programmatically.
 
 | Driver | Use for | Strengths |
@@ -85,6 +85,7 @@ Six drivers ship in-tree. Configure via `QUEUE_DRIVER` env or by calling
 | `RedisQueueDriver` | production fan-out | consumer groups + `XAUTOCLAIM` + ZSET-backed delayed jobs |
 | `DatabaseQueueDriver` | single-DB apps | `FOR UPDATE SKIP LOCKED` on Postgres/MySQL, `BEGIN`-serialised on SQLite |
 | `SqsQueueDriver` | production on AWS | a managed queue outside your database and Redis; see [Amazon SQS](#amazon-sqs) |
+| `MongoQueueDriver` | apps on MongoDB | one atomic `findOneAndUpdate` per reservation; brings its failed-job store and batch repository; see [MongoDB](#mongodb) |
 | `SyncQueueDriver` | dev, CI | runs the handler inline on `push`, no worker |
 | `NullQueueDriver` | testing wrappers | drops every push without running |
 
@@ -93,15 +94,15 @@ driver; `suprnova::queue::bootstrap_default()` always wires the memory driver. T
 server boot path calls one of these for you - most apps only configure via
 env.
 
-`QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database`, `sqs`
-and `failover`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
+`QUEUE_DRIVER` accepts `memory`, `sync`, `null`, `redis`, `database`, `sqs`,
+`failover` and `mongodb`, and defaults to `memory`. `sync` selects `SyncQueueDriver` and
 `null` selects `NullQueueDriver`. A value that names no driver is a boot
 error when `APP_ENV` is `production`, because an in-memory queue chosen by
 mistake loses every job at the next restart. In any other environment the
 boot logs a warning that lists the accepted names and uses the memory
 driver.
 
-`FailoverQueueDriver` isn't a seventh backend. It wraps an ordered list of
+`FailoverQueueDriver` isn't an eighth backend. It wraps an ordered list of
 the drivers above so a push one connection refuses falls through to the
 next. See [Failover connections](#failover-connections).
 
@@ -118,6 +119,9 @@ QUEUE_VISIBILITY_TIMEOUT_SECS=60
 # Database driver - DB::init() must run first
 QUEUE_DRIVER=database
 QUEUE_DB_TABLE=jobs
+
+# MongoDB driver - needs the database-mongodb feature and MONGODB_URI
+QUEUE_DRIVER=mongodb
 ```
 
 The database driver validates `QUEUE_DB_TABLE` as a SQL identifier at
@@ -268,6 +272,15 @@ default and brings `filesystem` with it.
 - **No default region or prefix.** Laravel's configuration falls back to
   `us-east-1` and a placeholder account URL; a missing setting here stops
   the boot instead.
+
+### MongoDB
+
+With the `database-mongodb` feature, `QUEUE_DRIVER=mongodb` keeps jobs in
+the `jobs` collection on the default MongoDB connection. It also makes
+`failed_jobs` the failed-job store and, unless your bootstrap installed
+one, `job_batches` the batch repository. A worker reserves a job with one
+atomic `findOneAndUpdate`, so two workers never run the same job. See
+[MongoDB: Queue](mongodb.md#queue) for the documents and how delays round.
 
 ### Why Suprnova diverges
 
@@ -1606,6 +1619,8 @@ Three backends:
 
 - `MemoryFailedJobStore` - in-process `Vec`, lost on restart.
 - `DatabaseFailedJobStore` - persists to a `failed_jobs` table via SeaORM.
+- `MongoFailedJobStore` - persists to a `failed_jobs` collection, with the
+  `database-mongodb` feature. `QUEUE_DRIVER=mongodb` binds it.
 - `NullFailedJobStore` - discards every record. Mirrors Laravel's
   `NullFailedJobProvider`.
 
@@ -1678,8 +1693,8 @@ application's binary, so `suprnova queue:failed` from the project directory
 does the same as `./app queue:failed`.
 
 The commands run the application's bootstrap, as `queue:work` does, and use
-the failed-job store that boot bound. `QUEUE_DRIVER=database` binds one. With
-any other driver, call `Queue::set_failed_store(...)` in `bootstrap::register()`.
+the failed-job store that boot bound. `QUEUE_DRIVER=database` and
+`QUEUE_DRIVER=mongodb` bind one. With any other driver, call `Queue::set_failed_store(...)` in `bootstrap::register()`.
 With no store bound, a command exits non-zero and says so. A retry pushes to
 the queue that boot configured, so with the `memory` driver the retried job
 goes into the memory of the command's own process, not into the process that runs
@@ -1758,6 +1773,11 @@ use suprnova::queue::{Queue, DatabaseBatchRepository};
 
 Queue::set_batch_repository(Arc::new(DatabaseBatchRepository::new(db.clone())));
 ```
+
+`QUEUE_DRIVER=mongodb` installs `MongoBatchRepository` over the
+`job_batches` collection when no repository is installed. Each settlement
+moves the counters with one atomic update of the batch's document, so it
+is durable the same way. See [MongoDB: Queue](mongodb.md#queue).
 
 Two tables, which `CreateJobBatchesTable` creates: Laravel 13's
 `job_batches`, and the framework's `job_batch_settlements`, which records

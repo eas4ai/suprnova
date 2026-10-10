@@ -1,7 +1,7 @@
 # Cache
 
-Suprnova ships a Laravel-shape `Cache` facade backed by one of two
-drivers - in-memory or Redis - picked explicitly at boot via
+Suprnova ships a Laravel-shape `Cache` facade backed by one of three
+drivers - in-memory, Redis or MongoDB - picked explicitly at boot via
 `CACHE_DRIVER`. The facade is a thin layer over a `CacheStore` trait, so
 custom backends plug in the same way the built-ins do.
 
@@ -40,6 +40,9 @@ configured `CacheConfig` (or constructs one from env) and dispatches on
   it. The store sends one command while it is built, so the boot **fails
   closed** if that connection cannot answer. There is no silent downgrade
   to memory.
+- `MongoDb` - with the `database-mongodb` feature, build a `MongoCache` on
+  the default MongoDB connection and bind it. The boot fails when no
+  MongoDB connection is registered. See [MongoDB: Cache](mongodb.md#cache).
 
 Workers (`queue:work`, `schedule:run`, `workflow:work`) go through the
 same bootstrap, so a job using `Cache::get` sees the same backend the
@@ -63,7 +66,7 @@ sees a boot failure instead of a half-working app.
 
 | Env | Meaning | Default |
 |---|---|---|
-| `CACHE_DRIVER` | `memory` or `redis` | `memory` |
+| `CACHE_DRIVER` | `memory`, `redis` or `mongodb` | `memory` |
 | `CACHE_PREFIX` | Key prefix applied to every store operation | the slug of `APP_NAME`, then `-cache-` (`suprnova-cache-` without `APP_NAME`) |
 | `REDIS_CACHE_CONNECTION` | The Redis connection the store's commands run on | `cache` |
 | `REDIS_CACHE_LOCK_CONNECTION` | The Redis connection the store's locks run on | `default` |
@@ -71,8 +74,9 @@ sees a boot failure instead of a half-working app.
 | `CACHE_SWEEP_INTERVAL` | Seconds between sweeps of the in-memory cache's expired entries; `0` turns the sweep off | `60` |
 
 Unset `CACHE_DRIVER` parses to `Memory`; any other value (case-
-insensitive, trimmed) that isn't `memory`/`in-memory`/`inmemory`/`redis`
-returns an error at boot.
+insensitive, trimmed) that isn't `memory`/`in-memory`/`inmemory`/`redis`/
+`mongodb` returns an error at boot, and so does `mongodb` in a build without
+the `database-mongodb` feature.
 
 The Redis server, its database and the connection's own key prefix come
 from the [Redis](redis.md) connections: `REDIS_URL`, `REDIS_CACHE_DB` for
@@ -479,21 +483,22 @@ empty `REDIS_PREFIX` drops the connection prefix, and `CACHE_PREFIX` puts
 back the old prefix (use the value you had in `REDIS_PREFIX`, if you set
 one).
 
-## Two backends
+## Three backends
 
-| Feature | `InMemoryCache` | `RedisCache` |
-|---|---|---|
-| Shared across processes | No | Yes |
-| Persistence | No | Yes, if Redis is configured for it |
-| Atomic `add` | Yes (write-lock) | Yes (`SET NX`) |
-| Atomic `increment`/`decrement` | Yes (write-lock) | Yes (`INCRBY`/`DECRBY`) |
-| Tagged cache | Yes | Yes |
-| Locks | Yes | Yes (cross-process) |
-| Sub-second TTL | Yes (`tokio::time::Instant`) | Yes (`PX`/`PEXPIRE`) |
-| Selected via | `CACHE_DRIVER=memory` (default) | `CACHE_DRIVER=redis` |
+| Feature | `InMemoryCache` | `RedisCache` | `MongoCache` |
+|---|---|---|---|
+| Shared across processes | No | Yes | Yes |
+| Persistence | No | Yes, if Redis is configured for it | Yes |
+| Atomic `add` | Yes (write-lock) | Yes (`SET NX`) | Yes (an upsert that collides with a live entry) |
+| Atomic `increment`/`decrement` | Yes (write-lock) | Yes (`INCRBY`/`DECRBY`) | Yes (`$inc` in one `findOneAndUpdate`) |
+| Tagged cache | Yes | Yes | Yes (a tags array on the entry) |
+| Locks | Yes | Yes (cross-process) | Yes (cross-process, `cache_locks`) |
+| Sub-second TTL | Yes (`tokio::time::Instant`) | Yes (`PX`/`PEXPIRE`) | Yes (millisecond `expires_at`, TTL index) |
+| Selected via | `CACHE_DRIVER=memory` (default) | `CACHE_DRIVER=redis` | `CACHE_DRIVER=mongodb` |
 
-There is no Database cache driver - the two backends above are the
-ones the framework ships. Custom backends can implement `CacheStore`
+There is no SQL database cache driver - the three backends above are the
+ones the framework ships. `MongoCache` needs the `database-mongodb`
+feature; see [MongoDB: Cache](mongodb.md#cache). Custom backends can implement `CacheStore`
 and bind into the container directly; see the test-injection pattern
 below.
 

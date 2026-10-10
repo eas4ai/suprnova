@@ -3,7 +3,51 @@
 use std::time::Duration;
 
 use super::blocking::SessionBlock;
+use crate::error::FrameworkError;
 use crate::http::{CookiePrefix, SameSite};
+
+/// Where the session middleware keeps sessions: `SESSION_DRIVER`, as
+/// Laravel's `session.driver`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionDriver {
+    /// [`DatabaseSessionDriver`](crate::session::DatabaseSessionDriver) over
+    /// the `sessions` table (or `SESSION_TABLE`) on the default SQL
+    /// connection. The default.
+    #[default]
+    Database,
+    /// [`MongoSessionDriver`](crate::session::MongoSessionDriver) over the
+    /// `sessions` collection (or `SESSION_TABLE`) on the default MongoDB
+    /// connection, or the one `SESSION_CONNECTION` names. Needs the
+    /// `database-mongodb` feature.
+    #[cfg(feature = "database-mongodb")]
+    MongoDb,
+}
+
+impl SessionDriver {
+    /// Parse a `SESSION_DRIVER` value, without regard to case or
+    /// surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// When the value names no session driver, listing the accepted ones,
+    /// and for `mongodb` in a build without the `database-mongodb` feature,
+    /// naming the feature.
+    pub fn parse(value: &str) -> Result<Self, FrameworkError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "database" => Ok(Self::Database),
+            #[cfg(feature = "database-mongodb")]
+            "mongodb" => Ok(Self::MongoDb),
+            #[cfg(not(feature = "database-mongodb"))]
+            "mongodb" => Err(FrameworkError::internal(
+                "SESSION_DRIVER=mongodb needs the `database-mongodb` feature of suprnova, which \
+                 this build leaves out",
+            )),
+            other => Err(FrameworkError::internal(format!(
+                "SESSION_DRIVER=`{other}` is not a session driver; use `database` or `mongodb`"
+            ))),
+        }
+    }
+}
 
 /// Maximum session/remember lifetime in seconds: 9999-12-31T23:59:59Z as
 /// a Unix timestamp.
@@ -30,6 +74,9 @@ pub const MAX_SESSION_LIFETIME_MINUTES: u64 = MAX_SESSION_LIFETIME_SECS / 60;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SessionConfig {
+    /// Where sessions are kept: `SESSION_DRIVER`, `database` by default.
+    /// Mirrors Laravel's `session.driver`.
+    pub driver: SessionDriver,
     /// Session lifetime
     pub lifetime: Duration,
     /// Minimum interval between sliding-expiry persistence writes.
@@ -75,15 +122,16 @@ pub struct SessionConfig {
     /// in the HTTP sense). Defaults to `false`. Mirrors Laravel's
     /// `session.expire_on_close`.
     pub expire_on_close: bool,
-    /// Database table the database session driver reads and writes.
-    /// Defaults to `sessions`. Mirrors Laravel's `session.table`; the
-    /// app's migration has to create the table under this name.
+    /// Database table the database session driver reads and writes, and
+    /// the collection the MongoDB driver does. Defaults to `sessions`.
+    /// Mirrors Laravel's `session.table`; the app's migration has to
+    /// create the table under this name.
     pub table_name: String,
-    /// Optional named database connection for the session store.
-    /// Defaults to `None` (uses the framework's default `DB::connection()`).
-    /// Mirrors Laravel's `session.connection`. Today the
-    /// [`crate::session::DatabaseSessionDriver`] reads the default
-    /// connection regardless; this field is the wire for a future
+    /// Optional named connection for the session store. Defaults to `None`
+    /// (the default connection). Mirrors Laravel's `session.connection`.
+    /// The MongoDB driver reads it as the name of a MongoDB connection.
+    /// The [`crate::session::DatabaseSessionDriver`] reads the default SQL
+    /// connection regardless; for it this field is the wire for a future
     /// `DatabaseSessionDriver::with_connection(name)` ctor.
     pub connection: Option<String>,
     /// Lifetime of a remember-me token (and its cookie). Default 30 days.
@@ -104,6 +152,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
+            driver: SessionDriver::Database,
             lifetime: Duration::from_secs(120 * 60), // 2 hours (120 minutes)
             touch_interval: Duration::from_secs(5 * 60),
             gc_interval: Duration::from_secs(60 * 60),
@@ -176,6 +225,8 @@ impl SessionConfig {
     /// Load session configuration from environment variables.
     ///
     /// Environment variables:
+    /// - `SESSION_DRIVER`: `database` (default) or `mongodb` (with the
+    ///   `database-mongodb` feature); `Config::init` rejects any other value
     /// - `SESSION_LIFETIME`: Session lifetime in minutes (default: 120;
     ///   clamped to [`MAX_SESSION_LIFETIME_MINUTES`] so oversized values
     ///   cannot overflow the deadline arithmetic into mass-expiry)
@@ -257,6 +308,12 @@ impl SessionConfig {
         });
 
         Self {
+            // An invalid value falls back to the default here for the same
+            // reason as the cookie prefix below: Config::init rejects it at
+            // boot.
+            driver: crate::env_optional("SESSION_DRIVER")
+                .and_then(|value: String| SessionDriver::parse(&value).ok())
+                .unwrap_or_default(),
             // Clamp before multiplying: `SESSION_LIFETIME=u64::MAX`
             // would otherwise wrap the minutes-to-seconds conversion
             // (panic in debug, silent wrap in release) into a tiny or
@@ -293,6 +350,12 @@ impl SessionConfig {
             ),
             block,
         }
+    }
+
+    /// Set where sessions are kept.
+    pub fn driver(mut self, driver: SessionDriver) -> Self {
+        self.driver = driver;
+        self
     }
 
     /// Set the session lifetime

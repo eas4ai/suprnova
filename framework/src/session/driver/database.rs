@@ -160,15 +160,16 @@ pub(crate) fn encode_payload(
 }
 
 /// A stored payload, decoded.
-struct Payload {
-    data: HashMap<String, serde_json::Value>,
-    csrf_token: Option<String>,
-    user_id: Option<String>,
+pub(crate) struct Payload {
+    pub(crate) data: HashMap<String, serde_json::Value>,
+    pub(crate) csrf_token: Option<String>,
+    pub(crate) user_id: Option<String>,
 }
 
 /// A stored payload's data, CSRF token and user. `None` when it is neither
-/// base64 of a JSON object nor a JSON object.
-fn decode_payload(stored: &str) -> Option<Payload> {
+/// base64 of a JSON object nor a JSON object. The MongoDB driver stores
+/// the same payload and reads it back through here.
+pub(crate) fn decode_payload(stored: &str) -> Option<Payload> {
     use base64::Engine as _;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(stored.trim())

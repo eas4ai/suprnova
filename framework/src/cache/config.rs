@@ -22,18 +22,32 @@ pub enum CacheDriver {
     /// `REDIS_CACHE_CONNECTION` names (`cache` by default). Boot fails
     /// closed if that connection cannot answer.
     Redis,
+    /// MongoDB-backed cache, [`MongoCache`](super::MongoCache) on the
+    /// default MongoDB connection, over the `cache` and `cache_locks`
+    /// collections. Needs the `database-mongodb` feature; the boot fails
+    /// when no MongoDB connection is registered.
+    #[cfg(feature = "database-mongodb")]
+    MongoDb,
 }
 
 impl CacheDriver {
     /// Parse a `CACHE_DRIVER` env-var value. Case-insensitive; trims
     /// whitespace; returns an `internal` error for unknown driver names
-    /// so misconfigurations surface at boot.
+    /// so misconfigurations surface at boot. `mongodb` is an error naming
+    /// the feature in a build without `database-mongodb`.
     pub fn parse(s: &str) -> Result<Self, FrameworkError> {
         match s.trim().to_ascii_lowercase().as_str() {
             "memory" | "in-memory" | "inmemory" => Ok(Self::Memory),
             "redis" => Ok(Self::Redis),
+            #[cfg(feature = "database-mongodb")]
+            "mongodb" => Ok(Self::MongoDb),
+            #[cfg(not(feature = "database-mongodb"))]
+            "mongodb" => Err(FrameworkError::internal(
+                "CACHE_DRIVER=mongodb needs the `database-mongodb` feature of suprnova, which \
+                 this build leaves out",
+            )),
             other => Err(FrameworkError::internal(format!(
-                "CACHE_DRIVER: unknown driver `{other}` (expected `memory` or `redis`)"
+                "CACHE_DRIVER: unknown driver `{other}` (expected `memory`, `redis` or `mongodb`)"
             ))),
         }
     }
@@ -43,10 +57,11 @@ impl CacheDriver {
 ///
 /// # Environment Variables
 ///
-/// - `CACHE_DRIVER` - `memory` (default) or `redis`. Selects the
+/// - `CACHE_DRIVER` - `memory` (default), `redis` or `mongodb`. Selects the
 ///   bootstrap target. Memory keeps everything in this process; Redis
 ///   runs on the Redis facade's connections and fails boot if the cache
-///   connection cannot answer.
+///   connection cannot answer; MongoDB (with the `database-mongodb`
+///   feature) runs on the default MongoDB connection.
 /// - `REDIS_CACHE_CONNECTION` - The Redis facade connection the store's
 ///   commands run on (default: `cache`, which reads `REDIS_CACHE_DB`)
 /// - `REDIS_CACHE_LOCK_CONNECTION` - The connection its locks run on

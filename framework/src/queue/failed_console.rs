@@ -80,8 +80,8 @@ pub(crate) async fn run(command: Command) -> Result<Report, FrameworkError> {
 fn store() -> Result<Arc<dyn FailedJobStore>, FrameworkError> {
     failed::current().ok_or_else(|| {
         FrameworkError::internal(
-            "no failed-job store is configured. QUEUE_DRIVER=database brings one; \
-             with any other driver, call Queue::set_failed_store(...) in bootstrap",
+            "no failed-job store is configured. QUEUE_DRIVER=database or mongodb brings \
+             one; with any other driver, call Queue::set_failed_store(...) in bootstrap",
         )
     })
 }
