@@ -7,8 +7,14 @@
 //! `TestContainer` isolates them, and a request's values never reach
 //! another request, through the render cache neither: not through a
 //! template's `value` filter, and not through `View::shared`.
+//!
+//! The Live testing helpers' types are named through `suprnova` (MAN-002):
+//! an application names the clock trait `AdjustableTestClock` implements,
+//! its error, and the cancellation flag `request_cancellation_for_test`
+//! returns from the crate root, as the house rule says.
 
 use std::any::Any;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -447,4 +453,52 @@ async fn a_request_value_read_through_shared_never_reaches_another_request_throu
         3,
         "the fourth request is a hit"
     );
+}
+
+// ---- The Live testing types are named through `suprnova` --------------------
+
+/// A clock an application writes against the trait `suprnova` re-exports;
+/// `u64::MAX` stands for a reading the clock cannot represent.
+struct FrozenClock(u64);
+
+impl suprnova::live::Clock for FrozenClock {
+    fn now(&self) -> Result<suprnova::live::UnixMillis, suprnova::live::ClockError> {
+        if self.0 == u64::MAX {
+            return Err(suprnova::live::ClockError::timestamp_overflow());
+        }
+        Ok(suprnova::live::UnixMillis::new(self.0))
+    }
+}
+
+#[test]
+fn the_live_testing_types_are_named_through_suprnova() {
+    use suprnova::live::testing::{AdjustableTestClock, request_cancellation_for_test};
+    use suprnova::live::{CancellationFlag, Clock, ClockErrorKind, UnixMillis};
+
+    // The adjustable test clock is a `suprnova::live::Clock`.
+    let adjustable = Arc::new(AdjustableTestClock::new(1_000));
+    adjustable.advance_ms(500);
+    let clock: Arc<dyn Clock> = adjustable;
+    assert_eq!(clock.now().map(UnixMillis::get), Ok(1_500));
+
+    // A clock of the application's own, and its failure, named the same way.
+    let frozen: Arc<dyn Clock> = Arc::new(FrozenClock(7));
+    assert_eq!(frozen.now().map(UnixMillis::get), Ok(7));
+    let failure = FrozenClock(u64::MAX)
+        .now()
+        .expect_err("a reading the clock cannot represent");
+    assert_eq!(failure.kind(), ClockErrorKind::TimestampOverflow);
+
+    // A request the Live runtime did not prepare carries no flag; the type
+    // of the answer is `suprnova::live::CancellationFlag`.
+    let request = Request::for_test("GET", "/page");
+    let cancellation: Option<CancellationFlag> = request_cancellation_for_test(&request);
+    assert!(cancellation.is_none());
+
+    // The flag itself, as an application holds one.
+    let flag = CancellationFlag::new();
+    assert!(!flag.is_canceled());
+    assert!(flag.cancel(), "the first cancel moves the flag");
+    assert!(!flag.cancel(), "a second cancel moves nothing");
+    assert!(flag.is_canceled());
 }

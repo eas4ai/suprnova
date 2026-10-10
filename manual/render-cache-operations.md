@@ -426,7 +426,10 @@ disagree with. (That is a clock zero, not the authority epoch this chapter
 otherwise means by the word.) The harness wraps the pair as
 `setup_app_with_clock` and `advance_clock_ms`, the second of which panics
 rather than silently doing nothing when the boot took the system clock.
-`stale_service_is_marked_and_rebuilt_in_the_background` is the test.
+`stale_service_is_marked_and_rebuilt_in_the_background` is the test. To pass
+a clock of your own, implement `suprnova::live::Clock`: its `now` returns a
+`suprnova::live::UnixMillis`, or a `suprnova::live::ClockError` when it
+cannot read the time.
 
 **4. Count SQL statements.** A cache that skipped the handler but still
 consulted the database on every hit satisfies every handler-side counter and
