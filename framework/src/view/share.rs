@@ -77,9 +77,9 @@ impl View {
     /// application shared under the same key.
     ///
     /// A request runs in a container scope the framework opens for it, and
-    /// the value lives in that scope. A page rendered with a value shared
-    /// this way is never stored in the render cache, so it cannot be served
-    /// to another visitor.
+    /// the value lives in that scope. A page formed from a value shared this
+    /// way, read in a template or through [`View::shared`], is never stored
+    /// in the render cache, so it cannot be served to another visitor.
     ///
     /// # Errors
     ///
@@ -101,6 +101,13 @@ impl View {
     /// The value a render would read under `key`: the request's value when
     /// the current request shared one, else the application's. `None` when
     /// neither shared the key, or the value is not a `T`.
+    ///
+    /// When the current request shared `key`, the answer depends on that
+    /// request alone, even when it is `None` because the value is not a
+    /// `T`. No render cache key names it, so the render cache does not
+    /// store a page formed while this answer was read, the same as for a
+    /// template that reads the value. An answer from the application's
+    /// values is the same for every request and leaves the page storable.
     pub fn shared<T: Any + Send + Sync>(key: &str) -> Option<Arc<T>> {
         let request = scoped_request_value::<RequestShares>().and_then(|shares| {
             shares
@@ -110,16 +117,20 @@ impl View {
                 .get(key)
                 .cloned()
         });
-        let value = request.or_else(|| {
-            application_shares(false).and_then(|shares| {
+        let value = match request {
+            Some(value) => {
+                crate::render_cache::collector::observe_unobservable_read();
+                value
+            }
+            None => application_shares(false).and_then(|shares| {
                 shares
                     .0
                     .read()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(key)
                     .cloned()
-            })
-        })?;
+            })?,
+        };
         value.downcast::<T>().ok()
     }
 }
