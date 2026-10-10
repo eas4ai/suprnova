@@ -2795,6 +2795,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   build. The header is now dropped when the tag is added, and the server
   sends the tagged document's length (DT-02, DT-10).
 
+- **Every Live engine type a public signature names is named through
+  `suprnova`.** `live::testing::request_cancellation_for_test` returned the
+  Live engine's cancellation flag, `AdjustableTestClock` implemented the
+  engine's clock trait with its clock error, and `StitchSlotDescriptor`,
+  `LiveNestedSegment::into_segment`, the RenderCache stores, lease stores and
+  instance record stores named engine types `suprnova` did not re-export, so
+  an application could not write those types down. `suprnova::live` now
+  re-exports `Clock`, `ClockError`, `ClockErrorKind`, `CancellationFlag`,
+  `BuildId`, `ComponentName`, `ContentDigest`, `IslandSlot`, `RouteIdentity`,
+  `DocumentMountKey` and `MountedDocumentPath`, and `suprnova::live::ledger`
+  the instance record store contract (`InstanceRecordStore`,
+  `InstanceRecordKey`, `PromotionRecordKey`, `StoredRecord`, `CasOutcome`,
+  `LedgerError`, `LedgerErrorKind`). `suprnova::render_cache` re-exports
+  `RenderCacheError`, `RenderCacheErrorKind`, `RenderKey`, `Segment`,
+  `ShellIsland`, `SlotFailurePolicy`, `AuthorizationConsult`,
+  `GenerationLedger`, `GenerationSet`, `LeaseStore` and `LeaseAttempt`, and
+  `suprnova::render_cache::store` the L1 store contract (`RenderStore`,
+  `PublicationFence`, `PublishOutcome`, `StoreInspection`, `StoredEntry`).
+- **The Inertia DevTools gate's `GateEvaluated` event names the signed-in
+  user.** The entry endpoints checked their gate with the user erased to
+  `dyn Any`, so the event named a user type that registered no gate or hook
+  as the erased trait object, and carried no user identifier. The endpoints
+  now check the user as `Gate::inspect_current` and `#[authorize]` do: the
+  event carries the user's own type name and identifier.
+
 ## 3.2.1 - 2026-10-05
 
 ### Fixed

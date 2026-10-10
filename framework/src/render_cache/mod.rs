@@ -66,6 +66,10 @@ pub use config::{
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
 pub use providers::{RedisRenderStore, SqlRenderStore};
+/// How a render consulted authorization, as
+/// [`CollectedContext::authorization`](crate::render_cache::collector::CollectedContext::authorization)
+/// reports it.
+pub use suprnova_live::render_cache::AuthorizationConsult;
 pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
@@ -73,6 +77,36 @@ pub use suprnova_live::render_cache::{
     QueryPolicy, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
     SharedCachePolicy, StorageLayers, VarianceDimension,
 };
+/// The generation ledger contract
+/// [`SqlGenerationLedger`](crate::render_cache::ledger::SqlGenerationLedger)
+/// implements, and the generations it reads.
+pub use suprnova_live::render_cache::{GenerationLedger, GenerationSet};
+/// The rebuild lease contract the SQL and Redis lease stores in
+/// [`providers`](crate::render_cache::providers) implement, and what an
+/// acquisition attempt answers.
+pub use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
+/// The failure every RenderCache contract reports, and its closed
+/// category.
+pub use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
+/// What a stitched shell and a nested segment are built from: the key an
+/// entry is stored under, one segment of a composite entry, an island a
+/// shell records, and what a slot does when its island cannot render.
+pub use suprnova_live::render_cache::{RenderKey, Segment, ShellIsland, SlotFailurePolicy};
+
+/// The provider contract every L1 store implements:
+/// [`L1Provider`](crate::render_cache::L1Provider), the file store, the SQL
+/// and Redis stores, and a store of the application's own, with the fence,
+/// outcome, entry and inspection its methods take and return. This
+/// `StoreInspection` is one store's own count;
+/// [`RenderCache::store_inspection`](crate::render_cache::RenderCache::store_inspection)
+/// answers the framework's
+/// [`StoreInspection`](crate::render_cache::StoreInspection), which adds the
+/// authority epoch.
+pub mod store {
+    pub use suprnova_live::render_cache::store::{
+        PublicationFence, PublishOutcome, RenderStore, StoreInspection, StoredEntry,
+    };
+}
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -82,7 +116,6 @@ use suprnova_live::render_cache::singleflight::{
     LocalCoordinatorLimits, LocalRebuildCoordinator, RebuildCoordinator,
 };
 use suprnova_live::render_cache::store::{MemoryRenderStore, MemoryStoreLimits, RenderStore};
-use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
 
 use crate::{FrameworkError, Router};
 

@@ -1,7 +1,9 @@
 //! The public `live` and `view` documentation never shows an internal crate
-//! path. The check reads rustdoc's JSON output, never the HTML renderer,
-//! which climbs past 64 GB of memory on this crate, and writes only inside
-//! the checkout's configured target directory.
+//! path, and no public signature of `suprnova` names a type of an internal
+//! crate that an application cannot name through `suprnova`. The checks read
+//! rustdoc's JSON output, never the HTML renderer, which climbs past 64 GB
+//! of memory on this crate, and write only inside the checkout's configured
+//! target directory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -428,5 +430,169 @@ fn rendered_public_docs_do_not_expose_internal_crate_paths() {
         exposures.is_empty(),
         "public documentation exposed internal paths:\n{}",
         exposures.join("\n")
+    );
+}
+
+/// The types the public signatures of one crate name, and what that crate
+/// re-exports from other crates.
+#[derive(Default)]
+struct Signatures {
+    /// Each named type's id, with the public items whose signatures name it.
+    named: BTreeMap<u64, BTreeSet<String>>,
+    /// The canonical paths of the other crates' items the crate re-exports.
+    re_exported: BTreeSet<Vec<String>>,
+    /// The canonical paths of the other crates' modules the crate re-exports
+    /// whole, through a module re-export or a glob.
+    re_exported_modules: Vec<Vec<String>>,
+}
+
+impl Signatures {
+    /// Whether an application reaches the item at `path` through the crate:
+    /// the crate re-exports it, or a module it sits under.
+    fn reaches(&self, path: &[String]) -> bool {
+        self.re_exported.contains(path)
+            || self
+                .re_exported_modules
+                .iter()
+                .any(|module| path.len() > module.len() && path.starts_with(module))
+    }
+}
+
+/// The ids of every type `value` names: a resolved path, or a trait in a
+/// bound, a `dyn` type or an `impl` header.
+fn named_types(value: &Value, found: &mut Vec<u64>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let names_a_type = matches!(key.as_str(), "resolved_path" | "trait")
+                    && value.get("path").is_some();
+                if names_a_type && let Some(id) = value["id"].as_u64() {
+                    found.push(id);
+                }
+                named_types(value, found);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                named_types(value, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walks every item an application reaches from `docs`'s root: modules,
+/// re-exports, items and their fields, variants, methods and the impls
+/// written in this crate. A blanket impl and an auto-trait impl rustdoc
+/// adds are not, as no one wrote their signatures here.
+fn signatures(docs: &Crate<'_>) -> Signatures {
+    let mut found = Signatures::default();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![(docs.root(), docs.name.to_owned())];
+    while let Some((id, owner)) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(item) = docs.item(id) else { continue };
+        if item["crate_id"].as_u64() != Some(0) {
+            continue;
+        }
+        let inner = &item["inner"];
+        if let Some(re_export) = inner.get("use") {
+            let Some(target) = re_export["id"].as_u64() else {
+                continue;
+            };
+            let glob = re_export["is_glob"].as_bool() == Some(true);
+            if docs
+                .item(target)
+                .is_some_and(|item| item["crate_id"].as_u64() == Some(0))
+            {
+                if glob {
+                    let items = docs.module_items(target);
+                    pending.extend(items.into_iter().map(|child| (child, owner.clone())));
+                } else {
+                    pending.push((target, owner));
+                }
+            } else if let Some(path) = docs.path(target) {
+                let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
+                if glob || docs.json["paths"][target.to_string()]["kind"] == "module" {
+                    found.re_exported_modules.push(path.clone());
+                }
+                found.re_exported.insert(path);
+            }
+            continue;
+        }
+        if inner.get("impl").is_some_and(|implementation| {
+            !implementation["blanket_impl"].is_null()
+                || implementation["is_synthetic"].as_bool() == Some(true)
+        }) {
+            continue;
+        }
+        // An impl is named after the type it is for; a method or a field
+        // after its owner, as neither has a path of its own.
+        let name = match docs.path(id) {
+            Some(path) => path.join("::"),
+            None if inner.get("impl").is_some() => owner,
+            None => format!("{owner}::{}", item["name"].as_str().unwrap_or_default()),
+        };
+        let mut types = Vec::new();
+        named_types(inner, &mut types);
+        for named in types {
+            found.named.entry(named).or_default().insert(name.clone());
+        }
+        let mut nested = Vec::new();
+        shown_with(inner, &mut nested);
+        pending.extend(nested.into_iter().map(|child| (child, name.clone())));
+    }
+    found
+}
+
+/// An application names a type through the crate root (the house rule), so
+/// a public signature that names a type of an internal crate the crate
+/// does not re-export hands the application a value whose type it cannot
+/// write down, and the rendered signature links into the internal crate.
+/// The compiler warns about a private type of this crate in a public
+/// signature, never about a public type of a dependency the application
+/// cannot reach, so this reads the signatures.
+#[test]
+fn public_signatures_name_only_types_an_application_can_reach() {
+    let root = workspace_root();
+    let (target, _) = workspace_metadata(&root);
+    let framework = rustdoc_json(&root, &target, "suprnova", "suprnova");
+    let docs = Crate {
+        name: "suprnova",
+        json: &framework,
+    };
+    let signatures = signatures(&docs);
+
+    let mut checked = 0;
+    let mut unreachable = Vec::new();
+    for (id, users) in &signatures.named {
+        let Some(owner) = docs.crate_of(*id) else {
+            continue;
+        };
+        if !FORBIDDEN.contains(&owner) {
+            continue;
+        }
+        let Some(path) = docs.path(*id) else { continue };
+        checked += 1;
+        let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
+        if !signatures.reaches(&path) {
+            let users: Vec<&str> = users.iter().map(String::as_str).collect();
+            unreachable.push(format!(
+                "{} is named by {}",
+                path.join("::"),
+                users.join(", ")
+            ));
+        }
+    }
+    assert!(
+        checked > 40,
+        "the walk found only {checked} Live engine types in public signatures, so it missed the signatures"
+    );
+    assert!(
+        unreachable.is_empty(),
+        "public signatures name types an application cannot name through `suprnova`:\n{}",
+        unreachable.join("\n")
     );
 }

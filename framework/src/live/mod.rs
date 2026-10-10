@@ -82,6 +82,18 @@ pub mod metadata {
     pub use suprnova_live::metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 }
 
+/// The record store contract behind Live's distributed instance ledger:
+/// what the SQL and Redis record stores in
+/// [`render_cache::providers`](crate::render_cache::providers) implement,
+/// and the keys, records, outcomes and errors their methods take and
+/// return.
+pub mod ledger {
+    pub use suprnova_live::ledger::{
+        CasOutcome, InstanceRecordKey, InstanceRecordStore, LedgerError, LedgerErrorKind,
+        PromotionRecordKey, StoredRecord,
+    };
+}
+
 /// Stable redacted failure and browser-recovery contracts.
 pub mod error {
     pub use suprnova_live::error::{
@@ -101,9 +113,35 @@ pub use error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCod
 pub use events::{AcceptedOutcomeKind, LiveOutcomeAccepted};
 pub use metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 pub use suprnova_live::canonical::CanonicalValue;
+/// The wall clock Live and the RenderCache read. Re-exported so an
+/// application can implement it, or hold one as `Arc<dyn Clock>`, as
+/// [`AdjustableTestClock`](crate::live::testing::AdjustableTestClock) and
+/// [`RenderCacheConfig::with_clock`](crate::render_cache::RenderCacheConfig::with_clock)
+/// do.
+pub use suprnova_live::clock::Clock;
+/// The failure a [`Clock`](crate::live::Clock) reports, and its closed
+/// reason.
+pub use suprnova_live::clock::{ClockError, ClockErrorKind};
 pub use suprnova_live::identity::UnixMillis;
+/// The typed identities a
+/// [`StitchSlotDescriptor`](crate::live::StitchSlotDescriptor) records.
+pub use suprnova_live::identity::{
+    BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity,
+};
 pub use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
+/// The server-declared document mount key a
+/// [`StitchSlotDescriptor`](crate::live::StitchSlotDescriptor) records.
+pub use suprnova_live::mount::DocumentMountKey;
 pub use suprnova_live::mount::MountFlags;
+/// The request-lifetime cancellation flag the Live runtime attaches to a
+/// prepared request, which
+/// [`request_cancellation_for_test`](crate::live::testing::request_cancellation_for_test)
+/// returns.
+pub use suprnova_live::resource::CancellationFlag;
+/// The including document's resolved path, which
+/// [`LiveNestedSegment::into_segment`](crate::live::LiveNestedSegment::into_segment)
+/// checks.
+pub use suprnova_live::snapshot::MountedDocumentPath;
 pub use suprnova_live::upload::{
     BoundedHeaders, ChunkDisposition, ChunkReceipt, DirectPartReference, DirectTransferInstruction,
     DirectUploadProvider, DurableUpload, DurableUploadId, FailedFinalize, FinalizeRequest,

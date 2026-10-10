@@ -1,7 +1,8 @@
 //! The authorization members of Laravel's auth surface that Suprnova lacked
 //! (PAR-123): `Gate::inspect_current` and `Gate::none_current` answer for the
 //! user of the route's guard, `Gate::after_with_arguments` hands the resource
-//! to an after-hook, every check dispatches `GateEvaluated`, and
+//! to an after-hook, every check dispatches `GateEvaluated`, the Inertia
+//! DevTools gate's event names the signed-in user's own type, and
 //! `GateResponse::authorize` keeps a denial's code.
 //!
 //! The checks that resolve the user run inside a request served by
@@ -18,9 +19,10 @@ use suprnova::events::testing::dispatched;
 use suprnova::http::text;
 use suprnova::testing::{TestClient, TestContainer};
 use suprnova::{
-    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, EventFacade, FrameworkError,
-    Gate, GateEvaluated, GateResponse, GuardConfig, Listener, Middleware, MiddlewareRegistry, Next,
-    Request, Response, Router, UserProvider, handler,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, DevToolsConfig, EventFacade,
+    FrameworkError, Gate, GateEvaluated, GateResponse, GuardConfig, Inertia, InertiaConfig,
+    Listener, Middleware, MiddlewareRegistry, Next, Request, Response, Router, UserProvider,
+    handler,
 };
 
 // ── Users and resources ──────────────────────────────────────────────────────
@@ -72,6 +74,8 @@ fn register_gates() {
         });
         Gate::define::<GapUser, GapPost>("gaps-update", |user, post| post.author_id == user.id);
         Gate::define::<GapUser, GapPost>("gaps-create", |user, _post| user.id == 7);
+        // The Inertia DevTools gate: a `GapUser` with id 7 reads the entries.
+        Gate::define::<GapUser, ()>("gaps-devtools", |user, _| user.id == 7);
     });
 }
 
@@ -833,6 +837,129 @@ async fn the_event_names_a_signed_in_user_whose_type_registered_nothing() {
     assert_eq!(events[0].user_type, Some(std::any::type_name::<BareUser>()));
     assert_eq!(events[0].user_id.as_deref(), Some("9"));
     assert_eq!(events[0].decision, None);
+}
+
+// ── The Inertia DevTools gate ───────────────────────────────────────────────
+
+/// `APP_ENV` set to `production`, where the DevTools endpoints ask their
+/// gate, under the shared environment lock, until the guard drops.
+struct Production {
+    _env: crate::env_snapshot::EnvSnapshot,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+async fn production() -> Production {
+    let lock = crate::env_lock::lock_env_async().await;
+    let env = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("production"));
+    Production {
+        _env: env,
+        _lock: lock,
+    }
+}
+
+/// A client whose DevTools endpoints, storing into `dir`, admit a request
+/// through the `gaps-devtools` gate, behind `sign_in`.
+fn devtools_client(dir: &std::path::Path, sign_in: impl Middleware + 'static) -> TestClient {
+    register_gates();
+    let devtools = DevToolsConfig::new()
+        .enabled(true)
+        .storage_path(dir)
+        .gate("gaps-devtools");
+    let config = InertiaConfig::new()
+        .development(true)
+        .version("")
+        .devtools(devtools);
+    TestClient::new(
+        Router::new().get("/compare", compare),
+        MiddlewareRegistry::new()
+            .append(sign_in)
+            .append(Inertia::middleware(&config)),
+    )
+}
+
+/// The status the DevTools entry list answered with `headers`.
+async fn devtools_entries(client: &TestClient, headers: &[(&str, &str)]) -> u16 {
+    let mut request = client.get("/_inertia/devtools/entries");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.send().await.status()
+}
+
+#[tokio::test]
+#[serial]
+async fn the_devtools_gate_event_names_a_user_whose_type_registered_nothing() {
+    let _production = production().await;
+    let dir = tempfile::tempdir().expect("a DevTools directory");
+    let client = devtools_client(dir.path(), LoginAsBare);
+    let _events = EventFacade::fake();
+
+    // No gate answers for a `BareUser`: the endpoint refuses, and the event
+    // names the user's own type and identifier, not the erased value.
+    assert_eq!(
+        devtools_entries(&client, &[("X-Bare-User", "9")]).await,
+        403
+    );
+    assert_eq!(
+        evaluated("gaps-devtools"),
+        vec![GateEvaluated {
+            user_type: Some(std::any::type_name::<BareUser>()),
+            user_id: Some("9".to_owned()),
+            action: "gaps-devtools".to_owned(),
+            resource_type: std::any::type_name::<()>(),
+            decision: None,
+        }]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_devtools_gate_answers_for_the_signed_in_user_and_names_them() {
+    let _production = production().await;
+    let dir = tempfile::tempdir().expect("a DevTools directory");
+    let client = devtools_client(dir.path(), LoginAs);
+    let _events = EventFacade::fake();
+
+    // User 7 is admitted, user 8 is refused; each event names its user.
+    assert_eq!(
+        devtools_entries(&client, &[("X-Test-User", "7")]).await,
+        200
+    );
+    assert_eq!(
+        devtools_entries(&client, &[("X-Test-User", "8")]).await,
+        403
+    );
+    let event = |id: &str, decision| GateEvaluated {
+        user_type: Some(std::any::type_name::<GapUser>()),
+        user_id: Some(id.to_owned()),
+        action: "gaps-devtools".to_owned(),
+        resource_type: std::any::type_name::<()>(),
+        decision,
+    };
+    assert_eq!(
+        evaluated("gaps-devtools"),
+        vec![event("7", Some(true)), event("8", Some(false))]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_devtools_gate_refuses_when_the_user_cannot_be_resolved() {
+    let _production = production().await;
+    TestContainer::scope(async {
+        // The default guard names the `users` provider, and nobody registered
+        // one: the endpoint cannot resolve the user, refuses, and asks no
+        // gate.
+        TestContainer::singleton(AuthManager::new(AuthConfig::new("web")));
+        let dir = tempfile::tempdir().expect("a DevTools directory");
+        let client = devtools_client(dir.path(), LoginAs);
+        let _events = EventFacade::fake();
+
+        assert_eq!(devtools_entries(&client, &[]).await, 403);
+        assert!(evaluated("gaps-devtools").is_empty());
+    })
+    .await;
 }
 
 // ── Response::authorize keeps the code ───────────────────────────────────────
