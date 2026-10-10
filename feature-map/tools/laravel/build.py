@@ -1,14 +1,20 @@
 """Assemble laravel/surface.jsonl: every extracted Laravel record, filed under its docs page.
 
 The docs page only decides where a record is tracked; every record comes
-from laravel/framework's source through extract.php. Rules are explicit and
-ordered: classes by namespace (longest prefix wins), members with their
-parent, facades by the implementation their @see names, and everything else
-by the rule for its family. A rule naming a page missing from the pinned
-docs index stops the run; a record no rule claims goes to a named
-"(no page)" group.
+from source: laravel/framework and inertiajs/inertia-laravel through
+extract.php, and the Inertia.js client (inertiajs/inertia) through
+inertia_js.cjs. Rules are explicit and ordered: a package other than the
+framework is filed whole under the page that documents it, then classes by
+namespace (longest prefix wins), members with their parent, facades by the
+implementation their @see names, and everything else by the rule for its
+family. A rule naming a page missing from the pinned docs index stops the
+run; a record no rule claims goes to a named "(no page)" group.
 
 Usage: build.py <raw.jsonl> <extract-exclusions.json> <docs-dir> <docs-rev> <laravel-version> <out-dir>
+                [<inertia-js.jsonl> <inertia-laravel-version> <inertia-version>]
+
+The last three come together: the Inertia.js records, and the versions of
+the two Inertia packages, which meta.json records beside Laravel's.
 """
 import json
 import re
@@ -17,7 +23,18 @@ from collections import Counter
 from pathlib import Path
 
 RAW, EXTRACT_EXCL, DOCS, DOCS_REV, VERSION, OUT = sys.argv[1:7]
+EXTRA = sys.argv[7:]
+if len(EXTRA) not in (0, 3):
+    raise SystemExit("give the Inertia.js records with both Inertia versions, or none of the three")
+INERTIA_JS_RAW, INERTIA_LARAVEL_VERSION, INERTIA_VERSION = EXTRA or (None, None, None)
 OUT = Path(OUT)
+
+# The Laravel docs page that documents each package beside the framework: frontend.md's
+# Inertia section introduces the Laravel adapter and the client together.
+PACKAGE_PAGES = {
+    "inertiajs/inertia-laravel": "frontend",
+    "inertiajs/inertia": "frontend",
+}
 
 NAMESPACE_RULES = {
     "Illuminate\\Auth\\Access": "authorization",
@@ -171,7 +188,7 @@ CONFIG_PAGES = {
 }
 
 docs_pages = set(re.findall(r'\(/docs/\{\{version\}\}/([a-z0-9-]+)\)', (Path(DOCS) / "documentation.md").read_text()))
-targets = list(NAMESPACE_RULES.values()) + [p for _, p in ARTISAN_RULES] + list(CONFIG_PAGES.values()) + [
+targets = list(NAMESPACE_RULES.values()) + [p for _, p in ARTISAN_RULES] + list(CONFIG_PAGES.values()) + list(PACKAGE_PAGES.values()) + [
     "facades", "helpers", "blade", "validation", "configuration", "artisan"]
 missing = sorted({t for t in targets if not t.startswith("(no page)") and t not in docs_pages})
 if missing:
@@ -185,11 +202,21 @@ def by_namespace(cls):
 
 
 records = [json.loads(l) for l in Path(RAW).read_text().splitlines() if l.strip()]
+if INERTIA_JS_RAW:
+    records += [json.loads(l) for l in Path(INERTIA_JS_RAW).read_text().splitlines() if l.strip()]
+unknown = sorted({r.get("package") for r in records} - {"laravel/framework", *PACKAGE_PAGES})
+if unknown:
+    raise SystemExit(f"records from packages with no filing rule: {unknown}")
+dupes = [i for i, n in Counter(r["id"] for r in records).items() if n > 1]
+if dupes:
+    raise SystemExit(f"ids two packages both use: {dupes[:10]}")
 by_id = {r["id"]: r for r in records}
 
 
 def page_of(r):
     kind, rid = r["kind"], r["id"]
+    if r["package"] in PACKAGE_PAGES:
+        return PACKAGE_PAGES[r["package"]]
     if kind == "helper":
         return "helpers"
     if kind == "blade directive":
@@ -214,9 +241,15 @@ def page_of(r):
 
 # A rule that claims nothing is misleading; every namespace rule must match a record.
 unused = [p for p in NAMESPACE_RULES
-          if not any(r["id"] == p or r["id"].startswith(p) for r in records if r["parent"] is None)]
+          if not any(r["id"] == p or r["id"].startswith(p) for r in records
+                     if r["parent"] is None and r["package"] == "laravel/framework")]
 if unused:
     raise SystemExit(f"namespace rules that match no record: {unused}")
+present = {r["package"] for r in records} - {"laravel/framework"}
+if INERTIA_JS_RAW and present != set(PACKAGE_PAGES):
+    raise SystemExit(f"package rules that match no record: {sorted(set(PACKAGE_PAGES) - present)}")
+if present and not INERTIA_JS_RAW:
+    raise SystemExit(f"records from {sorted(present)} need the Inertia.js records and both Inertia versions")
 
 pages = {}
 for r in records:
@@ -238,9 +271,15 @@ empty_pages = sorted(docs_pages - {r["page"] for r in out})
 excl = json.loads(Path(EXTRACT_EXCL).read_text())
 excl["docs_pages_with_no_framework_surface"] = empty_pages
 (OUT / "exclusions.json").write_text(json.dumps(excl, indent=1, sort_keys=True) + "\n")
+packages = {"laravel/framework": {"version": VERSION}}
+if INERTIA_JS_RAW:
+    packages["inertiajs/inertia-laravel"] = {"version": INERTIA_LARAVEL_VERSION}
+    packages["inertiajs/inertia"] = {"version": INERTIA_VERSION}
+for name, entry in packages.items():
+    entry["records"] = sum(1 for r in out if r["package"] == name)
 (OUT / "meta.json").write_text(json.dumps({
     "laravel_version": VERSION, "docs_rev": DOCS_REV, "records": len(out),
-    "source": "laravel/framework", "docs": "laravel/docs 13.x",
+    "packages": packages, "docs": "laravel/docs 13.x",
 }, indent=1, sort_keys=True) + "\n")
 unclassified = [r["id"] for r in out if r["page"] == "(no page) not yet classified" and r["parent"] is None]
 print(json.dumps({"records": len(out), "pages": len({r["page"] for r in out if not r["page"].startswith("(")}),

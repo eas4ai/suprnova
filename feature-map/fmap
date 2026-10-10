@@ -26,9 +26,10 @@ Examples:
   fmap mark suprnova::Queue --children --status done --note "<where in queues.md>"
   fmap orphans                          state for items the source no longer has
 
-Laravel parity (feature-map/laravel/): every public piece of laravel/framework
-at the pinned version, filed under its docs page, and the Suprnova items that
-implement each one (recorded in laravel/parity.jsonl).
+Laravel parity (feature-map/laravel/): every public piece of laravel/framework,
+the inertia-laravel adapter and the Inertia.js client at the pinned versions,
+filed under its docs page, and the Suprnova items that implement each one
+(recorded in laravel/parity.jsonl).
 
   fmap laravel summary                  parity progress per Laravel docs page
   fmap laravel next --page queues       Laravel items with no parity decision yet
@@ -351,6 +352,21 @@ def cmd_laravel(db, a):
                                        [f"%{a.text}%", a.limit]))})
 
 
+def package_versions(db, ids):
+    """The version of the package each Laravel id comes from, as meta.json records it.
+
+    A parity row stores the version of its Laravel side: Laravel's for laravel/framework
+    items, the package's own for inertia-laravel and Inertia.js items.
+    """
+    meta = json.loads(L_META.read_text())
+    packages = meta.get("packages", {})
+    out = {}
+    for i in ids:
+        package = json.loads(db.execute("SELECT record FROM lsurface WHERE id = ?", [i]).fetchone()[0]).get("package")
+        out[i] = packages.get(package, {}).get("version", meta["laravel_version"])
+    return out
+
+
 def cmd_parity(db, a):
     if not L_SURFACE.exists():
         emit(lfresh())
@@ -387,7 +403,7 @@ def cmd_parity(db, a):
     if a.children:
         for i in list(ids):
             ids += [r[0] for r in db.execute("SELECT id FROM lsurface WHERE parent = ?", [i])]
-    version = json.loads(L_META.read_text())["laravel_version"]
+    versions = package_versions(db, ids)
     rev = json.loads(META.read_text())["source_rev"]
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for i in dict.fromkeys(ids):
@@ -396,7 +412,7 @@ def cmd_parity(db, a):
             db.execute("DELETE FROM parity WHERE laravel_id = ?", [i])
             continue
         lsig = db.execute("SELECT sig_hash FROM lsurface WHERE id = ?", [i]).fetchone()[0]
-        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (i, a.status, a.note, lsig, version, rev, now))
+        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (i, a.status, a.note, lsig, versions[i], rev, now))
         for sid, h in sup.items():
             db.execute("INSERT INTO parity_links VALUES (?,?,?)", (i, sid, h))
     save_parity(db)
@@ -448,13 +464,13 @@ def cmd_parity_import(db, a):
     if a.dry_run:
         emit({"valid": len(plan), "by_status": dict(__import__("collections").Counter(p[1] for p in plan))})
         return
-    version = json.loads(L_META.read_text())["laravel_version"]
+    versions = package_versions(db, [p[0] for p in plan])
     rev = json.loads(META.read_text())["source_rev"]
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for lid, st, note, links in plan:
         db.execute("DELETE FROM parity_links WHERE laravel_id = ?", [lid])
         lsig = db.execute("SELECT sig_hash FROM lsurface WHERE id = ?", [lid]).fetchone()[0]
-        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (lid, st, note, lsig, version, rev, now))
+        db.execute("INSERT OR REPLACE INTO parity VALUES (?,?,?,?,?,?,?)", (lid, st, note, lsig, versions[lid], rev, now))
         for sid, h in links.items():
             db.execute("INSERT INTO parity_links VALUES (?,?,?)", (lid, sid, h))
     save_parity(db)
