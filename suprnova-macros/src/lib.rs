@@ -1210,6 +1210,7 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   `rust_decimal::Decimal` as a `Decimal128` without one.
 /// - `timestamps = false`, `created_at = "..."`, `updated_at = "..."` -
 ///   managed timestamps, on when the struct has both fields.
+///   `timestamps = true` on a struct without them fails to compile.
 /// - `soft_deletes`, `soft_deletes_column = "..."` - soft deletes through
 ///   an optional date-time field, `deleted_at` by default.
 /// - `hidden = [...]` or `visible = [...]` - the serialized fields.

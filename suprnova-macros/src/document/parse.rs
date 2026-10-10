@@ -245,7 +245,9 @@ impl DocumentInput {
         };
 
         // Timestamps, as on `#[model]`: on when both fields exist, off when
-        // neither does, an error when only one does.
+        // neither does, an error when only one does. An explicit
+        // `timestamps = true` asks for them, so a struct without the fields
+        // is an error, never a model that silently writes no timestamps.
         let created_at = attrs
             .created_at
             .clone()
@@ -270,6 +272,16 @@ impl DocumentInput {
                         }
                     }
                     Some((created_at, updated_at))
+                }
+                (None, None) if attrs.timestamps == Some(true) => {
+                    return Err(syn::Error::new_spanned(
+                        &item.ident,
+                        format!(
+                            "`timestamps = true` names no timestamp fields: add `{created_at}` \
+                             and `{updated_at}` (`bson::DateTime` or `chrono::DateTime<Utc>`, or \
+                             either in an `Option`), or drop `timestamps = true`"
+                        ),
+                    ));
                 }
                 (None, None) => None,
                 _ => {
@@ -759,6 +771,75 @@ mod tests {
             ),
         )
         .expect("off");
+        assert!(input.timestamps.is_none());
+    }
+
+    #[test]
+    fn explicit_timestamps_without_the_fields_are_refused() {
+        let message = error(
+            quote!(collection = "users", fillable = ["name"], timestamps = true),
+            quote!(
+                pub struct User {
+                    pub name: String,
+                }
+            ),
+        );
+        assert!(
+            message.contains("`timestamps = true` names no timestamp fields")
+                && message.contains("add `created_at` and `updated_at`"),
+            "{message}"
+        );
+        let message = error(
+            quote!(timestamps),
+            quote!(
+                pub struct User {
+                    pub name: String,
+                }
+            ),
+        );
+        assert!(message.contains("names no timestamp fields"), "{message}");
+        let message = error(
+            quote!(
+                timestamps = true,
+                created_at = "made",
+                updated_at = "changed"
+            ),
+            quote!(
+                pub struct User {
+                    pub name: String,
+                }
+            ),
+        );
+        assert!(
+            message.contains("add `made` and `changed`"),
+            "the message names the renamed fields: {message}"
+        );
+
+        // With both fields, the explicit attribute turns them on as the
+        // default does; without it, a model with neither field has none.
+        let input = parse(
+            quote!(timestamps = true),
+            quote!(
+                pub struct User {
+                    pub created_at: Option<bson::DateTime>,
+                    pub updated_at: Option<bson::DateTime>,
+                }
+            ),
+        )
+        .expect("parse");
+        assert_eq!(
+            input.timestamps,
+            Some(("created_at".to_owned(), "updated_at".to_owned()))
+        );
+        let input = parse(
+            quote!(),
+            quote!(
+                pub struct User {
+                    pub name: String,
+                }
+            ),
+        )
+        .expect("the default");
         assert!(input.timestamps.is_none());
     }
 
