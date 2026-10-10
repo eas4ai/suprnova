@@ -183,6 +183,12 @@ impl<M: DocumentModel> DocumentQuery<M> {
     /// expression anchored at both ends; other characters match
     /// literally.
     ///
+    /// `=` compares the whole value. A document or a regular expression is
+    /// rendered under `$eq`, so `{"$ne": null}` matches only a field that
+    /// holds that document, never every non-null field, and a value that
+    /// comes from a request cannot widen the query. Send query operators
+    /// through [`Self::where_raw`].
+    ///
     /// The method is `where_` because `where` is a Rust keyword. An
     /// unknown operator, or `like` with a value that is no string, makes
     /// the query an error that names `where_`.
@@ -260,9 +266,10 @@ impl<M: DocumentModel> DocumentQuery<M> {
         self.join(filter, false)
     }
 
-    /// The document whose stored key is `key`.
+    /// The document whose stored key is `key`, compared as a whole value as
+    /// `=` compares it: a key type may serialize to a document.
     pub(crate) fn where_stored_key(self, key: Bson) -> Self {
-        self.join(one("_id", key), false)
+        self.join(one("_id", literal(key)), false)
     }
 
     /// Sort by `field`; later calls sort ties of earlier ones.
@@ -497,7 +504,11 @@ impl<M: DocumentModel> DocumentQuery<M> {
     }
 
     /// The distinct values of `field` among the matching documents. An
-    /// array field gives its elements, as MongoDB's `distinct` does.
+    /// array field gives its elements, as MongoDB's `distinct` does. A
+    /// stored null is one of the values; a document that lacks the field,
+    /// or holds an empty array in it, gives none. An order, `skip` or
+    /// `take` keeps the same values; `take(0)` answers none without a
+    /// query.
     ///
     /// # Errors
     ///
@@ -505,6 +516,39 @@ impl<M: DocumentModel> DocumentQuery<M> {
     /// values do not carry (the error names `distinct` and the field), and
     /// as [`Self::get_documents`].
     pub async fn distinct(self, field: &str) -> Result<Vec<Bson>, FrameworkError> {
+        let stages = self.distinct_stages(field)?;
+        // `take(0)` asks for no values; the server rejects a `$limit` of 0,
+        // so answer without a query, as the other reads do.
+        if self.limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let collection = M::collection()?;
+        if self.sort.is_empty() && self.skip.is_none() && self.limit.is_none() {
+            return Ok(collection
+                .distinct(storage::<M>(field), self.filter())
+                .await?);
+        }
+        let documents: Vec<Document> = collection.aggregate(stages).await?.try_collect().await?;
+        Ok(documents
+            .into_iter()
+            .map(|mut document| document.remove("_id").unwrap_or(Bson::Null))
+            .collect())
+    }
+
+    /// The aggregation stages [`Self::distinct`] runs when the query has an
+    /// order, `skip` or `take`; without them it sends the server's
+    /// `distinct` command instead. The stages keep what that command
+    /// keeps: `$match` leaves out a missing field and an empty array, and
+    /// `$unwind` keeps a null, which its plain field-path form drops.
+    ///
+    /// **Not part of the public API.** It is `pub` so a test can assert the
+    /// stages without a server.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::distinct`], before any connection is needed.
+    #[doc(hidden)]
+    pub fn distinct_stages(&self, field: &str) -> Result<Vec<Document>, FrameworkError> {
         self.check()?;
         let path = storage::<M>(field);
         if let Some(other) = self.sort.keys().find(|key| **key != path) {
@@ -513,16 +557,12 @@ impl<M: DocumentModel> DocumentQuery<M> {
                  `{other}` cannot sort them; order by `{field}` or drop the order"
             )));
         }
-        let filter = self.filter();
-        let collection = M::collection()?;
-        if self.sort.is_empty() && self.skip.is_none() && self.limit.is_none() {
-            return Ok(collection.distinct(&path, filter).await?);
-        }
-        let mut stages = Vec::new();
-        if !filter.is_empty() {
-            stages.push(one("$match", filter));
-        }
-        stages.push(one("$unwind", format!("${path}")));
+        let mut present = one("$exists", true);
+        present.insert("$not", one("$size", 0));
+        let filter = and(vec![self.filter(), one(path.clone(), present)]);
+        let mut unwind = one("path", format!("${path}"));
+        unwind.insert("preserveNullAndEmptyArrays", true);
+        let mut stages = vec![one("$match", filter), one("$unwind", unwind)];
         stages.push(one("$group", one("_id", format!("${path}"))));
         if let Some(order) = self.sort.get(&path) {
             stages.push(one("$sort", one("_id", order.clone())));
@@ -533,11 +573,7 @@ impl<M: DocumentModel> DocumentQuery<M> {
         if let Some(limit) = self.limit {
             stages.push(one("$limit", signed(limit)));
         }
-        let documents: Vec<Document> = collection.aggregate(stages).await?.try_collect().await?;
-        Ok(documents
-            .into_iter()
-            .map(|mut document| document.remove("_id").unwrap_or(Bson::Null))
-            .collect())
+        Ok(stages)
     }
 
     /// The sum of `field` over the matching documents, `None` when none
@@ -1280,10 +1316,22 @@ fn and(clauses: Vec<Document>) -> Document {
     clauses.into_iter().flatten().collect()
 }
 
+/// `value` as an equality condition. MongoDB reads `{field: value}` as
+/// equality for most values, so those stay bare. A document is read as
+/// query operators when its first key starts with `$`, and a regular
+/// expression as a pattern match, so both go under `$eq`, which compares
+/// them as values.
+fn literal(value: Bson) -> Bson {
+    match value {
+        Bson::Document(_) | Bson::RegularExpression(_) => one("$eq", value).into(),
+        other => other,
+    }
+}
+
 /// The condition `op value` renders.
 fn render_condition(call: &str, op: &str, value: Bson) -> Result<Bson, String> {
     let operator = match op.trim().to_ascii_lowercase().as_str() {
-        "=" | "==" => return Ok(value),
+        "=" | "==" => return Ok(literal(value)),
         "!=" | "<>" => "$ne",
         "<" => "$lt",
         "<=" => "$lte",

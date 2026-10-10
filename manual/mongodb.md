@@ -599,8 +599,11 @@ let people = User::query()
 
 A field can be a dotted path into an embedded document, such as
 `addresses.city`. `where_raw` takes its filter as written, so in it the key
-is `_id`. An unknown operator, or `like` with a value that isn't a string,
-makes the query an error that names `where_`.
+is `_id`. `=` compares the whole value, so a document such as
+`{"$ne": null}` or a regular expression you pass to `where_` matches only a
+field that holds that value; send query operators through `where_raw`. An
+unknown operator, or `like` with a value that isn't a string, makes the
+query an error that names `where_`.
 
 ### Order, offset, limit, and projection
 
