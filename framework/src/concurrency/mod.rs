@@ -297,18 +297,21 @@ impl PendingConcurrency {
     /// been sent, as Laravel's `Concurrency::defer`, and discard their
     /// results.
     ///
-    /// Inside a request the call returns at once. The tasks start once the
-    /// response's last bytes have been written and flushed, through the
-    /// same facility as `Bus::dispatch_after_response`. A task that fails
-    /// is logged, with its name and error, and the response, already sent,
-    /// is not touched.
+    /// Inside a request the call returns at once, and the tasks run after
+    /// the response, in every request the framework serves. Under the
+    /// framework server they start once the response's last bytes have
+    /// been written and flushed, through the same facility as
+    /// `Bus::dispatch_after_response`. Where no response writer is in
+    /// reach, as in the in-memory test client or a custom Hyper loop that
+    /// does not use `after_response_connection`, they start when the
+    /// response's body ends. A task that fails is logged, with its name and
+    /// error, and the response, already sent, is not touched. The returned
+    /// [`DeferredTasks`] holds nothing then: awaiting or dropping it does
+    /// not run the tasks.
     ///
     /// Outside a request, as in a console command or a worker, there is no
     /// response to wait for: the returned [`DeferredTasks`] runs the tasks
     /// when it is awaited, or starts them on the runtime when it is dropped.
-    /// The same holds where no response writer is in reach, as in a custom
-    /// Hyper loop that does not use `after_response_connection` or the
-    /// in-memory test client.
     ///
     /// # Errors
     ///
@@ -415,19 +418,20 @@ async fn run_deferred(
 
 /// Deferred tasks, as [`Concurrency::defer`] returns them.
 ///
-/// Inside a request the tasks already wait for the response, and this
-/// holds nothing. Outside one it holds the tasks: awaiting it runs them and
-/// waits for them, dropping it starts them on the Tokio runtime and returns.
-/// A process that ends right after the drop can end before the tasks do, so
-/// await it where the process may end, as at the end of a console command.
+/// Inside a request, with or without a response writer, the tasks already
+/// wait for the response, and this holds nothing. Outside one it holds the
+/// tasks: awaiting it runs them and waits for them, dropping it starts them
+/// on the Tokio runtime and returns. A process that ends right after the
+/// drop can end before the tasks do, so await it where the process may
+/// end, as at the end of a console command.
 pub struct DeferredTasks {
     pending: Option<CommandFuture>,
 }
 
 impl DeferredTasks {
-    /// Whether the tasks wait for the current response: `true` inside a
-    /// request served with a response writer, `false` when this handle
-    /// runs them.
+    /// Whether the tasks wait for the current response: `true` inside any
+    /// request the framework serves, the in-memory test client's included,
+    /// and `false` outside a request, where this handle runs them.
     pub fn after_response(&self) -> bool {
         self.pending.is_none()
     }
