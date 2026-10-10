@@ -1,4 +1,27 @@
 //! Hold commands until Hyper finishes a response and flushes its bytes to the writer.
+//!
+//! A request's pending commands complete on one of two paths, because not
+//! every connection that serves a request can tell when its bytes left:
+//!
+//! - **With a writer.** The framework server scopes each connection with
+//!   [`after_response_connection`], which wraps its IO in
+//!   [`AfterResponseIo`]. The commands start after the writer's next
+//!   successful flush, once the response's bytes are on the wire, and a
+//!   failed flush discards them.
+//! - **Without a writer.** A request served through `handle_request` on a
+//!   connection with no writer, such as the in-memory test client or a
+//!   custom Hyper loop, still has a response to wait for. With no flush to
+//!   watch, the end of the response's body is the last point the framework
+//!   sees: the commands are spawned on the runtime there, as one task that
+//!   runs them in order. A response Hyper sends without a body
+//!   (informational, 204 or 304) spawns them as soon as it is built. There
+//!   is no failed flush to see either, so they run even when the client
+//!   has gone.
+//!
+//! `Bus::dispatch_after_response` queues only to the first path (`defer`):
+//! a command dispatched after the response must start only after its bytes
+//! flushed. `Concurrency::defer` queues to either (`try_defer`), since
+//! running its tasks after the response is all it promises.
 
 use crate::{FrameworkError, lock::recover as lock};
 use bytes::Bytes;
@@ -43,18 +66,19 @@ pub(super) fn defer(future: CommandFuture) -> Result<(), FrameworkError> {
         })
 }
 
-/// Hold `future` until the current response has been written and flushed,
-/// or hand it back when there is no response to wait for: outside a
-/// request, or inside one served without a response writer.
+/// Hold `future` until the current response has been sent, or hand it
+/// back when there is no response to wait for, outside a request.
 ///
-/// [`defer`] refuses the same cases with an error, which is right for the
-/// bus, where a command dispatched after the response must not run at any
-/// other time. `Concurrency::defer` runs its tasks anyway, through the
-/// handle it returns, so it needs the future back.
+/// Inside a request the future waits for the response whether or not a
+/// response writer is in reach: with one it starts after the flush, and
+/// without one when the response's body ends (see the module docs).
+///
+/// [`defer`] refuses a request without a writer, and a call outside a
+/// request, with an error, which is right for the bus, where a command
+/// dispatched after the response must not run at any other time.
+/// `Concurrency::defer` runs its tasks outside a request anyway, through
+/// the handle it returns, so it needs the future back.
 pub(crate) fn try_defer(future: CommandFuture) -> Result<(), CommandFuture> {
-    if WRITER.try_with(|_| ()).is_err() {
-        return Err(future);
-    }
     let mut held = Some(future);
     match PENDING.try_with(|pending| pending.borrow_mut().extend(held.take())) {
         Ok(()) => Ok(()),
@@ -64,7 +88,8 @@ pub(crate) fn try_defer(future: CommandFuture) -> Result<(), CommandFuture> {
     }
 }
 
-/// Scope one request's pending commands and attach them to its final outgoing body.
+/// Scope one request's pending commands and attach them to its final
+/// outgoing body, on the completion path the connection allows.
 pub(crate) async fn response<F>(future: F) -> hyper::Response<BoxBody<Bytes, Infallible>>
 where
     F: Future<Output = hyper::Response<BoxBody<Bytes, Infallible>>>,
@@ -76,37 +101,90 @@ where
             if pending.is_empty() {
                 return response;
             }
-            // defer refused a command without a writer, so this is present for any pending command.
-            let completed = WRITER.with(Arc::clone);
+            let completion = Completion::current();
             if response.status().is_informational()
                 || response.status() == hyper::StatusCode::NO_CONTENT
                 || response.status() == hyper::StatusCode::NOT_MODIFIED
             {
-                // Hyper never polls these bodies. Their response is complete when its headers flush.
-                lock(&completed).commands.extend(pending);
+                // Hyper never polls these bodies. With a writer, their
+                // response is complete when its headers flush; without
+                // one, nothing later than now marks it.
+                completion.complete(pending);
                 return response;
             }
             let (parts, inner) = response.into_parts();
             let body = CompletionBody {
                 inner,
                 pending: Mutex::new(Some(pending)),
-                completed,
+                completion,
             };
             hyper::Response::from_parts(parts, BoxBody::new(body))
         })
         .await
 }
 
+/// Where a response's pending commands go once the response is complete.
+enum Completion {
+    /// The connection's writer: they start after its next successful flush.
+    Writer(Completed),
+    /// No writer in reach: they start at once on the runtime the response
+    /// was built on. `None` when it was built outside a Tokio runtime,
+    /// where nothing can start them.
+    Runtime(Option<tokio::runtime::Handle>),
+}
+
+impl Completion {
+    /// The path of the current request: its connection's writer when one
+    /// is in scope, otherwise the current runtime.
+    fn current() -> Self {
+        match WRITER.try_with(Arc::clone) {
+            Ok(completed) => Self::Writer(completed),
+            Err(_) => Self::Runtime(tokio::runtime::Handle::try_current().ok()),
+        }
+    }
+
+    /// Hand `commands` to this path.
+    fn complete(&self, commands: Commands) {
+        match self {
+            Self::Writer(completed) => lock(completed).commands.extend(commands),
+            Self::Runtime(Some(runtime)) => {
+                // Detached: the commands run on and log their own failures.
+                drop(runtime.spawn(run_in_order(commands)));
+            }
+            Self::Runtime(None) => tracing::error!(
+                commands = commands.len(),
+                "after-response commands did not run: the response was built outside a Tokio runtime"
+            ),
+        }
+    }
+}
+
+/// Run `commands` one after another. A command that fails or panics
+/// cannot change bytes already sent, so it is logged and the next one
+/// runs.
+async fn run_in_order(commands: Commands) {
+    for command in commands {
+        let outcome = std::panic::AssertUnwindSafe(command).catch_unwind().await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "after-response command failed")
+            }
+            Err(_) => tracing::error!("after-response command panicked"),
+        }
+    }
+}
+
 struct CompletionBody {
     inner: BoxBody<Bytes, Infallible>,
     pending: Mutex<Option<Commands>>,
-    completed: Completed,
+    completion: Completion,
 }
 
 impl CompletionBody {
     fn finish(&self) {
         if let Some(commands) = lock(&self.pending).take() {
-            lock(&self.completed).commands.extend(commands);
+            self.completion.complete(commands);
         }
     }
 }
@@ -192,20 +270,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for AfterResponseIo<I> {
                 while completed.tasks.try_join_next().is_some() {}
                 let commands = std::mem::take(&mut completed.commands);
                 if !commands.is_empty() {
-                    completed.tasks.spawn(async move {
-                        for command in commands {
-                            // A handler failure cannot change bytes already sent. Report it and continue.
-                            let outcome =
-                                std::panic::AssertUnwindSafe(command).catch_unwind().await;
-                            match outcome {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => {
-                                    tracing::error!(%error, "after-response command failed")
-                                }
-                                Err(_) => tracing::error!("after-response command panicked"),
-                            }
-                        }
-                    });
+                    completed.tasks.spawn(run_in_order(commands));
                 }
                 Poll::Ready(Ok(()))
             }

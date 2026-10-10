@@ -286,10 +286,14 @@ await the handle at the end of a console command:
 Concurrency::defer([Task::new::<WarmCaches>(())])?.await;
 ```
 
-The handle also runs the tasks when a request has no response writer in
-reach: a custom Hyper loop that doesn't use `after_response_connection`, or
-the in-memory test client. `DeferredTasks::after_response()` tells you
-which path the tasks took.
+In every request the framework serves, the in-memory test client
+included, the tasks run after the response. A request with no response
+writer in reach, such as one from the test client or a custom Hyper loop
+that doesn't use `after_response_connection`, starts them when the
+response's body ends instead of after its bytes flush. Only outside a
+request does the handle run the tasks when you await it or drop it.
+`DeferredTasks::after_response()` tells you which path the tasks took: it
+returns `true` inside a request and `false` outside one.
 
 ## Testing
 

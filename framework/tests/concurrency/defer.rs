@@ -3,19 +3,23 @@
 //!
 //! A request is served over an in-memory connection the way the server
 //! serves one: `handle_request` inside `after_response_connection`, so the
-//! response's flush is what releases the deferred tasks.
+//! response's flush is what releases the deferred tasks. Other requests
+//! go through the in-memory `TestClient`, or a plain Hyper connection,
+//! which have no response writer: there the end of the response's body
+//! releases them.
 
 use crate::support::{exists, wait_until};
-use crate::tasks::{FailWith, Touch, TouchAfter};
+use crate::tasks::{FailWith, StampNap, StampThenNap, Touch, TouchAfter, stamps};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use serial_test::serial;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use suprnova::concurrency::Task;
+use suprnova::testing::TestClient;
 use suprnova::{
     Concurrency, ConcurrentTask, HttpResponse, MiddlewareRegistry, Router,
     after_response_connection,
@@ -240,7 +244,7 @@ async fn a_handler_can_defer_on_the_process_driver() {
 async fn without_a_response_writer_the_deferred_task_still_runs() {
     let dir = tempfile::tempdir().expect("a directory");
     let ran = dir.path().join("ran");
-    let after_response = Arc::new(AtomicBool::new(true));
+    let after_response = Arc::new(AtomicBool::new(false));
     let path = ran.clone();
     let router = deferring_router(
         Some("tokio"),
@@ -252,10 +256,204 @@ async fn without_a_response_writer_the_deferred_task_still_runs() {
 
     assert_eq!((served.status, served.body.as_str()), (200, "answered"));
     assert!(
-        !after_response.load(Ordering::SeqCst),
-        "with no writer the handle runs the tasks"
+        after_response.load(Ordering::SeqCst),
+        "with no writer the tasks still wait for the response"
     );
     assert!(wait_until(Duration::from_secs(2), || exists(&ran)).await);
+}
+
+/// What a `/stamp` handler does with the handle `Concurrency::defer`
+/// returns.
+#[derive(Debug, Clone, Copy)]
+enum Handling {
+    /// Await it, as a handler that wants the tasks done before it answers
+    /// would.
+    Await,
+    /// Drop it, then do more asynchronous work before answering.
+    DropThenWork,
+}
+
+/// What a `/stamp` handler saw.
+#[derive(Debug, Clone, Copy)]
+struct Handled {
+    /// Whether its handle said the tasks wait for the response.
+    after_response: bool,
+    /// When it returned its response.
+    returned: Instant,
+}
+
+/// A router whose `/stamp` handler defers one `StampThenNap` task labelled
+/// `label`, which sleeps 300 ms, with `Concurrency::defer`; treats the
+/// handle as `handling` says; records what it saw in `handled`; and
+/// answers `respond()`.
+fn stamping_router(
+    label: &'static str,
+    handling: Handling,
+    respond: fn() -> HttpResponse,
+    handled: Arc<Mutex<Option<Handled>>>,
+) -> Router {
+    Router::new()
+        .get("/stamp", move |_| {
+            let handled = handled.clone();
+            async move {
+                let deferred = Concurrency::defer([Task::new::<StampThenNap>(StampNap {
+                    label: label.to_owned(),
+                    millis: 300,
+                })])
+                .map_err(HttpResponse::from)?;
+                let after_response = deferred.after_response();
+                match handling {
+                    Handling::Await => deferred.await,
+                    Handling::DropThenWork => {
+                        drop(deferred);
+                        // A task the drop started would run during this.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+                *handled.lock().unwrap_or_else(PoisonError::into_inner) = Some(Handled {
+                    after_response,
+                    returned: Instant::now(),
+                });
+                Ok(respond())
+            }
+        })
+        .into()
+}
+
+fn answered() -> HttpResponse {
+    HttpResponse::text("answered")
+}
+
+fn no_content() -> HttpResponse {
+    HttpResponse::new().status(204)
+}
+
+/// Assert what PAR-190 asks of the task labelled `label`, deferred by the
+/// handler that recorded `handled`: the handle said the task waits for the
+/// response, the task started after the handler returned, it was still
+/// running when the client received the response at `received`, and it
+/// finished within two seconds of it.
+async fn assert_ran_after_the_response(
+    label: &str,
+    handled: &Mutex<Option<Handled>>,
+    received: Instant,
+) {
+    let handled = handled
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .expect("the handler ran");
+    assert!(
+        wait_until(Duration::from_secs(2), || stamps(label).finished.is_some()).await,
+        "the task finished within two seconds of the response"
+    );
+    let stamps = stamps(label);
+    let started = stamps.started.expect("the task started");
+    let finished = stamps.finished.expect("the task finished");
+    assert!(
+        started > handled.returned,
+        "the task started after the handler returned, not {:?} before",
+        handled.returned.saturating_duration_since(started)
+    );
+    assert!(
+        finished > received,
+        "the client received the response before the task finished, not {:?} after",
+        received.saturating_duration_since(finished)
+    );
+    assert!(finished.saturating_duration_since(received) < Duration::from_secs(2));
+    assert!(
+        handled.after_response,
+        "the handle says the task waits for the response"
+    );
+}
+
+#[tokio::test]
+async fn through_the_test_client_an_awaited_handle_leaves_the_task_until_after_the_response() {
+    const LABEL: &str = "test-client-awaited";
+    let handled = Arc::new(Mutex::new(None));
+    let client = TestClient::new(
+        stamping_router(LABEL, Handling::Await, answered, handled.clone()),
+        MiddlewareRegistry::new(),
+    );
+
+    let response = client.get("/stamp").send().await;
+    let received = Instant::now();
+
+    response.assert_ok().assert_see("answered");
+    assert_ran_after_the_response(LABEL, &handled, received).await;
+}
+
+#[tokio::test]
+async fn through_the_test_client_a_dropped_handle_leaves_the_task_until_after_the_response() {
+    const LABEL: &str = "test-client-dropped";
+    let handled = Arc::new(Mutex::new(None));
+    let client = TestClient::new(
+        stamping_router(LABEL, Handling::DropThenWork, answered, handled.clone()),
+        MiddlewareRegistry::new(),
+    );
+
+    let response = client.get("/stamp").send().await;
+    let received = Instant::now();
+
+    response.assert_ok().assert_see("answered");
+    assert_ran_after_the_response(LABEL, &handled, received).await;
+}
+
+#[tokio::test]
+async fn through_the_test_client_a_no_content_response_still_runs_the_task_after_it() {
+    const LABEL: &str = "test-client-no-content";
+    let handled = Arc::new(Mutex::new(None));
+    let client = TestClient::new(
+        stamping_router(LABEL, Handling::Await, no_content, handled.clone()),
+        MiddlewareRegistry::new(),
+    );
+
+    let response = client.get("/stamp").send().await;
+    let received = Instant::now();
+
+    response.assert_no_content();
+    assert_ran_after_the_response(LABEL, &handled, received).await;
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn through_the_test_client_a_failing_deferred_task_is_logged_and_leaves_the_response_intact()
+{
+    let dir = tempfile::tempdir().expect("a directory");
+    let ran = dir.path().join("ran");
+    let after_response = Arc::new(AtomicBool::new(false));
+    let path = ran.clone();
+    let router = deferring_router(
+        Some("tokio"),
+        move || {
+            vec![
+                Task::new::<FailWith>("the deferred report broke".to_owned()),
+                touch(&path, 0),
+            ]
+        },
+        after_response.clone(),
+    );
+
+    let response = TestClient::new(router, MiddlewareRegistry::new())
+        .get("/defer")
+        .send()
+        .await;
+
+    response.assert_ok().assert_see("answered");
+    assert!(
+        after_response.load(Ordering::SeqCst),
+        "the tasks wait for the response"
+    );
+    assert!(
+        wait_until(Duration::from_secs(2), || exists(&ran)).await,
+        "the other deferred task still ran"
+    );
+    assert!(
+        wait_until(Duration::from_secs(2), || logs_contain(
+            "deferred concurrent task failed"
+        ))
+        .await
+    );
+    assert!(logs_contain("the deferred report broke"));
 }
 
 #[tokio::test]

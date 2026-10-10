@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use suprnova::concurrency::Task;
 use suprnova::{Concurrency, FrameworkError, concurrent_task};
@@ -127,4 +128,63 @@ pub async fn report_default_driver() -> Result<DriverReport, FrameworkError> {
 #[concurrent_task(name = "--dashed-task")]
 pub async fn dashed() -> Result<String, FrameworkError> {
     Ok("dashed".to_owned())
+}
+
+/// The input of [`stamp_then_nap`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StampNap {
+    /// The label the task's stamps are kept under, one per test.
+    pub label: String,
+    /// How long to sleep between the start and the finish.
+    pub millis: u64,
+}
+
+/// When a [`stamp_then_nap`] task started and finished.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stamps {
+    /// When the task started.
+    pub started: Option<Instant>,
+    /// When the task finished, after its nap.
+    pub finished: Option<Instant>,
+}
+
+/// Every [`stamp_then_nap`] task's stamps in this process, by label.
+static STAMPS: Mutex<Vec<(String, Stamps)>> = Mutex::new(Vec::new());
+
+/// The stamps of the task labelled `label`; both are `None` until it starts.
+pub fn stamps(label: &str) -> Stamps {
+    STAMPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(held, _)| held == label)
+        .map(|(_, stamps)| *stamps)
+        .unwrap_or_default()
+}
+
+/// Change the stamps of the task labelled `label`.
+fn stamp(label: &str, change: impl FnOnce(&mut Stamps)) {
+    let mut all = STAMPS.lock().unwrap_or_else(PoisonError::into_inner);
+    match all.iter_mut().find(|(held, _)| held == label) {
+        Some((_, stamps)) => change(stamps),
+        None => {
+            let mut stamps = Stamps::default();
+            change(&mut stamps);
+            all.push((label.to_owned(), stamps));
+        }
+    }
+}
+
+/// Records when it starts, sleeps, then records when it finishes, so a
+/// test can order a deferred task against the handler that deferred it
+/// and the response the client received. It runs in this process, on the
+/// tokio or sync driver.
+#[concurrent_task]
+pub async fn stamp_then_nap(input: StampNap) -> Result<(), FrameworkError> {
+    stamp(&input.label, |stamps| stamps.started = Some(Instant::now()));
+    tokio::time::sleep(Duration::from_millis(input.millis)).await;
+    stamp(&input.label, |stamps| {
+        stamps.finished = Some(Instant::now())
+    });
+    Ok(())
 }
