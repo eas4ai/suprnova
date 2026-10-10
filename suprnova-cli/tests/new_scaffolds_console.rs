@@ -61,9 +61,12 @@ fn assert_production_build_shape(cargo: &str) {
         .split("[dev-dependencies]")
         .nth(1)
         .expect("[dev-dependencies] table present");
+    let dev_dependency = format!(
+        "suprnova = {{ git = \"https://github.com/eas4ai/suprnova.git\", {}, ",
+        suprnova_cli::templates::framework_pin()
+    );
     assert!(
-        dev_section
-            .contains(r#"suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = ""#)
+        dev_section.contains(&dev_dependency)
             && dev_section.contains(r#"features = ["testing"] }"#),
         "Cargo.toml's dev-dependency must turn `testing` back on: {cargo}"
     );

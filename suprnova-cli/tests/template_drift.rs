@@ -101,28 +101,32 @@ fn dockerfiles_pin_the_workspace_rust_version() {
     }
 }
 
-/// The tag both scaffolds must pin, derived the same way the scaffolder
-/// derives it. `suprnova-cli` inherits `version.workspace = true` and
-/// `release.sh` tags `v<workspace version>`.
-fn expected_tag() -> String {
-    format!("v{}", env!("CARGO_PKG_VERSION"))
+/// The pin both scaffolds must write, as the scaffolder chooses it: the
+/// tag `v<workspace version>` that `release.sh` creates, or the commit this
+/// CLI was built from when that commit is not the release (PAR-080).
+fn expected_pin() -> String {
+    suprnova_cli::templates::framework_pin().to_string()
 }
 
 #[test]
 fn backend_cargo_template_has_no_hardcoded_tag() {
     let tpl = read("src/templates/files/backend/Cargo.toml.tpl");
-    assert!(
-        tpl.contains(r#"tag = "{framework_tag}""#),
-        "backend Cargo.toml.tpl must template its tag, not hardcode one; got:\n{tpl}"
+    assert_eq!(
+        tpl.matches("git = \"https://github.com/eas4ai/suprnova.git\", {framework_pin},")
+            .count(),
+        2,
+        "backend Cargo.toml.tpl must template its pin, not hardcode one; got:\n{tpl}"
     );
 }
 
 #[test]
 fn api_cargo_template_has_no_hardcoded_tag() {
     let tpl = read("src/templates/files/api/Cargo.toml.tpl");
-    assert!(
-        tpl.contains(r#"tag = "{framework_tag}""#),
-        "api Cargo.toml.tpl must template its tag, not hardcode one; got:\n{tpl}"
+    assert_eq!(
+        tpl.matches("git = \"https://github.com/eas4ai/suprnova.git\", {framework_pin},")
+            .count(),
+        2,
+        "api Cargo.toml.tpl must template its pin, not hardcode one; got:\n{tpl}"
     );
 }
 
@@ -145,14 +149,14 @@ fn api_bootstrap_initializes_crypt_before_magnetar() {
 #[test]
 fn no_scaffold_template_pins_a_literal_version_tag() {
     // Catches the general case: any template that hardcodes `tag = "vX.Y.Z"`
-    // will be stale the moment the next release ships.
+    // or a `rev` will be stale the moment the next release ships.
     let templates = cli_root().join("src/templates/files");
     let mut offenders = Vec::new();
     let mut seen = 0usize;
     visit(&templates, &mut |path, body| {
         seen += 1;
         for line in body.lines() {
-            if line.contains("tag = \"v") && !line.contains("{framework_tag}") {
+            if line.contains("tag = \"v") || line.contains("rev = \"") {
                 offenders.push(format!("{}: {}", path.display(), line.trim()));
             }
         }
@@ -164,7 +168,7 @@ fn no_scaffold_template_pins_a_literal_version_tag() {
     );
     assert!(
         offenders.is_empty(),
-        "templates must derive the framework tag, not hardcode it:\n{}",
+        "templates must derive the framework pin, not hardcode it:\n{}",
         offenders.join("\n")
     );
 }
@@ -188,13 +192,14 @@ fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
 #[test]
 fn rendered_backend_cargo_toml_pins_the_running_version() {
     let rendered = suprnova_cli::templates::cargo_toml("my_app", "A test app", "");
-    let expected = format!("tag = \"{}\"", expected_tag());
-    assert!(
-        rendered.contains(&expected),
-        "backend Cargo.toml must pin {expected}; rendered:\n{rendered}"
+    let expected = expected_pin();
+    assert_eq!(
+        rendered.matches(&expected).count(),
+        2,
+        "backend Cargo.toml must pin {expected} twice; rendered:\n{rendered}"
     );
     assert!(
-        !rendered.contains("{framework_tag}"),
+        !rendered.contains("{framework_pin}"),
         "placeholder left unsubstituted - check the format! argument name"
     );
 }
@@ -202,13 +207,14 @@ fn rendered_backend_cargo_toml_pins_the_running_version() {
 #[test]
 fn rendered_api_cargo_toml_pins_the_running_version() {
     let rendered = suprnova_cli::templates::api::cargo_toml("my_api", "my-api");
-    let expected = format!("tag = \"{}\"", expected_tag());
-    assert!(
-        rendered.contains(&expected),
-        "api Cargo.toml must pin {expected}; rendered:\n{rendered}"
+    let expected = expected_pin();
+    assert_eq!(
+        rendered.matches(&expected).count(),
+        2,
+        "api Cargo.toml must pin {expected} twice; rendered:\n{rendered}"
     );
     assert!(
-        !rendered.contains("{framework_tag}"),
+        !rendered.contains("{framework_pin}"),
         "placeholder left unsubstituted - check the .replace() call"
     );
 }
@@ -932,7 +938,7 @@ fn a_scaffolded_project_contains_no_unsubstituted_placeholders() {
 const KNOWN_TEMPLATE_KEYS: &[&str] = &[
     "package_name",
     "project_name",
-    "framework_tag",
+    "framework_pin",
     "description",
     "db_password",
     "minio_password",
@@ -942,7 +948,7 @@ const KNOWN_TEMPLATE_KEYS: &[&str] = &[
     "project_title",
 ];
 
-/// The tag in a scaffold on disk must be the tag this build would release.
+/// The pin in a scaffold on disk must be the one this build chooses.
 ///
 /// `rendered_backend_cargo_toml_pins_the_running_version` asserts the same
 /// thing about `templates::cargo_toml(...)`, but that calls the render
@@ -951,7 +957,7 @@ const KNOWN_TEMPLATE_KEYS: &[&str] = &[
 #[test]
 fn a_scaffolded_manifest_on_disk_pins_the_running_tag() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let expected = format!("tag = \"{}\"", expected_tag());
+    let expected = expected_pin();
 
     for (name, extra) in [("tagfull", &[][..]), ("tagapi", &["--api"][..])] {
         let project = scaffold_to_disk(&tmp, name, extra);
