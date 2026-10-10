@@ -326,6 +326,11 @@ impl From<FakeSequence> for FakeHandler {
 }
 
 /// A faked result, from [`Process::result`](super::Process::result).
+///
+/// A started process reveals its output a line at a time, as a described
+/// one does: `Process::result("one\ntwo\n")` answers `latest_output` with
+/// `"one\n"`, then `"two\n"`, then the empty string. The error output works
+/// the same way, and the result `wait` returns holds all of both.
 #[derive(Debug, Clone, Default)]
 pub struct FakeResult {
     output: String,
@@ -400,22 +405,26 @@ impl FakeDescription {
         self
     }
 
-    /// Add a line of standard output.
+    /// Add a line of standard output. Text that holds newlines adds one
+    /// line for each, so a started process reveals them one at a time.
     pub fn output(mut self, line: impl Into<String>) -> Self {
-        self.chunks.push((
-            OutputKind::Out,
-            format!("{}\n", line.into().trim_end_matches('\n')),
-        ));
+        self.push_lines(OutputKind::Out, &line.into());
         self
     }
 
-    /// Add a line of standard error.
+    /// Add a line of standard error. Text that holds newlines adds one line
+    /// for each, as [`output`](Self::output) does.
     pub fn error_output(mut self, line: impl Into<String>) -> Self {
-        self.chunks.push((
-            OutputKind::Err,
-            format!("{}\n", line.into().trim_end_matches('\n')),
-        ));
+        self.push_lines(OutputKind::Err, &line.into());
         self
+    }
+
+    /// Store `text`, ended with one newline, as one chunk a line. A started
+    /// process reveals a chunk per read, so one chunk holding two lines
+    /// would reveal both at once.
+    fn push_lines(&mut self, kind: OutputKind, text: &str) {
+        let text = format!("{}\n", text.trim_end_matches('\n'));
+        self.chunks.extend(lines_of(kind, &text));
     }
 
     /// The exit code it ends with.
@@ -481,12 +490,22 @@ impl FakeSequence {
     }
 }
 
+/// The lines of `text`, each keeping its own newline, so the lines joined
+/// give back `text` byte for byte and a last line without a newline stays
+/// without one. Empty text has no lines.
+fn lines_of(kind: OutputKind, text: &str) -> impl Iterator<Item = (OutputKind, String)> + '_ {
+    text.split_inclusive('\n')
+        .map(move |line| (kind, line.to_owned()))
+}
+
 /// What a faked process does, whatever handler gave it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Canned {
     id: Option<u32>,
     output: String,
     error_output: String,
+    /// The output in the order it is shown, one line a chunk: a started
+    /// process reveals a chunk per read.
     chunks: Vec<(OutputKind, String)>,
     exit_code: i32,
     iterations: u32,
@@ -511,13 +530,9 @@ impl FakeHandler {
                 id: None,
                 output: result.output.clone(),
                 error_output: result.error_output.clone(),
-                chunks: [
-                    (OutputKind::Out, result.output.clone()),
-                    (OutputKind::Err, result.error_output.clone()),
-                ]
-                .into_iter()
-                .filter(|(_, text)| !text.is_empty())
-                .collect(),
+                chunks: lines_of(OutputKind::Out, &result.output)
+                    .chain(lines_of(OutputKind::Err, &result.error_output))
+                    .collect(),
                 exit_code: result.exit_code,
                 iterations: 0,
             }),
