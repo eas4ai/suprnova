@@ -245,6 +245,32 @@ async fn gc_removes_only_sessions_idle_past_the_lifetime() {
 }
 
 #[tokio::test]
+async fn rendered_expired_delete_matches_only_a_session_still_expired() {
+    let driver = MongoSessionDriver::with_connection(LIFETIME, &unreachable().await, "sessions")
+        .expect("valid collection");
+    let now = moment();
+    let cutoff = bson_time(now - chrono::Duration::hours(2));
+    assert_eq!(
+        driver.rendered_expired_delete("abc", now),
+        doc! {
+            "session_id": "abc",
+            "last_activity": { "$lt": cutoff },
+        }
+    );
+    // The same cutoff as the collection, so a read and a gc agree on what
+    // is expired.
+    let gc = driver.rendered_gc(now);
+    let gc_cutoff = gc
+        .get_document("filter")
+        .unwrap()
+        .get_document("last_activity")
+        .unwrap()
+        .get("$lt")
+        .unwrap();
+    assert_eq!(gc_cutoff, &Bson::DateTime(cutoff));
+}
+
+#[tokio::test]
 async fn a_server_that_does_not_answer_fails_the_store_as_mongodb() {
     let driver = MongoSessionDriver::with_connection(LIFETIME, &unreachable().await, "sessions")
         .expect("valid collection");
@@ -399,6 +425,70 @@ async fn mongodb_gc_removes_idle_sessions_and_keeps_active_ones() {
     assert!(
         driver.read(&active.id).await.unwrap().is_some(),
         "the active one stays"
+    );
+    drop_collections(&connection, &[&name]).await;
+}
+
+#[tokio::test]
+#[ignore = "needs MONGODB_TEST_URL"]
+async fn mongodb_expired_read_delete_spares_a_session_refreshed_after_the_read() {
+    let (driver, connection, name) = driver_on_server(LIFETIME).await;
+    let collection = connection.collection::<Document>(&name);
+    let now = Utc::now();
+    let stale_at = bson_time(now - chrono::Duration::hours(3));
+    let set_last_activity = |id: &str, at: suprnova::bson::DateTime| {
+        let collection = collection.clone();
+        let filter = doc! { "session_id": id };
+        async move {
+            collection
+                .update_one(filter, doc! { "$set": { "last_activity": at } })
+                .await
+                .expect("set last_activity");
+        }
+    };
+
+    // A read saw this session expired, then another request loaded it and
+    // refreshed its last activity. The read's delete must not remove it.
+    let refreshed = signed_in(Some("7"));
+    driver.write(&refreshed).await.expect("write");
+    set_last_activity(&refreshed.id, stale_at).await;
+    set_last_activity(&refreshed.id, bson_time(Utc::now())).await;
+    let deleted = collection
+        .delete_one(driver.rendered_expired_delete(&refreshed.id, now))
+        .await
+        .expect("the conditional delete runs");
+    assert_eq!(deleted.deleted_count, 0, "the refreshed session is active");
+    let read = driver
+        .read(&refreshed.id)
+        .await
+        .expect("read")
+        .expect("the refreshed session is still stored");
+    assert_eq!(read.user_id.as_deref(), Some("7"));
+
+    // A session left stale is deleted by the same filter, and a read
+    // answers none for it.
+    let stale = signed_in(Some("8"));
+    driver.write(&stale).await.expect("write");
+    set_last_activity(&stale.id, stale_at).await;
+    let deleted = collection
+        .delete_one(driver.rendered_expired_delete(&stale.id, now))
+        .await
+        .expect("the conditional delete runs");
+    assert_eq!(deleted.deleted_count, 1, "the stale session is expired");
+    assert!(driver.read(&stale.id).await.expect("read").is_none());
+
+    // A read of an expired session deletes it through the same filter.
+    let expired = signed_in(Some("9"));
+    driver.write(&expired).await.expect("write");
+    set_last_activity(&expired.id, stale_at).await;
+    assert!(driver.read(&expired.id).await.expect("read").is_none());
+    assert_eq!(
+        collection
+            .count_documents(doc! { "session_id": expired.id.as_str() })
+            .await
+            .expect("count"),
+        0,
+        "the expired read removes the record"
     );
     drop_collections(&connection, &[&name]).await;
 }
