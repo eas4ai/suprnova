@@ -15,6 +15,7 @@ mod command;
 mod console_derive;
 mod data;
 mod describe;
+mod document;
 mod domain_error;
 mod factory;
 mod handler;
@@ -1178,6 +1179,62 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     model::expand(attr.into(), item.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// `#[suprnova::document(collection = "...")]` - a document model stored
+/// in a MongoDB collection, with the Eloquent shape (PAR-183). Needs the
+/// framework's `database-mongodb` feature.
+///
+/// The macro implements `suprnova::DocumentModel` for the struct, which
+/// gives it `create`, `find`, `find_or_fail`, `all`, `query`, `save`,
+/// `update`, `delete`, `fresh`, `refresh`, the soft-delete calls and the
+/// array operators. It also implements serde's `Serialize`, honouring
+/// `hidden` and `visible`, and `RouteBinding` by the key, and it derives
+/// `Clone` and `Debug`.
+///
+/// Attribute keys, spelled as on `#[model]`:
+///
+/// - `collection = "..."` - the collection. Defaults to the plural
+///   snake-case name of the struct (`BlogPost` is `blog_posts`).
+/// - `connection = "..."` - a named MongoDB connection. Defaults to the
+///   `mongodb` connection.
+/// - `primary_key = "..."` - the field stored as `_id`. Without it, the
+///   key is the field `id`, and a struct without one gets
+///   `pub id: ObjectId`, generated when a model is made.
+/// - `fillable = [...]` or `guarded = [...]` - the mass-assignment guard.
+///   The default guards the key.
+/// - `casts = { field = Cast }` - a `DocumentCast` for a field. A
+///   `chrono::DateTime<Utc>` field is stored as a BSON datetime and a
+///   `rust_decimal::Decimal` as a `Decimal128` without one.
+/// - `timestamps = false`, `created_at = "..."`, `updated_at = "..."` -
+///   managed timestamps, on when the struct has both fields.
+/// - `soft_deletes`, `soft_deletes_column = "..."` - soft deletes through
+///   an optional date-time field, `deleted_at` by default.
+/// - `hidden = [...]` or `visible = [...]` - the serialized fields.
+///
+/// Field markers: `#[embeds_one]` on an `Option<T>` and `#[embeds_many]`
+/// on a `Vec<T>` store `T` as embedded documents and add a method of the
+/// field's name that answers the relation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[suprnova::document(collection = "users", fillable = ["name", "email"], hidden = ["password"])]
+/// pub struct User {
+///     pub name: String,
+///     pub email: String,
+///     pub password: Option<String>,
+///     #[embeds_many]
+///     pub addresses: Vec<Address>,
+///     pub created_at: Option<suprnova::bson::DateTime>,
+///     pub updated_at: Option<suprnova::bson::DateTime>,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn document(attr: TokenStream, item: TokenStream) -> TokenStream {
+    document::expand(attr.into(), item.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

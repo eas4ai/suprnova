@@ -953,7 +953,7 @@ pub fn to_snake(s: &str) -> String {
 
 /// Naive pluralizer - good enough for the common cases users will hit.
 /// Override with explicit `table = "..."` for irregulars.
-fn pluralize_snake(struct_name: &str) -> String {
+pub(crate) fn pluralize_snake(struct_name: &str) -> String {
     let snake = to_snake(struct_name);
     if snake.ends_with('s')
         || snake.ends_with("ch")
@@ -1148,7 +1148,7 @@ fn parse_default_attributes(input: ParseStream) -> Result<Vec<(Ident, Expr)>> {
     Ok(entries)
 }
 
-fn parse_str_array(input: ParseStream) -> Result<Vec<String>> {
+pub(crate) fn parse_str_array(input: ParseStream) -> Result<Vec<String>> {
     let content;
     syn::bracketed!(content in input);
     let mut out = Vec::new();
@@ -1162,7 +1162,7 @@ fn parse_str_array(input: ParseStream) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn parse_casts_map(input: ParseStream) -> Result<Vec<(Ident, Type)>> {
+pub(crate) fn parse_casts_map(input: ParseStream) -> Result<Vec<(Ident, Type)>> {
     let content;
     syn::braced!(content in input);
     let mut entries = Vec::new();

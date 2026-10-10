@@ -265,13 +265,483 @@ error as its source, which `FrameworkError::external_source` returns.
 
 ## Models
 
-This section describes document models, structs that
-`#[suprnova::document]` stores in a collection.
+A document model is a struct that `#[suprnova::document]` stores in a
+collection. It has the Eloquent calls of an SQL model: `create`, `find`,
+`find_or_fail`, `all`, `query`, `save`, `update`, `delete`, `fresh`, and
+`refresh`. The calls come from the `DocumentModel` trait, so import it where
+you call them:
+
+```rust
+use suprnova::bson::doc;
+use suprnova::{DocumentModel, FrameworkError};
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Address {
+    pub street: String,
+    pub city: String,
+}
+
+#[suprnova::document(
+    collection = "users",
+    fillable = ["name", "email", "password", "tags", "addresses"],
+    hidden = ["password"],
+    soft_deletes
+)]
+pub struct User {
+    pub name: String,
+    pub email: String,
+    pub password: Option<String>,
+    pub tags: Vec<String>,
+    #[embeds_many]
+    pub addresses: Vec<Address>,
+    pub created_at: Option<suprnova::bson::DateTime>,
+    pub updated_at: Option<suprnova::bson::DateTime>,
+    pub deleted_at: Option<suprnova::bson::DateTime>,
+}
+
+async fn example() -> Result<(), FrameworkError> {
+    let user = User::create(doc! {
+        "name": "Ada",
+        "email": "ada@example.com",
+        "tags": ["math"],
+    })
+    .await?;
+
+    let found = User::find(user.id).await?;
+    let user = user.update(doc! { "name": "Ada Lovelace" }).await?;
+    user.delete().await?;
+    Ok(())
+}
+```
+
+The macro derives `Clone` and `Debug`, and it implements serde's `Serialize`
+for the struct, so don't derive those three yourself. The model's events
+need the first two, and the third honours `hidden` and `visible`.
+
+### Collection and connection
+
+`collection = "..."` names the collection. Without it, the collection is the
+plural snake-case name of the struct, so `BlogPost` is stored in
+`blog_posts`. `connection = "..."` stores the model on a named connection
+instead of the default `mongodb` one.
+
+### Keys
+
+Every document has a key, which MongoDB stores as `_id`. Without a
+`primary_key`, the key is the field `id`. A struct without an `id` field
+gets one: `pub id: ObjectId`, which the model generates when you make or
+create it. You read it as `user.id`, and `User::find` takes it.
+
+To use another field as the key, name it with `primary_key`. That field is
+stored as `_id`, and you give its value when you create a document:
+
+```rust
+#[suprnova::document(collection = "products", primary_key = "sku", fillable = ["sku", "title"])]
+pub struct Product {
+    pub sku: String,
+    pub title: String,
+}
+
+let anvil = Product::create(doc! { "sku": "A-1", "title": "Anvil" }).await?;
+let same = Product::find("A-1").await?;
+```
+
+A key of type `ObjectId`, `String`, `i64`, or `i32` works out of the box. For
+another type, implement `DocumentKey`: it says how a route parameter names a
+key and whether the model can generate one.
+
+In queries, the key's field name means `_id`, so
+`User::query().where_("id", "=", id)` matches the stored `_id`.
+
+### Mass assignment
+
+`fillable` and `guarded` take the same lists as on an SQL model, and the
+same rules apply: `create`, `update`, `make`, and `fill` drop a field the
+guard refuses, or return an error when you turned on
+`prevent_silently_discarding_attributes(true)`. Without either list, the
+guard refuses the key. `suprnova::eloquent::unguarded` turns the guard off
+for one task, as it does for SQL models.
+
+A field that the struct doesn't declare is an error that names it, since the
+model has nowhere to keep its value. A value of the wrong type, such as a
+string for an `i64` field, is an error that names the field, and nothing is
+written.
+
+`make(attrs)` builds a model without storing it, and `fill(attrs)` sets
+fields on one. Call `save` to store either.
+
+### Field types and casts
+
+Each field is stored through serde, so strings, numbers, booleans, `Vec`s,
+nested structs, and `bson::Document` values keep their BSON types. A unit
+enum is stored as its serde name, which is a string. Three field types get
+the BSON type made for them:
+
+| Field type | Stored as | Cast |
+|---|---|---|
+| `bson::DateTime` | BSON datetime | none needed |
+| `chrono::DateTime<Utc>` | BSON datetime | `AsBsonDateTime` |
+| `rust_decimal::Decimal` | `Decimal128` | `AsDecimal128` |
+
+The macro selects the cast for a `chrono::DateTime<Utc>` or a `Decimal`
+field, and for an `Option` of one. A BSON datetime holds milliseconds, so a
+`chrono` time with finer precision reads back truncated to the millisecond.
+Both casts also read a string, which is how a date or a decimal arrives in
+attributes you build with `doc!`.
+
+To store a field another way, write a type that implements
+`DocumentCast<FieldType>` and name it in `casts`, as on an SQL model:
+
+```rust
+#[suprnova::document(casts = { colour = AsHexColour })]
+pub struct Theme {
+    pub colour: Colour,
+}
+```
+
+When a stored document lacks a field, an `Option` field reads as `None` and a
+`Vec` field reads as empty. Any other missing field is an error that names
+it.
+
+### Timestamps
+
+When the struct has both `created_at` and `updated_at`, the model manages
+them as BSON datetimes. `create` sets both, and `save`, `update`, `restore`,
+and `increment` set `updated_at`. A struct with only one of the two fields
+fails to compile. To turn the timestamps off, set `timestamps = false`. To
+rename the fields, set `created_at = "..."` and `updated_at = "..."`.
+
+### Soft deletes
+
+With `soft_deletes`, `delete` sets the `deleted_at` field instead of removing
+the document, and queries leave such trashed documents out. The field must
+be an optional date-time. To use another field, set
+`soft_deletes_column = "..."`.
+
+```rust
+user.delete().await?;                           // sets deleted_at
+let trashed = User::only_trashed().get().await?;
+let everyone = User::with_trashed().get().await?;
+
+let user = trashed.into_vec().remove(0).restore().await?;
+user.force_delete().await?;                     // removes the document
+```
+
+`restore` on a model without soft deletes is an error that names `restore`.
+
+### Embedded documents
+
+Mark a `Vec<T>` field `#[embeds_many]`, or an `Option<T>` field
+`#[embeds_one]`, to store `T` values inside the document. `T` is a plain
+struct that implements serde's `Serialize` and `Deserialize`. The model reads
+and writes the field like any other, and it gains a method with the field's
+name that answers the relation:
+
+```rust
+let mut user = User::find_or_fail(id).await?;
+user.addresses()
+    .save(&Address { street: "2 Engine Row".into(), city: "Leeds".into() })
+    .await?;
+user.addresses().destroy(&old_address).await?;
+```
+
+An `embeds_many` relation has `save`, `save_many`, `destroy`, and `clear`.
+An `embeds_one` relation has `save` and `delete`. Each call writes to the
+server and reloads the model from the result.
+
+### Array and counter operators
+
+These calls change one field on the server and reload the model:
+
+| Call | Operator |
+|---|---|
+| `push(field, value)` | `$push`: append `value` |
+| `push_unique(field, value)` | `$addToSet`: append unless present |
+| `pull(field, value)` | `$pull`: remove every equal element |
+| `increment(field, by)` | `$inc`, and set `updated_at` |
+| `decrement(field, by)` | `$inc` with `-by`, and set `updated_at` |
+
+```rust
+user.push("tags", "rust").await?;
+user.pull("tags", "math").await?;
+user.increment("logins", 1).await?;
+```
+
+`field` can be a dotted path into an embedded document. A field the model
+doesn't declare, or the key, is an error that names it, and so is an
+`increment` amount that isn't an integer or a float.
+
+### Events and observers
+
+Document models fire the lifecycle events of SQL models, in Laravel's order:
+`Saving`, then `Creating` or `Updating`, the write, `Created` or `Updated`,
+and `Saved`. SQL models in Suprnova fire `Creating` before `Saving`; document
+models keep Laravel's order. `delete` fires `Deleting`, `Trashed` when the model soft
+deletes, and `Deleted`. `restore` fires `Restoring`, the update's events,
+and `Restored`. Queries fire `Retrieving` and `Retrieved`. Each event is a
+generic type in `suprnova::mongodb::events`, such as `Created<User>`.
+
+A listener on `Saving`, `Creating`, `Updating`, `Deleting`, or `Restoring` can
+cancel the write: the call returns a `400 Bad Request` error with the
+listener's reason, and nothing is written. The first three carry the
+attributes about to be written as a `bson::Document`, which the listener can
+change.
+
+To collect the callbacks in one place, implement `DocumentObserver` and
+register it with `#[suprnova::observer]`, as for an SQL model:
+
+```rust
+use suprnova::bson::Document;
+use suprnova::{DocumentObserver, EventResult};
+
+pub struct UserObserver;
+
+#[suprnova::observer(User)]
+#[suprnova::async_trait]
+impl DocumentObserver<User> for UserObserver {
+    async fn creating(&self, attrs: &mut Document) -> EventResult {
+        attrs.insert("tags", vec!["new"]);
+        EventResult::ok()
+    }
+}
+```
+
+`User::observe(UserObserver).await` registers an observer by hand instead.
+
+### Serialization
+
+The model serializes as its fields: the key under its field name, an
+`ObjectId` as its hex string, a datetime as RFC 3339 text, and a
+`Decimal128` as its decimal text. `hidden = [...]` leaves fields out, and
+`visible = [...]` writes only the fields it lists. So a handler can answer a
+model as JSON:
+
+```rust
+let json = serde_json::to_value(&user)?;
+// {"id":"6523...","name":"Ada","email":"ada@example.com","tags":["math"],...}
+```
+
+For the stored form, call `to_document()`, which writes the key as `_id`.
+
+### Route binding
+
+A document model binds from a route parameter by its key, like an SQL
+model. A parameter that isn't a valid key, such as text that isn't an
+`ObjectId`, binds nothing, so the route answers `404 Not Found` without a
+query. A route with `with_trashed()` also binds trashed documents. A
+parameter with a binding field, such as `{user:email}`, matches that field
+as text.
+
+### Why Suprnova diverges
+
+- **Calls through a trait.** Laravel models extend
+  `MongoDB\Laravel\Eloquent\Model`. A Suprnova document model implements the
+  `DocumentModel` trait, so you import the trait to call `create` or `find`.
+- **Declared fields.** A Laravel MongoDB model stores any attribute you set.
+  A Suprnova model stores the fields its struct declares, so an attribute
+  that names no field is an error instead of an extra stored field.
+- **Embedded relations by field.** Laravel declares `embedsMany` in a
+  relation method. Suprnova marks the field, so the embedded documents are
+  part of the struct and read with it.
 
 ## Queries
 
-This section describes the document query builder that a model's `query()`
-returns.
+A model's `query()` returns a `DocumentQuery`, the builder for its
+collection. Chain conditions and finish with a call that runs the query:
+
+```rust
+use suprnova::{Direction, DocumentModel};
+
+let adults = User::query()
+    .where_("age", ">=", 18)
+    .where_in("role", ["admin", "editor"])
+    .order_by("name", Direction::Asc)
+    .skip(10)
+    .take(5)
+    .get()
+    .await?;
+```
+
+The method is `where_` because `where` is a Rust keyword.
+
+### Conditions
+
+| Call | Matches |
+|---|---|
+| `where_(field, op, value)` | `field` compared with `value` |
+| `or_where(field, op, value)` | the same, joined with OR |
+| `where_in(field, values)` | `field` equal to one of `values` (`$in`) |
+| `where_not_in(field, values)` | `field` equal to none of `values` (`$nin`) |
+| `where_null(field)` | `field` null or missing |
+| `where_not_null(field)` | `field` present and not null |
+| `where_between(field, low..=high)` | `field` from `low` to `high`, both included |
+| `where_date(field, date)` | a datetime `field` on the UTC day `date` |
+| `where_exists(field)` | `field` present, null or not |
+| `where_raw(filter)` | a filter in MongoDB's query language |
+
+`op` is one of `=`, `!=` (or `<>`), `<`, `<=`, `>`, `>=`, `like`, and
+`not like`. `like` takes an SQL pattern, where `%` matches any run of
+characters and `_` matches one character. It matches the whole value and
+ignores case, so `where_("name", "like", "jo%")` matches `Joan` and `john`.
+
+Conditions join with AND. `or_where` starts a new group, and the conditions
+after it join that group. AND binds tighter than OR, as in SQL, so this
+query matches people over 60, and admins in the core team:
+
+```rust
+let people = User::query()
+    .where_("age", ">", 60)
+    .or_where("role", "=", "admin")
+    .where_("team", "=", "core")
+    .get()
+    .await?;
+```
+
+A field can be a dotted path into an embedded document, such as
+`addresses.city`. `where_raw` takes its filter as written, so in it the key
+is `_id`. An unknown operator, or `like` with a value that isn't a string,
+makes the query an error that names `where_`.
+
+### Order, offset, limit, and projection
+
+`order_by(field, direction)` sorts, and later calls sort the ties of earlier
+ones. `skip(n)` and `take(n)` set the offset and the limit. `project(fields)`
+reads only those fields of each document. A projected query hydrates a model
+only when its other fields are `Option` or `Vec` fields, so read projected
+documents with `get_documents()`, which answers them as `bson::Document`
+values.
+
+### Reading
+
+| Call | Returns |
+|---|---|
+| `get()` | the matching models, as a `Collection` |
+| `get_documents()` | the matching documents, unread |
+| `first()` | the first match, or `None` |
+| `count()` | the number of matches |
+| `exists()` | whether anything matches |
+| `pluck(field)` | the value of `field` in each match |
+| `distinct(field)` | the distinct values of `field` |
+| `sum(field)`, `avg(field)`, `min(field)`, `max(field)` | one value, or `None` when nothing matches |
+| `paginate(per_page, page)` | a `LengthAwarePaginator` with the total |
+| `simple_paginate(per_page, page)` | a `Paginator` without a total |
+
+The page is 1-based, and your handler passes it. For example, read it from
+the query string:
+
+```rust
+use suprnova::Context;
+
+let page = Context::query_param("page")
+    .and_then(|page| page.parse().ok())
+    .unwrap_or(1);
+let users = User::query()
+    .order_by("name", Direction::Asc)
+    .paginate(15, page)
+    .await?;
+```
+
+### Grouping and aggregates
+
+`group_by(fields)` groups the matches. Add aggregates to it, then call
+`get()`, which answers one `bson::Document` per group: the group fields and
+the aggregates. `count()` adds `count`. `sum(field)`, `avg(field)`,
+`min(field)`, and `max(field)` add `sum_<field>`, `avg_<field>`,
+`min_<field>`, and `max_<field>`:
+
+```rust
+let per_role = User::query()
+    .where_("active", "=", true)
+    .group_by(["role"])
+    .count()
+    .avg("age")
+    .order_by("count", Direction::Desc)
+    .get()
+    .await?;
+// [{ "role": "user", "count": 12, "avg_age": 31.5 }, ...]
+```
+
+The order, skip, and take apply to the groups. `group_by` with no fields puts
+every match in one group.
+
+### Writing
+
+These calls write to every matching document and return how many changed:
+
+| Call | Writes |
+|---|---|
+| `update(doc)` | the fields of `doc` with `$set`, or `doc` as update operators |
+| `increment(field, by)`, `decrement(field, by)` | `$inc` |
+| `push(field, value)`, `pull(field, value)` | `$push`, `$pull` |
+| `unset(fields)` | `$unset` |
+| `delete()` | removes the matches, or trashes them when the model soft deletes |
+| `force_delete()` | removes the matches, trashed or not |
+
+`update` with plain fields leaves the other fields as they are. With update
+operators, such as `doc! { "$inc": { "views": 1 } }`, it sends them as they
+are. `update`, `increment`, and `decrement` also set `updated_at` when the
+model manages timestamps. These calls don't fire model events, as Laravel's
+query updates don't.
+
+`upsert(values, unique_by)` inserts each value, or updates the document
+whose `unique_by` fields equal the value's:
+
+```rust
+User::query()
+    .upsert(
+        vec![doc! { "email": "ada@example.com", "name": "Ada" }],
+        &["email"],
+    )
+    .await?;
+```
+
+### Rendering without a server
+
+`to_filter()` answers the parts of the find command the builder sends: the
+filter, the sort, the skip, the limit, and the projection. `to_pipeline()`
+answers the same query as aggregation stages. A group's `to_pipeline()`
+answers its `$group` stage and the rest. Use them to check a query in a test:
+
+```rust
+let rendered = User::query()
+    .where_("age", ">=", 18)
+    .where_in("role", ["a", "b"])
+    .to_filter()?;
+assert_eq!(rendered.filter, doc! { "age": { "$gte": 18 }, "role": { "$in": ["a", "b"] } });
+```
+
+On a soft-deleting model, the filter includes the condition that leaves
+trashed documents out.
+
+### Chains that can't run
+
+A chain that MongoDB can't run as written is an error that names the call,
+not a query that matches more or less than you asked for. The builder checks
+before it contacts the server:
+
+- A write after `skip` or `take`: MongoDB writes every matching document.
+- `upsert` after a condition, an order, `skip`, or `take`: it matches each
+  value by its `unique_by` fields.
+- `upsert` of a value without its `unique_by` fields, or without a key the
+  model can't generate.
+- `distinct(field)` ordered by another field, which the distinct values don't
+  carry.
+- `update` that mixes operators and fields, or that writes the key.
+- A one-value aggregate such as `sum` with a projection.
+
+### Why Suprnova diverges
+
+- **Explicit page.** Laravel's `paginate` reads the page from the request.
+  `paginate(per_page, page)` takes the page as an argument, so you can call
+  it outside a request.
+- **Writes take no limit.** Laravel MongoDB accepts a limit on some writes,
+  such as `take(1)` before a delete. Suprnova refuses `skip` and `take` on
+  every write, so a write never matches more or less than its conditions
+  say. To write some of the matches, select their keys with `pluck` and
+  write by them.
+- **Aggregates by name.** Laravel's grouped aggregates come back as
+  `aggregate`. Suprnova names each one after its function and field, so one
+  group can carry several.
 
 ## Relations
 
