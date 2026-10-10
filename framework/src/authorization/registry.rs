@@ -223,10 +223,10 @@ pub(crate) struct GateRegistry {
     after: RwLock<HashMap<TypeId, Vec<Arc<AfterFn>>>>,
     // The type name of every user type a gate or hook is registered under,
     // so the `GateEvaluated` event can name a user a check is handed only as
-    // a type-erased value, with no name beside it (`inspect_erased_async`).
-    // A check that resolves its own user (`#[authorize]`,
-    // `Gate::inspect_current`) names it through
-    // `Authenticatable::auth_type_name` instead, registrations or not.
+    // a type-erased value, with no name beside it. A check that resolves its
+    // own user (`#[authorize]`, `Gate::inspect_current`, the Inertia DevTools
+    // gate) names it through `Authenticatable::auth_type_name` instead,
+    // registrations or not.
     user_types: RwLock<HashMap<TypeId, &'static str>>,
 }
 

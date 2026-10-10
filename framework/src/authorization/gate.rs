@@ -253,24 +253,15 @@ impl Gate {
         Self::inspect_async_keyed::<U, R>(action, user, resource, None).await
     }
 
-    /// [`Self::inspect_async`] for a user held only as a type-erased value,
-    /// such as the one [`Auth::user`](crate::Auth::user) resolves. The lookup
-    /// keys by the concrete type behind the erasure, so the gates and hooks
-    /// registered for that type answer. `#[authorize]` checks through this,
-    /// because the macro does not know the application's user type.
-    pub(crate) async fn inspect_erased_async<R: 'static>(
-        action: &str,
-        user: &(dyn Any + Send + Sync),
-        resource: &R,
-    ) -> Response {
-        Self::inspect_async_keyed::<dyn Any + Send + Sync, R>(action, user, resource, None).await
-    }
-
     /// [`Self::inspect_async`] for a user the check resolved itself, from a
-    /// guard. The user is checked as its concrete type, through
-    /// [`Self::inspect_erased_async`], and the [`GateEvaluated`] event
-    /// carries its identifier and the name of its type, both read here,
-    /// before the erasure to `dyn Any` leaves no name to read.
+    /// guard, such as the one [`Auth::user`](crate::Auth::user) resolves.
+    /// The user is erased to `dyn Any` for the lookup, which keys by the
+    /// concrete type behind the erasure, so the gates and hooks registered
+    /// for that type answer. The [`GateEvaluated`] event carries the user's
+    /// identifier and the name of its type, both read here, before the
+    /// erasure leaves no name to read. `#[authorize]`,
+    /// [`Self::inspect_current`] and the Inertia DevTools gate check through
+    /// this, because none of them knows the application's user type.
     pub(crate) async fn inspect_authenticatable<R: 'static>(
         action: &str,
         user: Arc<dyn Authenticatable>,

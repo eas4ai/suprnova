@@ -80,6 +80,9 @@ pub(crate) async fn answer(
 /// included, only when the configured gate ability allows the signed-in
 /// user, or a guest when no one is signed in. A guest is asked about as `()`, as is the resource, so a gate that
 /// admits users is defined as `Gate::define::<User, ()>(ability, ...)`.
+/// The signed-in user is checked as its concrete type, and the
+/// `GateEvaluated` event names that type and the user's identifier, as
+/// `Gate::inspect_current` and `#[authorize]` name them.
 async fn allows(config: &DevToolsConfig) -> bool {
     if super::config::app_env_names_local() {
         return true;
@@ -88,12 +91,9 @@ async fn allows(config: &DevToolsConfig) -> bool {
         return false;
     };
     match crate::auth::Auth::user().await {
-        Ok(Some(user)) => {
-            let user = user.into_arc_any();
-            crate::authorization::Gate::inspect_erased_async(ability, &*user, &())
-                .await
-                .allowed()
-        }
+        Ok(Some(user)) => crate::authorization::Gate::inspect_authenticatable(ability, user, &())
+            .await
+            .allowed(),
         Ok(None) => crate::authorization::Gate::allows_async(ability, &(), &()).await,
         Err(error) => {
             tracing::debug!(%error, "Inertia DevTools: the user could not be resolved; denied");
