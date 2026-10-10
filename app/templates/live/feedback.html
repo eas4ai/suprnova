@@ -1,0 +1,25 @@
+{% import "suprnova-ui/flash-region/flash-region.html" as flash %}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Feedback gallery</title>
+{{ bootstrap|trusted_html }}
+<link rel="stylesheet" href="/suprnova-ui/button/button.css">
+<link rel="stylesheet" href="/suprnova-ui/alert/alert.css">
+<link rel="stylesheet" href="/suprnova-ui/skeleton/skeleton.css">
+<link rel="stylesheet" href="/suprnova-ui/spinner/spinner.css">
+<link rel="stylesheet" href="/suprnova-ui/progress/progress.css">
+<link rel="stylesheet" href="/suprnova-ui/empty-state/empty-state.css">
+<link rel="stylesheet" href="/suprnova-ui/toast/toast.css">
+<link rel="stylesheet" href="/suprnova-ui/flash-region/flash-region.css">
+<script type="module" src="/suprnova-ui/toast/toast.js"></script>
+</head>
+<body>
+<main>
+<h1>Feedback gallery</h1>
+{% call flash::flash_region("flash", messages) %}{% endcall %}
+{{ gallery|trusted_html }}
+</main>
+</body>
+</html>
