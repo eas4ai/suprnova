@@ -84,9 +84,10 @@ const URL_PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 ///
 /// A disk the application registered under the name `s3` is left as it
 /// is, and the variables are not read then: the bootstrap of the
-/// application runs first, and what it registered is what it meant. In
-/// this the disk differs from the queue and the mail transport, where
-/// the environment decides.
+/// application runs first, and what it registered is what it meant. The
+/// queue keeps a driver the application installed in the same way. In
+/// this the disk differs from the mail transport, where the environment
+/// decides.
 ///
 /// The disk is there when the server has booted its drivers. A `booted`
 /// callback runs before that, and the console binary boots no driver of

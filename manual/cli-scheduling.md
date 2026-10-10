@@ -227,6 +227,10 @@ its cache:
 ./target/release/app schedule:interrupt
 ```
 
+The command boots the cache store `CACHE_DRIVER` names, or keeps the store
+your `bootstrap` binds, so it writes where the schedulers read. A cache that
+doesn't come up stops the command with a non-zero exit status.
+
 You use the same shared cache as the schedulers you interrupt. The active
 run finishes its current task and checks the mark before it starts another.
 You do not cancel background tasks that already started. The next run

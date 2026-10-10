@@ -216,7 +216,10 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
         .await
         .expect("DB::init_with must succeed before the drivers boot");
 
-    // Step 2 - the env-driven driver bootstrap the worker subcommands run.
+    // Step 2 - the env-driven driver bootstrap the worker subcommands run,
+    // from an empty slot: a driver an earlier test installed with
+    // `Queue::set_driver` is the application's, which the boot keeps.
+    suprnova::queue::testing::forget_driver();
     bootstrap_from_env()
         .await
         .expect("QUEUE_DRIVER=database must resolve the initialised connection");
@@ -259,6 +262,7 @@ async fn postgres_queue_worker_dead_letters_into_the_database_store() {
     DB::init_with(DatabaseConfig::builder().url(pg_url()).build())
         .await
         .expect("DB::init_with");
+    suprnova::queue::testing::forget_driver();
     bootstrap_from_env().await.expect("driver bootstrap");
 
     let store = Arc::new(

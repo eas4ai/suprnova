@@ -464,6 +464,19 @@ pub fn forget_connections() {
     crate::queue::connections::clear();
 }
 
+/// Remove the default connection's driver, so the next
+/// [`bootstrap_from_env`](crate::queue::bootstrap_from_env) installs the one
+/// `QUEUE_DRIVER` names.
+///
+/// A driver installed with
+/// [`Queue::set_driver`](crate::queue::Queue::set_driver) is the
+/// application's, and the boot keeps it. The slot is process-wide: a test
+/// that boots the queue from the environment calls this first, because an
+/// earlier test in the same process may have installed a driver.
+pub fn forget_driver() {
+    crate::queue::forget_driver();
+}
+
 /// RAII guard returned by [`install_fake`]. Holds the process-wide
 /// serialization lock and clears the fake store on drop.
 pub struct QueueFakeGuard {
