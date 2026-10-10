@@ -143,8 +143,10 @@ entry when it is rendered with a struct:
 
 - `inertia_response!(&req, "Home", HomeProps { .. })`, or with
   `HomeProps::new(..)` or a unit struct in the props position.
-- `InertiaResponse::new("Users/Show")` with `.with_data(UserDto { .. })` or
-  `.try_with_data(..)` in the same chain.
+- `InertiaResponse::new("Users/Show")` or
+  `Inertia::paginate("Users/Index", "users", page)` with
+  `.with_data(UserDto { .. })` or `.try_with_data(..)` anywhere in the same
+  chain.
 - `Inertia::data("Users/Show", UserDto { .. })` and `Inertia::try_data`.
 
 In any of those positions, a local name counts when the generator can
@@ -168,6 +170,29 @@ The generator follows Rust's scoping: a later `let` of the same name
 replaces the earlier one, and a block's names end with the block. A name
 it cannot type, such as a `match` arm's binding or `let props = load();`,
 leaves the page without an entry.
+
+A field the chain defers or marks optional after it gives the struct is
+absent from the first response, so its key is optional in the struct's
+interface:
+
+```rust
+InertiaResponse::new("Dashboard")
+    .with_data(props)
+    .defer("stats", move || note_stats(user_id))
+    .optional("recent_notes", move || recent_notes(user_id))
+```
+
+```typescript
+export interface DashboardProps {
+  greeting: string;
+  stats?: Stats;
+  recent_notes?: Array<NoteSummary>;
+}
+```
+
+`.defer(..)`, `.defer_with(..)` and `.optional(..)` count when the key is a
+string literal. A key deferred before `.with_data(..)` is sent with the
+struct, so it stays required.
 
 A component rendered with JSON-like props
 (`inertia_response!(&req, "About", { "team_size": 4 })`) or only through

@@ -1803,3 +1803,178 @@ fn intt_an_unreadable_frontend_file_leaves_the_generated_file_alone() {
         before
     );
 }
+
+// A page assembled with the builder: the component named in the first call
+// of a chain pairs with the struct `with_data` receives anywhere in it, and
+// a field the chain defers or marks optional after that is absent from the
+// first response, so its key is optional.
+
+const BUILDER: &str = r#"
+use suprnova::{handler, DeferOptions, FrameworkError, Inertia, InertiaProps, InertiaResponse, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct DashboardProps {
+    pub greeting: String,
+    pub stats: Stats,
+    pub recent_notes: Vec<String>,
+}
+
+#[derive(InertiaProps)]
+pub struct Stats {
+    pub notes: i32,
+}
+
+#[derive(InertiaProps)]
+pub struct NotesIndexProps {
+    pub notes: Vec<String>,
+    pub search: String,
+}
+
+#[handler]
+pub async fn dashboard(req: Request) -> Response {
+    let props = DashboardProps {
+        greeting: "Hi".into(),
+        stats: Stats { notes: 0 },
+        recent_notes: Vec::new(),
+    };
+    Ok(InertiaResponse::new("Dashboard")
+        .with_data(props)
+        .defer("stats", || async { Ok::<_, FrameworkError>(Stats { notes: 1 }) })
+        .optional("recent_notes", || async { Ok::<_, FrameworkError>(Vec::<String>::new()) })
+        .resolve(&req)
+        .await?)
+}
+
+#[handler]
+pub async fn notes(req: Request) -> Response {
+    Ok(Inertia::paginate("Notes/Index", "notes", rows())
+        .with_data(NotesIndexProps { notes: Vec::new(), search: String::new() })
+        .resolve(&req)
+        .await?)
+}
+
+#[handler]
+pub async fn users(req: Request) -> Response {
+    Ok(Inertia::paginate("Users/Index", "users", rows())
+        .with("search", "")
+        .resolve(&req)
+        .await?)
+}
+"#;
+
+#[test]
+fn intt_a_page_built_with_the_builder_pairs_with_the_struct_its_chain_gives() {
+    let ts = generated(&[("controllers/builder.rs", BUILDER)]);
+    assert_eq!(
+        declaration(&ts, "export interface Pages {"),
+        "export interface Pages {\n  \"Dashboard\": DashboardProps;\n  \
+         \"Notes/Index\": NotesIndexProps;\n}\n",
+        "a paginated page pairs with its `with_data` struct; `Users/Index` \
+         gives no struct:\n{ts}"
+    );
+    assert_eq!(
+        declaration(&ts, "export interface DashboardProps {"),
+        "export interface DashboardProps {\n  greeting: string;\n  stats?: Stats;\n  \
+         recent_notes?: Array<string>;\n}\n",
+        "a deferred and an optional field are absent from the first response"
+    );
+    assert_eq!(
+        declaration(&ts, "export interface NotesIndexProps {"),
+        "export interface NotesIndexProps {\n  notes: Array<string>;\n  search: string;\n}\n",
+        "a field the chain neither defers nor marks optional stays required"
+    );
+}
+
+#[test]
+fn intt_only_a_key_absent_after_the_struct_is_given_is_optional() {
+    let ts = generated(&[(
+        "controllers/pages.rs",
+        r#"
+use suprnova::{handler, DeferOptions, FrameworkError, Inertia, InertiaProps, InertiaResponse, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct LaterProps { pub stats: u32, pub chart: u32 }
+
+#[derive(suprnova::Data)]
+pub struct EditDto { pub name: String, pub audit: Vec<String> }
+
+const KEY: &str = "chart";
+
+#[handler]
+pub async fn later(req: Request) -> Response {
+    // The struct is given after the deferral, so it sends `stats` itself;
+    // a key the scan cannot read is left as the struct says.
+    Ok(InertiaResponse::new("Later")
+        .defer("stats", || async { Ok::<_, FrameworkError>(1) })
+        .with_data(LaterProps { stats: 1, chart: 2 })
+        .defer(KEY, || async { Ok::<_, FrameworkError>(2) })
+        .resolve(&req)
+        .await?)
+}
+
+#[handler]
+pub async fn edit(req: Request) -> Response {
+    Ok(Inertia::data("Users/Edit", EditDto { name: "Ada".into(), audit: Vec::new() })
+        .defer_with("audit", DeferOptions::default(), || async {
+            Ok::<_, FrameworkError>(Vec::<String>::new())
+        })
+        .resolve(&req)
+        .await?)
+}
+"#,
+    )]);
+    assert_eq!(
+        declaration(&ts, "export interface LaterProps {"),
+        "export interface LaterProps {\n  stats: number;\n  chart: number;\n}\n"
+    );
+    assert_eq!(
+        declaration(&ts, "export interface EditDto {"),
+        "export interface EditDto {\n  name: string;\n  audit?: Array<string>;\n}\n",
+        "`defer_with` defers too, on a page `Inertia::data` starts"
+    );
+    assert!(
+        ts.contains("  \"Later\": LaterProps;\n") && ts.contains("  \"Users/Edit\": EditDto;\n"),
+        "{ts}"
+    );
+}
+
+#[test]
+fn intt_a_chain_given_two_structs_gets_no_pages_entry() {
+    let ts = generated(&[(
+        "controllers/pages.rs",
+        r#"
+use suprnova::{handler, Inertia, InertiaProps, Request, Response};
+
+#[derive(InertiaProps)]
+pub struct FiltersProps { pub search: String }
+
+#[derive(InertiaProps)]
+pub struct TotalsProps { pub total: u32 }
+
+#[derive(suprnova::Data)]
+pub struct EditDto { pub name: String }
+
+#[handler]
+pub async fn index(req: Request) -> Response {
+    Ok(Inertia::paginate("Notes/Index", "notes", rows())
+        .with_data(FiltersProps { search: String::new() })
+        .with_data(TotalsProps { total: 0 })
+        .resolve(&req)
+        .await?)
+}
+
+#[handler]
+pub async fn edit(req: Request) -> Response {
+    Ok(Inertia::try_data("Users/Edit", EditDto { name: "Ada".into() })?
+        .with_data(TotalsProps { total: 0 })
+        .resolve(&req)
+        .await?)
+}
+"#,
+    )]);
+    assert_eq!(
+        declaration(&ts, "export interface Pages {"),
+        "export interface Pages {\n}\n",
+        "a page built from two structs has no one interface to name:\n{ts}"
+    );
+}

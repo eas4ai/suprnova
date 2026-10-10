@@ -779,6 +779,33 @@ Field shapes:
 | `Vec<String>` / `Vec<T: FromStr>` | repeated text fields |
 | `Vec<Option<String>>` / `Vec<Option<T: FromStr>>` | repeated text fields, an empty one as `None` |
 
+A part reaches a field by its name, read as a form request reads
+[nested names and lists](#nested-names-and-lists). The Inertia client sends
+a list of files with indexes, `photos[0]` and `photos[1]`, and a nested
+field with brackets, `user[name]`:
+
+- `photos[0]` and `photos[]` fill the `Vec` field declared as `photos[]`
+  (or `photos`), in index order. `[]` appends after the highest index the
+  list holds, and a later part at an index replaces an earlier one, as PHP
+  keeps it.
+- `user[name]` fills the field declared as `user.name`, the name a form
+  request's rules use.
+- A part sent under the exact name in `#[field(...)]` reaches that field,
+  whatever the name holds.
+
+```rust
+use suprnova::MultipartRequest;
+use suprnova::http::upload::UploadedFile;
+
+#[derive(MultipartRequest)]
+pub struct Trip {
+    #[field("user.name")]
+    pub name: String,
+    #[field("photos[]")]
+    pub photos: Vec<UploadedFile>,
+}
+```
+
 A text field is read through its type's `FromStr`, except a `bool`, which
 takes what forms send: `1` and `0`, as Inertia sends them, `true` and
 `false`, and `on` and `off`, as an HTML checkbox sends them, the words in any
@@ -795,7 +822,7 @@ still leaves out an empty file input or a `null` file, which is how a
 client leaves a file out.
 
 A text field that holds one value, rather than a `Vec`, takes the last part
-of its name. Only that part is parsed, so an earlier part that doesn't parse
+sent for it. Only that part is parsed, so an earlier part that doesn't parse
 reports nothing, and a last part that doesn't parse reports one error.
 
 Built-in validators in `suprnova::http::upload::validators`:
@@ -874,8 +901,10 @@ Laravel's tolerance of about one pixel.
 A failure that belongs to one field answers `422` with Laravel's
 `{ "message", "errors" }` body, the message under the field's form input
 name. The name is the one in `#[field(...)]`, with a trailing `[]`
-replaced by the part's zero-based index, so a PDF sent as the second file
-of `#[field("photos[]")]` reports under `photos.1`. For an Inertia form,
+replaced by the element's index: the one its name gives, or its place
+among the parts appended with `[]`, counted from zero. A PDF sent as
+`photos[3]` to `#[field("photos[]")]` reports under `photos.3`, and one
+sent as the second `photos[]` under `photos.1`. For an Inertia form,
 `InertiaValidationRedirectMiddleware` turns that `422` into a redirect back
 with the errors, and the form shows each one under its field.
 
@@ -910,8 +939,8 @@ validation-image = Choose a picture for { $field }.
 A file input left empty arrives as a file part with no file name and no
 bytes, and Inertia sends a `null` file as an empty text part. Both count as
 a missing file: an optional field is `None`, and a required one reports
-`validation-required`. A field that holds one file takes the first part of
-its name that isn't one of these, and ignores every later part of that name
+`validation-required`. A field that holds one file takes the first part
+sent for it that isn't one of these, and ignores every later part for it
 without checking it. Text where a file belongs is never checked as a file:
 it reports `validation-file`, however long it is.
 
@@ -974,8 +1003,10 @@ pub struct Gallery {
 }
 ```
 
-The (`max_count` + 1)-th part with that name returns HTTP `413` before
-allocating, so the extra part never reaches `Vec` growth. The four limits
+The (`max_count` + 1)-th part for that field returns HTTP `413` before
+allocating, so the extra part never reaches `Vec` growth. Every part the
+field takes counts, whatever name it was sent under: `photos[]`, `photos[3]`
+and a repeated index alike. The four limits
 on the whole request - the body's byte cap, the part ceiling, a field's
 `max_count`, and the in-memory limit on a text part - all answer `413`
 without reading the body further. Form text must fit in memory, so a text
