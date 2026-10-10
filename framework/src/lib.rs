@@ -208,9 +208,17 @@ pub use cache::{DEFAULT_MONGO_CACHE_COLLECTION, DEFAULT_MONGO_CACHE_LOCKS_COLLEC
 // Document models and their query builder (PAR-183, PAR-184): the trait
 // `#[suprnova::document]` implements, its keys, casts, embedded relations
 // and observer, and the builder `query()` answers.
+#[cfg(feature = "database-mongodb")]
 pub use crate::mongodb::{
     AsBsonDateTime, AsDecimal128, DocumentCast, DocumentGroup, DocumentKey, DocumentModel,
     DocumentObserver, DocumentQuery, EmbedsMany, EmbedsOne, RenderedFind,
+};
+// The relations between documents, and between documents and SQL models
+// (PAR-185), that `relations = { ... }` declares.
+#[cfg(feature = "database-mongodb")]
+pub use crate::mongodb::{
+    BelongsToDocument, BelongsToManyDocuments, BelongsToModel, HasManyDocuments, HasOneDocument,
+    RelationKey,
 };
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]

@@ -521,6 +521,12 @@ serial_test = "=2.0.0"
 # IMG-008). The version suprnova-macros already pins, so the lock gains
 # nothing.
 trybuild = "=1.0.120"
+# A trybuild case reaches only the dev-dependencies, and the `#[model]` in
+# the MongoDB relation compile-fail case (PAR-185) derives through `serde`
+# and `sea_orm`. Both are dependencies above already, so the lock gains
+# nothing.
+serde = { version = "1", features = ["derive"] }
+sea-orm = { version = "2.0", default-features = false }
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1", features = ["test-util"] }
 tracing = "0.1"

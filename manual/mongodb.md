@@ -745,8 +745,222 @@ before it contacts the server:
 
 ## Relations
 
-This section describes relations between documents, and between documents
-and SQL models.
+Document models relate to each other the way SQL models do, and to SQL
+models across the two stores. Declare relations in `relations = { ... }` on
+`#[suprnova::document]`, with the grammar of `#[suprnova::model]`:
+
+```rust
+use suprnova::bson::oid::ObjectId;
+
+#[suprnova::document(
+    collection = "users",
+    fillable = ["name"],
+    relations = {
+        posts: HasMany<Post>,
+        profile: HasOne<Profile>,
+        roles: BelongsToMany<Role>,
+    }
+)]
+pub struct User {
+    pub name: String,
+    pub role_ids: Vec<ObjectId>,
+}
+
+#[suprnova::document(
+    collection = "posts",
+    fillable = ["user_id", "title"],
+    relations = { user: BelongsTo<User> }
+)]
+pub struct Post {
+    pub user_id: ObjectId,
+    pub title: String,
+}
+```
+
+A document relates with these kinds:
+
+| Kind | Relates to | Method answers |
+|---|---|---|
+| `HasOne<D>` | one document of `D` whose foreign key holds this key | `HasOneDocument<D>` |
+| `HasMany<D>` | the documents of `D` whose foreign key holds this key | `HasManyDocuments<D>` |
+| `BelongsTo<D>` | the document of `D` this foreign key names | `BelongsToDocument<D>` |
+| `BelongsToMany<D>` | documents of `D`, each side keeping the other's keys in an array | `BelongsToManyDocuments<Self, D>` |
+| `BelongsToModel<M>` | the SQL model `M` this foreign key names | `BelongsToModel<M>` |
+
+Each relation's keys default to Laravel's names. Name others with options:
+
+| Kind | Default | Options |
+|---|---|---|
+| `HasOne`, `HasMany` | `<parent>_id` on the related document, holding this key | `fk` names the related field; `lk` names this document's field instead of the key |
+| `BelongsTo`, `BelongsToModel` | `<related>_id` on this document, holding the related key | `fk` names this document's field; `lk` names the related field or column instead of the key |
+| `BelongsToMany` | `<related>_ids` on this document and `<this>_ids` on the related one | `pivot_related_key` names this document's array; `pivot_foreign_key` names the related array |
+
+A document with relations gets an `__eager` field beside its own fields. It
+holds what `with` loaded, and the collection never stores it.
+
+### Read a relation
+
+Each relation adds a method of its name. The method sends no query. Its
+`get` reads the related documents, and its `query` answers the
+`DocumentQuery`, so you can add conditions first:
+
+```rust
+let posts = user.posts().get().await?;
+let drafts = user.posts().query().where_("published", "=", false).get().await?;
+let count = user.posts().count().await?;
+let author = post.user().get().await?;
+```
+
+`HasMany` and `BelongsToMany` have `get`, `first`, `count`, and `exists`.
+`HasOne` and `BelongsTo` have `get`, which answers an `Option`. A
+`BelongsTo` whose foreign key is null answers `None` without a query.
+
+`create` on a `HasMany` or a `HasOne` creates a related document with the
+foreign key set to the parent's key. The model's guard applies to the
+attributes you pass, and the relation's key always wins:
+
+```rust
+let post = user.posts().create(doc! { "title": "Hello" }).await?;
+assert_eq!(post.user_id, user.id);
+```
+
+### Eager loading
+
+`with` loads relations for every document a query reads, with one query per
+relation however many documents there are. Read a loaded relation with
+`<name>_loaded()`, which answers `None` when no query loaded it:
+
+```rust
+let users = User::query().with(["posts", "profile"]).get().await?;
+for user in users.iter() {
+    let posts = user.posts_loaded().unwrap_or_default();
+    let profile = user.profile_loaded();
+}
+```
+
+A dotted path loads a relation of the related documents, with one more
+query per step: `with(["posts.user"])` loads each post's user. `get`,
+`first`, `paginate`, and `simple_paginate` load the relations.
+`relation_loaded("posts")` answers whether a query loaded one. A name the
+model doesn't declare is an error that names it, before any query runs.
+
+### Many-to-many
+
+A `BelongsToMany` keeps no pivot collection. Each side keeps the keys of the
+other in an array, as Laravel MongoDB stores it: a user's `role_ids` holds
+its roles, and each role's `user_ids` holds its users. The relation reads
+the related side's array, so declare it on both models to read it from
+both:
+
+```rust
+#[suprnova::document(
+    collection = "roles",
+    fillable = ["name"],
+    relations = { users: BelongsToMany<User> }
+)]
+pub struct Role {
+    pub name: String,
+    pub user_ids: Vec<ObjectId>,
+}
+```
+
+`attach`, `detach`, `detach_all`, and `sync` write both arrays and answer
+the parent as the server holds it after. Assign the answer to keep the
+parent's own array current:
+
+```rust
+let user = user.roles().attach([editor.id, admin.id]).await?;
+let users = editor.users().get().await?;
+let user = user.roles().detach([admin.id]).await?;
+let user = user.roles().sync([editor.id]).await?;
+```
+
+The parent is written first, so a parent that no longer exists fails the
+call before any related document changes. Without a transaction, the two
+writes are separate. Each one is idempotent, so calling `attach` again
+completes one that failed between them.
+
+### Relations across stores
+
+An SQL model relates to documents with `HasManyDocuments<D>` and
+`HasOneDocument<D>`, and a document relates to an SQL model with
+`BelongsToModel<M>`. Each relation reads through its own store: the
+documents from their collection, the SQL model through its connection.
+
+```rust
+#[suprnova::model(table = "accounts", relations = {
+    notes: HasManyDocuments<Note>,
+    setting: HasOneDocument<Setting>,
+})]
+pub struct Account {
+    pub id: i64,
+    pub name: String,
+}
+
+#[suprnova::document(
+    collection = "notes",
+    fillable = ["account_id", "body"],
+    relations = { account: BelongsToModel<Account> }
+)]
+pub struct Note {
+    pub account_id: i64,
+    pub body: String,
+}
+
+let notes = account.notes().get().await?;
+let owner = note.account().get().await?;
+let accounts = Account::query().with(["notes"]).with_count(["notes"]).get().await?;
+let notes = Note::query().with(["account"]).get().await?;
+```
+
+On the SQL side, `with` and `with_count` read the documents with one query,
+and `<name>_loaded()` and `<name>_count()` answer `None` until a query loads
+them. A dotted path crosses the stores both ways, such as
+`with(["notes.account"])`. A document's `BelongsToModel` query is the SQL
+model's `Builder`, so its global scopes and soft deletes apply. An SQL
+model's relations to documents honour lazy-loading prevention, as its SQL
+relations do.
+
+These calls don't reach across the stores, and each one is an error that
+says so:
+
+- `with_where` on a relation to documents. Add the conditions to the
+  relation's `query()` instead.
+- `with_sum`, `with_avg`, `with_min`, and `with_max` over documents.
+  Aggregate the relation's `query()` instead.
+
+### Key types
+
+The key a relation compares and the field that holds it must have types that
+can match: the same type, the field holding it in an `Option`, or a `Vec` of
+keys for a many-to-many array. Each relation checks this when it compiles. A
+pair that can't match fails the build with an error that names both models:
+
+```text
+error[E0277]: `Account` and `Note` cannot relate: the key `i64` cannot match `ObjectId`
+```
+
+The key and foreign key fields must be visible where the relation is
+declared.
+
+### Why Suprnova diverges
+
+- **Key types checked at build time.** Laravel compares keys when the query
+  runs, so a foreign key of the wrong type answers no related documents.
+  Suprnova refuses the relation when it compiles.
+- **Writes answer the parent.** Laravel's `attach` changes the parent model
+  in place. Suprnova's `attach`, `detach`, and `sync` answer the parent as
+  stored after the write, so assign it.
+- **`BelongsTo` keys follow the model.** Laravel names a `belongsTo` foreign
+  key after the relation method. Suprnova names it after the related model,
+  `user_id` for `BelongsTo<User>`, as its SQL `BelongsTo` does. Name another
+  with `fk`.
+- **No existence queries across stores.** `has` and `where_has` render SQL,
+  which doesn't reach a collection. Read the keys you need with `pluck` and
+  filter with `where_in`.
+- **Loaded relations belong to the instance.** A call that reloads a document
+  from the server, such as `update` or `refresh`, answers it without the
+  relations `with` loaded.
 
 ## Queue
 

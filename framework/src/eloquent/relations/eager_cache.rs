@@ -210,6 +210,17 @@ impl EagerLoadCache {
             .insert(name.to_string(), RelationCell::Many(ClonedBox::new(rows)));
     }
 
+    /// The eager-loaded rows of the relation `name`, or `None` when it
+    /// was not loaded as rows of `T`. The non-panicking sibling of
+    /// [`Self::get_many`], for the accessors of relations to documents,
+    /// which answer `None` for a relation `with` did not load.
+    pub fn loaded_many<T: Any + Send + Sync>(&self, name: &str) -> Option<&[T]> {
+        match self.rows.get(name) {
+            Some(RelationCell::Many(boxed)) => boxed.downcast_ref::<Vec<T>>().map(Vec::as_slice),
+            _ => None,
+        }
+    }
+
     /// Read an eager-loaded HasMany / BelongsToMany row vector.
     ///
     /// Panics with a clear message if the relation was not loaded -

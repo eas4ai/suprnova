@@ -1,14 +1,16 @@
 //! Emits a document model from the parsed attribute and struct: the
 //! `DocumentModel` impl that writes and reads the BSON, the serde
 //! `Serialize` that honours `hidden` and `visible`, route binding by the
-//! key, one relation accessor per embedded field, and the module of event
-//! type names `#[suprnova::observer]` reads.
+//! key, one relation accessor per embedded field, the methods of the
+//! declared relations, and the module of event type names
+//! `#[suprnova::observer]` reads.
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{Ident, Visibility};
 
 use super::parse::{DocumentInput, Embed};
+use super::relations;
 use crate::model::parse::to_snake;
 
 pub fn emit(input: &DocumentInput) -> TokenStream {
@@ -22,6 +24,7 @@ pub fn emit(input: &DocumentInput) -> TokenStream {
     let serialize = emit_serialize(input);
     let route_binding = emit_route_binding(input);
     let embeds = emit_embeds(input);
+    let relations = relations::emit(input);
     let events = emit_events(input);
 
     quote! {
@@ -30,6 +33,7 @@ pub fn emit(input: &DocumentInput) -> TokenStream {
         #serialize
         #route_binding
         #embeds
+        #relations
         #events
     }
 }
@@ -121,8 +125,20 @@ fn emit_model(input: &DocumentInput) -> TokenStream {
         };
         quote! { document.insert(#storage, #value); }
     });
+    // A document with relations keeps what `with` loaded beside its
+    // fields; the stored document never holds it.
+    let (async_trait, cache, relation_items) = if input.relations.is_empty() {
+        (TokenStream::new(), TokenStream::new(), TokenStream::new())
+    } else {
+        (
+            quote! { #[::suprnova::__async_trait::async_trait] },
+            quote! { __eager: ::core::default::Default::default(), },
+            relations::emit_model_items(input),
+        )
+    };
 
     quote! {
+        #async_trait
         impl ::suprnova::mongodb::DocumentModel for #ident {
             type Key = #key_type;
             const COLLECTION: &'static str = #collection;
@@ -145,7 +161,7 @@ fn emit_model(input: &DocumentInput) -> TokenStream {
             fn from_document(
                 mut document: ::suprnova::bson::Document,
             ) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
-                ::core::result::Result::Ok(Self { #(#reads),* })
+                ::core::result::Result::Ok(Self { #(#reads,)* #cache })
             }
 
             fn to_document(
@@ -155,6 +171,8 @@ fn emit_model(input: &DocumentInput) -> TokenStream {
                 #(#writes)*
                 ::core::result::Result::Ok(document)
             }
+
+            #relation_items
         }
     }
 }

@@ -5,7 +5,8 @@
 //! functions, and `primary_key`, `connection`, `timestamps`, `created_at`,
 //! `updated_at`, `soft_deletes`, `soft_deletes_column`, `hidden` and
 //! `visible` are spelled as on a model. `collection` takes the place of
-//! `table`.
+//! `table`. `relations = { ... }` takes the `#[model]` grammar too, with
+//! the kinds a document has (see [`super::relations`]).
 
 use proc_macro2::{Span, TokenStream};
 use syn::parse::{Parse, ParseStream, Parser};
@@ -14,6 +15,7 @@ use syn::{
     Token, Type, parse2,
 };
 
+use super::relations::{self, DocumentRelation, RelationDecl};
 use crate::model::parse::{parse_casts_map, parse_str_array, pluralize_snake};
 
 /// How an `#[embeds_one]` or `#[embeds_many]` field holds its documents.
@@ -55,6 +57,10 @@ pub struct DocumentInput {
     pub soft_deletes: Option<String>,
     pub hidden: Vec<String>,
     pub visible: Option<Vec<String>>,
+    /// The relations `relations = { ... }` declares, keys resolved. A
+    /// document with any gets the `__eager` field that holds what `with`
+    /// loaded; it is not among `fields`.
+    pub relations: Vec<DocumentRelation>,
 }
 
 impl DocumentInput {
@@ -310,7 +316,16 @@ impl DocumentInput {
             None
         };
 
+        let relations =
+            relations::resolve(attrs.relations.unwrap_or_default(), &struct_name, &fields)?;
+        if !relations.is_empty()
+            && let Fields::Named(named) = &mut item.fields
+        {
+            named.named.push(relations::cache_field()?);
+        }
+
         Ok(Self {
+            relations,
             collection: attrs
                 .collection
                 .unwrap_or_else(|| pluralize_snake(&struct_name)),
@@ -467,6 +482,7 @@ struct DocumentAttrs {
     soft_deletes_column: Option<String>,
     hidden: Option<Vec<String>>,
     visible: Option<Vec<String>>,
+    relations: Option<Vec<RelationDecl>>,
 }
 
 impl Parse for DocumentAttrs {
@@ -512,6 +528,7 @@ impl Parse for DocumentAttrs {
                         }
                         "hidden" => out.hidden = Some(parse_str_array(input)?),
                         "visible" => out.visible = Some(parse_str_array(input)?),
+                        "relations" => out.relations = Some(relations::parse_relations(input)?),
                         other => {
                             return Err(syn::Error::new(
                                 key.span(),

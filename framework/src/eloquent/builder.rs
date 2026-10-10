@@ -1214,6 +1214,15 @@ impl<M> Builder<M> {
         self.into_effective()
     }
 
+    /// This builder, failing with `message` at its first terminal call: a
+    /// relation that could not read the key it filters by answers its
+    /// query this way instead of one that matches the wrong rows.
+    #[cfg(feature = "database-mongodb")]
+    pub(crate) fn failing(mut self, message: String) -> Self {
+        self.relationship_error = Some(message);
+        self
+    }
+
     /// The owning form of [`Self::effective`], for a terminal that
     /// consumes the builder.
     pub(crate) fn into_effective(mut self) -> Self {

@@ -17,16 +17,18 @@
 //! Document models (PAR-183) are structs `#[suprnova::document]` stores in
 //! a collection, with the Eloquent calls of [`DocumentModel`];
 //! [`DocumentQuery`] (PAR-184) queries them, and [`events`] holds their
-//! lifecycle events.
+//! lifecycle events. [`relations`] (PAR-185) relates them to each other
+//! and to SQL models.
 
 mod config;
 mod connection;
 mod document;
 pub mod events;
 mod facade;
+mod query;
+pub mod relations;
 // The helpers the MongoDB queue, cache and session stores share.
 pub(crate) mod stores;
-mod query;
 
 pub use config::{
     DEFAULT_MONGO_CONNECTION, MongoConfig, MongoConfigBuilder, MongoConnectionConfig,
@@ -44,6 +46,17 @@ pub use document::{
 pub use events::DocumentObserver;
 pub use facade::Mongo;
 pub use query::{DocumentGroup, DocumentQuery, RenderedFind};
+pub use relations::{
+    BelongsToDocument, BelongsToManyDocuments, BelongsToModel, HasManyDocuments, HasOneDocument,
+    RelationKey,
+};
+// What the relation code the macros emit calls; not part of the API.
+#[doc(hidden)]
+pub use relations::{
+    __count_documents, __document_key, __load_documents, __load_models, __load_nested_documents,
+    __load_nested_models, __present, __present_json, __relation_keys, __relation_model_key,
+    __split_relation_path, __unknown_relation,
+};
 
 /// The `mongodb` driver crate, for what the names here leave out: options,
 /// cursors, sessions, indexes and change streams.

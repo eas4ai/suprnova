@@ -267,6 +267,10 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     const HIDDEN: &'static [&'static str];
     /// The only fields serialization writes, when set.
     const VISIBLE: Option<&'static [&'static str]>;
+    /// The relations the model declares in `relations = { ... }`, by
+    /// name, in declaration order. `with(..)` refuses a name outside it
+    /// before it sends any query.
+    const RELATIONS: &'static [&'static str] = &[];
 
     /// The document's key.
     fn key(&self) -> &Self::Key;
@@ -369,25 +373,7 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     /// As [`Self::make`]; when a `Saving` or `Creating` listener cancels;
     /// and when the insert fails, a duplicate key included.
     async fn create(attrs: Document) -> Result<Self, FrameworkError> {
-        let mut attributes = guard::<Self>(attrs, "create")?;
-        ensure_key::<Self>(&mut attributes, "create")?;
-        if let Some((created_at, updated_at)) = Self::TIMESTAMPS {
-            let now = now();
-            for field in [created_at, updated_at] {
-                if matches!(attributes.get(field), None | Some(Bson::Null)) {
-                    attributes.insert(field, now.clone());
-                }
-            }
-        }
-        let shared: SharedAttributes = Arc::new(Mutex::new(attributes));
-        events::saving::<Self>(&shared, true).await?;
-        events::creating::<Self>(&shared).await?;
-        let attributes = shared.lock().await.clone();
-        let model = from_attributes::<Self>(attributes, "create")?;
-        Self::collection()?.insert_one(model.to_document()?).await?;
-        events::created(&model).await?;
-        events::saved(&model).await?;
-        Ok(model)
+        create_guarded::<Self>(attrs, Document::new(), "create").await
     }
 
     /// The document whose key is `id`, or `None`. A trashed document is
@@ -698,6 +684,70 @@ pub trait DocumentModel: Sized + Clone + Debug + Send + Sync + 'static {
     async fn observe<O: DocumentObserver<Self>>(observer: O) {
         events::observe::<Self, O>(observer).await;
     }
+
+    /// Whether `with(..)` loaded the relation `relation` on this model,
+    /// as Laravel's `relationLoaded`. A loaded relation that found no
+    /// document is loaded.
+    fn relation_loaded(&self, relation: &str) -> bool {
+        let _ = relation;
+        false
+    }
+
+    /// Load the relation path `path` (`"posts"`, or `"posts.comments"`
+    /// for a relation of each post) onto every model of `models`, with
+    /// one query per relation of the path.
+    ///
+    /// **Not part of the public API.** `#[suprnova::document]` writes it
+    /// for a model that declares relations; [`DocumentQuery::with`]
+    /// calls it.
+    ///
+    /// # Errors
+    ///
+    /// When the model has no relation of the path's first name, and as
+    /// the queries that load the path.
+    #[doc(hidden)]
+    async fn __eager_load(path: &str, models: &mut [&mut Self]) -> Result<(), FrameworkError> {
+        let _ = models;
+        Err(super::relations::__unknown_relation::<Self>(path))
+    }
+}
+
+/// [`DocumentModel::create`] with `forced` set after the guard: the
+/// foreign key a relation's `create` writes, which the caller's
+/// attributes cannot change and the guard does not drop.
+pub(crate) async fn create_guarded<M: DocumentModel>(
+    attrs: Document,
+    forced: Document,
+    call: &str,
+) -> Result<M, FrameworkError> {
+    let mut attributes = guard::<M>(attrs, call)?;
+    for (name, value) in forced {
+        if !M::FIELDS.contains(&name.as_str()) {
+            return Err(FrameworkError::internal(format!(
+                "{call}: `{name}` is no field of {}",
+                model_name::<M>()
+            )));
+        }
+        attributes.insert(name, value);
+    }
+    ensure_key::<M>(&mut attributes, call)?;
+    if let Some((created_at, updated_at)) = M::TIMESTAMPS {
+        let now = now();
+        for field in [created_at, updated_at] {
+            if matches!(attributes.get(field), None | Some(Bson::Null)) {
+                attributes.insert(field, now.clone());
+            }
+        }
+    }
+    let shared: SharedAttributes = Arc::new(Mutex::new(attributes));
+    events::saving::<M>(&shared, true).await?;
+    events::creating::<M>(&shared).await?;
+    let attributes = shared.lock().await.clone();
+    let model = from_attributes::<M>(attributes, call)?;
+    M::collection()?.insert_one(model.to_document()?).await?;
+    events::created(&model).await?;
+    events::saved(&model).await?;
+    Ok(model)
 }
 
 // --- What the provided methods share ---------------------------------------
