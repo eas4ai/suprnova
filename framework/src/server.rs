@@ -413,6 +413,13 @@ impl Server {
         // Register all #[policy] gates collected via inventory::submit!
         crate::authorization::init_policies();
 
+        // Register the MongoDB connections when `MONGODB_URI` is set or a
+        // `MongoConfig` is registered. Before the cache and the queue, so
+        // their MongoDB drivers find the connection. The driver connects
+        // lazily: a server that is down does not stop the boot.
+        #[cfg(feature = "database-mongodb")]
+        crate::mongodb::Mongo::bootstrap().await?;
+
         // Bootstrap cache - picks in-memory (default) or Redis based on
         // `CACHE_DRIVER`. Redis bootstrap fails closed on connect error;
         // no silent downgrade. See `Cache::bootstrap` for the contract.

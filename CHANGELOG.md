@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **MongoDB connections.** The `database-mongodb` feature (off by default)
+  adds the `Mongo` facade on the official `mongodb` driver: `MONGODB_URI` and
+  `MONGODB_DATABASE` (or `MongoConfig::builder()`, with pool options and
+  named connections) configure it, the server and the workers register it at
+  boot, and `Mongo::connection`, `connection_named`, `database`,
+  `collection::<T>` and `ping` reach it. A missing or malformed URI is an
+  error naming `MONGODB_URI`, and an unreachable server fails the first call
+  that needs it with a `FrameworkError`.
 - **A guard in use per request.** `TestClient::acting_as_with_guard` selects
   the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
   auth middleware without a guard name answer through for that request, as

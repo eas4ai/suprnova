@@ -42,10 +42,11 @@ pub(crate) enum ProcessBoot {
     /// The core and the drivers maintenance mode reads: the cache when
     /// `MAINTENANCE_DRIVER=cache`, and localization. `down` and `up`.
     Maintenance,
-    /// The core and every runtime driver: Cache, Localization, the
-    /// environment's disks, Queue, RateLimit, Mail. The workers, the queue
-    /// commands, and `schedule:run`. A driver whose backend does not come up
-    /// stops the boot: these processes exist to do work through them.
+    /// The core and every runtime driver: the MongoDB connections (with
+    /// `database-mongodb`), Cache, Localization, the environment's disks,
+    /// Queue, RateLimit, Mail. The workers, the queue commands, and
+    /// `schedule:run`. A driver whose backend does not come up stops the
+    /// boot: these processes exist to do work through them.
     Work,
     /// The core and every runtime driver, for the console binary. A driver
     /// that does not come up is reported on stderr and does not stop the
@@ -123,6 +124,12 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
             outcome => outcome,
         }
     };
+    // The MongoDB connections first: the cache and the queue may run on them.
+    #[cfg(feature = "database-mongodb")]
+    settle(
+        "mongodb",
+        crate::mongodb::Mongo::bootstrap().await.map_err(Into::into),
+    )?;
     settle(
         "cache",
         crate::cache::Cache::bootstrap().await.map_err(Into::into),

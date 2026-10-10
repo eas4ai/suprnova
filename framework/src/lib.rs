@@ -85,6 +85,9 @@ pub mod mail;
 #[cfg(feature = "media")]
 pub mod media;
 pub mod middleware;
+// The MongoDB backend (PAR-182 onward), behind `database-mongodb`.
+#[cfg(feature = "database-mongodb")]
+pub mod mongodb;
 pub mod notifications;
 pub mod pagination;
 pub mod payments;
@@ -185,6 +188,19 @@ pub use database::{
 };
 pub use database::{
     FullTextMode, FullTextOptions, QueryExpression, RawExpression, UpdateAttrs, UpdateValue,
+};
+// BSON, the documents MongoDB stores (`suprnova::bson::doc!`,
+// `suprnova::bson::Document`, `suprnova::bson::oid::ObjectId`), at the
+// version the driver links, so an application needs no dependency of its own.
+#[cfg(feature = "database-mongodb")]
+pub use ::bson;
+// The MongoDB connections and their facade (PAR-182). `crate::` is spelled
+// out because at the crate root `mongodb` names both this module and the
+// driver crate.
+#[cfg(feature = "database-mongodb")]
+pub use crate::mongodb::{
+    DEFAULT_MONGO_CONNECTION, Mongo, MongoConfig, MongoConfigBuilder, MongoConnection,
+    MongoConnectionConfig,
 };
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]

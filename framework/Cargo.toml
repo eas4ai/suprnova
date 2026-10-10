@@ -311,6 +311,19 @@ crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
 # allocation tests also use it as a dev-dependency.
 dhat = { version = "0.3", optional = true }
+# The MongoDB backend behind `database-mongodb`, off by default: the
+# official driver and the BSON crate it reads and writes. The driver's
+# default features are replaced. `compat-3-0-0` would pull in a second BSON
+# major (`bson-2`); `compat-3-3-0` with `bson-3` keeps one, the `bson` below.
+# `rustls-tls` is kept: it uses `ring`, the provider the framework already
+# installs for Redis, and builds its TLS config with that provider itself.
+# `dns-resolver` is kept, because `mongodb+srv://` URIs (MongoDB Atlas, as
+# Laravel's MongoDB page shows) need SRV and TXT lookups. `bson` keeps its
+# default `compat-3-0-0` marker and adds `serde`, which typed collections
+# need; 3.1 is the version the driver itself asks for, so the tree holds one
+# copy.
+mongodb = { version = "3.9", optional = true, default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
+bson = { version = "3.1", optional = true, features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 # Signals for the Process facade: a kill reaches the process group a
@@ -468,6 +481,11 @@ otel = [
 # dependencies; it gates only the fanout module, keeping that public API
 # surface opt-in.
 broadcasting-fanout = []
+# The MongoDB backend: the `Mongo` facade and its connections, read from
+# `MONGODB_URI` and `MONGODB_DATABASE`. Off by default, because the driver is
+# a large dependency tree an SQL-only application never needs, as `otel` and
+# `vector-pinecone` are.
+database-mongodb = ["dep:mongodb", "dep:bson"]
 # Enables the Pinecone vector driver. It costs no extra dependencies -
 # the driver speaks Pinecone's REST API over the `reqwest` client the
 # framework already carries - so this feature gates compilation, not a
@@ -531,6 +549,14 @@ required-features = ["testing", "database-sqlite"]
 # exact contents their tests assert, which collide inside a shared module
 # binary. They stay in their module folder but compile as their own targets.
 # Named after the former top-level file so test ids are unchanged.
+# The MongoDB backend's tests (PAR-182 to PAR-188). Built only with the
+# feature, which is off by default. The `mongodb_` tests need a server
+# (`MONGODB_TEST_URL`) and are ignored; the rest run without one.
+[[test]]
+name = "mongodb"
+path = "tests/mongodb/main.rs"
+required-features = ["database-mongodb"]
+
 [[test]]
 name = "container_boot_returns_err_on_missing_dep"
 path = "tests/container/boot_returns_err_on_missing_dep.rs"
