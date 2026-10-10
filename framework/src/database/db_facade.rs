@@ -52,6 +52,7 @@ use crate::database::clauses::{
     validate_select_column,
 };
 use crate::database::dynamic_row::DynamicRow;
+use crate::database::full_text::FullTextOptions;
 use crate::eloquent::Collection;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::builder::Direction;
@@ -777,6 +778,99 @@ impl DbTableBuilder {
             query: Box::new(query),
             negated: true,
         });
+        self
+    }
+
+    /// The full-text condition the `where_full_text` family adds.
+    fn full_text_condition<I, S>(
+        columns: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Condition
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Condition::FullText {
+            columns: columns.into_iter().map(Into::into).collect(),
+            text: text.into(),
+            options,
+        }
+    }
+
+    /// Add a full-text search of `columns` for `text`, in natural-language
+    /// mode, as Laravel's `whereFullText`. The text is bound as a parameter,
+    /// so it can come from the request.
+    ///
+    /// MySQL and MariaDB render `MATCH (c1, c2) AGAINST (? IN NATURAL
+    /// LANGUAGE MODE)` and need a `FULLTEXT` index over exactly these
+    /// columns. Postgres renders `(to_tsvector('english', c1) ||
+    /// to_tsvector('english', c2)) @@ plainto_tsquery('english', ?)`, which
+    /// a `GIN` index over the same expression answers. Create either index
+    /// with [`Blueprint::full_text`](crate::schema::Blueprint::full_text).
+    /// SQLite has no full-text search: every terminal returns an error that
+    /// names SQLite, before any I/O. An empty column list is an error too.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::DB;
+    /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let rows = DB::table("articles")
+    ///     .where_full_text(["title", "body"], "query builder")
+    ///     .get()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn where_full_text<I, S>(self, columns: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.where_full_text_with(columns, text, FullTextOptions::new())
+    }
+
+    /// [`Self::where_full_text`] with a mode, a Postgres language or MySQL's
+    /// query expansion; see [`FullTextOptions`]. Laravel passes these as the
+    /// options array of `whereFullText`.
+    pub fn where_full_text_with<I, S>(
+        mut self,
+        columns: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.conditions
+            .push(Self::full_text_condition(columns, text, options));
+        self
+    }
+
+    /// `OR` a full-text search, appended with flat SQL precedence, as
+    /// Laravel's `orWhereFullText`; see [`Self::where_full_text`].
+    pub fn or_where_full_text<I, S>(self, columns: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.or_where_full_text_with(columns, text, FullTextOptions::new())
+    }
+
+    /// [`Self::or_where_full_text`] with [`FullTextOptions`].
+    pub fn or_where_full_text_with<I, S>(
+        mut self,
+        columns: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        push_or(
+            &mut self.conditions,
+            Self::full_text_condition(columns, text, options),
+        );
         self
     }
 

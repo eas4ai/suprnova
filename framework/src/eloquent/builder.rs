@@ -70,7 +70,7 @@ use crate::database::clauses::{
     IntoWhereIn, JoinClause, JoinKind, JoinTarget, ReadSet, WhereIn, join_tables, quote_identifier,
     raw_select_may_read, render_join, render_limit_offset, validate_join, validate_select_column,
 };
-use crate::database::{DB, DbTableBuilder};
+use crate::database::{DB, DbTableBuilder, FullTextOptions};
 use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
 use crate::eloquent::collection::Collection;
@@ -2390,6 +2390,144 @@ impl<M> Builder<M> {
     #[doc(alias = "filter_not_exists")]
     pub fn where_not_exists(self, query: DbTableBuilder) -> Self {
         self.filter_not_exists(query)
+    }
+
+    // ---- Full-text search -----------------------------------------------
+
+    /// The term the full-text family adds.
+    fn full_text_term<I, C>(cols: I, text: impl Into<String>, options: FullTextOptions) -> WhereTerm
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        WhereTerm::Expression(Condition::FullText {
+            columns: cols.into_iter().map(IntoColumn::col_name).collect(),
+            text: text.into(),
+            options,
+        })
+    }
+
+    /// A full-text search of `cols` for `text`, in natural-language mode,
+    /// as Laravel's `whereFullText`. The text is bound as a parameter, so it
+    /// can come from the request.
+    ///
+    /// MySQL and MariaDB render `MATCH (c1, c2) AGAINST (? IN NATURAL
+    /// LANGUAGE MODE)` and need a `FULLTEXT` index over exactly these
+    /// columns. Postgres renders `(to_tsvector('english', c1) ||
+    /// to_tsvector('english', c2)) @@ plainto_tsquery('english', ?)`, which
+    /// a `GIN` index over the same expression answers. Create either index
+    /// with [`Blueprint::full_text`](crate::schema::Blueprint::full_text).
+    /// SQLite has no full-text search: every terminal returns an error that
+    /// names SQLite, before any I/O. An empty column list is an error too.
+    ///
+    /// ```ignore
+    /// let posts = Post::query()
+    ///     .filter_full_text(["title", "body"], "query builder")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    #[doc(alias = "where_full_text")]
+    pub fn filter_full_text<I, C>(self, cols: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_full_text_with(cols, text, FullTextOptions::new())
+    }
+
+    /// Laravel-shape alias for [`Self::filter_full_text`].
+    #[doc(alias = "filter_full_text")]
+    pub fn where_full_text<I, C>(self, cols: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_full_text(cols, text)
+    }
+
+    /// [`Self::filter_full_text`] with a mode, a Postgres language or
+    /// MySQL's query expansion; see [`FullTextOptions`]. Laravel passes these
+    /// as the options array of `whereFullText`.
+    #[doc(alias = "where_full_text_with")]
+    pub fn filter_full_text_with<I, C>(
+        mut self,
+        cols: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.where_terms
+            .push(Self::full_text_term(cols, text, options));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_full_text_with`].
+    #[doc(alias = "filter_full_text_with")]
+    pub fn where_full_text_with<I, C>(
+        self,
+        cols: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.filter_full_text_with(cols, text, options)
+    }
+
+    /// `OR` a full-text search, appended with flat SQL precedence, as
+    /// Laravel's `orWhereFullText`; see [`Self::filter_full_text`].
+    #[doc(alias = "or_where_full_text")]
+    pub fn or_filter_full_text<I, C>(self, cols: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_full_text_with(cols, text, FullTextOptions::new())
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_full_text`].
+    #[doc(alias = "or_filter_full_text")]
+    pub fn or_where_full_text<I, C>(self, cols: I, text: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_full_text(cols, text)
+    }
+
+    /// [`Self::or_filter_full_text`] with [`FullTextOptions`].
+    #[doc(alias = "or_where_full_text_with")]
+    pub fn or_filter_full_text_with<I, C>(
+        self,
+        cols: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_push_term(Self::full_text_term(cols, text, options))
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_full_text_with`].
+    #[doc(alias = "or_filter_full_text_with")]
+    pub fn or_where_full_text_with<I, C>(
+        self,
+        cols: I,
+        text: impl Into<String>,
+        options: FullTextOptions,
+    ) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: IntoColumn,
+    {
+        self.or_filter_full_text_with(cols, text, options)
     }
 
     // ---- Joins --------------------------------------------------------------

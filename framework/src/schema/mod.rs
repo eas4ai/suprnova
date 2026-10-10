@@ -134,6 +134,13 @@
 //! `.name(..)` names it. Indexes are separate `CREATE INDEX` statements that
 //! run after the table.
 //!
+//! `t.full_text(&["title", "body"])` is a full-text index named
+//! `{table}_{columns}_fulltext`: a `FULLTEXT` index on MySQL and MariaDB, and
+//! a `GIN` index over `to_tsvector` on Postgres, with `.language(name)` for
+//! another Postgres text search configuration. It is what `where_full_text`
+//! searches. SQLite has no full-text index and refuses it, and refuses
+//! `drop_full_text`, before any statement runs.
+//!
 //! `t.foreign(column)` declares a key on a column declared on its own, and
 //! `t.primary(&[..])` a primary key over one or more columns. The actions
 //! have Laravel's shorthands: `.cascade_on_delete()`, `.null_on_delete()`,
@@ -142,11 +149,12 @@
 //! # Altering a table
 //!
 //! [`Schema::table`] accepts new columns of any type, `rename_column`,
-//! `drop_column`, `index`, `unique`, `drop_index`, `foreign_id(..)
-//! .constrained(..)`, `foreign`, `drop_foreign`,
-//! `drop_constrained_foreign_id` and, on Postgres and MySQL, `primary`. It runs the operations in the order
-//! the closure recorded them, each as its own statement. Changing the type
-//! of an existing column is not supported.
+//! `drop_column`, `index`, `unique`, `drop_index`, `full_text`,
+//! `drop_full_text`, `foreign_id(..).constrained(..)`, `foreign`,
+//! `drop_foreign`, `drop_constrained_foreign_id` and, on Postgres and MySQL,
+//! `primary`. It runs the operations in the order the closure recorded them,
+//! each as its own statement. Changing the type of an existing column is not
+//! supported.
 //!
 //! SQLite cannot add or drop a foreign key on an existing table. On SQLite
 //! `Schema::table` returns an error for either operation before it runs any
@@ -180,7 +188,7 @@ use sea_orm::sea_query::{Alias, IntoTableRef, Table, TableRef};
 use sea_orm::{ConnectionTrait, DbBackend, DbErr};
 use sea_orm_migration::SchemaManager;
 
-pub use blueprint::Blueprint;
+pub use blueprint::{Blueprint, FullTextIndexBuilder};
 pub use column::ColumnBuilder;
 pub use foreign::{ForeignBuilder, ForeignIdBuilder};
 

@@ -1380,6 +1380,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form.
 - **Log level names.** `LogLevel::parse` reads the eight PSR-3 names and
   `warn` and `trace`, and `LOG_LEVEL` accepts the PSR-3 names.
+- **Full-text search.** `where_full_text` and `or_where_full_text` on
+  `DB::table` and the model builder render `MATCH ... AGAINST` on MySQL and
+  MariaDB and `to_tsvector ... @@` on Postgres, with `FullTextOptions` for the
+  mode, the language and query expansion; SQLite returns an error.
+- **Full-text indexes.** `Blueprint::full_text` creates a `FULLTEXT` index on
+  MySQL and MariaDB and a `GIN` index over `to_tsvector` on Postgres, with
+  `.language(..)`, and `drop_full_text` drops it; SQLite refuses both.
 
 ### Changed
 
