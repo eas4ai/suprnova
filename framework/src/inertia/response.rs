@@ -3302,7 +3302,7 @@ fn page_url(resolver: Option<&super::config::UrlResolver>, req: &dyn InertiaRequ
     match resolver {
         Some(resolve_url) => crate::routing::root::rooted_owned(resolve_url(req)),
         None => crate::routing::root::prefixed_owned(
-            super::query_string::normalize_path_and_query(req.path_and_query()),
+            crate::http::query_string::normalize_path_and_query(req.path_and_query()),
         ),
     }
 }

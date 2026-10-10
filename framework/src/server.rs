@@ -1233,8 +1233,15 @@ async fn handle_request_inner(
             if allowed.is_empty()
                 && let Some((fallback_handler, fallback_middleware)) = router.get_fallback()
             {
-                let request =
-                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
+                // Marked, not given a route pattern: Laravel's fallback is a
+                // route, so an Inertia visit it answers records the previous
+                // URL (PAR-048), while RenderCache, the debug page and
+                // DevTools, which read the pattern, see no routed match.
+                let request = stamp_peer(
+                    Request::new(req)
+                        .with_params(std::collections::HashMap::new())
+                        .with_fallback_route(),
+                );
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
                 crate::error::debug_page::note_request_id(request_id.as_str());
 

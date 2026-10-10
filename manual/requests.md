@@ -1245,7 +1245,7 @@ Beyond the validated-form pattern above, the `Request` type carries Laravel-styl
 | `req.segments()` | `Vec<String>` | Path split on `/`, empty segments dropped. |
 | `req.segment(index, default)` | `Option<String>` | 1-based segment access. |
 | `req.url()` | `String` | Scheme + host + path (no query string). |
-| `req.full_url()` | `String` | URL + query string. |
+| `req.full_url()` | `String` | URL + query string, its pairs sorted by key and re-encoded as Laravel's `fullUrl()` writes them. |
 | `req.full_url_with_query(&[("k","v")])` | `String` | Append or override query keys. |
 | `req.full_url_without_query(&["k"])` | `String` | Strip query keys. |
 

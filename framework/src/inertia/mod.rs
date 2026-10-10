@@ -21,7 +21,6 @@ mod manifest;
 mod pages;
 mod prop;
 mod providers;
-mod query_string;
 mod response;
 mod root_share;
 mod root_template;

@@ -340,7 +340,7 @@ async fn breadcrumbs(req: Request) -> Response {
 | Helper | Returns | Source |
 |---|---|---|
 | `url::current(&req)` | absolute URL of this request, without the query | `APP_URL` origin + public root + path |
-| `url::full(&req)` | absolute URL of this request, with the query | `APP_URL` origin + public root + path + query |
+| `url::full(&req)` | absolute URL of this request, with the query | `APP_URL` origin + public root + path + query, its pairs sorted by key and re-encoded (`/posts?b=2&a=1` gives `?a=1&b=2`) |
 | `url::previous(fallback)` | previous URL recorded by the session middleware | `_previous.url` in the session, or `fallback` |
 | `url::previous_path(fallback)` | the path of `previous(fallback)` | `previous(fallback)` without query, root or trailing slash |
 

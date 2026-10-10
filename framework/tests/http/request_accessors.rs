@@ -658,9 +658,10 @@ async fn url_and_full_url_with_proxy_host() {
     .with_peer_addr(IpAddr::from([127, 0, 0, 1]))
     .with_trusted_proxies(trust_loopback());
     assert_eq!(req.url(), "https://app.example.com/dashboard");
+    // The query is normalised, sorted by key (PAR-056).
     assert_eq!(
         req.full_url(),
-        "https://app.example.com/dashboard?tab=metrics&page=2"
+        "https://app.example.com/dashboard?page=2&tab=metrics"
     );
 }
 
@@ -696,6 +697,64 @@ async fn full_url_without_query_removes_keys() {
     assert!(pruned.contains("b=2"));
     assert!(!pruned.contains("a=1"));
     assert!(!pruned.contains("c=3"));
+}
+
+/// A request to `uri` on the host `app.test`, with no peer and no proxy.
+fn on_app_host(uri: &str) -> Request {
+    Request::for_test_with_headers("GET", uri, [("Host", "app.test")])
+}
+
+/// PAR-056: `full_url()` answers the query as Laravel's `fullUrl()` does
+/// through Symfony's `normalizeQueryString`: the pairs sorted by key and
+/// re-encoded per RFC 3986.
+#[test]
+fn inp_full_url_sorts_the_query_by_key_and_reencodes_it_per_rfc_3986() {
+    assert_eq!(
+        on_app_host("/s?b=2&a=1").full_url(),
+        "http://app.test/s?a=1&b=2"
+    );
+    assert_eq!(
+        on_app_host("/s?b=2&a=1%20x").full_url(),
+        "http://app.test/s?a=1%20x&b=2"
+    );
+    // A reserved character stays encoded, and `+` is a space written `%20`.
+    assert_eq!(
+        on_app_host("/s?q=a+b&a=%2Fx").full_url(),
+        "http://app.test/s?a=%2Fx&q=a%20b"
+    );
+    // `url()` has no query and does not change.
+    assert_eq!(on_app_host("/s?b=2&a=1").url(), "http://app.test/s");
+}
+
+/// A query that normalises to nothing leaves no `?`, as Laravel's
+/// `fullUrl()` omits it when `getQueryString()` is empty.
+#[test]
+fn inp_full_url_drops_a_query_that_normalises_to_nothing() {
+    assert_eq!(on_app_host("/s?&").full_url(), "http://app.test/s");
+    assert_eq!(on_app_host("/s?=x").full_url(), "http://app.test/s");
+    assert_eq!(on_app_host("/s").full_url(), "http://app.test/s");
+}
+
+/// `full_url_is` matches the normalised URL, as Laravel's `fullUrlIs`
+/// reads `fullUrl()`; a pattern written in the order the pairs arrived
+/// in no longer matches.
+#[test]
+fn inp_full_url_is_matches_the_normalised_url() {
+    let request = on_app_host("/s?b=2&a=1");
+    assert!(request.full_url_is(&["http://app.test/s?a=1&b=2"]));
+    assert!(request.full_url_is(&["*?a=1*"]));
+    assert!(!request.full_url_is(&["http://app.test/s?b=2&a=1"]));
+}
+
+/// The readers that compare the URL the client sent keep reading it as it
+/// arrived: `full_url_with_query` appends to the query in its own order,
+/// as Laravel's `fullUrlWithQuery` merges into `query()` without sorting.
+#[test]
+fn inp_full_url_with_query_keeps_the_query_in_the_order_it_arrived() {
+    assert_eq!(
+        on_app_host("/x?b=2&a=1").full_url_with_query(&[("c", "3")]),
+        "http://app.test/x?b=2&a=1&c=3"
+    );
 }
 
 #[tokio::test]

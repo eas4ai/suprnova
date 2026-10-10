@@ -369,3 +369,58 @@ async fn redirect_back_self_heals_a_session_poisoned_before_the_write_guard_exis
          to its caller-supplied default"
     );
 }
+
+/// The previous URL a full page load leaves after one `GET` to `target`.
+async fn previous_url_after_page_load(target: &str) -> Option<String> {
+    ensure_crypt();
+    let last_written: Arc<Mutex<Option<SessionData>>> = Arc::new(Mutex::new(None));
+    let store = Arc::new(CapturingStore {
+        last_written: last_written.clone(),
+    });
+    let middleware = SessionMiddleware::with_store(test_config(), store);
+    let next: Next = Arc::new(|_req| {
+        Box::pin(async move {
+            suprnova::session::session_mut(|s| s.put("marker", true));
+            Ok(suprnova::HttpResponse::text("page"))
+        })
+    });
+    let response = middleware
+        .handle(get_request(target, None).await, next)
+        .await;
+    assert!(response.is_ok());
+    let session = last_written
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the handler's mutation persisted the session");
+    session.previous_url()
+}
+
+/// PAR-056: a full page load records its previous URL with the query
+/// normalised, as Laravel's `StartSession::storeCurrentUrl` stores
+/// `$request->fullUrl()`, so the session holds the spelling the Inertia
+/// middleware records for an Inertia visit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inp_a_page_load_records_its_previous_url_with_the_query_normalised() {
+    assert_eq!(
+        previous_url_after_page_load("/list?b=2&a=1+x")
+            .await
+            .as_deref(),
+        Some("/list?a=1%20x&b=2")
+    );
+    // A query that normalises to nothing leaves the path alone.
+    assert_eq!(
+        previous_url_after_page_load("/list?&").await.as_deref(),
+        Some("/list")
+    );
+}
+
+/// The open-redirect guard still reads the normalised URL: a
+/// protocol-relative target with a query is never stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inp_a_protocol_relative_page_load_with_a_query_is_never_recorded() {
+    assert_eq!(
+        previous_url_after_page_load("//evil.test/x?b=1&a=2").await,
+        None
+    );
+}

@@ -55,6 +55,26 @@ fn current_is_the_app_url_origin_root_and_path_without_the_query_child() {
     );
 }
 
+/// `url::full` is Laravel's `url()->full()`, which is `$request->fullUrl()`:
+/// the query sorted by key and re-encoded per RFC 3986 (PAR-056), on the
+/// origin `url::current` names.
+#[test]
+fn inp_full_sorts_the_query_by_key_and_reencodes_it() {
+    let request = Request::for_test("GET", "/invoices?b=2&a=1+x");
+    assert_eq!(
+        url::full(&request),
+        format!("{}?a=1%20x&b=2", url::current(&request))
+    );
+    let reserved = Request::for_test("GET", "/invoices?q=%2Fx&flag");
+    assert_eq!(
+        url::full(&reserved),
+        format!("{}?flag=&q=%2Fx", url::current(&reserved))
+    );
+    // A query that normalises to nothing leaves no `?`.
+    let empty = Request::for_test("GET", "/invoices?&");
+    assert_eq!(url::full(&empty), url::current(&empty));
+}
+
 #[test]
 fn current_carries_the_public_root() {
     run_alone("current_carries_the_public_root_child");

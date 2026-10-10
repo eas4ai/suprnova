@@ -6861,6 +6861,8 @@ where
     /// be too expensive.
     ///
     /// Reads the current page from `?page=N` like [`Self::paginate`].
+    /// Use [`Self::simple_paginate_using`] to read it from another
+    /// parameter.
     ///
     /// ## Errors
     ///
@@ -6869,10 +6871,31 @@ where
         self,
         per_page: u64,
     ) -> Result<crate::pagination::Paginator<M>, FrameworkError> {
+        self.simple_paginate_using("page", per_page).await
+    }
+
+    /// Simple paginate with a custom page-param name. See
+    /// [`Self::simple_paginate`] for the query and error semantics.
+    ///
+    /// `page_param` is the query-string key read for the current page
+    /// number, and the paginator's `page_name`, so its URLs and the Inertia
+    /// scroll metadata's `pageName` use the same key: Laravel's
+    /// `simplePaginate($perPage, $columns, $pageName)`. A page that renders
+    /// two listings gives each its own key:
+    ///
+    /// ```ignore
+    /// let posts = Post::query().simple_paginate_using("posts_page", 10).await?;
+    /// let comments = Comment::query().simple_paginate_using("comments_page", 25).await?;
+    /// ```
+    pub async fn simple_paginate_using(
+        self,
+        page_param: &str,
+        per_page: u64,
+    ) -> Result<crate::pagination::Paginator<M>, FrameworkError> {
         if per_page == 0 {
             return Err(FrameworkError::param("per_page"));
         }
-        let page = current_page_from_request("page");
+        let page = current_page_from_request(page_param);
         let offset = page.saturating_sub(1).saturating_mul(per_page);
         let raw: Vec<M> = self
             .limit(per_page + 1)
@@ -6885,9 +6908,10 @@ where
         if has_more {
             rows.truncate(per_page as usize);
         }
-        Ok(crate::pagination::Paginator::new(
-            rows, page, per_page, has_more,
-        ))
+        Ok(
+            crate::pagination::Paginator::new(rows, page, per_page, has_more)
+                .with_page_name(page_param),
+        )
     }
 
     /// Cursor paginate - opaque-cursor keyset pagination over the

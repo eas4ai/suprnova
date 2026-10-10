@@ -2794,6 +2794,37 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   breaks the HTTP/1 framing, and asserted on the mismatch in a debug
   build. The header is now dropped when the tag is added, and the server
   sends the tagged document's length (DT-02, DT-10).
+- **An Inertia visit the fallback route answers records the previous
+  URL.** The server built the fallback route's request with no route
+  pattern, and the Inertia middleware records only a visit that matched a
+  route, so an Inertia `GET` the fallback answered left the session's
+  previous URL where it was. Laravel's `shouldStoreCurrentUrl` reads a
+  fallback route as a matched route. The request now carries a fallback
+  mark, `Request::is_fallback_route`, which the middleware reads beside
+  the pattern; the request still has no route pattern and no route name,
+  so RenderCache, the debug page and DevTools see no routed match
+  (PAR-048).
+- **`Request::full_url` and `url::full` normalise their query as
+  Laravel's `fullUrl` does.** They returned the query as it arrived,
+  where Laravel's `fullUrl()` and `url()->full()` sort the pairs by key
+  and re-encode them per RFC 3986 through Symfony's
+  `normalizeQueryString`: `/s?b=2&a=1` is now `/s?a=1&b=2`, and a query
+  that normalises to nothing leaves no `?`. `full_url_is`, the SSR
+  exclusion patterns, the `InertiaVisit` a hook receives and the DevTools
+  entry URL read the normalised URL, as Laravel's do. The previous URL a
+  page load or an Inertia visit records is normalised too, as Laravel's
+  `StartSession` and Inertia `storeCurrentUrl` store `fullUrl()`, so the
+  session holds the query as the page `url` and the version 409's
+  location spell it. `full_url_with_query` and signed URL checks keep the
+  query as the client sent it (PAR-056).
+- **`simple_paginate` takes a page name, and `cursor_paginate` records its
+  cursor.** `Builder::simple_paginate_using(page_name, per_page)` reads
+  the page from that query parameter and sets the paginator's
+  `page_name`, so its URLs and the Inertia scroll metadata's `pageName`
+  use it, as `paginate_using` does for the length-aware paginator. A
+  `cursor_paginate` page keeps the cursor it was fetched with in
+  `current_cursor`, which the scroll metadata reports as the current
+  page (PAR-052).
 
 ## 3.2.1 - 2026-10-05
 
