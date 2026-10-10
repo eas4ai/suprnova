@@ -18,7 +18,10 @@
 //!   or panics, an attempt that runs past its timeout, and an error
 //!   `FailOnException` fails the job for.
 //! - Every error a console command returns, except
-//!   [`FrameworkError::AlreadyReported`], which says the user has seen it.
+//!   [`FrameworkError::AlreadyReported`], which says the user has seen it,
+//!   and the exit code of [`FrameworkError::exit`], which the command
+//!   chose, as a Laravel command returns an integer that never reaches the
+//!   handler.
 //! - Every error the application hands to [`Exceptions::report`].
 //!
 //! A report writes the `framework error` log line after the callbacks. A

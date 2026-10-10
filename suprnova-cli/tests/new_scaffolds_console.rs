@@ -87,6 +87,10 @@ fn inertia_starter_scaffolds_console_binary_and_commands_dir() {
         "console registers the user's package version so --version works"
     );
     assert!(console_src.contains("smoke_inertia::bootstrap::register"));
+    assert!(
+        console_src.contains("Err(error) => ExitCode::from(error.exit_code())"),
+        "console ends with the exit code a command chose (PAR-177)"
+    );
     // Two properties in one line, both load-bearing: the entry point is
     // `#[suprnova::main]` so `.env` loads before the runtime exists
     // (SEC-06), and the flavor stays single-threaded because a one-shot
@@ -132,6 +136,10 @@ fn api_starter_scaffolds_console_binary_and_commands_dir() {
         "api console registers the user's package version"
     );
     assert!(console_src.contains("smoke_api::bootstrap::register"));
+    assert!(
+        console_src.contains("Err(error) => ExitCode::from(error.exit_code())"),
+        "api console ends with the exit code a command chose (PAR-177)"
+    );
 
     let commands_mod = project.join("src/commands/mod.rs");
     assert!(commands_mod.exists(), "api commands stub written");

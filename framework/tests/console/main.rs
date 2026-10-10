@@ -13,6 +13,7 @@ mod env_lock;
 mod env_snapshot;
 pub mod harness;
 pub mod laravel_infra_gaps;
+pub mod laravel_testing_gaps;
 pub mod process_boot;
 pub mod ssr;
 pub mod typed;
