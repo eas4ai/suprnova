@@ -40,7 +40,8 @@ pub(crate) enum ProcessBoot {
     /// daemon would run and prints it.
     Core,
     /// The core and the drivers maintenance mode reads: the cache when
-    /// `MAINTENANCE_DRIVER=cache`, and localization. `down` and `up`.
+    /// `MAINTENANCE_DRIVER=cache`, with the MongoDB connections it may run
+    /// on (with `database-mongodb`), and localization. `down` and `up`.
     Maintenance,
     /// The core and every runtime driver: the MongoDB connections (with
     /// `database-mongodb`), Cache, Localization, the environment's disks,
@@ -169,8 +170,16 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
 /// The cache only when the cache driver holds the maintenance state. The
 /// localization always: the commands print user-facing status text, and a
 /// custom driver may call `Lang::get`.
+///
+/// With `database-mongodb`, the MongoDB connections come before the cache,
+/// as in [`bootstrap_runtime_drivers`]: `CACHE_DRIVER=mongodb` builds its
+/// store on the default connection, and finds none unless the boot
+/// registered it. They come only with the cache, so `down` on the file
+/// driver never reads `MONGODB_URI`.
 async fn bootstrap_maintenance_drivers() -> Result<(), BootError> {
     if std::env::var("MAINTENANCE_DRIVER").as_deref() == Ok("cache") {
+        #[cfg(feature = "database-mongodb")]
+        crate::mongodb::Mongo::bootstrap().await?;
         crate::cache::Cache::bootstrap()
             .await
             .map_err(|e| format!("maintenance (cache driver) bootstrap failed: {e}"))?;
@@ -180,4 +189,116 @@ async fn bootstrap_maintenance_drivers() -> Result<(), BootError> {
         .await
         .map_err(|e| format!("localization bootstrap failed: {e}"))?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "database-mongodb"))]
+mod mongodb_boot_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Set in the child process the tests below start; unset, a child test
+    /// does nothing.
+    const CHILD_MODE: &str = "SUPRNOVA_PROCESS_BOOT_MONGODB_CHILD";
+
+    /// A URI nothing answers. The driver builds its client without sending
+    /// anything, so the boot and the store need no server.
+    const UNREACHABLE_URI: &str = "mongodb://127.0.0.1:1/suprnova_boot";
+
+    /// Run the test `child` (its path in this binary) in a process of its
+    /// own, with `env` set, and fail unless it ran and passed.
+    ///
+    /// The boot writes the process-wide container: the MongoDB connections
+    /// and the bound cache store would stay behind for every later test in a
+    /// shared process. The child gets its variables through the command, so
+    /// this process's environment is never written. The callers are
+    /// `#[serial]`, the lock the in-source tests that do write it hold, so
+    /// the child never inherits a variable one of them set for itself.
+    fn run_child(child: &str, env: &[(&str, &str)]) {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args(["--exact", child, "--nocapture"])
+            .env(CHILD_MODE, "1")
+            .env("APP_ENV", "testing");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("spawn the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "status: {}\nstdout:\n{stdout}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            stdout.contains("running 1 test"),
+            "child filter matched no test; stdout:\n{stdout}"
+        );
+    }
+
+    /// `down` and `up` with the maintenance state in a MongoDB cache: the
+    /// boot registers the connection from `MONGODB_URI` before it builds the
+    /// cache, as the server and the workers do. Without it the cache found
+    /// no connection, and the commands stopped before they could read or
+    /// write the state.
+    #[test]
+    #[serial]
+    fn maintenance_boot_registers_mongodb_before_a_mongodb_cache() {
+        run_child(
+            "app::process_boot::mongodb_boot_tests::maintenance_cache_on_mongodb_child",
+            &[
+                ("MONGODB_URI", UNREACHABLE_URI),
+                ("MONGODB_DATABASE", "suprnova_boot"),
+                ("CACHE_DRIVER", "mongodb"),
+                ("MAINTENANCE_DRIVER", "cache"),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_cache_on_mongodb_child() {
+        if std::env::var_os(CHILD_MODE).is_none() {
+            return;
+        }
+        boot_after_hook(ProcessBoot::Maintenance)
+            .await
+            .unwrap_or_else(|error| panic!("the maintenance boot failed: {error}"));
+        let store = crate::cache::Cache::store().expect("the cache store resolves");
+        assert_eq!(store.name(), "mongodb");
+        let database = crate::mongodb::Mongo::database().expect("the connection is registered");
+        assert_eq!(database.name(), "suprnova_boot");
+    }
+
+    /// `down` and `up` with the maintenance state in a file do not touch
+    /// MongoDB: a URI that is not a MongoDB connection string does not stop
+    /// them, and nothing is registered. The operator reaches for `down`
+    /// during an outage, so the boot builds only what the command reads.
+    #[test]
+    #[serial]
+    fn maintenance_boot_on_the_file_driver_leaves_mongodb_alone() {
+        run_child(
+            "app::process_boot::mongodb_boot_tests::maintenance_file_leaves_mongodb_alone_child",
+            &[
+                ("MONGODB_URI", "postgres://127.0.0.1/suprnova_boot"),
+                ("MONGODB_DATABASE", "suprnova_boot"),
+                ("CACHE_DRIVER", "mongodb"),
+                ("MAINTENANCE_DRIVER", "file"),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_file_leaves_mongodb_alone_child() {
+        if std::env::var_os(CHILD_MODE).is_none() {
+            return;
+        }
+        boot_after_hook(ProcessBoot::Maintenance)
+            .await
+            .unwrap_or_else(|error| panic!("the maintenance boot failed: {error}"));
+        assert!(
+            crate::mongodb::Mongo::connection().is_err(),
+            "the file driver registered a MongoDB connection"
+        );
+    }
 }
