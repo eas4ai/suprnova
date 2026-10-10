@@ -1094,6 +1094,20 @@ pub enum FrameworkError {
     #[error("")]
     AlreadyReported,
 
+    /// A console command's own exit code, as a Laravel command returns an
+    /// integer from `handle`. Built with [`Self::exit`].
+    ///
+    /// The console dispatcher neither prints nor reports it: the command
+    /// chose the code, and a command that wants to say why writes the
+    /// reason before it returns. The console binary ends with the code
+    /// [`Self::exit_code`] reads. Has no HTTP meaning; `status_code()`
+    /// returns 500 only because the enum is HTTP-flavored.
+    #[error("the command ended with exit code {code}")]
+    Exit {
+        /// The exit code the console binary ends with.
+        code: u8,
+    },
+
     /// Throttled by a downstream service that supplied a retry hint.
     ///
     /// Carries the optional `Retry-After` duration so callers (queue
@@ -1237,6 +1251,46 @@ impl FrameworkError {
     /// messages for the same failure.
     pub fn is_silent(&self) -> bool {
         matches!(self, Self::AlreadyReported)
+    }
+
+    /// End a console command with exit code `code`, as a Laravel command
+    /// returns `Command::INVALID` or any other integer from `handle`.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{FrameworkError, console};
+    ///
+    /// // The body of an `orders:check` command.
+    /// async fn check_orders(late: usize) -> Result<(), FrameworkError> {
+    ///     if late > 0 {
+    ///         console::error(format!("{late} orders are late"));
+    ///         return Err(FrameworkError::exit(2));
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// A script that runs the command can then tell this outcome from a
+    /// failure, which ends with `1`. The dispatcher prints nothing for it
+    /// and does not report it, so write the reason first, as above. An exit
+    /// code of `0` is a success: the dispatcher returns `Ok(())` for it.
+    #[track_caller]
+    pub fn exit(code: u8) -> Self {
+        Self::Exit { code }.recorded()
+    }
+
+    /// The exit code the console binary ends with when a command returns
+    /// this error: the code [`Self::exit`] named, and `1` for every other
+    /// error.
+    ///
+    /// The console binary's `main` passes it to
+    /// `std::process::ExitCode::from`, and
+    /// [`ConsoleRun::exit_code`](crate::console::ConsoleRun::exit_code)
+    /// answers the same code in a test.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Exit { code } => *code,
+            _ => 1,
+        }
     }
 
     /// Create a Domain error with custom status code
@@ -1416,6 +1470,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => 422,
             Self::InvalidUpload(_) => 422,
             Self::AlreadyReported => 500,
+            Self::Exit { .. } => 500,
             Self::RateLimited { .. } => 429,
             Self::Timeout { .. } => 504,
             Self::External { .. } => 500,
@@ -1612,6 +1667,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => "Precognition validation failed",
             Self::InvalidUpload(message) => &message.fallback,
             Self::AlreadyReported => "",
+            Self::Exit { .. } => "the command ended with an exit code of its own",
             Self::RateLimited { message, .. } => message,
             Self::Timeout { message, .. } => message,
             Self::External { message, .. } => message,
@@ -1649,7 +1705,7 @@ impl FrameworkError {
     /// (`Validation`, `ValidationError`, `PrecognitionFailure`,
     /// `InvalidUpload`, `PrecognitionSuccess`, `Unauthorized`, `Denial`,
     /// `ModelNotFound`, `ParamParse`, `UnsupportedMediaType`,
-    /// `AlreadyReported`, `RateLimited`) keep their variant so their response renderer
+    /// `AlreadyReported`, `Exit`, `RateLimited`) keep their variant so their response renderer
     /// still emits the per-variant body (Laravel `errors` map,
     /// Precognition headers, JSON:API `source.pointer`, the
     /// `Retry-After` header, etc.). The context prefix is folded into
@@ -1743,10 +1799,12 @@ impl FrameworkError {
             // so the response renderer still chooses the right shape;
             // the context prefix has nowhere to land without losing
             // structure, so the variant is returned unchanged.
+            // An exit code stays one, so the binary still ends with it.
             other @ (Self::Unauthorized
             | Self::UnsupportedMediaType
             | Self::PrecognitionSuccess
-            | Self::AlreadyReported) => other,
+            | Self::AlreadyReported
+            | Self::Exit { .. }) => other,
             // Without this arm `External` falls into the catch-all below,
             // which flattens to `Domain` and drops the `Arc` - silently, with
             // no compiler error. The whole point of the variant is the source,
@@ -1799,6 +1857,7 @@ impl FrameworkError {
             Self::PrecognitionFailure(_) => "FrameworkError::PrecognitionFailure",
             Self::InvalidUpload(_) => "FrameworkError::InvalidUpload",
             Self::AlreadyReported => "FrameworkError::AlreadyReported",
+            Self::Exit { .. } => "FrameworkError::Exit",
             Self::RateLimited { .. } => "FrameworkError::RateLimited",
             Self::Timeout { .. } => "FrameworkError::Timeout",
             Self::External { source, .. } => {
@@ -1976,6 +2035,30 @@ mod context_tests {
         assert!(matches!(p, FrameworkError::PrecognitionSuccess));
         let a = FrameworkError::silent().context("ignored");
         assert!(matches!(a, FrameworkError::AlreadyReported));
+    }
+
+    #[test]
+    fn exit_code_is_the_code_exit_named_and_1_for_every_other_error() {
+        assert_eq!(FrameworkError::exit(2).exit_code(), 2);
+        assert_eq!(FrameworkError::exit(0).exit_code(), 0);
+        assert_eq!(FrameworkError::exit(255).exit_code(), 255);
+        assert_eq!(FrameworkError::internal("x").exit_code(), 1);
+        assert_eq!(FrameworkError::silent().exit_code(), 1);
+        assert!(
+            !FrameworkError::exit(2).is_silent(),
+            "an exit code is no error the user has seen"
+        );
+        assert_eq!(
+            FrameworkError::exit(3).to_string(),
+            "the command ended with exit code 3"
+        );
+    }
+
+    #[test]
+    fn context_preserves_an_exit_code() {
+        let wrapped = FrameworkError::exit(2).context("checking orders");
+        assert!(matches!(wrapped, FrameworkError::Exit { code: 2 }));
+        assert_eq!(wrapped.exit_code(), 2);
     }
 
     #[test]

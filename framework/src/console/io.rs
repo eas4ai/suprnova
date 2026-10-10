@@ -28,6 +28,46 @@ pub(super) struct Expected {
     /// [`expects_choice`](super::testing::ConsoleTest::expects_choice).
     /// `None` answers any prompt, a menu included.
     pub(super) options: Option<Vec<String>>,
+    /// Why the prompt refused this answer: the menu offers other options,
+    /// or the prompt is no menu. The run reports it in place of "not
+    /// asked", since the command did ask.
+    pub(super) refusal: Option<String>,
+}
+
+impl Expected {
+    pub(super) fn new(question: String, answer: String, options: Option<Vec<String>>) -> Self {
+        Self {
+            question,
+            answer,
+            options,
+            refusal: None,
+        }
+    }
+}
+
+/// The stream a write went to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stream {
+    Output,
+    Errors,
+}
+
+impl Stream {
+    /// The stream as a failed assertion names it.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Output => "the output",
+            Self::Errors => "the errors",
+        }
+    }
+}
+
+/// One write of a command, as it reached its stream: the text of one
+/// [`line()`], one question, or one message of the console.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Written {
+    pub(super) stream: Stream,
+    pub(super) text: String,
 }
 
 /// The output of one test run, and the answers it still holds.
@@ -35,10 +75,35 @@ pub(super) struct Expected {
 pub(super) struct Captured {
     pub(super) output: String,
     pub(super) errors: String,
+    /// Every write in the order it was made, on both streams. A test's
+    /// output expectations look at one write at a time, so a match never
+    /// joins the end of one write to the start of the next.
+    pub(super) writes: Vec<Written>,
     /// The questions the test expects, in order, each with its answer.
     pub(super) answers: VecDeque<Expected>,
+    /// The questions the command asked that the test did not expect at
+    /// that point: none were left, or another one was next.
+    pub(super) unexpected: Vec<String>,
     /// The level the run's `-q` and `-v` flags asked for.
     pub(super) verbosity: Verbosity,
+}
+
+impl Captured {
+    fn push_output(&mut self, text: &str) {
+        self.output.push_str(text);
+        self.writes.push(Written {
+            stream: Stream::Output,
+            text: text.to_owned(),
+        });
+    }
+
+    fn push_errors(&mut self, text: &str) {
+        self.errors.push_str(text);
+        self.writes.push(Written {
+            stream: Stream::Errors,
+            text: text.to_owned(),
+        });
+    }
 }
 
 #[derive(Default)]
@@ -77,39 +142,47 @@ impl Capture {
     /// that offers none. An answer prepared with the options the menu must
     /// offer fails when the menu offers others, and when the prompt is no
     /// menu: the test was written for a prompt the command does not show.
+    ///
+    /// A question the test did not expect next is kept, so the run's
+    /// assertions name it even when the command goes on past the error
+    /// (PAR-177). A refused answer stays prepared and keeps the reason.
     fn answer(&self, question: &str, menu: Option<&[String]>) -> Result<String, FrameworkError> {
         let mut captured = self.lock();
         let Some(next) = captured.answers.front() else {
+            captured.unexpected.push(question.to_owned());
             return Err(FrameworkError::internal(format!(
                 "console test: the command asked `{question}`, and the test has no answer \
                  left; add `.expects_question(\"{question}\", ...)`"
             )));
         };
         if next.question != question {
-            return Err(FrameworkError::internal(format!(
+            let message = format!(
                 "console test: the command asked `{question}`, and the question the test \
                  expects next is `{}`",
                 next.question
-            )));
+            );
+            captured.unexpected.push(question.to_owned());
+            return Err(FrameworkError::internal(message));
         }
-        match (&next.options, menu) {
-            (Some(_), None) => {
-                return Err(FrameworkError::internal(format!(
-                    "console test: `{question}` offers no options, and the test expects a \
-                     choice; prepare its answer with `.expects_question`"
-                )));
+        let refusal = match (&next.options, menu) {
+            (Some(_), None) => Some(format!(
+                "console test: `{question}` offers no options, and the test expects a \
+                 choice; prepare its answer with `.expects_question`"
+            )),
+            (Some(expected), Some(offered)) if expected.as_slice() != offered => Some(format!(
+                "console test: `{question}` offers {}, and the test expects {}",
+                quoted_list(offered),
+                quoted_list(expected)
+            )),
+            _ => None,
+        };
+        if let Some(message) = refusal {
+            if let Some(next) = captured.answers.front_mut() {
+                next.refusal = Some(message.clone());
             }
-            (Some(expected), Some(offered)) if expected.as_slice() != offered => {
-                return Err(FrameworkError::internal(format!(
-                    "console test: `{question}` offers {}, and the test expects {}",
-                    quoted_list(offered),
-                    quoted_list(expected)
-                )));
-            }
-            _ => {}
+            return Err(FrameworkError::internal(message));
         }
-        captured.output.push_str(question);
-        captured.output.push('\n');
+        captured.push_output(&format!("{question}\n"));
         Ok(captured
             .answers
             .pop_front()
@@ -144,7 +217,7 @@ pub(super) async fn collect_into<F: Future>(capture: Arc<Capture>, future: F) ->
 /// Write `text` as it is to the standard output, or to the test.
 pub(super) fn write_output(text: &str) {
     match capture() {
-        Some(capture) => capture.lock().output.push_str(text),
+        Some(capture) => capture.lock().push_output(text),
         None => {
             // A write to a pipe the reader has closed (`console list |
             // head`) fails, and `println!` panics on it. There is no
@@ -158,7 +231,7 @@ pub(super) fn write_output(text: &str) {
 /// Write `text` as it is to the standard error, or to the test.
 pub(super) fn write_errors(text: &str) {
     match capture() {
-        Some(capture) => capture.lock().errors.push_str(text),
+        Some(capture) => capture.lock().push_errors(text),
         None => {
             // As in `write_output`: nowhere is left to report it.
             let _ = std::io::stderr().lock().write_all(text.as_bytes());
@@ -552,11 +625,7 @@ mod tests {
         let capture = Arc::new(Capture::with_answers(
             answers
                 .iter()
-                .map(|(q, a)| Expected {
-                    question: (*q).to_owned(),
-                    answer: (*a).to_owned(),
-                    options: None,
-                })
+                .map(|(q, a)| Expected::new((*q).to_owned(), (*a).to_owned(), None))
                 .collect(),
         ));
         let output = collect_into(capture.clone(), future).await;
@@ -608,8 +677,52 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_the_test_has_no_answer_for_is_an_error() {
-        let (answer, _) = collected(&[], async { ask("Name?") }).await;
+        let (answer, captured) = collected(&[], async { ask("Name?") }).await;
         assert!(answer.is_err());
+        assert_eq!(captured.unexpected, ["Name?"], "the run keeps the question");
+    }
+
+    #[tokio::test]
+    async fn a_question_out_of_order_is_kept_for_the_run() {
+        let (_, captured) = collected(&[("Name?", "Ada")], async {
+            // The command goes on past the error.
+            let _ignored = ask("Town?");
+            line("went on");
+        })
+        .await;
+
+        assert_eq!(captured.unexpected, ["Town?"]);
+        assert_eq!(captured.answers.len(), 1, "the answer is still there");
+    }
+
+    #[tokio::test]
+    async fn each_write_is_kept_apart_in_the_order_it_was_made() {
+        let ((), captured) = collected(&[("Name?", "Ada")], async {
+            write_output("bo");
+            write_output("om");
+            error_line("careful");
+            let _answer = ask("Name?");
+        })
+        .await;
+
+        let writes: Vec<(Stream, &str)> = captured
+            .writes
+            .iter()
+            .map(|w| (w.stream, w.text.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                (Stream::Output, "bo"),
+                (Stream::Output, "om"),
+                (Stream::Errors, "careful\n"),
+                (Stream::Output, "Name?\n"),
+            ]
+        );
+        assert_eq!(
+            captured.output, "boomName?\n",
+            "the output itself is unchanged"
+        );
     }
 
     #[tokio::test]

@@ -1159,6 +1159,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   where the output is not a terminal.
 - **Console forms.** `console::form()` chains `text`, `secret`, `confirm` and
   `select` steps and returns every answer by name from `submit()`.
+- **Up-front console test expectations.** `ConsoleTest::expects_output(line)`
+  expects exact lines in order, `expects_output_to_contain(text)` and
+  `doesnt_expect_output_to_contain(text)` search one write at a time on both
+  streams, and `expects_confirmation(question, answer)` answers a `confirm`
+  with yes or no.
+- **Exit codes of a command's own.** `FrameworkError::exit(code)` ends a
+  console command with `code`, printed and reported nowhere, and
+  `FrameworkError::exit_code()` reads the code the console binary ends with;
+  `ConsoleRun::assert_exit_code(code)` and `assert_not_exit_code(code)` assert
+  it, and exit code `0` is a success.
 - **`MaintenanceModeEnabled`.** `down` dispatches the event after it records
   maintenance mode, on a first `down` and on an update alike.
 - **Prerendered maintenance pages.** `down --render <view>` renders the Tera
@@ -1393,6 +1403,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   by default, and SQLite declares `datetime` for zoned timestamp columns.
 - **Production seeding requires force.** `db:seed` returns an error in
   production unless you pass `--force`.
+- **Console test assertions check every expectation.**
+  `ConsoleRun::assert_successful` fails on a prepared question the command did
+  not ask and on every unmet output expectation, which `unmet_expectations()`
+  lists; a question the test did not expect fails `assert_successful`,
+  `assert_failed` and the exit-code assertions, naming it, even when the
+  command goes on, and `unexpected_questions()` lists it.
+- **The console binary ends with the command's exit code.** A new project's
+  `src/bin/console.rs` ends with `ExitCode::from(error.exit_code())`; an
+  existing project replaces `Err(_) => ExitCode::FAILURE` with that arm to end
+  with the code of `FrameworkError::exit`.
 - **A wrong method answers 405.** A request whose path a route of another
   method matches answers `405` with `Allow` and Laravel's message in place of
   the 404, and an `OPTIONS` request answers `200` with `Allow`. Both run

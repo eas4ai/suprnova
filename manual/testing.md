@@ -356,8 +356,27 @@ async fn greet_says_hello() {
 }
 ```
 
-See [Console](console.md#testing-a-command) for the questions, the assert
-methods, and the rules a command follows to be testable.
+You can also state the expectations before the run, and
+`assert_successful` checks each one:
+
+```rust
+use suprnova::console;
+
+#[tokio::test]
+async fn greet_prints_one_greeting() {
+    console::test(["greet", "--name", "Alice"])
+        .expects_output("Hello, Alice!")
+        .doesnt_expect_output_to_contain("error")
+        .run()
+        .await
+        .assert_successful();
+}
+```
+
+A command that ends with `FrameworkError::exit(code)` is checked with
+`assert_exit_code(code)`. See [Console](console.md#testing-a-command) for
+the questions, every expectation and assert method, and the rules a command
+follows to be testable.
 
 ## Encryption key test helpers
 

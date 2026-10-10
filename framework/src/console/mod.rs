@@ -250,6 +250,11 @@ fn verbosity_of(matches: &clap::ArgMatches) -> io::Verbosity {
 /// themselves. A test that faked the queue or the mailer keeps its fake,
 /// because nothing here installs the drivers of the environment over it.
 /// The console binary calls [`dispatch_argv_with_init`] instead.
+///
+/// A command that returns [`FrameworkError::exit`] ends the dispatch with
+/// that error, printed and reported nowhere, and
+/// [`FrameworkError::exit_code`] reads its code; an exit code of `0` comes
+/// back as `Ok(())`.
 pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
     dispatch(argv, None::<fn() -> std::future::Ready<()>>).await
 }
@@ -282,6 +287,10 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// responsibility - handled via `handle_clap_error` which prints
 /// formatted output and returns Ok (for help/version) or a silent
 /// Err (for parse failures) so `main` doesn't double-print.
+///
+/// The binary's `main` ends with `ExitCode::from(error.exit_code())` for
+/// an error: the code a command chose with [`FrameworkError::exit`], and
+/// `1` for every other failure, as [`dispatch_argv`] describes.
 pub async fn dispatch_argv_with_init<F, Fut>(
     argv: Vec<String>,
     lazy_init: F,
@@ -339,12 +348,23 @@ where
             // dropped when it returns. The boot registers bindings and
             // stays outside.
             let command = (entry.handler)(sub_matches);
-            let result = crate::container::scope::run_in_new_scope(command).await;
+            let result = match crate::container::scope::run_in_new_scope(command).await {
+                // Exit code 0 is a success, whatever carried it: the binary
+                // and a test both read the code (PAR-177).
+                Err(FrameworkError::Exit { code: 0 }) => Ok(()),
+                other => other,
+            };
+            // An exit code of the command's own is the outcome it chose, as
+            // the integer a Laravel command returns, and no failure: it is
+            // neither reported nor printed.
+            let chosen_exit = matches!(result, Err(FrameworkError::Exit { .. }));
             // Laravel's console kernel reports the error before it renders
             // it (PAR-111). `report` passes over `AlreadyReported`, which
             // the user has seen. Before the drain below, so the queued
             // listeners a reporter starts are awaited too.
-            if let Err(ref e) = result {
+            if let Err(ref e) = result
+                && !chosen_exit
+            {
                 crate::error::Exceptions::report(e);
             }
             // A supervisor the bootstrap started and a queued listener both
@@ -359,6 +379,7 @@ where
             crate::logging::Log::flush();
             if let Err(ref e) = result
                 && !e.is_silent()
+                && !chosen_exit
             {
                 // Past the verbosity, as the bootstrap failure above.
                 io::write_errors(&format!("error: {}\n", e.message()));
