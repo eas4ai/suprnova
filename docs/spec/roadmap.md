@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-concurrency
+Current: backlog-defects-round
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -983,6 +983,59 @@ Requirements: PAR-189, PAR-190
    `par-laravel-gaps-concurrency` (the `concurrency` test binary). Done
    when it passes on a committed tree, the manual passages are in place,
    and the review is recorded.
+
+## backlog-defects-round
+
+Requirements: MAN-002, PAR-017, PAR-048, PAR-049, PAR-052, PAR-055, PAR-056, PAR-068, PAR-080, PAR-089, PAR-111, PAR-121, PAR-123, PAR-183, PAR-188, REG-032
+
+51. backlog-defects-round - the eighteen backlog items captured during the
+   parity rounds, taken up together before the upgrade guide and the
+   release by the developer's words of 2026-10-09 20:58 ("ok you know how
+   to fix them"): each item names the Agreed requirement it violates or
+   falls short of, and each is fixed with its regression test under that
+   requirement's existing mechanism. The items:
+   - live-testing-types-not-nameable-from-the-crate-root (from MAN-002, item 50c8a6d88b7d): suprnova::live::testing::request_cancellation_for_test returns Option<suprnova_live::resource::CancellationFlag>, and AdjustableTestClock implements suprnova_live::clock::Clock with suprnova_live::clock::ClockError; neit
+   - script-scan-written-globals-depend-on-walk-order (from REG-032, item 6dc6ff1cfbcd): The script scan's first walk collects written_globals, the names a computed write to the global object (window[k] = v) traces to, while it is still walking: a name the walk has not reached yet resolves where the walk sta
+   - multipart-request-derive-matches-names-literally (from PAR-055, item 53356ae40499): #[derive(MultipartRequest)] (the streaming upload request, suprnova-macros) matches part names literally: Inertia 3.8 sends photos[0], photos[1] (forceIndicesArrayFormatInFormData defaults to true) and user[name], which
+   - request-full-url-does-not-normalise-its-query (from PAR-056, item 257d7489ac50): Request::full_url() returns the query as it arrived, while Laravel's fullUrl() (Symfony Request::getQueryString, normalizeQueryString) sorts the pairs by key and re-encodes them per RFC 3986; PAR-056 normalised the Inert
+   - paginator-builders-miss-the-cursor-and-the-page-name (from PAR-052, item 8c1588571984): Builder::cursor_paginate does not record the cursor the page was fetched with (current_cursor), so a cursor page's current page in scroll metadata falls back to the request's cursor parameter, and Builder::simple_paginat
+   - inertia-rows-have-no-feature-map-surface (from PAR-049, item 3ba43cfbf890): The roadmap's inertia-protocol delivery names feature-map/laravel/parity.jsonl rows of the group linked to the shipped items, but the Laravel surface (feature-map/laravel/surface.jsonl) holds laravel/framework alone: it
+   - inertia-fallback-visits-record-no-previous-url (from PAR-048, item 12301b4d3f1d): A fallback route's request carries no route pattern (server.rs builds it with Request::new(req).with_params(..) and no with_route_pattern), so an Inertia GET answered by the fallback handler records no previous URL, wher
+   - cursor-paginate-ignores-the-query-order (from PAR-080, item bf363cd70ba1): Builder::cursor_paginate (framework/src/eloquent/builder.rs, from the cursor branch near line 5555) drops any order_by on the query and always walks the primary key ascending, so a list that asks for newest first (the sc
+   - generate-types-pairs-no-page-built-with-the-builder (from PAR-068, item c05ddf6552e4): suprnova generate-types pairs a page component with its props struct only through inertia_response!, Inertia::data and InertiaResponse::new(..).with_data(struct); a page whose handler assembles its props with the builder
+   - laravel-database-notes-test-flakes-with-no-such-table (from PAR-080, item 79eaa210ec84): framework/tests/laravel_database/columns.rs kit_scaffold_notes_belong_to_laravels_users_sqlite (kit backend lane of inertia-starter-kits, commit daea7e145) failed three runs in a row under nextest at 16:58 to 17:05 on 20
+   - untagged-cli-build-pins-the-last-tag (from PAR-080, item 33499ff96fc6): templates::framework_tag (suprnova-cli/src/templates/mod.rs:28) pins a new project's framework dependency at the tag of the CLI's own version, so a CLI built from main between two releases (workspace 3.2.1 while the temp
+   - where-relation-on-a-morph-to-matches-nothing (from PAR-121, item 310cae7a17b2): where_relation(relation, column, op, value) on a MorphTo relation still builds the generic probe with no target table and matches nothing; has, doesnt_have, has_count and where_has route a MorphTo through the morph engin
+   - console-bootstrap-failure-is-not-reported (from PAR-111, item e5f5cdbb1655): A console command's bootstrap failure (Config::init, the container boot, the database connection before the handler runs) exits without reaching Exceptions::report; a command's own Err, every framework-built 5xx, timed-o
+   - devtools-gate-event-names-the-erased-user (from PAR-123, item c75c64459e22): The Inertia DevTools gate (framework/src/inertia/devtools/endpoints.rs around line 93) still names the event's user through the registry, so a user type that registered no gate or hook appears as the erased trait object
+   - queue-set-driver-replaced-by-bootstrap-from-env (from PAR-017, item a6167c90f674): manual/queues.md's failover example calls Queue::set_driver(..) in the application's bootstrap, but Server::run calls queue::bootstrap_from_env afterwards and that replaces the installed driver unconditionally, so the do
+   - database-session-expired-read-deletes-a-refreshed-row (from PAR-188, item 9153cc0aaa91): The SQL session driver (framework/src/session/driver/database.rs, the read path near line 426) decides a session expired from the row it fetched and then calls destroy(id), whose delete filters only by id. A concurrent w
+   - model-explicit-timestamps-true-without-columns-is-silent (from PAR-183, item bf5320b0e838): suprnova-macros/src/model/parse.rs lines 575 to 582: #[model(timestamps = true)] on a struct with neither created_at nor updated_at is accepted and timestamps are silently off, the same as the default. An explicit timest
+   - schedule-interrupt-boots-without-a-cache-store (from PAR-089, item a34d5f8d1163): schedule:interrupt boots through ProcessBoot::Core (framework/src/app/mod.rs, the Commands::ScheduleInterrupt arm), which binds no cache store, yet Schedule::interrupt (framework/src/schedule/mod.rs line 256) writes its 
+   Delivery: one fix per item in its module, each with the test that
+   failed before it, merged under a lease on the item's requirement; the
+   manual passages the fixes touch and the changelog. Mechanisms: no new
+   mechanism; each regression test lives where its requirement's
+   mechanism already selects: the Inertia items (PAR-048, PAR-049,
+   PAR-052, PAR-055, PAR-056) in the `inertia` binary or as `inp_` tests
+   of the `http` binary for `par-inertia-protocol`; PAR-068 as `intt_`
+   tests of the CLI's `generate_types_data` for `par-inertia-testing`;
+   the untagged pin (PAR-080) as a `kit_` test of `kit_pages` for
+   `par-starter-kits`, the cursor order (PAR-080) beside PAR-121 in the
+   `eloquent` binary's `laravel_gaps` module for `par-laravel-gaps-data`,
+   and the notes flake (PAR-080) made deterministic in `laravel_database`,
+   where the workspace run observes it; PAR-089 and PAR-017 in the
+   `laravel_delta` modules of `schedule` and `queue` for
+   `par-laravel-delta`; PAR-111 and PAR-188 in the `laravel_http_gaps`
+   modules of `error` and `session` for `par-laravel-gaps-http`; PAR-183
+   as a trybuild case in the `eloquent` binary's `laravel_gaps` module for
+   `par-laravel-gaps-data`; PAR-123 in the `authorization` binary's
+   `laravel_auth_gaps` module for `par-laravel-gaps-auth`; REG-032 in the
+   CLI's `live_registry_scan` for `registries-scan`; and the Live
+   re-exports (MAN-002) in the `live` binary's `laravel_infra_gaps` module
+   for `par-laravel-gaps-infra`, beside the public API test. Done when
+   every requirement above has a current pass on a committed tree and the
+   review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

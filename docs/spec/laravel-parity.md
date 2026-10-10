@@ -1562,12 +1562,16 @@ Status: Agreed 2026-10-08
 a precognitive `GET` or `DELETE` MUST validate its query parameters
 (`key[]` as a list, a JSON-encoded object as the object), a precognitive
 multipart request MUST validate its files and fields through the same
-path as a JSON body, and validation a handler or middleware runs inline
-through `Request::validate::<T>()` MUST apply the same narrowing and
-answer `204` or `422` with the Precognition headers on a marked request.
-Falsifier: a precognitive `GET` with `?email=` answers `204` while the rule on `email` fails; a precognitive `multipart/form-data` request answers `415`, or reaches a handler with a file the rules reject; `Request::validate::<T>()` on a marked request answers a `422` without `Precognition: true`, validates an unlisted field, or returns the typed value so the handler continues.
+path as a JSON body, and validation a middleware runs inline through
+`Request::validate::<T>()` MUST apply the same narrowing and answer `204`
+or `422` with the Precognition headers on a marked request. A handler's
+body never runs on a marked request (PAR-082), as Laravel's dispatchers
+skip the method, so inline validation that must run under live validation
+sits in middleware; `Request::validate::<T>()` in a handler applies on a
+real request and on a route outside the dispatch skip.
+Falsifier: a precognitive `GET` with `?email=` answers `204` while the rule on `email` fails; a precognitive `multipart/form-data` request answers `415`, or reaches a handler with a file the rules reject; `Request::validate::<T>()` in a middleware on a marked request answers a `422` without `Precognition: true`, validates an unlisted field, or returns the typed value so the middleware continues.
 Mechanism: `par-precognition`.
-Rationale: Rows 031, 032, 033, 047 and 049 of the Precognition group; Laravel's `validationData()` is `all()`, query merged with body and files included, and the client sends `GET` and `DELETE` data in the query and multipart with `validateFiles()`; Suprnova's form request read only the body.
+Rationale: Rows 031, 032, 033, 047 and 049 of the Precognition group; Laravel's `validationData()` is `all()`, query merged with body and files included, and the client sends `GET` and `DELETE` data in the query and multipart with `validateFiles()`; Suprnova's form request read only the body. The first wording named a handler's inline validation, which PAR-082 makes unreachable on a marked request (the adversary's precognition finding 4), so the text names middleware.
 Status: Agreed 2026-10-08
 
 [PAR-085] A marked request MUST NOT save the session (flash data is
@@ -3272,12 +3276,14 @@ Status: Agreed 2026-10-10
 [PAR-178] The mail fake MUST answer queued mailables typed:
 `queued_of::<M>()` returns every mailable of type `M` queued while the
 fake was active, rebuilt from its payload, `queued_where::<M>(f)` those
-`f` accepts, and `assert_queued::<M>(f)` and `assert_not_queued::<M>(f)`
-assert on them, as Laravel's `MailFake::queued` takes a class and a
-closure; `queued()`, the snapshot list, stays as it is.
-Falsifier: after `Mail::queue(Welcome { name: "a" })` under `Mail::fake()`, `queued_of::<Welcome>()` is empty or its element lacks `name == "a"`; `queued_where::<Welcome>(|m| m.name == "b")` returns it; `assert_queued::<Welcome>(|m| m.name == "a")` fails; or `assert_not_queued::<Welcome>(|_| true)` passes.
+`f` accepts, and `assert_queued_mailable::<M>(f)` and
+`assert_not_queued_mailable::<M>(f)` assert on them, as Laravel's
+`MailFake::queued` takes a class and a closure; `assert_queued(name)` and
+`assert_not_queued(name)`, the untyped forms by mailable name, and
+`queued()`, the snapshot list, stay as they are.
+Falsifier: after `Mail::queue(Welcome { name: "a" })` under `Mail::fake()`, `queued_of::<Welcome>()` is empty or its element lacks `name == "a"`; `queued_where::<Welcome>(|m| m.name == "b")` returns it; `assert_queued_mailable::<Welcome>(|m| m.name == "a")` fails; or `assert_not_queued_mailable::<Welcome>(|_| true)` passes.
 Mechanism: `par-laravel-gaps-testing`.
-Rationale: Row `MailFake::queued` (`Support/Testing/Fakes/MailFake.php`); the fake stores JSON snapshots a test cannot read by field.
+Rationale: Row `MailFake::queued` (`Support/Testing/Fakes/MailFake.php`); the fake stores JSON snapshots a test cannot read by field. The typed forms carry the `_mailable` suffix because `assert_queued(&str)` had shipped under the untyped name and shipped names are not renamed (the developer, 2026-10-09 07:12).
 Status: Agreed 2026-10-10
 
 [PAR-179] Under `Queue::fake()`, `queue::testing::pushed::<J>()` MUST fail
