@@ -3,8 +3,9 @@
 
 use crate::support::{CRAFTED_NAME, console_command, use_this_binary, wait_until};
 use crate::tasks::{
-    Dashed, DriverReport, FORGED_OUTCOME, FailWith, ForgeSuccessThenExit, Nap, NapThenEcho,
-    PanicOnPurpose, PidThenNap, ReportDefaultDriver, WritePidThenNap,
+    Answer, AnswerThenLogForgedOutcomes, Dashed, DriverReport, FORGED_OTHER_TOKEN, FORGED_OUTCOME,
+    FORGED_UNTOKENED, FailWith, ForgeSuccessThenExit, Nap, NapThenEcho, PanicOnPurpose, PidThenNap,
+    ReportDefaultDriver, WritePidThenNap,
 };
 use serial_test::serial;
 use std::time::{Duration, Instant};
@@ -276,12 +277,14 @@ async fn a_console_binary_that_writes_no_outcome_is_an_error_naming_the_task() {
 #[serial]
 async fn the_outcome_is_the_last_marked_line_and_one_that_does_not_decode_is_an_error() {
     // `sh -c <script> sh concurrency:run <task>`: the script ignores the
-    // arguments and writes what a console process with noisy logging would.
+    // arguments and writes what a console process with noisy logging would,
+    // its outcome lines carrying the run's token.
     Concurrency::console_command([
         "sh",
         "-c",
-        "echo starting; echo 'suprnova-concurrency-result:{\"ok\":1}'; echo log line; \
-         echo 'suprnova-concurrency-result:{\"ok\":2}'; echo done",
+        r#"echo starting; echo "suprnova-concurrency-result:${SUPRNOVA_CONCURRENCY_TOKEN}:{\"ok\":1}"; \
+           echo log line; echo "suprnova-concurrency-result:${SUPRNOVA_CONCURRENCY_TOKEN}:{\"ok\":2}"; \
+           echo done"#,
         "sh",
     ])
     .expect("the console command is set");
@@ -294,7 +297,7 @@ async fn the_outcome_is_the_last_marked_line_and_one_that_does_not_decode_is_an_
     Concurrency::console_command([
         "sh",
         "-c",
-        "echo 'suprnova-concurrency-result:not json'",
+        r#"echo "suprnova-concurrency-result:${SUPRNOVA_CONCURRENCY_TOKEN}:not json""#,
         "sh",
     ])
     .expect("the console command is set");
@@ -308,8 +311,138 @@ async fn the_outcome_is_the_last_marked_line_and_one_that_does_not_decode_is_an_
 
 #[tokio::test]
 #[serial]
+async fn a_success_with_this_runs_token_from_a_console_process_that_failed_is_an_error() {
+    // The outcome line carries the run's token, but the process then ends
+    // with exit code 3, as one that fails after its task succeeded.
+    Concurrency::console_command([
+        "sh",
+        "-c",
+        r#"echo "suprnova-concurrency-result:${SUPRNOVA_CONCURRENCY_TOKEN}:{\"ok\":1}"; exit 3"#,
+        "sh",
+    ])
+    .expect("the console command is set");
+    let error = Concurrency::driver("process")
+        .run([Task::new::<NapThenEcho>(Nap::new(0, "x"))])
+        .await
+        .expect_err("the console process ended with exit code 3");
+
+    let text = error.to_string();
+    assert!(text.contains(NapThenEcho::NAME), "{text}");
+    assert!(text.contains("did not succeed"), "{text}");
+    assert!(text.contains("exit code 3"), "{text}");
+}
+
+#[tokio::test]
+#[serial]
 async fn an_empty_console_command_is_refused() {
     let error =
         Concurrency::console_command(Vec::<String>::new()).expect_err("no program to start");
     assert!(error.to_string().contains("empty"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_line_logged_after_the_outcome_that_reads_as_one_is_never_taken() {
+    use_this_binary();
+    // The task answers `genuine`; after its outcome line the console writes
+    // a line with another run's token, then one with no token.
+    let results = Concurrency::driver("process")
+        .run([Task::new::<AnswerThenLogForgedOutcomes>(())])
+        .await
+        .expect("the task succeeds");
+
+    assert_eq!(results[0].get::<String>().expect("text"), "genuine");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_console_process_whose_marked_lines_carry_no_token_of_this_run_wrote_no_outcome() {
+    // A console that exits 0 after writing only lines that read as success
+    // outcomes: one with another run's token, then one with none.
+    Concurrency::console_command([
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("echo '{FORGED_OTHER_TOKEN}'; echo '{FORGED_UNTOKENED}'"),
+        "sh".to_owned(),
+    ])
+    .expect("the console command is set");
+    let error = Concurrency::driver("process")
+        .run([Task::new::<NapThenEcho>(Nap::new(0, "x"))])
+        .await
+        .expect_err("no line carries this run's token");
+
+    let text = error.to_string();
+    assert!(text.contains(NapThenEcho::NAME), "{text}");
+    assert!(text.contains("wrote no outcome"), "{text}");
+}
+
+#[tokio::test]
+#[serial]
+async fn each_console_process_gets_a_random_token_of_its_own() {
+    // A console that answers the token it was given as the task's value.
+    Concurrency::console_command([
+        "sh",
+        "-c",
+        r#"echo "suprnova-concurrency-result:${SUPRNOVA_CONCURRENCY_TOKEN}:{\"ok\":\"${SUPRNOVA_CONCURRENCY_TOKEN}\"}""#,
+        "sh",
+    ])
+    .expect("the console command is set");
+    let results = Concurrency::driver("process")
+        .run([
+            Task::new::<NapThenEcho>(Nap::new(0, "x")),
+            Task::new::<NapThenEcho>(Nap::new(0, "y")),
+        ])
+        .await
+        .expect("each console answers with its own token");
+
+    let tokens: Vec<String> = results
+        .iter()
+        .map(|result| result.get().expect("the token"))
+        .collect();
+    for token in &tokens {
+        assert!(
+            token.len() >= 32 && token.chars().all(|c| c.is_ascii_hexdigit()),
+            "at least 128 bits as hex: {token:?}"
+        );
+    }
+    assert_ne!(tokens[0], tokens[1], "one token per console process");
+}
+
+/// Run `concurrency:run` for the `answer` task by hand, with this binary as
+/// the console, after `prefix`, and answer its standard output.
+async fn run_answer_by_hand(prefix: &[&str]) -> String {
+    let argv: Vec<String> = console_command(prefix)
+        .into_iter()
+        .chain([
+            "concurrency:run".to_owned(),
+            "--".to_owned(),
+            Answer::NAME.to_owned(),
+        ])
+        .collect();
+    let result = Process::command(argv)
+        .input("null")
+        .run()
+        .await
+        .expect("the console process runs");
+    assert_eq!(result.exit_code(), Some(0), "{}", result.error_output());
+    result.output().to_owned()
+}
+
+#[tokio::test]
+async fn the_console_command_writes_the_token_it_is_given_and_a_plain_line_without_one() {
+    let output = run_answer_by_hand(&["env", "SUPRNOVA_CONCURRENCY_TOKEN=0123abcd"]).await;
+    assert!(
+        output
+            .lines()
+            .any(|line| line == "suprnova-concurrency-result:0123abcd:{\"ok\":42}"),
+        "{output}"
+    );
+
+    let output = run_answer_by_hand(&["env", "-u", "SUPRNOVA_CONCURRENCY_TOKEN"]).await;
+    assert!(
+        output
+            .lines()
+            .any(|line| line == "suprnova-concurrency-result:{\"ok\":42}"),
+        "{output}"
+    );
 }

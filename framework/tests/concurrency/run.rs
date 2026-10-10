@@ -435,3 +435,21 @@ async fn extend_adds_a_driver_the_facade_selects_by_name() {
         .expect_err("one outcome per task");
     assert!(error.to_string().contains("`losing`"), "{error}");
 }
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_deferred_task_with_a_refused_name_is_logged_with_the_name_escaped() {
+    Concurrency::driver("sync")
+        .defer([Task::named(CRAFTED_NAME, ())])
+        .expect("the driver exists")
+        .await;
+
+    assert!(logs_contain("deferred concurrent task failed"));
+    // The whole name on the one log line, its line breaks escaped: a name
+    // logged as it is would start a line of its own that reads as an
+    // outcome.
+    assert!(
+        logs_contain(&format!("task={CRAFTED_NAME:?}")),
+        "the task name is logged in its escaped form"
+    );
+}

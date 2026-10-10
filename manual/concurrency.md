@@ -80,7 +80,10 @@ function in its own registry. Two attributes change the defaults:
 
 `Task::named(name, input)` builds a task from its registered name, for a
 task that only the console binary links. Nothing checks its input until the
-task runs.
+task runs. A name can't be empty or contain a control character, such as a
+line break or a tab: `Task::named` keeps a refused name as an error that
+fails the task when it runs, and `Task::try_named(name, input)` returns
+that error at once.
 
 ## Run tasks
 
@@ -181,7 +184,9 @@ for each closure. The binary runs the hidden `concurrency:run` command with
 the task's name, reads the input as JSON from its standard input, runs the
 task, and writes the outcome to its standard output. The command is
 registered by the framework, so every console binary has it, and it stays
-out of the console's help.
+out of the console's help. The outcome line carries a random token that the
+driver generates for each run, so text your application logs to standard
+output can't pass for a task's result.
 
 The driver starts the first of these that exists:
 

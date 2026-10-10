@@ -14,11 +14,24 @@ use std::time::Duration;
 /// The hidden console command that runs one task in a console process.
 pub(crate) const RUN_COMMAND: &str = "concurrency:run";
 
+/// The variable that carries a run's token to the console process. The
+/// driver sets it for every console process it starts; [`RESULT_MARKER`]
+/// says why.
+pub(crate) const TOKEN_ENV: &str = "SUPRNOVA_CONCURRENCY_TOKEN";
+
 /// The start of the line that carries a task's outcome on the console
-/// process's standard output. The application's own logging may write to
-/// the same stream, so the driver reads only the last line that starts with
-/// this, and takes a success from it only when the process ended with exit
-/// code 0.
+/// process's standard output.
+///
+/// The line is `{RESULT_MARKER}{token}:{json}`, where the token is the one
+/// the driver generated for this run and passed in [`TOKEN_ENV`]. The
+/// application's own logging shares standard output with the outcome: a
+/// stdout log channel, or a queued listener still running while the
+/// console shuts down, can write text that starts with this marker, before
+/// the outcome line or after it. The driver takes only the line that
+/// carries its run's token, which no logged text knows, so a logged line
+/// that reads as an outcome is never taken. Without the variable, as when
+/// someone runs `concurrency:run` by hand, the line is
+/// `{RESULT_MARKER}{json}`.
 pub(crate) const RESULT_MARKER: &str = "suprnova-concurrency-result:";
 
 /// A task's outcome as the console process writes it.
@@ -40,11 +53,13 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// an `artisan` process.
 ///
 /// The console binary is started with `concurrency:run -- <task>`, the
-/// task's input as JSON on its standard input. The hidden command finds the task
-/// in that binary's registry, runs it, and writes the outcome on its
-/// standard output, which this driver reads back. The tasks run side by
-/// side, each with the isolation of a process: its own memory, its own
-/// runtime, and a timeout that kills it and every process it started.
+/// task's input as JSON on its standard input and a random token for the
+/// run in `SUPRNOVA_CONCURRENCY_TOKEN`. The hidden command finds the task
+/// in that binary's registry, runs it, and writes the outcome, with the
+/// token, on its standard output, which this driver reads back. The tasks
+/// run side by side, each with the isolation of a process: its own memory,
+/// its own runtime, and a timeout that kills it and every process it
+/// started.
 ///
 /// The binary is the one
 /// [`Concurrency::console_command`](super::Concurrency::console_command)
@@ -55,12 +70,13 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// that runs the tasks. Starting a process costs far more than a Tokio
 /// task, so this driver pays off for heavy or untrusted work.
 ///
-/// The outcome shares standard output with the application's own logging.
-/// A stdout log channel reports a failed command after the outcome line,
-/// with whatever text its error carries, so a line that reads as a success
-/// can follow a failure. The driver therefore takes a success only from a
-/// console process that ended with exit code 0, and a task name carries no
-/// control character, so a name cannot start a line of its own there.
+/// The outcome shares standard output with the application's own logging,
+/// which can write a line that reads as an outcome, before the outcome line
+/// or after it. The driver therefore takes only the outcome line that
+/// carries the token it gave the process, takes a success only from a
+/// console process that ended with exit code 0, and refuses a task name
+/// with a control character, so a name cannot start a line of its own
+/// there.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessConcurrencyDriver;
 
@@ -102,7 +118,10 @@ async fn run_one(
             .iter()
             .cloned()
             .chain([RUN_COMMAND.to_owned(), "--".to_owned(), name.clone()]);
-    let pending = Process::command(arguments).input(input);
+    let token = new_token();
+    let pending = Process::command(arguments)
+        .env(TOKEN_ENV, token.as_str())
+        .input(input);
     // The facade's "no timeout" is no timeout here too, not the Process
     // facade's default of 60 seconds.
     let pending = match timeout {
@@ -110,7 +129,7 @@ async fn run_one(
         None => pending.forever(),
     };
     match pending.run().await {
-        Ok(result) => read_outcome(&name, &result),
+        Ok(result) => read_outcome(&name, &token, &result),
         Err(ProcessError::TimedOut { timeout, .. }) => Err(timed_out(&name, timeout)),
         Err(error) => Err(FrameworkError::internal(format!(
             "concurrent task `{name}` could not run in a console process: {error}"
@@ -118,22 +137,34 @@ async fn run_one(
     }
 }
 
+/// A fresh token for one console process: 128 bits from the thread's
+/// cryptographically secure generator, as 32 hex digits. It is random so
+/// that no text the application logs can carry it, by chance or by craft.
+fn new_token() -> String {
+    hex::encode(rand::random::<[u8; 16]>())
+}
+
 /// The outcome the console process wrote, or an error naming the task
 /// when it wrote none or did not succeed.
 ///
-/// The outcome is the last marked line on standard output. The exit status
-/// is checked too, because the application's own logging shares that
-/// stream: a stdout log channel reports a failed command after the outcome
-/// line, with whatever text its error carries, so a line that reads as a
-/// success can follow a failure. `concurrency:run` ends with exit code 1
-/// whenever the task fails, so a success counts only from a process that
-/// ended with exit code 0.
-fn read_outcome(name: &str, result: &ProcessResult) -> Result<TaskResult, FrameworkError> {
-    let envelope = result
-        .output()
-        .lines()
-        .rev()
-        .find_map(|line| line.strip_prefix(RESULT_MARKER));
+/// The outcome is the last line that starts with [`RESULT_MARKER`],
+/// `token` and a colon; every other marked line is ignored. The
+/// application's own logging shares standard output with the outcome, and
+/// a logged text that reads as an outcome, before the outcome line or
+/// after it, must not be taken: it cannot carry the token, which the driver
+/// generated for this run alone. The exit status is checked too:
+/// `concurrency:run` ends with exit code 1 whenever the task fails, so a
+/// success counts only from a process that ended with exit code 0.
+fn read_outcome(
+    name: &str,
+    token: &str,
+    result: &ProcessResult,
+) -> Result<TaskResult, FrameworkError> {
+    let envelope = result.output().lines().rev().find_map(|line| {
+        line.strip_prefix(RESULT_MARKER)?
+            .strip_prefix(token)?
+            .strip_prefix(':')
+    });
     match envelope.map(serde_json::from_str::<Envelope>) {
         Some(Ok(Envelope::Ok(value))) if result.successful() => Ok(TaskResult::new(name, value)),
         Some(Ok(Envelope::Ok(_))) => Err(FrameworkError::internal(format!(

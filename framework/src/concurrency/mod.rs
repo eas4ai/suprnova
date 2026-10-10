@@ -304,10 +304,10 @@ impl PendingConcurrency {
     /// `Bus::dispatch_after_response`. Where no response writer is in
     /// reach, as in the in-memory test client or a custom Hyper loop that
     /// does not use `after_response_connection`, they start when the
-    /// response's body ends. A task that fails is logged, with its name and
-    /// error, and the response, already sent, is not touched. The returned
-    /// [`DeferredTasks`] holds nothing then: awaiting or dropping it does
-    /// not run the tasks.
+    /// response's body ends. A task that fails is logged, with its name,
+    /// escaped, and its error, and the response, already sent, is not
+    /// touched. The returned [`DeferredTasks`] holds nothing then: awaiting
+    /// or dropping it does not run the tasks.
     ///
     /// Outside a request, as in a console command or a worker, there is no
     /// response to wait for: the returned [`DeferredTasks`] runs the tasks
@@ -399,8 +399,10 @@ async fn run_deferred(
         Ok(outcomes) => {
             for (task, outcome) in names.iter().zip(outcomes) {
                 if let Err(error) = outcome {
+                    // Debug, so the name is escaped: a line break in a
+                    // name a task was refused for stays on this line.
                     tracing::error!(
-                        task = %task,
+                        task = ?task,
                         driver = %driver_name,
                         %error,
                         "deferred concurrent task failed"
