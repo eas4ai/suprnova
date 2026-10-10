@@ -22,7 +22,9 @@ mod derive_eloquent;
 mod derive_seaorm;
 mod events;
 mod observers;
-mod parse;
+// `pub(crate)` so `#[suprnova::document]` parses `fillable`, `guarded`
+// and `casts` with the same grammar.
+pub(crate) mod parse;
 pub mod prunable;
 mod relations;
 mod route_binding;

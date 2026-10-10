@@ -205,6 +205,13 @@ pub use crate::mongodb::{
 // The MongoDB queue, cache and session stores (PAR-186 to PAR-188).
 #[cfg(feature = "database-mongodb")]
 pub use cache::{DEFAULT_MONGO_CACHE_COLLECTION, DEFAULT_MONGO_CACHE_LOCKS_COLLECTION, MongoCache};
+// Document models and their query builder (PAR-183, PAR-184): the trait
+// `#[suprnova::document]` implements, its keys, casts, embedded relations
+// and observer, and the builder `query()` answers.
+pub use crate::mongodb::{
+    AsBsonDateTime, AsDecimal128, DocumentCast, DocumentGroup, DocumentKey, DocumentModel,
+    DocumentObserver, DocumentQuery, EmbedsMany, EmbedsOne, RenderedFind,
+};
 pub use magnetar::sessions::RememberStore;
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar::{
@@ -831,6 +838,9 @@ pub use suprnova_macros::injectable;
 pub use suprnova_macros::live;
 pub use suprnova_macros::main;
 pub use suprnova_macros::model;
+// `#[suprnova::document]`, the document model attribute (PAR-183).
+#[cfg(feature = "database-mongodb")]
+pub use suprnova_macros::document;
 pub use suprnova_macros::mutator;
 pub use suprnova_macros::observer;
 pub use suprnova_macros::policy;

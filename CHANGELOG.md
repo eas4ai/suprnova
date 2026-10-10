@@ -31,6 +31,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   keeps sessions in a `sessions` collection (`MongoSessionDriver`) and
   promotes a two-factor session with one atomic update. `Config::init`
   refuses an unknown `SESSION_DRIVER`.
+- **MongoDB document models.** `#[suprnova::document(collection = "...")]`
+  stores a struct in a collection with the Eloquent calls of the
+  `DocumentModel` trait: `create`, `find`, `find_or_fail`, `all`, `query`,
+  `save`, `update`, `delete`, `fresh`, `refresh`, `make` and `fill`. The key
+  is an `ObjectId` stored as `_id` unless `primary_key` names a field;
+  `fillable`, `guarded`, `casts`, `hidden` and `visible` take the `#[model]`
+  syntax; `chrono` dates are stored as BSON datetimes and decimals as
+  `Decimal128`; `created_at` and `updated_at` are managed; `soft_deletes`
+  adds `with_trashed`, `only_trashed`, `restore` and `force_delete`;
+  `#[embeds_one]` and `#[embeds_many]` fields store embedded documents with
+  relation methods; `push`, `push_unique`, `pull`, `increment` and
+  `decrement` change one field; the model events reach listeners and a
+  `DocumentObserver` registered with `#[suprnova::observer]`; and the model
+  serializes through serde and binds from routes by its key.
+- **MongoDB document queries.** A document model's `query()` answers a
+  `DocumentQuery` with `where_` (`=`, `!=`, `<`, `<=`, `>`, `>=`, `like`),
+  `or_where`, `where_in`, `where_not_in`, `where_null`, `where_not_null`,
+  `where_between`, `where_date`, `where_exists`, `where_raw`, `order_by`,
+  `skip`, `take`, `project`, `get`, `first`, `count`, `exists`, `pluck`,
+  `distinct`, `sum`, `avg`, `min`, `max`, `paginate`, `simple_paginate`,
+  `update`, `upsert`, `delete`, `force_delete`, `increment`, `decrement`,
+  `push`, `pull` and `unset`, and `group_by` with `count`, `sum`, `avg`,
+  `min` and `max` aggregates. `to_filter()` and `to_pipeline()` answer the
+  BSON the builder sends, and a chain MongoDB cannot run as written, such as
+  `take` before `update`, is an error naming the call.
 - **A guard in use per request.** `TestClient::acting_as_with_guard` selects
   the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
   auth middleware without a guard name answer through for that request, as

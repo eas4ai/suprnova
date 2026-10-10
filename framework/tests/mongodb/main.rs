@@ -17,6 +17,7 @@
 pub mod cache;
 pub mod configuration;
 pub mod connection;
+pub mod documents;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 #[path = "../support/own_process.rs"]
@@ -24,4 +25,5 @@ mod own_process;
 pub mod queue;
 pub mod session;
 pub mod store_support;
+pub mod queries;
 pub mod support;
