@@ -158,7 +158,9 @@ async fn a_question_the_test_did_not_prepare_fails_the_command() {
     // question fails every assertion on the run, `assert_failed` included
     // (PAR-177), so the exit code is read directly.
     assert_eq!(run.exit_code(), 1);
-    run.assert_errors_contain("Which table?");
+    // Read the stream directly: `assert_errors_contain` fails on an
+    // unexpected question (PAR-177), and this test is about that question.
+    assert!(run.errors().contains("Which table?"), "{}", run.errors());
     assert_eq!(run.unexpected_questions(), ["Which table?"]);
     assert!(
         !run.output().contains("deleted"),
@@ -176,7 +178,13 @@ async fn an_answer_is_not_given_to_another_question() {
         .await;
 
     assert_eq!(run.exit_code(), 1);
-    run.assert_errors_contain("Delete every row of sessions?");
+    // Read the stream directly: `assert_errors_contain` fails on an
+    // unexpected question (PAR-177), and this test is about that question.
+    assert!(
+        run.errors().contains("Delete every row of sessions?"),
+        "{}",
+        run.errors()
+    );
     assert_eq!(
         run.unexpected_questions(),
         ["Delete every row of sessions?"]

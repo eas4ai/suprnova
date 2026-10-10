@@ -412,6 +412,35 @@ async fn a_question_the_test_did_not_expect_fails_every_assertion_on_the_run() {
 }
 
 #[tokio::test]
+async fn the_output_error_and_question_assertions_fail_naming_an_unexpected_question() {
+    // The command goes on after `ask` refused it. Its output and error
+    // stream both hold the text the assertions look for, so only the
+    // unexpected question can make them fail.
+    let run = print(&["swallow:Delete every row?", "out:done", "err:warned"])
+        .run()
+        .await;
+
+    assert_eq!(run.exit_code(), 0);
+    assert_eq!(run.unexpected_questions(), ["Delete every row?"]);
+    for message in [
+        panic_of(|| {
+            run.assert_output_contains("done");
+        }),
+        panic_of(|| {
+            run.assert_errors_contain("warned");
+        }),
+        panic_of(|| {
+            run.assert_every_question_was_asked();
+        }),
+    ] {
+        assert!(
+            message.contains("`Delete every row?`"),
+            "the failure must name the question:\n{message}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_question_asked_out_of_order_names_the_question() {
     let run = print(&["ask:Second?", "ask:First?"])
         .expects_question("First?", "1")
