@@ -138,7 +138,16 @@ pub async fn empty(engine: Engine) -> Db {
                 std::process::id(),
                 uuid::Uuid::new_v4().simple()
             ));
-            let conn = connect(&format!("sqlite://{}?mode=rwc", path.display())).await;
+            // One connection, so every statement of a test runs on the
+            // connection that ran the statement before it. sqlx hands a
+            // released connection back to the pool on a spawned task, so a
+            // larger pool opens a second and a third connection even when
+            // every statement is awaited in turn, and the fixture, the
+            // migrator's `CREATE TABLE` and a model's first write each land
+            // on a connection chosen by task scheduling. A test that holds
+            // a transaction and queries outside it waits for the connection
+            // until the acquire timeout, as under `TestDatabase::fresh`.
+            let conn = connect(&format!("sqlite://{}?mode=rwc", path.display()), 1).await;
             conn.execute_unprepared("PRAGMA foreign_keys = ON")
                 .await
                 .expect("enable foreign keys");
@@ -150,7 +159,7 @@ pub async fn empty(engine: Engine) -> Db {
         Engine::Postgres => {
             let url = std::env::var("PG_TEST_URL")
                 .expect("set PG_TEST_URL to a throwaway Postgres database");
-            let conn = connect(&url).await;
+            let conn = connect(&url, 4).await;
             conn.execute_unprepared("DROP SCHEMA IF EXISTS public CASCADE")
                 .await
                 .expect("drop the public schema");
@@ -176,7 +185,7 @@ pub async fn empty(engine: Engine) -> Db {
                 name.starts_with("suprnova_test_"),
                 "MYSQL_TEST_URL must name a throwaway suprnova_test_* database, not {name}"
             );
-            let conn = connect(&url).await;
+            let conn = connect(&url, 4).await;
             // Drop every table on one pinned connection, with foreign key
             // checks off for that session, so the order does not matter.
             let tables: Vec<String> = conn
@@ -221,10 +230,10 @@ pub async fn empty(engine: Engine) -> Db {
     }
 }
 
-async fn connect(url: &str) -> DatabaseConnection {
+async fn connect(url: &str, max_connections: u32) -> DatabaseConnection {
     let mut options = ConnectOptions::new(url.to_owned());
     options
-        .max_connections(4)
+        .max_connections(max_connections)
         .min_connections(0)
         .connect_timeout(Duration::from_secs(10))
         .acquire_timeout(Duration::from_secs(30))

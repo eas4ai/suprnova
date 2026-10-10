@@ -195,9 +195,22 @@ on_every_engine!(scaffold_user_on_laravels_users =>
 /// `notes` with its key into the `users` table Laravel's skeleton created
 /// (`id` unsigned on MySQL), and the scaffold's `Note` reads one user's
 /// notes and no other user's.
+///
+/// Unlike the `users` test above, whose tables the fixture created before
+/// the migrator ran, the first write here goes to a table the migrator
+/// created. On SQLite the fixture's pool holds one connection, so that
+/// write runs on the connection that ran the `CREATE TABLE`, whatever order
+/// the runtime returns connections to the pool in.
 async fn scaffold_notes_on_laravels_users(engine: Engine) {
     let (db, _) = support::laravel(engine).await;
     crate::scaffold::migrate(&db.conn).await.expect("migrate");
+    if engine == Engine::Sqlite {
+        assert_eq!(
+            db.conn.get_sqlite_connection_pool().size(),
+            1,
+            "the migrator and the model share one SQLite connection"
+        );
+    }
     let _bound = support::bind(&db.conn);
 
     for (user_id, title) in [(1u64, "Taylor's note"), (2u64, "Abigail's note")] {
