@@ -1,0 +1,2357 @@
+// Types for entity generation templates
+
+/// Column information from database schema
+pub struct ColumnInfo {
+    pub name: String,
+    pub col_type: String,
+    pub is_nullable: bool,
+    pub is_primary_key: bool,
+}
+
+/// Table information from database schema
+pub struct TableInfo {
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+}
+
+// Backend templates
+
+/// The git tag generated projects pin their `suprnova` dependency to.
+///
+/// Derived from the running CLI's own version rather than written into the
+/// templates, because a hardcoded tag has no mechanism that forces it to
+/// advance with a release: the templates sat on `v0.6.0` through two
+/// releases, handing every new user a stale framework. `suprnova-cli`
+/// inherits `version.workspace = true` and every release is tagged
+/// `v<workspace version>`, so this is always the tag of the release that
+/// shipped this binary.
+pub fn framework_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn cargo_toml(package_name: &str, description: &str, author: &str) -> String {
+    let authors_line = if author.is_empty() {
+        String::new()
+    } else {
+        format!("authors = [\"{}\"]\n", author)
+    };
+
+    format!(
+        include_str!("files/backend/Cargo.toml.tpl"),
+        package_name = package_name,
+        description = description,
+        authors_line = authors_line,
+        framework_tag = framework_tag()
+    )
+}
+
+pub fn cmd_main_rs(package_name: &str) -> String {
+    include_str!("files/backend/cmd/main.rs.tpl").replace("{package_name}", package_name)
+}
+
+pub fn console_main_rs(package_name: &str) -> String {
+    include_str!("files/backend/src/bin/console.rs.tpl").replace("{package_name}", package_name)
+}
+
+pub fn commands_mod_rs() -> &'static str {
+    include_str!("files/backend/src/commands/mod.rs.tpl")
+}
+
+/// `src/live/<snake>.rs` scaffolded by `live:make`.
+pub fn live_component(snake: &str, pascal: &str, component_name: &str, view: &str) -> String {
+    render_placeholders(
+        include_str!("files/backend/live/component.rs.tpl"),
+        &[
+            ("{snake}", snake),
+            ("{pascal}", pascal),
+            ("{component_name}", component_name),
+            ("{view}", view),
+        ],
+    )
+}
+
+/// Replace each `{name}` placeholder of `template` with its value in one
+/// walk of the template, which collects the pieces of the output, borrowed
+/// from the template and the values, and joins them into a string of
+/// exactly the output's length. A chain of `replace` calls copied the
+/// whole template once per placeholder.
+pub(crate) fn render_placeholders(template: &str, values: &[(&str, &str)]) -> String {
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut rest = template;
+    while let Some(at) = rest.find('{') {
+        pieces.push(&rest[..at]);
+        let tail = &rest[at..];
+        match values.iter().find(|(key, _)| tail.starts_with(key)) {
+            Some((key, value)) => {
+                pieces.push(value);
+                rest = &tail[key.len()..];
+            }
+            None => {
+                pieces.push("{");
+                rest = &tail[1..];
+            }
+        }
+    }
+    pieces.push(rest);
+    pieces.concat()
+}
+
+/// `templates/live/<snake>.html` scaffolded by `live:make`.
+pub fn live_view() -> &'static str {
+    include_str!("files/backend/live/view.html.tpl")
+}
+
+/// `src/live/mod.rs`: the empty registry and the guarded reserved routes,
+/// written by `suprnova new` and by the first `live:make` in an older project.
+pub fn live_mod_rs() -> &'static str {
+    include_str!("files/backend/live/mod.rs.tpl")
+}
+
+pub fn lib_rs() -> &'static str {
+    include_str!("files/backend/lib.rs.tpl")
+}
+
+pub fn routes_rs() -> &'static str {
+    include_str!("files/backend/routes.rs.tpl")
+}
+
+pub fn controllers_mod() -> &'static str {
+    include_str!("files/backend/controllers/mod.rs.tpl")
+}
+
+pub fn home_controller() -> &'static str {
+    include_str!("files/backend/controllers/home.rs.tpl")
+}
+
+pub fn create_workflows_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_workflows_table.rs.tpl")
+}
+
+pub fn create_workflow_steps_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_workflow_steps_table.rs.tpl")
+}
+
+pub fn normalize_workflow_datetimes_migration() -> &'static str {
+    include_str!("files/backend/migrations/normalize_workflow_datetime_columns.rs.tpl")
+}
+
+// Middleware templates
+
+pub fn middleware_mod() -> &'static str {
+    include_str!("files/backend/middleware/mod.rs.tpl")
+}
+
+pub fn middleware_logging() -> &'static str {
+    include_str!("files/backend/middleware/logging.rs.tpl")
+}
+
+/// Template for generating new middleware with make:middleware command.
+///
+/// The body passes the request on and returns the handler's response,
+/// as Laravel's `stubs/middleware.stub` does, so the new middleware changes
+/// nothing until you give it logic. Its doc comment says where checks and
+/// response work go.
+pub fn middleware_template(name: &str, struct_name: &str) -> String {
+    format!(
+        r#"//! {name} middleware
+
+use suprnova::{{async_trait, Middleware, Next, Request, Response}};
+
+/// {name} middleware.
+pub struct {struct_name};
+
+#[async_trait]
+impl Middleware for {struct_name} {{
+    /// Handle an incoming request.
+    ///
+    /// Code before `next(request).await` runs before the route's handler:
+    /// return a response there to stop the request. Code after it can
+    /// change the response the handler returned.
+    async fn handle(&self, request: Request, next: Next) -> Response {{
+        next(request).await
+    }}
+}}
+"#,
+        name = name,
+        struct_name = struct_name
+    )
+}
+
+/// The test `make:middleware --test` writes under `tests/`: it runs the
+/// middleware in front of a route through `TestClient`, the framework's
+/// in-process client, and asserts the route's response comes back.
+///
+/// `crate_name` is the application's library crate, `module_path` the
+/// path from it to the middleware (`middleware::admin`), and `test_name`
+/// the test function's name.
+pub fn middleware_test_template(
+    crate_name: &str,
+    module_path: &str,
+    struct_name: &str,
+    test_name: &str,
+) -> String {
+    render_placeholders(
+        r#"//! `{struct}` runs in front of a route.
+
+use {crate}::{module}::{struct};
+use suprnova::testing::TestClient;
+use suprnova::{MiddlewareRegistry, Request, Response, Router};
+
+async fn handled(_req: Request) -> Response {
+    suprnova::http::text("handled")
+}
+
+#[tokio::test]
+async fn {test}() {
+    let router = Router::new().get("/", handled);
+    let client = TestClient::new(router, MiddlewareRegistry::new().append({struct}));
+
+    client.get("/").send().await.assert_ok().assert_see("handled");
+}
+"#,
+        &[
+            ("{crate}", crate_name),
+            ("{module}", module_path),
+            ("{struct}", struct_name),
+            ("{test}", test_name),
+        ],
+    )
+}
+
+/// `templates/<path>.html` scaffolded by `make:view`: the markup the
+/// view struct's `title` field fills.
+pub fn view_html_template() -> &'static str {
+    "<div>\n    <h1>{{ title }}</h1>\n</div>\n"
+}
+
+/// `src/views/<path>.rs` scaffolded by `make:view`: a `#[suprnova::view]`
+/// struct naming its template, which the macro checks when the crate
+/// compiles.
+pub fn view_template(view_path: &str, struct_name: &str) -> String {
+    render_placeholders(
+        r#"//! The `{path}` view.
+
+/// The data `templates/{path}` renders.
+///
+/// `#[suprnova::view]` compiles the template against this struct, so a
+/// name the template reads that the struct lacks fails the build.
+#[suprnova::view(path = "{path}")]
+pub struct {struct} {
+    /// The page heading.
+    pub title: String,
+}
+"#,
+        &[("{path}", view_path), ("{struct}", struct_name)],
+    )
+}
+
+/// The test `make:view --test` writes under `tests/`: it renders the view
+/// with a title and asserts the title is in the HTML.
+pub fn view_test_template(
+    crate_name: &str,
+    module_path: &str,
+    struct_name: &str,
+    view_path: &str,
+    test_name: &str,
+) -> String {
+    render_placeholders(
+        r#"//! `{struct}` renders `templates/{path}`.
+
+use {crate}::{module}::{struct};
+use suprnova::view::ViewTemplate;
+
+#[test]
+fn {test}() {
+    let view = {struct} {
+        title: "Rendered heading".to_string(),
+    };
+    let mut html = String::new();
+    view.render_view(&mut html).expect("the view renders");
+
+    assert!(html.contains("<h1>Rendered heading</h1>"), "{html}");
+}
+"#,
+        &[
+            ("{crate}", crate_name),
+            ("{module}", module_path),
+            ("{struct}", struct_name),
+            ("{path}", view_path),
+            ("{test}", test_name),
+        ],
+    )
+}
+
+/// The test `make:inertia --test` writes under `tests/`: a route answers
+/// with the page, and the test asserts the response names it and that its
+/// file exists under `frontend/src/pages`. `inertia_response!` also checks
+/// the file when the test compiles.
+pub fn inertia_page_test_template(component: &str, test_name: &str) -> String {
+    render_placeholders(
+        r#"//! The `{component}` Inertia page renders.
+
+use suprnova::testing::TestClient;
+use suprnova::{inertia_response, MiddlewareRegistry, Request, Response, Router};
+
+async fn page(req: Request) -> Response {
+    inertia_response!(&req, "{component}", {})
+}
+
+#[tokio::test]
+async fn {test}() {
+    let client = TestClient::new(Router::new().get("/", page), MiddlewareRegistry::new());
+
+    client
+        .get("/")
+        .inertia()
+        .send()
+        .await
+        .assert_ok()
+        .assert_inertia()
+        .component_exists("{component}", true);
+}
+"#,
+        &[("{component}", component), ("{test}", test_name)],
+    )
+}
+
+/// Template for generating new controller with make:controller command
+pub fn controller_template(name: &str) -> String {
+    format!(
+        r#"//! {name} controller
+
+use suprnova::{{handler, json_response, Request, Response}};
+
+#[handler]
+pub async fn invoke(_req: Request) -> Response {{
+    json_response!({{
+        "controller": "{name}"
+    }})
+}}
+"#,
+        name = name
+    )
+}
+
+/// Template for generating new action with make:action command.
+///
+/// Emits a real, working single-responsibility action: a container-resolvable
+/// struct with an async `execute()` that returns `Result<String,
+/// FrameworkError>`. Compiles out of the box and demonstrates the resolve →
+/// invoke pattern that controllers use. Replace the body when you need
+/// different behavior; the signature is the production-safe shape every
+/// Suprnova action uses.
+pub fn action_template(name: &str, struct_name: &str) -> String {
+    format!(
+        r#"//! {name} action
+
+use suprnova::{{injectable, FrameworkError}};
+
+/// {struct_name}
+///
+/// Single-responsibility command resolved from the container. Inject any
+/// dependencies as fields and the `#[injectable]` macro wires them at
+/// resolve time.
+#[injectable]
+pub struct {struct_name} {{
+    // Add injected dependencies as fields here, e.g.
+    // db: suprnova::DbConnection,
+}}
+
+impl {struct_name} {{
+    /// Execute the action.
+    ///
+    /// Returns a status string by default so the skeleton compiles and
+    /// runs immediately. Swap the body for the real workflow when you
+    /// implement the feature - typically wrap fallible work in
+    /// `?` and return the produced value.
+    pub async fn execute(&self) -> Result<String, FrameworkError> {{
+        Ok("{struct_name} executed".to_string())
+    }}
+}}
+"#,
+        name = name,
+        struct_name = struct_name
+    )
+}
+
+/// Template for generating a new console command file with
+/// `make:command`.
+///
+/// Emits a runnable typed-command stub: `#[derive(clap::Parser,
+/// Command)]` on a struct + an `impl TypedCommand`. Clap parses the
+/// argv, the user fills in real behavior, the scaffold compiles
+/// immediately so the `make:command` → `cargo run` loop is fast.
+///
+/// The TODO marker in the body is intentional - it's a starting
+/// point, not deferred framework work.
+pub fn command_template(struct_name: &str, command_name: &str) -> String {
+    format!(
+        r#"//! `{command_name}` console command.
+
+use async_trait::async_trait;
+use clap::Parser;
+use suprnova::{{Command, FrameworkError, TypedCommand}};
+
+#[derive(Parser, Command, Debug)]
+#[console(name = "{command_name}", description = "TODO: describe what {command_name} does")]
+pub struct {struct_name} {{
+    // Add clap-derive args here. Examples:
+    //
+    //   #[arg(short, long)]
+    //   pub name: Option<String>,
+    //
+    //   #[arg(long, default_value_t = false)]
+    //   pub dry_run: bool,
+    //
+    //   #[arg(value_name = "TARGET")]
+    //   pub target: String,
+}}
+
+#[async_trait]
+impl TypedCommand for {struct_name} {{
+    async fn run(self) -> Result<(), FrameworkError> {{
+        // TODO: implement the command body. Self's fields are the
+        // parsed args; reach for shared services via the framework's
+        // facades (`DB::connection()`, `Mail::to(...)`, etc.).
+        //
+        // Print with `suprnova::console::line`, not `println!`: a test
+        // that runs the command with `suprnova::console::test` can then
+        // read what it printed.
+        suprnova::console::line("{command_name}: not yet implemented");
+        Ok(())
+    }}
+}}
+"#,
+        struct_name = struct_name,
+        command_name = command_name
+    )
+}
+
+/// Template for generating a new Inertia page with `make:inertia`.
+///
+/// Dispatches to the right per-frontend snippet so the generated file
+/// compiles in the user's actual project.
+///
+/// `component` is the Inertia component name, with its directory when the
+/// page is nested (`Admin/UsersPage`); the React function and every heading
+/// use the last segment, since a function name cannot hold a `/`.
+pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
+    let ext = frontend.page_ext();
+    let component_name = component.rsplit('/').next().unwrap_or(component);
+    match frontend {
+        Frontend::React => format!(
+            r#"export default function {component_name}() {{
+  return (
+    <div className="font-sans p-8 max-w-xl mx-auto">
+      <h1 className="text-3xl font-bold">{component_name}</h1>
+      <p className="mt-2">
+        Edit <code className="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
+      </p>
+    </div>
+  )
+}}
+"#,
+            component_name = component_name,
+            component = component,
+            ext = ext,
+        ),
+        Frontend::Svelte => format!(
+            r#"<div class="font-sans p-8 max-w-xl mx-auto">
+  <h1 class="text-3xl font-bold">{component_name}</h1>
+  <p class="mt-2">
+    Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
+  </p>
+</div>
+"#,
+            component_name = component_name,
+            component = component,
+            ext = ext,
+        ),
+        Frontend::Vue => format!(
+            r#"<script setup lang="ts">
+</script>
+
+<template>
+  <div class="font-sans p-8 max-w-xl mx-auto">
+    <h1 class="text-3xl font-bold">{component_name}</h1>
+    <p class="mt-2">
+      Edit <code class="bg-gray-100 px-1 rounded">frontend/src/pages/{component}.{ext}</code> to get started.
+    </p>
+  </div>
+</template>
+"#,
+            component_name = component_name,
+            component = component,
+            ext = ext,
+        ),
+    }
+}
+
+/// Template for generating new error with make:error command
+pub fn error_template(struct_name: &str) -> String {
+    // Convert PascalCase to human readable message
+    let mut message = String::new();
+    for (i, c) in struct_name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            message.push(' ');
+            message.push(c.to_lowercase().next().unwrap());
+        } else {
+            message.push(c);
+        }
+    }
+
+    format!(
+        r#"//! {struct_name} error
+
+use suprnova::domain_error;
+
+#[domain_error(status = 500, message = "{message}")]
+pub struct {struct_name};
+"#,
+        struct_name = struct_name,
+        message = message
+    )
+}
+
+/// Template for models/mod.rs
+pub fn models_mod() -> &'static str {
+    include_str!("files/backend/models/mod.rs.tpl")
+}
+
+// Props templates: the structs more than one page reads.
+
+/// The scaffolded `src/props/mod.rs`.
+pub fn props_mod() -> &'static str {
+    include_str!("files/backend/props/mod.rs.tpl")
+}
+
+/// The scaffolded `src/props/flash.rs`: the `Flash` the generated types
+/// name as Inertia's `flashDataType`, and the `Toast` every account flow
+/// and the notes form flash under it (PAR-078).
+pub fn flash_props() -> &'static str {
+    include_str!("files/backend/props/flash.rs.tpl")
+}
+
+/// The scaffolded `src/props/shared.rs`: the `auth` prop every page
+/// receives, the signed-in user or none, and the struct that types it in
+/// the generated `SharedProps`.
+pub fn shared_props() -> &'static str {
+    include_str!("files/backend/props/shared.rs.tpl")
+}
+
+// Actions templates
+
+pub fn actions_mod() -> &'static str {
+    include_str!("files/backend/actions/mod.rs.tpl")
+}
+
+pub fn example_action() -> &'static str {
+    include_str!("files/backend/actions/example_action.rs.tpl")
+}
+
+// Config templates
+
+pub fn config_mod() -> &'static str {
+    include_str!("files/backend/config/mod.rs.tpl")
+}
+
+pub fn config_database() -> &'static str {
+    include_str!("files/backend/config/database.rs.tpl")
+}
+
+pub fn config_mail() -> &'static str {
+    include_str!("files/backend/config/mail.rs.tpl")
+}
+
+/// The project's name as a title: `my-shop` and `my_shop` are `My Shop`.
+/// The scaffold names the application with it in two places that must
+/// agree: the server's `default_title` in `src/bootstrap.rs` and the
+/// frontend entries' `title` callback.
+pub fn project_title(project_name: &str) -> String {
+    project_name
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The scaffolded `src/bootstrap.rs`. Takes the frontend because the
+/// generated `Inertia::install` call pins it: left to the environment, the
+/// framework falls back to Svelte, and a React project rendering Svelte's
+/// entry point is a blank page with nothing in the log. Takes the project's
+/// title for the config's default title, which every page without a title
+/// of its own is otherwise named `Suprnova` by.
+pub fn bootstrap(frontend: Frontend, project_title: &str) -> String {
+    include_str!("files/backend/bootstrap.rs.tpl")
+        .replace("{frontend_variant}", frontend.variant_name())
+        .replace("{project_title}", project_title)
+}
+
+/// The scaffolded `templates/app.html`: the root document every Inertia
+/// first visit renders into, in place of a `frontend/index.html` the server
+/// never served.
+pub fn app_root_template() -> &'static str {
+    include_str!("files/backend/templates/app.html.tpl")
+}
+
+// Migrations templates
+
+pub fn migrations_mod() -> &'static str {
+    include_str!("files/backend/migrations/mod.rs.tpl")
+}
+
+// migrate_bin removed - migrations now integrated into main binary
+
+// Frontend templates
+//
+// Per-framework submodules. Add a new framework by mirroring the structure
+// in `files/frontend/<name>/` and adding a submodule below.
+
+use std::fs;
+use std::path::Path;
+
+/// Which frontend framework the user picked when scaffolding the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frontend {
+    React,
+    Svelte,
+    Vue,
+}
+
+impl Frontend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Frontend::React => "react",
+            Frontend::Svelte => "svelte",
+            Frontend::Vue => "vue",
+        }
+    }
+
+    /// The `suprnova::Frontend` variant name, for templates that emit Rust
+    /// source. `as_str()` is the lowercase value `SUPRNOVA_FRONTEND` takes;
+    /// this is what goes after `Frontend::` in generated code.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Frontend::React => "React",
+            Frontend::Svelte => "Svelte",
+            Frontend::Vue => "Vue",
+        }
+    }
+
+    /// File written at `frontend/src/<main_file_name>`, the Vite entry point.
+    fn main_file_name(&self) -> &'static str {
+        match self {
+            Frontend::React => "main.tsx",
+            Frontend::Svelte => "main.ts",
+            Frontend::Vue => "main.ts",
+        }
+    }
+
+    /// File written at `frontend/src/<ssr_file_name>`, the `vite build
+    /// --ssr` entry point `suprnova ssr:start` launches under Node.
+    fn ssr_file_name(&self) -> &'static str {
+        match self {
+            Frontend::React => "ssr.tsx",
+            Frontend::Svelte => "ssr.ts",
+            Frontend::Vue => "ssr.ts",
+        }
+    }
+
+    /// Extension for page components.
+    pub fn page_ext(&self) -> &'static str {
+        match self {
+            Frontend::React => "tsx",
+            Frontend::Svelte => "svelte",
+            Frontend::Vue => "vue",
+        }
+    }
+
+    /// Read the frontend choice from the `SUPRNOVA_FRONTEND` env var,
+    /// honoring any `.env` already loaded into the process. Defaults to
+    /// Svelte when unset or unparseable - matches the framework's
+    /// `InertiaConfig::default()` behavior.
+    pub fn detect_from_env() -> Self {
+        match std::env::var("SUPRNOVA_FRONTEND") {
+            Ok(s) => s.parse().unwrap_or(Frontend::Svelte),
+            Err(_) => Frontend::Svelte,
+        }
+    }
+}
+
+impl std::str::FromStr for Frontend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "react" => Ok(Frontend::React),
+            "svelte" => Ok(Frontend::Svelte),
+            "vue" | "vue3" => Ok(Frontend::Vue),
+            other => Err(format!(
+                "Unknown frontend '{}'. Supported: react, svelte, vue",
+                other
+            )),
+        }
+    }
+}
+
+pub mod react {
+    pub fn package_json(project_name: &str) -> String {
+        include_str!("files/frontend/react/package.json.tpl")
+            .replace("{project_name}", project_name)
+    }
+    pub fn vite_config() -> &'static str {
+        include_str!("files/frontend/react/vite.config.ts.tpl")
+    }
+    pub fn tsconfig() -> &'static str {
+        include_str!("files/frontend/react/tsconfig.json.tpl")
+    }
+    pub fn main_file() -> &'static str {
+        include_str!("files/frontend/react/src/main.tsx.tpl")
+    }
+    pub fn ssr_file() -> &'static str {
+        include_str!("files/frontend/react/src/ssr.tsx.tpl")
+    }
+    pub fn home_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Home.tsx.tpl")
+    }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Error.tsx.tpl")
+    }
+    pub fn dashboard_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Dashboard.tsx.tpl")
+    }
+    pub fn login_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/Login.tsx.tpl")
+    }
+    pub fn register_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/Register.tsx.tpl")
+    }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/ForgotPassword.tsx.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/ResetPassword.tsx.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/auth/VerifyEmail.tsx.tpl")
+    }
+    pub fn inertia_props_types() -> &'static str {
+        include_str!("files/frontend/react/src/types/inertia-props.ts.tpl")
+    }
+    /// `LangProvider` / `useLang()` - the React localization wrapper.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/react/src/lib/lang.ts.tpl")
+    }
+    pub fn vite_env_dts() -> &'static str {
+        include_str!("files/frontend/react/src/vite-env.d.ts.tpl")
+    }
+    pub fn app_css() -> &'static str {
+        include_str!("files/frontend/react/src/app.css.tpl")
+    }
+    /// `src/lib/app.ts`: the application's name, the tab title callback and
+    /// the layout resolver both entries pass to `createInertiaApp`. Takes
+    /// the project's title, which names the application in the tab.
+    pub fn app_module(project_title: &str) -> String {
+        include_str!("files/frontend/react/src/lib/app.ts.tpl")
+            .replace("{project_title}", project_title)
+    }
+    /// The persistent layout of every page outside `auth/`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/react/src/layouts/AppLayout.tsx.tpl")
+    }
+    /// The persistent layout of the pages under `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/react/src/layouts/GuestLayout.tsx.tpl")
+    }
+    /// The account corner both layouts show from the shared `auth` prop:
+    /// the user's name and sign-out, or the sign-in and register links.
+    pub fn account_links() -> &'static str {
+        include_str!("files/frontend/react/src/components/AccountLinks.tsx.tpl")
+    }
+    /// The toast both layouts show from the page's flash data.
+    pub fn flash_toast() -> &'static str {
+        include_str!("files/frontend/react/src/components/FlashToast.tsx.tpl")
+    }
+    /// The signed-in user's notes, rendered by `controllers::notes::index`.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Notes/Index.tsx.tpl")
+    }
+    /// One of the signed-in user's notes, rendered by
+    /// `controllers::notes::show`.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Notes/Show.tsx.tpl")
+    }
+}
+
+pub mod svelte {
+    pub fn package_json(project_name: &str) -> String {
+        include_str!("files/frontend/svelte/package.json.tpl")
+            .replace("{project_name}", project_name)
+    }
+    pub fn vite_config() -> &'static str {
+        include_str!("files/frontend/svelte/vite.config.ts.tpl")
+    }
+    pub fn svelte_config() -> &'static str {
+        include_str!("files/frontend/svelte/svelte.config.js.tpl")
+    }
+    pub fn tsconfig() -> &'static str {
+        include_str!("files/frontend/svelte/tsconfig.json.tpl")
+    }
+    pub fn app_dts() -> &'static str {
+        include_str!("files/frontend/svelte/src/app.d.ts.tpl")
+    }
+    pub fn app_css() -> &'static str {
+        include_str!("files/frontend/svelte/src/app.css.tpl")
+    }
+    pub fn main_file() -> &'static str {
+        include_str!("files/frontend/svelte/src/main.ts.tpl")
+    }
+    pub fn ssr_file() -> &'static str {
+        include_str!("files/frontend/svelte/src/ssr.ts.tpl")
+    }
+    pub fn home_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Home.svelte.tpl")
+    }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Error.svelte.tpl")
+    }
+    pub fn dashboard_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Dashboard.svelte.tpl")
+    }
+    pub fn login_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/Login.svelte.tpl")
+    }
+    pub fn register_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/Register.svelte.tpl")
+    }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/ForgotPassword.svelte.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/ResetPassword.svelte.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/auth/VerifyEmail.svelte.tpl")
+    }
+    pub fn inertia_props_types() -> &'static str {
+        include_str!("files/frontend/svelte/src/types/inertia-props.ts.tpl")
+    }
+    /// `$state`-based localization module - `.svelte.ts` extension is
+    /// required for runes outside a component.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/lang.svelte.ts.tpl")
+    }
+    /// `src/lib/title.ts`: the tab-title function both entries pass as
+    /// `title` and `components/Head.svelte` applies. It carries the
+    /// project's title, the name `src/bootstrap.rs` gives the server's
+    /// default title, so a page's tab and an untitled page agree.
+    pub fn title_module(project_title: &str) -> String {
+        include_str!("files/frontend/svelte/src/lib/title.ts.tpl")
+            .replace("{project_title}", project_title)
+    }
+    /// `src/lib/dates.ts`: the date format the notes pages print, the same
+    /// on the server and in the browser so hydration matches.
+    pub fn dates_module() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/dates.ts.tpl")
+    }
+    /// `src/components/Head.svelte`: `@inertiajs/svelte` ships no `Head`,
+    /// so the kit's pages title themselves through this one.
+    pub fn head_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/Head.svelte.tpl")
+    }
+    /// `src/components/AccountLinks.svelte`: the signed-in user's name and
+    /// sign-out, or the sign-in and register links, in both layouts.
+    pub fn account_links_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/AccountLinks.svelte.tpl")
+    }
+    /// `src/components/FlashToast.svelte`: the toast both layouts show
+    /// from `page.flash`.
+    pub fn flash_toast_component() -> &'static str {
+        include_str!("files/frontend/svelte/src/components/FlashToast.svelte.tpl")
+    }
+    /// `src/layouts/AppLayout.svelte`: the persistent frame of every page
+    /// outside `auth/`, applied through `createInertiaApp`'s `layout`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/svelte/src/layouts/AppLayout.svelte.tpl")
+    }
+    /// `src/layouts/GuestLayout.svelte`: the frame of the pages under
+    /// `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/svelte/src/layouts/GuestLayout.svelte.tpl")
+    }
+    /// `src/pages/Notes/Index.svelte`: the signed-in user's notes, the page
+    /// the `notes` controller's `index` renders.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Notes/Index.svelte.tpl")
+    }
+    /// `src/pages/Notes/Show.svelte`: one note, the page the `notes`
+    /// controller's `show` renders.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Notes/Show.svelte.tpl")
+    }
+}
+
+pub mod vue {
+    pub fn package_json(project_name: &str) -> String {
+        include_str!("files/frontend/vue/package.json.tpl").replace("{project_name}", project_name)
+    }
+    pub fn vite_config() -> &'static str {
+        include_str!("files/frontend/vue/vite.config.ts.tpl")
+    }
+    pub fn tsconfig() -> &'static str {
+        include_str!("files/frontend/vue/tsconfig.json.tpl")
+    }
+    pub fn shims_dts() -> &'static str {
+        include_str!("files/frontend/vue/src/shims-vue.d.ts.tpl")
+    }
+    /// The browser entry. Takes the project's title because the `title`
+    /// callback appends the application's name to every page title, and
+    /// the name must match the server's `default_title`.
+    pub fn main_file(project_title: &str) -> String {
+        include_str!("files/frontend/vue/src/main.ts.tpl").replace("{project_title}", project_title)
+    }
+    /// The SSR entry, titled like [`main_file`]: the browser hydrates what
+    /// it renders, so the two must agree.
+    pub fn ssr_file(project_title: &str) -> String {
+        include_str!("files/frontend/vue/src/ssr.ts.tpl").replace("{project_title}", project_title)
+    }
+    pub fn home_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Home.vue.tpl")
+    }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Error.vue.tpl")
+    }
+    pub fn dashboard_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Dashboard.vue.tpl")
+    }
+    /// The signed-in user's notes: the create form, the remembered search
+    /// and the infinite list the `notes::index` handler paginates.
+    pub fn notes_index_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Notes/Index.vue.tpl")
+    }
+    /// One of the signed-in user's notes, opened from the list as an
+    /// instant visit.
+    pub fn notes_show_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Notes/Show.vue.tpl")
+    }
+    /// The layout `main.ts` gives every page outside `auth/`.
+    pub fn app_layout() -> &'static str {
+        include_str!("files/frontend/vue/src/layouts/AppLayout.vue.tpl")
+    }
+    /// The layout `main.ts` gives the pages under `auth/`.
+    pub fn guest_layout() -> &'static str {
+        include_str!("files/frontend/vue/src/layouts/GuestLayout.vue.tpl")
+    }
+    /// The toast both layouts show from the page's flash data.
+    pub fn flash_toast() -> &'static str {
+        include_str!("files/frontend/vue/src/components/FlashToast.vue.tpl")
+    }
+    /// The account links both layouts show from the shared `auth.user`:
+    /// the name and the sign-out, or the sign-in and register links.
+    pub fn account_links() -> &'static str {
+        include_str!("files/frontend/vue/src/components/AccountLinks.vue.tpl")
+    }
+    pub fn login_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/Login.vue.tpl")
+    }
+    pub fn register_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/Register.vue.tpl")
+    }
+    pub fn forgot_password_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/ForgotPassword.vue.tpl")
+    }
+    pub fn reset_password_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/ResetPassword.vue.tpl")
+    }
+    pub fn verify_email_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/auth/VerifyEmail.vue.tpl")
+    }
+    pub fn inertia_props_types() -> &'static str {
+        include_str!("files/frontend/vue/src/types/inertia-props.ts.tpl")
+    }
+    /// `useLang()` composable - the Vue localization wrapper.
+    pub fn lang() -> &'static str {
+        include_str!("files/frontend/vue/src/lib/lang.ts.tpl")
+    }
+    pub fn app_css() -> &'static str {
+        include_str!("files/frontend/vue/src/app.css.tpl")
+    }
+}
+
+/// Write all the frontend files for the chosen framework under
+/// `<project_path>/frontend/`.
+pub fn scaffold_frontend(
+    project_path: &Path,
+    project_name: &str,
+    frontend: Frontend,
+) -> Result<(), String> {
+    let fe = project_path.join("frontend");
+    let src = fe.join("src");
+    let pages = src.join("pages");
+    let auth = pages.join("auth");
+    let types = src.join("types");
+    let lib = src.join("lib");
+    for d in [&fe, &src, &pages, &auth, &types, &lib] {
+        fs::create_dir_all(d).map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+    }
+
+    let ext = frontend.page_ext();
+    let main = src.join(frontend.main_file_name());
+    let ssr_entry = src.join(frontend.ssr_file_name());
+
+    // Kept out of the tuple below, which is already at the width where a
+    // positional list stops being readable.
+    let error_page = match frontend {
+        Frontend::React => react::error_page(),
+        Frontend::Svelte => svelte::error_page(),
+        Frontend::Vue => vue::error_page(),
+    };
+
+    // The account-flow pages the `password_reset` and `email_verification`
+    // controllers render, kept out of the tuple for the same reason.
+    let (forgot_password_page, reset_password_page, verify_email_page) = match frontend {
+        Frontend::React => (
+            react::forgot_password_page(),
+            react::reset_password_page(),
+            react::verify_email_page(),
+        ),
+        Frontend::Svelte => (
+            svelte::forgot_password_page(),
+            svelte::reset_password_page(),
+            svelte::verify_email_page(),
+        ),
+        Frontend::Vue => (
+            vue::forgot_password_page(),
+            vue::reset_password_page(),
+            vue::verify_email_page(),
+        ),
+    };
+
+    let (pkg, vite, ts, main_src, ssr_src, home, dash, login, reg, props, css) = match frontend {
+        Frontend::React => (
+            react::package_json(project_name),
+            react::vite_config().to_string(),
+            react::tsconfig().to_string(),
+            react::main_file().to_string(),
+            react::ssr_file().to_string(),
+            react::home_page().to_string(),
+            react::dashboard_page().to_string(),
+            react::login_page().to_string(),
+            react::register_page().to_string(),
+            react::inertia_props_types().to_string(),
+            react::app_css().to_string(),
+        ),
+        Frontend::Svelte => (
+            svelte::package_json(project_name),
+            svelte::vite_config().to_string(),
+            svelte::tsconfig().to_string(),
+            svelte::main_file().to_string(),
+            svelte::ssr_file().to_string(),
+            svelte::home_page().to_string(),
+            svelte::dashboard_page().to_string(),
+            svelte::login_page().to_string(),
+            svelte::register_page().to_string(),
+            svelte::inertia_props_types().to_string(),
+            svelte::app_css().to_string(),
+        ),
+        Frontend::Vue => (
+            vue::package_json(project_name),
+            vue::vite_config().to_string(),
+            vue::tsconfig().to_string(),
+            vue::main_file(&project_title(project_name)),
+            vue::ssr_file(&project_title(project_name)),
+            vue::home_page().to_string(),
+            vue::dashboard_page().to_string(),
+            vue::login_page().to_string(),
+            vue::register_page().to_string(),
+            vue::inertia_props_types().to_string(),
+            vue::app_css().to_string(),
+        ),
+    };
+
+    let writes: &[(std::path::PathBuf, &str)] = &[
+        (fe.join("package.json"), &pkg),
+        (fe.join("vite.config.ts"), &vite),
+        (fe.join("tsconfig.json"), &ts),
+        (main, &main_src),
+        (ssr_entry, &ssr_src),
+        (src.join("app.css"), &css),
+        (pages.join(format!("Home.{}", ext)), &home),
+        (pages.join(format!("Error.{}", ext)), error_page),
+        (pages.join(format!("Dashboard.{}", ext)), &dash),
+        (auth.join(format!("Login.{}", ext)), &login),
+        (auth.join(format!("Register.{}", ext)), &reg),
+        (
+            auth.join(format!("ForgotPassword.{}", ext)),
+            forgot_password_page,
+        ),
+        (
+            auth.join(format!("ResetPassword.{}", ext)),
+            reset_password_page,
+        ),
+        (auth.join(format!("VerifyEmail.{}", ext)), verify_email_page),
+        (types.join("inertia-props.ts"), &props),
+        (types.join("lang-keys.ts"), lang_keys_starter()),
+    ];
+
+    for (path, content) in writes {
+        fs::write(path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    // Per-framework extras.
+    match frontend {
+        Frontend::Svelte => {
+            fs::write(fe.join("svelte.config.js"), svelte::svelte_config())
+                .map_err(|e| format!("Failed to write svelte.config.js: {}", e))?;
+            fs::write(src.join("app.d.ts"), svelte::app_dts())
+                .map_err(|e| format!("Failed to write src/app.d.ts: {}", e))?;
+            // `.svelte.ts` extension: runes (`$state`) only work in a
+            // module with that suffix.
+            fs::write(lib.join("lang.svelte.ts"), svelte::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.svelte.ts: {}", e))?;
+
+            // The layouts `createInertiaApp`'s `layout` option applies, the
+            // components they and the pages share, and the notes pages.
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            let notes = pages.join("Notes");
+            for d in [&layouts, &components, &notes] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            let title = svelte::title_module(&project_title(project_name));
+            let svelte_writes: [(std::path::PathBuf, &str); 9] = [
+                (lib.join("title.ts"), &title),
+                (lib.join("dates.ts"), svelte::dates_module()),
+                (components.join("Head.svelte"), svelte::head_component()),
+                (
+                    components.join("AccountLinks.svelte"),
+                    svelte::account_links_component(),
+                ),
+                (
+                    components.join("FlashToast.svelte"),
+                    svelte::flash_toast_component(),
+                ),
+                (layouts.join("AppLayout.svelte"), svelte::app_layout()),
+                (layouts.join("GuestLayout.svelte"), svelte::guest_layout()),
+                (notes.join("Index.svelte"), svelte::notes_index_page()),
+                (notes.join("Show.svelte"), svelte::notes_show_page()),
+            ];
+            for (path, content) in svelte_writes {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
+        }
+        Frontend::Vue => {
+            fs::write(src.join("shims-vue.d.ts"), vue::shims_dts())
+                .map_err(|e| format!("Failed to write src/shims-vue.d.ts: {}", e))?;
+            fs::write(lib.join("lang.ts"), vue::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
+            // The notes pages, the two layouts `main.ts` applies through
+            // its `layout` option, and the toast and account links they
+            // show.
+            let notes = pages.join("Notes");
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            for d in [&notes, &layouts, &components] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            for (path, content) in [
+                (notes.join("Index.vue"), vue::notes_index_page()),
+                (notes.join("Show.vue"), vue::notes_show_page()),
+                (layouts.join("AppLayout.vue"), vue::app_layout()),
+                (layouts.join("GuestLayout.vue"), vue::guest_layout()),
+                (components.join("FlashToast.vue"), vue::flash_toast()),
+                (components.join("AccountLinks.vue"), vue::account_links()),
+            ] {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
+        }
+        Frontend::React => {
+            fs::write(src.join("vite-env.d.ts"), react::vite_env_dts())
+                .map_err(|e| format!("Failed to write src/vite-env.d.ts: {}", e))?;
+            fs::write(lib.join("lang.ts"), react::lang())
+                .map_err(|e| format!("Failed to write src/lib/lang.ts: {}", e))?;
+            let app_module = react::app_module(&project_title(project_name));
+            let layouts = src.join("layouts");
+            let components = src.join("components");
+            let notes = pages.join("Notes");
+            for d in [&layouts, &components, &notes] {
+                fs::create_dir_all(d)
+                    .map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+            }
+            for (path, content) in [
+                (lib.join("app.ts"), app_module.as_str()),
+                (layouts.join("AppLayout.tsx"), react::app_layout()),
+                (layouts.join("GuestLayout.tsx"), react::guest_layout()),
+                (components.join("AccountLinks.tsx"), react::account_links()),
+                (components.join("FlashToast.tsx"), react::flash_toast()),
+                (notes.join("Index.tsx"), react::notes_index_page()),
+                (notes.join("Show.tsx"), react::notes_show_page()),
+            ] {
+                fs::write(&path, content)
+                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// API-only starter templates
+// ============================================================================
+
+pub mod api {
+    pub fn cargo_toml(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/Cargo.toml.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+            .replace("{framework_tag}", &super::framework_tag())
+    }
+    pub fn main_rs(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/src/main.rs.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn console_main_rs(package_name: &str, project_name: &str) -> String {
+        include_str!("files/api/src/bin/console.rs.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+    }
+    pub fn commands_mod_rs() -> &'static str {
+        include_str!("files/api/src/commands/mod.rs.tpl")
+    }
+    pub fn lib_rs() -> &'static str {
+        include_str!("files/api/src/lib.rs.tpl")
+    }
+    /// The template's "switching databases" doc comment names the project's
+    /// own database, so it carries a `{package_name}` placeholder and must
+    /// be substituted rather than emitted verbatim. It was emitted verbatim
+    /// through v0.7.2, which shipped every API project a doc line telling
+    /// the reader to connect to a database literally called
+    /// `{package_name}`.
+    pub fn bootstrap_rs(package_name: &str) -> String {
+        include_str!("files/api/src/bootstrap.rs.tpl").replace("{package_name}", package_name)
+    }
+    pub fn routes_rs() -> &'static str {
+        include_str!("files/api/src/routes.rs.tpl")
+    }
+    pub fn config_mod_rs() -> &'static str {
+        include_str!("files/api/src/config/mod.rs.tpl")
+    }
+    pub fn controllers_mod_rs() -> &'static str {
+        include_str!("files/api/src/controllers/mod.rs.tpl")
+    }
+    pub fn controllers_users_rs() -> &'static str {
+        include_str!("files/api/src/controllers/users.rs.tpl")
+    }
+    pub fn resources_mod_rs() -> &'static str {
+        include_str!("files/api/src/resources/mod.rs.tpl")
+    }
+    pub fn resources_user_resource_rs() -> &'static str {
+        include_str!("files/api/src/resources/user_resource.rs.tpl")
+    }
+    pub fn models_mod_rs() -> &'static str {
+        include_str!("files/api/src/models/mod.rs.tpl")
+    }
+    pub fn models_user_rs() -> &'static str {
+        include_str!("files/api/src/models/user.rs.tpl")
+    }
+    pub fn migrations_mod_rs() -> &'static str {
+        include_str!("files/api/src/migrations/mod.rs.tpl")
+    }
+    pub fn migrations_create_users_rs() -> &'static str {
+        include_str!("files/api/src/migrations/create_users_table.rs.tpl")
+    }
+    pub fn env(package_name: &str, project_name: &str, app_key: &str) -> String {
+        include_str!("files/api/.env.tpl")
+            .replace("{package_name}", package_name)
+            .replace("{project_name}", project_name)
+            .replace("{app_key}", app_key)
+    }
+    pub fn gitignore() -> &'static str {
+        include_str!("files/api/.gitignore.tpl")
+    }
+}
+
+/// Scaffold a JSON:API-only project under `project_path`.
+///
+/// No Inertia, no frontend. Registers `BearerTokenMiddleware` and
+/// `IncludeMiddleware` globally; includes example `UserResource` with
+/// `#[derive(Data)] #[json_resource("users")]`.
+pub fn scaffold_api(
+    project_path: &Path,
+    project_name: &str,
+    package_name: &str,
+) -> Result<(), String> {
+    let src = project_path.join("src");
+    let bin = src.join("bin");
+    let commands = src.join("commands");
+    let config = src.join("config");
+    let controllers = src.join("controllers");
+    let resources = src.join("resources");
+    let models = src.join("models");
+    let migrations = src.join("migrations");
+
+    for d in [
+        &src,
+        &bin,
+        &commands,
+        &config,
+        &controllers,
+        &resources,
+        &models,
+        &migrations,
+    ] {
+        fs::create_dir_all(d).map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
+    }
+
+    let writes: &[(std::path::PathBuf, String)] = &[
+        (
+            project_path.join("Cargo.toml"),
+            api::cargo_toml(package_name, project_name),
+        ),
+        (
+            src.join("main.rs"),
+            api::main_rs(package_name, project_name),
+        ),
+        (
+            bin.join("console.rs"),
+            api::console_main_rs(package_name, project_name),
+        ),
+        (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
+        (src.join("lib.rs"), api::lib_rs().to_string()),
+        (src.join("bootstrap.rs"), api::bootstrap_rs(package_name)),
+        (src.join("routes.rs"), api::routes_rs().to_string()),
+        (config.join("mod.rs"), api::config_mod_rs().to_string()),
+        (
+            controllers.join("mod.rs"),
+            api::controllers_mod_rs().to_string(),
+        ),
+        (
+            controllers.join("users.rs"),
+            api::controllers_users_rs().to_string(),
+        ),
+        (
+            resources.join("mod.rs"),
+            api::resources_mod_rs().to_string(),
+        ),
+        (
+            resources.join("user_resource.rs"),
+            api::resources_user_resource_rs().to_string(),
+        ),
+        (models.join("mod.rs"), api::models_mod_rs().to_string()),
+        (models.join("user.rs"), api::models_user_rs().to_string()),
+        (
+            migrations.join("mod.rs"),
+            api::migrations_mod_rs().to_string(),
+        ),
+        (
+            migrations.join("m20240101_000001_create_users_table.rs"),
+            api::migrations_create_users_rs().to_string(),
+        ),
+        (
+            project_path.join(".env"),
+            api::env(
+                package_name,
+                project_name,
+                &crate::commands::key_generate::generate_app_key(),
+            ),
+        ),
+        (
+            project_path.join(".gitignore"),
+            api::gitignore().to_string(),
+        ),
+    ];
+
+    for (path, content) in writes {
+        // `.env` carries the generated APP_KEY, so it gets 0600 rather
+        // than whatever the umask happens to allow. Everything else is
+        // ordinary source and keeps the default mode.
+        let result = if path.file_name().is_some_and(|name| name == ".env") {
+            crate::secure_fs::write_private(path, content)
+        } else {
+            fs::write(path, content)
+        };
+        result.map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    Ok(())
+}
+
+// Auth backend templates
+
+pub fn auth_controller() -> &'static str {
+    include_str!("files/backend/controllers/auth.rs.tpl")
+}
+
+pub fn dashboard_controller() -> &'static str {
+    include_str!("files/backend/controllers/dashboard.rs.tpl")
+}
+
+pub fn email_verification_controller() -> &'static str {
+    include_str!("files/backend/controllers/email_verification.rs.tpl")
+}
+
+pub fn password_reset_controller() -> &'static str {
+    include_str!("files/backend/controllers/password_reset.rs.tpl")
+}
+
+/// The scaffolded `src/controllers/notes.rs`: the signed-in user's own
+/// notes, listed by cursor, shown and written (PAR-080).
+pub fn notes_controller() -> &'static str {
+    include_str!("files/backend/controllers/notes.rs.tpl")
+}
+
+/// The scaffolded `src/controllers/profile.rs`: the JSON handler the
+/// dashboard's display-name form posts to (PAR-080).
+pub fn profile_controller() -> &'static str {
+    include_str!("files/backend/controllers/profile.rs.tpl")
+}
+
+pub fn authenticate_middleware() -> &'static str {
+    include_str!("files/backend/middleware/authenticate.rs.tpl")
+}
+
+pub fn user_model() -> &'static str {
+    include_str!("files/backend/models/user.rs.tpl")
+}
+
+/// The scaffolded `src/models/note.rs`: a note owned by one user.
+pub fn note_model() -> &'static str {
+    include_str!("files/backend/models/note.rs.tpl")
+}
+
+// Auth migration templates
+
+pub fn create_users_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_users_table.rs.tpl")
+}
+
+pub fn create_sessions_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_sessions_table.rs.tpl")
+}
+
+pub fn create_remember_tokens_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_remember_tokens_table.rs.tpl")
+}
+
+pub fn create_auth_flow_tokens_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_auth_flow_tokens_table.rs.tpl")
+}
+
+/// The scaffolded notes migration, created after the users table it
+/// references.
+pub fn create_notes_migration() -> &'static str {
+    include_str!("files/backend/migrations/create_notes_table.rs.tpl")
+}
+
+// Root templates
+
+pub fn gitignore() -> &'static str {
+    include_str!("files/root/gitignore.tpl")
+}
+
+/// The scaffolded root `.env`. Takes the frontend because the file sets
+/// `SUPRNOVA_FRONTEND`, the documented contract (`manual/env-vars.md`) that
+/// the framework's `Frontend::detect_from_env` and the `suprnova` CLI's own
+/// generators read. What the generated app serves does not hang on it -
+/// `bootstrap.rs` pins the same value on the config it installs - but a
+/// value that disagrees with the project points those generators at the
+/// wrong frontend kit.
+pub fn env(project_name: &str, app_key: &str, frontend: Frontend) -> String {
+    include_str!("files/root/env.tpl")
+        .replace("{project_name}", project_name)
+        .replace("{app_key}", app_key)
+        .replace("{frontend}", frontend.as_str())
+}
+
+pub fn env_example() -> &'static str {
+    include_str!("files/root/env.example.tpl")
+}
+
+/// Starter Fluent catalog written to `lang/en/app.ftl`, so a fresh
+/// scaffold has a translator-ready catalog from first boot instead of an
+/// empty `lang/` directory (which would make every `Lang::get` call and
+/// the `lang` Inertia share's `catalog` fall through to `null`).
+pub fn lang_app_ftl() -> &'static str {
+    include_str!("files/root/lang/en/app.ftl.tpl")
+}
+
+/// Starter `frontend/<kit>/src/types/lang-keys.ts`, shipped so the
+/// `t(key: MessageKey, ...)` wrappers type-check before a user ever runs
+/// `suprnova generate-types` - same rationale as `inertia_props_types()`
+/// per kit below. Its content is exactly what `generate-types` itself
+/// would produce by scanning the starter `lang_app_ftl()` catalog above
+/// (one message id, `welcome`), so the first real generation is a no-op
+/// diff rather than a surprise rewrite.
+pub fn lang_keys_starter() -> &'static str {
+    include_str!("files/frontend/lang-keys.ts.tpl")
+}
+
+// Entity generation templates for db:sync command
+
+/// Escape a value for embedding inside a Rust `"…"` string literal.
+///
+/// `entity_template` drops the table name into `#[sea_orm(table_name = "…")]`,
+/// and that name came from the database. `db:sync` already refuses names that
+/// aren't bare identifiers, so in practice nothing here needs escaping - but
+/// this is the last place a name becomes *source code*, and a generator that
+/// trusts its caller to have sanitised the input is exactly how injections
+/// survive a refactor. Control characters are escaped rather than passed
+/// through because a raw newline would end the attribute line outright.
+pub fn escape_rust_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Generate auto-generated entity file (regenerated on every sync)
+pub fn entity_template(table_name: &str, columns: &[ColumnInfo]) -> String {
+    let _struct_name = to_pascal_case(&singularize(table_name));
+
+    // Generate column fields
+    let column_fields: Vec<String> = columns
+        .iter()
+        .map(|col| {
+            let rust_type = sql_type_to_rust_type(col);
+            let mut attrs = Vec::new();
+
+            if col.is_primary_key {
+                attrs.push("    #[sea_orm(primary_key)]".to_string());
+            }
+
+            let field = format!("    pub {}: {},", col.name, rust_type);
+            if attrs.is_empty() {
+                field
+            } else {
+                format!("{}\n{}", attrs.join("\n"), field)
+            }
+        })
+        .collect();
+
+    // Find primary key columns (reserved for future use)
+    let _pk_columns: Vec<&ColumnInfo> = columns.iter().filter(|c| c.is_primary_key).collect();
+
+    format!(
+        r#"// AUTO-GENERATED FILE - DO NOT EDIT
+// Generated by `suprnova db:sync` - Changes will be overwritten
+// Add custom code to src/models/{table_name}.rs instead
+
+use sea_orm::entity::prelude::*;
+use serde::Serialize;
+
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
+#[sea_orm(table_name = "{table_name_literal}")]
+pub struct Model {{
+{columns}
+}}
+
+// Note: Relation enum is required here for DeriveEntityModel macro.
+// Define your actual relations in src/models/{table_name}.rs using the Related trait.
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {{}}
+"#,
+        table_name = table_name,
+        table_name_literal = escape_rust_string(table_name),
+        columns = column_fields.join("\n"),
+    )
+}
+
+/// Generate user model file with Eloquent-like API (created only once, never overwritten)
+pub fn user_model_template(table_name: &str, struct_name: &str, columns: &[ColumnInfo]) -> String {
+    let model_setters = generate_model_setters(columns);
+    let builder_fields = generate_builder_fields(columns);
+    let builder_setters = generate_builder_setters(columns);
+    let builder_to_active = generate_builder_to_active(columns);
+    let model_to_active = generate_model_to_active(columns);
+    let pk_field = columns
+        .iter()
+        .find(|c| c.is_primary_key)
+        .map(|c| c.name.as_str())
+        .unwrap_or("id");
+
+    format!(
+        r#"//! {struct_name} model
+//!
+//! This file contains custom implementations for the {struct_name} model.
+//! The base entity is auto-generated in src/models/entities/{table_name}.rs
+//!
+//! This file is NEVER overwritten by `suprnova db:sync` - your custom code is safe here.
+
+// Re-export the auto-generated entity
+pub use super::entities::{table_name}::*;
+
+use suprnova::database::{{EntityExtMut, QueryBuilder}};
+use sea_orm::{{entity::prelude::*, Set}};
+
+/// Type alias for convenient access
+pub type {struct_name} = Model;
+
+// ============================================================================
+// ENTITY CONFIGURATION
+// ============================================================================
+
+impl ActiveModelBehavior for ActiveModel {{}}
+
+impl suprnova::database::EntityExt for Entity {{}}
+impl suprnova::database::EntityExtMut for Entity {{}}
+
+// ============================================================================
+// ELOQUENT-LIKE API
+// Fluent query builder and setter methods for {struct_name}
+// ============================================================================
+
+impl Model {{
+    /// Start a new query builder
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let records = {struct_name}::query().all().await?;
+    /// let record = {struct_name}::query().filter(Column::Id.eq(1)).first().await?;
+    /// ```
+    pub fn query() -> QueryBuilder<Entity> {{
+        QueryBuilder::new()
+    }}
+
+    /// Create a new record builder
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let record = {struct_name}::create()
+    ///     .set_field("value")
+    ///     .insert()
+    ///     .await?;
+    /// ```
+    pub fn create() -> {struct_name}Builder {{
+        {struct_name}Builder::default()
+    }}
+
+{model_setters}
+    /// Save changes to the database
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let updated = record.set_field("new_value").update().await?;
+    /// ```
+    pub async fn update(self) -> Result<Self, suprnova::FrameworkError> {{
+        let active = self.to_active_model();
+        Entity::update_one(active).await
+    }}
+
+    /// Delete this record from the database
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// record.delete().await?;
+    /// ```
+    pub async fn delete(self) -> Result<u64, suprnova::FrameworkError> {{
+        Entity::delete_by_pk(self.{pk_field}).await
+    }}
+
+    fn to_active_model(&self) -> ActiveModel {{
+{model_to_active}
+    }}
+}}
+
+// ============================================================================
+// BUILDER
+// For creating new records with fluent setter pattern
+// ============================================================================
+
+/// Builder for creating new {struct_name} records
+#[derive(Default)]
+pub struct {struct_name}Builder {{
+{builder_fields}
+}}
+
+impl {struct_name}Builder {{
+{builder_setters}
+    /// Insert the record into the database
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let record = {struct_name}::create()
+    ///     .set_field("value")
+    ///     .insert()
+    ///     .await?;
+    /// ```
+    pub async fn insert(self) -> Result<Model, suprnova::FrameworkError> {{
+        let active = self.build();
+        Entity::insert_one(active).await
+    }}
+
+    fn build(self) -> ActiveModel {{
+{builder_to_active}
+    }}
+}}
+
+// ============================================================================
+// CUSTOM METHODS
+// Add your custom query and mutation methods below
+// ============================================================================
+
+// Example custom finder:
+// impl Model {{
+//     pub async fn find_by_email(email: &str) -> Result<Option<Self>, suprnova::FrameworkError> {{
+//         Self::query().filter(Column::Email.eq(email)).first().await
+//     }}
+// }}
+
+// ============================================================================
+// RELATIONS
+// Define relationships to other entities here
+// ============================================================================
+
+// Example: One-to-Many relation
+// impl Entity {{
+//     pub fn has_many_posts() -> RelationDef {{
+//         Entity::has_many(super::posts::Entity).into()
+//     }}
+// }}
+
+// Example: Belongs-To relation
+// impl Entity {{
+//     pub fn belongs_to_user() -> RelationDef {{
+//         Entity::belongs_to(super::users::Entity)
+//             .from(Column::UserId)
+//             .to(super::users::Column::Id)
+//             .into()
+//     }}
+// }}
+"#,
+        struct_name = struct_name,
+        table_name = table_name,
+        model_setters = model_setters,
+        builder_fields = builder_fields,
+        builder_setters = builder_setters,
+        builder_to_active = builder_to_active,
+        model_to_active = model_to_active,
+        pk_field = pk_field,
+    )
+}
+
+/// Generate entities/mod.rs (regenerated on every sync)
+pub fn entities_mod_template(tables: &[TableInfo]) -> String {
+    let mut content = String::from(
+        "// AUTO-GENERATED FILE - DO NOT EDIT\n// Generated by `suprnova db:sync`\n\n",
+    );
+
+    for table in tables {
+        content.push_str(&format!("pub mod {};\n", table.name));
+    }
+
+    content
+}
+
+// Helper functions for entity generation
+
+fn sql_type_to_rust_type(col: &ColumnInfo) -> String {
+    let col_type_upper = col.col_type.to_uppercase();
+    let base_type = if col_type_upper.contains("INT") {
+        if col_type_upper.contains("BIGINT") || col_type_upper.contains("INT8") {
+            "i64"
+        } else if col_type_upper.contains("SMALLINT") || col_type_upper.contains("INT2") {
+            "i16"
+        } else {
+            "i32"
+        }
+    } else if col_type_upper.contains("TEXT")
+        || col_type_upper.contains("VARCHAR")
+        || col_type_upper.contains("CHAR")
+        || col_type_upper.contains("CHARACTER")
+    {
+        "String"
+    } else if col_type_upper.contains("BOOL") {
+        "bool"
+    } else if col_type_upper.contains("REAL") || col_type_upper.contains("FLOAT4") {
+        "f32"
+    } else if col_type_upper.contains("DOUBLE") || col_type_upper.contains("FLOAT8") {
+        "f64"
+    } else if col_type_upper.contains("TIMESTAMP") || col_type_upper.contains("DATETIME") {
+        "DateTimeUtc"
+    } else if col_type_upper.contains("DATE") {
+        "Date"
+    } else if col_type_upper.contains("TIME") {
+        "Time"
+    } else if col_type_upper.contains("UUID") {
+        "Uuid"
+    } else if col_type_upper.contains("JSON") {
+        "Json"
+    } else if col_type_upper.contains("BYTEA") || col_type_upper.contains("BLOB") {
+        "Vec<u8>"
+    } else if col_type_upper.contains("DECIMAL") || col_type_upper.contains("NUMERIC") {
+        "Decimal"
+    } else {
+        "String" // fallback
+    };
+
+    if col.is_nullable {
+        format!("Option<{}>", base_type)
+    } else {
+        base_type.to_string()
+    }
+}
+
+fn to_pascal_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = true;
+
+    for c in s.chars() {
+        if c == '_' || c == '-' || c == ' ' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(c.to_uppercase().next().unwrap());
+            capitalize_next = false;
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn singularize(word: &str) -> String {
+    if let Some(stem) = word.strip_suffix("ies") {
+        format!("{}y", stem)
+    } else if word.ends_with("es") && !word.ends_with("ses") && !word.ends_with("xes") {
+        word[..word.len() - 2].to_string()
+    } else if word.ends_with("s") && !word.ends_with("ss") && !word.ends_with("us") {
+        word[..word.len() - 1].to_string()
+    } else {
+        word.to_string()
+    }
+}
+
+// ============================================================================
+// Eloquent-like API Code Generation Helpers
+// ============================================================================
+
+/// Generate setter methods for the Model (used for updates)
+fn generate_model_setters(columns: &[ColumnInfo]) -> String {
+    columns
+        .iter()
+        .filter(|c| !c.is_primary_key && !is_timestamp_field(&c.name))
+        .map(|col| {
+            let rust_type = sql_type_to_rust_type(col);
+            let setter_input_type = get_setter_input_type(&rust_type, col.is_nullable);
+
+            format!(
+                r#"    /// Set the {} field
+    pub fn set_{field}(mut self, value: {input_type}) -> Self {{
+        self.{field} = {assignment};
+        self
+    }}
+
+"#,
+                col.name,
+                field = col.name,
+                input_type = setter_input_type,
+                assignment = get_setter_assignment(&rust_type, col.is_nullable),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Generate builder struct fields
+fn generate_builder_fields(columns: &[ColumnInfo]) -> String {
+    columns
+        .iter()
+        .filter(|c| !c.is_primary_key)
+        .map(|col| {
+            let rust_type = sql_type_to_rust_type(col);
+            format!("    {}: Option<{}>,", col.name, rust_type)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Generate setter methods for the Builder (used for creates)
+fn generate_builder_setters(columns: &[ColumnInfo]) -> String {
+    columns
+        .iter()
+        .filter(|c| !c.is_primary_key && !is_timestamp_field(&c.name))
+        .map(|col| {
+            let rust_type = sql_type_to_rust_type(col);
+            let setter_input_type = get_builder_setter_input_type(&rust_type, col.is_nullable);
+
+            format!(
+                r#"    /// Set the {} field
+    pub fn set_{field}(mut self, value: {input_type}) -> Self {{
+        self.{field} = Some({builder_assignment});
+        self
+    }}
+
+"#,
+                col.name,
+                field = col.name,
+                input_type = setter_input_type,
+                builder_assignment = get_builder_setter_assignment(&rust_type, col.is_nullable),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Generate code to convert Builder to ActiveModel
+fn generate_builder_to_active(columns: &[ColumnInfo]) -> String {
+    let mut lines = vec!["        ActiveModel {".to_string()];
+
+    for col in columns {
+        if col.is_primary_key {
+            lines.push(format!(
+                "            {}: sea_orm::ActiveValue::NotSet,",
+                col.name
+            ));
+        } else {
+            lines.push(format!(
+                "            {field}: self.{field}.map(Set).unwrap_or(sea_orm::ActiveValue::NotSet),",
+                field = col.name
+            ));
+        }
+    }
+
+    lines.push("        }".to_string());
+    lines.join("\n")
+}
+
+/// Generate code to convert Model to ActiveModel for updates
+fn generate_model_to_active(columns: &[ColumnInfo]) -> String {
+    let mut lines = vec!["        ActiveModel {".to_string()];
+
+    for col in columns {
+        let rust_type = sql_type_to_rust_type(col);
+        let needs_clone = needs_clone_for_type(&rust_type);
+
+        if needs_clone {
+            lines.push(format!(
+                "            {field}: Set(self.{field}.clone()),",
+                field = col.name
+            ));
+        } else {
+            lines.push(format!(
+                "            {field}: Set(self.{field}),",
+                field = col.name
+            ));
+        }
+    }
+
+    lines.push("        }".to_string());
+    lines.join("\n")
+}
+
+/// Check if field is a timestamp field (auto-managed)
+fn is_timestamp_field(name: &str) -> bool {
+    matches!(name, "created_at" | "updated_at" | "deleted_at")
+}
+
+/// Get the input type for a setter method on Model
+fn get_setter_input_type(rust_type: &str, is_nullable: bool) -> String {
+    if is_nullable {
+        // For Option<String>, accept Option<impl Into<String>>
+        if rust_type == "Option<String>" {
+            "Option<impl Into<String>>".to_string()
+        } else {
+            rust_type.to_string()
+        }
+    } else if rust_type == "String" {
+        "impl Into<String>".to_string()
+    } else {
+        rust_type.to_string()
+    }
+}
+
+/// Get the assignment expression for a setter on Model
+fn get_setter_assignment(rust_type: &str, is_nullable: bool) -> String {
+    if is_nullable {
+        if rust_type == "Option<String>" {
+            "value.map(|v| v.into())".to_string()
+        } else {
+            "value".to_string()
+        }
+    } else if rust_type == "String" {
+        "value.into()".to_string()
+    } else {
+        "value".to_string()
+    }
+}
+
+/// Get the input type for a builder setter method
+fn get_builder_setter_input_type(rust_type: &str, is_nullable: bool) -> String {
+    if is_nullable {
+        // For nullable fields in builder, accept the inner type (not Option)
+        if rust_type == "Option<String>" {
+            "impl Into<String>".to_string()
+        } else if rust_type.starts_with("Option<") && rust_type.ends_with(">") {
+            // Extract inner type from Option<T>
+            rust_type[7..rust_type.len() - 1].to_string()
+        } else {
+            rust_type.to_string()
+        }
+    } else if rust_type == "String" {
+        "impl Into<String>".to_string()
+    } else {
+        rust_type.to_string()
+    }
+}
+
+/// Get the assignment expression for a builder setter
+fn get_builder_setter_assignment(rust_type: &str, is_nullable: bool) -> String {
+    if is_nullable {
+        // Wrap in Some for nullable fields
+        if rust_type == "Option<String>" {
+            "Some(value.into())".to_string()
+        } else {
+            "Some(value)".to_string()
+        }
+    } else if rust_type == "String" {
+        "value.into()".to_string()
+    } else {
+        "value".to_string()
+    }
+}
+
+/// Check if a type needs .clone() when converting
+fn needs_clone_for_type(rust_type: &str) -> bool {
+    // Types that implement Copy don't need clone
+    let copy_types = [
+        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "bool",
+    ];
+
+    // Check if it's a Copy type
+    if copy_types.contains(&rust_type) {
+        return false;
+    }
+
+    // Option<Copy> types also don't need clone
+    for copy_type in &copy_types {
+        if rust_type == format!("Option<{}>", copy_type) {
+            return false;
+        }
+    }
+
+    // Everything else needs clone (String, Option<String>, DateTimeUtc, etc.)
+    true
+}
+
+// ============================================================================
+// Docker Templates
+// ============================================================================
+
+/// Generate Dockerfile for production deployment
+pub fn dockerfile_template(package_name: &str) -> String {
+    include_str!("files/docker/Dockerfile.tpl").replace("{package_name}", package_name)
+}
+
+/// Generate the Dockerfile for an API project (`suprnova new --api`).
+///
+/// A separate template rather than conditionals inside the full-stack
+/// one: an API project has no `frontend/`, no `cmd/` and no
+/// `public/assets`, so the shared file would be more `if` than Dockerfile.
+pub fn api_dockerfile_template(package_name: &str) -> String {
+    include_str!("files/docker/Dockerfile.api.tpl").replace("{package_name}", package_name)
+}
+
+/// Generate .dockerignore file
+pub fn dockerignore_template() -> &'static str {
+    include_str!("files/docker/dockerignore.tpl")
+}
+
+/// Generate docker-compose.yml for local development
+/// A rendered `docker-compose.yml` plus the credentials minted for it.
+///
+/// The caller needs the passwords back so it can print a `DATABASE_URL`
+/// that actually works - they are generated per project and exist
+/// nowhere else.
+pub struct GeneratedCompose {
+    /// The rendered `docker-compose.yml` contents.
+    pub yaml: String,
+    /// Postgres password baked in as the `DB_PASSWORD` default.
+    pub db_password: String,
+    /// MinIO root password, when the MinIO service was included.
+    pub minio_password: Option<String>,
+}
+
+pub fn docker_compose_template(
+    project_name: &str,
+    include_mailpit: bool,
+    include_minio: bool,
+) -> GeneratedCompose {
+    let mailpit_service = if include_mailpit {
+        include_str!("files/docker/mailpit.service.tpl").replace("{project_name}", project_name)
+    } else {
+        String::new()
+    };
+
+    let minio_password = if include_minio {
+        Some(crate::commands::key_generate::generate_service_password())
+    } else {
+        None
+    };
+
+    let minio_service = match &minio_password {
+        Some(password) => include_str!("files/docker/minio.service.tpl")
+            .replace("{project_name}", project_name)
+            .replace("{minio_password}", password),
+        None => String::new(),
+    };
+
+    let additional_volumes = if include_minio {
+        "\n  minio_data:".to_string()
+    } else {
+        String::new()
+    };
+
+    let db_password = crate::commands::key_generate::generate_service_password();
+
+    let yaml = include_str!("files/docker/docker-compose.yml.tpl")
+        .replace("{project_name}", project_name)
+        .replace("{db_password}", &db_password)
+        .replace("{mailpit_service}", &mailpit_service)
+        .replace("{minio_service}", &minio_service)
+        .replace("{additional_volumes}", &additional_volumes);
+
+    GeneratedCompose {
+        yaml,
+        db_password,
+        minio_password,
+    }
+}
+
+// ============================================================================
+// Schedule Templates
+// ============================================================================
+
+/// Template for schedule.rs registration file
+pub fn schedule_rs() -> &'static str {
+    include_str!("files/backend/schedule.rs.tpl")
+}
+
+/// Template for tasks/mod.rs
+pub fn tasks_mod() -> &'static str {
+    include_str!("files/backend/tasks/mod.rs.tpl")
+}
+
+// schedule_bin removed - scheduler now integrated into main binary
+
+/// Template for generating new scheduled task with make:task command.
+///
+/// Emits a real, working `Task` impl that logs a structured start/finish
+/// event. The skeleton runs cleanly the first time the scheduler invokes
+/// it; users replace the body with their actual job (cleanup, reminders,
+/// nightly aggregates, etc).
+pub fn task_template(file_name: &str, struct_name: &str) -> String {
+    format!(
+        r#"//! {struct_name} scheduled task
+//!
+//! Created with `suprnova make:task {file_name}`.
+
+use std::time::Instant;
+
+use async_trait::async_trait;
+use suprnova::{{Task, TaskResult}};
+
+/// {struct_name} - A scheduled task.
+///
+/// Register the task in `src/schedule.rs` with the fluent API; the
+/// skeleton below times its own run and prints a structured log line on
+/// each invocation so it works end-to-end the first time you wire it up.
+///
+/// # Example Registration
+///
+/// ```rust,ignore
+/// // In src/schedule.rs
+/// use crate::tasks::{file_name};
+///
+/// schedule.add(
+///     schedule.task({struct_name}::new())
+///         .daily()
+///         .at("03:00")
+///         .name("{file_name}")
+///         .description("{struct_name} scheduled task")
+/// );
+/// ```
+pub struct {struct_name};
+
+impl {struct_name} {{
+    /// Create a new instance of this task.
+    pub fn new() -> Self {{
+        Self
+    }}
+}}
+
+impl Default for {struct_name} {{
+    fn default() -> Self {{
+        Self::new()
+    }}
+}}
+
+#[async_trait]
+impl Task for {struct_name} {{
+    async fn handle(&self) -> TaskResult {{
+        let started_at = Instant::now();
+        println!("[{struct_name}] task started");
+
+        // Replace this with the real job. The skeleton ships as a
+        // no-op success so the task can be scheduled and observed
+        // before the implementation is filled in.
+
+        println!(
+            "[{struct_name}] task finished in {{}} ms",
+            started_at.elapsed().as_millis(),
+        );
+        Ok(())
+    }}
+}}
+"#,
+        file_name = file_name,
+        struct_name = struct_name
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_rust_string_leaves_plain_names_alone() {
+        assert_eq!(escape_rust_string("users"), "users");
+        assert_eq!(escape_rust_string("user_profiles"), "user_profiles");
+    }
+
+    #[test]
+    fn escape_rust_string_neutralises_quote_and_backslash() {
+        // Unescaped, this closes the attribute literal and appends items.
+        let hostile = r#"users")] pub struct Evil; #[sea_orm(table_name = "x"#;
+        let escaped = escape_rust_string(hostile);
+        // Every `"` that survives must be preceded by an odd number of
+        // backslashes - i.e. none of them can terminate the literal.
+        let mut backslashes = 0usize;
+        for c in escaped.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                '"' => {
+                    assert!(
+                        backslashes % 2 == 1,
+                        "an unescaped quote closes the literal: {escaped}"
+                    );
+                    backslashes = 0;
+                }
+                _ => backslashes = 0,
+            }
+        }
+        assert_eq!(escape_rust_string(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_rust_string(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn escape_rust_string_escapes_control_characters() {
+        assert_eq!(escape_rust_string("a\nb"), "a\\nb");
+        assert_eq!(escape_rust_string("a\rb"), "a\\rb");
+        assert_eq!(escape_rust_string("a\tb"), "a\\tb");
+        assert_eq!(escape_rust_string("a\u{0}b"), "a\\u{0}b");
+        assert_eq!(escape_rust_string("a\u{1b}b"), "a\\u{1b}b");
+    }
+
+    #[test]
+    fn entity_template_emits_an_escaped_table_name_attribute() {
+        let columns = vec![ColumnInfo {
+            name: "id".to_string(),
+            col_type: "INTEGER".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+        }];
+        let generated = entity_template(r#"a"b"#, &columns);
+        assert!(
+            generated.contains(r#"table_name = "a\"b""#),
+            "the attribute value must be escaped; got:\n{generated}"
+        );
+    }
+
+    /// MEM-005: `live_component` renders in one pass to exactly the text the
+    /// chained replacements gave.
+    #[test]
+    fn mem_audit_live_component_renders_in_one_pass() {
+        let rendered = live_component(
+            "counter_card",
+            "CounterCard",
+            "app.counter-card",
+            "live/counter_card.html",
+        );
+        let expected = include_str!("files/backend/live/component.rs.tpl")
+            .replace("{snake}", "counter_card")
+            .replace("{pascal}", "CounterCard")
+            .replace("{component_name}", "app.counter-card")
+            .replace("{view}", "live/counter_card.html");
+        assert_eq!(rendered, expected);
+        assert_eq!(
+            rendered.capacity(),
+            rendered.len(),
+            "the render grew by copying"
+        );
+    }
+
+    /// MEM-007: both scaffolds offer the `profiling` profile, the release
+    /// profile with debug symbols, and a `heap-profiling` feature that
+    /// turns on the framework's.
+    #[test]
+    fn mem_audit_the_scaffolds_offer_heap_profiling() {
+        for (scaffold, manifest) in [
+            ("backend", cargo_toml("demo", "A demo", "")),
+            ("api", api::cargo_toml("demo", "demo")),
+        ] {
+            let manifest: toml::Table = toml::from_str(&manifest)
+                .unwrap_or_else(|e| panic!("the {scaffold} manifest parses: {e}"));
+            let profile = manifest
+                .get("profile")
+                .and_then(|p| p.get("profiling"))
+                .unwrap_or_else(|| panic!("the {scaffold} scaffold has no profiling profile"));
+            assert_eq!(
+                profile.get("inherits").and_then(toml::Value::as_str),
+                Some("release"),
+                "the {scaffold} profiling profile inherits the release profile"
+            );
+            assert_eq!(
+                profile.get("debug").and_then(toml::Value::as_bool),
+                Some(true),
+                "the {scaffold} profiling profile keeps debug symbols"
+            );
+            let feature = manifest
+                .get("features")
+                .and_then(|f| f.get("heap-profiling"))
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| panic!("the {scaffold} scaffold has no heap-profiling feature"));
+            assert_eq!(
+                feature.iter().map(toml::Value::as_str).collect::<Vec<_>>(),
+                [Some("suprnova/heap-profiling")],
+                "the {scaffold} heap-profiling feature turns on the framework's"
+            );
+        }
+    }
+}

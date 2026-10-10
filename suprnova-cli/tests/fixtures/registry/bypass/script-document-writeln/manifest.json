@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-document-writeln",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
