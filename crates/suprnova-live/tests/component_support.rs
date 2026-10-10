@@ -31,9 +31,10 @@ use suprnova_live::endpoint::{
     ParsedLiveMediaType, RequestCachePolicy,
 };
 use suprnova_live::host::{
-    HostScopeFacts, MountCatalogBuilder, MountCatalogEntry, MountScopeRequirements, MountSelection,
-    PrincipalFingerprint, ScopeRequirement, SessionFingerprint, TenantFingerprint,
-    TrustedLiveRequestContext,
+    CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostScopeFacts,
+    LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalog, MountCatalogBuilder,
+    MountCatalogEntry, MountScopeRequirements, MountSelection, PrincipalFingerprint,
+    ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
     BuildId, ComponentName, CorrelationId, InstanceId, IslandSlot, ModelField, Revision,
@@ -725,6 +726,60 @@ fn trusted_context_for_with_ports(
     upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
     schemas: SnapshotSchemaSet,
 ) -> TrustedLiveRequestContext {
+    let (catalog, selection) = trace_catalog(component_metadata, schemas);
+    let facts = fixture_host_scope();
+    let mut builder = SyntheticLiveRequestContextBuilder::new(
+        catalog,
+        selection,
+        facts,
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    );
+    if let Some(authorization) = authorization {
+        builder = builder.with_action_authorization(authorization);
+    }
+    if let Some(authorization) = upload_authorization {
+        builder = builder.with_upload_authorization(authorization);
+    }
+    builder.build().expect("trusted context")
+}
+
+/// A trusted context for the trace fixture whose host capabilities carry
+/// `values`, the runtime values every component view rendered under it
+/// reads. It runs the production validator, as a host does.
+pub(crate) fn trusted_context_with_view_values(
+    values: Arc<dyn askama::Values + Send + Sync>,
+) -> TrustedLiveRequestContext {
+    let (catalog, selection) = trace_catalog(metadata(), schema_set());
+    let facts = fixture_host_scope();
+    let expires_at = UnixMillis::new(2_000);
+    let mut checks = HostCheckFacts::new();
+    for kind in CheckKind::ALL {
+        checks
+            .record(kind, CheckFact::new(CheckDisposition::Passed, expires_at))
+            .expect("passed check");
+    }
+    let candidate = LiveRequestContextCandidate::new(
+        selection.route().clone(),
+        selection.slot().clone(),
+        selection,
+        facts.clone(),
+        checks,
+        HostCapabilities::bound_to(facts).with_view_values(values),
+        expires_at,
+    );
+    LiveRequestContextValidator::new(300_000)
+        .expect("context validator")
+        .validate(&catalog, candidate, UnixMillis::new(1_000))
+        .expect("trusted context")
+}
+
+/// The mount catalog holding the trace fixture's one slot, and the
+/// selection of that slot.
+fn trace_catalog(
+    component_metadata: &'static ComponentMetadata,
+    schemas: SnapshotSchemaSet,
+) -> (MountCatalog, MountSelection) {
     let descriptor = ComponentDescriptor::new(component_metadata.clone());
     let contract = ComponentContract::new(
         component_metadata.identity().clone(),
@@ -760,27 +815,14 @@ fn trusted_context_for_with_ports(
         )
         .expect("mount catalog entry")
         .build();
-    let facts = fixture_host_scope();
-    let mut builder = SyntheticLiveRequestContextBuilder::new(
-        catalog,
-        MountSelection::new(
-            route,
-            slot,
-            component_metadata.identity().clone(),
-            component_metadata.contract_digest().clone(),
-            1,
-        ),
-        facts,
-        UnixMillis::new(1_000),
-        UnixMillis::new(2_000),
+    let selection = MountSelection::new(
+        route,
+        slot,
+        component_metadata.identity().clone(),
+        component_metadata.contract_digest().clone(),
+        1,
     );
-    if let Some(authorization) = authorization {
-        builder = builder.with_action_authorization(authorization);
-    }
-    if let Some(authorization) = upload_authorization {
-        builder = builder.with_upload_authorization(authorization);
-    }
-    builder.build().expect("trusted context")
+    (catalog, selection)
 }
 
 pub(crate) fn fixture_host_scope() -> HostScopeFacts {

@@ -208,7 +208,7 @@ where
 
 /// The runtime values one render reads: a copy of the request's shares
 /// and the application's, taken when the render starts.
-pub(super) struct RenderValues {
+pub(crate) struct RenderValues {
     request: BTreeMap<String, SharedValue>,
     application: BTreeMap<String, SharedValue>,
 }
@@ -227,20 +227,38 @@ impl RenderValues {
                     .clone()
             })
             .unwrap_or_default();
-        let application = application_shares(false)
-            .map(|shares| {
-                shares
-                    .0
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone()
-            })
-            .unwrap_or_default();
         Self {
             request,
-            application,
+            application: application_snapshot(),
         }
     }
+
+    /// The values a Live component's view reads: the application's shares
+    /// alone, taken now.
+    ///
+    /// A component's view is rendered again on each of its action requests,
+    /// and a public seed's render is shared between visitors, so a value
+    /// shared for one request never reaches it. A component template that
+    /// requires one fails its render as a missing value.
+    pub(crate) fn application() -> Self {
+        Self {
+            request: BTreeMap::new(),
+            application: application_snapshot(),
+        }
+    }
+}
+
+/// A copy of the active container's application shares.
+fn application_snapshot() -> BTreeMap<String, SharedValue> {
+    application_shares(false)
+        .map(|shares| {
+            shares
+                .0
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        })
+        .unwrap_or_default()
 }
 
 impl askama::Values for RenderValues {

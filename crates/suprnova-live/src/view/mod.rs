@@ -157,7 +157,25 @@ impl ViewRenderer {
         assets: AssetSet,
         children: Vec<ChildMount>,
     ) -> Result<IslandRender, ViewError> {
-        let body = self.render_body(&view, template, &())?;
+        self.render_component_fragment_with_values(view, template, assets, children, &())
+    }
+
+    /// Renders component-owned markup as [`Self::render_component_fragment`]
+    /// does, with host-supplied runtime values the template reads through
+    /// Askama's `value` filter.
+    ///
+    /// A component's view is rendered again on its action requests, and a
+    /// public seed's render is shared between visitors, so pass only values
+    /// every visitor may see.
+    pub fn render_component_fragment_with_values<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        assets: AssetSet,
+        children: Vec<ChildMount>,
+        values: &dyn askama::Values,
+    ) -> Result<IslandRender, ViewError> {
+        let body = self.render_body(&view, template, values)?;
         let output = IslandRender {
             body,
             assets,

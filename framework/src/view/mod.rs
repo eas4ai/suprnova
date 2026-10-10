@@ -13,6 +13,7 @@ mod share;
 pub use head::Head;
 pub use http::{HeaderName, HeaderValue, StatusCode};
 pub use response::{DocumentResponseError, DocumentResponseErrorKind, document_response};
+pub(crate) use share::RenderValues;
 pub use share::View;
 pub use suprnova_live::identity::ViewName;
 

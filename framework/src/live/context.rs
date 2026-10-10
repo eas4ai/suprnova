@@ -217,9 +217,12 @@ pub(crate) fn candidate(
     }
 
     let scope = scope_facts(request, scope_override)?;
+    // Component views read the application's shared values, never the
+    // request's: see `RenderValues::application`.
     let capabilities = HostCapabilities::bound_to(scope.clone())
         .with_action_authorization(action_authorization)
-        .with_upload_authorization(upload_authorization);
+        .with_upload_authorization(upload_authorization)
+        .with_view_values(Arc::new(crate::view::RenderValues::application()));
     let capabilities = match subscription {
         Some(subscription) => capabilities
             .with_subscription_registry(subscription.registry)
