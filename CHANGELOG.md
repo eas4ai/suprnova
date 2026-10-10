@@ -1411,6 +1411,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Workers on the queue fake.** `QueueFakeGuard::driver()` returns a driver
   a worker reserves the recorded jobs from, and `queue::testing::reserved::<J>()`
   and `try_reserved::<J>()` return each reservation typed.
+- **Full-text search.** `where_full_text` and `or_where_full_text` on
+  `DB::table` and the model builder render `MATCH ... AGAINST` on MySQL and
+  MariaDB and `to_tsvector ... @@` on Postgres, with `FullTextOptions` for the
+  mode, the language and query expansion; SQLite returns an error.
+- **Full-text indexes.** `Blueprint::full_text` creates a `FULLTEXT` index on
+  MySQL and MariaDB and a `GIN` index over `to_tsvector` on Postgres, with
+  `.language(..)`, and `drop_full_text` drops it; SQLite refuses both.
 
 ### Changed
 

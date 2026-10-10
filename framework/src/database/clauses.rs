@@ -19,6 +19,7 @@ use sea_orm::{DbBackend, Value as SeaValue};
 
 use crate::FrameworkError;
 use crate::database::db_facade::DbTableBuilder;
+use crate::database::full_text::{self, FullTextOptions};
 use crate::database::placeholder::typed_placeholder;
 use crate::database::{validate_identifier, validate_sql_operator};
 use crate::eloquent::builder::{IntoVal, rewrite_raw_placeholders, validate_raw_placeholders};
@@ -216,6 +217,14 @@ pub(crate) enum Condition {
         query: Box<DbTableBuilder>,
         negated: bool,
     },
+    /// A full-text search of `columns` for `text`: `MATCH (..) AGAINST (..)`
+    /// on MySQL and MariaDB, `to_tsvector(..) @@ plainto_tsquery(..)` on
+    /// Postgres. SQLite refuses it when the statement renders.
+    FullText {
+        columns: Vec<String>,
+        text: String,
+        options: FullTextOptions,
+    },
     /// `(c1 OR c2 ...)`, one atom wherever it sits.
     Any(Vec<Condition>),
     /// `(c1 AND c2 ...)`, one atom wherever it sits.
@@ -319,6 +328,19 @@ pub(crate) fn validate_condition(condition: &Condition) -> Result<(), FrameworkE
         }
         Condition::Raw { sql, bindings } => validate_raw_placeholders(sql, bindings.len())?,
         Condition::Exists { query, .. } => query.validate_inputs()?,
+        Condition::FullText {
+            columns, options, ..
+        } => {
+            if columns.is_empty() {
+                return Err(FrameworkError::param(
+                    "where_full_text needs at least one column to search",
+                ));
+            }
+            for column in columns {
+                validate_identifier(column)?;
+            }
+            options.validate()?;
+        }
         Condition::Any(conditions) | Condition::All(conditions) => {
             for condition in conditions {
                 validate_condition(condition)?;
@@ -501,6 +523,23 @@ pub(crate) fn render_condition(
             let subquery = query.render_select_into(backend, values, n)?;
             format!("{not}EXISTS ({subquery})")
         }
+        Condition::FullText {
+            columns,
+            text,
+            options,
+        } => {
+            // Refused before the text binds, so a refused statement leaves
+            // no value behind.
+            if backend == DbBackend::Sqlite {
+                return Err(full_text::search_unsupported_on_sqlite());
+            }
+            let quoted: Vec<String> = columns
+                .iter()
+                .map(|column| quote_identifier(backend, column))
+                .collect();
+            let ph = bind(backend, &SeaValue::from(text.as_str()), values, n)?;
+            full_text::render_search(backend, &quoted, options, &ph)?
+        }
         // `OR` of nothing is false; `AND` of nothing is true. The public
         // surface never builds an empty group - `grouped` drops an empty
         // column list - but `()` is a syntax error, so these stay valid.
@@ -591,7 +630,8 @@ pub(crate) fn condition_tables(condition: &Condition, out: &mut ReadSet) {
         Condition::Compare { .. }
         | Condition::Columns { .. }
         | Condition::In { .. }
-        | Condition::Null { .. } => {}
+        | Condition::Null { .. }
+        | Condition::FullText { .. } => {}
     }
 }
 

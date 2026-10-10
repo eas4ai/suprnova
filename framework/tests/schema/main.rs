@@ -44,3 +44,4 @@ mod unsigned_table_writes;
 
 pub mod laravel_gaps;
 pub mod laravel_infra_gaps;
+pub mod laravel_testing_gaps;

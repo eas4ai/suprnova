@@ -30,15 +30,38 @@ impl IndexSpec {
     }
 }
 
+/// A full-text index the closure asked for: a `FULLTEXT` index on MySQL and
+/// MariaDB, a `GIN` index over `to_tsvector` on Postgres.
+#[derive(Debug, Clone)]
+pub(crate) struct FullTextSpec {
+    pub(crate) columns: Vec<String>,
+    /// The Postgres text search configuration, `english` when unset.
+    pub(crate) language: Option<String>,
+}
+
+/// The name Laravel's `createIndexName('fulltext', ..)` gives a full-text
+/// index over `columns`: `{table}_{columns}_fulltext`, a schema-qualified
+/// table's `.` made `_` as for any index. `drop_full_text` finds the index
+/// by the same name.
+pub(crate) fn full_text_name(table: &str, columns: &[String]) -> String {
+    format!("{}_{}_fulltext", table.replace('.', "_"), columns.join("_"))
+}
+
 /// One recorded operation. The list keeps the order of the calls, so a
 /// `drop_index` recorded before a `drop_column` runs before it too.
 #[derive(Debug, Clone)]
 pub(crate) enum Command {
     AddColumn(usize),
-    RenameColumn { from: String, to: String },
+    RenameColumn {
+        from: String,
+        to: String,
+    },
     DropColumn(String),
     AddIndex(IndexSpec),
     DropIndex(String),
+    AddFullText(FullTextSpec),
+    /// The columns of the full-text index to drop.
+    DropFullText(Vec<String>),
     AddForeign(usize),
     DropForeign(String),
     AddPrimary(Vec<String>),
@@ -597,6 +620,55 @@ impl Blueprint {
         self.push_index(columns, true);
     }
 
+    /// Creates a full-text index over `columns`, named
+    /// `{table}_{columns}_fulltext`, as Laravel's `fullText`: a `FULLTEXT`
+    /// index on MySQL and MariaDB, and on Postgres a `GIN` index over
+    /// `to_tsvector('english', c1) || to_tsvector('english', c2)`, the
+    /// expression `where_full_text` searches, so Postgres answers the search
+    /// from the index. `.language(name)` names another Postgres text search
+    /// configuration.
+    ///
+    /// SQLite has no full-text index: the migration fails there before it
+    /// runs any statement, with an error that names SQLite and `full_text`.
+    ///
+    /// ```no_run
+    /// # use suprnova::schema::Blueprint;
+    /// # fn define(t: &mut Blueprint) {
+    /// t.string("title");
+    /// t.text("body");
+    /// t.full_text(&["title", "body"]).language("english");
+    /// # }
+    /// ```
+    pub fn full_text(&mut self, columns: &[&str]) -> FullTextIndexBuilder<'_> {
+        self.commands.push(Command::AddFullText(FullTextSpec {
+            columns: columns.iter().map(|c| (*c).to_owned()).collect(),
+            language: None,
+        }));
+        let command = self.commands.len() - 1;
+        FullTextIndexBuilder {
+            blueprint: self,
+            command,
+        }
+    }
+
+    /// Drops the full-text index over `columns`, the one
+    /// [`full_text`](Blueprint::full_text) named `{table}_{columns}_fulltext`,
+    /// as Laravel's `dropFullText` given the columns. Drop an index of
+    /// another name with [`drop_index`](Blueprint::drop_index). Only
+    /// `Schema::table` accepts it, and SQLite refuses it.
+    pub fn drop_full_text(&mut self, columns: &[&str]) {
+        self.commands.push(Command::DropFullText(
+            columns.iter().map(|c| (*c).to_owned()).collect(),
+        ));
+    }
+
+    /// Sets the language of the full-text index `command` recorded.
+    fn set_full_text_language(&mut self, command: usize, language: &str) {
+        if let Some(Command::AddFullText(spec)) = self.commands.get_mut(command) {
+            spec.language = Some(language.to_owned());
+        }
+    }
+
     /// Makes `columns` the table's primary key, Laravel's `primary`: a
     /// composite key for a pivot table, or a key on a column other than
     /// `id`. A table has one primary key, so combined with `id()` or another
@@ -709,5 +781,30 @@ impl Blueprint {
         let name = ForeignSpec::new(column).name(&self.table);
         self.commands.push(Command::DropForeign(name));
         self.commands.push(Command::DropColumn(column.to_owned()));
+    }
+}
+
+/// The modifier of the full-text index [`Blueprint::full_text`] just
+/// declared. It borrows the blueprint, so it cannot outlive the closure.
+pub struct FullTextIndexBuilder<'a> {
+    blueprint: &'a mut Blueprint,
+    command: usize,
+}
+
+impl FullTextIndexBuilder<'_> {
+    /// Builds the Postgres index with the text search configuration
+    /// `language`, such as `simple` or `french`, instead of `english`, as
+    /// Laravel's `->language(..)`. A search uses the index only when it
+    /// names the same language, through
+    /// [`FullTextOptions::language`](crate::FullTextOptions::language).
+    /// MySQL and MariaDB have no language and ignore it.
+    ///
+    /// The name is written into the SQL, so one with anything but letters,
+    /// digits and `_` (and an optional `schema.` prefix) makes the migration
+    /// fail on every backend.
+    pub fn language(self, language: &str) -> Self {
+        self.blueprint
+            .set_full_text_language(self.command, language);
+        self
     }
 }
