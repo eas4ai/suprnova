@@ -21,16 +21,25 @@
 //! [`Queue::push_raw`] payloads are kept apart from typed pushes and read back
 //! with [`raw_pushes`] / [`pushed_raw`].
 //!
+//! A worker can run on the fake: [`QueueFakeGuard::driver`] returns a
+//! [`QueueDriver`] that reserves the recorded pushes, and every reservation
+//! it hands out is recorded for [`reserved`] and
+//! [`Queue::reserved_jobs`](crate::queue::Queue::reserved_jobs).
+//!
 //! [`PendingBatch::dispatch`]: crate::queue::PendingBatch::dispatch
 //! [`PendingChain::dispatch`]: crate::queue::PendingChain::dispatch
 //! [`Queue::push_raw`]: crate::queue::Queue::push_raw
 
 use crate::error::FrameworkError;
+use crate::queue::driver::{QueueDriver, QueueFilterCapability, Reservation, ReservationToken};
+use crate::queue::envelope::{queue_filter, queue_matches};
 use crate::queue::{Envelope, EnvelopeError, EnvelopeOverrides, InspectedJob, Job};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// One captured push: the envelope id the fake assigned, the serialized
@@ -108,6 +117,25 @@ struct FakeStore {
     /// `Job::job_name()`s that [`QueueFakeGuard::except`] sends to the real
     /// queue instead of recording.
     except: HashSet<String>,
+    /// The fake's own queue, the one [`QueueFakeGuard::driver`] reserves from:
+    /// one entry for each push recorded in `pushed`, in push order.
+    live: Vec<LiveJob>,
+    /// The envelope of every reservation the fake's driver handed out, in
+    /// the order it handed them out, as each envelope was when reserved.
+    /// Kept after the job settles, as Laravel's `QueueFake` keeps its
+    /// reserved jobs.
+    reservations: Vec<Envelope>,
+}
+
+/// One job on the fake's own queue.
+///
+/// Kept apart from the push records: a worker that retries a job changes its
+/// attempts and its `available_at`, and the record of what was pushed must
+/// not change with it.
+struct LiveJob {
+    envelope: Envelope,
+    /// The reservation holding this job, `None` while it waits for a worker.
+    token: Option<ReservationToken>,
 }
 
 /// Process-wide serializer: only one test may hold the fake at a time.
@@ -116,6 +144,27 @@ static FAKE: Mutex<Option<FakeStore>> = Mutex::new(None);
 
 fn lock_fake() -> std::sync::MutexGuard<'static, Option<FakeStore>> {
     FAKE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The error every read of the fake returns once no fake is installed.
+fn inactive() -> FrameworkError {
+    FrameworkError::internal("Queue::fake() must be active")
+}
+
+/// Run `f` on the installed fake's store, or report that none is installed.
+fn with_store<T>(f: impl FnOnce(&mut FakeStore) -> T) -> Result<T, FrameworkError> {
+    lock_fake().as_mut().map(f).ok_or_else(inactive)
+}
+
+/// Decode one recorded payload as `J`. `record` names what recorded it,
+/// `pushed` or `reserved`, so the error says which record failed.
+fn decode_recorded<J: Job>(payload: &serde_json::Value, record: &str) -> Result<J, FrameworkError> {
+    serde_json::from_value::<J>(payload.clone()).map_err(|e| {
+        FrameworkError::internal(format!(
+            "a {record} {} does not decode as its job type: {e}",
+            J::job_name()
+        ))
+    })
 }
 
 /// Whether the fake is installed at all, whatever it excepts. The paths that
@@ -150,13 +199,13 @@ pub(crate) fn record_with_overrides<J: Job>(
     available_at: DateTime<Utc>,
     overrides: EnvelopeOverrides,
 ) -> Result<Uuid, FrameworkError> {
-    let payload =
-        serde_json::to_value(job).map_err(|e| FrameworkError::internal(format!("encode: {e}")))?;
     let id = Uuid::new_v4();
     let queue = overrides
         .queue
         .clone()
         .or_else(|| J::queue().map(str::to_owned));
+    let envelope = fake_envelope::<J>(job, id, queue.clone(), available_at, &overrides)?;
+    let payload = envelope.payload.clone();
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
         store
@@ -172,8 +221,32 @@ pub(crate) fn record_with_overrides<J: Job>(
                 overrides,
                 chained: Vec::new(),
             });
+        store.live.push(LiveJob {
+            envelope,
+            token: None,
+        });
     }
     Ok(id)
+}
+
+/// The envelope a worker reserving from the fake receives for a typed push:
+/// the envelope the real path builds, with `J`'s declarations, the push's
+/// overrides and the caller's context, under the id and the queue the fake
+/// recorded. The queue is the fake's because routing does not run under the
+/// fake, so the worker sees the job where a test sees it.
+fn fake_envelope<J: Job>(
+    job: &J,
+    id: Uuid,
+    queue: Option<String>,
+    available_at: DateTime<Utc>,
+    overrides: &EnvelopeOverrides,
+) -> Result<Envelope, FrameworkError> {
+    let mut envelope =
+        super::build_envelope_on::<J>(job, available_at, "", crate::context::Context::dehydrate())?;
+    super::apply_overrides(&mut envelope, overrides, "");
+    envelope.id = id;
+    envelope.queue = queue;
+    Ok(envelope)
 }
 
 /// Record a push that reached the facade as a built envelope: a batch
@@ -185,26 +258,34 @@ pub(crate) fn record_with_overrides<J: Job>(
 /// reaches it through `bulk`, and each job is then an ordinary recorded
 /// push.
 pub(crate) fn record_envelope(env: &Envelope) {
-    let mut g = lock_fake();
-    if let Some(store) = g.as_mut() {
-        store
-            .pushed
-            .entry(env.job_name.clone())
-            .or_default()
-            .push(FakePush {
-                id: env.id,
-                job_name: env.job_name.clone(),
-                queue: env.queue.clone(),
-                payload: env.payload.clone(),
-                available_at: env.available_at,
-                overrides: EnvelopeOverrides::default(),
-                chained: env
-                    .chain_remaining
-                    .iter()
-                    .map(|link| link.job_name.clone())
-                    .collect(),
-            });
+    if let Some(store) = lock_fake().as_mut() {
+        record_envelope_in(store, env);
     }
+}
+
+/// [`record_envelope`] on a store the caller already holds.
+fn record_envelope_in(store: &mut FakeStore, env: &Envelope) {
+    store
+        .pushed
+        .entry(env.job_name.clone())
+        .or_default()
+        .push(FakePush {
+            id: env.id,
+            job_name: env.job_name.clone(),
+            queue: env.queue.clone(),
+            payload: env.payload.clone(),
+            available_at: env.available_at,
+            overrides: EnvelopeOverrides::default(),
+            chained: env
+                .chain_remaining
+                .iter()
+                .map(|link| link.job_name.clone())
+                .collect(),
+        });
+    store.live.push(LiveJob {
+        envelope: env.clone(),
+        token: None,
+    });
 }
 
 /// Record a raw push in place of writing it to the driver. `payload` and
@@ -388,6 +469,128 @@ impl QueueFakeGuard {
         drop(g);
         self
     }
+
+    /// A [`QueueDriver`] over this fake, for a worker to reserve from. Pass it
+    /// to [`run_worker`](crate::queue::worker::run_worker) or
+    /// [`run_worker_with_controls`](crate::queue::worker::run_worker_with_controls)
+    /// to run the jobs the fake recorded, and read the reservations back with
+    /// [`reserved`] or [`Queue::reserved_jobs`](crate::queue::Queue::reserved_jobs).
+    /// It stands in for Laravel's `QueueFake::reserve`, with a real worker
+    /// making the reservations.
+    ///
+    /// The driver reserves the recorded pushes in push order, each once it is
+    /// due, and filters by queue as the memory driver does. Each envelope is
+    /// the one the real path builds, the pusher's context included. A
+    /// reservation stays until the worker settles it: there is no visibility
+    /// timeout. `ack` takes the job off the fake's queue, `nack` and `release`
+    /// put it back, and `nack` adds an attempt. A push to the driver is
+    /// recorded as a push. A raw push is kept apart and is never reserved.
+    /// The push records never change, so [`pushed`] still lists a job after a
+    /// worker ran it.
+    ///
+    /// The fake records every reservation, settled or not, and keeps the
+    /// records until the guard drops. Every method of the driver returns an
+    /// error once the guard is dropped.
+    pub fn driver(&self) -> Arc<dyn QueueDriver> {
+        Arc::new(FakeQueueDriver)
+    }
+}
+
+/// The driver [`QueueFakeGuard::driver`] returns. It holds nothing: every
+/// method works on the installed fake's store.
+struct FakeQueueDriver;
+
+impl FakeQueueDriver {
+    /// Put the job reserved under `token` back on the fake's queue, due after
+    /// `delay`, adding an attempt when `consume_attempt` is set. An unknown
+    /// token is ignored, as the trait asks of `nack` and `release`.
+    fn requeue(
+        token: &ReservationToken,
+        delay: Duration,
+        consume_attempt: bool,
+    ) -> Result<(), FrameworkError> {
+        let available_at = crate::queue::driver::available_after(delay)?;
+        with_store(|store| {
+            if let Some(job) = store
+                .live
+                .iter_mut()
+                .find(|job| job.token.as_ref() == Some(token))
+            {
+                if consume_attempt {
+                    job.envelope.attempts += 1;
+                }
+                job.envelope.available_at = available_at;
+                job.token = None;
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl QueueDriver for FakeQueueDriver {
+    async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+        with_store(|store| record_envelope_in(store, &env))
+    }
+
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        self.pop_from(visibility_timeout, &[]).await
+    }
+
+    fn queue_filter_capability(&self) -> QueueFilterCapability {
+        QueueFilterCapability::Supported
+    }
+
+    async fn pop_from(
+        &self,
+        _visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        let now = crate::clock::now();
+        with_store(|store| {
+            let job = store.live.iter_mut().find(|job| {
+                job.token.is_none()
+                    && job.envelope.available_at <= now
+                    && queue_matches(job.envelope.queue.as_deref(), queues)
+            })?;
+            let token = ReservationToken(Uuid::new_v4());
+            job.token = Some(token.clone());
+            let envelope = job.envelope.clone();
+            store.reservations.push(envelope.clone());
+            Some(Reservation { envelope, token })
+        })
+    }
+
+    async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
+        with_store(|store| {
+            store.live.retain(|job| job.token.as_ref() != Some(token));
+        })
+    }
+
+    async fn nack(
+        &self,
+        token: &ReservationToken,
+        requeue_delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        Self::requeue(token, requeue_delay, true)
+    }
+
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        _env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        // The fake's copy still holds the attempts it was reserved with: the
+        // worker bumps only its own envelope.
+        Self::requeue(token, delay, false)
+    }
+
+    fn name(&self) -> &'static str {
+        "fake"
+    }
 }
 
 impl Drop for QueueFakeGuard {
@@ -462,19 +665,93 @@ pub fn assert_pushed_later<J: Job>(pred: impl Fn(&J, DateTime<Utc>) -> bool) {
     );
 }
 
-/// All captured pushes of `J` deserialized back into the typed payload.
+/// All captured pushes of `J` deserialized back into the typed payload, in
+/// push order.
+///
+/// # Panics
+///
+/// Panics when the fake is not installed, and when a payload recorded under
+/// `J`'s [`Job::job_name`] does not decode as `J`, with a message that names
+/// the job and the decode error. Leaving such a payload out would let a test
+/// pass over the very push it meant to check, and
+/// [`assert_not_pushed`] pass while it is there. Laravel's
+/// `QueueFake::serializeAndRestore` surfaces a job that does not restore the
+/// same way. [`try_pushed`] returns the error instead.
 pub fn pushed<J: Job>() -> Vec<J> {
-    let g = lock_fake();
-    let store = g.as_ref().expect("Queue::fake() must be active");
-    store
-        .pushed
-        .get(J::job_name())
-        .map(|b| {
-            b.iter()
-                .filter_map(|p| serde_json::from_value::<J>(p.payload.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    try_pushed::<J>().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`pushed`], returning an error instead of panicking.
+///
+/// # Errors
+///
+/// Returns [`FrameworkError`] when the fake is not installed, and, naming the
+/// job and the decode error, when a payload recorded under `J`'s name does not
+/// decode as `J`.
+pub fn try_pushed<J: Job>() -> Result<Vec<J>, FrameworkError> {
+    let payloads = with_store(|store| {
+        store
+            .pushed
+            .get(J::job_name())
+            .map(|b| b.iter().map(|p| p.payload.clone()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    })?;
+    payloads
+        .iter()
+        .map(|payload| decode_recorded::<J>(payload, "pushed"))
+        .collect()
+}
+
+/// Every job of type `J` a worker reserved from the fake's driver, in the
+/// order it reserved them, one entry for each reservation: a job retried
+/// once is listed twice. Mirrors the reserved jobs Laravel's `QueueFake`
+/// records; [`Queue::reserved_jobs`](crate::queue::Queue::reserved_jobs)
+/// lists the same records across every job type.
+///
+/// # Panics
+///
+/// Panics when the fake is not installed, and, naming the job and the decode
+/// error, when a reserved payload does not decode as `J`, as [`pushed`] does.
+/// [`try_reserved`] returns the error instead.
+pub fn reserved<J: Job>() -> Vec<J> {
+    try_reserved::<J>().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`reserved`], returning an error instead of panicking.
+///
+/// # Errors
+///
+/// As [`try_pushed`], for the reserved records.
+pub fn try_reserved<J: Job>() -> Result<Vec<J>, FrameworkError> {
+    let payloads = with_store(|store| {
+        store
+            .reservations
+            .iter()
+            .filter(|env| env.job_name == J::job_name())
+            .map(|env| env.payload.clone())
+            .collect::<Vec<_>>()
+    })?;
+    payloads
+        .iter()
+        .map(|payload| decode_recorded::<J>(payload, "reserved"))
+        .collect()
+}
+
+/// The reservations the fake recorded, on `queue` or on every queue for
+/// `None`, as [`InspectedJob`]s. What
+/// [`Queue::reserved_jobs`](crate::queue::Queue::reserved_jobs) answers
+/// while the fake is installed. Each carries the id, the attempts and the
+/// dispatch time of the envelope the worker reserved.
+pub(crate) fn reservations(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+    let filter = queue_filter(queue);
+    with_store(|store| {
+        store
+            .reservations
+            .iter()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect()
+    })
 }
 
 /// All captured pushes of `J` paired with the envelope id the fake
@@ -589,7 +866,7 @@ pub fn assert_pushed_on_connection<J: Job>(connection: &str) {
 
 /// Every recorded push, across every job type, whose `available_at <= now`,
 /// projected as [`InspectedJob`]. The fake's stand-in for
-/// [`QueueDriver::pending_jobs`](crate::queue::driver::QueueDriver::pending_jobs) -
+/// [`QueueDriver::pending_jobs`] -
 /// `attempts` is always `0` and `created_at` is always `None`, since nothing
 /// runs (and so nothing is ever retried) under the fake, and the fake never
 /// records a dispatch timestamp separate from `available_at`.
@@ -613,7 +890,7 @@ pub fn pending_jobs() -> Vec<InspectedJob> {
 
 /// Every recorded push, across every job type, whose `available_at > now`.
 /// The fake's stand-in for
-/// [`QueueDriver::delayed_jobs`](crate::queue::driver::QueueDriver::delayed_jobs).
+/// [`QueueDriver::delayed_jobs`].
 /// See [`pending_jobs`] for the projection caveats.
 pub fn delayed_jobs() -> Vec<InspectedJob> {
     let g = lock_fake();

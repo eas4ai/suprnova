@@ -1172,7 +1172,16 @@ impl Queue {
     /// Every envelope currently held by an unfinished reservation,
     /// optionally filtered to one `queue`. Mirrors Laravel's
     /// `Queue::reservedJobs($queue)` / `allReservedJobs()`.
+    ///
+    /// Under [`Queue::fake`] it reads no driver. It answers every reservation
+    /// a worker made through
+    /// [`QueueFakeGuard::driver`](testing::QueueFakeGuard::driver), settled
+    /// or not, as Laravel's `QueueFake::reservedJobs` answers from the jobs
+    /// it recorded as reserved. [`testing::reserved`] returns them typed.
     pub async fn reserved_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        if testing::is_active() {
+            return testing::reservations(queue);
+        }
         current_driver()?.reserved_jobs(queue).await
     }
 

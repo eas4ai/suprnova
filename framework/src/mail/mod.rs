@@ -83,6 +83,22 @@ struct QueuedMailable {
     connection: Option<String>,
 }
 
+impl QueuedMailable {
+    /// The public view of this capture, as [`MailFake::queued`] returns it.
+    fn into_snapshot(self) -> QueuedSnapshot {
+        QueuedSnapshot {
+            mailable_name: self.mailable_name,
+            payload: self.payload,
+            to: self.to,
+            cc: self.cc,
+            bcc: self.bcc,
+            delay: self.delay,
+            queue: self.queue,
+            connection: self.connection,
+        }
+    }
+}
+
 fn capture_queued(q: QueuedMailable) {
     QUEUE_CAPTURE
         .lock()
@@ -867,16 +883,7 @@ impl MailFake {
     pub fn queued(&self) -> Vec<QueuedSnapshot> {
         queue_capture_snapshot()
             .into_iter()
-            .map(|q| QueuedSnapshot {
-                mailable_name: q.mailable_name,
-                payload: q.payload,
-                to: q.to,
-                cc: q.cc,
-                bcc: q.bcc,
-                delay: q.delay,
-                queue: q.queue,
-                connection: q.connection,
-            })
+            .map(QueuedMailable::into_snapshot)
             .collect()
     }
 
@@ -923,6 +930,122 @@ impl MailFake {
             .into_iter()
             .filter(|q| q.to.iter().any(|a| a.email.eq_ignore_ascii_case(email)))
             .collect()
+    }
+
+    /// Every mailable of type `M` queued while this fake was active, rebuilt
+    /// from its payload, in queue order. Mirrors Laravel's
+    /// `MailFake::queued($mailable)`, which returns the mailables themselves,
+    /// so a test reads them by field instead of through a JSON snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the mailable and the decode error, when a payload queued
+    /// under `M`'s [`Mailable::mailable_name`] does not rebuild as `M`. Leaving
+    /// it out could let a test pass over the mailable it meant to check.
+    /// [`MailFake::try_queued_of`] returns the error instead.
+    pub fn queued_of<M: Mailable>(&self) -> Vec<M> {
+        self.try_queued_of::<M>()
+            .unwrap_or_else(|e| panic!("Mail::fake: {e}"))
+    }
+
+    /// [`MailFake::queued_of`], returning the decode error instead of
+    /// panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError`] naming the mailable and the decode error when
+    /// a payload queued under `M`'s name does not rebuild as `M`.
+    pub fn try_queued_of<M: Mailable>(&self) -> Result<Vec<M>, FrameworkError> {
+        Ok(queued_pairs::<M>()?
+            .into_iter()
+            .map(|(_, mailable)| mailable)
+            .collect())
+    }
+
+    /// The mailables of type `M` that `filter` accepts, rebuilt as
+    /// [`MailFake::queued_of`] rebuilds them. Mirrors Laravel's
+    /// `MailFake::queued($mailable, $callback)`.
+    ///
+    /// # Panics
+    ///
+    /// As [`MailFake::queued_of`]. [`MailFake::try_queued_where`] returns the
+    /// error instead.
+    pub fn queued_where<M: Mailable>(&self, filter: impl Fn(&M) -> bool) -> Vec<M> {
+        self.try_queued_where::<M>(filter)
+            .unwrap_or_else(|e| panic!("Mail::fake: {e}"))
+    }
+
+    /// [`MailFake::queued_where`], returning the decode error instead of
+    /// panicking.
+    ///
+    /// # Errors
+    ///
+    /// As [`MailFake::try_queued_of`].
+    pub fn try_queued_where<M: Mailable>(
+        &self,
+        filter: impl Fn(&M) -> bool,
+    ) -> Result<Vec<M>, FrameworkError> {
+        Ok(self
+            .try_queued_of::<M>()?
+            .into_iter()
+            .filter(|mailable| filter(mailable))
+            .collect())
+    }
+
+    /// Assert at least one queued mailable of type `M` satisfies `filter`.
+    /// Mirrors Laravel's `assertQueued($mailable, $callback)`.
+    ///
+    /// The typed sibling of [`MailFake::assert_queued`], which takes a name
+    /// and stays as it is, as [`MailFake::has_sent_mailable`] sits beside
+    /// [`MailFake::has_sent`].
+    ///
+    /// # Panics
+    ///
+    /// Panics naming the mailable when none matches, and as
+    /// [`MailFake::queued_of`] when a payload does not rebuild.
+    pub fn assert_queued_mailable<M: Mailable>(&self, filter: impl Fn(&M) -> bool) {
+        let queued = queued_pairs::<M>().unwrap_or_else(|e| panic!("Mail::fake: {e}"));
+        if !queued.iter().any(|(_, mailable)| filter(mailable)) {
+            panic!(
+                "Mail::fake assertion failed: expected a queued {} matching the filter; \
+                 queued {} of that type: {:#?}",
+                M::mailable_name(),
+                queued.len(),
+                queued
+                    .iter()
+                    .map(|(snapshot, _)| snapshot)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Assert no queued mailable of type `M` satisfies `filter`. Mirrors
+    /// Laravel's `assertNotQueued($mailable, $callback)`; pass `|_| true` to
+    /// assert none of the type was queued.
+    ///
+    /// The typed sibling of [`MailFake::assert_not_queued`], which takes a
+    /// name and stays as it is.
+    ///
+    /// # Panics
+    ///
+    /// Panics naming the mailable when one matches, and as
+    /// [`MailFake::queued_of`] when a payload does not rebuild: a payload the
+    /// filter cannot read is not evidence that nothing matched.
+    pub fn assert_not_queued_mailable<M: Mailable>(&self, filter: impl Fn(&M) -> bool) {
+        let queued = queued_pairs::<M>().unwrap_or_else(|e| panic!("Mail::fake: {e}"));
+        let matching: Vec<&QueuedSnapshot> = queued
+            .iter()
+            .filter(|(_, mailable)| filter(mailable))
+            .map(|(snapshot, _)| snapshot)
+            .collect();
+        if !matching.is_empty() {
+            panic!(
+                "Mail::fake assertion failed: expected NO queued {} matching the filter, \
+                 found {}: {matching:#?}",
+                M::mailable_name(),
+                matching.len()
+            );
+        }
     }
 
     /// Assert at least one captured message matches `predicate`.
@@ -1230,6 +1353,26 @@ impl QueuedSnapshot {
     pub fn has_to(&self, email: &str) -> bool {
         self.to.iter().any(|a| a.email.eq_ignore_ascii_case(email))
     }
+}
+
+/// Every mailable queued under `M`'s name while a `Mail::fake()` is active,
+/// as its snapshot and rebuilt as `M`, in queue order. Shared by the typed
+/// reads and assertions of [`MailFake`], so each reports a payload that does
+/// not rebuild in the same words.
+fn queued_pairs<M: Mailable>() -> Result<Vec<(QueuedSnapshot, M)>, FrameworkError> {
+    queue_capture_snapshot()
+        .into_iter()
+        .filter(|q| q.mailable_name == M::mailable_name())
+        .map(|q| {
+            let mailable = serde_json::from_value::<M>(q.payload.clone()).map_err(|e| {
+                FrameworkError::internal(format!(
+                    "the queued mailable {} does not rebuild from its payload: {e}",
+                    M::mailable_name()
+                ))
+            })?;
+            Ok((q.into_snapshot(), mailable))
+        })
+        .collect()
 }
 
 /// `first`, then each address of `then`, skipping an address whose email is
