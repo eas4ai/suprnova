@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: laravel-gaps-testing
+Current: laravel-gaps-mongodb
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -934,6 +934,35 @@ Requirements: PAR-174, PAR-175, PAR-176, PAR-177, PAR-178, PAR-179, PAR-180, PAR
    `laravel_testing_gaps` modules of the eight suites). Done when it
    passes on a committed tree, the manual passages are in place, and the
    review is recorded.
+
+## laravel-gaps-mongodb
+
+Requirements: PAR-182, PAR-183, PAR-184, PAR-185, PAR-186, PAR-187, PAR-188
+
+49. laravel-gaps-mongodb - the fifteenth of the parity rounds the
+   developer ordered on 2026-10-07 (17:35), the row he ruled build
+   himself at 17:12 ("You will add MongoDB"): a MongoDB backend on the
+   official `mongodb` crate behind the `database-mongodb` feature, off
+   by default, grouped into PAR-182 to PAR-188 in the scope the rulings
+   log names (models, queries, relations to and from SQL models, and the
+   queue, cache, session and batch stores); vector search, GridFS and
+   the Scout engine stay out (the search layer is the next version's).
+   Delivery: the connection, configuration and facade in
+   `framework/src/mongodb/`; the `#[suprnova::document]` macro in
+   `suprnova-macros/`; the document query builder and the relations,
+   document to document and across stores, in `framework/src/mongodb/`
+   and `framework/src/eloquent/`; the queue driver, batch repository and
+   failed-job store in `framework/src/queue/`; the cache store in
+   `framework/src/cache/`; the session store in `framework/src/session/`;
+   a `mongodb` test binary (`framework/tests/mongodb/`, built with the
+   feature) whose unignored tests assert the rendered BSON, the
+   configuration and the macro and whose `mongodb_` tests run against
+   the gate's standing MongoDB container; the manual chapter
+   `manual/mongodb.md` linked from `manual/documentation.md`, the
+   chapters each store owns, and the changelog. Mechanisms:
+   `par-laravel-gaps-mongodb` (the `mongodb` test binary under the
+   feature). Done when it passes on a committed tree, the manual
+   passages are in place, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

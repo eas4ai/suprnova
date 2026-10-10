@@ -3319,3 +3319,136 @@ Falsifier: on MySQL a migration calling `full_text(["title", "body"])` creates n
 Mechanism: `par-laravel-gaps-testing`.
 Rationale: Row `docs:search`, the developer on 2026-10-09 19:01 ("Yes add that and we will focus on creating a layer on top of our existing drivers which are faster I think"): Laravel's `Builder::whereFullText` (`Database/Query/Builder.php`) and `Blueprint::fullText` (`Database/Schema/Blueprint.php`); the engine tests follow the gate's naming (`postgres_` and `mysql_`) so the engine passes select them.
 Status: Agreed 2026-10-10
+
+## Laravel API gaps: MongoDB
+
+The MongoDB backend the developer ruled on 2026-10-07 17:12 ("You will add
+MongoDB https://github.com/mongodb/mongo-rust-driver"), on the official
+`mongodb` crate, as drivers behind the existing trait surfaces and a
+document model layer beside the SQL one, covering what the
+`mongodb/laravel-mongodb` package gives a Laravel application in the
+scope the rulings log names: models, queries, relations to and from SQL
+models, and the queue, cache, session and batch stores it documents.
+Vector search, GridFS and the Scout engine are outside that scope (the
+search layer is the next version's, by the developer's words of
+2026-10-09). Everything here lives behind the `database-mongodb` feature,
+off by default, so an application that never names MongoDB carries none
+of the driver.
+
+[PAR-182] Behind the `database-mongodb` feature the framework MUST open a
+MongoDB connection from `MONGODB_URI` and `MONGODB_DATABASE` (`MongoConfig::from_env`,
+with a builder for programmatic configuration and named connections),
+register it in the container at boot when the URI is set, and offer it as
+`Mongo::connection()` and `Mongo::connection_named(name)`, with
+`Mongo::database()` answering the `mongodb::Database`, `Mongo::collection::<T>(name)`
+a typed `mongodb::Collection<T>`, and `Mongo::ping()` a health check, as
+Laravel's `mongodb` connection reads `dsn` and `database` from
+`config/database.php`; a missing or malformed URI MUST be an error naming
+the variable, never a panic, and a connection failure MUST surface as a
+`FrameworkError` from the first call that needs the server.
+Falsifier: with `MONGODB_URI` and `MONGODB_DATABASE` set to a reachable server, `Mongo::ping()` fails or `Mongo::database().name()` is not the configured name; with the URI unset, `Mongo::connection()` panics or answers anything but an error naming `MONGODB_URI`; a malformed URI panics; or a build without `database-mongodb` carries the `mongodb` crate.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: The developer's ruling of 2026-10-07 17:12 and `reference/docs-13.x/mongodb.md` (configuration: `dsn`, `database`); the feature is opt-in because the driver is a large dependency tree an SQL-only application never needs, as `otel` and `vector-pinecone` are.
+Status: Agreed 2026-10-10
+
+[PAR-183] `#[suprnova::document(collection = "...")]` on a struct MUST
+generate a document model stored in that collection with the Eloquent
+shape: `create(attrs)`, `find(id)`, `find_or_fail(id)`, `all()`,
+`query()`, `save`, `update(attrs)`, `delete`, `fresh` and `refresh`; an
+`_id` of `ObjectId` unless a field is declared the key; `fillable` and
+`guarded` with the `#[model]` syntax; casts where BSON has the type
+(dates as BSON datetimes, enums, decimals as `Decimal128`, nested values
+kept as BSON); `created_at` and `updated_at` as BSON datetimes managed on
+write unless opted out; soft deletes through `deleted_at` with
+`with_trashed`, `only_trashed`, `restore` and `force_delete`; embedded
+documents through `#[embeds_one]` and `#[embeds_many]` fields of nested
+struct types; the array operators `push(field, value)` and `pull(field,
+value)` and `increment(field, by)` and `decrement(field, by)`; the model
+events `creating`, `created`, `updating`, `updated`, `saving`, `saved`,
+`deleting`, `deleted` and `restored` through the framework's observer
+shape; serialization through serde honouring `hidden` and `visible`; and
+route binding by the key, as `laravel-mongodb`'s `Model` gives Eloquent
+models in collections with embedded documents and array operators.
+Falsifier: `User::create(attrs)` then `User::find(id)` answers a document without the created fields or with `created_at` unset; `find` on an absent id answers anything but `None`; a field outside `fillable` is written by `create`; `delete` on a soft-deleting document removes it from the collection or `only_trashed` fails to list it; an embedded `embeds_many` field does not round trip; `push("tags", "a")` leaves the array unchanged; a `created` event is not dispatched; or a hidden field appears in the serialized document.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: `laravel-mongodb`'s Eloquent models (the "Using Eloquent" feature in `reference/docs-13.x/mongodb.md`): standard Eloquent features plus embedded documents and array operators; the SQL `#[model]` macro's attribute syntax is kept so a Laravel developer reads one shape.
+Status: Agreed 2026-10-10
+
+[PAR-184] `DocumentQuery<M>`, the builder `query()` answers, MUST offer
+`where_(field, op, value)` with `=`, `!=`, `<`, `<=`, `>`, `>=` and
+`like` (a regular expression), `where_in`, `where_not_in`, `where_null`,
+`where_not_null`, `where_between`, `where_date`, `where_exists`,
+`or_where`, `where_raw(bson::Document)`, `order_by(field, direction)`,
+`skip`, `take`, `distinct(field)`, `project(fields)`, `group_by` with
+`sum`, `avg`, `min`, `max` and `count` aggregates, `first`, `get`,
+`count`, `exists`, `pluck`, `update(doc)`, `upsert`, `delete`,
+`increment`, `decrement`, `push`, `pull` and `unset`, `paginate` and
+`simple_paginate` answering the framework's paginator types, and
+`to_filter()` and `to_pipeline()` answering the BSON the builder sends,
+as `laravel-mongodb`'s query builder does; a chain that the aggregation
+framework cannot express MUST be an error naming the call, never a
+silently narrowed query.
+Falsifier: `where_("age", ">=", 18).where_in("role", ["a", "b"]).order_by("name", Asc).skip(10).take(5).to_filter()` renders anything but `{age: {$gte: 18}, role: {$in: ["a", "b"]}}` with sort `{name: 1}`, skip 10 and limit 5; `where_("name", "like", "jo%")` renders no `$regex`; `group_by("role").count()` renders no `$group` stage; against a server `paginate(10, 2)` answers rows outside the second page or a wrong total; or `update` with `$set` leaves other fields changed.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: `laravel-mongodb`'s query builder (the "Write complex queries" feature); rendering is asserted without a server through `to_filter` and `to_pipeline`, the engine tests run against the gate's MongoDB.
+Status: Agreed 2026-10-10
+
+[PAR-185] Documents MUST relate: `has_one`, `has_many`, `belongs_to` and
+`belongs_to_many` between documents (the many-to-many kept as arrays of
+keys on both sides, as `laravel-mongodb` stores it), eager-loaded with
+`with(..)` in one query per relation; and across stores: a SQL
+`#[model]` MUST be able to declare `has_many_documents::<D>` and
+`has_one_document::<D>` and a document `belongs_to_model::<M>`, each
+loaded through its own store (the SQL connection for the model, the
+collection for the document) and eager-loadable, as `laravel-mongodb`'s
+hybrid relations do; a relation whose key types cannot match MUST be a
+compile or configuration error naming both sides.
+Falsifier: a `has_many` of posts on a user document answers posts of another user, or `with("posts")` over ten users issues more than two queries; a `belongs_to_many` role assignment is not visible from both sides; a SQL user's `has_many_documents::<Note>` answers nothing for notes carrying the user's id, or a note's `belongs_to_model::<User>` answers nothing for the SQL user; or a mismatched key type is accepted silently.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: `laravel-mongodb` relationships and `HybridRelations` ("relations to and from SQL models" in the rulings log's scope).
+Status: Agreed 2026-10-10
+
+[PAR-186] `QUEUE_DRIVER=mongodb` MUST select a `QueueDriver` over a
+`jobs` collection: `push` and `bulk_push` insert envelopes with their
+queue and availability, `pop` and `pop_from` reserve one job atomically
+(a single `findOneAndUpdate` setting the reservation and incrementing
+attempts) honouring delays and queue names, `ack` removes it, `nack` and
+`release` return it with the given delay, and the size and inspection
+calls read the collection; a `BatchRepository` over a `job_batches`
+collection MUST keep the batch counters atomically (`$inc` in one update)
+and claim terminal callbacks once; and a failed-job store over a
+`failed_jobs` collection MUST be selectable for the queue's failures, as
+`laravel-mongodb`'s queue driver, batch repository and failed-job
+provider do.
+Falsifier: two workers reserving from one queue of one job both receive it; a delayed job is reserved before its time; `nack` with a delay makes the job available at once; `size` disagrees with the documents in the collection; a batch of three jobs whose three successes race leaves `pending_jobs` above zero or runs its `then` callback twice; or a failed job is not listed by the failed-job store.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: `laravel-mongodb`'s queue and batch documentation ("Dispatch and process queued jobs" in `reference/docs-13.x/mongodb.md`); the trait `QueueDriver` (framework/src/queue/driver.rs) and `BatchRepository` (framework/src/queue/batch.rs) are the surfaces, beside the database, Redis and SQS drivers.
+Status: Agreed 2026-10-10
+
+[PAR-187] `CACHE_DRIVER=mongodb` MUST select a `CacheStore` over a `cache`
+collection with a TTL index on the expiry field, so the server removes
+expired entries, implementing every method of the trait: `get_raw`,
+`put_raw`, `add_raw` (an atomic insert that fails when the key exists
+and is unexpired), `has`, `forget`, `flush`, `increment`, `decrement`
+and `increment_if_below` (one `findOneAndUpdate` each), `touch`, tags
+through `tagged_put_raw` and `flush_tags` (a tags array on the entry,
+deleted by tag), and locks through `acquire_lock`, `release_lock` and
+`refresh_lock` on a `cache_locks` collection keyed uniquely with an
+expiry, as `laravel-mongodb`'s cache driver and lock do.
+Falsifier: an entry put with a one-second lifetime is read back after two seconds (the TTL index absent or the expiry unchecked); `add_raw` on a present key answers `true`; two concurrent `increment` calls lose one step; `flush_tags(["a"])` leaves an entry tagged `a` or removes one tagged only `b`; two concurrent `acquire_lock` on one key both succeed; or `release_lock` with another token releases it.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: `laravel-mongodb`'s cache driver ("optimized to use MongoDB features such as TTL indexes"); the trait `CacheStore` (framework/src/cache/store.rs) beside the memory and Redis stores.
+Status: Agreed 2026-10-10
+
+[PAR-188] `SESSION_DRIVER=mongodb` MUST select a `SessionStore` over a
+`sessions` collection implementing the whole trait: `read` and `write`
+of the session payload with its user id, guard and last activity,
+`destroy`, `destroy_for_user`, `destroy_guard_sessions`,
+`destroy_other_guard_sessions`, `migrate_two_factor_session` and `gc`
+removing sessions idle past the configured lifetime (a TTL index on last
+activity or an explicit sweep), as the database session driver does on
+SQL and `laravel-mongodb`'s session store does on MongoDB.
+Falsifier: a session written then read back lacks its payload; `destroy_for_user(id)` leaves a session of that user or removes another user's; `gc` after the lifetime leaves an idle session or removes an active one; or `migrate_two_factor_session` loses the pending factor.
+Mechanism: `par-laravel-gaps-mongodb`.
+Rationale: the rulings log's scope ("the queue, cache, session and batch stores it documents"); the trait `SessionStore` (framework/src/session/store.rs) beside the database driver (framework/src/session/driver/database.rs).
+Status: Agreed 2026-10-10
