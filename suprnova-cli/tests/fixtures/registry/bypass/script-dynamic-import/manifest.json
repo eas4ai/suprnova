@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-dynamic-import",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

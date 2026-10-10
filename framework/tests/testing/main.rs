@@ -25,4 +25,3 @@ pub mod request_diagnostics;
 pub mod test_client;
 pub mod test_database_helpers;
 pub mod test_response;
-pub mod laravel_testing_gaps;
