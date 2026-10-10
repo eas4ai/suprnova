@@ -200,17 +200,35 @@ impl MongoSessionDriver {
         doc! { "filter": self.gc_filter(now) }
     }
 
+    /// The delete an expired read sends for session `id` at `now`, as the
+    /// filter. It matches the session only while its last activity is still
+    /// older than the lifetime, so a session another request refreshed
+    /// after the read is left in place.
+    #[doc(hidden)]
+    pub fn rendered_expired_delete(&self, id: &str, now: DateTime<Utc>) -> Document {
+        doc! {
+            "session_id": id,
+            "last_activity": { "$lt": self.expired_cutoff(now) },
+        }
+    }
+
+    /// The last activity at or before which a session is expired at `now`:
+    /// `now` minus the lifetime. A read and a garbage collection both use
+    /// this cutoff, so they agree on what is expired.
+    fn expired_cutoff(&self, now: DateTime<Utc>) -> ::bson::DateTime {
+        ::bson::DateTime::from_millis(
+            now.timestamp_millis()
+                .saturating_sub(self.lifetime_millis()),
+        )
+    }
+
     /// The sessions this driver wrote whose last activity is older than
     /// the lifetime at `now`. A session written by another store sharing
     /// the collection has no `session_id`, and is left to that store.
     fn gc_filter(&self, now: DateTime<Utc>) -> Document {
-        let cutoff = ::bson::DateTime::from_millis(
-            now.timestamp_millis()
-                .saturating_sub(self.lifetime_millis()),
-        );
         doc! {
             "session_id": { "$exists": true },
-            "last_activity": { "$lt": cutoff },
+            "last_activity": { "$lt": self.expired_cutoff(now) },
         }
     }
 
@@ -284,6 +302,11 @@ fn signed_in_as(guard: &str, user_id: &str) -> Document {
 
 #[async_trait]
 impl SessionStore for MongoSessionDriver {
+    /// Reads session `id`. A session idle past the lifetime answers none and
+    /// is deleted, but the delete only matches while the session is still
+    /// expired: between this read and the delete, another request may load
+    /// the session and refresh it, and an unconditional delete would drop
+    /// that write and leave the session gone for later reads.
     async fn read(&self, id: &str) -> Result<Option<SessionData>, FrameworkError> {
         let collection = self.ready().await?;
         let Some(stored) = collection
@@ -298,14 +321,22 @@ impl SessionStore for MongoSessionDriver {
             .get_datetime("last_activity")
             .map(|at| at.timestamp_millis())
             .unwrap_or(i64::MIN);
-        let now = crate::clock::now().timestamp_millis();
-        if now > last_activity.saturating_add(self.lifetime_millis()) {
-            // Expired. The read already answers "no session"; a delete that
-            // fails leaves it for `gc`, so it is logged, without the id,
-            // which is a bearer credential.
-            if let Err(error) = self.destroy(id).await {
+        let now = crate::clock::now();
+        if now.timestamp_millis() > last_activity.saturating_add(self.lifetime_millis()) {
+            // Expired. The delete is conditional on the session still being
+            // expired: between this read and the delete, another request may
+            // have loaded the session and refreshed its last activity, and
+            // deleting it then would lose that write. A delete that matches
+            // nothing is that case, so it is not an error, and this request
+            // still answers no session. A delete that fails leaves the
+            // record for `gc`, so it is logged without the id, which is a
+            // bearer credential.
+            if let Err(error) = collection
+                .delete_one(self.rendered_expired_delete(id, now))
+                .await
+            {
                 tracing::warn!(
-                    error = %error,
+                    error = %store_error(STORE, "destroy", error),
                     "expired session could not be deleted; garbage collection will remove it"
                 );
             }
