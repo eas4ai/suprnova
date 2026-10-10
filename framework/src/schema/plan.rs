@@ -301,12 +301,43 @@ fn add_primary_sql(backend: DbBackend, table: &str, columns: &[String]) -> Strin
 
 /// Plans `Schema::create`: the table with its columns and inline foreign
 /// keys first, then one statement per index.
-pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<Vec<Step>, DbErr> {
+///
+/// On MySQL the table takes the blueprint's character set and collation, or
+/// else `defaults`, as Laravel's `MySqlGrammar::compileCreateEncoding` does;
+/// the other backends have no table encoding and ignore both.
+pub(crate) fn plan_create(
+    blueprint: &Blueprint,
+    backend: DbBackend,
+    defaults: &TableEncoding,
+) -> Result<Vec<Step>, DbErr> {
     check_blueprint(blueprint)?;
     check_qualified(blueprint.table(), backend)?;
     let table = blueprint.table();
     let mut create = Table::create();
     create.table(sea_table(table));
+    if backend == DbBackend::MySql {
+        let charset = blueprint.table_charset().or(defaults.charset.as_deref());
+        let collation = blueprint
+            .table_collation()
+            .or(defaults.collation.as_deref());
+        if let Some(charset) = charset {
+            check_encoding_name(table, "charset", charset)?;
+            create.character_set(charset);
+        }
+        if let Some(collation) = collation {
+            check_encoding_name(table, "collation", collation)?;
+            create.collate(collation);
+        }
+    } else {
+        // Checked on every backend, so a migration that is wrong on MySQL
+        // fails on the SQLite a developer runs too.
+        if let Some(charset) = blueprint.table_charset() {
+            check_encoding_name(table, "charset", charset)?;
+        }
+        if let Some(collation) = blueprint.table_collation() {
+            check_encoding_name(table, "collation", collation)?;
+        }
+    }
     let mut indexes = Vec::new();
     let mut seen_columns = HashSet::new();
     let mut nullable_columns = HashSet::new();
@@ -429,6 +460,25 @@ pub(crate) fn plan_create(blueprint: &Blueprint, backend: DbBackend) -> Result<V
     Ok(steps)
 }
 
+/// The character set and collation a new MySQL table takes when its
+/// blueprint names none: the configured ones.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TableEncoding {
+    pub(crate) charset: Option<String>,
+    pub(crate) collation: Option<String>,
+}
+
+/// Refuses a character set or collation that is not a plain name: sea-query
+/// writes a table's options unquoted.
+fn check_encoding_name(table: &str, what: &str, name: &str) -> Result<(), DbErr> {
+    if crate::database::config::is_encoding_name(name) {
+        return Ok(());
+    }
+    Err(refuse(format!(
+        "schema: the {what} {name:?} of table `{table}` is not a name; use letters, digits and underscores, such as utf8mb4_unicode_ci"
+    )))
+}
+
 fn nullable_primary(table: &str, column: &str) -> DbErr {
     refuse(format!(
         "schema: column `{column}` of table `{table}` is nullable and cannot be part of the primary key; drop .nullable()"
@@ -483,6 +533,16 @@ pub(crate) fn plan_alter(blueprint: &Blueprint, backend: DbBackend) -> Result<Ve
     check_blueprint(blueprint)?;
     check_qualified(blueprint.table(), backend)?;
     let table = blueprint.table();
+    for (operation, name) in [
+        ("charset", blueprint.table_charset()),
+        ("collation", blueprint.table_collation()),
+    ] {
+        if let Some(name) = name {
+            return Err(refuse(format!(
+                "schema: {operation}(`{name}`) on table `{table}` sets the encoding of a new table; an existing table keeps its own, so name it in Schema::create"
+            )));
+        }
+    }
     let sqlite = backend == DbBackend::Sqlite;
     if sqlite {
         refuse_sqlite_foreign_keys(blueprint)?;

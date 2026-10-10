@@ -2,11 +2,14 @@
 //! written to log channels.
 //!
 //! `tracing`'s macros write to the default channel, the one `LOG_CHANNEL`
-//! names (`stdout` unless set). [`Log`] reaches the others: files that
-//! rotate, syslog, stacks, and the drivers an application adds.
+//! names (`stdout` unless set), and so do [`Log`]'s level methods, which
+//! keep their PSR-3 level. [`Log`] reaches the others: files that rotate,
+//! syslog, stacks, and the drivers an application adds. Every write that
+//! reaches a channel is reported as [`MessageLogged`].
 
 pub mod channel;
 pub mod config;
+mod events;
 mod facade;
 pub mod init;
 pub mod layer;
@@ -15,6 +18,7 @@ mod sinks;
 
 pub use channel::{LogChannel, LogLevel, LogRecord, LogSink};
 pub use config::{LogConfig, LogFormat};
+pub use events::MessageLogged;
 pub use facade::{Log, Logger};
 pub use init::init_subscriber;
 pub use layer::{build_subscriber, check_channels};

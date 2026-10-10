@@ -35,9 +35,11 @@ configured `CacheConfig` (or constructs one from env) and dispatches on
 
 - `Memory` - bind an `InMemoryCache` with the configured prefix and
   default TTL. Always succeeds.
-- `Redis` - connect to `REDIS_URL` and bind the resulting `RedisCache`.
-  **Fails closed** if the URL is unreachable. There is no silent
-  downgrade to memory.
+- `Redis` - build a `RedisCache` on the [Redis](redis.md) facade's
+  `cache` connection (or the one `REDIS_CACHE_CONNECTION` names) and bind
+  it. The store sends one command while it is built, so the boot **fails
+  closed** if that connection cannot answer. There is no silent downgrade
+  to memory.
 
 Workers (`queue:work`, `schedule:run`, `workflow:work`) go through the
 same bootstrap, so a job using `Cache::get` sees the same backend the
@@ -62,14 +64,20 @@ sees a boot failure instead of a half-working app.
 | Env | Meaning | Default |
 |---|---|---|
 | `CACHE_DRIVER` | `memory` or `redis` | `memory` |
-| `REDIS_URL` | Redis URL (consulted only when `driver=redis`) | `redis://127.0.0.1:6379` |
-| `REDIS_PREFIX` | Key prefix applied to every store operation | `suprnova_cache:` |
+| `CACHE_PREFIX` | Key prefix applied to every store operation | the slug of `APP_NAME`, then `-cache-` (`suprnova-cache-` without `APP_NAME`) |
+| `REDIS_CACHE_CONNECTION` | The Redis connection the store's commands run on | `cache` |
+| `REDIS_CACHE_LOCK_CONNECTION` | The Redis connection the store's locks run on | `default` |
 | `CACHE_DEFAULT_TTL` | Default TTL in seconds for `Cache::put`, `Cache::remember`, and `Cache::tags_put` called with `None`; `0` means no default | `3600` |
 | `CACHE_SWEEP_INTERVAL` | Seconds between sweeps of the in-memory cache's expired entries; `0` turns the sweep off | `60` |
 
 Unset `CACHE_DRIVER` parses to `Memory`; any other value (case-
 insensitive, trimmed) that isn't `memory`/`in-memory`/`inmemory`/`redis`
 returns an error at boot.
+
+The Redis server, its database and the connection's own key prefix come
+from the [Redis](redis.md) connections: `REDIS_URL`, `REDIS_CACHE_DB` for
+the `cache` connection (database 1 unless you set it, even when
+`REDIS_URL` names another), and `REDIS_PREFIX`.
 
 You can also build the config programmatically when you don't want env
 parsing:
@@ -80,7 +88,8 @@ use suprnova::{Config, CacheConfig, cache::CacheDriver};
 Config::register(
     CacheConfig::builder()
         .driver(CacheDriver::Redis)
-        .url("redis://cache.internal:6379")
+        .connection("cache")
+        .lock_connection("default")
         .prefix("myapp:")
         .default_ttl(7200)
         .build(),
@@ -134,9 +143,11 @@ Cache::forget("session:42").await?;
 Cache::flush().await?;
 ```
 
-On Redis, `flush` deletes the keys that start with `REDIS_PREFIX`, matched
-literally: a prefix with glob characters such as `*`, `?`, or `[` matches only
-itself. An empty prefix matches every key in the Redis database, so `flush`
+On Redis, `flush` deletes the keys that start with the connection's
+`REDIS_PREFIX` followed by `CACHE_PREFIX`, matched literally: a prefix with
+glob characters such as `*`, `?`, or `[` matches only itself, and a key
+under the connection prefix alone survives. When both prefixes are empty
+the pattern matches every key in the connection's database, so `flush`
 then empties the whole database.
 
 `Cache::pull` is **not** atomic - it's a `get` followed by a `forget`,
@@ -199,6 +210,22 @@ through `?` rather than poisoning the cache.
 `Cache::sear(key, default)` is the Laravel-spelled alias for
 `remember_forever`. Same body, same semantics - ships under both names
 so migrated code reads the same way.
+
+When the value knows how long it is good for, compute the lifetime from
+it with `Cache::remember_with_ttl`, as Laravel's `remember` takes a
+closure for its lifetime:
+
+```rust
+let token: Token = Cache::remember_with_ttl(
+    "api:token",
+    |token: &Token| Some(Duration::from_secs(token.expires_in)),
+    || async { fetch_token().await },
+).await?;
+```
+
+The lifetime closure runs only on a miss, after the value is computed.
+`None` stores the value for `CACHE_DEFAULT_TTL`, as `remember`'s `None`
+does, and `Some(Duration::ZERO)` returns the value without storing it.
 
 ### Remember is NOT stampede-safe
 
@@ -364,6 +391,93 @@ other tags too. On the in-memory backend the periodic sweep removes expired
 keys from the indexes. On Redis every tagged write checks a sample of the
 tag's index and removes keys that expired, were forgotten, or were
 overwritten without the tag, and `flush()` clears every index.
+
+## Hit and miss events
+
+`Cache::get` dispatches `CacheHit` when the key holds a value and
+`CacheMissed` when it holds nothing, as Laravel's `Repository::get` does.
+`Cache::has`, `Cache::missing` and every read built on them (`pull`,
+`remember`, `remember_forever`, `sear`) dispatch the same, once per read.
+Each event carries the store's name (`memory`, `redis`) and the key you
+passed; `CacheHit` also carries the stored value when the read fetched it,
+and `None` for `has` and `missing`, which only check presence. A stored
+JSON `null` is a value: it is present, and its read is a hit.
+
+```rust
+use std::sync::Arc;
+use suprnova::{CacheHit, EventFacade, FrameworkError, Listener};
+
+struct TraceHits;
+
+#[suprnova::async_trait]
+impl Listener<CacheHit> for TraceHits {
+    async fn handle(&self, event: &CacheHit) -> Result<(), FrameworkError> {
+        tracing::debug!(store = %event.store, key = %event.key, "cache hit");
+        Ok(())
+    }
+}
+
+EventFacade::listen::<CacheHit, _>(Arc::new(TraceHits)).await;
+```
+
+A listener that fails is logged, and the read still answers. When no
+listener and no events fake is installed the read builds no event. The
+`Debug` output of a `CacheHit` leaves the value out, since a cached value
+can be a token or a user's data.
+
+## Redis connections
+
+The Redis store runs on the [Redis](redis.md) facade's named connections,
+as Laravel's `createRedisDriver` builds its store: its commands on the
+`cache` connection, which reads `REDIS_CACHE_DB`, and its locks on the
+`default` connection. `REDIS_CACHE_CONNECTION` and
+`REDIS_CACHE_LOCK_CONNECTION` name others, or set them in code with
+`CacheConfigBuilder::connection` and `lock_connection`.
+
+Every key the store writes is the connection's `REDIS_PREFIX`, then
+`CACHE_PREFIX`, then your key. With `APP_NAME=Shop`, `REDIS_PREFIX=shop-`
+and `CACHE_PREFIX` unset, `Cache::put("k", ..)` writes `shop-shop-cache-k`.
+
+`Cache::set_connection` moves the bound store's later commands to another
+connection, as Laravel's `Cache::setConnection`; its locks stay where they
+are. A store with no Redis connection, such as the memory store, answers an
+error.
+
+```rust
+use suprnova::{Cache, Redis};
+
+// In the bootstrap.
+Redis::define("reports", "redis://127.0.0.1:6379/5")?;
+
+// Later writes and reads go to database 5.
+Cache::set_connection("reports")?;
+Cache::put("report:today", &totals, None).await?;
+```
+
+`RedisCache::connect(&config)` still builds a store on `config.url` by
+hand, with `config.prefix` as its whole key prefix. The bootstrap uses
+`RedisCache::connect_named(&config)`, which builds it on the named
+connections.
+
+### Upgrading keeps the old keys only if you ask
+
+Before this release the Redis store opened its own connection from
+`REDIS_URL` and used `REDIS_PREFIX`, `suprnova_cache:` by default, as its
+cache prefix. It now runs on the `cache` connection's database
+(`REDIS_CACHE_DB`, 1 by default) under the new prefixes, so an upgraded
+deployment finds its Redis cache empty. That is safe for a cache, which
+refills as it is read. To keep the old keys, set:
+
+```dotenv
+REDIS_CACHE_CONNECTION=default
+REDIS_PREFIX=
+CACHE_PREFIX=suprnova_cache:
+```
+
+`REDIS_CACHE_CONNECTION=default` keeps the database `REDIS_URL` names, the
+empty `REDIS_PREFIX` drops the connection prefix, and `CACHE_PREFIX` puts
+back the old prefix (use the value you had in `REDIS_PREFIX`, if you set
+one).
 
 ## Two backends
 

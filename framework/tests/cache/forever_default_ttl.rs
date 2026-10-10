@@ -26,6 +26,8 @@ async fn store_put_raw_none_ttl_means_no_expiration_in_memory() {
     let config = CacheConfig {
         driver: CacheDriver::Memory,
         url: "unused".into(),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix: "test-forever:".into(),
         default_ttl: 1,
         sweep_interval: 0,
@@ -57,6 +59,8 @@ async fn store_exposes_default_ttl_for_facade_consumption() {
     let config = CacheConfig {
         driver: CacheDriver::Memory,
         url: "unused".into(),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix: "test-default:".into(),
         default_ttl: 42,
         sweep_interval: 0,
@@ -101,16 +105,18 @@ async fn store_put_raw_some_ttl_still_expires() {
 /// The facade is where `None` turns into either "the configured default" or
 /// "forever", so the facade's own tests have to see what the store was
 /// handed. Recording it is exact and needs no sleeping past a TTL.
-struct TtlRecorder {
+pub(crate) struct TtlRecorder {
     inner: InMemoryCache,
     writes: std::sync::Mutex<Vec<(String, Option<Duration>)>>,
 }
 
 impl TtlRecorder {
-    fn with_default(seconds: u64) -> Arc<Self> {
+    pub(crate) fn with_default(seconds: u64) -> Arc<Self> {
         let config = CacheConfig {
             driver: CacheDriver::Memory,
             url: "unused".into(),
+            connection: "cache".into(),
+            lock_connection: "default".into(),
             prefix: "ttl-recorder:".into(),
             default_ttl: seconds,
             sweep_interval: 0,
@@ -121,7 +127,7 @@ impl TtlRecorder {
         })
     }
 
-    fn ttl_for(&self, key: &str) -> Option<Option<Duration>> {
+    pub(crate) fn ttl_for(&self, key: &str) -> Option<Option<Duration>> {
         self.writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -207,7 +213,7 @@ impl CacheStore for TtlRecorder {
     }
 }
 
-fn install_recorder(
+pub(crate) fn install_recorder(
     default_seconds: u64,
 ) -> (
     suprnova::container::testing::TestContainerGuard,

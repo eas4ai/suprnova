@@ -1,15 +1,14 @@
 //! Redis-backed cache implementation
 
 use async_trait::async_trait;
-use redis::{
-    AsyncCommands,
-    aio::{ConnectionManager, ConnectionManagerConfig},
-};
+use redis::{AsyncCommands, aio::ConnectionManager};
+use std::sync::{PoisonError, RwLock};
 use std::time::Duration;
 
 use super::config::CacheConfig;
 use super::store::{CacheStore, ConditionalIncrement};
 use crate::error::FrameworkError;
+use crate::redis_facade::{Redis, RedisConnection};
 
 /// How many forward-index members `flush_tags` pulls per `SSCAN` round.
 ///
@@ -244,54 +243,56 @@ fn redis_ttl_ms(d: Duration) -> u64 {
 
 /// Redis cache implementation
 ///
-/// Uses redis-rs with async/tokio runtime for high-performance caching.
+/// Runs its commands on one named connection of the [`Redis`] facade and
+/// takes its locks on another, as Laravel's `RedisStore` does: the
+/// bootstrap builds it with [`connect_named`](Self::connect_named) on the
+/// connections `REDIS_CACHE_CONNECTION` and `REDIS_CACHE_LOCK_CONNECTION`
+/// name, `cache` and `default` by default. Every key it writes is the
+/// connection's prefix (`REDIS_PREFIX`), then the cache prefix, then the
+/// key.
 pub struct RedisCache {
-    conn: ConnectionManager,
-    prefix: String,
+    /// Where the commands go. [`CacheStore::set_connection`] replaces it.
+    commands: RwLock<Endpoint>,
+    /// Where the locks go.
+    locks: Endpoint,
+    /// The cache prefix, `CACHE_PREFIX`, kept to rebuild the commands'
+    /// whole prefix when the connection changes.
+    cache_prefix: String,
     default_ttl: Option<Duration>,
 }
 
-impl RedisCache {
-    /// Create a new Redis cache connection
-    pub async fn connect(config: &CacheConfig) -> Result<Self, FrameworkError> {
-        let client = crate::redis_client::open(config.url.as_str())
-            .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
+/// A connection and the whole prefix of the keys the store writes on it:
+/// the connection's own prefix, then the cache prefix.
+#[derive(Clone)]
+struct Endpoint {
+    connection: RedisConnection,
+    prefix: String,
+}
 
-        // Bound the initial-connect budget so an unreachable Redis fails
-        // CLOSED promptly instead of hanging. The redis-rs
-        // defaults are 6 reconnect retries with an UNCAPPED exponential
-        // backoff (max_delay = None), so against a down/unreachable host the
-        // connect future can take well over 10s to resolve with an error -
-        // blocking `Cache::bootstrap` at startup for that whole window.
-        //
-        // We cap it: at most 3 retries, =<500ms between them, each connection
-        // and command attempt bounded by an explicit timeout. A refused or
-        // unreachable host now errors in under two seconds, while a healthy
-        // Redis (sub-second on localhost/LAN) is unaffected.
-        let cm_config = ConnectionManagerConfig::new()
-            .set_connection_timeout(Some(Duration::from_secs(2)))
-            .set_response_timeout(Some(Duration::from_secs(5)))
-            .set_number_of_retries(3)
-            .set_max_delay(Duration::from_millis(500));
-        let conn = ConnectionManager::new_with_config(client, cm_config)
-            .await
-            .map_err(|e| {
-                FrameworkError::internal(format!("Redis connection manager error: {e}"))
-            })?;
-
-        let default_ttl = if config.default_ttl > 0 {
-            Some(Duration::from_secs(config.default_ttl))
-        } else {
-            None
-        };
-
-        Ok(Self {
-            conn,
-            prefix: config.prefix.clone(),
-            default_ttl,
-        })
+impl Endpoint {
+    fn new(connection: RedisConnection, cache_prefix: &str) -> Self {
+        let prefix = format!("{}{cache_prefix}", connection.prefix());
+        Self { connection, prefix }
     }
 
+    /// The connection for one operation. The facade's connection is bound
+    /// to the runtime it was first used on and opened again on a new one,
+    /// so it is taken per operation, never kept.
+    fn target(&self) -> Result<Target, FrameworkError> {
+        Ok(Target {
+            conn: self.connection.client()?,
+            prefix: self.prefix.clone(),
+        })
+    }
+}
+
+/// One operation's connection and key prefix.
+struct Target {
+    conn: ConnectionManager,
+    prefix: String,
+}
+
+impl Target {
     fn prefixed_key(&self, key: &str) -> String {
         data_key(&self.prefix, key)
     }
@@ -343,16 +344,106 @@ impl RedisCache {
     }
 }
 
+impl RedisCache {
+    /// Build a store on a Redis server of its own: `config.url`, for its
+    /// commands and its locks, with `config.prefix` as the whole key prefix.
+    /// For code that builds a store by hand; the bootstrap uses
+    /// [`connect_named`](Self::connect_named).
+    ///
+    /// # Errors
+    ///
+    /// When the URL is not usable, or the server does not answer the one
+    /// command sent while the store is built.
+    pub async fn connect(config: &CacheConfig) -> Result<Self, FrameworkError> {
+        let client = crate::redis_client::open(config.url.as_str())
+            .map_err(|e| FrameworkError::internal(format!("Redis connection error: {}", e)))?;
+        // A connection of its own, with no connection prefix, so the keys
+        // are the cache prefix and the key, as they always were.
+        let connection = RedisConnection::new("cache store", client, String::new());
+        Self::on(connection.clone(), connection, config).await
+    }
+
+    /// Build the store the bootstrap binds for `CACHE_DRIVER=redis`: its
+    /// commands on the [`Redis`] connection `config.connection` names, its
+    /// locks on the one `config.lock_connection` names, as Laravel's
+    /// `createRedisDriver` builds its store on `connection` and
+    /// `lock_connection`.
+    ///
+    /// # Errors
+    ///
+    /// When either connection is not defined, or the command connection
+    /// does not answer the one command sent while the store is built: a
+    /// cache that cannot reach its server fails the boot instead of every
+    /// request.
+    pub async fn connect_named(config: &CacheConfig) -> Result<Self, FrameworkError> {
+        let commands = Redis::connection(&config.connection)?;
+        let locks = Redis::connection(&config.lock_connection)?;
+        Self::on(commands, locks, config).await
+    }
+
+    /// The store on `commands` and `locks`, once `commands` has answered a
+    /// `PING`.
+    async fn on(
+        commands: RedisConnection,
+        locks: RedisConnection,
+        config: &CacheConfig,
+    ) -> Result<Self, FrameworkError> {
+        // The facade's connections open lazily, so a server that cannot
+        // answer would otherwise surface on the first read. Each attempt is
+        // bounded (2s to connect, at most 3 retries 500ms apart), so an
+        // unreachable host fails the boot within seconds instead of hanging
+        // it.
+        let mut conn = commands.client()?;
+        redis::cmd("PING")
+            .query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!(
+                    "the Redis connection '{}' at {} did not answer: {e}",
+                    commands.name(),
+                    commands.endpoint()
+                ))
+            })?;
+
+        let default_ttl = if config.default_ttl > 0 {
+            Some(Duration::from_secs(config.default_ttl))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            commands: RwLock::new(Endpoint::new(commands, &config.prefix)),
+            locks: Endpoint::new(locks, &config.prefix),
+            cache_prefix: config.prefix.clone(),
+            default_ttl,
+        })
+    }
+
+    /// The connection and prefix for one command.
+    fn target(&self) -> Result<Target, FrameworkError> {
+        self.commands
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .target()
+    }
+
+    /// The connection and prefix for one lock operation.
+    fn lock_target(&self) -> Result<Target, FrameworkError> {
+        self.locks.target()
+    }
+}
+
 #[async_trait]
 impl CacheStore for RedisCache {
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
-        let key = self.prefixed_key(key);
+        let target = self.target()?;
+        let key = target.prefixed_key(key);
 
         // GET is a pure read: running it twice returns the same answer, so a
         // connection that died under the first attempt costs a reconnect, not
         // a failed cache read.
         let value: Option<String> = crate::redis_retry::retry_read("cache GET", || {
-            let mut conn = self.conn.clone();
+            let mut conn = target.conn.clone();
             let key = key.clone();
             async move { conn.get(&key).await }
         })
@@ -368,9 +459,10 @@ impl CacheStore for RedisCache {
         value: &str,
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.prefixed_key(key);
-        let aux = self.key_tags_set(&pkey);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.prefixed_key(key);
+        let aux = target.key_tags_set(&pkey);
 
         // Drop any prior tag aux set so a later tagged_put_raw does not
         // resurrect stale tag memberships AND a later flush_tags cannot
@@ -409,15 +501,29 @@ impl CacheStore for RedisCache {
         true
     }
 
+    fn name(&self) -> &str {
+        "redis"
+    }
+
+    fn set_connection(&self, name: &str) -> Result<(), FrameworkError> {
+        let endpoint = Endpoint::new(Redis::connection(name)?, &self.cache_prefix);
+        *self
+            .commands
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = endpoint;
+        Ok(())
+    }
+
     async fn add_raw(
         &self,
         key: &str,
         value: &str,
         ttl: Option<Duration>,
     ) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.prefixed_key(key);
-        let aux = self.key_tags_set(&pkey);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.prefixed_key(key);
+        let aux = target.key_tags_set(&pkey);
         let mut script = redis::cmd("EVAL");
         script
             .arg(ADD_RAW_LUA)
@@ -436,11 +542,12 @@ impl CacheStore for RedisCache {
     }
 
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
-        let key = self.prefixed_key(key);
+        let target = self.target()?;
+        let key = target.prefixed_key(key);
 
         // EXISTS, like GET, answers the same way however many times it runs.
         let exists: bool = crate::redis_retry::retry_read("cache EXISTS", || {
-            let mut conn = self.conn.clone();
+            let mut conn = target.conn.clone();
             let key = key.clone();
             async move { conn.exists(&key).await }
         })
@@ -451,14 +558,15 @@ impl CacheStore for RedisCache {
     }
 
     async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.prefixed_key(key);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.prefixed_key(key);
 
         // Drop the value AND its tag aux set. The forward `tag:{t}` set
         // may still list this key; that's harmless - flush_tags validates
         // membership via the aux set and skips a key whose aux set says
         // "no longer tagged with t" (or no longer exists at all).
-        let aux = self.key_tags_set(&pkey);
+        let aux = target.key_tags_set(&pkey);
         // `DEL key aux` returns the count of ALL keys removed, so deleting the
         // value and its aux bookkeeping key together would report `true` even
         // when only the aux key survived (e.g. the value expired first while
@@ -480,23 +588,25 @@ impl CacheStore for RedisCache {
     }
 
     async fn flush(&self) -> Result<(), FrameworkError> {
-        let mut conn = self.conn.clone();
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
 
         // SCAN beats KEYS for production: incremental cursor iteration
         // avoids blocking the Redis server on a single O(N) pass. We
         // batch DEL per page so very large keyspaces don't build one
-        // giant argument list. The MATCH glob is anchored to our prefix,
-        // escaped so it matches literally, so we never touch other
-        // applications' keys. An empty prefix has nothing to anchor to and
-        // matches the whole database.
-        let pattern = format!("{}*", glob_escape(&self.prefix));
+        // giant argument list. The MATCH glob is anchored to the whole
+        // prefix, the connection's and then the cache's, escaped so it
+        // matches literally, so we never touch other applications' keys
+        // or the connection's keys outside the cache. An empty prefix has
+        // nothing to anchor to and matches the whole database.
+        let pattern = format!("{}*", glob_escape(&target.prefix));
         let mut cursor: u64 = 0;
         loop {
             // SCAN is a pure read; the DEL below is not, and is deliberately
             // left un-retried.
             let (next_cursor, batch): (u64, Vec<String>) =
                 crate::redis_retry::retry_read("cache SCAN", || {
-                    let mut conn = self.conn.clone();
+                    let mut conn = target.conn.clone();
                     let pattern = pattern.clone();
                     async move {
                         redis::cmd("SCAN")
@@ -526,8 +636,9 @@ impl CacheStore for RedisCache {
     }
 
     async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let key = self.prefixed_key(key);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let key = target.prefixed_key(key);
 
         let value: i64 = conn
             .incr(&key, amount)
@@ -538,8 +649,9 @@ impl CacheStore for RedisCache {
     }
 
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let key = self.prefixed_key(key);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let key = target.prefixed_key(key);
 
         let value: i64 = conn
             .decr(&key, amount)
@@ -555,8 +667,9 @@ impl CacheStore for RedisCache {
         amount: i64,
         ceiling: i64,
     ) -> Result<ConditionalIncrement, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let key = self.prefixed_key(key);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let key = target.prefixed_key(key);
         // Not retried: a reply lost after the script ran would count twice.
         let (incremented, value): (i64, String) = redis::cmd("EVAL")
             .arg(INCREMENT_IF_BELOW_LUA)
@@ -588,9 +701,10 @@ impl CacheStore for RedisCache {
         value: &str,
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.prefixed_key(key);
-        let aux = self.key_tags_set(&pkey);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.prefixed_key(key);
+        let aux = target.key_tags_set(&pkey);
 
         let mut pipe = redis::pipe();
         pipe.atomic();
@@ -632,9 +746,9 @@ impl CacheStore for RedisCache {
         // Forward index: tag -> set of value keys. Used as the candidate
         // list by flush_tags; the aux set is the source of truth for
         // "is this key still tagged with t" at deletion time.
-        let aux_prefix = self.key_tags_prefix();
+        let aux_prefix = target.key_tags_prefix();
         for t in tags {
-            let tag_key = self.tag_index_key(t);
+            let tag_key = target.tag_index_key(t);
             pipe.cmd("SADD").arg(&tag_key).arg(&pkey).ignore();
             // Prune a sample of the same index in the same transaction, so
             // a tag that is written often but rarely flushed stays near its
@@ -655,10 +769,11 @@ impl CacheStore for RedisCache {
     }
 
     async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
-        let mut conn = self.conn.clone();
-        let index_prefix = self.tag_index_prefix();
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let index_prefix = target.tag_index_prefix();
         for t in tags {
-            let tag_key = self.tag_index_key(t);
+            let tag_key = target.tag_index_key(t);
             let mut cursor: u64 = 0;
             loop {
                 // SSCAN, not SMEMBERS. A tag's forward index is unbounded -
@@ -677,7 +792,7 @@ impl CacheStore for RedisCache {
                 // values, so it is never retried.
                 let (next, members): (u64, Vec<String>) =
                     crate::redis_retry::retry_read("cache SSCAN", || {
-                        let mut conn = self.conn.clone();
+                        let mut conn = target.conn.clone();
                         let tag_key = tag_key.clone();
                         async move {
                             redis::cmd("SSCAN")
@@ -701,7 +816,7 @@ impl CacheStore for RedisCache {
                         .arg(*t)
                         .arg(&index_prefix);
                     for member in &members {
-                        script.arg(member).arg(self.key_tags_set(member));
+                        script.arg(member).arg(target.key_tags_set(member));
                     }
                     script
                         .query_async::<i64>(&mut conn)
@@ -723,8 +838,9 @@ impl CacheStore for RedisCache {
         key: &str,
         ttl: Duration,
     ) -> Result<Option<String>, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.locked_key(key);
+        let target = self.lock_target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.locked_key(key);
         let token = uuid::Uuid::new_v4().to_string();
 
         // SET key token NX PX ttl_ms - atomic: only sets if key does not
@@ -745,8 +861,9 @@ impl CacheStore for RedisCache {
     }
 
     async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.locked_key(key);
+        let target = self.lock_target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.locked_key(key);
         // Atomically: if GET key == token then DEL key, else return 0
         let script = redis::Script::new(
             "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
@@ -766,8 +883,9 @@ impl CacheStore for RedisCache {
         token: &str,
         ttl: Duration,
     ) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.locked_key(key);
+        let target = self.lock_target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.locked_key(key);
         // Atomically: if GET key == token then PEXPIRE key ttl_ms, else
         // return 0. PEXPIRE preserves sub-second precision - EXPIRE
         // would truncate, and `EXPIRE key 0` deletes the key, which
@@ -786,9 +904,10 @@ impl CacheStore for RedisCache {
     }
 
     async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let pkey = self.prefixed_key(key);
-        let aux = self.key_tags_set(&pkey);
+        let target = self.target()?;
+        let mut conn = target.conn.clone();
+        let pkey = target.prefixed_key(key);
+        let aux = target.key_tags_set(&pkey);
         // PEXPIRE returns 1 if the TTL was set, 0 if the key does not
         // exist. PEXPIRE preserves sub-second precision; EXPIRE would
         // truncate a sub-second ttl to 0 and delete the key. The script

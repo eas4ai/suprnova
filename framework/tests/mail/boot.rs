@@ -40,6 +40,15 @@ impl Mailable for Ping {
     }
 }
 
+/// Names a test process for the caller, which holds the env lock: an unset
+/// `APP_ENV` is production, which refuses a mail driver that delivers
+/// nothing and plaintext SMTP. The snapshot restores the variable.
+fn testing_environment() -> crate::env_snapshot::EnvSnapshot {
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    snapshot
+}
+
 /// Clear every env var this test file touches. Called at the start of each
 /// test (defensive against prior-test leakage) and at the end (defensive
 /// against future tests in the same process).
@@ -71,6 +80,7 @@ fn clear_mail_env() {
 #[serial]
 async fn boot_default_binds_log_transport() {
     let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
 
@@ -92,6 +102,7 @@ async fn boot_default_binds_log_transport() {
 #[serial]
 async fn boot_memory_driver_binds_in_memory_transport() {
     let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
     // SAFETY: serial test.
@@ -129,6 +140,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     // `clear_memory_capture()` at the top of `bootstrap_from_env` must fix
     // this - verify the captured handle is fresh across switches.
     let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
 
@@ -178,6 +190,7 @@ async fn boot_smtp_driver_binds_unencrypted_when_creds_absent() {
     // bootstrap path runs without error when MAIL_DRIVER=smtp and no creds
     // are set (falls through to unencrypted local-dev mode).
     let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -502,6 +515,7 @@ async fn boot_resend_missing_key_returns_descriptive_error() {
 #[serial]
 async fn boot_unknown_driver_falls_back_to_log_with_warning() {
     let _env = crate::env_lock::lock_env_async().await;
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
     unsafe {
@@ -540,6 +554,7 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
 #[serial]
 fn bootstrap_from_env_is_callable_from_sync_context() {
     let _env = crate::env_lock::lock_env();
+    let _app_env = testing_environment();
     clear_mail_env();
     let _ = Mail::clear_transport();
 

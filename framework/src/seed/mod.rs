@@ -485,7 +485,13 @@ mod tests {
         });
         assert!(poisoner.join().is_err(), "the registry is poisoned");
 
-        let argv = vec!["console".to_string(), "db:seed".to_string()];
+        // `--force`, since an unset APP_ENV is production, where a bare
+        // `db:seed` stops before it reads the registry.
+        let argv = vec![
+            "console".to_string(),
+            "db:seed".to_string(),
+            "--force".to_string(),
+        ];
         let err = crate::console::dispatch_argv(argv)
             .await
             .expect_err("a registry that cannot be read must fail the command");

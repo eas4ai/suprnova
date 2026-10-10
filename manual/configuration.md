@@ -70,22 +70,40 @@ commit it; do not commit `.env`. The default `.gitignore` excludes
 
 At boot, the framework:
 
-1. Detects the environment from `APP_ENV` (case-insensitive,
-   `prod`/`dev`/`stage`/`stg`/`test` are also recognised).
-2. Loads `.env` from the project root.
-3. If a per-environment file exists (`.env.staging`, `.env.production`),
-   loads it on top - its values override `.env`.
-4. Real process environment variables override both (this is what
+1. Loads `.env` from the project root.
+2. Detects the environment from `APP_ENV`, set in the process or in
+   `.env` (case-insensitive, `prod`/`dev`/`stage`/`stg`/`test` are also
+   recognised). **An unset `APP_ENV` is production**, as in Laravel.
+3. Loads `.env.local` on top, if it exists.
+4. If `APP_ENV` is set and a per-environment file exists
+   (`.env.staging`, `.env.production`), loads it and then
+   `.env.<environment>.local` on top - their values override `.env`. With
+   `APP_ENV` unset no per-environment file loads, as Laravel's loader
+   picks one only for a named environment.
+5. Real process environment variables override all of them (this is what
    container orchestration relies on).
 
-The order in one line: **process env > `.env.<environment>` > `.env`**.
+The order in one line: **process env > `.env.<environment>.local` >
+`.env.<environment>` > `.env.local` > `.env`**.
 
 ```rust
 use suprnova::Config;
 
+// With the scaffold's APP_ENV=local:
 let env = Config::environment();           // Environment::Local
 let is_prod = Config::is_production();     // false
 ```
+
+A process that sets no `APP_ENV` runs as production: debug is off, and
+every production check runs, among them the `APP_KEY` refusal, the SQLite
+fallback refusal, the Inertia manifest check, and the refusal of a mail
+driver that delivers nothing, of the in-memory rate limiter, of an unknown
+queue driver and of the mock payment provider. `db:seed` and
+`migrate:fresh` ask for `--force`. The scaffold's `.env` sets
+`APP_ENV=local`, so a new project runs as before; a deployment names its
+environment or gets production. `Environment::detect_explicit()` answers
+`None` when `APP_ENV` is unset, for code that needs to tell the two
+apart.
 
 In a CI run with `APP_ENV=testing`, the framework loads `.env.testing`
 on top of `.env` so you can override DB URLs and disable mail drivers
@@ -166,6 +184,59 @@ The registry is keyed by `TypeId`, so each struct is stored once.
 Calling `Config::register` again with the same type replaces the
 previous entry - convenient for tests.
 
+### Defaults a crate registers
+
+A crate that ships its own configuration registers it without
+overwriting what the application set, whichever runs first.
+`Config::register_default` registers a value only when none of its type
+is registered, and answers whether it did:
+
+```rust
+use suprnova::Config;
+
+#[derive(Clone)]
+pub struct BillingConfig {
+    pub currency: String,
+}
+
+// The application's config::register runs first...
+Config::register(BillingConfig { currency: "EUR".into() });
+// ...and the billing crate's defaults change nothing.
+let registered = Config::register_default(BillingConfig { currency: "USD".into() });
+assert!(!registered);
+```
+
+`Config::merge` is Laravel's `mergeConfigFrom`: it merges a map of
+defaults under the registered map of the same type, keeping every key the
+application set and adding the keys only the defaults have. With nothing
+registered it registers the defaults.
+
+```rust
+use std::collections::BTreeMap;
+use suprnova::Config;
+
+Config::register(BTreeMap::from([("disk".to_string(), "s3".to_string())]));
+Config::merge(BTreeMap::from([
+    ("disk".to_string(), "local".to_string()),
+    ("root".to_string(), "storage/app".to_string()),
+]));
+// disk = s3, root = storage/app
+```
+
+`Config::merge` takes `HashMap<String, V>`, `BTreeMap<String, V>` and
+`serde_json::Map<String, Value>`. For a struct of your own, implement
+`MergeConfig`, whose `merge_defaults(&mut self, defaults)` decides which
+fields the defaults fill. Both calls check and write under one lock of the
+registry, so two crates registering at the same time cannot both win.
+
+### Why Suprnova diverges
+
+Laravel's configuration is one tree of arrays, so `mergeConfigFrom`
+merges by key. Suprnova's is a registry of typed values, one per type: the
+merge applies to map-shaped values, and to any type that says how it
+merges through `MergeConfig`. Like Laravel's `array_merge`, the merge is
+shallow: a key the application set keeps its whole value.
+
 ### Wiring registration into your app
 
 The scaffold's `cmd/main.rs` includes a `.config(…)` step in the
@@ -235,7 +306,7 @@ The `Environment` enum covers the standard set:
 | `Local` | `local` |
 | `Development` | `development`, `dev` |
 | `Staging` | `staging`, `stage`, `stg` |
-| `Production` | `production`, `prod` |
+| `Production` | `production`, `prod`, or `APP_ENV` unset |
 | `Testing` | `testing`, `test` |
 | `Custom(String)` | anything else (preserves your casing, used for `.env.<custom>` lookup) |
 
@@ -261,14 +332,15 @@ match Config::environment() {
 
 `is_debug()` returns `true` when `APP_DEBUG=true` is set explicitly,
 or - when `APP_DEBUG` is unset - when the detected environment is
-`Local`, `Development`, or `Testing`. Production, staging, and any
-unrecognised custom environment default to `false`. Keep it off in
+`Local`, `Development`, or `Testing`. Production (an unset `APP_ENV`
+included), staging, and any unrecognised custom environment default to
+`false`. Keep it off in
 production; it controls error-page detail and a few internal defaults.
 
 ### `APP_KEY` is required in non-development
 
 In production (any `APP_ENV` other than `local`/`development`/
-`testing`), Suprnova requires `APP_KEY` to be set to a valid 32-byte
+`testing`, and an unset one), Suprnova requires `APP_KEY` to be set to a valid 32-byte
 URL-safe base64 string. Booting without it fails closed with a
 descriptive error message - there is no silent fallback.
 
@@ -319,7 +391,7 @@ Your app reads more on top.
 | Var | Default | What it does |
 |---|---|---|
 | `APP_NAME` | `"app"` | Logged at boot, used in some default error messages |
-| `APP_ENV` | `local` | Drives `Environment::detect` and `.env.<suffix>` lookup |
+| `APP_ENV` | `production` | Drives `Environment::detect` and `.env.<suffix>` lookup; unset means production and loads no `.env.<suffix>` |
 | `APP_DEBUG` | env-aware (`false` in production) | Verbose error pages + extra logging |
 | `APP_URL` | `http://localhost:8765` | Base URL for absolute URL generation, signed URLs |
 | `APP_KEY` | none (required in prod) | AES-256 key for `Crypt`, sessions, cursors |
@@ -341,7 +413,7 @@ Your app reads more on top.
 | `QUEUE_DRIVER` | `memory` | One of `memory`, `sync`, `null`, `redis`, `database`, `sqs`, `failover`. An unknown value is a boot error in production; elsewhere it logs a warning and uses `memory` |
 | `RATE_LIMIT_DRIVER` | `memory` | One of `memory`, `redis` |
 | `LOG_FORMAT` | env-aware (`pretty` in dev/local, `json` in production) | `pretty` or `json` |
-| `LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`, `trace` |
+| `LOG_LEVEL` | `info` | A `tracing` filter directive; the eight PSR-3 names (`warning`, `notice`, `critical` and the rest) are accepted, and its bare level is the lowest level the file and stream channels keep |
 
 The full audited list lives in [Environment Variables](env-vars.md).
 

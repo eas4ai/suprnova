@@ -11,5 +11,6 @@ mod env_lock;
 mod env_snapshot;
 #[path = "../support/http_wire.rs"]
 mod http_wire;
+pub mod laravel_infra_gaps;
 pub mod logging;
 pub mod request_id_e2e;

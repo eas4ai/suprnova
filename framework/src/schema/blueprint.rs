@@ -72,6 +72,8 @@ pub struct Blueprint {
     foreigns: Vec<ForeignSpec>,
     commands: Vec<Command>,
     faults: Vec<String>,
+    charset: Option<String>,
+    collation: Option<String>,
 }
 
 impl Blueprint {
@@ -82,11 +84,17 @@ impl Blueprint {
             foreigns: Vec::new(),
             commands: Vec::new(),
             faults: Vec::new(),
+            charset: None,
+            collation: None,
         }
     }
 
     /// Previews the same validated CREATE statements a migration executes.
     /// You can check backend types without connecting to that database.
+    ///
+    /// On MySQL the table takes the character set and collation the
+    /// blueprint names, or else the configured ones, as
+    /// [`Schema::create`](super::Schema::create) gives it.
     pub fn create_sql<F>(
         table: &str,
         backend: sea_orm::DbBackend,
@@ -97,7 +105,7 @@ impl Blueprint {
     {
         let mut blueprint = Self::new(table);
         define(&mut blueprint);
-        super::plan::plan_create(&blueprint, backend)
+        super::plan::plan_create(&blueprint, backend, &super::table_encoding(backend))
             .map(|steps| steps.into_iter().map(|step| step.sql(backend)).collect())
     }
 
@@ -121,6 +129,16 @@ impl Blueprint {
     /// they return no `Result`. The plan turns the first one into an error.
     pub(crate) fn faults(&self) -> &[String] {
         &self.faults
+    }
+
+    /// The character set [`Self::charset`] named, if any.
+    pub(crate) fn table_charset(&self) -> Option<&str> {
+        self.charset.as_deref()
+    }
+
+    /// The collation [`Self::collation`] named, if any.
+    pub(crate) fn table_collation(&self) -> Option<&str> {
+        self.collation.as_deref()
     }
 
     pub(crate) fn foreign_mut(&mut self, index: usize) -> Option<&mut ForeignSpec> {
@@ -593,6 +611,35 @@ impl Blueprint {
         self.commands.push(Command::AddPrimary(
             columns.iter().map(|column| (*column).to_owned()).collect(),
         ));
+    }
+
+    /// Gives the table the character set `name` on MySQL and MariaDB, over
+    /// `DB_CHARSET`, as Laravel's `$table->charset`. Postgres and SQLite
+    /// ignore it. It applies to [`Schema::create`](super::Schema::create);
+    /// [`Schema::table`](super::Schema::table) refuses it, since an existing
+    /// table keeps the character set it was created with.
+    ///
+    /// The name reaches the SQL unquoted, so one with anything but letters,
+    /// digits and underscores makes the migration fail.
+    pub fn charset(&mut self, name: &str) {
+        self.charset = Some(name.to_owned());
+    }
+
+    /// Gives the table the collation `name` on MySQL and MariaDB, over
+    /// `DB_COLLATION`, as Laravel's `$table->collation`: `utf8mb4_bin`
+    /// compares text byte by byte, for a column of tokens or case-sensitive
+    /// codes. Otherwise as [`Self::charset`].
+    ///
+    /// ```no_run
+    /// # use suprnova::schema::Blueprint;
+    /// # fn define(t: &mut Blueprint) {
+    /// t.id();
+    /// t.string("token").unique();
+    /// t.collation("utf8mb4_bin");
+    /// # }
+    /// ```
+    pub fn collation(&mut self, name: &str) {
+        self.collation = Some(name.to_owned());
     }
 
     /// Creates a foreign key on `column`, a column the table already has or

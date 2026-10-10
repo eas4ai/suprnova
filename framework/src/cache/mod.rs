@@ -10,7 +10,8 @@
 //!
 //! The cache is automatically initialized when the server starts. The
 //! driver defaults to in-memory; set `CACHE_DRIVER=redis` to bootstrap
-//! against `REDIS_URL`.
+//! on the Redis facade's `cache` connection, or the one
+//! `REDIS_CACHE_CONNECTION` names.
 //!
 //! ```rust,no_run
 //! # async fn ex() -> Result<(), suprnova::FrameworkError> {
@@ -38,11 +39,13 @@
 //! ```
 
 pub mod config;
+mod events;
 pub mod memory;
 pub mod redis;
 pub mod store;
 
 pub use config::{CacheConfig, CacheConfigBuilder, CacheDriver};
+pub use events::{CacheHit, CacheMissed};
 pub use memory::InMemoryCache;
 pub use redis::RedisCache;
 pub use store::{CacheStore, ConditionalIncrement};
@@ -97,10 +100,12 @@ impl Cache {
     /// - [`CacheDriver::Memory`] - bind an `InMemoryCache` derived from
     ///   the prefix and default TTL, swept every
     ///   [`CacheConfig::sweep_interval`] seconds. Always succeeds.
-    /// - [`CacheDriver::Redis`] - connect to `REDIS_URL` and bind the
-    ///   resulting `RedisCache`. **Fails closed** if the URL is
-    ///   unreachable so a misconfigured production deployment never
-    ///   silently downgrades to a per-process cache.
+    /// - [`CacheDriver::Redis`] - build a `RedisCache` on the Redis facade
+    ///   connections [`CacheConfig::connection`] and
+    ///   [`CacheConfig::lock_connection`] name and bind it. **Fails
+    ///   closed** if the command connection cannot answer, so a
+    ///   misconfigured production deployment never silently downgrades to
+    ///   a per-process cache.
     ///
     /// A `dyn CacheStore` the application already bound, in its
     /// `bootstrap_fn` or a test, is kept: an app override always wins.
@@ -133,19 +138,21 @@ impl Cache {
         }
     }
 
-    /// Connect the Redis store the bootstrap binds.
+    /// Connect the Redis store the bootstrap binds, on the facade's named
+    /// connections.
     ///
     /// No silent downgrade - surface the connection failure so operators
-    /// notice misconfiguration at boot.
+    /// notice misconfiguration at boot. The inner error names the
+    /// connection's endpoint, never its URL: `REDIS_URL` routinely carries
+    /// a password, and this message goes to boot logs.
     async fn connect_redis(config: &CacheConfig) -> Result<RedisCache, FrameworkError> {
-        RedisCache::connect(config).await.map_err(|e| {
-            // The endpoint, never the URL: `REDIS_URL` routinely carries a
-            // password, and this message goes to boot logs.
+        RedisCache::connect_named(config).await.map_err(|e| {
             FrameworkError::internal(format!(
-                "Cache::bootstrap: CACHE_DRIVER=redis but Redis is unreachable at \
-                 {endpoint}: {e}. Fix REDIS_URL or set CACHE_DRIVER=memory to use the \
-                 in-memory backend explicitly.",
-                endpoint = config::redis_endpoint(&config.url),
+                "Cache::bootstrap: CACHE_DRIVER=redis but the Redis connection '{connection}' \
+                 is not usable: {e}. Fix the connection (REDIS_URL, REDIS_CACHE_DB, or \
+                 Redis::define in the bootstrap), name another with REDIS_CACHE_CONNECTION, \
+                 or set CACHE_DRIVER=memory to use the in-memory backend explicitly.",
+                connection = config.connection,
             ))
         })
     }
@@ -186,13 +193,41 @@ impl Cache {
         App::has_binding::<dyn CacheStore>()
     }
 
+    /// Run the bound Redis store's later commands on the Redis facade
+    /// connection `name`, as Laravel's `Cache::setConnection` does. Its
+    /// locks stay on the lock connection. Every clone of the store moves,
+    /// since they share it.
+    ///
+    /// # Errors
+    ///
+    /// When the bound store has no Redis connection (the memory store, or
+    /// a store of your own that does not override
+    /// [`CacheStore::set_connection`]), or no connection has the name.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Cache, Redis};
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// Redis::define("reports", "redis://127.0.0.1:6379/5")?;
+    /// Cache::set_connection("reports")?;
+    /// Cache::put("report:today", &42, None).await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn set_connection(name: &str) -> Result<(), FrameworkError> {
+        Self::store()?.set_connection(name)
+    }
+
     // =========================================================================
     // Main cache operations
     // =========================================================================
 
     /// Retrieve an item from the cache
     ///
-    /// Returns `None` if the key doesn't exist or has expired.
+    /// Returns `None` if the key doesn't exist or has expired. Dispatches
+    /// [`CacheHit`], with the stored value, or [`CacheMissed`], as Laravel's
+    /// `Repository::get` does; a listener's failure is logged and never
+    /// fails the read.
     ///
     /// # Example
     ///
@@ -206,12 +241,16 @@ impl Cache {
         let store = Self::store()?;
         match store.get_raw(key).await? {
             Some(json) => {
+                events::hit(store.as_ref(), key, Some(&json)).await;
                 let value = serde_json::from_str(&json).map_err(|e| {
                     FrameworkError::internal(format!("Cache deserialize error: {}", e))
                 })?;
                 Ok(Some(value))
             }
-            None => Ok(None),
+            None => {
+                events::missed(store.as_ref(), key).await;
+                Ok(None)
+            }
         }
     }
 
@@ -269,7 +308,10 @@ impl Cache {
         store.put_raw(key, &json, None).await
     }
 
-    /// Check if a key exists in the cache
+    /// Check if a key exists in the cache. A stored JSON `null` exists.
+    ///
+    /// Dispatches [`CacheHit`], without the value, or [`CacheMissed`], as
+    /// [`Cache::get`] does.
     ///
     /// # Example
     ///
@@ -283,11 +325,18 @@ impl Cache {
     /// ```
     pub async fn has(key: &str) -> Result<bool, FrameworkError> {
         let store = Self::store()?;
-        store.has(key).await
+        let present = store.has(key).await?;
+        if present {
+            events::hit(store.as_ref(), key, None).await;
+        } else {
+            events::missed(store.as_ref(), key).await;
+        }
+        Ok(present)
     }
 
     /// Determine if an item does NOT exist in the cache. Mirror of
-    /// Laravel's `Cache::missing($key)`; semantically `!has(key)`.
+    /// Laravel's `Cache::missing($key)`; semantically `!has(key)`, and
+    /// dispatches what [`Cache::has`] does.
     ///
     /// # Example
     ///
@@ -597,6 +646,62 @@ impl Cache {
         Ok(value)
     }
 
+    /// Get an item, or compute it and store it for the lifetime `ttl`
+    /// reads from the computed value, as Laravel's `remember` takes a
+    /// closure for its lifetime.
+    ///
+    /// For a value that knows how long it is good for, such as a token
+    /// with its own expiry. `ttl` runs only on a miss, after `default`:
+    /// `None` stores the value for the configured default lifetime, as
+    /// [`Cache::remember`]'s `None` does, and `Some(Duration::ZERO)`
+    /// returns the value without storing it, as Laravel stores nothing for
+    /// a lifetime that is not positive. A hit returns the cached value and
+    /// runs neither closure. Inherits `remember`'s non-atomic semantics.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::Cache;
+    /// #[derive(serde::Serialize, serde::Deserialize)]
+    /// struct Token {
+    ///     value: String,
+    ///     expires_in: u64,
+    /// }
+    /// # async fn fetch_token() -> Result<Token, suprnova::FrameworkError> {
+    /// #     Ok(Token { value: String::new(), expires_in: 120 })
+    /// # }
+    /// # async fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// let token: Token = Cache::remember_with_ttl(
+    ///     "api:token",
+    ///     |token: &Token| Some(Duration::from_secs(token.expires_in)),
+    ///     || async { fetch_token().await },
+    /// )
+    /// .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn remember_with_ttl<T, L, F, Fut>(
+        key: &str,
+        ttl: L,
+        default: F,
+    ) -> Result<T, FrameworkError>
+    where
+        T: Serialize + DeserializeOwned,
+        L: FnOnce(&T) -> Option<Duration>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FrameworkError>>,
+    {
+        if let Some(cached) = Self::get::<T>(key).await? {
+            return Ok(cached);
+        }
+        let value = default().await?;
+        match ttl(&value) {
+            Some(lifetime) if lifetime.is_zero() => {}
+            lifetime => Self::put(key, &value, lifetime).await?,
+        }
+        Ok(value)
+    }
+
     /// Store a tagged value via the static facade.
     ///
     /// The value is serialized to JSON and stored under `key`. Every tag in
@@ -771,10 +876,13 @@ mod redis_url_redaction {
     /// carry the whole URL, password included, into boot logs.
     #[tokio::test]
     async fn an_unreachable_redis_error_names_the_endpoint_not_the_credentials() {
+        let name = format!("redaction-{}", uuid::Uuid::new_v4().simple());
+        // Port 1 refuses the connection at once on a local host.
+        crate::redis_facade::Redis::define(&name, "redis://cache-user:s3cret-pw@127.0.0.1:1/2")
+            .unwrap();
         let config = CacheConfig::builder()
             .driver(CacheDriver::Redis)
-            // Port 1 refuses the connection at once on a local host.
-            .url("redis://cache-user:s3cret-pw@127.0.0.1:1/2")
+            .connection(name.clone())
             .build();
         let Err(err) = Cache::connect_redis(&config).await else {
             panic!("nothing listens on port 1, so the connect must fail");

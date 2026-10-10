@@ -48,6 +48,7 @@ impl DbConnection {
         // misconfigured `ConnectOptions` (e.g. a zero-sized pool that
         // immediately starves callers).
         config.validate_pool()?;
+        config.validate_encoding()?;
 
         // For SQLite, ensure the database file can be created
         let url = if config.url.starts_with("sqlite://") {
@@ -118,6 +119,16 @@ impl DbConnection {
         opt.test_before_acquire(config.test_before_acquire);
         if let Some(secs) = config.ping_after_idle {
             opt.test_before_acquire_if_idle_for(Duration::from_secs(secs));
+        }
+        // MySQL and MariaDB: every connection of the pool sends
+        // `SET NAMES <charset> COLLATE <collation>` when it opens, as
+        // Laravel's `MySqlConnector` does, so a string literal compares with
+        // the tables' collation instead of the server's default. The config
+        // already holds the URL's own parameters when it has them.
+        #[cfg(feature = "database-mysql")]
+        if let (Some(charset), Some(collation)) = (config.charset.clone(), config.collation.clone())
+        {
+            opt.map_sqlx_mysql_opts(move |options| options.charset(&charset).collation(&collation));
         }
 
         let conn = Database::connect(opt)

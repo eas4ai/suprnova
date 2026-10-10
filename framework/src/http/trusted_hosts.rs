@@ -51,10 +51,10 @@ use crate::middleware::{Middleware, Next};
 ///
 /// # Environments and proxies
 ///
-/// In the local environment (`APP_ENV=local`, the default when `APP_ENV`
-/// is unset) the middleware trusts every host, as Laravel's does, so a
-/// development server answers on `localhost`, a LAN address and a tunnel
-/// alike. Set `APP_ENV` everywhere else.
+/// In the local environment (`APP_ENV=local`) the middleware trusts every
+/// host, as Laravel's does, so a development server answers on
+/// `localhost`, a LAN address and a tunnel alike. An unset `APP_ENV` is
+/// production, so the hosts are checked there.
 ///
 /// Behind a terminating proxy the host comes from `X-Forwarded-Host` when
 /// the proxy is trusted (see

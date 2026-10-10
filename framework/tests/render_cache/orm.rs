@@ -1518,6 +1518,7 @@ async fn send_payments_webhook(
 
 #[tokio::test]
 async fn payments_webhook_insert_and_update_advance_the_table_generation() {
+    let _env = testing_environment().await;
     suprnova::render_cache::mark_installed();
     let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
         .await
@@ -1691,6 +1692,7 @@ async fn payments_webhook_mirror_scenario(conn: Arc<sea_orm::DatabaseConnection>
 
 #[tokio::test]
 async fn payments_webhook_subscription_insert_and_update_advance_the_mirror_table() {
+    let _env = testing_environment().await;
     suprnova::render_cache::mark_installed();
     let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
         .await
@@ -1738,6 +1740,7 @@ async fn serve_one_payments_connection(
 /// advanced them.
 #[tokio::test]
 async fn a_payment_hydration_canceled_after_its_commit_leaves_its_tables_advanced() {
+    let _env = testing_environment().await;
     suprnova::render_cache::mark_installed();
     let db = TestDatabase::fresh::<PaymentsRenderCacheMigrator>()
         .await
@@ -1862,6 +1865,19 @@ async fn deliver_and_cancel_at(
     );
 }
 
+/// Run as a test process: the mock provider verifies nothing and refuses to
+/// run in production, which an unset `APP_ENV` is. The snapshot restores the
+/// variable before the lock goes.
+async fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 /// A database with the payments and RenderCache schemas, and a mock
 /// provider bound under `provider_name` that knows no subscription, so a
 /// `subscription.created` webhook fails its hydration.
@@ -1901,6 +1917,7 @@ fn failing_webhook(event_id: &str) -> Bytes {
 /// lost its advance.
 #[tokio::test]
 async fn a_webhook_canceled_after_its_receipt_insert_commits_leaves_the_receipt_table_advanced() {
+    let _env = testing_environment().await;
     let provider_name = "render-cache-receipt-insert";
     let (_db, conn) = receipts_fixture(provider_name).await;
     let before = receipts_generation().await;
@@ -1928,6 +1945,7 @@ async fn a_webhook_canceled_after_its_receipt_insert_commits_leaves_the_receipt_
 /// and advance afterwards.
 #[tokio::test]
 async fn a_webhook_canceled_after_its_failure_record_commits_leaves_the_receipt_table_advanced() {
+    let _env = testing_environment().await;
     let provider_name = "render-cache-receipt-failure";
     let (_db, conn) = receipts_fixture(provider_name).await;
     let before = receipts_generation().await;
@@ -1954,6 +1972,7 @@ async fn a_webhook_canceled_after_its_failure_record_commits_leaves_the_receipt_
 /// advanced. The clear used to commit on its own and advance afterwards.
 #[tokio::test]
 async fn a_retry_canceled_after_its_error_clear_commits_leaves_the_receipt_table_advanced() {
+    let _env = testing_environment().await;
     let provider_name = "render-cache-receipt-retry";
     let (_db, conn) = receipts_fixture(provider_name).await;
     let path = format!("/webhooks/payments/{provider_name}");

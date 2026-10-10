@@ -3,6 +3,7 @@
 //! finalize through the component action and the application finalizer.
 
 mod live_support;
+mod test_environment;
 
 use bytes::Bytes;
 use http_body_util::Full;

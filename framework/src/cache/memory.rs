@@ -389,6 +389,10 @@ impl CacheStore for InMemoryCache {
         self.default_ttl
     }
 
+    fn name(&self) -> &str {
+        "memory"
+    }
+
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
         let key = self.prefixed_key(key);
 

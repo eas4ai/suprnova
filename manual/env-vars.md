@@ -44,8 +44,8 @@ becomes relevant as you opt into subsystems.
 | Var | Default | Type | Purpose |
 |---|---|---|---|
 | `APP_NAME` | `"Suprnova Application"` | `String` | Application name. Used as the TOTP issuer (2FA), the HTTP Basic `WWW-Authenticate` realm, mail subject branding, and structured-log fields. |
-| `APP_ENV` | `local` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. |
-| `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
+| `APP_ENV` | `production` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. Unset means production, as in Laravel: debug is off, every production check runs, and no `.env.<suffix>` file loads (`.env.local` still does). The scaffold's `.env` sets `APP_ENV=local`; a deployment that sets nothing runs as production. |
+| `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, an unset `APP_ENV`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
 | `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
 | `APP_KEY` | none - required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
 | `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries - `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
@@ -125,7 +125,7 @@ user.
 | `development` | no |
 | `testing` | no |
 | `staging` | yes - boot exits non-zero with a remediation message |
-| `production` | yes |
+| `production`, or `APP_ENV` unset | yes |
 | `Custom(...)` | yes - anything not in the safe-list is treated as production for this check |
 
 ## Server
@@ -162,6 +162,8 @@ drops idle connections - see [Pool liveness](database.md#pool-liveness).
 | `DB_ACQUIRE_TIMEOUT` | unset (falls back to `DB_CONNECT_TIMEOUT`) | `u64` (seconds) | How long a caller waits for a free pooled connection. Overrides `DB_CONNECT_TIMEOUT` for the checkout wait; set one or the other, not both. Zero is rejected at boot. |
 | `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Ping a pooled connection before handing it out. Leave it on unless you have measured the per-checkout round trip and `DB_PING_AFTER_IDLE` is not enough. |
 | `DB_PING_AFTER_IDLE` | unset | `u64` (seconds) | Ping a pooled connection only after it has been idle this long. Setting it turns `DB_TEST_BEFORE_ACQUIRE` off, so hot connections are handed out untouched. |
+| `DB_CHARSET` | `utf8mb4` | `String` | MySQL and MariaDB only: the character set every connection sends with `SET NAMES`, and the one `Schema::create` gives a new table. A `charset` parameter in the URL wins. Ignored for Postgres and SQLite. See [Character set and collation](database.md#character-set-and-collation). |
+| `DB_COLLATION` | `utf8mb4_unicode_ci` | `String` | MySQL and MariaDB only: the collation every connection sends, and the one `Schema::create` gives a new table, as Laravel's. A `collation` parameter in the URL wins. Tables created before you upgraded keep the server's default collation (`utf8mb4_0900_ai_ci` on MySQL 8), and MySQL refuses to compare string columns of two collations: set this to that default to keep it. Only letters, digits and underscores; anything else fails the connection. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
 
 ## Laravel database
@@ -219,11 +221,23 @@ boots with the framework's embedded English validation catalog.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `CACHE_DRIVER` | `memory` | `String` (`memory`/`in-memory`/`inmemory`, `redis`) | Selects the bootstrap target. Memory keeps everything in-process; Redis requires `REDIS_URL` and fails boot if unreachable. Unknown values fail boot with a clear error. |
-| `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | The `Redis` facade's `default` connection, and the cache's Redis server when `CACHE_DRIVER=redis`. A `rediss://` URL connects over TLS. See [Redis](redis.md). |
-| `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Key prefix for cache entries (collision-avoidance for shared Redis). |
+| `CACHE_DRIVER` | `memory` | `String` (`memory`/`in-memory`/`inmemory`, `redis`) | Selects the bootstrap target. Memory keeps everything in-process; Redis runs on the `Redis` facade's connections below and fails boot if the cache connection cannot answer. Unknown values fail boot with a clear error. |
+| `CACHE_PREFIX` | the slug of `APP_NAME`, then `-cache-` (`suprnova-cache-` without `APP_NAME`) | `String` | Key prefix for cache entries (collision-avoidance for shared Redis). On Redis it comes after the connection's `REDIS_PREFIX`. An empty value means no prefix. |
+| `REDIS_CACHE_CONNECTION` | `cache` | `String` | The `Redis` facade connection the cache store's commands run on with `CACHE_DRIVER=redis`. The `cache` connection reads `REDIS_CACHE_DB`. |
+| `REDIS_CACHE_LOCK_CONNECTION` | `default` | `String` | The `Redis` facade connection the cache store's locks run on. |
+| `REDIS_CACHE_DB` | `1` | `u32` | The database of the `Redis` facade's `cache` connection, applied even when `REDIS_URL` names another. |
+| `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | The `Redis` facade's `default` and `cache` connections, the cache store's server with `CACHE_DRIVER=redis`. A `rediss://` URL connects over TLS. See [Redis](redis.md). |
+| `REDIS_PREFIX` | the slug of `APP_NAME`, then `-database-` | `String` | The `Redis` facade connections' key prefix, which the cache store's keys start with too. An empty value means no prefix. See [Redis](redis.md#key-prefixes). |
 | `CACHE_DEFAULT_TTL` | `3600` (seconds) | `u64` | Default TTL in seconds. `0` means "no expiration". Applied to `Cache::put`, `Cache::remember`, and `Cache::tags_put` called with `None`; `Cache::forever`, `Cache::remember_forever`, and `Cache::tags_forever` always bypass. |
 | `CACHE_SWEEP_INTERVAL` | `60` (seconds) | `u64` | Seconds between sweeps of the in-memory cache, which remove every expired entry, including the ones nothing reads again. `0` turns the sweep off. Redis expires keys itself and ignores this. See [Cache](cache.md#in-memory-expiration). |
+
+An upgraded deployment with `CACHE_DRIVER=redis` finds its cache empty: the
+store used to read `REDIS_PREFIX`, `suprnova_cache:` by default, as its
+cache prefix on the database `REDIS_URL` names, and now runs on the `cache`
+connection's database under `REDIS_PREFIX` and `CACHE_PREFIX`. Set
+`REDIS_CACHE_CONNECTION=default`, an empty `REDIS_PREFIX` and
+`CACHE_PREFIX=suprnova_cache:` (or your old `REDIS_PREFIX`) to keep the old
+keys. See [Cache](cache.md#upgrading-keeps-the-old-keys-only-if-you-ask).
 | `REDIS_COMMAND_RETRIES` | `0` | `u32` | Extra retries for read-shaped Redis commands, on top of the one every read already gets. Applies to the cache, queue, and rate-limit drivers, and to the reads of the `Redis` facade. Writes never retry at any value. Budget it in seconds: a retry against a dropped connection waits for the reconnect, so it costs the driver's whole connect and response budget - up to 3 connect retries at most 500 ms apart, each capped at 2 s, plus a 5 s response timeout on the cache driver; up to 6 connect retries with an uncapped exponential delay, each capped at 1 s, plus a 500 ms response timeout on the queue and rate-limit drivers. The clamp of `10` bounds attempts, not seconds: at that setting one read makes 12 attempts. A timeout counts as transient too, so during a stall each wrapped read issues up to that many commands. An unparseable value falls back to `0`. |
 
 ## Queue
@@ -530,14 +544,14 @@ see [Live](live.md#limits).
 
 ## Logging
 
-`LOG_FORMAT` is **environment-aware**: in production (`APP_ENV=production`)
-the default is `json` for log-aggregator friendliness; everywhere else
-the default is `pretty` for human-readable local/dev output. An
-explicit value always wins.
+`LOG_FORMAT` is **environment-aware**: in production (`APP_ENV=production`,
+or `APP_ENV` unset) the default is `json` for log-aggregator friendliness;
+everywhere else the default is `pretty` for human-readable local/dev
+output. An explicit value always wins.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `LOG_LEVEL` | `"info"` | `String` (`error`, `warn`, `info`, `debug`, `trace` - case-insensitive) | Tracing-subscriber filter level. |
+| `LOG_LEVEL` | `"info"` (filter), `debug` (channels) | `String` (`emergency`, `alert`, `critical`, `error`, `warning`/`warn`, `notice`, `info`, `debug`/`trace` - case-insensitive, with `tracing` target directives) | Tracing-subscriber filter directive, such as `info,sqlx=warn`. A PSR-3 name reads as its nearest `tracing` level: `warning` as `warn`, `notice` as `info`, `critical`, `alert` and `emergency` as `error`. Its bare level (`info` in `info,sqlx=warn`, `debug` when it names none) is also the lowest level the `single`, `daily`, `monthly`, `stderr`, `errorlog` and `syslog` channels keep, as Laravel's. A bare level that is no level fails boot. See [Logging](logging.md#levels). |
 | `LOG_FORMAT` | env-aware (`json` in production, `pretty` elsewhere) | `String` (`json`, `pretty`) | Tracing-subscriber output format. |
 | `LOG_CHANNEL` | `stdout` | `String` | The default log channel: `stdout`, `stderr`, `errorlog`, `single`, `daily`, `monthly`, `syslog`, `null`, `stack`, `custom`, or one the bootstrap defines with `Log::define`. A name that is no channel fails boot. See [Logging](logging.md#channels). |
 | `LOG_CHANNEL_DRIVER` | none - required for `custom` | `String` | The driver the built-in `custom` channel uses. Register it with `Log::extend` in the bootstrap. Missing or unregistered drivers fail boot when the `custom` channel is selected. |
@@ -661,9 +675,12 @@ failure must not panic.
 The loader reads files in this order, each overriding the previous:
 
 1. `.env`
-2. `.env.<environment>` (e.g. `.env.production`, `.env.staging`,
-   `.env.testing`, `.env.<custom>` for `APP_ENV=<custom>`)
-3. Process environment
+2. `.env.local`
+3. `.env.<environment>` (e.g. `.env.production`, `.env.staging`,
+   `.env.testing`, `.env.<custom>` for `APP_ENV=<custom>`), then
+   `.env.<environment>.local`, only when `APP_ENV` is set, in the process
+   or in `.env`
+4. Process environment
 
 That means a containerised production deploy can ship a minimal
 `.env.production` overriding only the keys that differ from `.env`

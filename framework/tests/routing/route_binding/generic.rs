@@ -605,6 +605,7 @@ async fn bind_006_on_a_generic_route_a_child_taken_without_its_parent_is_scoped_
 #[tokio::test]
 async fn bind_006_a_generic_route_handler_the_router_cannot_find_refuses_a_child_without_its_parent()
  {
+    let _env = super::testing_environment_async().await;
     // A generic handler declared inside a function: the router cannot find
     // its arguments by its path, so it cannot tell which parent it binds,
     // and a handler that takes the post alone is refused, never unscoped.
@@ -646,6 +647,7 @@ async fn bind_006_a_generic_route_handler_the_router_cannot_find_refuses_a_child
 
 #[tokio::test]
 async fn bind_007_an_unplanned_handler_reading_a_bound_parameter_raw_is_refused_at_the_request() {
+    let _env = super::testing_environment_async().await;
     // A binder covers `user`, which each handler reads as a raw value: the
     // startup checks would refuse it, so the request answers that refusal.
     let _db = fixture().await;
@@ -678,6 +680,7 @@ async fn bind_007_an_unplanned_handler_reading_a_bound_parameter_raw_is_refused_
 #[tokio::test]
 async fn bind_006_a_parent_the_generic_route_handler_binds_by_its_type_parameter_refuses_a_child_alone()
  {
+    let _env = super::testing_environment_async().await;
     // The route's generic handler binds `user` as `RouteParam<T>`, which
     // its record cannot describe, so the post the `missing()` handler takes
     // alone cannot be scoped: the request answers the refusal.

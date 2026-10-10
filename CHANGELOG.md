@@ -1335,6 +1335,52 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   reads it as Markdown and through `llms.txt`, how to install the Suprnova
   language server, and how to point an assistant at a project.
 
+- **Configuration defaults that never overwrite.** `Config::register_default`
+  registers a value only when none of its type is registered and answers
+  whether it did; `Config::merge` merges a map of defaults under the
+  registered one, the application's keys winning, through `MergeConfig`.
+- **Environment detection that tells unset from named.**
+  `Environment::detect_explicit` answers `None` when `APP_ENV` is unset.
+- **Cache connections by name.** With `CACHE_DRIVER=redis` the store runs its
+  commands on the Redis connection `REDIS_CACHE_CONNECTION` names, `cache`
+  by default, and its locks on `REDIS_CACHE_LOCK_CONNECTION`, `default` by
+  default; `CacheConfigBuilder::connection` and `lock_connection` name them in
+  code, and `RedisCache::connect_named` builds the store on them.
+- **Moving the cache to another connection.** `Cache::set_connection` moves
+  the bound Redis store's later commands to another named connection, and
+  answers an error for a store without one.
+- **Cache hit and miss events.** `Cache::get`, `has` and `missing`, and every
+  read built on them, dispatch `CacheHit` and `CacheMissed` with the store's
+  name and the key; a hit that fetched the value carries it, and its `Debug`
+  output leaves it out.
+- **A lifetime read from the cached value.** `Cache::remember_with_ttl` takes
+  the lifetime of a computed value from a closure over it: `None` stores it for
+  the configured default, `Some(Duration::ZERO)` returns it unstored.
+- **MySQL character set and collation.** On a MySQL or MariaDB URL,
+  `DatabaseConfig` carries `charset` and `collation` from `DB_CHARSET` and
+  `DB_COLLATION` (`utf8mb4` and `utf8mb4_unicode_ci`), a URL parameter winning,
+  and every connection sends them with `SET NAMES`.
+- **Table character set and collation.** `Schema::create` gives a new MySQL
+  table the configured character set and collation, and
+  `Blueprint::charset` and `Blueprint::collation` name its own.
+- **The `Log` facade's level methods.** `Log::emergency` through `Log::debug`,
+  a `*_with` form of each and `Log::log` write to the default channel through
+  `tracing`, and a file or stack channel keeps their own level, `CRITICAL`
+  included.
+- **Logger context.** `Logger::with_context` and `without_context` return a
+  logger whose writes carry a context, and `Logger` has a `*_with` form of
+  every level.
+- **Shared log context.** `Log::share_context` adds a context to every later
+  write of the current request or job, with `Log::shared_context`,
+  `Log::without_context` and `Log::flush_shared_context`.
+- **Log listeners.** Every write that reaches a channel dispatches
+  `MessageLogged`, and `Log::listen` registers a callback for each write.
+- **Placeholders per channel.** `LogChannel::replace_placeholders(false)` keeps
+  a channel's messages as templates, and a stack gives each channel its own
+  form.
+- **Log level names.** `LogLevel::parse` reads the eight PSR-3 names and
+  `warn` and `trace`, and `LOG_LEVEL` accepts the PSR-3 names.
+
 ### Changed
 
 - **Typed factory counts.** `count` and `times` make `make` and `create`
@@ -2239,6 +2285,37 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   directory; it holds overrides of namespaced catalogs.
 - **`#[service(impl = ...)]` parses.** The named form beginning with `impl`
   was refused as a keyword; it now registers the implementation.
+
+- **An unset `APP_ENV` is production.** A deployment that sets no `APP_ENV`
+  now runs every production check: debug is off, `APP_KEY` is required, the
+  SQLite fallback, a mail driver that delivers nothing, plaintext SMTP, the
+  in-memory rate limiter, an unknown queue driver and the mock payment
+  provider are refused, the Inertia shell needs its Vite manifest,
+  `on_one_server` tasks need a shared cache, and `db:seed`,
+  `migrate:fresh` and `suprnova migrate:fresh` ask for `--force`. No
+  `.env.<environment>` file loads for an unset `APP_ENV`; `.env.local` still
+  does. Set `APP_ENV=local` (the scaffold's `.env` does) to keep the old
+  behaviour.
+- **`CacheConfig` gained `connection` and `lock_connection`.** A
+  `CacheConfig` struct literal names both fields, or spreads
+  `..CacheConfig::default()`.
+- **The Redis cache moves to the `cache` connection and `CACHE_PREFIX`.** The
+  store runs on the `cache` connection's database (`REDIS_CACHE_DB`, 1 by
+  default) and its keys are `REDIS_PREFIX`, then `CACHE_PREFIX` (the slug of
+  `APP_NAME` and `-cache-`), then the key; `REDIS_PREFIX` no longer names the
+  cache prefix, and `Cache::flush` deletes only keys under both prefixes. An
+  upgraded deployment finds its Redis cache empty; `REDIS_CACHE_CONNECTION=default`,
+  an empty `REDIS_PREFIX` and `CACHE_PREFIX` set to the old prefix
+  (`suprnova_cache:` by default) keep the old keys.
+- **MySQL tables default to `utf8mb4_unicode_ci`.** Tables created before the
+  upgrade keep the server's default collation, and MySQL refuses to compare
+  string columns of two collations; an application whose tables use the
+  server's default keeps it by setting `DB_COLLATION` to that collation
+  (`utf8mb4_0900_ai_ci` on MySQL 8).
+- **File and stream log channels keep `LOG_LEVEL`'s bare level.** `single`,
+  `daily`, `monthly`, `stderr`, `errorlog` and `syslog` keep only records at
+  or above it, `debug` when it names none, and a bare level that is no level
+  fails the boot.
 
 ### Fixed
 

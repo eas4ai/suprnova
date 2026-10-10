@@ -49,6 +49,8 @@ async fn fresh_store(url: &str, prefix: &str) -> Arc<dyn CacheStore> {
     let cfg = CacheConfig {
         driver: suprnova::cache::CacheDriver::Redis,
         url: url.to_string(),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix: format!("{}{}:", prefix, uuid::Uuid::new_v4()),
         default_ttl: 0,
         sweep_interval: 0,

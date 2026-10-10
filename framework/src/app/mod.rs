@@ -2719,7 +2719,13 @@ mod worker_boot_order_tests {
     #[tokio::test]
     #[serial]
     async fn worker_boot_runs_app_bootstrap_before_the_env_drivers() {
-        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+        // An unset APP_ENV is production, whose mail and rate-limit checks
+        // would refuse the default drivers; these tests name a test process.
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
+            ("QUEUE_DRIVER", "database"),
+            ("QUEUE_DB_TABLE", "jobs"),
+        ]);
 
         let bootstrap: BootstrapFn = Box::new(|| {
             Box::pin(async {
@@ -2758,7 +2764,7 @@ mod worker_boot_order_tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("worker.log");
         let name = "bootstrap-defined-log-channel";
-        let _env = EnvGuard::set(&[("LOG_CHANNEL", name)]);
+        let _env = EnvGuard::set(&[("APP_ENV", "testing"), ("LOG_CHANNEL", name)]);
         let bootstrap: BootstrapFn = Box::new(move || {
             let path = path.clone();
             Box::pin(async move {
@@ -2792,6 +2798,7 @@ mod worker_boot_order_tests {
     async fn worker_boot_registers_the_environment_disks_before_the_queue() {
         let _storage = crate::filesystem::Storage::fake();
         let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
             ("QUEUE_DRIVER", "sqs"),
             (
                 "SQS_PREFIX",
@@ -2904,7 +2911,13 @@ mod worker_boot_order_tests {
         crate::queue::Queue::set_driver(std::sync::Arc::new(
             crate::queue::memory::MemoryQueueDriver::new(),
         ));
-        let _env = EnvGuard::set(&[("QUEUE_DRIVER", "database"), ("QUEUE_DB_TABLE", "jobs")]);
+        // An unset APP_ENV is production, whose mail and rate-limit checks
+        // would refuse the default drivers; these tests name a test process.
+        let _env = EnvGuard::set(&[
+            ("APP_ENV", "testing"),
+            ("QUEUE_DRIVER", "database"),
+            ("QUEUE_DB_TABLE", "jobs"),
+        ]);
         let hook_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ran = std::sync::Arc::clone(&hook_ran);
         let bootstrap: BootstrapFn = Box::new(move || {

@@ -55,6 +55,20 @@ impl MigratorTrait for PaymentsTestMigrator {
 
 type TestHmacSha256 = Hmac<Sha256>;
 
+/// Run as a test process: the mock provider verifies nothing and refuses to
+/// run in production, which an unset `APP_ENV` is. Laravel's `phpunit.xml`
+/// sets `APP_ENV=testing` the same way. The snapshot restores the variable
+/// before the lock goes.
+async fn testing_environment() -> (
+    crate::env_snapshot::EnvSnapshot,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
+    let lock = crate::env_lock::lock_env_async().await;
+    let snapshot = crate::env_snapshot::EnvSnapshot::capture(&["APP_ENV"]);
+    crate::env_snapshot::set_env("APP_ENV", Some("testing"));
+    (snapshot, lock)
+}
+
 const TEST_WEBHOOK_SIGNING_SECRET: &[u8] = b"f05-webhook-signing-secret";
 
 /// Minimal provider that authenticates the regression event with HMAC-SHA256
@@ -315,6 +329,7 @@ async fn sanity_seaorm_update_via_model_into_active_model() {
 /// in `payments_subscription_items`, hydrated from `Subscription::get`.
 #[tokio::test]
 async fn subscription_created_webhook_hydrates_mirror_with_items() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-sub-created";
     let mock = register_mock(provider_name);
 
@@ -405,6 +420,7 @@ async fn subscription_created_webhook_hydrates_mirror_with_items() {
 /// dropped from the provider-side subscription.
 #[tokio::test]
 async fn subscription_updated_webhook_syncs_items_and_removes_stale() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-sub-updated";
     let mock = register_mock(provider_name);
 
@@ -485,6 +501,7 @@ async fn subscription_updated_webhook_syncs_items_and_removes_stale() {
 /// on an existing mirror row.
 #[tokio::test]
 async fn subscription_canceled_webhook_sets_canceled_at_and_status() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-sub-canceled";
     let mock = register_mock(provider_name);
 
@@ -553,6 +570,7 @@ async fn subscription_canceled_webhook_sets_canceled_at_and_status() {
 /// extracted from the payload.
 #[tokio::test]
 async fn payment_succeeded_webhook_hydrates_transaction_mirror() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-payment-ok";
     let _mock = register_mock(provider_name);
 
@@ -612,6 +630,7 @@ async fn payment_succeeded_webhook_hydrates_transaction_mirror() {
 /// path on the transaction table.
 #[tokio::test]
 async fn payment_refunded_webhook_updates_existing_transaction() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-payment-refund";
     let _mock = register_mock(provider_name);
 
@@ -677,6 +696,7 @@ async fn payment_refunded_webhook_updates_existing_transaction() {
 /// insert a new row when no match exists (we don't synthesize `user_id`).
 #[tokio::test]
 async fn customer_updated_webhook_updates_existing_customer_row_only() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-customer";
     let _mock = register_mock(provider_name);
 
@@ -792,6 +812,7 @@ async fn customer_updated_webhook_updates_existing_customer_row_only() {
 /// recovery), `process_error` set on the audit row, no mirror change.
 #[tokio::test]
 async fn subscription_event_missing_id_returns_503_and_records_error() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-bad-sub-id";
     let _mock = register_mock(provider_name);
 
@@ -915,6 +936,7 @@ async fn provider_error_text_containing_duplicate_remains_retryable() {
 /// confirming both return 503 + process_error stays current (no stale data).
 #[tokio::test]
 async fn failed_hydration_retry_keeps_process_error_current() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-retry-failure";
     let _mock = register_mock(provider_name);
 
@@ -961,6 +983,7 @@ async fn failed_hydration_retry_keeps_process_error_current() {
 /// cleared. This is the recovery path that the 503-on-failure design enables.
 #[tokio::test]
 async fn previously_failed_event_recovers_on_retry_when_provider_state_appears() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-recover";
     let mock = register_mock(provider_name);
 
@@ -1055,6 +1078,7 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
 /// produce an audit row and return 200 - hydration is a no-op.
 #[tokio::test]
 async fn unmapped_event_records_audit_row_only() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-unmapped";
     let _mock = register_mock(provider_name);
 
@@ -1103,6 +1127,7 @@ async fn unmapped_event_records_audit_row_only() {
 
 #[tokio::test]
 async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mirror() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-malformed-payment";
     let _mock = register_mock(provider_name);
 
@@ -1331,6 +1356,7 @@ async fn malformed_payment_snapshot_is_retryable_without_corrupting_existing_mir
 
 #[tokio::test]
 async fn customerless_partial_payment_without_existing_mirror_is_retryable() {
+    let _env = testing_environment().await;
     let provider_name: &'static str = "mock-hydration-missing-partial-payment";
     let _mock = register_mock(provider_name);
 

@@ -55,6 +55,79 @@ impl LogLevel {
     pub(crate) fn passes(self, minimum: Option<LogLevel>) -> bool {
         minimum.is_none_or(|minimum| self <= minimum)
     }
+
+    /// The level `name` names: one of the eight PSR-3 names Laravel's
+    /// `config/logging.php` takes (`emergency` to `debug`), or `tracing`'s
+    /// `warn` and `trace`, read as `warning` and `debug`, in any case. It
+    /// reads the bare level of `LOG_LEVEL`, which a channel keeps records
+    /// at or above.
+    ///
+    /// # Errors
+    ///
+    /// When `name` is none of them, as Laravel's `level()` throws
+    /// `Invalid log level.`: a typo would otherwise keep or drop records
+    /// nobody chose.
+    pub fn parse(name: &str) -> Result<Self, FrameworkError> {
+        Ok(match name.trim().to_ascii_lowercase().as_str() {
+            "emergency" => LogLevel::Emergency,
+            "alert" => LogLevel::Alert,
+            "critical" => LogLevel::Critical,
+            "error" => LogLevel::Error,
+            "warning" | "warn" => LogLevel::Warning,
+            "notice" => LogLevel::Notice,
+            "info" => LogLevel::Info,
+            "debug" | "trace" => LogLevel::Debug,
+            _ => {
+                return Err(FrameworkError::internal(format!(
+                    "'{name}' is not a log level: use emergency, alert, critical, error, \
+                     warning, notice, info or debug (warn and trace are read as warning and \
+                     debug)"
+                )));
+            }
+        })
+    }
+
+    /// The lower-case PSR-3 name, as the level field of a `tracing` event
+    /// written through [`Log`](super::Log) carries it.
+    pub(crate) fn psr_name(self) -> &'static str {
+        match self {
+            LogLevel::Emergency => "emergency",
+            LogLevel::Alert => "alert",
+            LogLevel::Critical => "critical",
+            LogLevel::Error => "error",
+            LogLevel::Warning => "warning",
+            LogLevel::Notice => "notice",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+        }
+    }
+
+    /// The level a PSR-3 name in the level field names. Exact, since the
+    /// framework writes the field.
+    pub(crate) fn from_psr_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "emergency" => LogLevel::Emergency,
+            "alert" => LogLevel::Alert,
+            "critical" => LogLevel::Critical,
+            "error" => LogLevel::Error,
+            "warning" => LogLevel::Warning,
+            "notice" => LogLevel::Notice,
+            "info" => LogLevel::Info,
+            "debug" => LogLevel::Debug,
+            _ => return None,
+        })
+    }
+
+    /// The most severe level a `tracing` event at `level` can carry in its
+    /// level field: `ERROR` carries `critical`, `alert` and `emergency`,
+    /// `INFO` carries `notice`.
+    pub(crate) fn most_severe_for(level: tracing::Level) -> Self {
+        match level {
+            tracing::Level::ERROR => LogLevel::Emergency,
+            tracing::Level::INFO => LogLevel::Notice,
+            other => LogLevel::from(other),
+        }
+    }
 }
 
 impl From<tracing::Level> for LogLevel {
@@ -121,6 +194,7 @@ pub struct LogChannel {
     pub(crate) kind: ChannelKind,
     pub(crate) level: Option<LogLevel>,
     pub(crate) options: BTreeMap<String, String>,
+    pub(crate) replace_placeholders: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +225,7 @@ impl LogChannel {
             kind,
             level: None,
             options: BTreeMap::new(),
+            replace_placeholders: true,
         }
     }
 
@@ -222,6 +297,23 @@ impl LogChannel {
     pub fn level(mut self, level: LogLevel) -> Self {
         self.level = Some(level);
         self
+    }
+
+    /// Whether the channel replaces each `{key}` placeholder of a message
+    /// with the context's value under `key`, as Laravel's
+    /// `replace_placeholders`. On by default, as Laravel's shipped channels
+    /// set it; turn it off for a channel whose reader wants the message
+    /// template, such as a log service that groups records by it. A stack
+    /// gives each of its channels the form that channel chose.
+    pub fn replace_placeholders(mut self, on: bool) -> Self {
+        self.replace_placeholders = on;
+        self
+    }
+
+    /// Whether the channel replaces `{key}` placeholders; see
+    /// [`replace_placeholders`](Self::replace_placeholders).
+    pub fn replaces_placeholders(&self) -> bool {
+        self.replace_placeholders
     }
 
     /// How many daily files to keep, counting the one written to; 0 keeps
@@ -323,6 +415,29 @@ mod tests {
         assert!(!LogLevel::Info.passes(Some(LogLevel::Warning)));
         assert!(LogLevel::Debug.passes(None));
         assert_eq!(LogLevel::Warning.severity(), 4);
+    }
+
+    #[test]
+    fn the_most_severe_level_a_tracing_level_carries() {
+        assert_eq!(
+            LogLevel::most_severe_for(tracing::Level::ERROR),
+            LogLevel::Emergency
+        );
+        assert_eq!(
+            LogLevel::most_severe_for(tracing::Level::INFO),
+            LogLevel::Notice
+        );
+        assert_eq!(
+            LogLevel::most_severe_for(tracing::Level::WARN),
+            LogLevel::Warning
+        );
+        assert_eq!(
+            LogLevel::most_severe_for(tracing::Level::TRACE),
+            LogLevel::Debug
+        );
+        for level in [LogLevel::Emergency, LogLevel::Notice, LogLevel::Debug] {
+            assert_eq!(LogLevel::from_psr_name(level.psr_name()), Some(level));
+        }
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //! `Inertia::install` runs inside the bootstrap, so the component
 //! assertions also check `frontend/src/pages/Users/Index.svelte` exists.
 
+mod test_environment;
+
 use std::sync::Arc;
 
 use app::models::users::User;
@@ -73,6 +75,7 @@ async fn app_client() -> TestClient {
     // The stack goes on the process-global registry; once per process, so
     // tests sharing one never stack it twice.
     STACK.get_or_init(|| {
+        test_environment::testing();
         app::bootstrap::register_http_stack();
         app::bootstrap::register_inertia_shared_data();
     });

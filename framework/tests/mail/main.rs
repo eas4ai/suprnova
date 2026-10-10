@@ -6,6 +6,8 @@ pub mod boot;
 pub mod dispatch_validation;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
+#[path = "../support/env_snapshot.rs"]
+mod env_snapshot;
 pub mod fake;
 pub mod file_transport;
 pub mod in_memory;

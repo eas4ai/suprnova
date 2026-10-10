@@ -700,6 +700,8 @@ async fn redis_synchronously_blocked_body_reports_unfenced_after_takeover() {
         url: std::env::var("CACHE_REDIS_TEST_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned()),
+        connection: "cache".into(),
+        lock_connection: "default".into(),
         prefix: format!("idem-final-proof:{}:", uuid::Uuid::new_v4()),
         default_ttl: 0,
         sweep_interval: 0,

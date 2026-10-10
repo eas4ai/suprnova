@@ -22,7 +22,7 @@ names another (see [Channels](#channels)). On `stdout`, two formats:
 | Where | Format | When |
 |---|---|---|
 | `stdout` | `LogFormat::Pretty` - multi-line, coloured, human-friendly | dev (`APP_ENV` is `local`, `dev`, `testing`, …) |
-| `stdout` | `LogFormat::Json` - one JSON object per line | production (`APP_ENV=production` / `prod`) |
+| `stdout` | `LogFormat::Json` - one JSON object per line | production (`APP_ENV=production` / `prod`, or `APP_ENV` unset) |
 
 The dev/prod default is computed from `APP_ENV` via
 `Environment::detect()`. Override with `LOG_FORMAT=pretty` or
@@ -104,6 +104,25 @@ its value, and the context is written beside the message. A channel
 own, and a default stack that names `stdout` more than once writes an event
 there when any of those channels keeps its level.
 
+The built-in `single`, `daily`, `monthly`, `stderr`, `errorlog` and
+`syslog` channels keep the records at or above the bare level of
+`LOG_LEVEL` (see [Log levels](#log-levels)), `debug` when it names none,
+as Laravel's channels take `env('LOG_LEVEL', 'debug')`. With
+`LOG_LEVEL=error`, `Log::channel("errorlog")?.debug(..)` writes nothing.
+
+A channel replaces each `{key}` placeholder with the context's value unless
+you turn it off with `.replace_placeholders(false)`, for a reader that wants
+the message template, such as a log service that groups records by it. A
+stack gives each of its channels the form that channel chose:
+
+```rust
+Log::define("app", LogChannel::daily("storage/logs/app.log"));
+Log::define("events", LogChannel::monthly("storage/logs/events.log").replace_placeholders(false));
+
+// app.log gets "user 7 signed in", events.log gets "user {id} signed in".
+Log::stack(&["app", "events"])?.info_with("user {id} signed in", json!({ "id": 7 }));
+```
+
 A stack writes each record to every channel it lists, and a channel that
 cannot write, such as a file it cannot open, stops none of the others;
 the failure is reported once on stderr, and the code that logged never
@@ -155,6 +174,86 @@ out at once, the rest within a second, and everything on `Log::flush()`,
 which the server, the workers and every console command call when they
 end. A record written before a clean exit is never lost. A driver added
 with `Log::extend` is flushed with the files.
+
+## Writing through `Log`
+
+`Log` has Laravel's level methods, which write to the default channel:
+`Log::emergency`, `alert`, `critical`, `error`, `warning`, `notice`,
+`info` and `debug`, a `*_with` form of each that takes a JSON context, and
+`Log::log(level, message, context)`.
+
+```rust
+use serde_json::json;
+use suprnova::{Log, LogLevel};
+
+Log::critical("disk full");
+Log::warning_with("payment {id} retried", json!({ "id": 7 }));
+Log::log(LogLevel::Notice, "cache warmed", json!({ "keys": 120 }));
+```
+
+Each write is a `tracing` event, so `LOG_LEVEL` filters it and the
+request's span stamps it as it does a `tracing` macro's. It keeps its own
+level in a file or stack channel's record: `Log::critical` writes
+`CRITICAL`, where `tracing` alone knows only `ERROR`. On standard output,
+`tracing`'s formatter shows the `tracing` level with the PSR-3 level and
+the context as the `suprnova.level` and `suprnova.context` fields.
+
+### Context on every line
+
+`Logger::with_context` returns a logger whose writes carry a context under
+each call's own; `without_context` drops keys from it, or all of them:
+
+```rust
+let tenant = Log::channel("audit")?.with_context(json!({ "tenant": "acme" }));
+tenant.info("export started");               // tenant=acme
+tenant.info_with("export done", json!({ "rows": 1200 }));
+let plain = tenant.without_context(Some(&["tenant"]));
+```
+
+`Log::share_context` adds a context to every later write of the current
+request or queued job, on every channel, as Laravel's `shareContext` does:
+
+```rust
+// In a middleware, once the user is known.
+Log::share_context(json!({ "user_id": 42 }));
+```
+
+The context lives in the request's [`Context`](context.md) scope, so one
+request's context never reaches the lines of another running at the same
+time, and outside a scope it shares nothing. `Log::shared_context()` reads
+it, `Log::without_context(Some(&["user_id"]))` drops keys, and
+`Log::flush_shared_context()` drops it all. A job the request dispatches
+starts without it. A write carries the shared context, then the logger's,
+then the call's own, a later key winning. On standard output a `tracing`
+macro's line shows only its own fields, since `tracing`'s formatter writes
+it; every other channel and every `Log` write carries the shared context.
+
+### Listening to writes
+
+Every write that reaches a channel, the `null` channel included, is
+reported once as a `MessageLogged` event with its level, its message (with
+its placeholders) and its context, as Laravel's `Logger` dispatches it.
+`Log::listen` adds a callback that runs on the writing thread before the
+write returns:
+
+```rust
+use suprnova::{Log, LogLevel, MessageLogged};
+
+Log::listen(|event: &MessageLogged| {
+    if event.level <= LogLevel::Error {
+        // count it, forward it, keep it for the request's profile
+    }
+});
+```
+
+A listener added with `EventFacade::listen::<MessageLogged, _>` runs on a
+task spawned on the current runtime, since logging is synchronous and the
+dispatcher is not; outside a runtime only the callbacks hear the write.
+Under `EventFacade::fake()` the write is recorded before it returns. A
+callback that panics or a listener that fails never fails the write, and
+the lines the dispatcher and the listeners log while a `MessageLogged` is
+being reported are not reported again. When nothing listens, a write
+builds no event.
 
 ## Emitting events
 
@@ -224,17 +323,26 @@ Find a target by reading the JSON log line - the `target` field on
 every event is its filter key.
 
 Levels in increasing verbosity: `error` < `warn` < `info` (default) <
-`debug` < `trace`. The wire-format error response is always sanitised
+`debug` < `trace`. Laravel's PSR-3 names work too, each read as its
+nearest `tracing` level: `warning` as `warn`, `notice` as `info`, and
+`critical`, `alert` and `emergency` as `error`, so `LOG_LEVEL=warning`
+keeps errors and warnings.
+
+The bare level, `info` in `info,sqlx=warn`, is also the lowest level the
+built-in file and stream channels keep (see [Channels](#channels)), so
+`LOG_LEVEL=notice` keeps `Log::notice` and drops `info` there. A bare level
+that is none of the eight PSR-3 names, `warn` or `trace` stops the boot
+with an error that names it, as Laravel's refuses one. The wire-format error response is always sanitised
 to `{"message": "Internal Server Error"}` regardless of level - the
 detail goes only to the structured log.
 
-### Invalid directives don't crash boot
+### Invalid target directives don't crash boot
 
-A malformed `LOG_LEVEL` (e.g. `LOG_LEVEL=app=notalevel`) falls back to
-`"info"` and writes a one-line warning to `stderr`:
+A malformed target directive (e.g. `LOG_LEVEL=info,app=notalevel`) falls
+back to `"info"` and writes a one-line warning to `stderr`:
 
 ```text
-suprnova: invalid LOG_LEVEL directive "app=notalevel" (...); falling back to "info". Fix LOG_LEVEL to silence this.
+suprnova: invalid LOG_LEVEL directive "info,app=notalevel" (...); falling back to "info". Fix LOG_LEVEL to silence this.
 ```
 
 This is `stderr` rather than `tracing::warn!` because the subscriber
@@ -424,12 +532,19 @@ task-local spans: no plumbing, fields stay typed, and correlation is
 automatic because the request span is in scope for every event the
 chain emits.
 
-Laravel's channels are here as `Log`, with three differences. The
+Laravel's channels are here as `Log`, with these differences. The
 default channel is `stdout`, not a stack of files, because a container's
-runtime keeps its logs. Channels are configured from the environment and
-`Log::define` in the bootstrap, not a config file. And file channels
-buffer, flushing at once for errors, within a second otherwise, and on
-shutdown, where Monolog writes each record straight through.
+runtime keeps its logs, and it keeps every level the `LOG_LEVEL` filter
+lets through, so a target directive more verbose than the bare level still
+reaches it. Channels are configured from the environment and
+`Log::define` in the bootstrap, not a config file. File channels buffer,
+flushing at once for errors, within a second otherwise, and on shutdown,
+where Monolog writes each record straight through. `Log::info` and the
+other level methods write through `tracing`, so standard output shows
+`tracing`'s level beside the PSR-3 one. Shared context belongs to the
+request's or job's `Context` scope rather than the process, for the reason
+above. And `MessageLogged` reaches the event dispatcher on a spawned task,
+because a write cannot wait for an async listener.
 
 ## Next
 
