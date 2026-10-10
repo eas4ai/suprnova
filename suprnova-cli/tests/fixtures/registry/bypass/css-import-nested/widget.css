@@ -1,2 +1,0 @@
-.evil-widget { color: red; }
-@media screen { @import "/x.css"; } /* refused: css-import */
