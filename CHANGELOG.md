@@ -65,6 +65,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   and the SQL `with` and `with_count` load them with one query per relation,
   dotted paths cross the stores, and a relation whose key types cannot match
   fails the build naming both models.
+- **Concurrent tasks.** The `Concurrency` facade runs `#[concurrent_task]`
+  functions (an `async fn` with serde input and output, registered by name)
+  side by side: `run` answers each `TaskResult` in order, `run_named` answers
+  them by key, `with_timeout` ends a task that outlives it with an error
+  naming it, and `driver` picks a driver for one call. The `tokio` driver
+  (the default), the `process` driver (each task in a console process through
+  the hidden `concurrency:run` command) and the `sync` driver implement
+  `ConcurrencyDriver`; `CONCURRENCY_DRIVER` selects the default, and
+  `Concurrency::extend` adds a driver.
+- **Deferred concurrent tasks.** `Concurrency::defer` returns at once and runs
+  its tasks after the response has been sent, logging a failed task without
+  touching the response; outside a request the returned handle runs them when
+  it is awaited or dropped.
 - **A guard in use per request.** `TestClient::acting_as_with_guard` selects
   the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
   auth middleware without a guard name answer through for that request, as

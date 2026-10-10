@@ -563,6 +563,14 @@ name = "mongodb"
 path = "tests/mongodb/main.rs"
 required-features = ["database-mongodb"]
 
+# The Concurrency facade's tests (PAR-189, PAR-190). The binary is also the
+# console the process driver starts in them: its `child::entry` test runs
+# `concurrency:run` when the driver passes it, so the tasks the tests
+# register here are the ones the console process finds.
+[[test]]
+name = "concurrency"
+path = "tests/concurrency/main.rs"
+
 [[test]]
 name = "container_boot_returns_err_on_missing_dep"
 path = "tests/container/boot_returns_err_on_missing_dep.rs"

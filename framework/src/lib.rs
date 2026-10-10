@@ -49,6 +49,7 @@ pub mod broadcasting;
 pub mod bus;
 pub mod cache;
 pub mod clock;
+pub mod concurrency;
 pub mod config;
 pub mod console;
 pub mod container;
@@ -327,6 +328,13 @@ pub use broadcasting::{
 pub use bus::testing::{dispatched, dispatched_after_response, dispatched_sync};
 pub use bus::{AfterResponseIo, after_response_connection};
 pub use bus::{Bus, Dispatched};
+// The concurrency facade. Its `Task` and `TaskResult` stay at
+// `suprnova::concurrency::{Task, TaskResult}`: the crate root's `Task` and
+// `TaskResult` are the scheduler's.
+pub use concurrency::{
+    Concurrency, ConcurrencyDriver, ConcurrentTask, ConcurrentTaskEntry, DeferredTasks,
+    PendingConcurrency, ProcessConcurrencyDriver, SyncConcurrencyDriver, TokioConcurrencyDriver,
+};
 pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two_column_detail};
 pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
 pub use error::{
@@ -838,6 +846,7 @@ pub use suprnova_macros::LiveComponent;
 pub use suprnova_macros::accessor;
 pub use suprnova_macros::authorize;
 pub use suprnova_macros::command;
+pub use suprnova_macros::concurrent_task;
 pub use suprnova_macros::domain_error;
 pub use suprnova_macros::handler;
 pub use suprnova_macros::inertia_response;
