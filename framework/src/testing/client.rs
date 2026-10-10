@@ -19,11 +19,19 @@
 //! the request arrived on, `/users`. The client keeps the root each request
 //! was served under, and a reload of the page sends the page's url without
 //! it, so the reload reaches the route the first visit did.
+//!
+//! A client can carry default headers ([`TestClient::with_header`]) and
+//! act as a signed-in user ([`TestClient::acting_as`]), as Laravel's
+//! `withHeaders` and `actingAs` do. The user is set on the guard at the
+//! start of each request, through a middleware the client puts in front
+//! of the registry's own, so every middleware and handler downstream sees
+//! it.
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -33,8 +41,13 @@ use serde::Serialize;
 
 use super::inertia::{ReloadRequest, Reloader};
 use super::response::TestResponse;
+use crate::auth::{AuthManager, Authenticatable};
+use crate::middleware::{Middleware, Next};
 use crate::routing::root::FORWARDED_PREFIX_HEADER;
-use crate::{ErrorReport, Method, MiddlewareRegistry, Router, SessionStore};
+use crate::{
+    App, Auth, ErrorReport, FrameworkError, Method, MiddlewareRegistry, Request, Response, Router,
+    SessionStore,
+};
 
 /// How long one request may take before [`TestRequest::send`] gives up on
 /// it. A request that never answers is a hung test otherwise, with nothing
@@ -64,7 +77,10 @@ const INERTIA_ACCEPT: &str = "text/html, application/xhtml+xml";
 /// ```
 ///
 /// A clone shares the original's router, registry and cookies, so a
-/// request sent through either continues the same session.
+/// request sent through either continues the same session. Default headers
+/// and the user it acts as belong to each client value: a builder call
+/// returns a client that carries them, and leaves the client it was called
+/// on as it was.
 #[derive(Clone)]
 pub struct TestClient {
     router: Arc<Router>,
@@ -72,6 +88,10 @@ pub struct TestClient {
     session: Option<(Arc<dyn SessionStore>, String)>,
     cookies: Arc<Mutex<Vec<(String, String)>>>,
     timeout: Duration,
+    /// The headers every request this client builds starts with.
+    default_headers: Vec<(String, String)>,
+    /// The user every request this client sends is signed in as.
+    acting_as: Option<ActingAs>,
 }
 
 impl TestClient {
@@ -87,6 +107,8 @@ impl TestClient {
             session: None,
             cookies: Arc::new(Mutex::new(Vec::new())),
             timeout: DEFAULT_TIMEOUT,
+            default_headers: Vec::new(),
+            acting_as: None,
         }
     }
 
@@ -111,6 +133,91 @@ impl TestClient {
     /// debug build.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Send `name: value` on every request this client builds from now on,
+    /// as Laravel's `withHeader` does, so a header every request of a test
+    /// needs, such as an API version or a tenant, is set once. A request
+    /// that sets the same header with [`TestRequest::header`] sends its own
+    /// value instead. A later call with the same name, compared without
+    /// case, replaces the value.
+    ///
+    /// The header is checked when a request is built: an invalid name or
+    /// value makes [`TestRequest::send`] panic naming the method and path.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        set_header(&mut self.default_headers, name.into(), value.into());
+        self
+    }
+
+    /// [`Self::with_header`] for each `(name, value)` pair, in order, as
+    /// Laravel's `withHeaders` does. Takes an array of pairs, a `Vec` or a
+    /// map.
+    pub fn with_headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        for (name, value) in headers {
+            set_header(&mut self.default_headers, name.into(), value.into());
+        }
+        self
+    }
+
+    /// Clear every header set with [`Self::with_header`] or
+    /// [`Self::with_headers`], as Laravel's `flushHeaders` does. Requests
+    /// built afterwards carry only their own headers; a request built
+    /// before keeps the headers it started with.
+    pub fn flush_headers(&mut self) -> &mut Self {
+        self.default_headers.clear();
+        self
+    }
+
+    /// Make `user` the authenticated user of every request this client
+    /// sends from now on, through the default guard, as Laravel's
+    /// `actingAs($user)` does. A route behind
+    /// [`AuthMiddleware`](crate::AuthMiddleware) answers as it does for a
+    /// signed-in user, and [`Auth::user`] in its handler is `user`.
+    ///
+    /// Each request sets `user` on the guard ([`Guard::set_user`](crate::Guard::set_user))
+    /// before any middleware runs, so the test writes no middleware and
+    /// needs no session or provider lookup. Nothing is written to the
+    /// session. Pass a user by reference, a model or an
+    /// `Arc<dyn Authenticatable>` ([`ActingUser`]); a later call replaces
+    /// the user.
+    ///
+    /// The guard's failures are reported as
+    /// [`Self::acting_as_with_guard`] reports them.
+    pub fn acting_as<U: ActingUser>(mut self, user: &U) -> Self {
+        self.acting_as = Some(ActingAs {
+            user: user.acting_user(),
+            guard: None,
+        });
+        self
+    }
+
+    /// [`Self::acting_as`] through the guard named `guard`, as Laravel's
+    /// `actingAs($user, $guard)` does: a route behind
+    /// `AuthMiddleware::new().for_guard(guard)` answers as the user, and
+    /// `Auth::guard(guard)` reports the user. The default guard gets no
+    /// user unless `guard` is its name.
+    ///
+    /// A guard the application did not register fails every request with
+    /// an error naming it before any middleware or handler runs, so the
+    /// user is signed in nowhere: the response is a `500` whose
+    /// [`TestResponse::error_report`] names the guard and says why. The
+    /// guard is looked up when the request runs, so an `AuthManager` the
+    /// test registers after building the client is the one used.
+    pub fn acting_as_with_guard<U: ActingUser>(
+        mut self,
+        user: &U,
+        guard: impl Into<String>,
+    ) -> Self {
+        self.acting_as = Some(ActingAs {
+            user: user.acting_user(),
+            guard: Some(guard.into()),
+        });
         self
     }
 
@@ -139,14 +246,35 @@ impl TestClient {
         self.send(Method::DELETE, path)
     }
 
+    /// Start a `QUERY` request to `path` with `body` serialized as JSON, as
+    /// Laravel's `queryJson` does: `Content-Type: application/json` and
+    /// `Accept: application/json`, which win over the client's default
+    /// headers. A `QUERY` request carries a read query in its body; a
+    /// `query!` route answers it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `body` fails to serialize, as [`TestRequest::json`]
+    /// does.
+    pub fn query_json<T: Serialize + ?Sized>(
+        &self,
+        path: impl Into<String>,
+        body: &T,
+    ) -> TestRequest {
+        self.send(crate::routing::query_method(), path)
+            .json(body)
+            .header("Accept", "application/json")
+    }
+
     /// Start a request with any `method`, for the ones without their own
     /// method here (`OPTIONS`, `HEAD`). Laravel's `call($method, $uri)`.
+    /// The request starts with the client's default headers.
     pub fn send(&self, method: Method, path: impl Into<String>) -> TestRequest {
         TestRequest {
             client: self.clone(),
             method,
             path: path.into(),
-            headers: Vec::new(),
+            headers: self.default_headers.clone(),
             body: Bytes::new(),
         }
     }
@@ -207,6 +335,23 @@ impl TestClient {
         }
     }
 
+    /// The registry a request is served through: the client's own, with
+    /// the [`ActingAs`] sign-in in front of it when the client acts as a
+    /// user, so the user is set before any middleware asks for one.
+    fn request_registry(&self) -> Arc<MiddlewareRegistry> {
+        let Some(acting_as) = &self.acting_as else {
+            return self.registry.clone();
+        };
+        let registry = self
+            .registry
+            .global_middleware()
+            .iter()
+            .cloned()
+            .fold(MiddlewareRegistry::new(), MiddlewareRegistry::append_boxed)
+            .prepend(acting_as.clone());
+        Arc::new(registry)
+    }
+
     /// Send `request` over a fresh in-memory connection and read the whole
     /// response, with the error report the framework attached to it and
     /// the public root the request was served under.
@@ -224,7 +369,7 @@ impl TestClient {
         let root: Arc<Mutex<Option<Arc<str>>>> = Arc::default();
         let service = {
             let router = self.router.clone();
-            let registry = self.registry.clone();
+            let registry = self.request_registry();
             let report = report.clone();
             let root = root.clone();
             service_fn(move |req: hyper::Request<Incoming>| {
@@ -286,6 +431,93 @@ impl TestClient {
             report,
             root,
         })
+    }
+}
+
+/// A user a [`TestClient`] can act as ([`TestClient::acting_as`]). The
+/// guards take `Arc<dyn Authenticatable>`; this lets a test pass `&user`
+/// whichever form it holds: any [`Authenticatable`] value that is `Clone`,
+/// such as a model, is cloned into the request, and an
+/// `Arc<dyn Authenticatable>` or `Arc<U>` is shared.
+pub trait ActingUser {
+    /// The user as the guards take it.
+    fn acting_user(&self) -> Arc<dyn Authenticatable>;
+}
+
+impl<U: Authenticatable + Clone> ActingUser for U {
+    fn acting_user(&self) -> Arc<dyn Authenticatable> {
+        Arc::new(self.clone())
+    }
+}
+
+impl ActingUser for Arc<dyn Authenticatable> {
+    fn acting_user(&self) -> Arc<dyn Authenticatable> {
+        Arc::clone(self)
+    }
+}
+
+impl<U: Authenticatable> ActingUser for Arc<U> {
+    fn acting_user(&self) -> Arc<dyn Authenticatable> {
+        self.clone()
+    }
+}
+
+/// The user a client acts as, and the guard it signs them into: `None`
+/// for the default guard. As a middleware, it sets the user on that guard
+/// for the request being served, inside the request's auth scope, which
+/// is where every guard keeps the user of a request.
+#[derive(Clone)]
+struct ActingAs {
+    user: Arc<dyn Authenticatable>,
+    guard: Option<String>,
+}
+
+impl ActingAs {
+    /// Set the user on the guard, as Laravel's `actingAs` calls
+    /// `setUser` on it. Without an [`AuthManager`] the only guard is the
+    /// default one, which [`Auth::set_user`] serves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the guard when it is not registered, or
+    /// when the manager cannot build it (its provider is not registered).
+    async fn sign_in(&self) -> Result<(), FrameworkError> {
+        let user = self.user.clone();
+        let Some(manager) = App::get::<AuthManager>() else {
+            let default = Auth::default_guard_name();
+            return match self.guard.as_deref() {
+                Some(name) if name != default => Err(FrameworkError::internal(format!(
+                    "TestClient cannot sign the user in through the guard '{name}': no \
+                     AuthManager is registered, so the only guard is the default guard \
+                     '{default}'. Register one with \
+                     App::singleton(AuthManager::new(AuthConfig::from_env()))."
+                ))),
+                _ => {
+                    Auth::set_user(user);
+                    Ok(())
+                }
+            };
+        };
+        let name = match &self.guard {
+            Some(name) => name.clone(),
+            None => manager.default_guard_name().to_owned(),
+        };
+        let guard = manager.guard(&name).map_err(|e| {
+            FrameworkError::from_external_with(
+                format!("TestClient cannot sign the user in through the guard '{name}'"),
+                e,
+            )
+        })?;
+        guard.set_user(user).await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Middleware for ActingAs {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        self.sign_in().await?;
+        next(request).await
     }
 }
 
@@ -356,11 +588,11 @@ impl TestRequest {
     /// Set a request header, replacing one of the same name (compared
     /// without case) set before, so a later call overrides what
     /// [`Self::inertia`] or [`Self::json`] put there.
+    ///
+    /// A header the client sends by default
+    /// ([`TestClient::with_header`]) is replaced the same way.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        let name = name.into();
-        self.headers
-            .retain(|(held, _)| !held.eq_ignore_ascii_case(&name));
-        self.headers.push((name, value.into()));
+        set_header(&mut self.headers, name.into(), value.into());
         self
     }
 
@@ -475,6 +707,13 @@ impl TestRequest {
         }
         response
     }
+}
+
+/// Set `name: value` in `headers`, replacing a header of the same name
+/// (compared without case), so one name is sent once.
+fn set_header(headers: &mut Vec<(String, String)>, name: String, value: String) {
+    headers.retain(|(held, _)| !held.eq_ignore_ascii_case(&name));
+    headers.push((name, value));
 }
 
 /// The hyper request for `method` and `path`: the caller's headers,

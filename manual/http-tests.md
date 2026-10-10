@@ -123,6 +123,108 @@ call its bootstrap's middleware registration, then pass
 `MiddlewareRegistry::from_global()`. The dogfood app's
 `app/tests/inertia_test_client.rs` does exactly that.
 
+### Default headers
+
+When every request of a test needs the same header, such as an API
+version or a tenant, set it once on the client. `with_header(name,
+value)` and `with_headers(pairs)` return a client that sends those
+headers on every request it builds afterwards, as Laravel's
+`withHeaders` does. A header you set on one request with `header`
+replaces the client's value for that request only. `flush_headers()`
+clears the defaults, as Laravel's `flushHeaders` does:
+
+```rust
+let mut client = TestClient::new(router, MiddlewareRegistry::new())
+    .with_headers([("X-Api-Version", "2"), ("X-Tenant", "acme")]);
+
+client.get("/invoices").send().await.assert_ok();
+
+// This request sends version 3; the next one sends 2 again.
+client.get("/invoices").header("X-Api-Version", "3").send().await.assert_ok();
+
+client.flush_headers();
+client.get("/invoices").send().await.assert_status(400);
+```
+
+Header names compare without case, so `with_header("x-tenant", ...)`
+replaces `X-Tenant`. A request you built before a change keeps the
+headers it started with.
+
+### `QUERY` requests
+
+`query_json(path, &body)` starts a `QUERY` request with `body` as JSON,
+`Content-Type: application/json` and `Accept: application/json`, as
+Laravel's `queryJson` does. A `query!` route answers it. The two JSON
+headers win over the client's defaults, and a `header` call on the
+request wins over both:
+
+```rust
+client
+    .query_json("/search", &json!({ "q": "laravel" }))
+    .send()
+    .await
+    .assert_ok()
+    .assert_json(json!({ "total": 1 }));
+```
+
+### Acting as a user
+
+`acting_as(&user)` returns a client whose every request is signed in as
+`user` through the default guard, as Laravel's `actingAs($user)` does. A
+route behind `AuthMiddleware` answers as it does for a signed-in user,
+and `Auth::user()` in its handler is `user`. You write no middleware,
+and the user needs no session or provider lookup:
+
+```rust
+use suprnova::testing::TestClient;
+use suprnova::{AuthMiddleware, MiddlewareRegistry, Router};
+
+let router = Router::new()
+    .get("/dashboard", dashboard)
+    .middleware(AuthMiddleware::redirect_to("/login"));
+let guest = TestClient::new(router, MiddlewareRegistry::new());
+
+guest.get("/dashboard").send().await.assert_redirect(Some("/login"));
+
+let user = User::find_or_fail(1).await?;
+let client = guest.clone().acting_as(&user);
+client.get("/dashboard").send().await.assert_ok();
+```
+
+Each request sets the user on the guard (`Guard::set_user`) before any
+middleware runs, so every middleware and the handler see it. Nothing is
+written to the session. Pass the user by reference: a model or any
+other `Authenticatable` that is `Clone` is cloned, and an
+`Arc<dyn Authenticatable>` is shared (the `ActingUser` trait). Call
+`acting_as` again to switch users.
+
+`acting_as_with_guard(&user, "api")` signs the user in through the named
+guard instead, as `actingAs($user, 'api')` does. A route behind
+`AuthMiddleware::new().for_guard("api")` answers as the user, and
+`Auth::guard("api")` reports the user. The default guard gets no user
+unless you name it. A token guard also reports the user's id through
+`Auth::id()`, as it does for a request that sent a valid bearer token.
+
+The client looks the guard up when a request runs, so an `AuthManager`
+the test registers after building the client is the one it uses. A
+guard the application did not register fails every request before any
+middleware or handler runs, so the user is signed in nowhere. The
+response is a `500`, and its error report names the guard:
+
+```text
+assert_ok()
+  Expected: 200
+  Received: 500
+  body: ...
+  error report:
+    TestClient cannot sign the user in through the guard 'apu'
+    caused by: Internal server error: Auth guard 'apu' is not defined. ...
+```
+
+Without an `AuthManager` the only guard is the default one,
+`Auth::set_user` signs the user in, and any other guard name fails the
+same way.
+
 ### Why Suprnova diverges
 
 Laravel's test client hands the request object to the kernel in the
@@ -131,6 +233,21 @@ which only a hyper connection produces, so the client still speaks
 HTTP/1.1, over memory instead of a socket. A request is a builder you
 finish with `.send().await` rather than a call that takes the headers as
 arguments, because it is asynchronous.
+
+`with_header`, `with_headers` and `acting_as` return a new client rather
+than change the one you call them on, as the client's other builder
+calls do. Laravel keeps both on the test case. Clone the client first
+when you still need it without them. `flush_headers` changes the client
+in place, so it takes `&mut self`.
+
+Laravel's `actingAs($user, 'api')` also makes `api` the default guard
+for the rest of the test (`shouldUse`), so `Auth::user()` answers through
+it. Suprnova signs the user in through the named guard only:
+`Auth::user()` keeps asking the default guard, and the user stays out of
+it. A test that names a guard then proves that the route checks that
+guard. Laravel throws for an undefined guard when `actingAs` runs;
+Suprnova fails the request instead, because the guard registry belongs
+to the container the request runs in.
 
 ## The hyper body problem
 
@@ -391,13 +508,23 @@ collect into), a `Vec<(String, String)>`, or `HeaderMap::iter()` mapped
 to owned strings - so no harness has to change how it drives a request.
 
 Every assertion returns `&Self`, so they chain: `assert_status`,
-`assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json`
+`assert_ok`, `assert_no_content`, `assert_no_content_status(status)`,
+`assert_redirect(target: Option<&str>)`, `assert_json`
 (subset match - extra keys in the body are fine), `assert_json_path`
 (dot notation, a numeric segment indexes an array), `assert_json_count`,
 `assert_see`, `assert_header`, `assert_cookie`. Assertion failures
 panic with an expected/actual excerpt, the same contract as `expect!`
 ([Testing](testing.md)) - this is a testing surface, not library code,
 so the no-panic house rule doesn't apply.
+
+`assert_no_content()` passes only for a `204` with an empty body, as
+Laravel's `assertNoContent()` does. `assert_no_content_status(205)`
+checks another status the same way. A `204` that carries a body fails,
+and the failure shows the body:
+
+```rust
+client.delete("/posts/1").send().await.assert_no_content();
+```
 
 ### See why a request failed
 
@@ -965,9 +1092,12 @@ assert_eq!(status, 403); // unauthenticated request
 
 ### Stubbing the authenticated user
 
-Real auth-flow tests need a logged-in user. The cleanest pattern is a
-tiny one-off middleware that calls `Auth::set_user` ahead of the
-middleware under test. The framework's own
+Real auth-flow tests need a logged-in user. With `TestClient`, call
+`acting_as(&user)`; see [Acting as a user](#acting-as-a-user).
+
+A test that drives `handle_request` through its own harness uses a tiny
+one-off middleware that calls `Auth::set_user` ahead of the middleware
+under test, which is what `acting_as` does for you. The framework's own
 `framework/tests/auth_flows/email_verified_middleware.rs` uses this:
 
 ```rust
@@ -980,6 +1110,7 @@ struct UserById(String);
 impl Authenticatable for UserById {
     fn get_auth_identifier(&self) -> String { self.0.clone() }
     fn as_any(&self) -> &dyn Any { self }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> { self }
 }
 
 struct LoginAs(String);
@@ -1244,7 +1375,7 @@ A short list of footguns that catch first-time authors:
 | `handle_request`, `handle_request_with_peer` | `framework/src/server.rs` |
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
-| `TestClient`, `TestRequest` (in-memory connection, cookies, reloads) | `framework/src/testing/client.rs` |
+| `TestClient`, `TestRequest`, `ActingUser` (in-memory connection, cookies, reloads, default headers, acting as a user) | `framework/src/testing/client.rs` |
 | Loopback test harness (for a test that needs the socket) | `framework/tests/cors/middleware.rs` |
 | `TestResponse` (fluent assertions over the triple above) | `framework/src/testing/response.rs` |
 | `ErrorReport` (what went wrong, kept in process) | `framework/src/error/report.rs` |

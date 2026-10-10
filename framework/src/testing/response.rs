@@ -242,6 +242,43 @@ impl TestResponse {
         self
     }
 
+    /// Assert a `204 No Content` response with an empty body, as Laravel's
+    /// `assertNoContent()` does. A `204` that carries bytes fails: the
+    /// status says there is no content, so a body is a defect.
+    ///
+    /// # Panics
+    ///
+    /// Panics with the expected and received status and body, and the
+    /// error report when the response carries one.
+    pub fn assert_no_content(&self) -> &Self {
+        self.no_content(204, "assert_no_content()")
+    }
+
+    /// [`Self::assert_no_content`] for another status, as Laravel's
+    /// `assertNoContent($status)` does: a `205 Reset Content`, or a `200`
+    /// an endpoint answers with no body.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`Self::assert_no_content`] does.
+    pub fn assert_no_content_status(&self, expected: u16) -> &Self {
+        self.no_content(expected, &format!("assert_no_content_status({expected})"))
+    }
+
+    /// Fail `call` unless the status is `expected` and the body is empty.
+    fn no_content(&self, expected: u16, call: &str) -> &Self {
+        if self.status != expected || !self.body.is_empty() {
+            self.fail(format!(
+                "{call}\n  Expected: status {expected} with an empty body\n  Received: status {} \
+                 with a body of {} bytes\n  body: {}",
+                self.status,
+                self.body.len(),
+                excerpt(&self.body_text())
+            ));
+        }
+        self
+    }
+
     /// Assert live validation passed: `204` with `Precognition-Success:
     /// true`. The header distinguishes it from an ordinary empty response.
     ///
