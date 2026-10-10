@@ -154,6 +154,14 @@ impl<'a> RenderContext<'a> {
         self.request
     }
 
+    /// The runtime values the component's view reads: the ones the host
+    /// installed on this request's capabilities, or none. Every render of
+    /// the request reads them, a public seed's included, so the host
+    /// installs only values every visitor may see.
+    pub(crate) fn view_values(&self) -> &'a (dyn askama::Values + Send + Sync) {
+        self.request.capabilities().view_values()
+    }
+
     /// Returns validated inert browser presentation facts when the browser initiated execution.
     #[must_use]
     pub const fn browser(&self) -> Option<&BrowserRenderContext> {

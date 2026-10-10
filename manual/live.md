@@ -405,9 +405,11 @@ one request per process. One Rust process serves many requests at once, so
 the request's own values need `View::share_for_request`, and a shared value
 reaches the template through Askama's runtime values rather than as a
 variable, because a checked template knows its variables at compile time.
-Live component templates do not receive shared values: a component's view
-is rendered again on its action requests, and a public seed is shared
-between visitors.
+A Live component template reads the application's values on every render,
+a public seed's and an action's included, but never a value shared for the
+request: a component's view is rendered again on its action requests, and a
+public seed is shared between visitors. A component template that requires
+a request's value fails its render.
 
 ## Security boundaries
 

@@ -575,6 +575,10 @@ name = "live_session_fields"
 path = "tests/live/session_fields.rs"
 
 [[test]]
+name = "live_shared_values"
+path = "tests/live/shared_values.rs"
+
+[[test]]
 name = "live_assets"
 path = "tests/live/assets.rs"
 

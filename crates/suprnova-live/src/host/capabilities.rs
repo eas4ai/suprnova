@@ -120,6 +120,7 @@ pub struct HostCapabilities {
     subscription_credentials: Option<Arc<dyn SubscriptionCredentialPort>>,
     subscription_registry: Option<Arc<dyn SubscriptionRegistryPort>>,
     subscription_continuity: Option<Arc<dyn SubscriptionContinuityPort>>,
+    view_values: Option<Arc<dyn askama::Values + Send + Sync>>,
 }
 
 impl HostCapabilities {
@@ -134,6 +135,7 @@ impl HostCapabilities {
             subscription_credentials: None,
             subscription_registry: None,
             subscription_continuity: None,
+            view_values: None,
         }
     }
 
@@ -195,6 +197,30 @@ impl HostCapabilities {
     ) -> Self {
         self.subscription_continuity = Some(continuity);
         self
+    }
+
+    /// Installs the runtime values every component view rendered under this
+    /// request reads through Askama's `value` filter.
+    ///
+    /// A component's view is rendered again on each of its action requests,
+    /// and a public seed's render is shared between visitors, so install only
+    /// values every visitor may see. Suprnova installs the values the
+    /// application shares with every view, never the ones shared for one
+    /// request. Without this call a component view reads no values, and a
+    /// template that requires one fails its render.
+    #[must_use]
+    pub fn with_view_values(mut self, values: Arc<dyn askama::Values + Send + Sync>) -> Self {
+        self.view_values = Some(values);
+        self
+    }
+
+    /// The runtime values installed with [`Self::with_view_values`], or
+    /// none.
+    pub(crate) fn view_values(&self) -> &(dyn askama::Values + Send + Sync) {
+        match &self.view_values {
+            Some(values) => values.as_ref(),
+            None => &(),
+        }
     }
 
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
