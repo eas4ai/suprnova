@@ -29,6 +29,8 @@ use suprnova::{
     DocumentObserver, EventResult, FrameworkError, Mongo, MongoConfig, RouteBinding,
 };
 
+use suprnova::mongodb::__rendered_array_update;
+
 use crate::support::{database_of, test_url};
 
 // --- Models ----------------------------------------------------------------
@@ -90,6 +92,14 @@ pub struct Member {
 pub struct Product {
     pub sku: String,
     pub title: String,
+}
+
+/// A model that asks for its timestamps with `timestamps = true`.
+#[suprnova::document(collection = "m2_stamped", fillable = ["tags"], timestamps = true)]
+pub struct Stamped {
+    pub tags: Vec<String>,
+    pub created_at: Option<suprnova::bson::DateTime>,
+    pub updated_at: Option<suprnova::bson::DateTime>,
 }
 
 /// A card that serializes only the fields `visible` lists.
@@ -164,6 +174,77 @@ fn the_attribute_records_the_collection_the_key_and_the_managed_fields() {
     );
     assert_eq!(Product::SOFT_DELETES, None);
     assert_eq!(Card::VISIBLE, Some(&["title"][..]));
+}
+
+#[test]
+fn explicit_timestamps_with_both_fields_are_managed() {
+    assert_eq!(Stamped::TIMESTAMPS, Some(("created_at", "updated_at")));
+}
+
+#[test]
+fn the_array_operators_set_updated_at_in_the_same_update_on_a_model_with_timestamps() {
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    for operator in ["$push", "$addToSet", "$pull"] {
+        let update = __rendered_array_update::<Member, _>(operator, "tags", &"a", now)
+            .expect("render the update");
+        let mut expected = Document::new();
+        expected.insert(operator, doc! { "tags": "a" });
+        expected.insert("$set", doc! { "updated_at": now });
+        assert_eq!(update, expected, "{operator}");
+
+        let update = __rendered_array_update::<Stamped, _>(operator, "tags", &"a", now)
+            .expect("render the update");
+        assert_eq!(
+            update.get_document("$set").expect("a `$set`"),
+            &doc! { "updated_at": now },
+            "`timestamps = true` manages them too: {update}"
+        );
+    }
+
+    // A dotted path into an embedded document keeps the `$set` beside it.
+    let update = __rendered_array_update::<Member, _>(
+        "$push",
+        "settings.labels",
+        &doc! { "name": "x" },
+        now,
+    )
+    .expect("render a dotted path");
+    assert_eq!(
+        update,
+        doc! {
+            "$push": { "settings.labels": { "name": "x" } },
+            "$set": { "updated_at": now },
+        }
+    );
+}
+
+#[test]
+fn the_array_operators_send_the_operator_alone_on_a_model_without_timestamps() {
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    for operator in ["$push", "$addToSet", "$pull"] {
+        let update = __rendered_array_update::<Product, _>(operator, "title", &"x", now)
+            .expect("render the update");
+        let mut expected = Document::new();
+        expected.insert(operator, doc! { "title": "x" });
+        assert_eq!(update, expected, "{operator}");
+    }
+}
+
+#[test]
+fn an_array_update_on_the_key_an_unknown_field_or_another_operator_is_refused() {
+    let now = suprnova::bson::DateTime::from_millis(1_760_090_400_000);
+    let error =
+        __rendered_array_update::<Member, _>("$push", "id", &"x", now).expect_err("the key");
+    assert!(names(&error, "push") && names(&error, "`id`"), "{error}");
+    let error = __rendered_array_update::<Member, _>("$addToSet", "nicknames", &"x", now)
+        .expect_err("no such field");
+    assert!(
+        names(&error, "push_unique") && names(&error, "nicknames"),
+        "{error}"
+    );
+    let error = __rendered_array_update::<Member, _>("$set", "tags", &"x", now)
+        .expect_err("no array operator");
+    assert!(names(&error, "`$set`"), "{error}");
 }
 
 #[test]
@@ -774,21 +855,56 @@ async fn mongodb_push_pull_increment_and_decrement_change_the_stored_document() 
     let mut member = Member::create(member_with_email(email))
         .await
         .expect("create");
+    let created_at = member.created_at.expect("created_at is set");
+    let mut updated_at = member.updated_at.expect("updated_at is set");
+
+    // A BSON datetime holds milliseconds, so each write waits past one
+    // before it runs: an `updated_at` it set is then strictly later.
+    let advanced = |member: &Member, before: &mut suprnova::bson::DateTime, call: &str| {
+        let after = member.updated_at.expect("updated_at stays set");
+        assert!(
+            after > *before,
+            "{call} advances updated_at: {before:?} then {after:?}"
+        );
+        assert_eq!(
+            member.created_at,
+            Some(created_at),
+            "{call} keeps created_at"
+        );
+        *before = after;
+    };
+    let tick = || tokio::time::sleep(std::time::Duration::from_millis(5));
+
+    tick().await;
     member.push("tags", "a").await.expect("push");
     assert_eq!(member.tags, vec!["math".to_owned(), "a".to_owned()]);
+    advanced(&member, &mut updated_at, "push");
+    tick().await;
     member.push_unique("tags", "a").await.expect("push_unique");
     assert_eq!(member.tags.len(), 2, "already there");
+    advanced(&member, &mut updated_at, "push_unique");
+    tick().await;
     member.pull("tags", "math").await.expect("pull");
     assert_eq!(member.tags, vec!["a".to_owned()]);
+    advanced(&member, &mut updated_at, "pull");
 
+    tick().await;
     member.increment("logins", 2).await.expect("increment");
     assert_eq!(member.logins, 5);
+    advanced(&member, &mut updated_at, "increment");
+    tick().await;
     member.decrement("logins", 1).await.expect("decrement");
     assert_eq!(member.logins, 4);
+    advanced(&member, &mut updated_at, "decrement");
 
     let found = Member::find(member.id).await.expect("find").expect("found");
     assert_eq!(found.tags, vec!["a".to_owned()]);
     assert_eq!(found.logins, 4);
+    assert_eq!(
+        found.updated_at,
+        Some(updated_at),
+        "the server holds the last updated_at"
+    );
 }
 
 /// The events the gadget listeners saw, in order.

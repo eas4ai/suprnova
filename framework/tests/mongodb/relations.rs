@@ -334,7 +334,9 @@ async fn a_missing_foreign_key_answers_no_owner_without_a_query() {
 /// Relations whose key types cannot match fail the build, and each error
 /// names both models: a writer's `ObjectId` against a `String` foreign key,
 /// a role array of strings, an SQL account's `i64` key against an
-/// `ObjectId` foreign key in both directions.
+/// `ObjectId` foreign key in both directions. The glob runs every case in
+/// `compile_fail/`, so it also runs the document models' other build
+/// errors, such as `timestamps = true` on a model without the fields.
 #[test]
 fn relation_key_types_that_cannot_match_fail_to_compile_naming_both_models() {
     trybuild::TestCases::new().compile_fail("tests/mongodb/compile_fail/*.rs");
