@@ -357,6 +357,49 @@ async fn the_fake_driver_refuses_once_the_fake_is_gone() {
     assert!(error.to_string().contains("Queue::fake()"), "{error}");
 }
 
+#[tokio::test]
+#[serial]
+async fn a_driver_from_a_dropped_guard_never_touches_a_later_fake() {
+    let first_fake = Queue::fake();
+    let old_driver = first_fake.driver();
+    drop(first_fake);
+
+    let second_fake = Queue::fake();
+    Queue::push(Invoice { id: 4 }).await.unwrap();
+
+    let error = old_driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect_err("a driver from a dropped guard is inactive");
+    assert!(error.to_string().contains("Queue::fake()"), "{error}");
+    assert!(
+        old_driver
+            .push(report_envelope())
+            .await
+            .expect_err("a push through a dropped guard's driver is refused")
+            .to_string()
+            .contains("Queue::fake()")
+    );
+    assert!(
+        Queue::reserved_jobs(None).await.unwrap().is_empty(),
+        "the later fake's jobs stay unreserved"
+    );
+    assert!(reserved::<Invoice>().is_empty());
+    assert_eq!(
+        pushed::<Report>(),
+        Vec::<Report>::new(),
+        "a push through the old driver is not recorded by the later fake"
+    );
+
+    second_fake
+        .driver()
+        .pop(Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("the later fake's own driver reserves its job");
+    assert_eq!(reserved::<Invoice>(), vec![Invoice { id: 4 }]);
+}
+
 /// An envelope for the real driver, of a job the fake never sees.
 fn report_envelope() -> Envelope {
     Envelope {
