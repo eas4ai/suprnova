@@ -215,3 +215,133 @@ async fn a_fixed_result_reveals_its_whole_output_as_one_line() {
     assert_eq!(process.latest_output(), "");
     assert_eq!(process.output(), "all of it\n");
 }
+
+#[tokio::test]
+#[serial]
+async fn a_fixed_result_reveals_one_more_line_per_output_call() {
+    let fake = Process::fake();
+    fake.when("worker", Process::result("one\ntwo\n"));
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(
+        process.output(),
+        "one\n",
+        "the first call reveals the first line only"
+    );
+    assert_eq!(process.output(), "one\ntwo\n");
+    assert_eq!(process.output(), "one\ntwo\n", "nothing more to reveal");
+    let result = process.wait().await.unwrap();
+    assert_eq!(result.output(), "one\ntwo\n");
+
+    let ran = Process::command(["worker"]).run().await.unwrap();
+    assert_eq!(ran.output(), "one\ntwo\n", "a run keeps the whole output");
+    assert_eq!(fake.recorded()[0].result.output(), "one\ntwo\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_fixed_result_answers_latest_output_a_line_at_a_time() {
+    let fake = Process::fake();
+    fake.when("worker", Process::result("one\ntwo\n"));
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(process.latest_output(), "one\n");
+    assert_eq!(process.latest_output(), "two\n");
+    assert_eq!(process.latest_output(), "");
+    assert_eq!(process.output(), "one\ntwo\n");
+    let result = process.wait().await.unwrap();
+    assert_eq!(result.output(), "one\ntwo\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_fixed_result_reveals_its_error_output_a_line_at_a_time() {
+    let fake = Process::fake();
+    fake.when("worker", Process::result("").error_output("bad\nworse\n"));
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(process.latest_error_output(), "bad\n");
+    assert_eq!(process.latest_error_output(), "worse\n");
+    assert_eq!(process.latest_error_output(), "");
+    assert_eq!(process.error_output(), "bad\nworse\n");
+    let result = process.wait().await.unwrap();
+    assert_eq!(result.error_output(), "bad\nworse\n");
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(process.error_output(), "bad\n");
+    assert_eq!(process.error_output(), "bad\nworse\n");
+    assert_eq!(process.output(), "", "the result has no standard output");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_fixed_result_keeps_blank_lines_and_a_last_line_without_a_newline() {
+    let fake = Process::fake();
+    fake.when("worker", Process::result("one\n\ntwo"));
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(process.latest_output(), "one\n");
+    assert_eq!(process.latest_output(), "\n", "a blank line is a line");
+    assert_eq!(
+        process.latest_output(),
+        "two",
+        "the last line gets no newline it did not have"
+    );
+    assert_eq!(process.latest_output(), "");
+    assert_eq!(
+        process.output(),
+        "one\n\ntwo",
+        "the revealed lines reproduce the output byte for byte"
+    );
+    let result = process.wait().await.unwrap();
+    assert_eq!(result.output(), "one\n\ntwo");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_described_line_holding_a_newline_reveals_each_line_in_turn() {
+    let fake = Process::fake();
+    fake.when(
+        "worker",
+        Process::describe().output("a\nb").error_output("x\ny"),
+    );
+    fake.when("replaced", Process::describe().replace_output("c\nd\n"));
+
+    let process = Process::command(["worker"]).start().unwrap();
+    assert_eq!(process.latest_output(), "a\n");
+    assert_eq!(
+        process.latest_output(),
+        "b\n",
+        "a described line ends with one newline"
+    );
+    assert_eq!(process.latest_output(), "");
+    assert_eq!(process.latest_error_output(), "x\n");
+    assert_eq!(process.error_output(), "x\ny\n");
+    let result = process.wait().await.unwrap();
+    assert_eq!(
+        (result.output(), result.error_output()),
+        ("a\nb\n", "x\ny\n")
+    );
+
+    let replaced = Process::command(["replaced"]).start().unwrap();
+    assert_eq!(replaced.output(), "c\n");
+    assert_eq!(replaced.output(), "c\nd\n");
+    let result = replaced.wait().await.unwrap();
+    assert_eq!(result.output(), "c\nd\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn running_shows_one_line_of_a_multi_line_description_at_a_time() {
+    let fake = Process::fake();
+    fake.when(
+        "worker",
+        Process::describe().output("one\ntwo\nthree").runs_for(5),
+    );
+
+    let mut process = Process::command(["worker"]).start().unwrap();
+    assert!(process.running(), "running shows the line `one`");
+    assert_eq!(process.latest_output(), "two\n");
+    assert_eq!(process.output(), "one\ntwo\nthree\n");
+    assert_eq!(process.latest_output(), "");
+}
