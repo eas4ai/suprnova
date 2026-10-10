@@ -2462,6 +2462,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The Laravel parity map holds the Inertia adapter and client.**
+  `feature-map/laravel/surface.jsonl` held laravel/framework alone, so no
+  Inertia protocol row (HD-01, MW-06, RF-16 and the rest) could name its
+  Laravel side, and the row ids in these notes were the only link between
+  a row and what shipped. The map now also holds inertia-laravel 3.5.1, read
+  through the same PHP reflection, and Inertia.js 3.8.0, read with
+  TypeScript's parser: classes, facade methods, macros, Blade directives,
+  config keys, every package export and each `X-Inertia*` header the client
+  sends or reads, each record tagged with its package. The rows' parity
+  decisions are in `feature-map/laravel/inertia-protocol-parity.jsonl` for
+  `fmap parity-import`.
 - **The error callback sees the error responses from outside the Inertia
   stack.** `Inertia::handle_exceptions_using` and `InertiaConfig::error_page`
   decided only what passed through the error-response middleware

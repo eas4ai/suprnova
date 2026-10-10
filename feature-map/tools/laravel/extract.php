@@ -1,33 +1,63 @@
 <?php
 /**
- * Extract Laravel's public surface from laravel/framework source, as JSON records.
+ * Extract Laravel's public surface from laravel/framework source, as JSON records,
+ * and with a second root the surface of the inertiajs/inertia-laravel package.
  *
- * Usage: php extract.php <laravel-root> <out.jsonl> <exclusions.json>
+ * Usage: php extract.php <laravel-root> <out.jsonl> <exclusions.json> [<inertia-laravel-root>]
  *
  * Everything comes from the framework source at the checked-out tag, read
  * through PHP reflection over Composer's classmap, plus the framework's own
  * config files. Anything that cannot be loaded, or that Laravel marks
  * @internal, is recorded in the exclusions file with the reason.
+ *
+ * inertia-laravel is read the same way, loaded beside the framework it
+ * extends: its classes through its composer.json PSR-4 map, its helpers, its
+ * Artisan commands and its config file. What its service providers register
+ * at run time (macros on Laravel classes, Blade directives and component
+ * namespaces, middleware aliases) is read by registering the providers its
+ * composer.json names on a bare application and comparing the registries
+ * before and after. Every record carries `package`, the Composer package it
+ * comes from, and its file relative to that package's root.
  */
 
 [$_, $root, $outPath, $exclPath] = $argv;
 $root = realpath($root);
+$inertiaRoot = isset($argv[4]) ? realpath($argv[4]) : null;
+if (isset($argv[4]) && $inertiaRoot === false) {
+    fwrite(STDERR, "no inertia-laravel checkout at {$argv[4]}\n");
+    exit(1);
+}
 require $root . '/vendor/autoload.php';
 $classmap = require $root . '/vendor/composer/autoload_classmap.php';
 $src = $root . '/src/Illuminate/';
 
 $records = [];
+/** Facade classes by name: their @method lines are records, their @see lines link them. */
+$facades = [];
 $excluded = ['unloadable' => [], 'internal' => [], 'blade_compiler_passes' => []];
-
-function rel(string $file): string {
-    global $root;
-    return ltrim(substr($file, strlen($root)), '/');
+/** The Composer package the records being emitted come from. */
+$package = 'laravel/framework';
+/** Package roots, and the marker each is replaced with in values (see portable()). */
+$roots = [$root => '<laravel>'];
+if ($inertiaRoot !== null) {
+    $roots[$inertiaRoot] = '<inertia-laravel>';
 }
 
-/** Replace the clone's absolute path, so records don't depend on where it sits on disk. */
+/** A file relative to the root of the package it belongs to. */
+function rel(string $file): string {
+    global $roots;
+    foreach (array_keys($roots) as $r) {
+        if (str_starts_with($file, $r . '/')) {
+            return substr($file, strlen($r) + 1);
+        }
+    }
+    throw new RuntimeException("$file is under no package root");
+}
+
+/** Replace each clone's absolute path, so records don't depend on where it sits on disk. */
 function portable(string $s): string {
-    global $root;
-    return str_replace($root, '<laravel>', $s);
+    global $roots;
+    return strtr($s, $roots);
 }
 
 function digest(string $text): ?string {
@@ -77,24 +107,85 @@ function doc_flags(string|false $doc): array {
 
 function component_of(string $class): string {
     $parts = explode('\\', $class);
-    return $parts[1] ?? '';
+    if (str_starts_with($class, 'Illuminate\\')) {
+        return $parts[1] ?? '';
+    }
+    // A package's own sub-namespace (Inertia\Ssr\Gateway is Ssr), else the package's (Inertia).
+    return count($parts) > 2 ? $parts[1] : $parts[0];
 }
 
 function emit(array $r): void {
-    global $records;
+    global $records, $package;
     if (($r['details'] ?? null) === []) {
         $r['details'] = new stdClass;  // an empty object, not a JSON list
     }
+    $r['package'] = $package;
     ksort($r);
     $records[] = $r;
+}
+
+/**
+ * Every Macroable class's registered macros, by the class that owns the static table
+ * (a subclass shares its parent's), so a provider's additions are a before/after diff.
+ */
+function macro_tables(): array {
+    $tables = [];
+    foreach (get_declared_classes() as $c) {
+        if (!in_array(\Illuminate\Support\Traits\Macroable::class, class_uses_recursive($c), true)) {
+            continue;
+        }
+        $prop = new ReflectionProperty($c, 'macros');
+        $tables[$prop->getDeclaringClass()->getName()] ??= $prop->getValue();
+    }
+    ksort($tables);
+    return $tables;
 }
 
 // ---- Classes, interfaces, traits, enums and their members -------------------
 $classes = array_filter(array_keys($classmap), fn ($c) =>
     str_starts_with($c, 'Illuminate\\') && str_starts_with(realpath($classmap[$c]) ?: '', $src));
 sort($classes);
+/** Every class to read, each with the package it belongs to. */
+$allClasses = array_map(fn ($c) => ['laravel/framework', $c], $classes);
+/** inertia-laravel's helper files, and the service providers it asks Laravel to register. */
+$inertiaHelpers = $inertiaProviders = [];
+$inertiaClasses = [];
+if ($inertiaRoot !== null) {
+    $composer = json_decode(file_get_contents("$inertiaRoot/composer.json"), true, flags: JSON_THROW_ON_ERROR);
+    $psr4 = $composer['autoload']['psr-4'] ?? [];
+    if (!$psr4) {
+        fwrite(STDERR, "inertia-laravel's composer.json declares no PSR-4 autoload\n");
+        exit(1);
+    }
+    foreach ($psr4 as $prefix => $dir) {
+        $base = realpath("$inertiaRoot/$dir");
+        spl_autoload_register(function ($class) use ($prefix, $base) {
+            if (str_starts_with($class, $prefix)) {
+                $file = $base . '/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+                if (is_file($file)) {
+                    require $file;
+                }
+            }
+        });
+        $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS));
+        foreach ($files as $f) {
+            if ($f->getExtension() === 'php') {
+                $inertiaClasses[] = $prefix . str_replace('/', '\\', substr($f->getPathname(), strlen($base) + 1, -4));
+            }
+        }
+    }
+    sort($inertiaClasses);
+    foreach ($composer['autoload']['files'] ?? [] as $f) {
+        $inertiaHelpers[] = realpath("$inertiaRoot/$f");
+        require_once "$inertiaRoot/$f";
+    }
+    $inertiaProviders = $composer['extra']['laravel']['providers'] ?? [];
+    foreach ($inertiaClasses as $c) {
+        $allClasses[] = ['inertiajs/inertia-laravel', $c];
+    }
+}
 
-foreach ($classes as $class) {
+foreach ($allClasses as [$package, $class]) {
     try {
         $rc = new ReflectionClass($class);
     } catch (Throwable $e) {
@@ -191,7 +282,12 @@ foreach ($classes as $class) {
     }
 
     // Facades declare their static API in @method lines: that is the documented surface.
-    if (str_starts_with($class, 'Illuminate\\Support\\Facades\\') && ($doc = $rc->getDocComment())) {
+    $isFacade = str_starts_with($class, 'Illuminate\\Support\\Facades\\')
+        || $rc->isSubclassOf(\Illuminate\Support\Facades\Facade::class);
+    if ($isFacade) {
+        $facades[$class] = true;
+    }
+    if ($isFacade && ($doc = $rc->getDocComment())) {
         $docStart = $rc->getStartLine() - substr_count($doc, "\n") - 1;
         foreach (explode("\n", $doc) as $i => $line) {
             if (preg_match('/@method\s+(static\s+)?(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*$/', $line, $m)
@@ -199,7 +295,7 @@ foreach ($classes as $class) {
                 $sig = trim(($m[1] ? 'static ' : '') . "$m[2] $m[3]($m[4])");
                 emit([
                     'id' => "$class::$m[3]", 'kind' => 'facade method', 'family' => 'laravel-api',
-                    'component' => 'Support', 'namespace' => $rc->getNamespaceName(), 'parent' => $class,
+                    'component' => component_of($class), 'namespace' => $rc->getNamespaceName(), 'parent' => $class,
                     'file' => rel($file), 'line' => $docStart + $i + 1, 'deprecated' => false,
                     'details' => ['signature' => $sig], 'sig_hash' => digest($sig), 'body_hash' => null,
                 ]);
@@ -212,7 +308,7 @@ foreach ($classes as $class) {
 
 // Facade -> the classes its @see lines name, for linking facade methods to implementations.
 foreach ($records as &$r) {
-    if ($r['kind'] !== 'facade method' && str_starts_with($r['id'], 'Illuminate\\Support\\Facades\\') && $r['parent'] === null) {
+    if ($r['kind'] !== 'facade method' && isset($facades[$r['id']]) && $r['parent'] === null) {
         $doc = (new ReflectionClass($r['id']))->getDocComment() ?: '';
         preg_match_all('/@see\s+\\\\?(\S+)/', $doc, $m);
         if ($m[1]) {
@@ -225,13 +321,20 @@ unset($r);
 // ---- Global helpers ----------------------------------------------------------
 foreach (get_defined_functions()['user'] as $fn) {
     $rf = new ReflectionFunction($fn);
-    if (!str_starts_with($rf->getFileName() ?: '', $src)) {
+    $fnFile = $rf->getFileName() ?: '';
+    if (str_starts_with($fnFile, $src)) {
+        $package = 'laravel/framework';
+        $component = component_of('Illuminate\\' . basename(dirname($fnFile)));
+    } elseif (in_array($fnFile, $inertiaHelpers, true)) {
+        $package = 'inertiajs/inertia-laravel';
+        $component = 'Inertia';
+    } else {
         continue;
     }
     $sig = method_sig($rf);
     emit([
         'id' => 'helper ' . $rf->getName(), 'kind' => 'helper', 'family' => 'laravel-helpers',
-        'component' => component_of('Illuminate\\' . basename(dirname($rf->getFileName()))),
+        'component' => $component,
         'namespace' => '', 'parent' => null, 'file' => rel($rf->getFileName()), 'line' => $rf->getStartLine(),
         'deprecated' => doc_flags($rf->getDocComment())['deprecated'], 'details' => ['signature' => $sig],
         'sig_hash' => digest($sig), 'body_hash' => digest(source_span($rf->getFileName(), $rf->getStartLine(), $rf->getEndLine())),
@@ -239,7 +342,7 @@ foreach (get_defined_functions()['user'] as $fn) {
 }
 
 // ---- Artisan commands ----------------------------------------------------------
-foreach ($classes as $class) {
+foreach ($allClasses as [$package, $class]) {
     try {
         $rc = new ReflectionClass($class);
     } catch (Throwable $e) {
@@ -280,6 +383,8 @@ foreach ($classes as $class) {
         'details' => $details, 'sig_hash' => digest(($signature ?? $name) . json_encode($opts)), 'body_hash' => null,
     ]);
 }
+
+$package = 'laravel/framework';
 
 // ---- Blade directives -------------------------------------------------------------
 // BladeCompiler dispatches `@name` to `compile` . ucfirst(name) with one argument. The
@@ -347,7 +452,13 @@ foreach ($va->getMethods() as $m) {
 // Config files call path helpers (storage_path() and friends), which resolve through the
 // application instance; a bare Application rooted at the clone is enough. Nothing boots.
 new \Illuminate\Foundation\Application($root);
-foreach (glob($root . '/config/*.php') as $cfg) {
+$configFiles = array_map(fn ($f) => ['laravel/framework', $f], glob($root . '/config/*.php'));
+if ($inertiaRoot !== null) {
+    foreach (glob($inertiaRoot . '/config/*.php') as $f) {
+        $configFiles[] = ['inertiajs/inertia-laravel', $f];
+    }
+}
+foreach ($configFiles as [$package, $cfg]) {
     $name = basename($cfg, '.php');
     $text = file_get_contents($cfg);
     $values = require $cfg;
@@ -378,9 +489,90 @@ foreach (glob($root . '/config/*.php') as $cfg) {
         $line = substr_count(substr($text, 0, $e[0][1]), "\n") + 1;
         $envName = $e[1][0];
         $records[] = ['__env' => true, 'name' => $envName, 'file' => rel($cfg), 'line' => $line,
-                      'default' => isset($e[2]) ? trim($e[2][0]) : null];
+                      'default' => isset($e[2]) ? trim($e[2][0]) : null, 'package' => $package];
     }
 }
+
+// ---- What inertia-laravel's service providers register ------------------------------
+// Laravel registers the providers a package's composer.json names (extra.laravel.providers).
+// Registering them on a bare application, with the config, files and Blade compiler bound,
+// runs their register() methods; boot() never runs, so no route or command is installed.
+// The records are what changed: macros on Macroable classes, Blade directives and component
+// namespaces, and middleware aliases.
+if ($inertiaRoot !== null) {
+    $package = 'inertiajs/inertia-laravel';
+    $app = new \Illuminate\Foundation\Application($root);
+    $app->instance('config', new \Illuminate\Config\Repository([]));
+    $app->singleton('files', fn () => new \Illuminate\Filesystem\Filesystem);
+    $app->singleton('blade.compiler', fn ($app) => new \Illuminate\View\Compilers\BladeCompiler($app['files'], sys_get_temp_dir()));
+    $aliasesBefore = $app['router']->getMiddleware();
+    $macrosBefore = macro_tables();
+    foreach ($inertiaProviders as $provider) {
+        $app->register($provider);
+    }
+    $compiler = $app->make('blade.compiler');  // runs the providers' afterResolving callbacks
+
+    foreach (macro_tables() as $owner => $macros) {
+        foreach ($macros as $name => $macro) {
+            if (array_key_exists($name, $macrosBefore[$owner] ?? [])) {
+                continue;
+            }
+            $fn = new ReflectionFunction(Closure::fromCallable($macro));
+            $sig = 'function ' . $name . '(' . implode(', ', array_map('param_str', $fn->getParameters())) . ')'
+                . ($fn->hasReturnType() ? ': ' . type_str($fn->getReturnType()) : '');
+            emit([
+                'id' => "$owner::$name", 'kind' => 'macro', 'family' => 'laravel-api', 'component' => component_of($owner),
+                'namespace' => (new ReflectionClass($owner))->getNamespaceName(), 'parent' => null,
+                'file' => rel($fn->getFileName()), 'line' => $fn->getStartLine(), 'deprecated' => false,
+                'details' => ['on' => $owner, 'signature' => $sig], 'sig_hash' => digest($sig),
+                'body_hash' => digest(source_span($fn->getFileName(), $fn->getStartLine(), $fn->getEndLine())),
+            ]);
+        }
+    }
+
+    foreach ($compiler->getCustomDirectives() as $name => $handler) {
+        $fn = is_array($handler) ? new ReflectionMethod($handler[0], $handler[1])
+            : new ReflectionFunction(Closure::fromCallable($handler));
+        $method = $fn instanceof ReflectionMethod ? $fn->getDeclaringClass()->getName() . '::' . $fn->getName() : null;
+        emit([
+            'id' => '@' . $name, 'kind' => 'blade directive', 'family' => 'laravel-blade', 'component' => 'View',
+            'namespace' => $fn instanceof ReflectionMethod ? $fn->getDeclaringClass()->getNamespaceName() : '',
+            'parent' => null, 'file' => rel($fn->getFileName()), 'line' => $fn->getStartLine(), 'deprecated' => false,
+            'details' => array_filter(['method' => $method]), 'sig_hash' => digest(method_sig($fn)),
+            'body_hash' => digest(source_span($fn->getFileName(), $fn->getStartLine(), $fn->getEndLine())),
+        ]);
+    }
+
+    // <x-prefix::name> resolves to the namespace's class Str::studly(name), each '.' a sub-namespace.
+    foreach ($compiler->getClassComponentNamespaces() as $prefix => $namespace) {
+        foreach ($inertiaClasses as $class) {
+            if (!str_starts_with($class, $namespace . '\\') || !is_subclass_of($class, \Illuminate\View\Component::class)) {
+                continue;
+            }
+            $rc = new ReflectionClass($class);
+            $tag = implode('.', array_map(fn ($seg) => \Illuminate\Support\Str::kebab($seg),
+                explode('\\', substr($class, strlen($namespace) + 1))));
+            $ctor = $rc->getConstructor();
+            emit([
+                'id' => "<x-$prefix::$tag>", 'kind' => 'blade component', 'family' => 'laravel-blade', 'component' => 'View',
+                'namespace' => $rc->getNamespaceName(), 'parent' => null, 'file' => rel($rc->getFileName()),
+                'line' => $rc->getStartLine(), 'deprecated' => false, 'details' => ['class' => $class],
+                'sig_hash' => digest("$tag " . ($ctor ? method_sig($ctor) : '')), 'body_hash' => null,
+            ]);
+        }
+    }
+
+    foreach (array_diff_key($app['router']->getMiddleware(), $aliasesBefore) as $alias => $class) {
+        $rc = new ReflectionClass($class);
+        emit([
+            'id' => "middleware $alias", 'kind' => 'middleware alias', 'family' => 'laravel-api',
+            'component' => component_of($class), 'namespace' => $rc->getNamespaceName(), 'parent' => null,
+            'file' => rel($rc->getFileName()), 'line' => $rc->getStartLine(), 'deprecated' => false,
+            'details' => ['class' => $class], 'sig_hash' => digest("$alias=$class"), 'body_hash' => null,
+        ]);
+    }
+}
+
 // One record per env var, with every config line that reads it.
 $envs = [];
 foreach ($records as $i => $r) {
@@ -391,6 +583,11 @@ foreach ($records as $i => $r) {
 }
 ksort($envs);
 foreach ($envs as $envName => $reads) {
+    $package = $reads[0]['package'];
+    if (count(array_unique(array_column($reads, 'package'))) > 1) {
+        fwrite(STDERR, "env $envName is read by the config of more than one package\n");
+        exit(1);
+    }
     emit([
         'id' => "env $envName", 'kind' => 'env var', 'family' => 'laravel-config', 'component' => 'Config',
         'namespace' => '', 'parent' => null, 'file' => $reads[0]['file'], 'line' => $reads[0]['line'], 'deprecated' => false,
@@ -418,5 +615,7 @@ $excluded['unloadable'] = (object) $excluded['unloadable'];
 file_put_contents($exclPath, json_encode($excluded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
 $byKind = array_count_values(array_column($records, 'kind'));
 ksort($byKind);
-echo json_encode(['records' => count($records), 'by_kind' => $byKind,
+$byPackage = array_count_values(array_column($records, 'package'));
+ksort($byPackage);
+echo json_encode(['records' => count($records), 'by_kind' => $byKind, 'by_package' => $byPackage,
                   'unloadable' => count((array) $excluded['unloadable']), 'internal' => count($excluded['internal'])]), "\n";

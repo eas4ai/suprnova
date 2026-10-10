@@ -2,6 +2,7 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod backlog_defects;
+pub mod backlog_defects_feature_map;
 pub mod devtools;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
