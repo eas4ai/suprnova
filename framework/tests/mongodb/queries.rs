@@ -9,7 +9,7 @@
 use chrono::NaiveDate;
 use suprnova::bson::oid::ObjectId;
 use suprnova::bson::{Bson, Document, Regex, doc};
-use suprnova::{Direction, DocumentModel, FrameworkError, Mongo, MongoConfig};
+use suprnova::{Direction, DocumentKey, DocumentModel, FrameworkError, Mongo, MongoConfig};
 
 use crate::support::{database_of, test_url};
 
@@ -38,6 +38,30 @@ pub struct Ticket {
 #[suprnova::document(collection = "m2_codes", primary_key = "code", fillable = ["code", "label"])]
 pub struct Code {
     pub code: String,
+    pub label: String,
+}
+
+/// A key that is a whole document, as an application's own `DocumentKey`
+/// may be. `find` must compare it with the stored `_id` as a value, never
+/// read it as query operators.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct DocumentId(pub Document);
+
+impl DocumentKey for DocumentId {
+    fn parse_route_key(_value: &str) -> Option<Self> {
+        None
+    }
+
+    fn to_route_key(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+/// A label whose key is a [`DocumentId`].
+#[suprnova::document(collection = "m2_document_keys", primary_key = "key", fillable = ["key", "label"])]
+pub struct Keyed {
+    pub key: DocumentId,
     pub label: String,
 }
 
@@ -211,6 +235,72 @@ fn two_conditions_on_one_field_render_as_and() {
 }
 
 #[test]
+fn equality_compares_an_operator_shaped_document_as_a_whole_value() {
+    // The server reads `{name: {$ne: null}}` as an operator, so the value
+    // goes under `$eq`, which compares it literally.
+    let filter = Person::query()
+        .where_("name", "=", doc! { "$ne": Bson::Null })
+        .to_filter()
+        .expect("render")
+        .filter;
+    assert_eq!(filter, doc! { "name": { "$eq": { "$ne": null } } });
+
+    // `==` and `or_where` render equality the same way.
+    let filter = Person::query()
+        .where_("age", ">", 60)
+        .or_where("name", "==", doc! { "$gt": "" })
+        .to_filter()
+        .expect("render")
+        .filter;
+    assert_eq!(
+        filter,
+        doc! { "$or": [
+            { "age": { "$gt": 60 } },
+            { "name": { "$eq": { "$gt": "" } } },
+        ] }
+    );
+}
+
+#[test]
+fn equality_compares_a_regular_expression_as_a_whole_value() {
+    // The server reads `{name: /.*/}` as a pattern match.
+    let pattern = insensitive(".*");
+    let filter = Person::query()
+        .where_("name", "=", Bson::RegularExpression(pattern.clone()))
+        .to_filter()
+        .expect("render")
+        .filter;
+    assert_eq!(
+        filter,
+        doc! { "name": { "$eq": Bson::RegularExpression(pattern) } }
+    );
+}
+
+#[test]
+fn equality_keeps_the_bare_shape_for_scalars_and_arrays() {
+    let filter = |value: Bson| {
+        Person::query()
+            .where_("name", "=", value)
+            .to_filter()
+            .expect("render")
+            .filter
+    };
+    assert_eq!(filter("Ada".into()), doc! { "name": "Ada" });
+    assert_eq!(filter(Bson::Null), doc! { "name": null });
+    assert_eq!(
+        filter(Bson::Array(vec!["a".into()])),
+        doc! { "name": ["a"] }
+    );
+    // `!=` already compares its value literally under `$ne`.
+    let filter = Person::query()
+        .where_("name", "!=", doc! { "$gt": "" })
+        .to_filter()
+        .expect("render")
+        .filter;
+    assert_eq!(filter, doc! { "name": { "$ne": { "$gt": "" } } });
+}
+
+#[test]
 fn the_key_field_is_queried_sorted_and_projected_as_underscore_id() {
     let id = ObjectId::new();
     let rendered = Person::query()
@@ -273,6 +363,74 @@ fn to_pipeline_renders_the_find_as_aggregation_stages() {
             doc! { "$project": { "name": 1 } },
         ]
     );
+}
+
+#[tokio::test]
+async fn a_distinct_with_take_zero_answers_no_values_without_a_query() {
+    // The server rejects a `$limit` of 0; the builder answers the empty
+    // result itself, as `get` and `first` do, so no connection is needed.
+    let values = Person::query()
+        .order_by("role", Direction::Asc)
+        .take(0)
+        .distinct("role")
+        .await
+        .expect("no query runs");
+    assert!(values.is_empty());
+}
+
+#[test]
+fn an_ordered_distinct_keeps_null_values_and_leaves_out_missing_fields_and_empty_arrays() {
+    let stages = Person::query()
+        .order_by("role", Direction::Asc)
+        .take(5)
+        .distinct_stages("role")
+        .expect("render");
+    assert_eq!(
+        stages,
+        vec![
+            doc! { "$match": { "role": { "$exists": true, "$not": { "$size": 0 } } } },
+            doc! { "$unwind": { "path": "$role", "preserveNullAndEmptyArrays": true } },
+            doc! { "$group": { "_id": "$role" } },
+            doc! { "$sort": { "_id": 1 } },
+            doc! { "$limit": 5_i64 },
+        ]
+    );
+
+    // The query's own filter joins the presence condition; a condition on
+    // the same field joins it with `$and`, so neither overwrites the other.
+    let stages = Person::query()
+        .where_("age", ">=", 18)
+        .order_by("role", Direction::Desc)
+        .skip(2)
+        .distinct_stages("role")
+        .expect("render");
+    assert_eq!(
+        stages[0],
+        doc! { "$match": {
+            "age": { "$gte": 18 },
+            "role": { "$exists": true, "$not": { "$size": 0 } },
+        } }
+    );
+    assert_eq!(stages[3], doc! { "$sort": { "_id": -1 } });
+    assert_eq!(stages[4], doc! { "$skip": 2_i64 });
+    let stages = Person::query()
+        .where_("role", "!=", "guest")
+        .take(1)
+        .distinct_stages("role")
+        .expect("render");
+    assert_eq!(
+        stages[0],
+        doc! { "$match": { "$and": [
+            { "role": { "$ne": "guest" } },
+            { "role": { "$exists": true, "$not": { "$size": 0 } } },
+        ] } }
+    );
+
+    let error = Person::query()
+        .order_by("age", Direction::Asc)
+        .distinct_stages("role")
+        .expect_err("the distinct values have no age");
+    assert!(names(&error, "distinct") && names(&error, "age"), "{error}");
 }
 
 #[test]
@@ -738,6 +896,109 @@ async fn mongodb_group_by_and_the_aggregates_answer_per_group_and_overall() {
         None,
         "no documents, no value"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs MONGODB_TEST_URL"]
+async fn mongodb_equality_with_an_operator_shaped_document_matches_only_that_value() {
+    connect().await;
+    seed(
+        "q-literal",
+        &[("Ada", 36, "admin", &[]), ("Bob", 17, "user", &[])],
+    )
+    .await;
+
+    let matched = team("q-literal")
+        .where_("name", "=", doc! { "$ne": Bson::Null })
+        .get()
+        .await
+        .expect("get");
+    assert!(
+        matched.is_empty(),
+        "no name is the document {{$ne: null}}, so nothing matches"
+    );
+    let present = team("q-literal")
+        .where_not_null("name")
+        .get()
+        .await
+        .expect("get");
+    assert_eq!(present.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "needs MONGODB_TEST_URL"]
+async fn mongodb_find_compares_a_document_key_as_a_whole_value() {
+    connect().await;
+    let key = doc! { "run": uuid::Uuid::new_v4().to_string() };
+    Mongo::collection::<Document>(Keyed::COLLECTION)
+        .expect("collection")
+        .insert_one(doc! { "_id": key.clone(), "label": "stored" })
+        .await
+        .expect("insert a keyed document");
+
+    let found = Keyed::find(DocumentId(doc! { "$ne": Bson::Null }))
+        .await
+        .expect("find");
+    assert!(found.is_none(), "no key is the document {{$ne: null}}");
+    let found = Keyed::find(DocumentId(key))
+        .await
+        .expect("find")
+        .expect("the stored document");
+    assert_eq!(found.label, "stored");
+}
+
+#[tokio::test]
+#[ignore = "needs MONGODB_TEST_URL"]
+async fn mongodb_distinct_ordered_or_not_keeps_null_and_leaves_out_missing_and_empty() {
+    connect().await;
+    let collection = Mongo::collection::<Document>(Person::COLLECTION).expect("collection");
+    collection
+        .delete_many(doc! { "team": "q-distinct" })
+        .await
+        .expect("remove the team");
+    collection
+        .insert_many(vec![
+            doc! { "team": "q-distinct", "name": "A", "role": Bson::Null },
+            doc! { "team": "q-distinct", "name": "B", "role": "admin" },
+            doc! { "team": "q-distinct", "name": "C", "role": "admin" },
+            doc! { "team": "q-distinct", "name": "D", "role": "user" },
+            doc! { "team": "q-distinct", "name": "E" },
+            doc! { "team": "q-distinct", "name": "F", "role": [] },
+            doc! { "team": "q-distinct", "name": "G", "role": ["user", "admin"] },
+        ])
+        .await
+        .expect("seed the roles");
+
+    let mut unordered = team("q-distinct").distinct("role").await.expect("distinct");
+    unordered.sort_by_key(|role| role.to_string());
+    assert_eq!(
+        unordered,
+        vec![
+            Bson::String("admin".into()),
+            Bson::String("user".into()),
+            Bson::Null,
+        ]
+    );
+    let ordered = team("q-distinct")
+        .order_by("role", Direction::Asc)
+        .distinct("role")
+        .await
+        .expect("ordered distinct");
+    assert_eq!(
+        ordered,
+        vec![
+            Bson::Null,
+            Bson::String("admin".into()),
+            Bson::String("user".into()),
+        ]
+    );
+    let first_two = team("q-distinct")
+        .order_by("role", Direction::Asc)
+        .take(2)
+        .distinct("role")
+        .await
+        .expect("windowed distinct");
+    assert_eq!(first_two, vec![Bson::Null, Bson::String("admin".into())]);
 }
 
 #[test]
