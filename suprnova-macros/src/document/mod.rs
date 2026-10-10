@@ -4,6 +4,7 @@
 
 mod emit;
 mod parse;
+mod relations;
 
 use proc_macro2::TokenStream;
 use syn::Result;

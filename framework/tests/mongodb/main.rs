@@ -22,8 +22,9 @@ pub mod documents;
 mod env_lock;
 #[path = "../support/own_process.rs"]
 mod own_process;
+pub mod queries;
 pub mod queue;
+pub mod relations;
 pub mod session;
 pub mod store_support;
-pub mod queries;
 pub mod support;

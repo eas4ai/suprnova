@@ -20,6 +20,7 @@ mod casts;
 mod columns;
 mod derive_eloquent;
 mod derive_seaorm;
+mod document_relations;
 mod events;
 mod observers;
 // `pub(crate)` so `#[suprnova::document]` parses `fillable`, `guarded`

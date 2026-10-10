@@ -56,6 +56,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `min` and `max` aggregates. `to_filter()` and `to_pipeline()` answer the
   BSON the builder sends, and a chain MongoDB cannot run as written, such as
   `take` before `update`, is an error naming the call.
+- **MongoDB relations.** `relations = { ... }` on `#[suprnova::document]`
+  declares `HasOne`, `HasMany`, `BelongsTo` and `BelongsToMany` between
+  documents (the many-to-many kept as arrays of keys on both sides, written
+  by `attach`, `detach`, `detach_all` and `sync`) and `BelongsToModel<M>` to
+  an SQL model, and `#[suprnova::model]` declares `HasManyDocuments<D>` and
+  `HasOneDocument<D>`; each reads through its own store, `DocumentQuery::with`
+  and the SQL `with` and `with_count` load them with one query per relation,
+  dotted paths cross the stores, and a relation whose key types cannot match
+  fails the build naming both models.
 - **A guard in use per request.** `TestClient::acting_as_with_guard` selects
   the named guard as the one `Auth::user`, `Auth::id`, `Auth::check` and the
   auth middleware without a guard name answer through for that request, as

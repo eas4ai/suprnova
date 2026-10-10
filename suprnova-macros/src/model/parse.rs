@@ -109,6 +109,46 @@ impl RelationKindAttr {
     }
 }
 
+/// What an SQL model's relation to documents loads (PAR-185):
+/// `HasManyDocuments<D>` or `HasOneDocument<D>` in `relations = { ... }`.
+/// The documents come from their collection, so these relations stay out
+/// of the SQL relation list and its existence queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentRelationKind {
+    /// `HasManyDocuments<D>`: every document whose foreign key holds the
+    /// model's key.
+    HasMany,
+    /// `HasOneDocument<D>`: one such document.
+    HasOne,
+}
+
+/// One relation of an SQL model to documents, its keys resolved.
+#[derive(Debug, Clone)]
+pub struct DocumentRelationDecl {
+    /// The relation name, which names its method.
+    pub name: Ident,
+    /// `HasManyDocuments` or `HasOneDocument`.
+    pub kind: DocumentRelationKind,
+    /// The document model.
+    pub target: Type,
+    /// The document's field that holds the model's key: `fk = "..."`,
+    /// else `<snake(model)>_id`.
+    pub foreign_key: String,
+    /// The model's field the foreign key holds: `lk = "..."`, `None` for
+    /// the primary key.
+    pub local_key: Option<String>,
+}
+
+/// A document relation as written, before the struct's fields are known.
+#[derive(Debug, Clone)]
+struct DocumentRelationRaw {
+    name: Ident,
+    kind: DocumentRelationKind,
+    target: Type,
+    foreign_key: Option<String>,
+    local_key: Option<LitStr>,
+}
+
 /// One inline option declared inside `Kind<...> { ... }`.
 ///
 /// Every variant is consumed by `relations.rs` when emitting the
@@ -237,6 +277,10 @@ pub struct ModelInput {
     /// `relations = {}` (legal - still wires the four dispatcher
     /// skeletons).
     pub relations: Option<Vec<RelationDecl>>,
+    /// PAR-185 - the relations to documents (`HasManyDocuments<D>`,
+    /// `HasOneDocument<D>`) of the same `relations = { ... }` body, in
+    /// declaration order.
+    pub document_relations: Vec<DocumentRelationDecl>,
     /// Phase 10B T6 - `morph_type = "post"` attribute. The string this
     /// model registers under in a `MorphTo`'s `*_type` discriminator
     /// column. Defaults to `to_snake(struct_name)` at use sites when
@@ -666,6 +710,12 @@ impl ModelInput {
             None => None,
         };
 
+        let document_relations = resolve_document_relations(
+            attrs.document_relations,
+            attrs.relations.as_deref().unwrap_or(&[]),
+            &item,
+        )?;
+
         Ok(Self {
             item,
             table,
@@ -690,6 +740,7 @@ impl ModelInput {
             mutators: attrs.mutators.unwrap_or_default(),
             touches: attrs.touches.unwrap_or_default(),
             relations: attrs.relations,
+            document_relations,
             morph_type: attrs.morph_type,
             morph_aliases: attrs.morph_aliases.unwrap_or_default(),
             observers: attrs.observers,
@@ -999,6 +1050,7 @@ struct ModelAttrs {
     mutators: Option<Vec<String>>,
     touches: Option<Vec<String>>,
     relations: Option<Vec<RelationDecl>>,
+    document_relations: Vec<DocumentRelationRaw>,
     morph_type: Option<String>,
     morph_aliases: Option<Vec<String>>,
     observers: Option<ObserversAttr>,
@@ -1069,7 +1121,11 @@ impl Parse for ModelAttrs {
                     "visible" => out.visible = Some(parse_str_array(input)?),
                     "mutators" => out.mutators = Some(parse_str_array(input)?),
                     "touches" => out.touches = Some(parse_str_array(input)?),
-                    "relations" => out.relations = Some(parse_relations_map(input)?),
+                    "relations" => {
+                        let (relations, documents) = parse_relations_map(input)?;
+                        out.relations = Some(relations);
+                        out.document_relations = documents;
+                    }
                     "morph_type" => out.morph_type = Some(input.parse::<LitStr>()?.value()),
                     "morph_aliases" => out.morph_aliases = Some(parse_str_array(input)?),
                     "route_key" => {
@@ -1200,17 +1256,161 @@ pub(crate) fn parse_casts_map(input: ParseStream) -> Result<Vec<(Ident, Type)>> 
 /// Options inside `{}` are comma-separated `<key> = <value>` pairs
 /// (or bare flags like `with_timestamps`). Unknown options surface as
 /// a clear compile error pointing at the option name.
-fn parse_relations_map(input: ParseStream) -> Result<Vec<RelationDecl>> {
+fn parse_relations_map(
+    input: ParseStream,
+) -> Result<(Vec<RelationDecl>, Vec<DocumentRelationRaw>)> {
     let content;
     syn::braced!(content in input);
-    let mut out = Vec::new();
+    let mut relations = Vec::new();
+    let mut documents = Vec::new();
     while !content.is_empty() {
-        let decl = parse_one_relation(&content)?;
-        out.push(decl);
+        // A relation to documents reads its kind and options itself; look
+        // ahead past `name:` to the kind to choose the parser.
+        let ahead = content.fork();
+        ahead.parse::<Ident>()?;
+        ahead.parse::<Token![:]>()?;
+        let kind: Ident = ahead.parse()?;
+        let document_kind = match kind.to_string().as_str() {
+            "HasManyDocuments" => Some(DocumentRelationKind::HasMany),
+            "HasOneDocument" => Some(DocumentRelationKind::HasOne),
+            _ => None,
+        };
+        match document_kind {
+            Some(document_kind) => {
+                let name: Ident = content.parse()?;
+                content.parse::<Token![:]>()?;
+                let kind_ident: Ident = content.parse()?;
+                documents.push(parse_document_relation(
+                    &content,
+                    name,
+                    &kind_ident,
+                    document_kind,
+                )?);
+            }
+            None => relations.push(parse_one_relation(&content)?),
+        }
         if content.is_empty() {
             break;
         }
         content.parse::<Token![,]>()?;
+    }
+    Ok((relations, documents))
+}
+
+/// The rest of a `HasManyDocuments<D> { ... }` or `HasOneDocument<D>`
+/// entry, after its kind: one generic argument and the `fk` and `lk`
+/// options.
+fn parse_document_relation(
+    input: ParseStream,
+    name: Ident,
+    kind_ident: &Ident,
+    kind: DocumentRelationKind,
+) -> Result<DocumentRelationRaw> {
+    input.parse::<Token![<]>()?;
+    let target: Type = input.parse()?;
+    if input.peek(Token![,]) {
+        return Err(syn::Error::new(
+            kind_ident.span(),
+            format!("`{kind_ident}` takes one generic argument, the document model"),
+        ));
+    }
+    input.parse::<Token![>]>()?;
+    let mut foreign_key = None;
+    let mut local_key = None;
+    if input.peek(syn::token::Brace) {
+        let content;
+        syn::braced!(content in input);
+        while !content.is_empty() {
+            let option: Ident = content.parse()?;
+            let value = if content.peek(Token![=]) {
+                content.parse::<Token![=]>()?;
+                Some(content.parse::<LitStr>()?)
+            } else {
+                None
+            };
+            let value = match (option.to_string().as_str(), value) {
+                ("fk" | "lk", Some(value)) => value,
+                _ => {
+                    return Err(syn::Error::new(
+                        option.span(),
+                        format!("`{option}` is no option of `{kind_ident}`; it takes fk and lk"),
+                    ));
+                }
+            };
+            if syn::parse_str::<Ident>(&value.value()).is_err() {
+                return Err(syn::Error::new(
+                    value.span(),
+                    format!("`{option}` names a field: it must be a Rust identifier"),
+                ));
+            }
+            if option == "fk" {
+                foreign_key = Some(value.value());
+            } else {
+                local_key = Some(value);
+            }
+            if content.is_empty() {
+                break;
+            }
+            content.parse::<Token![,]>()?;
+        }
+    }
+    Ok(DocumentRelationRaw {
+        name,
+        kind,
+        target,
+        foreign_key,
+        local_key,
+    })
+}
+
+/// Resolve the relations to documents against the struct: default the
+/// foreign key, check the local key is a field, and refuse a name declared
+/// twice across both relation lists.
+fn resolve_document_relations(
+    raw: Vec<DocumentRelationRaw>,
+    sql: &[RelationDecl],
+    item: &ItemStruct,
+) -> Result<Vec<DocumentRelationDecl>> {
+    let struct_name = item.ident.to_string();
+    let is_field = |name: &str| match &item.fields {
+        syn::Fields::Named(named) => named
+            .named
+            .iter()
+            .any(|field| field.ident.as_ref().is_some_and(|ident| ident == name)),
+        _ => false,
+    };
+    let mut names: Vec<&Ident> = sql.iter().map(|decl| &decl.name).collect();
+    let mut out = Vec::with_capacity(raw.len());
+    for decl in &raw {
+        if names.contains(&&decl.name) {
+            return Err(syn::Error::new(
+                decl.name.span(),
+                format!("the relation `{}` is declared twice", decl.name),
+            ));
+        }
+        names.push(&decl.name);
+        if let Some(local) = &decl.local_key
+            && !is_field(&local.value())
+        {
+            return Err(syn::Error::new(
+                local.span(),
+                format!(
+                    "`lk = \"{}\"` names no field of `{struct_name}`: the key the documents \
+                     hold must be a field of the model",
+                    local.value()
+                ),
+            ));
+        }
+        out.push(DocumentRelationDecl {
+            name: decl.name.clone(),
+            kind: decl.kind,
+            target: decl.target.clone(),
+            foreign_key: decl
+                .foreign_key
+                .clone()
+                .unwrap_or_else(|| format!("{}_id", to_snake(&struct_name))),
+            local_key: decl.local_key.as_ref().map(LitStr::value),
+        });
     }
     Ok(out)
 }
@@ -1228,7 +1428,8 @@ fn parse_one_relation(input: ParseStream) -> Result<RelationDecl> {
             format!(
                 "unknown relation kind `{kind_str}`. Expected one of: HasOne, BelongsTo, \
                  HasMany, BelongsToMany, HasOneThrough, HasManyThrough, MorphTo, MorphOne, \
-                 MorphMany, MorphToMany, MorphedByMany.",
+                 MorphMany, MorphToMany, MorphedByMany, or, to documents, HasManyDocuments \
+                 and HasOneDocument.",
             ),
         )
     })?;
@@ -2546,6 +2747,81 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("unknown relation kind"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_relations_document_kinds_go_to_their_own_list() {
+        // PAR-185: an SQL model's relations to documents are loaded from
+        // a collection, so they stay out of the SQL relation list.
+        let input = ModelInput::parse(
+            quote! {
+                relations = {
+                    posts: HasMany<Post>,
+                    notes: HasManyDocuments<Note>,
+                    setting: HasOneDocument<crate::documents::Setting> {
+                        fk = "owner_id",
+                        lk = "uuid",
+                    },
+                }
+            },
+            quote! { pub struct User { pub id: i64, pub uuid: String } },
+        )
+        .unwrap();
+        let relations = input.relations.as_ref().unwrap();
+        assert_eq!(relations.len(), 1, "only `posts` is an SQL relation");
+        let documents = &input.document_relations;
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0].name.to_string(), "notes");
+        assert_eq!(documents[0].kind, DocumentRelationKind::HasMany);
+        assert_eq!(
+            documents[0].foreign_key, "user_id",
+            "the document names the model"
+        );
+        assert_eq!(documents[0].local_key, None, "the primary key");
+        assert_eq!(documents[1].name.to_string(), "setting");
+        assert_eq!(documents[1].kind, DocumentRelationKind::HasOne);
+        assert_eq!(documents[1].foreign_key, "owner_id");
+        assert_eq!(documents[1].local_key.as_deref(), Some("uuid"));
+    }
+
+    #[test]
+    fn parse_relations_document_kinds_take_only_their_keys() {
+        let message = |relations: proc_macro2::TokenStream| match ModelInput::parse(
+            relations,
+            quote! { pub struct User { pub id: i64 } },
+        ) {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        let err =
+            message(quote! { relations = { notes: HasManyDocuments<Note> { with_timestamps } } });
+        assert!(
+            err.contains("with_timestamps") && err.contains("HasManyDocuments"),
+            "got: {err}"
+        );
+        let err = message(quote! { relations = { notes: HasManyDocuments<Note, Pivot> } });
+        assert!(err.contains("one generic argument"), "got: {err}");
+        let err = message(quote! { relations = { notes: HasOneDocument<Note> { lk = "uuid" } } });
+        assert!(err.contains("uuid") && err.contains("User"), "got: {err}");
+        let err =
+            message(quote! { relations = { notes: HasMany<Post>, notes: HasManyDocuments<Note> } });
+        assert!(err.contains("notes") && err.contains("twice"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_relations_unknown_kind_lists_the_document_kinds() {
+        let result = ModelInput::parse(
+            quote! { relations = { bogus: NotARelation<Foo> } },
+            quote! { pub struct X { pub id: i64 } },
+        );
+        let err = match result {
+            Ok(_) => panic!("expected error, got Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("HasManyDocuments") && err.contains("HasOneDocument"),
+            "got: {err}"
+        );
     }
 
     #[test]

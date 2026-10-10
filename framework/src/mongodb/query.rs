@@ -85,6 +85,8 @@ pub struct DocumentQuery<M> {
     limit: Option<u64>,
     projection: Option<Document>,
     trashed: Trashed,
+    /// The relation paths `with` names, loaded after the documents.
+    relations: Vec<String>,
     /// The first condition that could not be rendered, as its message.
     error: Option<String>,
     model: PhantomData<fn() -> M>,
@@ -99,6 +101,7 @@ impl<M> Clone for DocumentQuery<M> {
             limit: self.limit,
             projection: self.projection.clone(),
             trashed: self.trashed,
+            relations: self.relations.clone(),
             error: self.error.clone(),
             model: PhantomData,
         }
@@ -115,6 +118,7 @@ impl<M> fmt::Debug for DocumentQuery<M> {
             .field("limit", &self.limit)
             .field("projection", &self.projection)
             .field("trashed", &self.trashed)
+            .field("relations", &self.relations)
             .field("error", &self.error)
             .finish()
     }
@@ -136,6 +140,7 @@ impl<M: DocumentModel> DocumentQuery<M> {
             limit: None,
             projection: None,
             trashed: Trashed::Without,
+            relations: Vec::new(),
             error: None,
             model: PhantomData,
         }
@@ -150,6 +155,24 @@ impl<M: DocumentModel> DocumentQuery<M> {
     /// Read trashed documents only. Laravel's `onlyTrashed`.
     pub fn only_trashed(mut self) -> Self {
         self.trashed = Trashed::Only;
+        self
+    }
+
+    /// Load the relations `relations` onto the documents the query reads,
+    /// as Laravel's `with`: one query per relation, whatever the number of
+    /// documents. A dotted path (`"posts.comments"`) also loads a relation
+    /// of each related document. The calls that answer models (`get`,
+    /// `first`, `paginate` and `simple_paginate`) load them; read each with
+    /// the model's `<relation>_loaded()`.
+    ///
+    /// A name the model does not declare makes the reading call an error
+    /// that names it, before any query is sent.
+    pub fn with<I, S>(mut self, relations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.relations.extend(relations.into_iter().map(Into::into));
         self
     }
 
@@ -337,14 +360,23 @@ impl<M: DocumentModel> DocumentQuery<M> {
     // --- Reading ------------------------------------------------------------
 
     /// The matching documents as models. Fires `Retrieving` once, then
-    /// `Retrieved` for each model.
+    /// `Retrieved` for each model, then loads the relations
+    /// [`Self::with`] names.
     ///
     /// # Errors
     ///
-    /// As [`Self::to_filter`]; when the connection is not registered or
-    /// the query fails; and when a document does not read as `M`.
-    pub async fn get(self) -> Result<Models<M>, FrameworkError> {
+    /// As [`Self::to_filter`]; when `with` names a relation `M` does not
+    /// declare, before any query; when the connection is not registered
+    /// or a query fails; and when a document does not read as `M`.
+    pub async fn get(mut self) -> Result<Models<M>, FrameworkError> {
         self.check()?;
+        let relations = std::mem::take(&mut self.relations);
+        for path in &relations {
+            let head = path.split('.').next().unwrap_or(path);
+            if !M::RELATIONS.contains(&head) {
+                return Err(super::relations::__unknown_relation::<M>(head));
+            }
+        }
         events::retrieving::<M>().await?;
         let documents = self.get_documents().await?;
         let mut models = Vec::with_capacity(documents.len());
@@ -353,7 +385,32 @@ impl<M: DocumentModel> DocumentQuery<M> {
             events::retrieved(&model).await?;
             models.push(model);
         }
+        if !relations.is_empty() && !models.is_empty() {
+            let mut loading: Vec<&mut M> = models.iter_mut().collect();
+            for path in &relations {
+                M::__eager_load(path, &mut loading).await?;
+            }
+        }
         Ok(Models::from(models))
+    }
+
+    /// The matching documents as models, each beside the stored value of
+    /// `field` (null when the document lacks it), which an eager load
+    /// groups the related documents by. Fires the events [`Self::get`]
+    /// fires.
+    pub(crate) async fn get_keyed(self, field: &str) -> Result<Vec<(Bson, M)>, FrameworkError> {
+        self.check()?;
+        let path = storage::<M>(field);
+        events::retrieving::<M>().await?;
+        let documents = self.get_documents().await?;
+        let mut rows = Vec::with_capacity(documents.len());
+        for document in documents {
+            let value = value_at(&document, &path);
+            let model = M::from_document(document)?;
+            events::retrieved(&model).await?;
+            rows.push((value, model));
+        }
+        Ok(rows)
     }
 
     /// The matching documents as stored, without reading them as models:
@@ -803,7 +860,9 @@ impl<M: DocumentModel> DocumentQuery<M> {
 
     // --- Internals ----------------------------------------------------------
 
-    fn fail(mut self, message: String) -> Self {
+    /// The query, failing with `message` at the first call that renders
+    /// or runs it.
+    pub(crate) fn fail(mut self, message: String) -> Self {
         if self.error.is_none() {
             self.error = Some(message);
         }
@@ -1174,7 +1233,7 @@ impl<M: DocumentModel> DocumentGroup<M> {
 }
 
 /// The stored path of `field`: the key's field name is `_id`.
-fn storage<M: DocumentModel>(field: &str) -> String {
+pub(crate) fn storage<M: DocumentModel>(field: &str) -> String {
     match field.split_once('.') {
         Some((root, rest)) if root == M::KEY_FIELD => format!("_id.{rest}"),
         None if field == M::KEY_FIELD => "_id".to_owned(),

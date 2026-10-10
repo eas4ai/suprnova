@@ -37,6 +37,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let pivot_accessor = emit_pivot_accessor(struct_ident);
     let with_helper = emit_with_helper(struct_ident);
     let dispatch_impl = emit_dispatch_impl(struct_ident);
+    let document_methods = super::document_relations::emit_methods(input);
 
     // Build per-relation accessors + relation methods + inventory
     // submissions. Each lives in its own `impl Self { ... }` block -
@@ -59,6 +60,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         #( #relation_methods )*
         #( #relation_accessors )*
         #( #relation_inventory )*
+        #document_methods
     })
 }
 
@@ -209,6 +211,15 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
         if let Some(arm) = emit_recurse_batched_arm(input, rel)? {
             recurse_batched_arms.push(arm);
         }
+    }
+    // PAR-185: the relations to documents read their collection.
+    for relation in &input.document_relations {
+        let arms = super::document_relations::arms(input, relation);
+        eager_arms.push(arms.eager);
+        count_arms.push(arms.count);
+        aggregate_arms.push(arms.aggregate);
+        recurse_arms.push(arms.recurse);
+        recurse_batched_arms.push(arms.recurse_batched);
     }
 
     Ok(quote! {
