@@ -336,10 +336,17 @@ impl Mark {
 }
 
 /// Whether to style a line on `stream`: only a terminal shows a style,
-/// and `NO_COLOR` set to anything but an empty value asks for none, as
-/// <https://no-color.org> defines it.
+/// and a `NO_COLOR` that is set asks for none.
 fn styled(stream: &impl IsTerminal) -> bool {
-    stream.is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+    stream.is_terminal() && !no_color_is_set()
+}
+
+/// Whether `NO_COLOR` is present in the environment, empty or not. PAR-140
+/// reads presence as the request, where <https://no-color.org> ignores an
+/// empty value; the framework follows the requirement, so `NO_COLOR=""`
+/// turns the styles off.
+fn no_color_is_set() -> bool {
+    std::env::var_os("NO_COLOR").is_some()
 }
 
 /// Write `text` behind `mark`, at [`Verbosity::Normal`]. A test reads the
@@ -639,5 +646,34 @@ mod tests {
         assert!(!is_captured());
         let ((), _) = collected(&[], async { assert!(is_captured()) }).await;
         assert!(!is_captured());
+    }
+
+    // The environment is process-wide; only this test writes NO_COLOR.
+    static NO_COLOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn no_color_present_but_empty_still_turns_the_styles_off() {
+        let _guard = NO_COLOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::var_os("NO_COLOR");
+
+        // SAFETY: NO_COLOR_LOCK serializes every access to NO_COLOR in this binary.
+        unsafe { std::env::set_var("NO_COLOR", "") };
+        let present_but_empty = no_color_is_set();
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("NO_COLOR") };
+        let unset = no_color_is_set();
+        // SAFETY: as above.
+        unsafe {
+            match before {
+                Some(value) => std::env::set_var("NO_COLOR", value),
+                None => std::env::remove_var("NO_COLOR"),
+            }
+        }
+
+        assert!(
+            present_but_empty,
+            "PAR-140: NO_COLOR present but empty must turn the styles off"
+        );
+        assert!(!unset, "PAR-140: NO_COLOR unset must leave the styles on");
     }
 }
