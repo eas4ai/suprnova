@@ -1418,6 +1418,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Full-text indexes.** `Blueprint::full_text` creates a `FULLTEXT` index on
   MySQL and MariaDB and a `GIN` index over `to_tsvector` on Postgres, with
   `.language(..)`, and `drop_full_text` drops it; SQLite refuses both.
+- **Tests on the configured database.** `TestDatabase::refresh` migrates the
+  database `DATABASE_URL` names once per test process and holds each test in a
+  transaction rolled back when the helper drops; `refresh_lazily` does the same
+  on the first query.
+- **Migrations rolled back after a test.** `TestDatabase::migrate` runs the
+  migrations on `DATABASE_URL`'s database and rolls back the ones it ran when
+  the helper drops.
+- **Seeding test databases.** `TestDatabase::seed` runs a named seeder and
+  `seed_root` the root seeder before the test body.
+- **`#[suprnova_test]` database keys.** `refresh` runs the test through
+  `TestDatabase::refresh`, and `seed` or `seed = Path` seeds before the body.
 
 ### Changed
 

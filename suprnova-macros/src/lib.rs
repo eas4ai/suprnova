@@ -747,6 +747,19 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// By default, it uses `crate::migrations::Migrator` as the migrator type,
 /// following Suprnova's convention for migration location.
 ///
+/// The keys:
+///
+/// - `migrator = Path`: the migrator to run instead of the default one.
+/// - `refresh`: run on the database `DATABASE_URL` names, through
+///   `TestDatabase::refresh`, migrated once per test process, with the test
+///   in a transaction that rolls back, as Laravel's `RefreshDatabase` does.
+/// - `seed = Path`: run that seeder after the migrations and before the
+///   body, as Laravel's `#[Seeder]` attribute does.
+/// - `seed`: run the root seeder, as a bare `db:seed` and Laravel's `#[Seed]`
+///   attribute do.
+///
+/// An unknown key, or a key given twice, is a compile error.
+///
 /// # Examples
 ///
 /// ## Basic usage (recommended):
@@ -780,6 +793,15 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// #[suprnova_test(migrator = my_crate::CustomMigrator)]
 /// async fn test_with_custom_migrator(db: TestDatabase) {
 ///     // Uses custom migrator instead of default
+/// }
+/// ```
+///
+/// ## On the configured database, seeded:
+/// ```rust,ignore
+/// #[suprnova_test(refresh, seed = crate::seeders::UsersSeeder)]
+/// async fn test_on_postgres(db: TestDatabase) {
+///     // DATABASE_URL's database, migrated and seeded; the rows the test
+///     // writes, the seeded ones included, are rolled back afterwards
 /// }
 /// ```
 #[proc_macro_attribute]
