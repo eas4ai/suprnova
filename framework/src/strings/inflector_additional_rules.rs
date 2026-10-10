@@ -22,7 +22,7 @@
 // SOFTWARE.
 
 //! Additional complete doctrine/inflector 2.1.0 rule sets.
-//! Source: https://github.com/doctrine/inflector/tree/2.1.0/src/Rules
+//! Source: <https://github.com/doctrine/inflector/tree/2.1.0/src/Rules>
 
 use super::inflector::{LanguageRules, RuleList};
 

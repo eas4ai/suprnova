@@ -119,18 +119,18 @@ pub use suprnova_live::canonical::CanonicalValue;
 /// [`RenderCacheConfig::with_clock`](crate::render_cache::RenderCacheConfig::with_clock)
 /// do.
 pub use suprnova_live::clock::Clock;
-/// The failure a [`Clock`](crate::live::Clock) reports, and its closed
+/// The failure a [`Clock`] reports, and its closed
 /// reason.
 pub use suprnova_live::clock::{ClockError, ClockErrorKind};
 pub use suprnova_live::identity::UnixMillis;
 /// The typed identities a
-/// [`StitchSlotDescriptor`](crate::live::StitchSlotDescriptor) records.
+/// [`StitchSlotDescriptor`] records.
 pub use suprnova_live::identity::{
     BuildId, ComponentName, ContentDigest, IslandSlot, RouteIdentity,
 };
 pub use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 /// The server-declared document mount key a
-/// [`StitchSlotDescriptor`](crate::live::StitchSlotDescriptor) records.
+/// [`StitchSlotDescriptor`] records.
 pub use suprnova_live::mount::DocumentMountKey;
 pub use suprnova_live::mount::MountFlags;
 /// The request-lifetime cancellation flag the Live runtime attaches to a
