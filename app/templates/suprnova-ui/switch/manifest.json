@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.switch",
+  "version": 1,
+  "root": "suprnova-ui/switch",
+  "files": [
+    "switch.html",
+    "switch.css"
+  ],
+  "elements": []
+}

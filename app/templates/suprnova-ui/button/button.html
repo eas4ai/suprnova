@@ -1,0 +1,18 @@
+{#
+  suprnova.button - a native button with an explicit type. action names a
+  Live action for click buttons; a submit button relies on the form's
+  live:submit and shows the action's loading state on itself. link_button
+  is an anchor that reads as a button for navigation that is a real
+  request.
+#}
+{% macro button(text, kind="button", action="", variant="primary") %}
+{% if kind == "submit" %}
+<button class="sn-button" type="submit" data-sn-variant="{{ variant }}"{% if action != "" %} live:loading.disabled="{{ action }}" live:loading.busy="{{ action }}"{% endif %}>{{ text }}</button>
+{% else %}
+<button class="sn-button" type="button" data-sn-variant="{{ variant }}"{% if action != "" %} live:click="{{ action }}" live:loading.disabled="{{ action }}" live:loading.busy="{{ action }}"{% endif %}>{{ text }}</button>
+{% endif %}
+{% endmacro %}
+
+{% macro link_button(text, href, variant="secondary") %}
+<a class="sn-button" role="button" href="{{ href }}" data-sn-variant="{{ variant }}">{{ text }}</a>
+{% endmacro %}
