@@ -2961,6 +2961,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   write goes to a table the migrator created, could run that write on a
   connection other than the one that created the table. The SQLite fixture
   now holds one connection, and that test checks it (PAR-080).
+- **The `Inertia` facade shares a once prop.** Laravel's
+  `Inertia::shareOnce($key, fn () => ...)` had no facade form: only
+  `App::inertia_share_once` and `InertiaRegistry::share_once` registered a
+  shared once prop, though the facade carried `share`, `share_many`,
+  `share_data` and `share_provider` (PAR-052). `Inertia::share_once(key,
+  resolver)` now makes the same registration and returns the same
+  `SharedOnceProp`, which takes `as_key`, `until`, `fresh` and `once_with`
+  as any once prop does.
 
 ## 3.2.1 - 2026-10-05
 

@@ -778,6 +778,20 @@ once prop takes - `.as_key(key)`, `.until(span or moment)`,
 a later share under the same key replaces it, and the earlier handle then
 changes nothing.
 
+The `Inertia` facade makes the same registration.
+`Inertia::share_once(key, resolver)` returns the same prop, and the same
+options chain on it:
+
+```rust
+use suprnova::Inertia;
+
+Inertia::share_once("plans", || async {
+    Ok::<_, suprnova::FrameworkError>(load_plan_catalog().await?)
+})
+.as_key("plan-catalog")
+.until(3600);
+```
+
 Shared keys nest on dots the same way `.with` does - two static shares
 under `"user.name"` / `"user.age"` land in one `user` object on the wire.
 Read a shared value back, or clear the static registry entirely, with
