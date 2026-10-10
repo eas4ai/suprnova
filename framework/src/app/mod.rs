@@ -1249,7 +1249,9 @@ where
         };
         crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
             .map_err(FrameworkError::internal)?;
-        match self.run_cli(cli, Failures::Return).await? {
+        // Boxed for the same reason as in `run_cli_or_exit`: a test's or a
+        // tool's async block must not inline the whole dispatch future.
+        match Box::pin(self.run_cli(cli, Failures::Return)).await? {
             0 => Ok(()),
             // The command printed why it failed.
             1 => Err(FrameworkError::silent()),
@@ -1262,7 +1264,14 @@ where
     /// status 1, and a command that reported another status ends it with
     /// that one.
     async fn run_cli_or_exit(self, cli: Cli) {
-        match self.run_cli(cli, Failures::Print).await {
+        // The dispatch future is boxed, here and in `run_with_args`, so the
+        // application's `async fn main` holds one pointer to it instead of
+        // inlining every nested future of every command: inlined, their
+        // layout nests deeper than rustc's query depth limit and the
+        // application fails to compile with "queries overflow the depth
+        // limit", with no change the application could make but a
+        // `recursion_limit` attribute in its own main.
+        match Box::pin(self.run_cli(cli, Failures::Print)).await {
             Ok(0) => {}
             Ok(status) => std::process::exit(status),
             Err(_) => std::process::exit(1),
