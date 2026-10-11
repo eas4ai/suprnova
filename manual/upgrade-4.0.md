@@ -409,8 +409,7 @@ to the session.
 
 **Before:** 3.2.1 had no `type/*` wildcards: `MimeType` compared each
 allowlist entry with the file's type exactly, and an SVG passed only when
-the allowlist named `image/svg+xml`. A development build between 3.2.1 and
-4.0.0 read `image/*` as a wildcard that admitted SVG; no release did.
+the allowlist named `image/svg+xml`.
 
 **Now:** A `type/*` wildcard admits every subtype except `image/svg+xml`.
 
@@ -1140,15 +1139,14 @@ printf '%s\n' '/.suprnova-live.lock' '/.suprnova-live-journal.json' >> .gitignor
 
 ### A component's script can no longer replace a built-in.
 
-**Before:** `live:add` installed a component's script without scanning it,
-including one that replaced a built-in's member, such as `Object.keys = f`
-or `Math.random = f`.
+**Before:** 3.2.1 had no script scan.
 
-**Now:** A write to a member of a built-in object or function is refused
-(`script-builtin`) in every form.
+**Now:** `live:add` scans a component's scripts, and a write to a member of
+a built-in object or function, such as `Object.keys = f`, is refused
+(`script-builtin`).
 
-**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
-component as the refusal says.
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author changes it as the refusal says.
 
 ## Authentication
 
@@ -1203,9 +1201,7 @@ stamp and no `EmailVerified`.
 
 **Before:** 3.2.1 rewrote no password hash: `validate_credentials` on
 `EloquentUserProvider` and `DatabaseUserProvider` only verified the
-password, and a sign-in left an outdated hash as it was. A development build
-between 3.2.1 and 4.0.0 rewrote the hash in `validate_credentials`; no
-release did.
+password, and a sign-in left an outdated hash as it was.
 
 **Now:** It writes nothing. The sign-in (`attempt`, `once` and
 `Auth::logout_other_devices`) rewrites the hash through
@@ -1982,9 +1978,8 @@ InertiaConfig::new()
 
 ### Inertia DevTools recording is opt-in.
 
-**Before:** 3.2.1 had no Inertia DevTools: nothing recorded requests, and
-no entries endpoint existed. A development build between 3.2.1 and 4.0.0
-recorded under `APP_ENV=local` without configuration; no release did.
+**Before:** 3.2.1 had no Inertia DevTools: nothing recorded requests, and no
+entries endpoint existed.
 
 **Now:** Inertia DevTools records and serves its entries only for an
 application that passes `.devtools(DevToolsConfig::new())` to its
@@ -2006,8 +2001,7 @@ shows:
 
 **Before:** A kit reached `@inertiajs/core` only through its adapter, and
 the generated `inertia-props.ts` did not augment it. 3.2.1 had no `root`
-prop. A development build between 3.2.1 and 4.0.0 typed `root` with
-`usePage<{ root: string }>()`; no release did.
+prop.
 
 **Now:** Each kit's `package.json` declares `@inertiajs/core` at `^3.8.0`,
 and the generated `inertia-props.ts` augments it, so a bare `usePage()`
@@ -2056,9 +2050,7 @@ describes, and copy `templates/` in your Dockerfile's build stage.
 
 ### The starter keeps an existing notes table.
 
-**Before:** 3.2.1's starter had no notes migration. A development build
-between 3.2.1 and 4.0.0 shipped one that created `notes` unconditionally; no
-release did.
+**Before:** 3.2.1's starter had no notes migration.
 
 **Now:** It checks for the table first, as the users migration does.
 
@@ -2202,112 +2194,6 @@ now takes it:
 suprnova generate-types --routes
 ```
 
-### A component's scripts import by relative path only.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one with a static `import` of an absolute path, such as
-`/acme-ui/x/x.js`.
-
-**Now:** The scan refuses an absolute path, even to the component's own
-script, as it refuses a URL (`script-import`). A static `import` is a
-relative path (`./` or `../`) to a script of the component or of a
-component it depends on, and a path with one `../` more than the component
-is deep, such as `../../../acme-ui/x/x.js` from `acme-ui/x/`, is refused,
-because under a path prefix it resolves outside the prefix.
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author writes each static `import` as a
-relative path inside the components' root, such as `./x.js`.
-
-### A component's script can no longer reach a built-in prototype through a computed key or a name.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that added a property to every array on the page, such as
-`Array["prototype"].polluted = 1` or
-`const p = Array.prototype; p.polluted = 1;`.
-
-**Now:** A script may read a member of a prototype
-(`Array.prototype.slice.call(list)`) but not keep or pass on the prototype.
-The scan refuses it wherever it is a value, under a computed key that
-traces to `prototype`, and from `getPrototypeOf` (`script-prototype`). It
-also refuses every write to a prototype's member (`??=`, `+=`, `++`, a
-destructuring or `for` loop target and `delete` included), a method called
-on the prototype itself (`Array.prototype.push(1)`), and destructuring
-`prototype` out of an object.
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author calls a prototype's method through
-`call` instead of keeping the prototype, and adds nothing to a built-in
-prototype.
-
-### A destructuring assignment's defaults, nested keys and shorthand targets are scanned.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one with `eval` in a destructuring default, such as
-`[a = eval("alert(1)")] = []`, or with a shorthand target that wrote a
-global, such as `({ location } = { location: "javascript:alert(1)" })`.
-
-**Now:** The scan walks every key and default of a destructuring target at
-any depth, as it walks any value, and a nested or shorthand key gets the
-checks a top-level key gets, so `({ constructor } = [])` is refused
-(`script-eval`). A shorthand target is a target like any other: the scan
-does not follow the value it receives, and a name the script does not
-declare is a global write (`script-url` for `location`, `script-global`
-otherwise).
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author keeps refused calls out of
-destructuring defaults, declares every name a destructuring assignment
-writes, and gives a URL a constant rather than a name such an assignment
-wrote.
-
-### The script scan follows a value by the names it was written with.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that hid a remote URL for `img.src` behind a name another
-binding shadowed.
-
-**Now:** The scan follows a name to its initializer, its assignments and
-the arguments of its function's calls, and reads each name it meets there
-as the binding it had where it was written. So
-`const y = "https://evil.example/x"; const x = y;` followed by
-`function show() { const y = "/ok"; img.src = x; }` is refused
-(`script-url`), and a string handed to a timer the same way is refused too.
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author gives each URL a constant on the
-application's origin and each timer a function.
-
-### The script scan sees the global object through an expression.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that reached the global object through an expression, such
-as `(0, window).localStorage` or `(0, globalThis).fetch = f`.
-
-**Now:** The scan's rules about the global object's members see through a
-sequence's last expression, a conditional's branches, a logical
-expression's sides and an assignment's value, so each such read or write is
-refused as its bare form is (`script-global`).
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author removes the read or write, since its
-bare form is refused as well.
-
-### Writing a browser global no longer unlocks reading it.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that wrote a browser global and then read it, such as
-`try { window.localStorage = 1 } catch {}` followed by a read of
-`window.localStorage`.
-
-**Now:** The write is refused (`script-global`), and a name written on the
-global object never becomes the script's own, so the read stays refused as
-a read of any global the scan does not admit is.
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one, its author keeps the component's state in its
-module scope and reads only the globals the scan admits.
-
 ### A prop holding `<!--<script>` no longer breaks the first Inertia page.
 
 **Before:** The first visit's page JSON, in its
@@ -2442,25 +2328,11 @@ commands report their errors too.
 
 **Do:** Check that your reportable callbacks expect boot failures.
 
-### `schedule:interrupt` boots the cache it writes its mark to.
-
-**Before:** 3.2.1 had no `schedule:interrupt`. A development build between
-3.2.1 and 4.0.0 booted no cache store for it, so it failed with
-`ServiceNotFound` unless the bootstrap bound one; no release did.
-
-**Now:** It boots the store `CACHE_DRIVER` names, and keeps a store the
-bootstrap bound.
-
-**Do:** Nothing to do. To stop the current schedule run before its next
-task, run your application binary with `schedule:interrupt`, as
-[Scheduling Commands](cli-scheduling.md) shows.
-
 ### `cursor_paginate` keeps the query's order.
 
 **Before:** `cursor_paginate` replaced every ordering with the primary key,
 ascending, so a newest-first query such as `latest()` came back oldest
-first. A development build between 3.2.1 and 4.0.0 kept two or more
-orderings but still replaced a single `order_by`; no release did.
+first.
 
 **Now:** Every ordering is kept and carried in the cursor. An ordering the
 cursor cannot carry, such as `order_by_raw`, and an ordering on a joined
@@ -2470,20 +2342,6 @@ Postgres.
 
 **Do:** Order cursor-paginated queries by columns of the model's table, or
 use `paginate` for raw and joined orderings.
-
-### `simple_paginate` takes a page name, and `cursor_paginate` records its cursor.
-
-**Before:** The simple `Paginator` had no `page_name` field, and a
-`CursorPaginator` had no `current_cursor`. A development build between 3.2.1
-and 4.0.0 had both fields and left `page_name` as `None` after
-`simple_paginate`; no release did.
-
-**Now:** `simple_paginate` sets `page_name` to `page`,
-`Builder::simple_paginate_using(page_name, per_page)` reads another
-parameter, and a cursor page keeps `current_cursor`.
-
-**Do:** Nothing to do. To read the page from another query parameter, call
-`simple_paginate_using(page_name, per_page)`.
 
 ### `where_relation` on a `MorphTo` relation matches the owners.
 
@@ -2530,9 +2388,7 @@ and returns the same `SharedOnceProp`.
 
 **Before:** `generate-types` wrote one interface per
 `#[derive(InertiaProps)]` struct and no `Pages` map, and a field a handler
-deferred or marked optional was written as required. A development build
-between 3.2.1 and 4.0.0 wrote `Pages` but gave no entry to a page whose
-chain started with `Inertia::paginate(..)`; no release did.
+deferred or marked optional was written as required.
 
 **Now:** A chain that starts with `InertiaResponse::new`,
 `Inertia::paginate`, `Inertia::data` or `Inertia::try_data` pairs its
@@ -2544,52 +2400,6 @@ component with the struct `.with_data(..)` gives, and a key passed to
 ```bash
 suprnova generate-types
 ```
-
-### The Inertia DevTools gate's `GateEvaluated` event names the signed-in user.
-
-**Before:** 3.2.1 had no Inertia DevTools and no `GateEvaluated` event. A
-development build between 3.2.1 and 4.0.0 named the erased `dyn Any` user
-type in the event the DevTools entry endpoints dispatched, with no user
-identifier; no release did.
-
-**Now:** It names the signed-in user's own type and carries the identifier.
-
-**Do:** Nothing to do.
-
-### Every Live engine type a public signature names is named through `suprnova`.
-
-**Before:** Some Live engine types that public signatures name had no path
-through `suprnova`, so an application could not write them down.
-
-**Now:** `suprnova::live`, `suprnova::live::ledger`, `suprnova::render_cache`
-and `suprnova::render_cache::store` re-export them.
-
-**Do:** Nothing to do.
-
-### The script scan refuses every write to a member of the global object.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that wrote a member of the global object, such as
-`window.AcmeState = {}`, `window.onload = f` or `delete window.fetch`.
-
-**Now:** Every write to a member of the global object, or of a window that
-`window.open` returns, is refused (`script-global`), `delete` included.
-
-**Do:** Nothing to do for an application that installs no such component.
-If `live:add` refuses one it installed on 3.2.1, its author keeps the
-component's state in its module scope, not on `window`.
-
-### What the script scan learns from member writes does not depend on statement order.
-
-**Before:** `live:add` installed a component's script without scanning it,
-including one that read a global name nothing declared or wrote.
-
-**Now:** The scan settles names after its first walk, so its verdict does
-not depend on the script's statement order, and a read of a global name
-nothing wrote is refused.
-
-**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
-component as the refusal says.
 
 ### A CLI built between two releases pins the framework commit it was built from.
 
@@ -2617,6 +2427,12 @@ observes, or touch only the framework's own tooling and tests.
 - **Live upload and async routes follow the configured endpoint** Serving under a path prefix is new in 4.0.0, and at the host root the routes are the same `/__live` routes.
 - **Batch settlement counts work on MySQL** It concerns a `job_batches` table Laravel created, which 4.0.0 is the first release to support.
 - **On Postgres, a session write for a guest** It concerns Laravel's `sessions` layout, new in 4.0.0; on 3.2.1 `sessions.user_id` was text.
+- **A component's scripts import by relative path only.** The script scan is new in 4.0.0.
+- **A component's script can no longer reach a built-in prototype through a computed key or a name.** The script scan is new in 4.0.0.
+- **A destructuring assignment's defaults, nested keys and shorthand targets are scanned.** The script scan is new in 4.0.0.
+- **The script scan follows a value by the names it was written with.** The script scan is new in 4.0.0.
+- **The script scan sees the global object through an expression.** The script scan is new in 4.0.0.
+- **Writing a browser global no longer unlocks reading it.** The script scan is new in 4.0.0.
 - **Magnetar's API documentation builds without the `two-factor` feature.** It changes API documentation only.
 - **API documentation writes ranges in words.** It changes API documentation only.
 - **An Inertia page that cannot be encoded answers an error.** Encoding a page does not fail in practice, so no response changes.
@@ -2632,6 +2448,12 @@ observes, or touch only the framework's own tooling and tests.
 - **DevTools no longer reads an upload before its authorization.** DevTools is new in 4.0.0.
 - **The DevTools id tag finds a closing body tag in any case.** DevTools is new in 4.0.0.
 - **A tagged first visit no longer carries the untagged page's length.** The DevTools id tag is new in 4.0.0.
+- **`schedule:interrupt` boots the cache it writes its mark to.** `schedule:interrupt` is new in 4.0.0.
+- **Every Live engine type a public signature names is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
+- **The Inertia DevTools gate's `GateEvaluated` event names the signed-in user.** DevTools is new in 4.0.0.
+- **`simple_paginate` takes a page name, and `cursor_paginate` records its cursor.** Both fields are new in 4.0.0; the struct literals are covered under Public types with new fields or variants.
+- **What the script scan learns from member writes does not depend on statement order.** The script scan is new in 4.0.0.
+- **The script scan refuses every write to a member of the global object.** The script scan is new in 4.0.0.
 - **The Laravel-database tests run each SQLite test on one connection.** It changes the framework's own tests.
 - **The component allowlist refuses test fakes, app-wide hooks and installs.** A component's Rust, and the allowlist that reads it, are new in 4.0.0; a 3.2.1 component carried no Rust.
 - **Every Live and Magnetar type a public signature leads to is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
