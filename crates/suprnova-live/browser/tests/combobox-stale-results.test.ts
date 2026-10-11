@@ -1,9 +1,10 @@
 // FORM-008: a stale result never replaces results for a newer query. The
 // combobox element ships as a vendored file that defines sn-combobox; its
-// stale-suppression decisions are plain functions on SuprnovaCombobox so this
-// fixture can prove them without a document. The file is evaluated with the
-// custom-element registry absent, which is also the state a document that
-// never added the component is in.
+// stale-suppression decisions are plain functions in an object the file's
+// function returns, which is the script's completion value, so this fixture
+// can prove them without a document. The file writes nothing on the global
+// object (REG-032). It is evaluated with the custom-element registry absent,
+// which is also the state a document that never added the component is in.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,10 +31,20 @@ function loadCombobox(): ComboboxApi {
   );
   const context: Record<string, unknown> = { HTMLElement: Object };
   context["globalThis"] = context;
-  runInNewContext(source, context);
-  const api: unknown = context["SuprnovaCombobox"];
-  if (typeof api !== "object" || api === null) throw new Error("combobox_api_missing");
-  return api as ComboboxApi;
+  const keys = Object.keys(context).sort();
+  const api = comboboxApi(runInNewContext(source, context));
+  if (Object.keys(context).sort().join() !== keys.join()) {
+    throw new Error("combobox_wrote_a_global");
+  }
+  return api;
+}
+
+// The decisions object a run of the file returned, or an error if it returned none.
+function comboboxApi(result: unknown): ComboboxApi {
+  if (typeof result !== "object" || result === null || !("acceptsResults" in result)) {
+    throw new Error("combobox_api_missing");
+  }
+  return result as ComboboxApi;
 }
 
 describe("combobox stale suppression", () => {
@@ -78,7 +89,10 @@ describe("combobox stale suppression", () => {
       },
     };
     context["globalThis"] = context;
-    runInNewContext(source, context);
+    const keys = Object.keys(context).sort();
+    const { acceptsResults } = comboboxApi(runInNewContext(source, context));
     expect(defined).toEqual(["sn-combobox"]);
+    expect(acceptsResults("ca", "ca")).toBe(true);
+    expect(Object.keys(context).sort()).toEqual(keys);
   });
 });

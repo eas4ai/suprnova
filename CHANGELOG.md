@@ -2644,12 +2644,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   could read back, so `try { window.localStorage = 1 } catch {}` made
   `window.localStorage` readable: the write throws, the `catch` swallows
   it, and the read returned the browser's storage, which the scan
-  otherwise refuses. A written name is now the script's own only if it
-  starts with a capital and no list of the scan holds it, since every
-  browser property of the global object whose write fails is named in
-  lower camel case; the write is checked as before, and a global named
-  like `AcmeX` still reads back. The `script-global-write-unlocks-read`
-  fixture pins it.
+  otherwise refuses. A written name no longer becomes the script's own,
+  so the read stays refused, and the write itself is now refused too. The
+  `script-global-write-unlocks-read` fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
   `LockoutService::without_user_lock` linked
@@ -2926,17 +2923,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `templates::cargo_toml_pinned` and `templates::api::cargo_toml_pinned`
   render a manifest with a pin you give.
 - **What the script scan learns from member writes does not depend on
-  statement order.** A script may read back a name it writes on the global
-  object (`window[key] = value`), a member a class writes on `this` is the
-  instance's own, and a name a script writes on an object of its own may
-  be its method rather than a browser API's. The scan traced a computed
-  key's name during its first walk, while a name the walk had not reached
-  yet resolved where the walk stood and a function's calls counted only
-  once reached, so the same script was admitted in one statement order and
-  refused in another, and a read of a global name nothing wrote could
-  pass. The scan now settles those names after the first walk has met
-  every name and every call. It never admitted `eval`, `Worker` or another
-  property refused by name.
+  statement order.** A member a class writes on `this` is the instance's
+  own, a name a script writes on an object of its own may be its method
+  rather than a browser API's, and a write on the global object
+  (`window[key] = value`) is refused under the name its key traces to. The
+  scan traced a computed key's name during its first walk, while a name
+  the walk had not reached yet resolved where the walk stood and a
+  function's calls counted only once reached, so the same script was
+  admitted in one statement order and refused in another, and a read of a
+  global name nothing wrote could pass. The scan now settles those names
+  after the first walk has met every name and every call. It never
+  admitted `eval`, `Worker` or another property refused by name.
+- **The script scan refuses every write to a member of the global
+  object.** REG-032 refuses a write to a member of a global object, but
+  the `live:add` scan admitted a capitalised name the browser does not
+  define (`window.AcmeState = {}`, `globalThis["Acme" + "State"] = 1`) as
+  a global of the script's own, which the script could then read back. It
+  also admitted a write of other names its lists do not hold
+  (`window.onload = f`, `window.name = "x"`) and `delete window.fetch`. A
+  component could overwrite a name the application or the Live runtime
+  keeps on `window`. A write to a member of the global object, or of the
+  window `window.open` returns, is now refused (`script-global`) whatever
+  the name, in every form of write, `delete` included, and a later read of
+  the name is refused as a read of any global the scan does not admit is.
+  A component keeps its state in its module scope. The shipped `combobox`
+  no longer writes `globalThis.SuprnovaCombobox`: its script's function
+  returns the stale-suppression decisions, and the fixture that evaluates
+  the file takes them from the script's completion value.
 - **`#[derive(MultipartRequest)]` reads indexed and bracketed part names.**
   The derive matched a part's name to `#[field(...)]` letter for letter, so
   the Inertia client's `photos[0]` and `photos[1]` never reached a

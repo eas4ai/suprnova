@@ -1459,7 +1459,9 @@ fn reg_032_call_apply_or_bind_written_on_a_value_the_script_did_not_make_is_refu
 /// window's first blank document. A built-in of that window, or a method
 /// of its page, is refused written or passed on as this window's is,
 /// through the call itself or a name that holds the window. Using the
-/// window (`focus()`, its `location.href`, its `name`) stays admitted.
+/// window (`focus()`, its `location.href`, reading its `name`) stays
+/// admitted; a write to a member of the window itself is refused as a
+/// write to a member of `window` is.
 #[test]
 fn reg_032_a_built_in_of_the_window_open_returns_is_a_built_in() {
     let cases: &[(&str, &str, u32)] = &[
@@ -1497,7 +1499,7 @@ fn reg_032_a_built_in_of_the_window_open_returns_is_a_built_in() {
     ];
     let mut failures = missing_cases(cases);
     failures.extend(refused_scripts(&[
-        "const w = window.open(\"/x\");\nw.focus();\nw.location.href = \"/y\";\nw.name = \"x\";\nw.document.title = \"x\";\nexport const closed = () => w.closed;\n",
+        "const w = window.open(\"/x\");\nw.focus();\nw.location.href = \"/y\";\nw.document.title = \"x\";\nexport const closed = () => w.closed;\nexport const label = () => w.name;\n",
     ]));
     assert!(
         failures.is_empty(),
@@ -1676,13 +1678,124 @@ fn reg_032_the_global_object_reached_through_an_expression_is_the_global_object(
     );
 }
 
-/// REG-032: writing a name on the global object makes it a global of the
-/// script's own, which the script may then read back, only when the name
-/// cannot be one of the browser's own properties there. A browser global
-/// whose write throws, as `localStorage`'s does, would otherwise be read
-/// for real after a `try`. Each read below is refused as the plain read is,
-/// however the name was written; the write itself is unchanged, and a
-/// global the script names with a capital stays its own.
+/// REG-032: a write to a member of the global object is refused whatever
+/// the member's name: static or computed, constant or not, a property the
+/// browser defines or one it does not, capitalised or not. Every form of
+/// write counts (`=`, a compound or logical assignment, `++` and `--`, a
+/// destructuring or `for` loop target, `delete`), and so does every way of
+/// reaching the global object: one of its names, an expression that may
+/// yield one, the window `open` returns, and the global object handed to
+/// `Object.assign` or `Object.defineProperty`. Such a write could replace
+/// a name the application or the Live runtime keeps on `window`, so a
+/// write never makes a global of the script's own: a later read of the
+/// name is refused as any read of a global the scan does not admit is.
+/// Each refusal names the member where the key traces to a name; the
+/// global object handed to a function is refused under its own name.
+#[test]
+fn reg_032_a_write_to_a_member_of_the_global_object_is_refused_whatever_the_name() {
+    // (the script, the line refused, the name the refusal carries)
+    let cases: &[(&str, u32, Option<&str>)] = &[
+        ("window.AcmeState = 1;\n", 1, Some("AcmeState")),
+        (
+            "globalThis[\"Acme\" + \"State\"] = 1;\n",
+            1,
+            Some("AcmeState"),
+        ),
+        ("window.acmeState = 1;\n", 1, Some("acmeState")),
+        ("window.AcmeState++;\n", 1, Some("AcmeState")),
+        ("--self.AcmeCount;\n", 1, Some("AcmeCount")),
+        ("window.AcmeState += 1;\n", 1, Some("AcmeState")),
+        ("window.AcmeState ??= {};\n", 1, Some("AcmeState")),
+        ("[window.AcmeState] = [1];\n", 1, Some("AcmeState")),
+        (
+            "({ a: globalThis.AcmeState } = { a: 1 });\n",
+            1,
+            Some("AcmeState"),
+        ),
+        ("for (self.AcmeState of [1]) {\n}\n", 1, Some("AcmeState")),
+        ("delete window.fetch;\n", 1, Some("fetch")),
+        ("window.onload = () => {};\n", 1, Some("onload")),
+        ("window.name = \"x\";\n", 1, Some("name")),
+        ("window.fetch = () => null;\n", 1, Some("fetch")),
+        (
+            "export function put(key) {\n  window[key] = 1;\n}\n",
+            2,
+            None,
+        ),
+        ("(0, window).AcmeState = 1;\n", 1, Some("AcmeState")),
+        (
+            "export function put(flag) {\n  (flag ? window : self).AcmeState = 1;\n}\n",
+            2,
+            Some("AcmeState"),
+        ),
+        (
+            "const w = window.open(\"/x\");\nw.AcmeState = 1;\n",
+            2,
+            Some("AcmeState"),
+        ),
+        ("window.open(\"/x\").name = \"x\";\n", 1, Some("name")),
+        (
+            "Object.assign(window, { AcmeState: 1 });\n",
+            1,
+            Some("window"),
+        ),
+        (
+            "Object.defineProperty(globalThis, \"AcmeState\", { value: 1 });\n",
+            1,
+            Some("globalThis"),
+        ),
+        (
+            "window.AcmeState = 1;\nexport const s = window.AcmeState;\n",
+            2,
+            Some("AcmeState"),
+        ),
+        (
+            "globalThis.AcmeLib = { version: 1 };\nglobalThis.AcmeLib.version = 2;\n",
+            1,
+            Some("AcmeLib"),
+        ),
+        (
+            "globalThis.AcmeLib = { version: 1 };\nglobalThis.AcmeLib.version = 2;\n",
+            2,
+            Some("AcmeLib"),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (script, line, name) in cases {
+        let report = scan_widget_script(script);
+        let refused = report.findings.iter().any(|finding| {
+            finding.check == "script-global"
+                && finding.line == Some(*line)
+                && name.is_none_or(|name| finding.message.contains(&format!("`{name}`")))
+        });
+        if !refused {
+            failures.push(format!(
+                "{script:?}: no `script-global` at widget.js:{line}{}; got [{}]",
+                name.map(|name| format!(" naming `{name}`"))
+                    .unwrap_or_default(),
+                report
+                    .findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// REG-032: writing a name on the global object never unlocks reading it.
+/// A browser global whose write throws, as `localStorage`'s does, would
+/// otherwise be read for real after a `try`, and a name the browser does
+/// not define could hold a value another script left there. The write is
+/// refused, and each read below is refused as the plain read is, however
+/// the name was written and however it is capitalised.
 #[test]
 fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
     let cases: &[(&str, &str, u32)] = &[
@@ -1711,6 +1824,16 @@ fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
             "acmeState",
             2,
         ),
+        (
+            "window.AcmeX = {};\nexport const x = (0, window).AcmeX;\n",
+            "AcmeX",
+            2,
+        ),
+        (
+            "globalThis[\"Acme\" + \"Y\"] = {};\nexport const y = window.AcmeY;\n",
+            "AcmeY",
+            2,
+        ),
     ];
     let mut failures = Vec::new();
     for (script, name, line) in cases {
@@ -1723,24 +1846,6 @@ fn reg_032_writing_a_browser_global_does_not_unlock_reading_it() {
         if !refused {
             failures.push(format!(
                 "{script:?}: the read of `{name}` at widget.js:{line} is not refused; got [{}]",
-                report
-                    .findings
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            ));
-        }
-    }
-    let own = [
-        "window.AcmeX = {};\nexport const x = (0, window).AcmeX;\n",
-        "globalThis[\"Acme\" + \"Y\"] = {};\nexport const y = window.AcmeY;\n",
-    ];
-    for script in own {
-        let report = scan_widget_script(script);
-        if !report.accepted() {
-            failures.push(format!(
-                "{script:?} was refused: {}",
                 report
                     .findings
                     .iter()
@@ -1772,15 +1877,16 @@ fn global_refusals(report: &ScanReport) -> Vec<String> {
     messages
 }
 
-/// REG-032: the globals of a script's own, the names a computed write on
-/// the global object traces to, do not depend on the order of the
-/// script's statements. Each pair is one script in two orders: the write
-/// before the names and calls its key traces through, and after them. The
-/// key resolves to the binding each name has where it is written, so a
-/// name the writing function shadows does not stand in for it, and it
-/// takes every value the function's calls pass, wherever the calls stand.
-/// In both orders the traced name reads back, a read of a global name
-/// nothing writes is refused, and the scan makes the same findings.
+/// REG-032: a computed write on the global object is refused, naming the
+/// name its key traces to, whatever the order of the script's statements.
+/// Each pair is one script in two orders: the write before the names and
+/// calls its key traces through, and after them. The key resolves to the
+/// binding each name has where it is written, so a name the writing
+/// function shadows does not stand in for it, and it takes every value the
+/// function's calls pass, wherever the calls stand. In both orders the
+/// write is refused, the read of the written name is refused as the read
+/// of a global name nothing writes is, so the written name has two
+/// refusals and the other name one, and the scan makes the same findings.
 #[test]
 fn reg_032_the_globals_a_script_writes_do_not_depend_on_statement_order() {
     // (the write first, the write last, the name written, a name nothing writes)
@@ -1803,33 +1909,32 @@ fn reg_032_the_globals_a_script_writes_do_not_depend_on_statement_order() {
         let mut refusals = Vec::new();
         for script in [write_first, write_last] {
             let report = scan_widget_script(script);
-            let refused = |name: &str| {
-                report.findings.iter().any(|finding| {
-                    finding.check == "script-global"
-                        && finding.message.contains(&format!("`{name}`"))
-                })
+            let refusals_of = |name: &str| {
+                report
+                    .findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.check == "script-global"
+                            && finding.message.contains(&format!("`{name}`"))
+                    })
+                    .count()
             };
-            if refused(written) {
-                failures.push(format!(
-                    "{script:?}: the read of `{written}`, which the script writes, is refused; got [{}]",
-                    report
-                        .findings
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                ));
-            }
-            if !refused(unlisted) {
-                failures.push(format!(
-                    "{script:?}: the read of `{unlisted}`, which nothing writes, is admitted; got [{}]",
-                    report
-                        .findings
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                ));
+            for (name, expected, what) in [
+                (written, 2, "the write and the read"),
+                (unlisted, 1, "the read alone"),
+            ] {
+                let found = refusals_of(name);
+                if found != expected {
+                    failures.push(format!(
+                        "{script:?}: {found} `script-global` findings name `{name}`, expected {expected} ({what}); got [{}]",
+                        report
+                            .findings
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ));
+                }
             }
             refusals.push((report.accepted(), global_refusals(&report)));
         }
@@ -1951,7 +2056,6 @@ fn reg_032_a_scripts_own_members_and_uses_of_built_ins_stay_admitted() {
         "location.hash = \"#a\";\n",
         "export const api = { open() {} };\napi.open.label = \"x\";\n",
         "export class A extends HTMLElement {\n  error = null;\n  connectedCallback() {\n    this.error = this.querySelector(\".e\");\n    if (this.error) this.error.hidden = true;\n  }\n}\n",
-        "globalThis.AcmeLib = { version: 1 };\nglobalThis.AcmeLib.version = 2;\n",
         "export const failure = (result) => ({ error: result.error, next: result.next });\n",
         "export const take = (el) => [el.focus, el.values];\n",
         "export function clear(form) {\n  form.querySelector(\"[name=search]\").value = \"\";\n}\n",
