@@ -171,7 +171,14 @@ pub use suprnova_live::child::{EligibleChildParametersV2, VerifiedChildParameter
 /// The wall clock Live and the RenderCache read. Re-exported so an
 /// application can implement it, or hold one as `Arc<dyn Clock>`, as
 /// [`AdjustableTestClock`](crate::live::testing::AdjustableTestClock) and
-/// [`RenderCacheConfig::with_clock`](crate::render_cache::RenderCacheConfig::with_clock)
+#[cfg_attr(
+    feature = "testing",
+    doc = "[`RenderCacheConfig::with_clock`](crate::render_cache::RenderCacheConfig::with_clock)"
+)]
+#[cfg_attr(
+    not(feature = "testing"),
+    doc = "`RenderCacheConfig::with_clock` (with the `testing` feature)"
+)]
 /// do.
 pub use suprnova_live::clock::Clock;
 /// The failure a [`Clock`] reports, and its closed
