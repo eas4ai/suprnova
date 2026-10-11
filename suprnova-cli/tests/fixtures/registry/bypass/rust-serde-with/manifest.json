@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-serde-with",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
