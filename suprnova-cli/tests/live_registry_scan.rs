@@ -194,6 +194,7 @@ fn reg_030_host_ports_trusted_contexts_and_key_material_are_refused() {
         "suprnova::live::ComponentInstance",
         "suprnova::live::RenderContext",
         "suprnova::live::action::RawActionArguments",
+        "suprnova::inertia_root",
     ] {
         assert!(
             matches!(list.admit(path), Some(Admission::Refused { .. })),

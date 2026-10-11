@@ -6,7 +6,10 @@
   "suprnova-cli",
   "suprnova-macros",
   "Cargo.toml",
-  ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl"
+  ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
+  ":(exclude)framework/tests",
+  ":(exclude)suprnova-cli/tests",
+  ":(exclude,glob)crates/*/tests/**"
  ],
- "source_rev": "1e5e04225"
+ "source_rev": "410c4ed4f"
 }

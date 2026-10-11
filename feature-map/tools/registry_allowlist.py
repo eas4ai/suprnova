@@ -457,6 +457,9 @@ ITEMS = {
     "suprnova::Http::global_response_middleware": REFUSE,
     "suprnova::Http::prevent_stray_requests": REFUSE,
     "suprnova::Inertia::install": REFUSE,
+    # Declares the application's Inertia root document, the template a first
+    # visit renders into: the application's to write, never a component's.
+    "suprnova::inertia_root": REFUSE,
     "suprnova::Mail::fake": REFUSE,
     "suprnova::MailFake": REFUSE,
     "suprnova::Process::fake": REFUSE,

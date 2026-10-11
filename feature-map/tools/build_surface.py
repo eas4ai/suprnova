@@ -316,11 +316,13 @@ excluded["rust_items_not_extracted"] = [
 EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")
 (OUT.parent / "meta.json").write_text(json.dumps({
     "source_rev": REV, "records": len(out),
-    # The component allowlist is generated from this map, so a commit that
-    # only regenerates it leaves the map current (generate.sh stamps REV the
-    # same way).
+    # The component allowlist is generated from this map, and the test
+    # directories feed nothing into it, so a commit that only touches them
+    # leaves the map current (generate.sh stamps REV the same way).
     "source_paths": ["framework", "crates", "suprnova-cli", "suprnova-macros", "Cargo.toml",
-                     ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl"],
+                     ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
+                     ":(exclude)framework/tests", ":(exclude)suprnova-cli/tests",
+                     ":(exclude,glob)crates/*/tests/**"],
 }, indent=1, sort_keys=True) + "\n")
 print(json.dumps({"raw": raw_count, "folded_reexports": raw_count - len(out), "records": len(out),
                   "chapters": len({r["chapter"] for r in out if not r["chapter"].startswith("(")}),
