@@ -11,7 +11,7 @@
 //! Without this conversion, browsers may re-submit the original method
 //! to the redirect target - breaking form-create-then-redirect flows.
 //! Laravel's Inertia adapter ships this conversion inside its own
-//! middleware; Suprnova ships it as an opt-in via `global_middleware!`.
+//! middleware; `Inertia::install` registers this one.
 
 use crate::http::{Request, Response};
 use crate::middleware::{Middleware, Next};
