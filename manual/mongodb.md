@@ -198,9 +198,10 @@ The facade answers the connections the boot registered:
 | `Mongo::ping()` | `Ok(())` when the server answers `ping`. |
 
 Every call returns a `Result`. With no connection registered, the error says
-why: `MONGODB_URI` is unset, or invalid, or set while the boot hasn't run
-yet in this process. An unknown name in `connection_named` is an error that
-names it.
+why: `MONGODB_URI` is unset or invalid, the database name from
+`MONGODB_DATABASE` or the URI is missing or invalid, or `MONGODB_URI` is set
+or a `MongoConfig` is registered while the boot hasn't run yet in this
+process. An unknown name in `connection_named` is an error that names it.
 
 A `MongoConnection` has the same methods for one connection, plus `name()`
 and `client()`, the driver's client for other databases, sessions, and
