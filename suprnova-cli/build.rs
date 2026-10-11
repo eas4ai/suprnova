@@ -15,16 +15,17 @@
 //!
 //! It also records the commit the CLI is built from, for the framework pin
 //! `suprnova new` writes (PAR-080): `SUPRNOVA_CLI_BUILD_COMMIT`, HEAD's
-//! full hash, and `SUPRNOVA_CLI_BUILD_TAGGED`, whether HEAD is the release
-//! `v<version>`. A CLI built from main between two releases has templates
-//! that may already use API the last tag lacks, so its scaffold must pin
-//! the commit, not the tag. When git cannot answer, the script records
-//! nothing and the scaffold pins the tag.
+//! full hash, and `SUPRNOVA_CLI_BUILD_TAGGED`, whether the local tag
+//! `v<version>` names HEAD. A CLI built from main between two releases has
+//! templates that may already use API the last tag lacks, so its scaffold
+//! must pin the commit, not the tag; so does any build without the release
+//! tag on HEAD. When git cannot answer, the script records nothing and the
+//! scaffold pins the tag. `build_commit.rs` holds the classification, so
+//! `tests/build_commit.rs` can check it on real repositories.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The generated code that spells the shipped library's `library.json`,
 /// with the version read by `env!` when the crate compiles.
@@ -108,14 +109,6 @@ fn absolute(path: &Path) -> String {
         .to_owned()
 }
 
-/// The commit this CLI is built from, as git reports it.
-struct BuildCommit {
-    /// HEAD's full commit hash.
-    sha: String,
-    /// Whether HEAD is the release `v<version>`.
-    tagged: bool,
-}
-
 /// Records the commit facts `templates::recorded_build_commit` reads, and
 /// asks cargo to run this script again when HEAD moves or a tag changes.
 /// Records nothing when git is missing or the CLI's sources are not the
@@ -141,41 +134,6 @@ fn record_build_commit(manifest_dir: &Path) {
     );
 }
 
-/// HEAD's commit and whether it is the release `v<version>`.
-///
-/// A local tag `v<version>` answers directly. Cargo's own git checkouts,
-/// which `cargo install --git` builds from, often carry no tags, so with
-/// no such tag the answer comes from the history instead: a release
-/// commit is the version bump, the commit that sets the workspace version,
-/// so HEAD is the release when it is the newest commit that adds
-/// `version = "<version>"` to the root `Cargo.toml`. In a clone one commit
-/// deep, HEAD itself seems to add the line, so the scaffold pins the tag.
-fn build_commit(workspace: &Path, version: &str) -> Option<BuildCommit> {
-    let top = git(workspace, &["rev-parse", "--show-toplevel"])?;
-    if fs::canonicalize(&top).ok()? != fs::canonicalize(workspace).ok()? {
-        return None;
-    }
-    let sha = git(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    if !commit_hash(&sha) {
-        return None;
-    }
-    let tag = format!("refs/tags/v{version}^{{commit}}");
-    let release = match git(workspace, &["rev-parse", "-q", "--verify", &tag]) {
-        Some(tagged) => tagged,
-        None => {
-            let line = format!("-Sversion = \"{version}\"");
-            git(
-                workspace,
-                &["log", "-n", "1", "--format=%H", &line, "--", "Cargo.toml"],
-            )?
-        }
-    };
-    Some(BuildCommit {
-        tagged: release == sha,
-        sha,
-    })
-}
-
 /// The git files whose change can change [`build_commit`]'s answer: HEAD,
 /// the branch it names, the packed refs and the tags. Only paths that
 /// exist are returned, because cargo runs a script again on every build
@@ -197,32 +155,4 @@ fn watched_git_paths(workspace: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Runs git in `directory` and returns its trimmed output, or `None` when
-/// git is missing, fails or prints nothing. `GIT_DIR` and `GIT_WORK_TREE`
-/// are cleared so a build started from a git hook still reads the
-/// repository the sources are in.
-fn git(directory: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_owned())
-}
-
-/// Whether `text` is a full commit hash: 40 hex digits for SHA-1, 64 for
-/// SHA-256, in lowercase as git prints them.
-fn commit_hash(text: &str) -> bool {
-    matches!(text.len(), 40 | 64)
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
+include!("build_commit.rs");

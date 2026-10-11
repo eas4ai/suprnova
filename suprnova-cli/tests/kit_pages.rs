@@ -807,11 +807,11 @@ mod backend {
     }
 
     /// PAR-080: the pin follows the facts the build recorded. A build from a
-    /// commit that is not the release writes that commit as `rev`, a build
-    /// from the release writes its tag, and a build git could not read
-    /// writes the tag. The dependency and the dev-dependency of the backend
-    /// and of the API starter carry the same pin, and never a `tag` beside
-    /// a `rev`.
+    /// commit the release tag does not name writes that commit as `rev`, a
+    /// build from the tagged release writes its tag, and a build git could
+    /// not read writes the tag. The dependency and the dev-dependency of
+    /// the backend and of the API starter carry the same pin, and never a
+    /// `tag` beside a `rev`.
     #[test]
     fn kit_an_untagged_build_pins_its_commit_and_a_tagged_build_pins_the_tag() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
@@ -844,8 +844,8 @@ mod backend {
 
     /// PAR-080: a fresh scaffold compiles against the framework it pins,
     /// so it pins the framework the CLI's templates were written for: the
-    /// commit the CLI was built from when that commit is not the release
-    /// `v<version>`, as on main between two releases, and the tag
+    /// commit the CLI was built from when the local tag `v<version>` does
+    /// not name that commit, as on main between two releases, and the tag
     /// otherwise. Both the dependency and the dev-dependency carry the pin
     /// this build recorded.
     #[test]
