@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "routes": "ordinary_documents",
+  "url_reflection": "replace_state_only",
+  "back_forward": "native_navigation",
+  "prefetch_mechanisms": ["speculation_rules", "link_prefetch"],
+  "prefetch_authority": "same_origin_get_only",
+  "view_transitions": {"mode": "optional_enhancement", "timeout_ms": 5000, "reduced_motion": "skip"},
+  "unload_listener": "forbidden",
+  "beforeunload": "dirty_state_only"
+}

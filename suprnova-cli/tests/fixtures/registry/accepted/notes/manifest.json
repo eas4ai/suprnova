@@ -1,0 +1,5 @@
+{
+  "name": "acme.notes",
+  "files": ["notes.html", "notes.rs"],
+  "register": ["notes::Notes"]
+}
