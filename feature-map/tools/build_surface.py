@@ -321,7 +321,7 @@ EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")
     # leaves the map current (generate.sh stamps REV the same way).
     "source_paths": ["framework", "crates", "suprnova-cli", "suprnova-macros", "Cargo.toml",
                      ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
-                     ":(exclude)framework/tests", ":(exclude)suprnova-cli/tests",
+                     ":(exclude)framework/tests", ":(exclude)suprnova-cli/tests", ":(exclude)suprnova-macros/tests",
                      ":(exclude,glob)crates/*/tests/**", ":(exclude,glob)**/*.md"],
 }, indent=1, sort_keys=True) + "\n")
 print(json.dumps({"raw": raw_count, "folded_reexports": raw_count - len(out), "records": len(out),

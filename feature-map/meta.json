@@ -9,6 +9,7 @@
   ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
   ":(exclude)framework/tests",
   ":(exclude)suprnova-cli/tests",
+  ":(exclude)suprnova-macros/tests",
   ":(exclude,glob)crates/*/tests/**",
   ":(exclude,glob)**/*.md"
  ],
