@@ -81,6 +81,7 @@ marketplace of listings, with or without paid placement.
 | Accounts and a place to build | **Nebula** |
 | A full product site - landing, docs, blog, community, RBAC | **Pulsar** |
 | A directory or marketplace of listings, free or paid | **Directory starter** |
+| Server-rendered pages with no Node toolchain | `suprnova new my-app --frontend live` |
 | An API-only backend (token auth, no frontend) | `suprnova new my-api --api` |
 
 All three kits track the framework as a git dependency and run on the same stack you
@@ -95,7 +96,8 @@ If neither kit fits, `suprnova new my-app --frontend svelte` (or `react`, or
 email verification, password reset, session authentication with the
 `authenticate` middleware, CSRF protection, and a protected `/dashboard`
 route - on any of the three frontends (Svelte 5,
-React 19, Vue 3.5) with Tailwind v4 and Inertia v3. See
+React 19, Vue 3.5) with Tailwind v4 and Inertia v3, or on the
+[Live starter kit](#the-live-starter-kit), which needs no Node toolchain. See
 [Installation](installation.md) for the scaffold output and
 [Quickstart](quickstart.md) for the first-five-minutes walkthrough.
 
@@ -223,6 +225,179 @@ and optional props, cursor scrolling, a JSON form, and flashed toasts each
 have a working server to talk to. No handler lists accounts: a directory of
 users would show every member the name and email of every other member.
 
+## The Live starter kit
+
+`suprnova new my-app --frontend live` scaffolds the same application as the
+Inertia kits without a frontend build: no `frontend/` directory, no
+`package.json`, and no Node toolchain. Every page is a server-rendered
+[Live](live.md) document. The application serves the Live browser runtime
+under `/__live/assets/` and the library components' stylesheets and scripts
+under `/suprnova-ui/`, so the backend is the only process you run.
+
+The kit keeps the backend the Inertia kits share: the `users` and `notes`
+tables and models, `Note::owned_by(user_id)` as the one way to read notes,
+the account flows through `Auth`, `PasswordReset`, and
+`EmailVerification`, and the route names. Pages render and act through Live
+instead of Inertia:
+
+| Page | Route | Layout | Live components |
+|---|---|---|---|
+| Welcome | `/` | application | none |
+| Sign in | `/login` | guest | `LoginForm` |
+| Register | `/register` | guest | `RegisterForm` |
+| Forgot password | `/forgot-password` | guest | `ForgotPasswordForm` |
+| Reset password | `/reset-password` | guest | `ResetPasswordForm` |
+| Verify email | `/verify-email` | guest | `VerifyEmail` |
+| Dashboard | `/dashboard` | application | `NoteStats`, `ProfileName` |
+| Notes | `/notes` | application | `NoteForm`, `NoteList` |
+| A note | `/notes/{id}` | application | none |
+| Error | any failed request | application | none |
+
+The forms on the guest pages are public seeds, which any visitor can use.
+Every other island is identity-bound: it belongs to the signed-in user, and
+its route sits behind the `auth` middleware.
+
+### Files
+
+The kit adds these files to the shared backend:
+
+- `src/controllers/` - one controller per page. Each opens the request's
+  `LiveDocument`, mounts the page's islands from `live::mounts()`, and
+  renders the page's view.
+- `src/views/mod.rs` - the view structs and `Frame`, the part both layouts
+  read: the title, the Live bootstrap tags, the signed-in user, the CSRF
+  token of the sign-out form, and the toast.
+- `templates/live/layouts/` - `guest.html` for the account pages and
+  `app.html` for the rest, with the header bar, the account menu, and the
+  toast region. `head.html` holds the bootstrap tags and the stylesheet
+  links both layouts include.
+- `templates/live/pages/` - one template per page. Each starts with
+  `{% extends "live/layouts/app.html" %}` or the guest layout.
+- `src/live/` and `templates/live/*.html` - the Live components and their
+  views, registered in `src/live/mod.rs`.
+- `templates/suprnova-ui/` - the library components the views import,
+  installed the way `suprnova live:add` installs them and recorded in
+  `suprnova.toml`, so a later `live:add` keeps them current.
+- `src/flash.rs` - the `Toast` a finished flow shows on the next page.
+- `src/controllers/errors.rs` - the `ErrorPage` middleware, which renders
+  every framework error response as the error page in the application
+  layout. A client that expects JSON keeps the JSON body, and in debug mode
+  a `5xx` keeps the development error page.
+- `public/css/app.css` - the page layout, written with the same `--sn-`
+  tokens the library uses.
+
+### What each component does
+
+- `LoginForm`, `RegisterForm`, `ForgotPasswordForm`, and
+  `ResetPasswordForm` check their fields with the same rules as the Inertia
+  kits' form requests and show each message under its field. An action
+  that succeeds signs the user in, mails a link, or rotates the password,
+  then sends the browser to the next page with a toast.
+- `VerifyEmail` names the address the link went to and mails a new link on
+  request.
+- `NoteStats` shows the user's note count, the notes written today, and the
+  five newest notes. It subscribes to the stream `notes/:principal`, which
+  Live fills with the user's own id. Saving a note publishes a refresh on
+  that topic, so every dashboard the user has open renders again without a
+  page load, over server-sent events or a WebSocket, and through polling
+  when neither connects. Its **Refresh** button renders it again on
+  request.
+- `ProfileName` changes the display name and reloads the dashboard, so the
+  navigation shows the new name.
+- `NoteForm` checks the title (1 to 255 characters) and the text (at most
+  10000 characters), saves the note, and reloads the list with a toast.
+- `NoteList` filters the notes by title and text. The applied search is
+  bound to the `?search=` query: each search puts it in the address bar
+  without a history entry, and the page mounts the list from it, so a
+  reloaded or shared URL shows the same list. **Load more** adds 10 notes
+  at a time.
+
+A finished flow keeps its `Toast` in the session, and the next document
+takes it with `Toast::take()`, which removes it. The toast is an ordinary
+session value rather than a session flash, because a flash ages on every
+request of the session, the Live requests included. Saving a note makes
+your open dashboards refresh, and that refresh would age a flashed toast
+away before the redirect lands.
+
+### Add a page
+
+To add a page, give it a route, a view, and a controller:
+
+1. Add the route to `src/routes.rs`, in the authenticated group if the page
+   needs a user.
+2. Add the view struct to `src/views/mod.rs`, and its template to
+   `templates/live/pages/`, starting with the layout it extends.
+3. Write the controller. Open the request's `LiveDocument`, mount the
+   page's islands, then build the `Frame`, which emits the bootstrap tags
+   after the last mount, and render the view.
+4. Declare the page in `live::routes()` in `src/live/mod.rs`: with
+   `.try_live_document("/path")?` when it mounts no island, or with a
+   `LiveMount` in `Mounts` and `.try_live_mount(&mounts.name)?` for each
+   island.
+
+An `/about` page with no island looks like this:
+
+```rust
+// src/views/mod.rs
+#[suprnova::view(path = "live/pages/about.html")]
+pub struct AboutPage {
+    pub frame: Frame,
+}
+
+// src/controllers/about.rs
+use suprnova::live::LiveDocument;
+use suprnova::{FrameworkError, HttpResponse, Request, Response, handler};
+
+use crate::views::{self, AboutPage, Frame, Nav};
+
+#[handler]
+pub async fn show(req: Request) -> Response {
+    Ok(page(&req).await?)
+}
+
+async fn page(req: &Request) -> Result<HttpResponse, FrameworkError> {
+    let mut document = LiveDocument::from_request(req)?;
+    let frame = Frame::live(&mut document, "About", Nav::None).await?;
+    views::render(document, "live/pages/about.html", &AboutPage { frame })
+}
+```
+
+```html
+{% extends "live/layouts/app.html" %}
+{% block content %}
+<h1 class="kit-page-title">About</h1>
+{% endblock %}
+```
+
+### Add a component
+
+1. Run `suprnova live:make Invoices`. It writes `src/live/invoices.rs` and
+   `templates/live/invoices.html` and registers the component.
+2. Add a `LiveMount` for it to `Mounts` in `src/live/mod.rs`:
+   `LiveMount::identity_bound` when it belongs to the signed-in user, or
+   `LiveMount::public_seed` when any visitor may use it. Seal it in
+   `live::routes()` with `.try_live_mount(&mounts.invoices)?`, and mount it
+   from the page's controller.
+3. To use another library component in its view, run
+   `suprnova live:add <name>` and link the component's stylesheet in
+   `templates/live/layouts/head.html`.
+4. Run `suprnova live:check` to prove every view against its component.
+
+In a debug build an action runs deep in its worker thread's stack, below
+the server, the middleware, and the Live engine, so it has little room
+left. The kit runs its deepest steps, such as a password reset or a mail
+sent over SMTP, on their own task with `live::on_own_task`. Do the same for
+a step of your own that goes deep and needs neither the session nor the
+signed-in user.
+
+### Why Suprnova diverges
+
+Laravel's Livewire starter kit renders Blade views with Livewire
+components, and still builds its assets with Vite. The Live kit has no
+build step: the framework serves the Live runtime, and the component
+library ships as files the scaffold installs into your project, which you
+own and edit like any other view.
+
 ## Contributing a starter kit
 
 Built something reusable on top of Suprnova and want to upstream it as a
@@ -237,3 +412,9 @@ same Chromium assertions over each served application. It uses the existing
 Playwright browser cache; it does not install browsers. Failed runs print
 the kit name, the browser output, the server log, and the retained artifact
 directory.
+
+The Live kit is held to `suprnova-cli/tests/kit_live.rs` and to
+`live_kit_compiles_and_renders` in `suprnova-cli/tests/scaffold_snapshot.rs`,
+which builds a fresh Live scaffold against the in-tree framework, starts it,
+and requests its pages:
+`cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored live_`.

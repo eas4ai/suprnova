@@ -107,8 +107,14 @@ pub fn run(
         &[&format!("cd {}", project_name), "suprnova serve"],
     );
     ui::br();
-    ui::label_value("Backend", "http://localhost:8765");
-    ui::label_value("Frontend", "http://localhost:5765");
+    if frontend == Frontend::Live {
+        // One process: the Live kit's pages and the browser runtime are
+        // served by the application itself.
+        ui::label_value("App", "http://localhost:8765");
+    } else {
+        ui::label_value("Backend", "http://localhost:8765");
+        ui::label_value("Frontend", "http://localhost:5765");
+    }
     ui::br();
     if with_portless {
         ui::header("portless - HTTPS dev URL");
@@ -165,6 +171,15 @@ fn get_description(no_interaction: bool) -> String {
     }
 }
 
+/// The frontend prompt's choices, in the order it lists them; the first is
+/// the default.
+const FRONTEND_CHOICES: [(&str, Frontend); 4] = [
+    ("Svelte (recommended)", Frontend::Svelte),
+    ("React", Frontend::React),
+    ("Vue", Frontend::Vue),
+    ("Live (server-rendered, no Node)", Frontend::Live),
+];
+
 fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
     if let Some(s) = choice {
         match Frontend::from_str(&s) {
@@ -180,10 +195,9 @@ fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
         return Frontend::Svelte;
     }
 
-    let options = ["Svelte (recommended)", "React", "Vue"];
     let idx = match Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Frontend framework")
-        .items(options)
+        .items(FRONTEND_CHOICES.map(|(label, _)| label))
         .default(0)
         .interact()
     {
@@ -191,17 +205,16 @@ fn get_frontend(choice: Option<String>, no_interaction: bool) -> Frontend {
         Err(e) => {
             ui::error(&format!(
                 "Failed to read the frontend selection: {e}. \
-                 Pass --frontend <svelte|react|vue> or --no-interaction in \
+                 Pass --frontend <svelte|react|vue|live> or --no-interaction in \
                  non-interactive shells."
             ));
             std::process::exit(1);
         }
     };
-    match idx {
-        0 => Frontend::Svelte,
-        1 => Frontend::React,
-        _ => Frontend::Vue,
-    }
+    // The prompt answers an index into the items it was given.
+    FRONTEND_CHOICES
+        .get(idx)
+        .map_or(Frontend::Svelte, |(_, frontend)| *frontend)
 }
 
 fn get_author(no_interaction: bool) -> String {
@@ -405,25 +418,22 @@ pub(crate) fn create_project(
         .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/models"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
-    fs::create_dir_all(project_path.join("src/props"))
-        .map_err(|e| format!("Failed to create directories: {}", e))?;
     fs::create_dir_all(project_path.join("src/migrations"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
-    // Frontend directories + files are created by templates::scaffold_frontend below.
+    // An Inertia kit's `frontend/` is written by `write_inertia_kit` below;
+    // the Live kit has none.
 
-    // Askama templates: the Inertia root document, and the Live views
-    // `suprnova live:make` adds under templates/live/.
+    // Askama templates: an Inertia kit's root document, the Live kit's
+    // documents and components, and the Live views `suprnova live:make`
+    // adds under templates/live/.
     fs::create_dir_all(project_path.join("templates"))
-        .map_err(|e| format!("Failed to create directories: {}", e))?;
-
-    // Public assets directory (for production builds)
-    fs::create_dir_all(project_path.join("public/assets"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
     // Localization catalogs. `Localization::bootstrap` looks for
     // `<project>/lang/` at boot, so this must exist (with a starter
-    // catalog) for the `lang` Inertia share to have anything to point at.
+    // catalog, which each kit writes) for an Inertia kit's `lang` share and
+    // the Live kit's `__!` lookups to have anything to read.
     fs::create_dir_all(project_path.join("lang/en"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
@@ -433,10 +443,6 @@ pub(crate) fn create_project(
     let cargo_toml = templates::cargo_toml(package_name, description, author);
     fs::write(project_path.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Failed to write Cargo.toml: {}", e))?;
-
-    // Write .gitignore
-    fs::write(project_path.join(".gitignore"), templates::gitignore())
-        .map_err(|e| format!("Failed to write .gitignore: {}", e))?;
 
     // Write .env (with a freshly-generated APP_KEY so the scaffolded
     // project boots out-of-the-box without operator intervention).
@@ -479,6 +485,180 @@ pub(crate) fn create_project(
         templates::commands_mod_rs(),
     )
     .map_err(|e| format!("Failed to write src/commands/mod.rs: {}", e))?;
+
+    // Write src/config/mod.rs
+    fs::write(
+        project_path.join("src/config/mod.rs"),
+        templates::config_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/config/mod.rs: {}", e))?;
+
+    // Write src/config/database.rs
+    fs::write(
+        project_path.join("src/config/database.rs"),
+        templates::config_database(),
+    )
+    .map_err(|e| format!("Failed to write src/config/database.rs: {}", e))?;
+
+    // Write src/config/mail.rs
+    fs::write(
+        project_path.join("src/config/mail.rs"),
+        templates::config_mail(),
+    )
+    .map_err(|e| format!("Failed to write src/config/mail.rs: {}", e))?;
+
+    // Write src/middleware/mod.rs
+    fs::write(
+        project_path.join("src/middleware/mod.rs"),
+        templates::middleware_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/middleware/mod.rs: {}", e))?;
+
+    // Write src/middleware/logging.rs
+    fs::write(
+        project_path.join("src/middleware/logging.rs"),
+        templates::middleware_logging(),
+    )
+    .map_err(|e| format!("Failed to write src/middleware/logging.rs: {}", e))?;
+
+    // Write src/middleware/authenticate.rs
+    fs::write(
+        project_path.join("src/middleware/authenticate.rs"),
+        templates::authenticate_middleware(),
+    )
+    .map_err(|e| format!("Failed to write src/middleware/authenticate.rs: {}", e))?;
+
+    // Write src/actions/mod.rs
+    fs::write(
+        project_path.join("src/actions/mod.rs"),
+        templates::actions_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/actions/mod.rs: {}", e))?;
+
+    // Write src/actions/example_action.rs
+    fs::write(
+        project_path.join("src/actions/example_action.rs"),
+        templates::example_action(),
+    )
+    .map_err(|e| format!("Failed to write src/actions/example_action.rs: {}", e))?;
+
+    // Write src/models/mod.rs
+    fs::write(
+        project_path.join("src/models/mod.rs"),
+        templates::models_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/models/mod.rs: {}", e))?;
+
+    // Write src/models/user.rs
+    fs::write(
+        project_path.join("src/models/user.rs"),
+        templates::user_model(),
+    )
+    .map_err(|e| format!("Failed to write src/models/user.rs: {}", e))?;
+
+    // Write src/models/note.rs
+    fs::write(
+        project_path.join("src/models/note.rs"),
+        templates::note_model(),
+    )
+    .map_err(|e| format!("Failed to write src/models/note.rs: {}", e))?;
+
+    // Write src/migrations/mod.rs
+    fs::write(
+        project_path.join("src/migrations/mod.rs"),
+        templates::migrations_mod(),
+    )
+    .map_err(|e| format!("Failed to write src/migrations/mod.rs: {}", e))?;
+
+    // Write auth migration files
+    fs::write(
+        project_path.join("src/migrations/m20240101_000001_create_users_table.rs"),
+        templates::create_users_migration(),
+    )
+    .map_err(|e| format!("Failed to write create_users_table migration: {}", e))?;
+
+    fs::write(
+        project_path.join("src/migrations/m20240101_000002_create_sessions_table.rs"),
+        templates::create_sessions_migration(),
+    )
+    .map_err(|e| format!("Failed to write create_sessions_table migration: {}", e))?;
+
+    fs::write(
+        project_path.join("src/migrations/m20240101_000003_create_remember_tokens_table.rs"),
+        templates::create_remember_tokens_migration(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to write create_remember_tokens_table migration: {}",
+            e
+        )
+    })?;
+
+    fs::write(
+        project_path.join("src/migrations/m20240101_000004_create_auth_flow_tokens_table.rs"),
+        templates::create_auth_flow_tokens_migration(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to write create_auth_flow_tokens_table migration: {}",
+            e
+        )
+    })?;
+
+    fs::write(
+        project_path.join("src/migrations/m20240101_000005_create_notes_table.rs"),
+        templates::create_notes_migration(),
+    )
+    .map_err(|e| format!("Failed to write create_notes_table migration: {}", e))?;
+
+    // Note: migrations are now integrated into the main binary
+    // Run with: ./app migrate
+
+    // === The kit's own files ===
+    //
+    // An Inertia kit writes its HTTP handlers, the root document and the
+    // Vite project under `frontend/`; the Live kit writes its document
+    // controllers, views and components, and installs the shipped library
+    // components its views use. Both share everything above.
+    match frontend {
+        Frontend::Live => write_live_kit(project_path, project_name, package_name)?,
+        Frontend::React | Frontend::Svelte | Frontend::Vue => {
+            write_inertia_kit(project_path, project_name, frontend)?
+        }
+    }
+
+    // portless.json (opt-in via --with-portless) - maps the app's fixed
+    // backend port to https://<package_name>.localhost for `portless run`.
+    if with_portless {
+        write_portless_json(project_path, package_name, SCAFFOLD_SERVER_PORT)?;
+    }
+
+    // Initialize git repository
+    if !no_git {
+        initialize_git_repository(project_path)?;
+    }
+
+    Ok(())
+}
+
+/// Writes what an Inertia kit adds to the shared backend: the HTTP
+/// handlers and routes, the Inertia bootstrap and root document, the props
+/// the pages read, the localization catalog the frontend's `t()` reads, and
+/// the Vite project under `frontend/`.
+fn write_inertia_kit(
+    project_path: &Path,
+    project_name: &str,
+    frontend: Frontend,
+) -> Result<(), String> {
+    fs::create_dir_all(project_path.join("src/props"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
+    // Public assets directory (for production builds)
+    fs::create_dir_all(project_path.join("public/assets"))
+        .map_err(|e| format!("Failed to create directories: {}", e))?;
+
+    // Write .gitignore
+    fs::write(project_path.join(".gitignore"), templates::gitignore())
+        .map_err(|e| format!("Failed to write .gitignore: {}", e))?;
 
     // Write src/lib.rs
     fs::write(project_path.join("src/lib.rs"), templates::lib_rs())
@@ -557,48 +737,6 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/controllers/profile.rs: {}", e))?;
 
-    // Write src/config/mod.rs
-    fs::write(
-        project_path.join("src/config/mod.rs"),
-        templates::config_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/config/mod.rs: {}", e))?;
-
-    // Write src/config/database.rs
-    fs::write(
-        project_path.join("src/config/database.rs"),
-        templates::config_database(),
-    )
-    .map_err(|e| format!("Failed to write src/config/database.rs: {}", e))?;
-
-    // Write src/config/mail.rs
-    fs::write(
-        project_path.join("src/config/mail.rs"),
-        templates::config_mail(),
-    )
-    .map_err(|e| format!("Failed to write src/config/mail.rs: {}", e))?;
-
-    // Write src/middleware/mod.rs
-    fs::write(
-        project_path.join("src/middleware/mod.rs"),
-        templates::middleware_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/middleware/mod.rs: {}", e))?;
-
-    // Write src/middleware/logging.rs
-    fs::write(
-        project_path.join("src/middleware/logging.rs"),
-        templates::middleware_logging(),
-    )
-    .map_err(|e| format!("Failed to write src/middleware/logging.rs: {}", e))?;
-
-    // Write src/middleware/authenticate.rs
-    fs::write(
-        project_path.join("src/middleware/authenticate.rs"),
-        templates::authenticate_middleware(),
-    )
-    .map_err(|e| format!("Failed to write src/middleware/authenticate.rs: {}", e))?;
-
     // Write src/bootstrap.rs, titled after the project
     let title = templates::project_title(project_name);
     fs::write(
@@ -614,41 +752,6 @@ pub(crate) fn create_project(
         templates::app_root_template(),
     )
     .map_err(|e| format!("Failed to write templates/app.html: {}", e))?;
-
-    // Write src/actions/mod.rs
-    fs::write(
-        project_path.join("src/actions/mod.rs"),
-        templates::actions_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/actions/mod.rs: {}", e))?;
-
-    // Write src/actions/example_action.rs
-    fs::write(
-        project_path.join("src/actions/example_action.rs"),
-        templates::example_action(),
-    )
-    .map_err(|e| format!("Failed to write src/actions/example_action.rs: {}", e))?;
-
-    // Write src/models/mod.rs
-    fs::write(
-        project_path.join("src/models/mod.rs"),
-        templates::models_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/models/mod.rs: {}", e))?;
-
-    // Write src/models/user.rs
-    fs::write(
-        project_path.join("src/models/user.rs"),
-        templates::user_model(),
-    )
-    .map_err(|e| format!("Failed to write src/models/user.rs: {}", e))?;
-
-    // Write src/models/note.rs
-    fs::write(
-        project_path.join("src/models/note.rs"),
-        templates::note_model(),
-    )
-    .map_err(|e| format!("Failed to write src/models/note.rs: {}", e))?;
 
     // Write src/props/mod.rs and src/props/flash.rs
     fs::write(
@@ -667,57 +770,6 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/props/shared.rs: {}", e))?;
 
-    // Write src/migrations/mod.rs
-    fs::write(
-        project_path.join("src/migrations/mod.rs"),
-        templates::migrations_mod(),
-    )
-    .map_err(|e| format!("Failed to write src/migrations/mod.rs: {}", e))?;
-
-    // Write auth migration files
-    fs::write(
-        project_path.join("src/migrations/m20240101_000001_create_users_table.rs"),
-        templates::create_users_migration(),
-    )
-    .map_err(|e| format!("Failed to write create_users_table migration: {}", e))?;
-
-    fs::write(
-        project_path.join("src/migrations/m20240101_000002_create_sessions_table.rs"),
-        templates::create_sessions_migration(),
-    )
-    .map_err(|e| format!("Failed to write create_sessions_table migration: {}", e))?;
-
-    fs::write(
-        project_path.join("src/migrations/m20240101_000003_create_remember_tokens_table.rs"),
-        templates::create_remember_tokens_migration(),
-    )
-    .map_err(|e| {
-        format!(
-            "Failed to write create_remember_tokens_table migration: {}",
-            e
-        )
-    })?;
-
-    fs::write(
-        project_path.join("src/migrations/m20240101_000004_create_auth_flow_tokens_table.rs"),
-        templates::create_auth_flow_tokens_migration(),
-    )
-    .map_err(|e| {
-        format!(
-            "Failed to write create_auth_flow_tokens_table migration: {}",
-            e
-        )
-    })?;
-
-    fs::write(
-        project_path.join("src/migrations/m20240101_000005_create_notes_table.rs"),
-        templates::create_notes_migration(),
-    )
-    .map_err(|e| format!("Failed to write create_notes_table migration: {}", e))?;
-
-    // Note: migrations are now integrated into the main binary
-    // Run with: ./app migrate
-
     // Write lang/en/app.ftl
     fs::write(
         project_path.join("lang/en/app.ftl"),
@@ -726,20 +778,24 @@ pub(crate) fn create_project(
     .map_err(|e| format!("Failed to write lang/en/app.ftl: {}", e))?;
 
     // === Frontend files ===
-    templates::scaffold_frontend(project_path, project_name, frontend)?;
+    templates::scaffold_frontend(project_path, project_name, frontend)
+}
 
-    // portless.json (opt-in via --with-portless) - maps the app's fixed
-    // backend port to https://<package_name>.localhost for `portless run`.
-    if with_portless {
-        write_portless_json(project_path, package_name, SCAFFOLD_SERVER_PORT)?;
-    }
-
-    // Initialize git repository
-    if !no_git {
-        initialize_git_repository(project_path)?;
-    }
-
-    Ok(())
+/// Writes what the Live kit adds to the shared backend (PAR-192): its
+/// gitignore and localization catalog, the document controllers, views,
+/// layouts and Live components, the stylesheet `public/css/app.css`, and
+/// the shipped library components its views import, installed the way
+/// `live:add` installs them so a later `live:add` keeps them current.
+fn write_live_kit(
+    project_path: &Path,
+    project_name: &str,
+    package_name: &str,
+) -> Result<(), String> {
+    templates::live_kit::scaffold(project_path, project_name, package_name)?;
+    crate::commands::live_add::install_shipped(
+        project_path,
+        templates::live_kit::LIBRARY_COMPONENTS,
+    )
 }
 
 fn initialize_git_repository(project_path: &Path) -> Result<(), String> {
@@ -773,7 +829,25 @@ fn initialize_git_repository(project_path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_project_name;
+    use super::{FRONTEND_CHOICES, validate_project_name};
+    use crate::templates::Frontend;
+
+    /// PAR-192: the prompt offers the Live kit as its fourth choice, after
+    /// the three Inertia frontends, and Svelte stays the default.
+    #[test]
+    fn the_frontend_prompt_offers_live_fourth() {
+        let frontends = FRONTEND_CHOICES.map(|(_, frontend)| frontend);
+        assert_eq!(
+            frontends,
+            [
+                Frontend::Svelte,
+                Frontend::React,
+                Frontend::Vue,
+                Frontend::Live
+            ]
+        );
+        assert!(FRONTEND_CHOICES[3].0.starts_with("Live"));
+    }
 
     #[test]
     fn accepts_well_formed_names() {

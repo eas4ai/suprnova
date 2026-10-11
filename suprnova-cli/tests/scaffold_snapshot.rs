@@ -163,6 +163,13 @@ fn default_starter_has_no_stub_markers_vue() {
     assert_no_marker_hits(&tmp.path().join("marker_vue"));
 }
 
+#[test]
+fn default_starter_has_no_stub_markers_live() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_live", &["--frontend", "live"]);
+    assert_no_marker_hits(&tmp.path().join("marker_live"));
+}
+
 // ---------------------------------------------------------------------------
 // Auth contract audits - the scaffolded model must keep the trait overrides
 // the login flow depends on.
@@ -403,4 +410,195 @@ fn default_starter_compiles_with_cargo_check() {
     let project = tmp.path().join("compile_default");
     patch_local_suprnova(&project);
     run_cargo_check(&project);
+}
+
+// ---------------------------------------------------------------------------
+// The Live starter kit (PAR-192): compiled, served, and its documents read.
+// ---------------------------------------------------------------------------
+
+/// The build directory the Live kit's scaffold shares with this package:
+/// the parent of `CARGO_TARGET_TMPDIR`, as `kit_browser.rs` does, so the
+/// framework this workspace already compiled is reused and only the
+/// scaffolded application builds.
+fn shared_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR has a parent")
+        .to_path_buf()
+}
+
+/// Runs `cargo <args>` in `project` against the shared build directory.
+fn run_cargo_shared(project: &Path, args: &[&str]) {
+    let output = Command::new(env!("CARGO"))
+        .args(args)
+        .current_dir(project)
+        .env("CARGO_TARGET_DIR", shared_target_dir())
+        .output()
+        .expect("cargo should run");
+    assert!(
+        output.status.success(),
+        "`cargo {}` failed for the Live scaffold at {}.\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        project.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The scaffold's server process, stopped when the test ends however it
+/// ends.
+struct LiveServer(std::process::Child);
+
+impl Drop for LiveServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// One `GET` over HTTP/1.1 to the local server, as a browser asks for a
+/// page: the status and the body.
+fn get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    Ok((status, body))
+}
+
+/// PAR-192: a fresh `--frontend live` scaffold compiles against the
+/// in-tree framework, and its server answers each guest page with a Live
+/// document in its layout. The scaffold builds its debug binary, the one
+/// `suprnova serve` runs, into the shared build directory.
+#[test]
+#[ignore = "compile check - builds and serves a Live kit scaffold; slow"]
+fn live_kit_compiles_and_renders() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "live_render";
+    scaffold(&tmp, name, &["--frontend", "live"]);
+    let project = tmp.path().join(name);
+    patch_local_suprnova(&project);
+    // The workspace's lock, so the scaffold resolves the dependency
+    // versions this workspace builds and tests rather than whatever is
+    // newest today; cargo drops the entries the scaffold does not use.
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+
+    run_cargo_shared(&project, &["check"]);
+    run_cargo_shared(&project, &["build", "--bin", name]);
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port();
+    let database = format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("live_render.sqlite").display()
+    );
+    let log_path = tmp.path().join("server.log");
+    let log = std::fs::File::create(&log_path).expect("server log");
+    let mut server = LiveServer(
+        Command::new(shared_target_dir().join("debug").join(name))
+            .arg("web:run")
+            .current_dir(&project)
+            .env("APP_ENV", "local")
+            .env("APP_URL", format!("http://127.0.0.1:{port}"))
+            .env("SERVER_HOST", "127.0.0.1")
+            .env("SERVER_PORT", port.to_string())
+            .env("SESSION_SECURE", "false")
+            .env("SESSION_COOKIE_PREFIX", "")
+            .env("DATABASE_URL", database)
+            .env("MAIL_DRIVER", "memory")
+            .stdout(log.try_clone().expect("server log"))
+            .stderr(log)
+            .spawn()
+            .expect("start the scaffold's server"),
+    );
+    let server_log = || std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if let Some(status) = server.0.try_wait().expect("poll the server") {
+            panic!(
+                "the server exited before it answered: {status}\n{}",
+                server_log()
+            );
+        }
+        if matches!(get(port, "/"), Ok((200, _))) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server did not answer `/` in time:\n{}",
+            server_log()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    for (path, layout, island) in [
+        ("/", "app", None),
+        ("/login", "guest", Some("login-form")),
+        ("/register", "guest", Some("register-form")),
+        ("/forgot-password", "guest", Some("forgot-password-form")),
+    ] {
+        let (status, body) = get(port, path).unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(status, 200, "GET {path}:\n{body}\n{}", server_log());
+        // The bootstrap tags: the inert configuration element and the
+        // runtime the framework serves under the reserved namespace.
+        assert!(
+            body.contains(r#"<script id="suprnova-live-config" type="application/json">"#),
+            "GET {path} has no Live configuration element:\n{body}"
+        );
+        assert!(
+            body.contains(r#"<script type="module" src="/__live/assets/"#),
+            "GET {path} loads no Live runtime:\n{body}"
+        );
+        assert!(
+            body.contains(&format!(r#"data-layout="{layout}""#)),
+            "GET {path} is not in the {layout} layout:\n{body}"
+        );
+        if let Some(island) = island {
+            assert!(
+                body.contains(&format!(
+                    r#"data-suprnova-live-component="{name}.{island}""#
+                )),
+                "GET {path} mounts no {island} island:\n{body}"
+            );
+        }
+    }
+
+    // The library's stylesheets and the kit's own are served, a page that
+    // needs a user sends a guest to sign in, and an unknown path is the
+    // error page.
+    for path in ["/suprnova-ui/card/card.css", "/css/app.css"] {
+        let (status, _) = get(port, path).unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(status, 200, "GET {path}");
+    }
+    let (status, _) = get(port, "/dashboard").expect("GET /dashboard");
+    assert_eq!(status, 302, "a guest is sent from the dashboard to sign in");
+    let (status, body) = get(port, "/no-such-page").expect("GET /no-such-page");
+    assert_eq!(status, 404);
+    assert!(
+        body.contains(r#"<h1 class="kit-error-status" id="error-status">404</h1>"#),
+        "{body}"
+    );
+
+    drop(server);
 }

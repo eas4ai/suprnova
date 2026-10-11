@@ -8,6 +8,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The Live starter kit.** `suprnova new --frontend live`, or the fourth
+  choice of its prompt, scaffolds an application with no Node toolchain: no
+  `frontend/`, no `package.json` and no Vite config. Its pages (home,
+  register, sign in, forgot and reset password, verify email, the
+  dashboard, the notes list and one note, and the error page) are
+  server-rendered Live documents in a guest layout or an application layout
+  with the navigation, the signed-in user and the toast. Live components
+  carry the account forms, which show each validation message under its
+  field; the dashboard's note counts, which refresh without a page load
+  when a note is saved; the display-name form; and the notes page, with a
+  search bound to the URL's `?search=`, a form that writes a note, and a
+  load-more list. The kit keeps the Inertia kits' models, migrations,
+  account flows and route names, and installs the library components its
+  views import under `templates/suprnova-ui/`, recorded in `suprnova.toml`.
+  `suprnova docker:init` writes a Live project a Dockerfile with no Node
+  stage, and `suprnova make:inertia` refuses in one.
 - **MongoDB connections.** The `database-mongodb` feature (off by default)
   adds the `Mongo` facade on the official `mongodb` driver: `MONGODB_URI` and
   `MONGODB_DATABASE` (or `MongoConfig::builder()`, with pool options and

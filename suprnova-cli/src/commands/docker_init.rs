@@ -33,8 +33,17 @@ pub fn run() {
     let manifest = fs::read_to_string("Cargo.toml").unwrap_or_default();
     let kind = cargo_meta::detect_project_kind(&manifest);
 
+    //
+    // A full-stack project without `frontend/package.json` is the Live kit:
+    // its pages are server-rendered, so the Node stage, whose first
+    // instruction copies that file, would fail the build.
+    let live =
+        kind == cargo_meta::ProjectKind::FullStack && !Path::new("frontend/package.json").is_file();
     let dockerfile_content = match kind {
         cargo_meta::ProjectKind::Api => templates::api_dockerfile_template(&package_name),
+        cargo_meta::ProjectKind::FullStack if live => {
+            templates::live_dockerfile_template(&package_name)
+        }
         cargo_meta::ProjectKind::FullStack => templates::dockerfile_template(&package_name),
     };
     if let Err(e) = fs::write(dockerfile_path, dockerfile_content) {
@@ -44,6 +53,9 @@ pub fn run() {
     match kind {
         cargo_meta::ProjectKind::Api => {
             ui::success("Created Dockerfile (API project - no frontend stage)")
+        }
+        cargo_meta::ProjectKind::FullStack if live => {
+            ui::success("Created Dockerfile (Live kit - no Node stage)")
         }
         cargo_meta::ProjectKind::FullStack => ui::success("Created Dockerfile"),
     }

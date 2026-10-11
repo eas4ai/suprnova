@@ -523,11 +523,14 @@ impl TypedCommand for {struct_name} {{
 /// `component` is the Inertia component name, with its directory when the
 /// page is nested (`Admin/UsersPage`); the React function and every heading
 /// use the last segment, since a function name cannot hold a `/`.
-pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
-    let ext = frontend.page_ext();
+///
+/// `None` for the Live kit, which has no Inertia pages to add one to.
+pub fn inertia_page_template(component: &str, frontend: Frontend) -> Option<String> {
+    let kit = frontend.inertia_kit()?;
+    let ext = kit.page_ext();
     let component_name = component.rsplit('/').next().unwrap_or(component);
-    match frontend {
-        Frontend::React => format!(
+    Some(match kit {
+        InertiaKit::React => format!(
             r#"export default function {component_name}() {{
   return (
     <div className="font-sans p-8 max-w-xl mx-auto">
@@ -543,7 +546,7 @@ pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
             component = component,
             ext = ext,
         ),
-        Frontend::Svelte => format!(
+        InertiaKit::Svelte => format!(
             r#"<div class="font-sans p-8 max-w-xl mx-auto">
   <h1 class="text-3xl font-bold">{component_name}</h1>
   <p class="mt-2">
@@ -555,7 +558,7 @@ pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
             component = component,
             ext = ext,
         ),
-        Frontend::Vue => format!(
+        InertiaKit::Vue => format!(
             r#"<script setup lang="ts">
 </script>
 
@@ -572,7 +575,7 @@ pub fn inertia_page_template(component: &str, frontend: Frontend) -> String {
             component = component,
             ext = ext,
         ),
-    }
+    })
 }
 
 /// Template for generating new error with make:error command
@@ -675,11 +678,15 @@ pub fn project_title(project_name: &str) -> String {
 /// framework falls back to Svelte, and a React project rendering Svelte's
 /// entry point is a blank page with nothing in the log. Takes the project's
 /// title for the config's default title, which every page without a title
-/// of its own is otherwise named `Suprnova` by.
+/// of its own is otherwise named `Suprnova` by. The Live kit installs no
+/// Inertia layer and gets its own bootstrap ([`live_kit::bootstrap`]).
 pub fn bootstrap(frontend: Frontend, project_title: &str) -> String {
-    include_str!("files/backend/bootstrap.rs.tpl")
-        .replace("{frontend_variant}", frontend.variant_name())
-        .replace("{project_title}", project_title)
+    match frontend.variant_name() {
+        Some(variant) => include_str!("files/backend/bootstrap.rs.tpl")
+            .replace("{frontend_variant}", variant)
+            .replace("{project_title}", project_title),
+        None => live_kit::bootstrap().to_owned(),
+    }
 }
 
 /// The scaffolded `templates/app.html`: the root document every Inertia
@@ -697,6 +704,10 @@ pub fn migrations_mod() -> &'static str {
 
 // migrate_bin removed - migrations now integrated into main binary
 
+/// The Live starter kit (PAR-192): the files `suprnova new --frontend live`
+/// writes in place of an Inertia kit's.
+pub mod live_kit;
+
 // Frontend templates
 //
 // Per-framework submodules. Add a new framework by mirroring the structure
@@ -705,12 +716,55 @@ pub fn migrations_mod() -> &'static str {
 use std::fs;
 use std::path::Path;
 
-/// Which frontend framework the user picked when scaffolding the app.
+/// Which starter kit the user picked when scaffolding the app: one of the
+/// three Inertia frontends, or the Live kit, whose pages are server-rendered
+/// Live documents and which has no `frontend/` directory at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
     React,
     Svelte,
     Vue,
+    Live,
+}
+
+/// The kits with an Inertia frontend under `frontend/`. The Live kit has
+/// none, so the code that writes or names `frontend/` files takes this
+/// instead of [`Frontend`] and never needs an arm for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InertiaKit {
+    React,
+    Svelte,
+    Vue,
+}
+
+impl InertiaKit {
+    /// File written at `frontend/src/<main_file_name>`, the Vite entry point.
+    fn main_file_name(self) -> &'static str {
+        match self {
+            InertiaKit::React => "main.tsx",
+            InertiaKit::Svelte => "main.ts",
+            InertiaKit::Vue => "main.ts",
+        }
+    }
+
+    /// File written at `frontend/src/<ssr_file_name>`, the `vite build
+    /// --ssr` entry point `suprnova ssr:start` launches under Node.
+    fn ssr_file_name(self) -> &'static str {
+        match self {
+            InertiaKit::React => "ssr.tsx",
+            InertiaKit::Svelte => "ssr.ts",
+            InertiaKit::Vue => "ssr.ts",
+        }
+    }
+
+    /// Extension for page components.
+    fn page_ext(self) -> &'static str {
+        match self {
+            InertiaKit::React => "tsx",
+            InertiaKit::Svelte => "svelte",
+            InertiaKit::Vue => "vue",
+        }
+    }
 }
 
 impl Frontend {
@@ -719,46 +773,37 @@ impl Frontend {
             Frontend::React => "react",
             Frontend::Svelte => "svelte",
             Frontend::Vue => "vue",
+            Frontend::Live => "live",
+        }
+    }
+
+    /// The Inertia kit this frontend is, or `None` for the Live kit.
+    fn inertia_kit(self) -> Option<InertiaKit> {
+        match self {
+            Frontend::React => Some(InertiaKit::React),
+            Frontend::Svelte => Some(InertiaKit::Svelte),
+            Frontend::Vue => Some(InertiaKit::Vue),
+            Frontend::Live => None,
         }
     }
 
     /// The `suprnova::Frontend` variant name, for templates that emit Rust
     /// source. `as_str()` is the lowercase value `SUPRNOVA_FRONTEND` takes;
-    /// this is what goes after `Frontend::` in generated code.
-    pub fn variant_name(&self) -> &'static str {
+    /// this is what goes after `Frontend::` in generated code. `None` for
+    /// the Live kit, which installs no Inertia layer.
+    pub fn variant_name(&self) -> Option<&'static str> {
         match self {
-            Frontend::React => "React",
-            Frontend::Svelte => "Svelte",
-            Frontend::Vue => "Vue",
+            Frontend::React => Some("React"),
+            Frontend::Svelte => Some("Svelte"),
+            Frontend::Vue => Some("Vue"),
+            Frontend::Live => None,
         }
     }
 
-    /// File written at `frontend/src/<main_file_name>`, the Vite entry point.
-    fn main_file_name(&self) -> &'static str {
-        match self {
-            Frontend::React => "main.tsx",
-            Frontend::Svelte => "main.ts",
-            Frontend::Vue => "main.ts",
-        }
-    }
-
-    /// File written at `frontend/src/<ssr_file_name>`, the `vite build
-    /// --ssr` entry point `suprnova ssr:start` launches under Node.
-    fn ssr_file_name(&self) -> &'static str {
-        match self {
-            Frontend::React => "ssr.tsx",
-            Frontend::Svelte => "ssr.ts",
-            Frontend::Vue => "ssr.ts",
-        }
-    }
-
-    /// Extension for page components.
-    pub fn page_ext(&self) -> &'static str {
-        match self {
-            Frontend::React => "tsx",
-            Frontend::Svelte => "svelte",
-            Frontend::Vue => "vue",
-        }
+    /// Extension for page components, or `None` for the Live kit, which has
+    /// no Inertia pages.
+    pub fn page_ext(&self) -> Option<&'static str> {
+        self.inertia_kit().map(InertiaKit::page_ext)
     }
 
     /// Read the frontend choice from the `SUPRNOVA_FRONTEND` env var,
@@ -780,8 +825,9 @@ impl std::str::FromStr for Frontend {
             "react" => Ok(Frontend::React),
             "svelte" => Ok(Frontend::Svelte),
             "vue" | "vue3" => Ok(Frontend::Vue),
+            "live" => Ok(Frontend::Live),
             other => Err(format!(
-                "Unknown frontend '{}'. Supported: react, svelte, vue",
+                "Unknown frontend '{}'. Supported: react, svelte, vue, live",
                 other
             )),
         }
@@ -1085,6 +1131,12 @@ pub fn scaffold_frontend(
     project_name: &str,
     frontend: Frontend,
 ) -> Result<(), String> {
+    let Some(kit) = frontend.inertia_kit() else {
+        return Err(
+            "the Live kit has no frontend/ directory: its pages are server-rendered Live documents"
+                .to_owned(),
+        );
+    };
     let fe = project_path.join("frontend");
     let src = fe.join("src");
     let pages = src.join("pages");
@@ -1095,40 +1147,40 @@ pub fn scaffold_frontend(
         fs::create_dir_all(d).map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
     }
 
-    let ext = frontend.page_ext();
-    let main = src.join(frontend.main_file_name());
-    let ssr_entry = src.join(frontend.ssr_file_name());
+    let ext = kit.page_ext();
+    let main = src.join(kit.main_file_name());
+    let ssr_entry = src.join(kit.ssr_file_name());
 
     // Kept out of the tuple below, which is already at the width where a
     // positional list stops being readable.
-    let error_page = match frontend {
-        Frontend::React => react::error_page(),
-        Frontend::Svelte => svelte::error_page(),
-        Frontend::Vue => vue::error_page(),
+    let error_page = match kit {
+        InertiaKit::React => react::error_page(),
+        InertiaKit::Svelte => svelte::error_page(),
+        InertiaKit::Vue => vue::error_page(),
     };
 
     // The account-flow pages the `password_reset` and `email_verification`
     // controllers render, kept out of the tuple for the same reason.
-    let (forgot_password_page, reset_password_page, verify_email_page) = match frontend {
-        Frontend::React => (
+    let (forgot_password_page, reset_password_page, verify_email_page) = match kit {
+        InertiaKit::React => (
             react::forgot_password_page(),
             react::reset_password_page(),
             react::verify_email_page(),
         ),
-        Frontend::Svelte => (
+        InertiaKit::Svelte => (
             svelte::forgot_password_page(),
             svelte::reset_password_page(),
             svelte::verify_email_page(),
         ),
-        Frontend::Vue => (
+        InertiaKit::Vue => (
             vue::forgot_password_page(),
             vue::reset_password_page(),
             vue::verify_email_page(),
         ),
     };
 
-    let (pkg, vite, ts, main_src, ssr_src, home, dash, login, reg, props, css) = match frontend {
-        Frontend::React => (
+    let (pkg, vite, ts, main_src, ssr_src, home, dash, login, reg, props, css) = match kit {
+        InertiaKit::React => (
             react::package_json(project_name),
             react::vite_config().to_string(),
             react::tsconfig().to_string(),
@@ -1141,7 +1193,7 @@ pub fn scaffold_frontend(
             react::inertia_props_types().to_string(),
             react::app_css().to_string(),
         ),
-        Frontend::Svelte => (
+        InertiaKit::Svelte => (
             svelte::package_json(project_name),
             svelte::vite_config().to_string(),
             svelte::tsconfig().to_string(),
@@ -1154,7 +1206,7 @@ pub fn scaffold_frontend(
             svelte::inertia_props_types().to_string(),
             svelte::app_css().to_string(),
         ),
-        Frontend::Vue => (
+        InertiaKit::Vue => (
             vue::package_json(project_name),
             vue::vite_config().to_string(),
             vue::tsconfig().to_string(),
@@ -1200,8 +1252,8 @@ pub fn scaffold_frontend(
     }
 
     // Per-framework extras.
-    match frontend {
-        Frontend::Svelte => {
+    match kit {
+        InertiaKit::Svelte => {
             fs::write(fe.join("svelte.config.js"), svelte::svelte_config())
                 .map_err(|e| format!("Failed to write svelte.config.js: {}", e))?;
             fs::write(src.join("app.d.ts"), svelte::app_dts())
@@ -1243,7 +1295,7 @@ pub fn scaffold_frontend(
                     .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
             }
         }
-        Frontend::Vue => {
+        InertiaKit::Vue => {
             fs::write(src.join("shims-vue.d.ts"), vue::shims_dts())
                 .map_err(|e| format!("Failed to write src/shims-vue.d.ts: {}", e))?;
             fs::write(lib.join("lang.ts"), vue::lang())
@@ -1270,7 +1322,7 @@ pub fn scaffold_frontend(
                     .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
             }
         }
-        Frontend::React => {
+        InertiaKit::React => {
             fs::write(src.join("vite-env.d.ts"), react::vite_env_dts())
                 .map_err(|e| format!("Failed to write src/vite-env.d.ts: {}", e))?;
             fs::write(lib.join("lang.ts"), react::lang())
@@ -1575,8 +1627,17 @@ pub fn gitignore() -> &'static str {
 /// `bootstrap.rs` pins the same value on the config it installs - but a
 /// value that disagrees with the project points those generators at the
 /// wrong frontend kit.
+///
+/// The Live kit runs no Vite server and installs no Inertia layer, so its
+/// `.env` takes [`live_kit::env_section`] in place of the ports and
+/// frontend section the Inertia kits get.
 pub fn env(project_name: &str, app_key: &str, frontend: Frontend) -> String {
-    include_str!("files/root/env.tpl")
+    let template = include_str!("files/root/env.tpl");
+    let template = match frontend {
+        Frontend::Live => live_kit::env_section(template),
+        Frontend::React | Frontend::Svelte | Frontend::Vue => template.to_owned(),
+    };
+    template
         .replace("{project_name}", project_name)
         .replace("{app_key}", app_key)
         .replace("{frontend}", frontend.as_str())
@@ -2176,6 +2237,17 @@ pub fn dockerfile_template(package_name: &str) -> String {
 /// `public/assets`, so the shared file would be more `if` than Dockerfile.
 pub fn api_dockerfile_template(package_name: &str) -> String {
     include_str!("files/docker/Dockerfile.api.tpl").replace("{package_name}", package_name)
+}
+
+/// Generate the Dockerfile for a Live kit project (`suprnova new
+/// --frontend live`).
+///
+/// A separate template for the same reason as the API one: the Live kit
+/// has no `frontend/`, so the full-stack file's Node stage would fail at its
+/// first `COPY`. It carries `templates/suprnova-ui/`, `public/` and `lang/`
+/// into the runtime image, which the server reads while it runs.
+pub fn live_dockerfile_template(package_name: &str) -> String {
+    include_str!("files/docker/Dockerfile.live.tpl").replace("{package_name}", package_name)
 }
 
 /// Generate .dockerignore file

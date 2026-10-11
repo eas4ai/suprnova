@@ -94,8 +94,9 @@ enum Commands {
         #[arg(long)]
         no_git: bool,
 
-        /// Frontend framework (svelte, react, vue). Prompts if omitted.
-        /// Conflicts with --api.
+        /// Starter kit frontend (svelte, react, vue, live). `live` is the
+        /// Live kit: server-rendered Live documents, no Node toolchain.
+        /// Prompts if omitted. Conflicts with --api.
         #[arg(long, conflicts_with = "api")]
         frontend: Option<String>,
 
