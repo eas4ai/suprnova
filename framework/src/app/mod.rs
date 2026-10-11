@@ -2314,7 +2314,7 @@ where
             return Ok(());
         }
         if let Some(bootstrap_fn) = bootstrap_fn {
-            process_boot::run_hook(bootstrap_fn()).await?;
+            process_boot::run_hook(bootstrap_fn).await?;
         }
         process_boot::boot_after_hook(boot).await
     }
@@ -2477,7 +2477,7 @@ where
     ) -> Result<i32, FrameworkError> {
         let name = command.name();
         let booted =
-            match process_boot::run_hook(Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn))
+            match process_boot::run_hook(|| Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn))
                 .await
             {
                 Ok(()) => process_boot::boot_after_hook(boot).await,

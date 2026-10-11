@@ -110,21 +110,32 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
 /// printed and drained as every boot failure is. The panic hook has already
 /// written the panic's message and location to stderr.
 ///
+/// It takes the closure, not its future, and calls it inside the same
+/// boundary it polls the future in. A closure can panic before it returns
+/// its future, as one that opens its connection before its `async` block
+/// does; when the caller called it, that panic unwound past the boundary.
+///
 /// # Errors
 ///
-/// When `hook` panics, with the panic's message.
-pub(crate) async fn run_hook<F: Future<Output = ()>>(hook: F) -> Result<(), BootError> {
+/// When `hook` panics, while it builds its future or while the future
+/// runs, with the panic's message.
+pub(crate) async fn run_hook<F, Fut>(hook: F) -> Result<(), BootError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
     use futures::FutureExt as _;
-    std::panic::AssertUnwindSafe(hook)
-        .catch_unwind()
-        .await
-        .map_err(|payload| {
-            format!(
-                "the bootstrap panicked: {}",
-                crate::server::panic_payload_message(&payload)
-            )
-            .into()
-        })
+    let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
+        Ok(future) => std::panic::AssertUnwindSafe(future).catch_unwind().await,
+        Err(payload) => Err(payload),
+    };
+    outcome.map_err(|payload| {
+        format!(
+            "the bootstrap panicked: {}",
+            crate::server::panic_payload_message(&payload)
+        )
+        .into()
+    })
 }
 
 /// How long the end of a booted process waits for the supervisors its

@@ -574,6 +574,49 @@ async fn a_console_bootstrap_that_panics_reaches_the_callbacks_child() {
     assert!(!seen.contains("console run 8"), "{:?}", seen.all());
 }
 
+/// A `lazy_init` can panic before it returns its future, as one that opens
+/// its connection before its `async` block does. The panic is still the
+/// boot's error, and the callback it registered first sees it.
+#[test]
+fn a_console_bootstrap_that_panics_before_its_future_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::a_console_bootstrap_that_panics_before_its_future_reaches_the_callbacks_child",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_console_bootstrap_that_panics_before_its_future_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _mode = page_mode(false, None).await;
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+
+    let result = suprnova::console::dispatch_argv_with_init(
+        vec![
+            "console".to_string(),
+            "laravel-http-gaps:close-ledger".to_string(),
+        ],
+        move || -> std::future::Ready<()> {
+            Exceptions::reportable(move |error: &FrameworkError| record.push(error.to_string()));
+            panic!("{REFUSED}")
+        },
+    )
+    .await;
+
+    let error = result.expect_err("a console whose bootstrap panics runs no command");
+    assert!(error.to_string().contains(REFUSED), "{error}");
+    assert!(
+        seen.contains(REFUSED),
+        "the bootstrap's panic must reach the callbacks it registered first; they saw {:?}",
+        seen.all()
+    );
+    assert!(!seen.contains("console run 8"), "{:?}", seen.all());
+}
+
 #[test]
 fn an_application_command_whose_framework_boot_fails_reaches_the_callbacks() {
     crate::own_process::run_alone(
@@ -634,6 +677,46 @@ fn an_application_bootstrap_that_panics_reaches_the_callbacks_child() {
                     record.push(error.to_string())
                 });
                 refuse_the_connection();
+            })
+            .run_with_args(["app", "schedule:list"])
+            .await
+            .expect_err("a command whose bootstrap panics does not run");
+        assert!(error.to_string().contains(REFUSED), "{error}");
+    });
+    assert!(
+        seen.contains(REFUSED),
+        "the bootstrap's panic must reach the callbacks it registered first; they saw {:?}",
+        seen.all()
+    );
+}
+
+/// A bootstrap closure can panic before it returns its future, as one that
+/// opens its connection before its `async` block does. The panic is still
+/// the boot's error, and the callback it registered first sees it.
+#[test]
+fn an_application_bootstrap_that_panics_before_its_future_reaches_the_callbacks() {
+    crate::own_process::run_alone(
+        "laravel_http_gaps::an_application_bootstrap_that_panics_before_its_future_reaches_the_callbacks_child",
+    );
+}
+
+#[test]
+#[serial]
+fn an_application_bootstrap_that_panics_before_its_future_reaches_the_callbacks_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = child_env(&[("APP_ENV", "testing")]);
+    let _isolated = Isolated::new();
+    let seen = Seen::default();
+    let record = seen.clone();
+    with_loaded_configuration(|| async move {
+        let error = suprnova::Application::new()
+            .bootstrap(move || -> std::future::Ready<()> {
+                Exceptions::reportable(move |error: &FrameworkError| {
+                    record.push(error.to_string())
+                });
+                panic!("{REFUSED}")
             })
             .run_with_args(["app", "schedule:list"])
             .await
