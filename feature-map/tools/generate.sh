@@ -20,7 +20,7 @@ mkdir -p "$J"
 # directories feed nothing into it (env_vars.py strips test modules), nor
 # does markdown under the source paths (license inventories, crate docs),
 # so a commit that only touches them leaves the map current.
-REV=$(git -C "$REPO" log -1 --format=%h -- framework crates suprnova-cli suprnova-macros Cargo.toml ':(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl' ':(exclude)framework/tests' ':(exclude)suprnova-cli/tests' ':(exclude,glob)crates/*/tests/**' ':(exclude,glob)**/*.md')
+REV=$(git -C "$REPO" log -1 --format=%h -- framework crates suprnova-cli suprnova-macros Cargo.toml ':(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl' ':(exclude)framework/tests' ':(exclude)suprnova-cli/tests' ':(exclude)suprnova-macros/tests' ':(exclude,glob)crates/*/tests/**' ':(exclude,glob)**/*.md')
 RAW=$WORK/raw
 mkdir -p "$RAW"
 cd "$REPO"
