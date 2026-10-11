@@ -2871,7 +2871,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   primary key breaks ties, and a query with no order still walks the
   primary key ascending. An ordering the cursor cannot carry, such as
   `order_by_raw` alone, now fails with a 400 error instead of being
-  dropped (PAR-080).
+  dropped. An ordering on a joined table's column, such as `owners.id`,
+  fails the same way instead of putting the model's own `id` in the cursor
+  and repeating the page, and in a joined query the primary key that
+  breaks ties names the model's table. A joined query now quotes the
+  columns it orders by, as it already quoted its other references to the
+  model's table, so an ordering on a table whose name has capitals no
+  longer fails on Postgres (PAR-080).
 - **`#[model(timestamps = true)]` without the columns fails the build.**
   An explicit `timestamps = true`, or the bare `timestamps` flag, on a
   struct with neither `created_at` nor `updated_at` was accepted and
