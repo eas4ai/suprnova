@@ -1,9 +1,10 @@
 //! The public `live` and `view` documentation never shows an internal crate
-//! path, and no public signature of `suprnova` names a type of an internal
-//! crate that an application cannot name through `suprnova`. The checks read
-//! rustdoc's JSON output, never the HTML renderer, which climbs past 64 GB
-//! of memory on this crate, and write only inside the checkout's configured
-//! target directory.
+//! path, and no public signature an application reaches through `suprnova`,
+//! its own or one of an engine item it re-exports, names a type of an
+//! internal crate that an application cannot name through `suprnova`. The
+//! checks read rustdoc's JSON output, never the HTML renderer, which climbs
+//! past 64 GB of memory on this crate, and write only inside the checkout's
+//! configured target directory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -15,6 +16,17 @@ use serde_json::Value;
 /// Crate names a reader of the public documentation must never see: the
 /// application reaches these crates only through `suprnova`.
 const FORBIDDEN: [&str; 3] = ["suprnova_live", "suprnova_live_macros", "askama_parser"];
+
+/// Crates an application reaches only through `suprnova`, so a type of one
+/// that a public signature names must be nameable through `suprnova`: the
+/// crates the documentation never shows, and Magnetar, which an application
+/// consumes through `suprnova::magnetar_integration` alone.
+const REACHED_THROUGH_SUPRNOVA: [&str; 4] = [
+    "suprnova_live",
+    "suprnova_live_macros",
+    "askama_parser",
+    "magnetar",
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -70,12 +82,78 @@ fn workspace_metadata(root: &Path) -> (PathBuf, BTreeMap<String, String>) {
 
 /// Builds one workspace library's rustdoc JSON and reads it back.
 fn rustdoc_json(root: &Path, target: &Path, package: &str, crate_name: &str) -> Value {
+    build_rustdoc_json(root, target, package, crate_name, &[], &[])
+}
+
+/// The features `suprnova`'s own build enables on the workspace library
+/// `package`, comma separated.
+///
+/// Built alone, a library takes its own default features, and Magnetar's
+/// are not what `suprnova` asks of it: the JSON would document items the
+/// framework never links, or miss items it does.
+fn features_as_suprnova_builds(root: &Path, package: &str) -> String {
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "-p",
+            "suprnova",
+            "-i",
+            package,
+            "-e",
+            "normal,build",
+        ])
+        .args(["--depth", "0", "--prefix", "none", "--format", "{f}"])
+        .current_dir(root)
+        .output()
+        .expect("run cargo tree");
+    assert!(
+        output.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("cargo tree prints UTF-8")
+        .trim()
+        .to_owned()
+}
+
+/// Builds the rustdoc JSON of a workspace library `suprnova` depends on,
+/// with the features `suprnova` enables on it, and reads it back.
+///
+/// Lints are capped at warnings: under `suprnova`'s feature set a doc link
+/// of that library may point at an item of a feature left off, which is the
+/// library's own concern, and its JSON is read here for its signatures.
+fn dependency_json(root: &Path, target: &Path, package: &str, crate_name: &str) -> Value {
+    let features = features_as_suprnova_builds(root, package);
+    build_rustdoc_json(
+        root,
+        target,
+        package,
+        crate_name,
+        &["--no-default-features", "--features", &features],
+        &["--cap-lints", "warn"],
+    )
+}
+
+/// Builds one workspace library's rustdoc JSON with the given cargo and
+/// rustdoc arguments, and reads it back.
+fn build_rustdoc_json(
+    root: &Path,
+    target: &Path,
+    package: &str,
+    crate_name: &str,
+    cargo_args: &[&str],
+    rustdoc_args: &[&str],
+) -> Value {
     let mut command = Command::new("cargo");
     command
-        .args(["rustdoc", "-p", package, "--lib", "--target-dir"])
+        .args(["rustdoc", "-p", package, "--lib"])
+        .args(cargo_args)
+        .arg("--target-dir")
         .arg(target)
         .arg("--")
         .args(["-Z", "unstable-options", "--output-format", "json"])
+        .args(rustdoc_args)
         .current_dir(root)
         .env("RUSTC_BOOTSTRAP", "1")
         .env("CARGO_INCREMENTAL", "0");
@@ -271,6 +349,53 @@ impl<'a> Crate<'a> {
             .iter()
             .try_fold(self.root(), |module, segment| self.named(module, segment))
     }
+
+    /// The ids rustdoc's path table records at `path` in this crate, with
+    /// their kinds, whether or not the crate exports them.
+    fn path_entries(&self, path: &[&str]) -> Vec<(u64, &'a str)> {
+        let Some(table) = self.json["paths"].as_object() else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .filter(|(_, summary)| {
+                summary["crate_id"].as_u64() == Some(0)
+                    && summary["path"].as_array().is_some_and(|segments| {
+                        segments
+                            .iter()
+                            .map(Value::as_str)
+                            .eq(path.iter().copied().map(Some))
+                    })
+            })
+            .filter_map(|(id, summary)| Some((id.parse().ok()?, summary["kind"].as_str()?)))
+            .collect()
+    }
+
+    /// The ids an application reaches from this crate's root: the items of
+    /// its public modules, and what they re-export, globs included.
+    fn exported(&self) -> BTreeSet<u64> {
+        let mut exported = BTreeSet::new();
+        let mut pending = vec![self.root()];
+        while let Some(id) = pending.pop() {
+            if !exported.insert(id) {
+                continue;
+            }
+            let Some(item) = self.item(id) else { continue };
+            match item["inner"].get("use") {
+                Some(re_export) => {
+                    if let Some(target) = re_export["id"].as_u64() {
+                        if re_export["is_glob"].as_bool() == Some(true) {
+                            pending.extend(self.module_items(target));
+                        } else {
+                            pending.push(target);
+                        }
+                    }
+                }
+                None => pending.extend(self.module_items(id)),
+            }
+        }
+        exported
+    }
 }
 
 /// What a reader of the documentation would see that names a forbidden
@@ -411,7 +536,7 @@ fn rendered_public_docs_do_not_expose_internal_crate_paths() {
     let others: BTreeMap<String, Value> = re_exported
         .iter()
         .map(|crate_name| {
-            let json = rustdoc_json(&root, &target, &packages[crate_name], crate_name);
+            let json = dependency_json(&root, &target, &packages[crate_name], crate_name);
             (crate_name.clone(), json)
         })
         .collect();
@@ -433,17 +558,23 @@ fn rendered_public_docs_do_not_expose_internal_crate_paths() {
     );
 }
 
-/// The types the public signatures of one crate name, and what that crate
-/// re-exports from other crates.
+/// The types the public signatures an application reaches name, and what
+/// those crates re-export from other crates.
 #[derive(Default)]
 struct Signatures {
-    /// Each named type's id, with the public items whose signatures name it.
-    named: BTreeMap<u64, BTreeSet<String>>,
-    /// The canonical paths of the other crates' items the crate re-exports.
+    /// Each named type of a crate an application reaches only through
+    /// `suprnova`, by its canonical path, with the public items whose
+    /// signatures name it.
+    named: BTreeMap<Vec<String>, BTreeSet<String>>,
+    /// The canonical paths of the other crates' items re-exported.
     re_exported: BTreeSet<Vec<String>>,
-    /// The canonical paths of the other crates' modules the crate re-exports
-    /// whole, through a module re-export or a glob.
+    /// The canonical paths of the other crates' modules re-exported whole,
+    /// through a module re-export or a glob.
     re_exported_modules: Vec<Vec<String>>,
+    /// The re-exported items of a crate an application reaches only through
+    /// `suprnova` whose own signatures an application reaches too: every one
+    /// but a macro, which has none.
+    to_follow: BTreeSet<Vec<String>>,
 }
 
 impl Signatures {
@@ -481,14 +612,13 @@ fn named_types(value: &Value, found: &mut Vec<u64>) {
     }
 }
 
-/// Walks every item an application reaches from `docs`'s root: modules,
-/// re-exports, items and their fields, variants, methods and the impls
-/// written in this crate. A blanket impl and an auto-trait impl rustdoc
-/// adds are not, as no one wrote their signatures here.
-fn signatures(docs: &Crate<'_>) -> Signatures {
-    let mut found = Signatures::default();
+/// Walks every item an application reaches from `starts` in `docs`:
+/// modules, re-exports, items and their fields, variants, methods and the
+/// impls written in that crate. A blanket impl and an auto-trait impl
+/// rustdoc adds are not, as no one wrote their signatures there.
+fn walk(docs: &Crate<'_>, starts: Vec<(u64, String)>, found: &mut Signatures) {
     let mut seen = BTreeSet::new();
-    let mut pending = vec![(docs.root(), docs.name.to_owned())];
+    let mut pending = starts;
     while let Some((id, owner)) = pending.pop() {
         if !seen.insert(id) {
             continue;
@@ -515,8 +645,17 @@ fn signatures(docs: &Crate<'_>) -> Signatures {
                 }
             } else if let Some(path) = docs.path(target) {
                 let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
-                if glob || docs.json["paths"][target.to_string()]["kind"] == "module" {
+                let kind = docs.json["paths"][target.to_string()]["kind"].as_str();
+                if glob || kind == Some("module") {
                     found.re_exported_modules.push(path.clone());
+                }
+                let macro_kind = matches!(kind, Some("macro" | "proc_attribute" | "proc_derive"));
+                if !macro_kind
+                    && path
+                        .first()
+                        .is_some_and(|name| REACHED_THROUGH_SUPRNOVA.contains(&name.as_str()))
+                {
+                    found.to_follow.insert(path.clone());
                 }
                 found.re_exported.insert(path);
             }
@@ -538,13 +677,18 @@ fn signatures(docs: &Crate<'_>) -> Signatures {
         let mut types = Vec::new();
         named_types(inner, &mut types);
         for named in types {
-            found.named.entry(named).or_default().insert(name.clone());
+            let reached_only_through_suprnova = docs
+                .crate_of(named)
+                .is_some_and(|owner| REACHED_THROUGH_SUPRNOVA.contains(&owner));
+            if reached_only_through_suprnova && let Some(path) = docs.path(named) {
+                let path = path.into_iter().map(str::to_owned).collect();
+                found.named.entry(path).or_default().insert(name.clone());
+            }
         }
         let mut nested = Vec::new();
         shown_with(inner, &mut nested);
         pending.extend(nested.into_iter().map(|child| (child, name.clone())));
     }
-    found
 }
 
 /// An application names a type through the crate root (the house rule), so
@@ -554,30 +698,95 @@ fn signatures(docs: &Crate<'_>) -> Signatures {
 /// The compiler warns about a private type of this crate in a public
 /// signature, never about a public type of a dependency the application
 /// cannot reach, so this reads the signatures.
+///
+/// The walk is transitive: an engine item `suprnova` re-exports is the
+/// application's too, so its own public signatures (its fields, its
+/// methods, its trait items and the impls its crate writes) are read in
+/// that crate's rustdoc JSON, and so on for every engine item they lead to.
 #[test]
 fn public_signatures_name_only_types_an_application_can_reach() {
     let root = workspace_root();
-    let (target, _) = workspace_metadata(&root);
+    let (target, packages) = workspace_metadata(&root);
     let framework = rustdoc_json(&root, &target, "suprnova", "suprnova");
     let docs = Crate {
         name: "suprnova",
         json: &framework,
     };
-    let signatures = signatures(&docs);
+    let mut signatures = Signatures::default();
+    walk(
+        &docs,
+        vec![(docs.root(), "suprnova".to_owned())],
+        &mut signatures,
+    );
 
+    // Follow every re-exported engine item into its own crate's JSON,
+    // until the items it leads to are all read.
+    let mut engines: BTreeMap<String, Value> = BTreeMap::new();
+    let mut followed = BTreeSet::new();
+    let mut unread = Vec::new();
+    loop {
+        let next: Vec<Vec<String>> = signatures
+            .to_follow
+            .difference(&followed)
+            .cloned()
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        for path in next {
+            followed.insert(path.clone());
+            let owner = path[0].clone();
+            let Some(package) = packages.get(&owner) else {
+                unread.push(format!(
+                    "{} is re-exported from {owner}, which is not a workspace library, so its signatures went unread",
+                    path.join("::")
+                ));
+                continue;
+            };
+            let json = engines
+                .entry(owner.clone())
+                .or_insert_with(|| dependency_json(&root, &target, package, &owner));
+            let engine = Crate { name: &owner, json };
+            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+            match engine.resolve(&segments) {
+                Some(id) => walk(&engine, vec![(id, path.join("::"))], &mut signatures),
+                None => unread.push(format!(
+                    "the re-export of {} names nothing in {owner}'s rustdoc JSON, so its signatures went unread",
+                    path.join("::")
+                )),
+            }
+        }
+    }
+    assert!(
+        followed.len() > 100,
+        "the walk followed only {} re-exported engine items, so it missed the re-exports",
+        followed.len()
+    );
+
+    let exported: BTreeMap<&str, BTreeSet<u64>> = engines
+        .iter()
+        .map(|(name, json)| (name.as_str(), Crate { name, json }.exported()))
+        .collect();
     let mut checked = 0;
     let mut unreachable = Vec::new();
-    for (id, users) in &signatures.named {
-        let Some(owner) = docs.crate_of(*id) else {
-            continue;
-        };
-        if !FORBIDDEN.contains(&owner) {
-            continue;
+    for (path, users) in &signatures.named {
+        let owner = path[0].as_str();
+        // A trait its own crate keeps private, the supertrait that seals a
+        // trait, is one no one outside may name or implement, by design.
+        if let (Some(json), Some(exported)) = (engines.get(owner), exported.get(owner)) {
+            let engine = Crate { name: owner, json };
+            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+            let entries = engine.path_entries(&segments);
+            let sealed = !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|(id, kind)| *kind == "trait" && !exported.contains(id));
+            if sealed {
+                continue;
+            }
         }
-        let Some(path) = docs.path(*id) else { continue };
         checked += 1;
-        let path: Vec<String> = path.into_iter().map(str::to_owned).collect();
-        if !signatures.reaches(&path) {
+        if !signatures.reaches(path) {
             let users: Vec<&str> = users.iter().map(String::as_str).collect();
             unreachable.push(format!(
                 "{} is named by {}",
@@ -587,12 +796,21 @@ fn public_signatures_name_only_types_an_application_can_reach() {
         }
     }
     assert!(
-        checked > 40,
-        "the walk found only {checked} Live engine types in public signatures, so it missed the signatures"
+        unread.is_empty() && unreachable.is_empty(),
+        "public signatures name types an application cannot name through `suprnova` ({} of {checked}):\n{}",
+        unreachable.len(),
+        unread
+            .iter()
+            .chain(&unreachable)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
     );
+    // `suprnova`'s own signatures name fewer than 200 engine types and the
+    // engine items they lead to name the rest, so a floor above that shows
+    // the walk followed them.
     assert!(
-        unreachable.is_empty(),
-        "public signatures name types an application cannot name through `suprnova`:\n{}",
-        unreachable.join("\n")
+        checked > 400,
+        "the walk found only {checked} engine types in public signatures, so it missed the signatures or the engine items they lead to"
     );
 }

@@ -1,8 +1,38 @@
 //! Registered action results and the Suprnova HTTP update adapter.
 
+/// The action table a [`ComponentDescriptor`](crate::live::ComponentDescriptor)
+/// owns: each entry and its generated dispatcher, the erased receiver it
+/// dispatches to and the boxed future it returns, the browser arguments
+/// before and after schema validation, and the argument schema,
+/// authorization requirement and transaction policy an action's
+/// [`ActionMetadata`](crate::live::metadata::ActionMetadata) declares.
+pub use suprnova_live::action::{
+    ActionArgumentField, ActionArgumentSchema, ActionDispatchFn, ActionEntry, ActionFuture,
+    ActionTable, ActionTarget, AuthorizationRequirement, PreparedActionArguments,
+    RawActionArguments, TransactionPolicy,
+};
+/// The host port that authorizes an action, with the request it reads and
+/// the decision it returns, which a
+/// [`HostCapabilities`](crate::live::HostCapabilities) takes.
+pub use suprnova_live::action::{
+    ActionAuthorizationPort, ActionAuthorizationRequest, AuthorizationDecision,
+};
+/// The conversion of an action's return value into its semantic result,
+/// which [`ActionOutcome`] and [`ActionResult`] implement, and the redacted
+/// failure, with its closed category, the conversion and a dispatch
+/// report.
+pub use suprnova_live::action::{ActionError, ActionErrorKind, IntoActionResult};
 pub use suprnova_live::action::{
     ActionOutcome, ActionResult, AuthorizedAction, FlashIntent, OutcomeError, OutcomeErrorKind,
     OutcomeMetadata, RouteIntent, UrlIntent,
+};
+/// The registered browser emissions an [`OutcomeMetadata`] carries, their
+/// channel, and the payload contracts an application's event and effect
+/// types implement: [`OutcomeMetadata::new`] takes the emissions and
+/// [`OutcomeMetadata::events`] and [`OutcomeMetadata::effects`] return
+/// them.
+pub use suprnova_live::action::{
+    EmissionKind, LiveEffectPayload, LiveEventPayload, RegisteredEmission,
 };
 
 use std::error::Error;
@@ -10,7 +40,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use suprnova_live::action::RawActionArguments;
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::child::ChildParameterEligibilityErrorKind;
 use suprnova_live::clock::Clock;
