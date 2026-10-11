@@ -191,11 +191,18 @@ dependency in `Cargo.toml`:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
-A CLI built from a commit that is not a release, such as one you install
-from `main` between two releases, pins that commit instead, as
-`rev = "<commit hash>"`. Its templates can use framework API that the last
-release tag does not have yet, so the scaffold needs the framework from the
-same commit. Replace `rev` with a release `tag` when you move to a release.
+A CLI pins the release tag only when it was built from a checkout where
+that tag names the commit being built. A CLI built from any other checkout
+pins its commit instead, as `rev = "<commit hash>"`:
+
+- A CLI built from `main` between two releases pins its commit because its
+  templates can use framework API that the last release tag does not have
+  yet. The scaffold needs the framework from the same commit.
+- `cargo install --git` builds from a checkout that usually carries no
+  tags. A CLI installed that way, even with `--tag`, pins the release
+  commit's hash, which names the same source as the tag.
+
+Replace `rev` with a release `tag` when you move to a release.
 
 To pull the latest framework changes:
 
@@ -213,9 +220,10 @@ there's no need to hand-pin a `rev` in `Cargo.toml`.
 Suprnova is distributed through git, not crates.io - both the framework
 and the CLI install from GitHub. Each version is published as a tagged
 GitHub Release (e.g. `v2.1.0`), and the tag is what your app depends on:
-a scaffolded `Cargo.toml` pins `tag = "v3.2.1"`, and `Cargo.lock` records
-the exact commit that tag resolved, so builds are reproducible until you
-choose to move. Updating is deliberate, never incidental - bump the tag and
+a scaffolded `Cargo.toml` pins `tag = "v3.2.1"` when the CLI was built from
+a checkout carrying that tag, or the release commit's hash otherwise (see
+above), and `Cargo.lock` records the exact commit, so builds are
+reproducible until you choose to move. Updating is deliberate, never incidental - bump the tag and
 run `cargo update -p suprnova`; the section on updating your app's
 framework version walks through it.
 
