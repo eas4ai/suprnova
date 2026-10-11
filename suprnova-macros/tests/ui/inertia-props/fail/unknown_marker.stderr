@@ -1,0 +1,5 @@
+error: expected `#[inertia_props(shared)]` or `#[inertia_props(flash)]`
+ --> tests/ui/inertia-props/fail/unknown_marker.rs:7:17
+  |
+7 | #[inertia_props(global)]
+  |                 ^^^^^^
