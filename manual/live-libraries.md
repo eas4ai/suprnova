@@ -548,7 +548,9 @@ that has no effects. The scan refuses:
   or `suprnova::view`, reaches a component only when the generator's admit
   table names it, so neither a re-export made for applications nor a new
   Live item of the framework widens the allowlist by default. Magnetar's
-  types are refused as a module.
+  types are refused, the OAuth provider types at the crate root included:
+  authentication is the application's, through the auth flows, never a
+  component's.
 
 Each capability the admitted paths carry goes into the plan. Resolving a
 trait your own library defines carries none, because the application binds

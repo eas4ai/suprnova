@@ -525,41 +525,11 @@ CRATES = {
 # adding Live items of its own; neither lands on the component allowlist by
 # default, a rule here admits it. The table is the boundary as it stood
 # before the 4.0.0 re-exports (REG-030); an ITEMS rule that refuses a path
-# wins over an entry here.
+# wins over an entry here. Magnetar has no entry: authentication is the
+# application's, through the framework's auth flows, never a component's.
 ENGINE_CRATES = {"suprnova_live", "suprnova_live_macros", "magnetar"}
 GATED_PREFIXES = ("suprnova::live", "suprnova::render_cache", "suprnova::view")
 ADMIT = {
-    "suprnova::AppleOAuthProvider": None,
-    "suprnova::AppleProviderConfig": None,
-    "suprnova::ApplePublicKeySource": None,
-    "suprnova::AuthorizationRequestShape": None,
-    "suprnova::AutoLinkPolicy": None,
-    "suprnova::ClientAuthentication": None,
-    "suprnova::ClientAuthenticationMaterial": None,
-    "suprnova::EndpointOverrides": None,
-    "suprnova::FacebookOAuthProvider": None,
-    "suprnova::FacebookProviderConfig": None,
-    "suprnova::GoogleOAuthProvider": None,
-    "suprnova::GoogleProviderConfig": None,
-    "suprnova::InvalidGrantMeaning": None,
-    "suprnova::OAuthAuthorizationConfig": None,
-    "suprnova::OAuthProtocolError": None,
-    "suprnova::OAuthProvider": None,
-    "suprnova::OAuthResult": None,
-    "suprnova::ParamPlacement": None,
-    "suprnova::PasskeyConfig": None,
-    "suprnova::PkcePosture": None,
-    "suprnova::ProviderIdentity": None,
-    "suprnova::ProviderResponse": None,
-    "suprnova::RefreshPolicy": None,
-    "suprnova::RevocationRequest": None,
-    "suprnova::RevocationTransport": None,
-    "suprnova::TikTokOAuthProvider": None,
-    "suprnova::TikTokProviderConfig": None,
-    "suprnova::TokenHint": None,
-    "suprnova::TokenRequestShape": None,
-    "suprnova::XOAuthProvider": None,
-    "suprnova::XProviderConfig": None,
     "suprnova::live::AcceptedOutcomeKind": None,
     "suprnova::live::ActionOutcome": None,
     "suprnova::live::ActionResult": None,
