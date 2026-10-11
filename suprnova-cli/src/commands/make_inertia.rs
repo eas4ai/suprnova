@@ -105,7 +105,15 @@ fn run_inertia_page(name: &str, force: bool, test: bool) -> Result<(), String> {
     let _ = dotenvy::from_path(".env");
 
     let frontend = Frontend::detect_from_env();
-    let ext = frontend.page_ext();
+    let Some(ext) = frontend.page_ext() else {
+        ui::hint(
+            "A Live page is a document route and a view: see the Live kit in manual/starter-kits.md, or run `suprnova live:make <name>` for a component.",
+        );
+        return Err(
+            "This project uses the Live kit (SUPRNOVA_FRONTEND=live), which has no Inertia pages"
+                .to_string(),
+        );
+    };
     let mut segments = generator::segments(name, false)?;
     let last = segments.pop().unwrap_or_default();
     let page_name = to_page_name(&last);
@@ -166,10 +174,9 @@ fn run_inertia_page(name: &str, force: bool, test: bool) -> Result<(), String> {
     }
 
     let mut files = WriteSet::default();
-    files.put(
-        page_file,
-        templates::inertia_page_template(&component, frontend),
-    )?;
+    let page = templates::inertia_page_template(&component, frontend)
+        .ok_or_else(|| "the Live kit has no Inertia pages".to_string())?;
+    files.put(page_file, page)?;
     if test {
         files.put(
             test_file,

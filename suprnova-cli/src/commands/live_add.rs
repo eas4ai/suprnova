@@ -186,6 +186,33 @@ fn run_inner(request: &Request) -> Result<(), String> {
     }
     Ok(())
 }
+/// Installs shipped library components into the application at `root`,
+/// with no terminal, through the plan and write phase `live:add` runs, so
+/// each one is recorded in `suprnova.toml` and the next `live:add` of it
+/// keeps the files current. `suprnova new --frontend live` installs the
+/// components its views import this way. A shipped component carries no
+/// Rust and asks for no capability or key pin, so the install needs no
+/// answer from a person and `--yes` is all it takes.
+pub(crate) fn install_shipped(root: &Path, names: &[&str]) -> Result<(), String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("cannot resolve {}: {error}", root.display()))?;
+    let options = Options {
+        yes: true,
+        ..Options::default()
+    };
+    let fetcher = SourceFetcher::default();
+    let lock = ProjectLock::acquire(&root).map_err(|error| error.to_string())?;
+    let mut project = ProjectFile::load(&root).map_err(|error| error.to_string())?;
+    for name in names {
+        let source = address::parse(name).map_err(|error| error.to_string())?;
+        let plan = plan::resolve(&source, &options, &fetcher, &project)
+            .map_err(|error| format!("cannot install the shipped component `{name}`: {error}"))?;
+        install::apply(&plan, &mut project, &lock, &options)
+            .map_err(|error| format!("cannot install the shipped component `{name}`: {error}"))?;
+    }
+    lock.release().map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{COMPONENTS, Request, source_spec};

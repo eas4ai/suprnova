@@ -1,9 +1,10 @@
 # suprnova new
 
 `suprnova new` scaffolds a Suprnova project - a fresh Cargo crate with
-controllers, routes, migrations, an Inertia SPA, and a working auth
-flow already wired together. Run it once per app, then live in
-`suprnova serve` from there.
+controllers, routes, migrations, a frontend, and a working auth flow
+already wired together. The frontend is an Inertia SPA (Svelte, React, or
+Vue) or the Live kit's server-rendered pages. Run it once per app, then
+live in `suprnova serve` from there.
 
 ## Usage
 
@@ -21,7 +22,7 @@ separators or `..`, and be 64 characters or fewer.
 
 | Option | Description |
 |---|---|
-| `--frontend <svelte\|react\|vue>` | Pick the SPA framework non-interactively. Conflicts with `--api`. |
+| `--frontend <svelte\|react\|vue\|live>` | Pick the frontend non-interactively: an Inertia SPA (`svelte`, `react`, `vue`) or the [Live kit](#live-starter-kit) (`live`). Conflicts with `--api`. |
 | `--api` | Scaffold a JSON:API-only project (no Inertia, no SPA, token auth instead of sessions). |
 | `--no-interaction` | Skip all prompts and use defaults (name `my-suprnova-app`, frontend `svelte`, empty author/description). |
 | `--no-git` | Skip `git init` in the new project. |
@@ -39,7 +40,8 @@ The wizard asks four questions, in this order:
 2. **Description** - used as the Cargo package description
 3. **Author** - used as the Cargo package author; defaults to your
    `git config user.name <name@email>` if set
-4. **Frontend framework** - `Svelte (recommended)`, `React`, or `Vue`
+4. **Frontend framework** - `Svelte (recommended)`, `React`, `Vue`, or
+   `Live (server-rendered, no Node)`
 
 After confirming, the scaffolder writes the project, runs `git init`
 (unless `--no-git`), and prints the next steps:
@@ -47,6 +49,12 @@ After confirming, the scaffolder writes the project, runs `git init`
 ```
 Backend  http://localhost:8765
 Frontend http://localhost:5765
+```
+
+A Live kit project runs one process, so it prints one address:
+
+```
+App http://localhost:8765
 ```
 
 ## Non-interactive mode
@@ -67,6 +75,32 @@ Defaults under `--no-interaction`:
 
 There are no `--description` or `--author` flags; those values are
 only set via the interactive prompts or accept their defaults.
+
+## Live starter kit
+
+The Live kit is the frontend for an application without a Node toolchain:
+
+```bash
+suprnova new my-app --frontend live
+```
+
+It writes no `frontend/` directory, no `package.json`, and no Vite
+config. Every page is a server-rendered Live document: a controller renders
+an Askama view in one of two layouts, and the pages that act mount
+[Live](live.md) components, such as the sign-in form, the dashboard's note
+counts, and the notes list. The application serves the Live browser runtime
+and the stylesheets and scripts of the shipped component library itself, so
+`suprnova serve` starts the backend alone and there is nothing to build
+before you deploy.
+
+The kit keeps the backend the Inertia kits share: the `users` and `notes`
+tables and models, the account flows, and the route names. The scaffold
+installs the library components its views import under
+`templates/suprnova-ui/`, the way `suprnova live:add` installs them, and
+records them in `suprnova.toml`. `.env` sets `SUPRNOVA_FRONTEND=live`, so
+`suprnova make:inertia` refuses in the project, and `suprnova docker:init`
+writes a Dockerfile with no Node stage. For the pages, the components, and
+how to add your own, see [the Live starter kit](starter-kits.md#the-live-starter-kit).
 
 ## API-only project
 
@@ -127,7 +161,9 @@ the short version is:
 - `src/bin/console.rs` - the per-project `php artisan` analogue
 - `frontend/` - Vite 8 + Tailwind v4 + your chosen framework, with
   Home / Dashboard / Login / Register / ForgotPassword / ResetPassword /
-  VerifyEmail pages already wired through Inertia
+  VerifyEmail pages already wired through Inertia. The Live kit has no
+  `frontend/`: its pages are views under `templates/live/` and its
+  components live in `src/live/`
 - the account flows: registration mails a verification link and
   continues to `/verify-email`, which resends and consumes it;
   `/forgot-password` mails a reset link to a verified address and
@@ -148,11 +184,11 @@ the short version is:
 
 Laravel ships with Blade and pulls a frontend in via Breeze/Jetstream
 after the fact. Suprnova goes the other way: `suprnova new` always
-scaffolds either a real SPA (Svelte/React/Vue on Inertia) or a real
-JSON:API project. There is no template-engine-first starter - if you
-want server-rendered HTML, Tera is available, but it's not the default
-shape and there's no scaffolder path that puts views in the front of
-your app.
+scaffolds a complete frontend - a real SPA (Svelte/React/Vue on Inertia),
+the server-rendered Live kit - or a real JSON:API project. Laravel's
+Livewire starter kit still builds its assets with Vite; the Live kit needs
+no build step, because the framework serves the Live runtime and the
+component library's files.
 
 The default frontend is **Svelte 5** (runes-on), not React. We picked
 it because it's the lightest of the three at runtime and the closest
