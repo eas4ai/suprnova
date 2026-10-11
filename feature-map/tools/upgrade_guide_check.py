@@ -28,15 +28,26 @@ def release_section(changelog: str, version: str) -> str:
 
 
 def bold_leads(section: str, headings: tuple[str, ...]) -> list[str]:
-    """The bold lead sentence of every entry under the given `###` headings."""
+    """The bold lead sentence of every entry under the given `###` headings.
+
+    A lead that wraps onto the entry's continuation lines is joined with
+    single spaces, so the heading to search for is the sentence as read,
+    not as the changelog breaks it.
+    """
     leads: list[str] = []
     current = None
-    for line in section.splitlines():
+    lines = section.splitlines()
+    for index, line in enumerate(lines):
         if line.startswith("### "):
             current = line[4:].strip()
             continue
         if current in headings and line.startswith("- **"):
-            match = re.match(r"- \*\*(.+?)\*\*", line)
+            entry = line
+            following = index + 1
+            while "**" not in entry[4:] and following < len(lines) and lines[following].startswith("  "):
+                entry = f"{entry} {lines[following].strip()}"
+                following += 1
+            match = re.match(r"- \*\*(.+?)\*\*", entry)
             if match:
                 leads.append(match.group(1).strip())
     return leads

@@ -41,6 +41,7 @@ PATH_RULES = {
     "framework/src/clock": "testing",
     "framework/src/schema/": "migrations",
     "framework/src/redis_retry": "cache",
+    "framework/src/concurrency/": "concurrency",
     "framework/src/config/": "configuration",
     "framework/src/console/": "console",
     "framework/src/container/": "container",
@@ -53,6 +54,7 @@ PATH_RULES = {
     "framework/src/database/schema_dump": "migrations",
     "framework/src/database/route_binding": "routing",
     "framework/src/database/": "database",
+    "framework/src/date.rs": "dates",
     "framework/src/eloquent/builder": "queries",
     "framework/src/eloquent/scopes": "queries",
     "framework/src/eloquent/lazy": "queries",
@@ -88,6 +90,7 @@ PATH_RULES = {
     "framework/src/mail/": "mail",
     "framework/src/media/": "images",
     "framework/src/middleware/": "middleware",
+    "framework/src/mongodb/": "mongodb",
     "framework/src/notifications/channels/webpush": "web-push",
     "framework/src/notifications/": "notifications",
     "framework/src/pagination/": "pagination",
@@ -163,6 +166,7 @@ MACROS = {
     "InertiaProps": "frontend-typescript-types", "redirect": "responses",
     "InputNames": "data", "authorize": "authorization",
     "RouteBinding": "routing", "resource": "routing", "api_resource": "routing",
+    "concurrent_task": "concurrency", "document": "mongodb", "inertia_root": "frontend-inertia-responses",
 }
 # External crates re-exported by `suprnova`.
 EXTERNAL = {
@@ -172,6 +176,7 @@ EXTERNAL = {
     "fake": "eloquent-factories", "dummy": "eloquent-factories", "webauthn_rs": "oauth",
     "webauthn_rs_core": "oauth", "webauthn_rs_proto": "oauth", "opentelemetry_http": "observability",
     "featureflag": "feature-flags", "secrecy": "encryption", "redis": "redis", "askama": "(no chapter) server-rendered views",
+    "mongodb": "mongodb", "bson": "mongodb",
     "chrono": "(no chapter) re-exported utility crates", "chrono_tz": "(no chapter) re-exported utility crates",
     "indexmap": "(no chapter) re-exported utility crates", "async_trait": "(no chapter) re-exported utility crates",
     "strum": "(no chapter) re-exported utility crates", "magnetar": "(no chapter) Magnetar engine API",
@@ -189,9 +194,9 @@ CLI_RULES = [  # (binary, command prefix, chapter)
     ("suprnova", "ssr:", "frontend-inertia-responses"), ("suprnova", "key:generate", "encryption"),
     ("app", "serve", "deployment"), ("app", "web:run", "deployment"), ("app", "migrate", "cli-migrations"), ("app", "schema:dump", "cli-migrations"),
     ("app", "schedule:", "cli-scheduling"), ("app", "workflow:", "workflows"), ("app", "queue:", "queues"),
-    ("app", "down", "deployment"), ("app", "up", "deployment"),
+    ("app", "down", "deployment"), ("app", "up", "deployment"), ("app", "ssr:", "frontend-inertia-responses"),
     ("console", "db:seed", "seeding"), ("console", "model:prune", "eloquent"),
-    ("console", "db:monitor", "database"),
+    ("console", "db:monitor", "database"), ("console", "concurrency:", "concurrency"),
     ("suprnova", "db:seed", "seeding"), ("suprnova", "model:prune", "eloquent"),
     ("suprnova", "queue:", "queues"),
     ("console", "render-cache:", "render-cache-operations"), ("console", "__suprnova:live-tool", "live"),
@@ -315,4 +320,4 @@ EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")
 }, indent=1, sort_keys=True) + "\n")
 print(json.dumps({"raw": raw_count, "folded_reexports": raw_count - len(out), "records": len(out),
                   "chapters": len({r["chapter"] for r in out if not r["chapter"].startswith("(")}),
-                  "unclassified": unfiled[:10]}))
+                  "unfiled": len(unfiled), "unclassified": unfiled[:10]}))
