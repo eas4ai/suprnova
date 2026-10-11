@@ -2319,8 +2319,9 @@ suprnova::queue::testing::forget_driver();
 
 ### A console command whose boot fails is reported.
 
-**Before:** A console command whose bootstrap panicked, or whose framework
-boot returned an error, never reached `Exceptions::report`.
+**Before:** 3.2.1 had no `Exceptions`. A console command whose bootstrap
+panicked, or whose framework boot returned an error, printed the failure
+and nothing else saw it.
 
 **Now:** The failure is reported, so the callbacks the bootstrap registered
 before it failed see it, then printed. The application binary's own
