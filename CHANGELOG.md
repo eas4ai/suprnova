@@ -2945,7 +2945,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   sent exactly as declared still matches. A failure is named by the index
   the part was sent under (`photos.3`), and `max_count` and the file checks
   that run while the body streams apply to every part the field takes,
-  whatever name it was sent under.
+  whatever name it was sent under. Parts are read in the order they were
+  sent, as PHP reads them: a later part sent under a parent name, such as
+  `user` or a bare `photos`, replaces what `user.name` or `photos[]` held,
+  and a later `user[name][first]` or `photos[0][caption]` makes `user.name`
+  or that element an array, which fails as the wrong kind of value.
 - **`suprnova generate-types` pairs a page built with the builder.** A page
   whose chain starts with `Inertia::paginate(..)` got no `Pages` entry,
   however its chain gave the props struct, and a field the chain deferred

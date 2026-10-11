@@ -771,7 +771,7 @@ where
 {
     parse_parts(req, limits, Checked::EveryPart, per_field_validator)
         .await
-        .map(|(payload, _)| payload)
+        .map(|routed| routed.payload)
 }
 
 /// The parse `#[derive(MultipartRequest)]` runs: as
@@ -802,7 +802,7 @@ where
         per_file_validator,
     )
     .await
-    .map(|(payload, _)| payload)
+    .map(|routed| routed.payload)
 }
 
 /// The parse `#[derive(MultipartRequest)]` runs: each part goes to the
@@ -817,6 +817,17 @@ where
 /// kept. A `max_count` in `limits.per_field_max_counts`, keyed by the name
 /// in `#[field(...)]`, counts every part that goes to the field, whatever
 /// name it was sent under.
+///
+/// The parts are read in the order they were sent, as PHP reads them. A
+/// part sent under a parent of a field's name (`user` for `user.name`, a
+/// bare `photos` for the list `photos[]`) replaces what the field held, so
+/// the field's earlier parts go to no field and a later part fills it
+/// again. A part sent under a member of the name of a field that holds one
+/// value (`user[name][first]` for `user.name`), or of a list element
+/// (`photos[0][caption]` for `photos[]`), makes that value or element an
+/// array, which [`RoutedPayload::nested`] records, until a later part sent
+/// at that place replaces it. The parts a field gave up still count toward
+/// its `max_count`, because they were read.
 ///
 /// # Errors
 ///
@@ -833,7 +844,7 @@ pub async fn parse_multipart_for_fields<F>(
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
-    let (payload, routes) = parse_parts(
+    parse_parts(
         req,
         limits,
         Checked::Fields {
@@ -841,8 +852,7 @@ where
         },
         per_file_validator,
     )
-    .await?;
-    Ok(RoutedPayload { payload, routes })
+    .await
 }
 
 /// A multipart body parsed for a `#[derive(MultipartRequest)]` struct by
@@ -853,8 +863,18 @@ pub struct RoutedPayload {
     /// The parts kept, in the order they were sent.
     pub payload: MultipartPayload,
     /// The route of each part of `payload`, at the same position: the
-    /// field it goes to, or `None` for a part no field takes.
+    /// field it goes to, or `None` for a part no field takes or one a later
+    /// part sent under a parent or a member name replaced.
     pub routes: Vec<Option<PartRoute>>,
+    /// The places the last part to reach them made an array, by sending a
+    /// member under them, as PHP reads the parts in order: the field's
+    /// position among the fields given to [`parse_multipart_for_fields`],
+    /// with `None` for a field that holds one value (`user[name][first]` or
+    /// `user[name][]` for `user.name`) or the element's index for a list
+    /// (`photos[0][caption]` for `photos[]` gives `Some(0)`). No part has a
+    /// route to such a place, so it reads as a value of the wrong kind. In
+    /// field order, then index order.
+    pub nested: Vec<(usize, Option<i64>)>,
 }
 
 /// What a field of a `#[derive(MultipartRequest)]` struct holds, which
@@ -916,6 +936,35 @@ pub struct PartRoute {
     pub index: i64,
 }
 
+/// What a part does to a field it does not go to, as PHP reads the parts
+/// in the order they were sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Displaced {
+    /// The part was sent under a parent of the field's name (`user` for
+    /// `user.name`), or under a list's name without brackets (`photos` for
+    /// `photos[]`). It replaces the whole value, so the field, given by its
+    /// position, holds nothing until a later part reaches it.
+    Cleared(usize),
+    /// The part was sent under a member of the name of a field that holds
+    /// one value (`user[name][first]` for `user.name`), so the field's
+    /// value, given by its position, is an array.
+    Nested(usize),
+    /// The part was sent under a member of a list element
+    /// (`photos[0][caption]` for `photos[]`), so the element at the index,
+    /// in the list given by its position, is an array.
+    NestedElement(usize, i64),
+}
+
+/// Where one part goes, and what it does to the fields it does not go to.
+struct Routing<'a> {
+    /// The field the part goes to and its place there, or `None` when no
+    /// field takes it.
+    route: Option<(PartRoute, PartField<'a>)>,
+    /// The fields the part replaces or makes an array, in declaration
+    /// order.
+    displaced: Vec<Displaced>,
+}
+
 /// Routes the parts of one body to the fields of one struct, in the order
 /// the parts arrive, keeping the index each list appends at next.
 struct PartRouter<'a> {
@@ -942,6 +991,17 @@ enum NextIndex {
     Full,
 }
 
+impl NextIndex {
+    /// The index `[]` takes next once the list also holds `index`.
+    fn after(self, index: i64) -> Self {
+        match (self, index.checked_add(1)) {
+            (Self::Full, _) | (_, None) => Self::Full,
+            (Self::At(at), Some(_)) if index < at => Self::At(at),
+            (_, Some(after)) => Self::At(after),
+        }
+    }
+}
+
 impl<'a> PartRouter<'a> {
     fn new(fields: &'a [PartField<'a>]) -> Self {
         let paths = fields
@@ -958,22 +1018,83 @@ impl<'a> PartRouter<'a> {
         }
     }
 
-    /// The route of a part sent under `name` and the field it names, or
-    /// `None` when no field takes it.
-    fn route(&mut self, name: &str) -> Option<(PartRoute, PartField<'a>)> {
-        if let Some(field) = self.fields.iter().position(|field| field.name == name) {
-            return self.place(field, None);
+    /// Where a part sent under `name` goes, and what it does to the fields
+    /// it does not go to.
+    fn route(&mut self, name: &str) -> Routing<'a> {
+        let read = crate::http::input::name_path(name);
+        // The field the part is sent to, and the index its name gives.
+        let matched = match self.fields.iter().position(|field| field.name == name) {
+            Some(field) => Some((field, None)),
+            None => read.as_ref().and_then(|read| {
+                let field = self
+                    .fields
+                    .iter()
+                    .zip(&self.paths)
+                    .position(|(field, path)| {
+                        field.kind.is_list() == read.element.is_some()
+                            && path.as_deref() == Some(read.path.as_str())
+                    })?;
+                Some((field, read.element.flatten()))
+            }),
+        };
+        let displaced = match &read {
+            Some(read) => self.displace(read, matched.map(|(field, _)| field)),
+            None => Vec::new(),
+        };
+        let route = matched.and_then(|(field, index)| self.place(field, index));
+        Routing { route, displaced }
+    }
+
+    /// The fields other than `matched` that a part whose name reads as
+    /// `read` replaces or makes an array, or whose list element it makes
+    /// an array. A list it replaces starts over, so its next `[]` takes
+    /// `0`, as in a new PHP array; an element it makes counts toward the
+    /// index `[]` takes next, as PHP counts it.
+    fn displace(
+        &mut self,
+        read: &crate::http::input::NamePath,
+        matched: Option<usize>,
+    ) -> Vec<Displaced> {
+        // Where the part puts its value: its path, or an element's path for
+        // an element at an index. An element `[]` appends is new, so no
+        // field's value is under it.
+        let place = match read.element {
+            None => Some(std::borrow::Cow::Borrowed(read.path.as_str())),
+            Some(Some(index)) => Some(std::borrow::Cow::Owned(format!("{}.{index}", read.path))),
+            Some(None) => None,
+        };
+        let mut displaced = Vec::new();
+        for (field, (declared, path)) in self.fields.iter().zip(&self.paths).enumerate() {
+            let Some(path) = path.as_deref() else {
+                continue;
+            };
+            if matched == Some(field) {
+                continue;
+            }
+            let list = declared.kind.is_list();
+            let cleared = place
+                .as_deref()
+                .is_some_and(|place| is_under(path, place) || (list && path == place));
+            // An element under the field's own path is a member of it too.
+            let nested = !list
+                && (is_under(&read.path, path) || (read.element.is_some() && read.path == path));
+            if cleared {
+                if list && let Some(next) = self.next.get_mut(field) {
+                    *next = NextIndex::Empty;
+                }
+                displaced.push(Displaced::Cleared(field));
+            } else if list {
+                if let Some(index) = element_member(read, path) {
+                    if let Some(next) = self.next.get_mut(field) {
+                        *next = next.after(index);
+                    }
+                    displaced.push(Displaced::NestedElement(field, index));
+                }
+            } else if nested {
+                displaced.push(Displaced::Nested(field));
+            }
         }
-        let read = crate::http::input::name_path(name)?;
-        let field = self
-            .fields
-            .iter()
-            .zip(&self.paths)
-            .position(|(field, path)| {
-                field.kind.is_list() == read.element.is_some()
-                    && path.as_deref() == Some(read.path.as_str())
-            })?;
-        self.place(field, read.element.flatten())
+        displaced
     }
 
     /// The part's place in `field`: `index` when its name gives one, else
@@ -990,13 +1111,88 @@ impl<'a> PartRouter<'a> {
             (None, NextIndex::Full) if !list => i64::MAX,
             (None, NextIndex::Full) => return None,
         };
-        *next = match (*next, index.checked_add(1)) {
-            (NextIndex::Full, _) | (_, None) => NextIndex::Full,
-            (NextIndex::At(at), Some(_)) if index < at => NextIndex::At(at),
-            (_, Some(after)) => NextIndex::At(after),
-        };
+        *next = next.after(index);
         Some((PartRoute { field, index }, declared))
     }
+}
+
+/// The index of the element of the list at `path` that a part whose name
+/// reads as `read` puts a member under: `0` for `photos[0][caption]`,
+/// `photos[0][]` and `photos[0][0]` under the list at `photos`. `None` when
+/// the part puts nothing under an element, or when the key under the list
+/// is no integer as PHP writes one (`photos[01][x]`), which PHP keeps as
+/// text, so it names no element.
+fn element_member(read: &crate::http::input::NamePath, path: &str) -> Option<i64> {
+    let rest = read.path.strip_prefix(path)?.strip_prefix('.')?;
+    let key = match rest.split_once('.') {
+        Some((key, _)) => key,
+        // The key ends the path, so the part puts something under it only
+        // when it puts an element there.
+        None if read.element.is_some() => rest,
+        None => return None,
+    };
+    crate::http::input::php_integer(key)
+}
+
+/// What one field of a `#[derive(MultipartRequest)]` struct holds while
+/// the body streams, so a later part sent under a parent or a member name
+/// can take it back.
+#[derive(Default)]
+struct FieldHold {
+    /// Where in the routes the parts that went to the field are, by the
+    /// index of each route: the element's in a list, the part's count in a
+    /// field that holds one value.
+    routed: std::collections::HashMap<i64, Vec<usize>>,
+    /// Whether a member name came last for a field that holds one value.
+    nested: bool,
+    /// The list elements a member name came last for.
+    nested_elements: std::collections::BTreeSet<i64>,
+}
+
+impl FieldHold {
+    /// Give up every part the field holds, so none of them has a route,
+    /// and every array mark with them.
+    fn release(&mut self, routes: &mut [Option<PartRoute>]) {
+        for (_, positions) in self.routed.drain() {
+            clear_routes(routes, &positions);
+        }
+        self.nested = false;
+        self.nested_elements.clear();
+    }
+
+    /// Give up the parts at `index` of a list, which a member name made an
+    /// array.
+    fn nest_element(&mut self, index: i64, routes: &mut [Option<PartRoute>]) {
+        if let Some(positions) = self.routed.remove(&index) {
+            clear_routes(routes, &positions);
+        }
+        self.nested_elements.insert(index);
+    }
+
+    /// Hold the part at `position` of the routes, at `index`: the place is
+    /// a value again, no array.
+    fn hold(&mut self, index: i64, position: usize) {
+        self.routed.entry(index).or_default().push(position);
+        self.nested = false;
+        self.nested_elements.remove(&index);
+    }
+}
+
+/// Take the route of each part at `positions` of `routes`.
+fn clear_routes(routes: &mut [Option<PartRoute>], positions: &[usize]) {
+    for &position in positions {
+        if let Some(route) = routes.get_mut(position) {
+            *route = None;
+        }
+    }
+}
+
+/// Whether the dotted path `inner` is under `outer` and is not `outer`
+/// itself: `user.name` is under `user`, and `username` is not.
+fn is_under(inner: &str, outer: &str) -> bool {
+    inner
+        .strip_prefix(outer)
+        .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// Which parts the chunk validator is called for.
@@ -1019,13 +1215,15 @@ enum Checked<'a> {
 }
 
 /// The parse behind every public parser: the parts kept, and under
-/// [`Checked::Fields`] the route of each, at the same position.
+/// [`Checked::Fields`] the route of each, at the same position, and the
+/// places a member name made an array. Under any other [`Checked`] both
+/// are empty.
 async fn parse_parts<F>(
     req: crate::http::Request,
     limits: MultipartLimits<'_>,
     mut checked: Checked<'_>,
     mut per_field_validator: F,
-) -> Result<(MultipartPayload, Vec<Option<PartRoute>>), FrameworkError>
+) -> Result<RoutedPayload, FrameworkError>
 where
     F: FnMut(&str, &[u8], u64) -> Result<(), FrameworkError>,
 {
@@ -1168,6 +1366,15 @@ where
             vec![0usize; router.fields.len()],
         ),
     };
+    // Under `Checked::Fields`, what each field holds, so a later part sent
+    // under a parent or a member name can take it back. Bounded by
+    // `max_parts`.
+    let mut holds: Vec<FieldHold> = match &checked {
+        Checked::Fields { router } => std::iter::repeat_with(FieldHold::default)
+            .take(router.fields.len())
+            .collect(),
+        Checked::EveryPart | Checked::TakenFiles { .. } => Vec::new(),
+    };
 
     while let Some(mut field) = multipart
         .next_field()
@@ -1238,32 +1445,62 @@ where
                     None,
                 )
             }
-            Checked::Fields { router } => match router.route(&name) {
-                Some((route, field)) => {
-                    if let Some(parts) = field_parts.get_mut(route.field) {
-                        *parts += 1;
-                        if let Some(&cap) = cap_for.get(field.name)
-                            && *parts > cap
-                        {
-                            return Err(FrameworkError::Domain {
-                                message: format!("field '{}' exceeds max_count {cap}", field.name),
-                                status_code: 413,
-                            });
+            Checked::Fields { router } => {
+                let routing = router.route(&name);
+                // The fields this part replaces or makes an array give up
+                // the parts they took, and a list the parts at the element
+                // it makes an array: those parts go to no field, and a field
+                // that holds one file takes the next file sent for it. The
+                // parts still count toward the field's `max_count`, because
+                // they were read.
+                for displaced in routing.displaced {
+                    let at = match displaced {
+                        Displaced::Cleared(at) | Displaced::Nested(at) => at,
+                        Displaced::NestedElement(at, index) => {
+                            if let Some(hold) = holds.get_mut(at) {
+                                hold.nest_element(index, &mut routes);
+                            }
+                            continue;
                         }
+                    };
+                    if let Some(hold) = holds.get_mut(at) {
+                        hold.release(&mut routes);
+                        hold.nested = matches!(displaced, Displaced::Nested(_));
                     }
-                    let one_file = field.kind == PartFieldKind::OneFile;
-                    if one_file && file_taken.get(route.field).copied().unwrap_or(false) {
-                        continue;
+                    if let Some(taken) = file_taken.get_mut(at) {
+                        *taken = false;
                     }
-                    (
-                        (file_name.is_some() && field.kind.is_file()).then_some(field.name),
-                        one_file.then_some(route.field),
-                        Some(route),
-                        Some(field.name),
-                    )
                 }
-                None => (None, None, None, None),
-            },
+                match routing.route {
+                    Some((route, field)) => {
+                        if let Some(parts) = field_parts.get_mut(route.field) {
+                            *parts += 1;
+                            if let Some(&cap) = cap_for.get(field.name)
+                                && *parts > cap
+                            {
+                                return Err(FrameworkError::Domain {
+                                    message: format!(
+                                        "field '{}' exceeds max_count {cap}",
+                                        field.name
+                                    ),
+                                    status_code: 413,
+                                });
+                            }
+                        }
+                        let one_file = field.kind == PartFieldKind::OneFile;
+                        if one_file && file_taken.get(route.field).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        (
+                            (file_name.is_some() && field.kind.is_file()).then_some(field.name),
+                            one_file.then_some(route.field),
+                            Some(route),
+                            Some(field.name),
+                        )
+                    }
+                    None => (None, None, None, None),
+                }
+            }
         };
 
         // Classification: presence of `filename=` in Content-Disposition
@@ -1336,12 +1573,34 @@ where
 
         payload.fields.push((name, value));
         if matches!(checked, Checked::Fields { .. }) {
+            // The part now holds its place in the field: a later parent or
+            // member name takes it back.
+            if let Some(route) = route
+                && let Some(hold) = holds.get_mut(route.field)
+            {
+                hold.hold(route.index, routes.len());
+            }
             routes.push(route);
         }
     }
 
     report.parsed(&payload.fields);
-    Ok((payload, routes))
+    let nested = holds
+        .iter()
+        .enumerate()
+        .flat_map(|(field, hold)| {
+            hold.nested.then_some((field, None)).into_iter().chain(
+                hold.nested_elements
+                    .iter()
+                    .map(move |&index| (field, Some(index))),
+            )
+        })
+        .collect();
+    Ok(RoutedPayload {
+        payload,
+        routes,
+        nested,
+    })
 }
 
 /// Stream the body of `req` into a `MultipartPayload`, invoking
@@ -1901,6 +2160,7 @@ mod key_tests {
         let mut route = |name: &str| {
             router
                 .route(name)
+                .route
                 .map(|(route, _)| (route.field, route.index))
         };
 
@@ -1932,6 +2192,94 @@ mod key_tests {
         assert_eq!(route("photos[9223372036854775807]"), Some((1, i64::MAX)));
         assert_eq!(route("photos[]"), None);
         assert_eq!(route("photos[7]"), Some((1, 7)));
+
+        // A part sent under a parent name replaces what the fields under it
+        // hold, and a part sent under a member of a field that holds one
+        // value makes the value an array. Neither goes to that field.
+        let mut router = PartRouter::new(&fields);
+        let mut routing = |name: &str| {
+            let routing = router.route(name);
+            (
+                routing.route.map(|(route, _)| (route.field, route.index)),
+                routing.displaced,
+            )
+        };
+        assert_eq!(routing("user"), (None, vec![Displaced::Cleared(0)]));
+        assert_eq!(routing("photos[2]"), (Some((1, 2)), vec![]));
+        // A bare name replaces the list, which starts over at `0`.
+        assert_eq!(routing("photos"), (None, vec![Displaced::Cleared(1)]));
+        assert_eq!(routing("photos[]"), (Some((1, 0)), vec![]));
+        assert_eq!(
+            routing("user[name][first]"),
+            (None, vec![Displaced::Nested(0)])
+        );
+        assert_eq!(routing("user[name][]"), (None, vec![Displaced::Nested(0)]));
+        assert_eq!(routing("user[name][0]"), (None, vec![Displaced::Nested(0)]));
+        // A part that goes to a field never displaces it: a list declared
+        // without brackets takes its own name as an append.
+        assert_eq!(routing("tags"), (Some((2, 0)), vec![]));
+        assert_eq!(routing("user[name]"), (Some((0, 0)), vec![]));
+        // A sibling, a name that only starts like the field's, and a field
+        // reached by its exact name only are left alone.
+        assert_eq!(routing("user[email]"), (None, vec![]));
+        assert_eq!(routing("username"), (None, vec![]));
+        assert_eq!(routing("x"), (None, vec![]));
+        assert_eq!(routing("[user]"), (None, vec![]));
+
+        // A part sent under a member of a list element makes that element an
+        // array, whatever the member's key, and the element counts toward the
+        // index `[]` takes next.
+        let mut router = PartRouter::new(&fields);
+        let mut routing = |name: &str| {
+            let routing = router.route(name);
+            (
+                routing.route.map(|(route, _)| (route.field, route.index)),
+                routing.displaced,
+            )
+        };
+        assert_eq!(routing("photos[0]"), (Some((1, 0)), vec![]));
+        for member in ["photos[0][caption]", "photos[0][]", "photos[0][0]"] {
+            assert_eq!(
+                routing(member),
+                (None, vec![Displaced::NestedElement(1, 0)]),
+                "{member}"
+            );
+        }
+        assert_eq!(
+            routing("photos[4][a][b]"),
+            (None, vec![Displaced::NestedElement(1, 4)])
+        );
+        assert_eq!(routing("photos[]"), (Some((1, 5)), vec![]));
+        assert_eq!(
+            routing("photos[-1][caption]"),
+            (None, vec![Displaced::NestedElement(1, -1)])
+        );
+        assert_eq!(
+            routing("tags[2][x]"),
+            (None, vec![Displaced::NestedElement(2, 2)])
+        );
+        // A key PHP keeps as text is no element.
+        assert_eq!(routing("photos[01][caption]"), (None, vec![]));
+        assert_eq!(routing("photos[caption][x]"), (None, vec![]));
+        // An element at the highest index an `i64` holds leaves no index for
+        // `[]`.
+        assert_eq!(
+            routing("photos[9223372036854775807][x]"),
+            (None, vec![Displaced::NestedElement(1, i64::MAX)])
+        );
+        assert_eq!(routing("photos[]"), (None, vec![]));
+
+        // An element at an index replaces a field under that element.
+        let nested_fields = [PartField {
+            name: "items.0.name",
+            kind: PartFieldKind::OneText,
+        }];
+        let mut router = PartRouter::new(&nested_fields);
+        let mut routing = |name: &str| router.route(name).displaced;
+        assert_eq!(routing("items[0]"), vec![Displaced::Cleared(0)]);
+        assert_eq!(routing("items[1]"), vec![]);
+        assert_eq!(routing("items[]"), vec![]);
+        assert_eq!(routing("items"), vec![Displaced::Cleared(0)]);
     }
 
     #[test]

@@ -792,6 +792,11 @@ field with brackets, `user[name]`:
   request's rules use.
 - A part sent under the exact name in `#[field(...)]` reaches that field,
   whatever the name holds.
+- Parts are read in the order they were sent, as PHP reads them: a later
+  part sent under a parent name, such as `user` or a bare `photos`, replaces
+  what `user.name` or `photos[]` held, and a later `user[name][first]` or
+  `photos[0][caption]` makes `user.name` or that element an array, which
+  fails as the wrong kind of value.
 
 ```rust
 use suprnova::MultipartRequest;
