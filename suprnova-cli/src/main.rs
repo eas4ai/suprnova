@@ -353,7 +353,7 @@ enum Commands {
     MakeInertia {
         /// Name of the page or struct (e.g., About, Admin/Users, UserProps)
         name: String,
-        /// Scaffold a #[derive(Data, Validate)] struct in app/src/props/ instead of a frontend page
+        /// Scaffold a #[derive(Data, Validate)] struct in src/props/ instead of a frontend page
         #[arg(long)]
         data: bool,
         /// Overwrite the page (or the Data struct) and its test if they exist

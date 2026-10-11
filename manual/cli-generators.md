@@ -690,12 +690,12 @@ between controllers and pages, partial reloads, and shared props.
 suprnova make:inertia UserProps --data
 ```
 
-Emits a `#[derive(Data, Validate)]` struct in `app/src/props/`
-(not `src/props/` - the `app/` prefix is hardcoded so the file lands
-in the workspace's example/host app):
+Emits a `#[derive(Data, Validate)]` struct in `src/props/`, and warns
+when it creates the directory, since `src/lib.rs` has to declare
+`pub mod props;` for the struct to be reachable:
 
 ```rust
-// app/src/props/user_props.rs
+// src/props/user_props.rs
 use suprnova::Data;
 use validator::Validate;
 
@@ -1594,7 +1594,7 @@ not a follow-up step you remember on your own.
 | `make:task <Name>` | `src/tasks/<snake>_task.rs` | `tasks/mod.rs`, `schedule.rs`, `lib.rs`, `main.rs` |
 | `make:inertia <Name>` | `frontend/src/pages/<Name>Page.<ext>` | (no module wiring) |
 | `make:inertia <Dir>/<Name> --test` | `frontend/src/pages/<Dir>/<Name>Page.<ext>`, `tests/<dir>_<name>_page.rs` | (no module wiring) |
-| `make:inertia <Name> --data` | `app/src/props/<snake>.rs` | (no module wiring) |
+| `make:inertia <Name> --data` | `src/props/<snake>.rs` | (no module wiring; warns when `src/props/` is new) |
 | `make:migration <name>` | `migrations/YYYYMMDDHHMMSS_<name>.rs` | (no module wiring) |
 | `make:factory <Name> [--model <Model>]` | `src/factories/<snake>_factory.rs` | `factories/mod.rs`, `lib.rs` |
 | `make:seeder <Name>` | `src/seeders/<snake>_seeder.rs` | `seeders/mod.rs`, `lib.rs` |
