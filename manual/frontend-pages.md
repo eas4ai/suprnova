@@ -1,0 +1,923 @@
+# Page Components
+
+A page is the unit Inertia ships across the wire. The Rust controller picks a
+component name and a typed props struct; the Vite-bundled frontend resolves
+that name to a file in `frontend/src/pages/` and renders it with the props as
+arguments. The framework is framework-agnostic - Suprnova ships first-class
+starters for Svelte 5, React 19, and Vue 3.5, and the page contract is the
+same shape in all three.
+
+## The contract
+
+A controller returns an Inertia response naming a component:
+
+```rust
+use suprnova::{InertiaProps, Request, Response, inertia_response};
+
+#[derive(InertiaProps)]
+pub struct HomeProps {
+    pub title: String,
+    pub message: String,
+}
+
+pub async fn index(req: Request) -> Response {
+    inertia_response!(&req, "Home", HomeProps {
+        title: "Welcome".to_string(),
+        message: "Hello from Suprnova!".to_string(),
+    })
+}
+```
+
+The string `"Home"` is resolved against `frontend/src/pages/Home.<ext>`. The
+extension depends on which starter you scaffolded:
+
+| Starter | Extension | Default? |
+|---|---|---|
+| Svelte 5 | `.svelte` | yes |
+| React 19 | `.tsx` | - |
+| Vue 3.5 | `.vue` | - |
+
+The macro validates at compile time that the file exists, so a typo or a
+deleted page fails `cargo check` instead of 500-ing in production.
+
+## Directory layout
+
+Whichever framework you picked, pages live under `frontend/src/pages/` and
+the component name in `inertia_response!` is the file path relative to that
+directory, without the extension. Forward slashes work the same on all
+platforms. A project with a different layout can
+[point the check elsewhere](#another-page-layout).
+
+```
+frontend/src/pages/
+├── Home.svelte                 # inertia_response!(&req, "Home", ...)
+├── About.svelte                # inertia_response!(&req, "About", ...)
+├── Users/
+│   ├── Index.svelte            # inertia_response!(&req, "Users/Index", ...)
+│   ├── Show.svelte             # inertia_response!(&req, "Users/Show", ...)
+│   └── Edit.svelte             # inertia_response!(&req, "Users/Edit", ...)
+├── Posts/
+│   ├── Index.svelte            # inertia_response!(&req, "Posts/Index", ...)
+│   └── Show.svelte             # inertia_response!(&req, "Posts/Show", ...)
+└── auth/
+    ├── Login.svelte            # inertia_response!(&req, "auth/Login", ...)
+    └── Register.svelte         # inertia_response!(&req, "auth/Register", ...)
+```
+
+The convention is `Index` for collection pages, `Show` / `Edit` / `Create` for
+single-item pages, and a lowercase subdirectory like `auth/` for grouped
+feature pages. Capitalisation in the component name must match the file name
+exactly - Vite's `import.meta.glob` is case-sensitive.
+
+### Another page layout
+
+The compile-time check looks in `frontend/src/pages/` because that is where
+`suprnova new` puts pages. A frontend that lays its pages out another way,
+such as an Angular app on a community Inertia adapter, sets its own lookup in
+the application crate's `Cargo.toml`:
+
+```toml
+[package.metadata.suprnova.inertia]
+pages_dir = "resources/angular/pages"
+page_file = "{dir}/{name|lower}.page.ts"
+```
+
+`pages_dir` is the pages directory, relative to the crate directory.
+`page_file` is the page's path inside it, built from the component name:
+
+| Placeholder | `Tramits/BaixaMatricula/Create` | `Home` |
+|---|---|---|
+| `{dir}` | `Tramits/BaixaMatricula` | empty |
+| `{name}` | `Create` | `Home` |
+
+With the lookup above, the macro requires these files:
+
+| Component | File |
+|---|---|
+| `Tramits/Index` | `resources/angular/pages/Tramits/index.page.ts` |
+| `Tramits/BaixaMatricula/Create` | `resources/angular/pages/Tramits/BaixaMatricula/create.page.ts` |
+| `Home` | `resources/angular/pages/home.page.ts` |
+
+An empty `{dir}` leaves no stray `/` behind, so a top-level page sits directly
+in `pages_dir`.
+
+A filter after `|` changes the case of a placeholder. On `{dir}`, it applies to
+each directory name.
+
+| Filter | `BaixaMatricula` becomes |
+|---|---|
+| `lower` | `baixamatricula` |
+| `kebab` | `baixa-matricula` |
+| `snake` | `baixa_matricula` |
+
+`kebab` and `snake` start a new word at each capital letter that follows a
+lowercase letter or a digit, and at the last capital of an acronym followed by
+a lowercase letter, so `HTMLReport` becomes `html-report`. A `-`, `_`, or space
+already in the name also separates words.
+
+Both keys are optional. With `pages_dir` alone, the macro looks for
+`{Component}.svelte`, `.tsx`, `.jsx`, or `.vue` under that directory. With
+`page_file` alone, it resolves the pattern under `frontend/src/pages/`. Without
+the table, the macro uses the starter lookup.
+
+A misspelled key, an unknown filter, or an unbalanced `{` is a compile error
+that names the key and the problem. A missing page names the path the macro
+looked for:
+
+```text
+error: Inertia component 'Tramits/BaixaMatricula/Edit' not found.
+       Looked for: resources/angular/pages/Tramits/BaixaMatricula/edit.page.ts
+       The page lookup comes from [package.metadata.suprnova.inertia] in Cargo.toml.
+```
+
+Deleting a page or editing the table re-runs the check on the next build, even
+when no Rust file changed.
+
+The table moves only the compile-time check. Your frontend's own resolver,
+such as the `resolve` callback passed to `createInertiaApp`, must map the same
+component names to the same files. `suprnova make:inertia` still writes pages
+in the starter layout.
+
+## Generating a page
+
+The CLI's `make:inertia` generator drops a starter component into the right
+location and uses the syntax for whichever frontend the project is using:
+
+```bash
+suprnova make:inertia Dashboard
+```
+
+The generator reads `SUPRNOVA_FRONTEND` from your `.env` (defaulting to
+Svelte), picks the matching extension, and appends `Page` to the component
+name if it's not already there. So the command above creates one of:
+
+- `frontend/src/pages/DashboardPage.svelte`
+- `frontend/src/pages/DashboardPage.tsx`
+- `frontend/src/pages/DashboardPage.vue`
+
+The console output prints the matching `inertia_response!` call you should
+paste into your controller.
+
+To skip the suffix and own the name, pass the full name:
+
+```bash
+suprnova make:inertia DashboardPage   # creates DashboardPage.<ext>
+```
+
+To generate a typed props struct on the Rust side instead, pass `--data`:
+
+```bash
+suprnova make:inertia Dashboard --data
+# Creates app/src/props/dashboard.rs with #[derive(Data, Validate)]
+```
+
+## A page in each starter
+
+The same `inertia_response!(&req, "Home", HomeProps { ... })` on the backend
+maps to one of these page files on the frontend. Props arrive as typed
+arguments via the generated `inertia-props.ts` types.
+
+### Svelte 5
+
+Runes-on. Props arrive via `$props()`:
+
+```svelte
+<!-- frontend/src/pages/Home.svelte -->
+<script lang="ts">
+  import Head from '../components/Head.svelte'
+  import type { HomeProps } from '../types/inertia-props'
+  import { t } from '../lib/lang.svelte'
+
+  let { title, message }: HomeProps = $props()
+</script>
+
+<!-- No title of its own: the tab shows the application's name. -->
+<Head />
+
+<div class="mx-auto max-w-xl p-8 font-sans">
+  <h1 class="text-3xl font-bold">{t('welcome', { app: title })}</h1>
+  <p class="mt-2">{message}</p>
+</div>
+```
+
+`@inertiajs/svelte` has no `Head` component, so the kit ships its own in
+`frontend/src/components/Head.svelte`. It writes the page's title into
+Svelte's `<svelte:head>` as `Title - App`, through the same `pageTitle`
+function `main.ts` passes to `createInertiaApp` as `title`. A page that
+passes no title shows the application's name alone.
+
+### React 19
+
+Standard function component. Props arrive as the first argument, and
+`Head` sets the tab title. The page renders no frame of its own: the layout
+comes from `createInertiaApp` (see [Layouts](#layouts)).
+
+```tsx
+// frontend/src/pages/Home.tsx
+import { Head } from '@inertiajs/react'
+import type { HomeProps } from '../types/inertia-props'
+import { useLang } from '../lib/lang'
+
+export default function Home({ title, message }: HomeProps) {
+  const { t } = useLang()
+
+  return (
+    <div className="font-sans p-8 max-w-xl mx-auto">
+      <Head title="Welcome" />
+      <h1 className="text-3xl font-bold">{t('welcome', { app: title })}</h1>
+      <p className="mt-2">{message}</p>
+    </div>
+  )
+}
+```
+
+The browser tab then reads `Welcome - My App`: the `title` callback in
+`frontend/src/lib/app.ts` appends the application's name to each page's
+title.
+
+### Vue 3.5
+
+`<script setup lang="ts">` with `defineProps`. Props are accessed directly
+in the template. `<Head>` sets the tab title, and the entry's `title`
+callback appends the application's name, so a project scaffolded as
+`my-app` shows `Welcome - My App`:
+
+```vue
+<!-- frontend/src/pages/Home.vue -->
+<script setup lang="ts">
+import { Head } from '@inertiajs/vue3'
+import type { HomeProps } from '../types/inertia-props'
+import { t } from '../lib/lang'
+
+defineProps<HomeProps>()
+</script>
+
+<template>
+  <Head title="Welcome" />
+
+  <div class="font-sans p-8 max-w-xl mx-auto">
+    <h1 class="text-3xl font-bold">{{ t('welcome', { app: title }) }}</h1>
+    <p class="mt-2">{{ message }}</p>
+  </div>
+</template>
+```
+
+## Navigation between pages
+
+Each starter ships the Inertia v3 adapter for its framework. The exports are
+the same: `Link` for declarative navigation, `router` for programmatic
+navigation, `usePage` (or `page`) for shared props, `Form` and `useForm` for
+form handling.
+
+### Svelte 5
+
+The kit builds every link from the `root` shared prop, so the same build
+works at `/` and under a path prefix:
+
+```svelte
+<script lang="ts">
+  import { Link, usePage } from '@inertiajs/svelte'
+
+  const { root } = usePage().props
+  let { note }: { note: { id: number; title: string } } = $props()
+</script>
+
+<Link href={`${root}/notes`}>Notes</Link>
+<Link href={`${root}/logout`} method="post" as="button" preserveState={false}>Sign out</Link>
+
+<!-- Prefetched on hover, and instant: Notes/Show renders from this row
+     before the server answers. -->
+<Link
+  href={`${root}/notes/${note.id}`}
+  prefetch
+  component="Notes/Show"
+  pageProps={(_props, shared) => ({ ...shared, note })}
+>
+  {note.title}
+</Link>
+```
+
+The sign-out link comes from `components/AccountLinks.svelte`, and the note link
+comes from `pages/Notes/Index.svelte`. A link with a method other than GET
+keeps the page's state by default, so the sign-out link passes
+`preserveState={false}` to start the page it lands on afresh. The function
+form of `pageProps`
+keeps the shared props, `root` among them, on the page that renders before
+the server answers. A plain object replaces every prop on that page.
+`router.visit(url)` does the same navigation from a script.
+
+### React 19
+
+The React starter builds every link from the shared `root` prop, so the
+same build runs at `/` and under a path prefix. These lines come from its
+layout and its notes page:
+
+```tsx
+import { Link, router, usePage } from '@inertiajs/react'
+
+const { root } = usePage().props
+
+<Link href={`${root}/notes`}>Notes</Link>
+<Link href={`${root}/logout`} method="post" as="button" preserveState={false}>Sign out</Link>
+
+{/* Prefetch on hover, and render Notes/Show from this row before the server answers. */}
+<Link
+  href={`${root}/notes/${note.id}`}
+  prefetch
+  component="Notes/Show"
+  pageProps={(_props, shared) => ({ ...shared, note })}
+>
+  {note.title}
+</Link>
+
+<button onClick={() => router.visit(`${root}/notes`)}>Visit programmatically</button>
+```
+
+The sign-out `Link` passes `preserveState={false}`. A `Link` that posts
+keeps the page's state by default, and with it the layout props a page
+set, so without it the dashboard's heading would follow the visitor to the
+next page.
+
+An instant visit given an object for `pageProps` renders the next page
+with those props alone. The function form receives the shared props as its
+second argument, so `root` reaches the first render too.
+
+### Vue 3.5
+
+The Vue kit reaches every application route through `Link`. Each URL starts
+from `root`, the public root the server shares with every page, so one build
+runs at `/` and under a path prefix. The account links read the signed-in
+user the server shares as `auth.user`. The sign-out is a `Link` that posts,
+rendered as a button. A posting link keeps the page's state by default, so
+it passes `:preserve-state="false"`, and the layout props the page set do not
+follow the visitor to the sign-in page:
+
+```vue
+<!-- frontend/src/components/AccountLinks.vue, without its classes -->
+<script setup lang="ts">
+import { computed } from 'vue'
+import { Link, usePage } from '@inertiajs/vue3'
+
+const page = usePage()
+const { root } = page.props
+const user = computed(() => page.props.auth.user)
+</script>
+
+<template>
+  <template v-if="user">
+    <span>{{ user.name }}</span>
+    <Link :href="`${root}/logout`" method="post" as="button" :preserve-state="false">
+      Sign out
+    </Link>
+  </template>
+  <template v-else>
+    <Link :href="`${root}/login`">Sign in</Link>
+    <Link :href="`${root}/register`">Register</Link>
+  </template>
+</template>
+```
+
+A row of `Notes/Index.vue` prefetches its note on hover and opens it as an
+instant visit: `component` and `page-props` let the client render
+`Notes/Show` from the row at once, and the server's answer replaces it when
+it arrives. `page-props` takes the function form, which keeps the shared
+props, `root` among them, on that first render; the object form would drop
+them until the server answers. The search box navigates programmatically,
+keeping the page's state and starting the infinite list over:
+
+```vue
+<Link
+  :href="`${root}/notes/${note.id}`"
+  prefetch
+  component="Notes/Show"
+  :page-props="(_props, shared) => ({ ...shared, note })"
+>
+  {{ note.title }}
+</Link>
+```
+
+```ts
+router.get(
+  `${root}/notes`,
+  { search: unref(filters).search },
+  { preserveState: true, replace: true, only: ['notes', 'search'], reset: ['notes'] },
+)
+```
+
+The `router` object also exposes `router.post(url, data)`,
+`router.put(url, data)`, `router.patch(url, data)`, `router.delete(url)`, and
+`router.reload()` - same shape across all three adapters.
+
+## Forms
+
+Inertia v3 ships a declarative `<Form>` component and the imperative
+`useForm` (or `createForm` in Svelte) helper. Both POST back to your Rust
+controller; validation errors surface as a structured `errors` prop.
+
+### Svelte 5
+
+The kit's notes page creates a note with the `Form` component. `Form` posts
+the fields by their `name` and hands its children the form's `errors` and
+`processing`:
+
+```svelte
+<!-- frontend/src/pages/Notes/Index.svelte -->
+<script lang="ts">
+  import { Form, usePage } from '@inertiajs/svelte'
+
+  const { root } = usePage().props
+</script>
+
+<Form action={`${root}/notes`} method="post" class="space-y-4">
+  {#snippet children({ errors, processing })}
+    <input name="title" type="text" required maxlength="255" />
+    {#if errors.title}
+      <p class="text-red-600">{errors.title}</p>
+    {/if}
+
+    <textarea name="body" rows="4" maxlength="10000"></textarea>
+
+    <button type="submit" disabled={processing}>
+      {processing ? 'Saving...' : 'Save note'}
+    </button>
+  {/snippet}
+</Form>
+```
+
+Every auth page in the kit submits the same way. A failed submission comes
+back as a `303` to the form's page with the errors flashed, and `Form` reads
+them from the page. The Login page also passes `transform`. A checked
+checkbox submits the text `on`, and `transform` turns `remember` into the
+boolean the handler's `LoginRequest` reads. For a form whose data a script
+needs, `useForm` gives the same `errors` and `processing` on an object you
+bind inputs to.
+
+### React 19
+
+The React starter submits every form through `<Form>`: the sign-in and
+registration pages, the password reset, the verification resend, and the
+note form on `Notes/Index`. `Form` reads the inputs by their `name` and
+passes `errors` and `processing` to its children:
+
+```tsx
+// frontend/src/pages/Notes/Index.tsx (the note form)
+import { Form, usePage } from '@inertiajs/react'
+
+const { root } = usePage().props
+
+<Form action={`${root}/notes`} method="post" options={{ preserveState: 'errors' }}>
+  {({ errors, processing }) => (
+    <>
+      <input name="title" type="text" required maxLength={255} />
+      {errors.title && <p className="text-red-600">{errors.title}</p>}
+
+      <textarea name="body" rows={4} />
+      {errors.body && <p className="text-red-600">{errors.body}</p>}
+
+      <button type="submit" disabled={processing}>
+        {processing ? 'Saving...' : 'Save note'}
+      </button>
+    </>
+  )}
+</Form>
+```
+
+Every value a form sends is a string, and an unchecked checkbox sends
+nothing. A handler that reads a `bool` gets one through `transform`, as the
+sign-in page does for its `remember` checkbox:
+
+```tsx
+<Form
+  action={`${root}/login`}
+  method="post"
+  transform={(data) => ({ ...data, remember: Boolean(data.remember) })}
+>
+```
+
+### Vue 3.5
+
+The Vue kit submits every form through the `<Form>` component. It reads the
+fields by their `name`, sends them to `action`, and hands its slot the
+`errors` the server answered with and a `processing` flag. The note form in
+`Notes/Index.vue`, without its classes:
+
+```vue
+<!-- frontend/src/pages/Notes/Index.vue (the note form) -->
+<script setup lang="ts">
+import { Form, usePage } from '@inertiajs/vue3'
+
+const { root } = usePage().props
+</script>
+
+<template>
+  <Form
+    :action="`${root}/notes`"
+    method="post"
+    :options="{ preserveState: 'errors' }"
+    v-slot="{ errors, processing }"
+  >
+    <input id="title" name="title" type="text" required maxlength="255" />
+    <p v-if="errors.title">{{ errors.title }}</p>
+
+    <textarea id="body" name="body" rows="4" maxlength="10000" />
+    <p v-if="errors.body">{{ errors.body }}</p>
+
+    <button type="submit" :disabled="processing">
+      {{ processing ? 'Saving...' : 'Save note' }}
+    </button>
+  </Form>
+</template>
+```
+
+`preserveState: 'errors'` keeps the page as it is when the server answers
+with validation errors, and remounts it after a saved note, so the list
+starts over from the newest note and the fields are empty again.
+
+`<Form>` sends JSON, and a checked checkbox is the string `"on"` in its data.
+The sign-in page sends `remember` as the boolean the server reads:
+
+```vue
+<script setup lang="ts">
+import type { FormDataConvertible } from '@inertiajs/core'
+
+function withRememberFlag(data: Record<string, FormDataConvertible>) {
+  return { ...data, remember: 'remember' in data }
+}
+</script>
+
+<template>
+  <Form :action="`${root}/login`" method="post" :transform="withRememberFlag" v-slot="{ errors, processing }">
+    <!-- email, password, and <input name="remember" type="checkbox" /> -->
+  </Form>
+</template>
+```
+
+For a JSON endpoint outside page visits, the dashboard's display-name form
+uses `useHttp`. `optimistic` shows the new name before the server answers; a
+`422` puts the old name back and fills `errors.name`. A saved name reloads the
+shared `auth` prop, so the layout shows it too:
+
+```ts
+const page = usePage()
+const user = computed(() => page.props.auth.user)
+
+const profile = useHttp<{ name: string }, { user: UserInfo }>({ name: user.value?.name ?? '' })
+const draft = ref(user.value?.name ?? '')
+
+function saveName() {
+  return profile.optimistic(() => ({ name: draft.value })).post(`${root}/profile/name`, {
+    onSuccess: () => router.reload({ only: ['auth'] }),
+  })
+}
+```
+
+### Form callbacks
+
+`form.post(url, options)` - and the matching `.put` / `.patch` /
+`.delete` - accept the standard visit callbacks (`onStart`, `onSuccess`,
+`onError`, `onFinish`). Validation errors returned by your Rust handler
+land in `form.errors` automatically; the callbacks are for side effects:
+
+```ts
+form.post('/posts', {
+  onSuccess: async () => { await refreshDrafts() },  // awaited
+  onError: (errors) => console.warn(errors),
+  onFinish: () => form.reset('content'),
+})
+```
+
+An async `onSuccess` is awaited before the submission settles, so
+`form.processing` stays `true` until your callback resolves - handy when a
+successful submit kicks off follow-up work you don't want the UI to race
+past.
+
+## Polling
+
+For a page that should refresh on an interval - a live dashboard, a job
+status, an unread badge - the `usePoll` hook reissues a partial reload on
+a timer. Import it from your adapter:
+
+```ts
+import { usePoll } from '@inertiajs/svelte' // or '@inertiajs/react' / '@inertiajs/vue3'
+```
+
+Pair it with `only` so each tick fetches just the props that change - the
+server then resolves only those keys (see
+[partial reloads](frontend-inertia-responses.md#partial-reloads)):
+
+```ts
+const { stop, start } = usePoll(5000, { only: ['stats', 'jobs'] })
+```
+
+`usePoll(interval, requestOptions, options)`:
+
+- **`interval`** - milliseconds between reloads.
+- **`requestOptions`** - a reload options object (`only`, `except`,
+  `data`, `onSuccess`, …) **or a function returning one**, so the request
+  can depend on current state (e.g. a cursor that advances each tick).
+- **`options.mode`** - how a tick that fires while the previous request is
+  still in flight is handled: `'overlap'` (default - fire anyway),
+  `'cancel'` (abort the in-flight request), or `'rest'` (skip this tick).
+- **`options.keepAlive`** - keep polling while the tab is backgrounded
+  (default `false`: polling pauses on a hidden tab).
+- **`options.autoStart`** - begin immediately (default `true`); pass
+  `false` and call the returned `start()` when you're ready.
+
+The hook returns `{ stop, start }` for manual control. Outside a
+component, `router.poll(...)` from `@inertiajs/core` is the same call.
+
+Because every tick is an ordinary partial reload, the props under `only`
+flow through the same Lazy / Optional / Defer resolvers as any other
+request - and those resolvers run concurrently (capped by
+`max_concurrent_resolvers`), so a dashboard polling six widgets issues six
+parallel queries per tick instead of six serial ones.
+
+## Shared props
+
+Anything you register as a shared prop at boot - typically the current user,
+flash messages, and global CSRF token - is available on every page through
+`usePage()` (React, Vue) or the reactive `page` store (Svelte). Page props
+override shared props on key collision.
+
+### Svelte 5
+
+```svelte
+<script lang="ts">
+  import { page } from '@inertiajs/svelte'
+
+  let auth = $derived($page.props.auth as { user?: { name: string } })
+</script>
+
+{#if auth.user}
+  <span>Welcome, {auth.user.name}</span>
+{:else}
+  <a href="/login">Log in</a>
+{/if}
+```
+
+### React 19
+
+```tsx
+import { usePage } from '@inertiajs/react'
+
+function Header() {
+  const { auth } = usePage<{ auth: { user?: { name: string } } }>().props
+  return auth.user ? <span>Welcome, {auth.user.name}</span> : <a href="/login">Log in</a>
+}
+```
+
+### Vue 3.5
+
+```vue
+<script setup lang="ts">
+import { usePage } from '@inertiajs/vue3'
+
+const page = usePage<{ auth: { user?: { name: string } } }>()
+</script>
+
+<template>
+  <span v-if="page.props.auth.user">Welcome, {{ page.props.auth.user.name }}</span>
+  <a v-else href="/login">Log in</a>
+</template>
+```
+
+## Layouts
+
+The kits apply their layouts through `createInertiaApp`'s `layout` option.
+Pages render their own content inside the layout selected there. The
+layout stays mounted across visits between pages that share it, so its
+state survives navigation.
+
+### Svelte 5
+
+The kit applies its layouts once, in `createInertiaApp`'s `layout` option,
+instead of wrapping each page in one. A layout given there stays mounted
+while visits move between the pages that use it, so its state survives a
+visit:
+
+```ts
+// frontend/src/main.ts (and src/ssr.ts, so the server renders the same frame)
+createInertiaApp({
+  pages: './pages',
+  layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),
+  // ...
+})
+```
+
+A layout receives the page's props, the props a page sets with
+`setLayoutProps`, and the page as `children`:
+
+```svelte
+<!-- frontend/src/layouts/AppLayout.svelte -->
+<script lang="ts">
+  import { Link } from '@inertiajs/svelte'
+  import type { Snippet } from 'svelte'
+  import AccountLinks from '../components/AccountLinks.svelte'
+  import FlashToast from '../components/FlashToast.svelte'
+  import type { SharedProps } from '../types/inertia-props'
+
+  interface Props extends SharedProps {
+    heading?: string
+    children?: Snippet
+  }
+
+  let { root, heading, children }: Props = $props()
+</script>
+
+<nav>
+  <Link href={`${root}/dashboard`}>Dashboard</Link>
+  <Link href={`${root}/notes`}>Notes</Link>
+  <AccountLinks />
+</nav>
+
+<FlashToast />
+
+<main>
+  {#if heading}<h1>{heading}</h1>{/if}
+  {@render children?.()}
+</main>
+```
+
+Both layouts render `components/AccountLinks.svelte`, which reads `auth`,
+a prop the server shares with every page. When `auth.user` is set, it shows
+the user's name and a sign-out link. When `auth.user` is `null`, it shows
+sign-in and register links. The guest layout needs both branches, because
+`auth/VerifyEmail` is shown to a user who is signed in:
+
+```svelte
+<!-- frontend/src/components/AccountLinks.svelte -->
+<script lang="ts">
+  import { Link, page } from '@inertiajs/svelte'
+
+  const root = $derived(page.props.root)
+  const user = $derived(page.props.auth.user)
+</script>
+
+{#if user}
+  <span>{user.name}</span>
+  <Link href={`${root}/logout`} method="post" as="button" preserveState={false}>
+    Sign out
+  </Link>
+{:else}
+  <Link href={`${root}/login`}>Sign in</Link>
+  <Link href={`${root}/register`}>Register</Link>
+{/if}
+```
+
+The dashboard sets the heading with `setLayoutProps({ heading: 'Dashboard' })`.
+The next page that sets none shows no heading, because a visit to another
+page resets the layout props. `FlashToast` renders `page.flash.toast`, the
+toast a handler flashed with `Inertia::flash("toast", ..)`, so it shows on
+one page and is gone on the next.
+
+### React 19
+
+The React starter ships two layouts and applies them through
+`createInertiaApp`'s `layout` option, which both entries import from
+`frontend/src/lib/app.ts`:
+
+```ts
+// frontend/src/lib/app.ts
+export function layout(name: string) {
+  return name.startsWith('auth/') ? GuestLayout : AppLayout
+}
+```
+
+A page never renders its layout itself. Inertia renders the layout around
+the page with the page's props, so a visit between two pages with the same
+layout keeps the layout mounted, and its state with it. A page passes
+values up with `setLayoutProps`; the dashboard sets the heading the
+application layout shows, and the next visit clears it:
+
+```tsx
+// frontend/src/pages/Dashboard.tsx
+import { setLayoutProps } from '@inertiajs/react'
+
+setLayoutProps({ heading: 'Dashboard' })
+```
+
+```tsx
+// frontend/src/layouts/AppLayout.tsx (shortened)
+import type { ReactNode } from 'react'
+import { Link, usePage } from '@inertiajs/react'
+import AccountLinks from '../components/AccountLinks'
+import FlashToast from '../components/FlashToast'
+
+export default function AppLayout({ children, heading }: { children?: ReactNode; heading?: string }) {
+  const { root } = usePage().props
+
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <nav className="bg-white shadow">
+        <Link href={`${root}/dashboard`}>Dashboard</Link>
+        <Link href={`${root}/notes`}>Notes</Link>
+        <AccountLinks className="text-sm" />
+      </nav>
+      <FlashToast />
+      {heading && <h1 className="text-2xl font-bold">{heading}</h1>}
+      <main className="max-w-7xl mx-auto py-6">{children}</main>
+    </div>
+  )
+}
+```
+
+`AccountLinks` reads the signed-in user from the shared `auth` prop: the
+name and the sign-out `Link` when someone is signed in, the sign-in and
+register links when not. `FlashToast` shows `usePage().flash.toast`, the
+toast a handler flashed with `Inertia::flash("toast", Toast { .. })`,
+typed by the generated `flashDataType`. It reads the toast from the page
+on every render. The server sends a flash with one page only, so the toast
+is gone on the next visit.
+
+### Vue 3.5
+
+The Vue kit applies its two layouts through `createInertiaApp`'s `layout`
+option, so no page imports one. Pages under `auth/` get the guest layout and
+every other page gets the application layout:
+
+```ts
+// frontend/src/main.ts
+import AppLayout from './layouts/AppLayout.vue'
+import GuestLayout from './layouts/GuestLayout.vue'
+
+createInertiaApp({
+  pages: './pages',
+  layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),
+  // title, serverHead, nonce and setup follow
+})
+```
+
+A layout given this way stays mounted across visits between two pages that
+share it; only the page inside it changes. It reads the signed-in user from
+the shared `auth.user`, so a guest on the home page sees the sign-in links
+rather than a sign-out, and it receives the props a page sets with
+`setLayoutProps`:
+
+```vue
+<!-- frontend/src/layouts/AppLayout.vue (structure) -->
+<script setup lang="ts">
+import AccountLinks from '../components/AccountLinks.vue'
+import FlashToast from '../components/FlashToast.vue'
+
+defineProps<{
+  heading?: string
+}>()
+</script>
+
+<template>
+  <div class="min-h-screen bg-gray-100">
+    <!-- the Dashboard and Notes Links for a signed-in user, then: -->
+    <AccountLinks />
+    <FlashToast />
+    <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <h1 v-if="heading" class="mb-6 text-2xl font-semibold text-gray-900">{{ heading }}</h1>
+      <slot />
+    </main>
+  </div>
+</template>
+```
+
+```ts
+// frontend/src/pages/Dashboard.vue
+setLayoutProps({ heading: 'Dashboard' })
+```
+
+The client clears the layout props on every visit that does not preserve
+state, so the next page shows no heading unless it sets one.
+
+## Why Suprnova diverges
+
+Laravel's Inertia integration ships one frontend at a time - you pick React,
+Vue, or Svelte at install with a single starter kit per project. Suprnova
+keeps the same one-per-project rule (you don't mix), but the CLI scaffolds
+to all three idiomatically from the same `inertia_response!` call. The Rust
+side never knows which frontend is running; the generator and Vite resolver
+pick the right extension on disk.
+
+The other divergence is compile-time component validation. Laravel resolves
+the component name at runtime, so a typo in `Inertia::render('Dahsboard')`
+becomes a production error. Suprnova's `inertia_response!` macro walks
+`frontend/src/pages/` at expansion time and fails `cargo check` with a
+"Did you mean 'Dashboard'?" suggestion. The full TypeScript type story
+(generated from `#[derive(InertiaProps)]` on the Rust struct) means the
+component's props are typed end-to-end too.
+
+inertia-laravel can check that a page exists when it renders, against the page
+paths and extensions in `config/inertia.php`, and leaves that check off by
+default. Suprnova's check always runs, at compile time, so its
+lookup lives in `Cargo.toml`, the one configuration a macro can read during
+the build. Because `page_file` is a pattern rather than a list of extensions,
+it also covers layouts where the file name is not the component name plus an
+extension.
+
+## Next
+
+- [Inertia Responses](frontend-inertia-responses.md) - the
+  `inertia_response!` macro, partial reloads, deferred props
+- [TypeScript Types](frontend-typescript-types.md) - `suprnova generate-types`
+  and the typed-props pipeline
+- [Frontend Overview](frontend.md) - how the Inertia bridge fits together
+- [Inertia CRUD Tutorial](tutorial-inertia-crud.md) - a full Posts resource
+  end-to-end
+- [Authentication](authentication.md) - wiring the auth pages the starter
+  scaffolds for you
