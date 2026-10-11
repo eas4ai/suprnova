@@ -13,10 +13,11 @@
 // for the query in its data-sn-query. The element shows all of them, as the
 // server chose them, while that query is the input's current text
 // (FORM-012), and keeps a listbox rendered for any other text hidden until
-// a newer render arrives (stale suppression, FORM-008);
-// SuprnovaCombobox.acceptsResults decides that alone so a fixture can prove
-// it without a document. A local listbox holds a fixed list, which the
-// element filters by the typed text.
+// a newer render arrives (stale suppression, FORM-008). acceptsResults
+// decides that alone, and the script's completion value is the object that
+// holds it, so a fixture that evaluates this file can prove it without a
+// document. A local listbox holds a fixed list, which the element filters
+// by the typed text.
 //
 // Every write below happens only when the value changes. The listbox
 // observer watches the hidden attribute that a morph resets, and setting an
@@ -39,9 +40,10 @@
       return sequence === this.#latest;
     }
   }
+  // The decisions leave this file only as the function's return value,
+  // never on the global object, which every script on the page shares.
   const api = Object.freeze({ QuerySequence, acceptsResults });
-  if (typeof globalThis !== "undefined") globalThis.SuprnovaCombobox = api;
-  if (typeof customElements === "undefined" || customElements.get("sn-combobox")) return;
+  if (typeof customElements === "undefined" || customElements.get("sn-combobox")) return api;
   const setAttribute = (element, name, value) => {
     if (element.getAttribute(name) !== value) element.setAttribute(name, value);
   };
@@ -237,4 +239,5 @@
       }
     },
   );
+  return api;
 })();

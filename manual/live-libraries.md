@@ -674,12 +674,18 @@ In a script, parsed as a JavaScript module:
   `popup.Object.keys = f` after `const popup = window.open("/x")`. Using
   the window, as `popup.focus()` and `popup.location.href = "/y"` do,
   stays admitted.
-- A name a script writes on the global object (`window.AcmeState = {}`)
-  is a global of its own, which it may read back, only when the name starts
-  with a capital and the browser defines no property of that name; a
-  lower-case name (`window.acmeState`) is not read back, and writing a
-  browser property (`try { window.localStorage = 1 } catch {}`) never
-  unlocks reading it.
+- A write to a member of the global object is refused, whatever the name
+  and in every form: `window.AcmeState = {}`,
+  `globalThis["Acme" + "State"] = 1`, `window.acmeState++` and
+  `delete window.fetch` are all refused, and so is a write to a member of
+  the window `window.open` returns (`popup.name = "x"`). Every script on
+  the page shares the global object, so such a write could replace a
+  browser API or a name the application or the Live runtime keeps there.
+  Keep a component's state in its module scope instead: a `let` or `const`
+  at the top of the script, or a field of its element class. A write never
+  unlocks a read: after `try { window.localStorage = 1 } catch {}`,
+  reading `window.localStorage` is still refused, as is any read of a
+  global the scan does not admit.
 - An attribute name given to `setAttribute` traces to constants and is not an
   event handler, `srcdoc` or `style`.
 - A URL given to `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,

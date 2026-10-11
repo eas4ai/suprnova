@@ -3,9 +3,9 @@
 //! first pass records what each binding is assigned and where each
 //! function is called; the second checks every call, member access and
 //! assignment against those facts and the lists in `lists.rs`. The names a
-//! script writes on members, of the global object, of its classes'
-//! instances and of its own objects, are settled between the two, once the
-//! first pass has met every name and every call.
+//! script writes on members, of its classes' instances and of its own
+//! objects, are settled between the two, once the first pass has met every
+//! name and every call.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -34,6 +34,10 @@ const MAX_DEPTH: usize = 200;
 /// Why destructuring `prototype` out of an object is refused (REG-032).
 const DESTRUCTURED_PROTOTYPE: &str =
     "destructuring `prototype` puts a prototype in a name the scan does not follow";
+
+/// Why a write to a member of the global object is refused, whatever its
+/// name (REG-032).
+const GLOBAL_OBJECT_WRITE: &str = "may replace a browser API or a name the application or the Live runtime keeps there; a script keeps its state in its module scope";
 
 pub(super) type Bid = usize;
 
@@ -80,12 +84,6 @@ pub(super) struct Facts<'a> {
     pub instance_methods: HashMap<u32, BTreeSet<&'a str>>,
     pub private_methods: BTreeSet<&'a str>,
     pub tainted: BTreeSet<&'a str>,
-    /// The globals of the script's own: names it writes on the global
-    /// object that no browser property may hold, which it may read back.
-    /// They are settled from [`Self::member_writes`] after the first walk,
-    /// so they do not depend on the order of the script's statements
-    /// (REG-032).
-    pub written_globals: BTreeSet<String>,
     /// Every member the script writes, in the order the first walk meets
     /// them. A computed key's name is traced only once that walk has met
     /// every name and every call (REG-032).
@@ -124,8 +122,6 @@ pub(super) struct MemberWrite<'a> {
     /// The class whose instance the write is on, by the class's offset,
     /// when the member is written on `this` inside a class.
     pub class: Option<u32>,
-    /// Whether the member is written on one of the global object's names.
-    pub global: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,33 +591,27 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     /// Settles what the members the first walk saw written make of their
-    /// names (REG-032): a name defined on an object of the script's own, a
-    /// member of the instance of the class that writes it on `this`, and a
-    /// global of the script's own. It runs once that walk has met every
-    /// name and every call, so a computed key traces through the binding
-    /// each name has where it is written and through every call of a
-    /// parameter's function, wherever those stand in the script. While the
-    /// walk is still under way, a name it has not reached resolves where
-    /// the walk stands and a call it has not reached is missing, so these
-    /// sets would depend on the order of the statements. Only a write on
-    /// the global object's name makes a global: a write through an
-    /// expression that may yield the global object, such as
-    /// `(c ? window : o).x = v`, may land on another object. A name the
-    /// browser may already define there is never the script's own.
+    /// names (REG-032): a name defined on an object of the script's own,
+    /// and a member of the instance of the class that writes it on `this`.
+    /// It runs once that walk has met every name and every call, so a
+    /// computed key traces through the binding each name has where it is
+    /// written and through every call of a parameter's function, wherever
+    /// those stand in the script. While the walk is still under way, a name
+    /// it has not reached resolves where the walk stands and a call it has
+    /// not reached is missing, so these sets would depend on the order of
+    /// the statements. A write on the global object makes no global of the
+    /// script's own: [`Self::global_object_write`] refuses it.
     fn settle_member_writes(&mut self) {
-        let settled: Vec<(String, Option<u32>, bool)> = self
+        let settled: Vec<(String, Option<u32>)> = self
             .facts
             .member_writes
             .iter()
             .filter_map(|write| {
                 self.member_name(write.member)
-                    .map(|name| (name, write.class, write.global))
+                    .map(|name| (name, write.class))
             })
             .collect();
-        for (name, class, global) in settled {
-            if global && claimable_global(&name) {
-                self.facts.written_globals.insert(name.clone());
-            }
+        for (name, class) in settled {
             if let Some(class) = class {
                 self.facts
                     .class_members
@@ -1647,8 +1637,48 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     fn global_admitted(&self, name: &str) -> bool {
-        (ADMITTED_GLOBALS.contains(&name) && !GLOBAL_OBJECTS.contains(&name))
-            || self.facts.written_globals.contains(name)
+        ADMITTED_GLOBALS.contains(&name) && !GLOBAL_OBJECTS.contains(&name)
+    }
+
+    /// Refuses a write or a `delete` of a member of the global object,
+    /// whatever its name (REG-032): static or computed, constant or not, a
+    /// property the browser defines or one it does not. Every script on
+    /// the page shares the global object, so such a write may replace a
+    /// browser API or a name the application or the Live runtime keeps
+    /// there (`window.AcmeState = v`), and it never makes a global of the
+    /// script's own. The global object is one of its names, an expression
+    /// that may yield one, and the window `open` returns, where the
+    /// application's page keeps its own names.
+    fn global_object_write(&mut self, member: &'a MemberExpression<'a>, span: Span, verb: &str) {
+        if !self.check() {
+            return;
+        }
+        let object = member.object();
+        let what = if self.is_global_object(object) {
+            "the global object"
+        } else if self.opened_window(object, 0, &mut BTreeSet::new()) {
+            "the window `open` returns"
+        } else {
+            return;
+        };
+        match self.member_names(member) {
+            Some(names) => {
+                for name in names {
+                    self.refuse(
+                        "script-global",
+                        span,
+                        format!("{verb} `{name}` on {what} {GLOBAL_OBJECT_WRITE}"),
+                    );
+                }
+            }
+            None => self.refuse(
+                "script-global",
+                span,
+                format!(
+                    "{verb} a member of {what} whose key is not a constant {GLOBAL_OBJECT_WRITE}"
+                ),
+            ),
+        }
     }
 
     // ----- assignments -------------------------------------------------
@@ -1829,6 +1859,7 @@ impl<'a, 'c> Walker<'a, 'c> {
                     // any operator, `++` or `--`, a destructuring target and
                     // a `for` loop's target (REG-032).
                     if self.check() {
+                        self.global_object_write(member, member.span(), "writing");
                         if self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new())
                         {
                             self.refuse(
@@ -1919,7 +1950,6 @@ impl<'a, 'c> Walker<'a, 'c> {
             } else {
                 None
             },
-            global: self.names_global_object(member.object()),
         };
         self.facts.member_writes.push(write);
         let callable = value.is_some_and(is_function_expression);
@@ -1949,13 +1979,6 @@ impl<'a, 'c> Walker<'a, 'c> {
             return;
         };
         let span = member.span();
-        if self.is_global_object(member.object()) && ADMITTED_GLOBALS.contains(&name.as_str()) {
-            self.refuse(
-                "script-global",
-                span,
-                format!("assigning `{name}` on the global object replaces a browser API"),
-            );
-        }
         if IMPLICITLY_CALLED.contains(&name.as_str()) && !self.callback_safe(value, 0) {
             self.refuse(
                 "script-call",
@@ -3042,8 +3065,8 @@ impl<'a, 'c> Walker<'a, 'c> {
     }
 
     /// Refuses `delete` of a member of a prototype or of a value read from
-    /// one, of a built-in, or of a page object's method, which changes it
-    /// as a write does (REG-032).
+    /// one, of a built-in, of a page object's method, or of the global
+    /// object, which changes it as a write does (REG-032).
     fn member_delete(&mut self, unary: &'a UnaryExpression<'a>) {
         if !self.check() {
             return;
@@ -3055,6 +3078,7 @@ impl<'a, 'c> Walker<'a, 'c> {
         let Some(member) = member else {
             return;
         };
+        self.global_object_write(member, unary.span, "deleting");
         if self.prototype(member.object(), Reach::Through, 0, &mut BTreeSet::new()) {
             self.refuse(
                 "script-prototype",
@@ -4275,23 +4299,6 @@ impl<'a, 'c> Walker<'a, 'c> {
             _ => false,
         }
     }
-}
-
-/// Whether a script may claim a name it writes on the global object as a
-/// global of its own, which it may then read back (REG-032). The browser's
-/// own properties of the global object whose writes fail, so that a
-/// `try` around the write leaves the browser's value to read
-/// (`localStorage`, `indexedDB`, `navigator` and every property added
-/// later), are attributes, and attributes are named in lower camel case.
-/// A name that starts with a capital is an interface or a namespace,
-/// which a write replaces, so the script reads back its own value. A name
-/// the scan's lists already hold is never the script's: it is admitted,
-/// refused or read-only on its own terms.
-fn claimable_global(name: &str) -> bool {
-    name.starts_with(|c: char| c.is_ascii_uppercase())
-        && !ADMITTED_GLOBALS.contains(&name)
-        && !REFUSED_PROPERTIES.contains(&name)
-        && !READ_ONLY_PROPERTIES.contains(&name)
 }
 
 /// Whether a global the script does not declare names a built-in object or
