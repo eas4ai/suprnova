@@ -201,9 +201,9 @@
    "class": "noise",
    "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
-  "For non-GET Inertia visits, the framework auto-converts the response to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
-   "class": "noise",
-   "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+  "For Inertia `PUT`, `PATCH` and `DELETE` visits, the framework converts a `302` redirect to `303 See Other` when `Inertia303Middleware` is installed, so the browser issues a clean follow-up GET instead of re-submitting the original PUT/PATCH/DELETE to the redirect target.": {
+   "class": "verified",
+   "evidence": "framework/src/inertia/conversion_middleware.rs:45-58 converts a 302 to 303 on PUT, PATCH and DELETE Inertia visits; framework/src/inertia/facade.rs:846 registers the middleware in Inertia::install. The sentence describes the follow-up request the browser makes, not a moment in time."
   },
   "ForeignKeyAction::Cascade": {
    "class": "noise",
