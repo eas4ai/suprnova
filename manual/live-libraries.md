@@ -543,9 +543,11 @@ that has no effects. The scan refuses:
   upload authorization, continuity, credential and registry ports), the
   trusted contexts and fingerprints the engine mints, the snapshot key
   material, the wire protocol and proposal application, and the component
-  hooks the macros implement. A component names what the engine hands it:
-  identities, limits, errors, upload inspection results, metadata and
-  payload contracts. Magnetar's types are refused as a module.
+  hooks the macros implement. Beyond those, a type of the Live engine or of
+  Magnetar that the framework re-exports for applications reaches a
+  component only when the generator's admit table names it, so a new
+  re-export never widens the allowlist by default. Magnetar's types are
+  refused as a module.
 
 Each capability the admitted paths carry goes into the plan. Resolving a
 trait your own library defines carries none, because the application binds

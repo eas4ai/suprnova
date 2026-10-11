@@ -167,8 +167,9 @@ fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
 /// component's to name: the host ports a bootstrap installs, the trusted
 /// contexts and fingerprints the engine verifies, the snapshot key material,
 /// the wire protocol and proposal application, and the component hooks the
-/// macros implement. A component names what the engine hands it: identities,
-/// limits, errors, upload inspection results, metadata and payload contracts.
+/// macros implement. Beyond those, an engine type reaches a component only
+/// by a rule in the generator's ENGINE_ADMIT table, so a re-export made for
+/// applications never lands on the component allowlist by default.
 #[test]
 fn reg_030_host_ports_trusted_contexts_and_key_material_are_refused() {
     let list = allowlist::embedded().expect("the embedded allowlist parses");
@@ -200,16 +201,32 @@ fn reg_030_host_ports_trusted_contexts_and_key_material_are_refused() {
             list.admit(path)
         );
     }
-    // What the engine hands a component stays admitted.
+    // An engine type the framework re-exports for applications reaches a
+    // component only by a rule: the 4.0.0 re-exports are refused until one
+    // names them.
     for path in [
         "suprnova::live::ActionName",
         "suprnova::live::InputLimits",
         "suprnova::live::UploadInspection",
-        "suprnova::live::MountFailure",
         "suprnova::live::validation::ValidationBagError",
         "suprnova::live::action::RegisteredEmission",
-        "suprnova::live::metadata::PayloadContractIdentity",
         "suprnova::render_cache::QueryUnknown",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused until a rule admits it; got {:?}",
+            list.admit(path)
+        );
+    }
+    // The engine items components could already name stay admitted.
+    for path in [
+        "suprnova::live::ErrorBag::from_issues",
+        "suprnova::live::ValidationIssue",
+        "suprnova::live::ActionOutcome",
+        "suprnova::live::UploadLimits",
+        "suprnova::live::action::flash_intent",
+        "suprnova::view::TrustedHtml",
+        "suprnova::render_cache::RenderKey",
     ] {
         assert!(
             matches!(
