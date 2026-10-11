@@ -26,7 +26,8 @@ pub struct TableInfo {
 /// inherits `version.workspace = true` and every release is tagged
 /// `v<workspace version>`, so this is always the tag of the release that
 /// shipped this binary. [`framework_pin`] writes it into a new project
-/// unless the build recorded a commit that is not that release (PAR-080).
+/// unless the build recorded a commit that this tag does not name
+/// (PAR-080).
 pub fn framework_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
@@ -37,7 +38,10 @@ pub fn framework_tag() -> String {
 pub struct BuildCommit<'a> {
     /// The commit's full hash.
     pub sha: &'a str,
-    /// Whether the commit is the release `v<version>` of the CLI.
+    /// Whether the local tag `v<version>` of the CLI named the commit when
+    /// it was built. Only the tag proves a commit is the release: the
+    /// history cannot, because in a clone one commit deep, HEAD seems to
+    /// add the version line whatever commit it is.
     pub tagged: bool,
 }
 
@@ -56,17 +60,20 @@ pub fn recorded_build_commit() -> Option<BuildCommit<'static>> {
 /// Where a new project's `suprnova` git dependency points (PAR-080).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameworkPin {
-    /// A release tag, `v<version>`: what a released CLI pins.
+    /// A release tag, `v<version>`: what a CLI built from the commit that
+    /// tag names pins, and what a CLI pins when git could not answer.
     Tag(String),
-    /// A commit hash: what a CLI built between two releases pins, because
-    /// its templates may already use API the last tag does not have.
+    /// A commit hash: what any other build pins. A CLI built between two
+    /// releases may have templates that use API the last tag does not
+    /// have. A release built from a checkout without its tag pins the
+    /// release commit, which names the same source as the tag.
     Rev(String),
 }
 
 impl FrameworkPin {
     /// The pin a CLI whose release tag is `release_tag` writes when built
-    /// from `commit`: the commit when it is not that release, and the tag
-    /// when it is or when the build recorded no commit. Taking the facts as
+    /// from `commit`: the commit when the tag did not name it, and the tag
+    /// when it did or when the build recorded no commit. Taking the facts as
     /// arguments lets a test choose the pin of a tagged and of an untagged
     /// build.
     pub fn choose(release_tag: &str, commit: Option<BuildCommit<'_>>) -> Self {
