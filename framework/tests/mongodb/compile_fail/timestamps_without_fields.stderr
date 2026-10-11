@@ -1,0 +1,5 @@
+error: `timestamps = true` names no timestamp fields: add `created_at` and `updated_at` (`bson::DateTime` or `chrono::DateTime<Utc>`, or either in an `Option`), or drop `timestamps = true`
+ --> tests/mongodb/compile_fail/timestamps_without_fields.rs:5:12
+  |
+5 | pub struct User {
+  |            ^^^^
