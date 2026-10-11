@@ -333,8 +333,10 @@ where
                 // inline, an application's bootstrap nests its whole state
                 // machine inside this one, and a deep one pushes the
                 // console's `main` past rustc's query depth limit in a
-                // release build. A panic in it is the boot's error.
-                let booted = match crate::app::process_boot::run_hook(Box::pin(boot())).await {
+                // release build. `run_hook` calls the closure, so a panic
+                // before it returns its future is the boot's error too, as
+                // is a panic while the future runs.
+                let booted = match crate::app::process_boot::run_hook(|| Box::pin(boot())).await {
                     Ok(()) => {
                         crate::app::process_boot::boot_after_hook(
                             crate::app::process_boot::ProcessBoot::Console,
