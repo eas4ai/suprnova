@@ -30,7 +30,9 @@ covers the fixes that change what an application observes,
 [Added entries that change behaviour](#added-entries-that-change-behaviour)
 covers additions that change an existing path, and
 [Public types with new fields or variants](#public-types-with-new-fields-or-variants)
-covers types that gained fields without an entry of their own.
+covers types that gained fields without an entry of their own. Every `### Fixed`
+entry of the release is either a section here or listed under
+[Fixes with no upgrade step](#fixes-with-no-upgrade-step).
 
 ## Upgrade in this order
 
@@ -1116,13 +1118,14 @@ printf '%s\n' '/.suprnova-live.lock' '/.suprnova-live-journal.json' >> .gitignor
 
 ### A component's script can no longer replace a built-in.
 
-**Before:** The `live:add` scan admitted a write to a built-in's member,
-such as `Object.keys = f` or `Math.random = f`.
+**Before:** `live:add` installed a component's script without scanning it,
+including one that replaced a built-in's member, such as `Object.keys = f`
+or `Math.random = f`.
 
 **Now:** A write to a member of a built-in object or function is refused
 (`script-builtin`) in every form.
 
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, change the
+**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
 component as the refusal says.
 
 ## Authentication
@@ -2030,6 +2033,301 @@ describes, and copy `templates/` in your Dockerfile's build stage.
 These `### Fixed` entries change what an application observes, so they
 appear here in the same shape.
 
+### The error callback sees the error responses from outside the Inertia stack.
+
+**Before:** `InertiaConfig::error_page` decided only the responses that
+passed through the error-page middleware, which `Inertia::install`
+registered innermost. A middleware registered above `Inertia::install`
+that answered without calling `next`, such as `CsrfMiddleware`'s `419` or
+an outer rate limiter's `429`, and a panic in a middleware outside it never
+reached it, so an Inertia visit got the plain-JSON modal.
+
+**Now:** The server runs the same decision after the whole stack for every
+error response nothing inside the stack decided, so those responses become
+the page too. Such a page carries the shared registry and the shared
+providers, but no session data, no detected locale and none of the
+middleware hooks' shares. `Inertia::install` registers its error-page
+middleware just outside the validation redirect.
+
+**Do:** Nothing to do. To build those pages inside the visitor's session
+and locale, register `InertiaErrorPageMiddleware` yourself, before
+`Inertia::install` and outside the middleware whose rejections it covers,
+as [Inertia Responses](frontend-inertia-responses.md#where-the-page-is-rendered)
+shows.
+
+### An error page placed outside the Inertia stack follows a fragment redirect.
+
+**Before:** `InertiaErrorPageMiddleware` passed a response carrying
+`X-Inertia-Location` through, but not one carrying `X-Inertia-Redirect`.
+With `error_page` set, a handler's `InertiaResponse::redirect`, a `409`
+with `X-Inertia-Redirect` and an empty body, was read as an error and
+answered with the error page, so the client never followed the soft
+redirect.
+
+**Now:** An Inertia protocol response, one carrying `X-Inertia`,
+`X-Inertia-Location` or `X-Inertia-Redirect`, is never handed to an error
+callback, the default one included, wherever the middleware is registered,
+so the client follows the redirect to its target, a `#fragment` included.
+
+**Do:** Nothing to do.
+
+### A drop-in Inertia form with a file, and a `GET` filter form, read as the client shapes them.
+
+**Before:** A form request answered `415` for a `multipart/form-data` body.
+Every reader matched names letter for letter, apart from a trailing `[]`
+for a list, so `filters[status]=x` arrived as one literal key, not as the
+member `status` of `filters`.
+
+**Now:** A form request and `Request::input` read a multipart body, and an
+`UploadedFile` field takes a file part and runs its validators. Bracketed
+and indexed names in a url-encoded body, a multipart body and a query
+string decode into nested data as PHP's `parse_str` reads them, up to 64
+levels deep: `user[name]` is the member `name` of `user`, and
+`photos[1]=b&photos[0]=a` is a list in index order. A field that fails is
+named by its dotted path, such as `user.name` or `photos.1`. A multipart
+body stays under the form request's `max_body_bytes`, 8 MiB by default, and
+1,000 parts. `query_params` and `query_param` still read each name as sent.
+
+**Do:** Read nested names into a nested struct or a list. A field renamed to
+a literal bracketed name, such as `#[serde(rename = "filters[status]")]`,
+no longer matches. Update tests that expected `415` for a multipart form
+request.
+
+### JPEGs from the built-in driver show the right colours everywhere.
+
+**Before:** The `oxideav` driver wrote RGB samples behind a JFIF header, so
+libjpeg-based decoders, ImageMagick and most browsers among them, showed
+the wrong colours.
+
+**Now:** It writes standard JFIF YCbCr, every component at full resolution
+(4:4:4), so every decoder shows the colours the image held. The file's
+header changes with the samples.
+
+**Do:** Nothing to do. Encode again from their sources the JPEGs the driver
+wrote on 3.2.1 where their colours matter, and update tests that compare
+the encoded bytes.
+
+### Redirects stay on the origin for a request-target that names another host.
+
+**Before:** A request such as `GET //evil.example/x` or `GET /\evil.example`
+that reached a fallback route had a current URL that a browser reads as
+another host. `Redirect::refresh_for` sent the browser there,
+`Redirect::guest` stored it as the intended URL, `Redirect::intended`
+followed it after sign-in, and `url::full` returned `//evil.example/x` as
+it was.
+
+**Now:** `refresh_for` and `guest` check the request's URL with the rule
+the previous URL follows: for such a request `refresh_for` redirects to the
+root, and `guest` stores no intended URL and removes one already stored.
+`intended` checks the stored value when it reads it, so such a value stored
+on 3.2.1 is not followed, while an absolute URL the application stored
+itself still is. `url::full` stays on the `APP_URL` origin.
+
+**Do:** Nothing to do.
+
+### Queue and failed-job table names with capitals or reserved words work.
+
+**Before:** The jobs driver and the failed-jobs store wrote
+`QUEUE_DB_TABLE` and `QUEUE_FAILED_DB_TABLE` into their SQL unquoted.
+Postgres folded a name with capitals to lower case, so it missed a table
+created under its exact name, and a reserved word such as `order` failed as
+SQL.
+
+**Now:** Both quote each part of the configured name, as the shipped
+migrations do, so the name is the table's exact name on every database.
+
+**Do:** Nothing to do for a lower-case name. On Postgres, if a name with
+capitals worked on 3.2.1 because its table was created without quotes, set
+the variable to the lower-case name the table has.
+
+### `generate-types` reads `{post:slug}`
+
+**Before:** `suprnova generate-types --routes` looked for a handler's form
+request only in its first argument, so a handler that took a bound model or
+a path value first, such as `update(post: posts::Model, form: UpdatePost)`,
+got a route helper with no `data` argument.
+
+**Now:** It skips every argument named after a path parameter and takes the
+first other argument whose type is a form request, so that helper takes
+`data: UpdatePost`. A `{post:slug}` segment is the parameter `post`.
+
+**Do:** Regenerate the helpers and pass the form data to each helper that
+now takes it:
+
+```bash
+suprnova generate-types --routes
+```
+
+### A component's scripts import by relative path only.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one with a static `import` of an absolute path, such as
+`/acme-ui/x/x.js`.
+
+**Now:** The scan refuses an absolute path, even to the component's own
+script, as it refuses a URL (`script-import`). A static `import` is a
+relative path (`./` or `../`) to a script of the component or of a
+component it depends on, and a path with one `../` more than the component
+is deep, such as `../../../acme-ui/x/x.js` from `acme-ui/x/`, is refused,
+because under a path prefix it resolves outside the prefix.
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author writes each static `import` as a
+relative path inside the components' root, such as `./x.js`.
+
+### A component's script can no longer reach a built-in prototype through a computed key or a name.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one that added a property to every array on the page, such as
+`Array["prototype"].polluted = 1` or
+`const p = Array.prototype; p.polluted = 1;`.
+
+**Now:** A script may read a member of a prototype
+(`Array.prototype.slice.call(list)`) but not keep or pass on the prototype.
+The scan refuses it wherever it is a value, under a computed key that
+traces to `prototype`, and from `getPrototypeOf` (`script-prototype`). It
+also refuses every write to a prototype's member (`??=`, `+=`, `++`, a
+destructuring or `for` loop target and `delete` included), a method called
+on the prototype itself (`Array.prototype.push(1)`), and destructuring
+`prototype` out of an object.
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author calls a prototype's method through
+`call` instead of keeping the prototype, and adds nothing to a built-in
+prototype.
+
+### A destructuring assignment's defaults, nested keys and shorthand targets are scanned.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one with `eval` in a destructuring default, such as
+`[a = eval("alert(1)")] = []`, or with a shorthand target that wrote a
+global, such as `({ location } = { location: "javascript:alert(1)" })`.
+
+**Now:** The scan walks every key and default of a destructuring target at
+any depth, as it walks any value, and a nested or shorthand key gets the
+checks a top-level key gets, so `({ constructor } = [])` is refused
+(`script-eval`). A shorthand target is a target like any other: the scan
+does not follow the value it receives, and a name the script does not
+declare is a global write (`script-url` for `location`, `script-global`
+otherwise).
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author keeps refused calls out of
+destructuring defaults, declares every name a destructuring assignment
+writes, and gives a URL a constant rather than a name such an assignment
+wrote.
+
+### The script scan follows a value by the names it was written with.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one that hid a remote URL for `img.src` behind a name another
+binding shadowed.
+
+**Now:** The scan follows a name to its initializer, its assignments and
+the arguments of its function's calls, and reads each name it meets there
+as the binding it had where it was written. So
+`const y = "https://evil.example/x"; const x = y;` followed by
+`function show() { const y = "/ok"; img.src = x; }` is refused
+(`script-url`), and a string handed to a timer the same way is refused too.
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author gives each URL a constant on the
+application's origin and each timer a function.
+
+### The script scan sees the global object through an expression.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one that reached the global object through an expression, such
+as `(0, window).localStorage` or `(0, globalThis).fetch = f`.
+
+**Now:** The scan's rules about the global object's members see through a
+sequence's last expression, a conditional's branches, a logical
+expression's sides and an assignment's value, so each such read or write is
+refused as its bare form is (`script-global`).
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author removes the read or write, since its
+bare form is refused as well.
+
+### Writing a browser global no longer unlocks reading it.
+
+**Before:** `live:add` installed a component's script without scanning it,
+including one that wrote a browser global and then read it, such as
+`try { window.localStorage = 1 } catch {}` followed by a read of
+`window.localStorage`.
+
+**Now:** The write is refused (`script-global`), and a name written on the
+global object never becomes the script's own, so the read stays refused as
+a read of any global the scan does not admit is.
+
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one, its author keeps the component's state in its
+module scope and reads only the globals the scan admits.
+
+### A prop holding `<!--<script>` no longer breaks the first Inertia page.
+
+**Before:** The first visit's page JSON, in its
+`<script type="application/json" data-page="app">` element, had `/` escaped
+but `<` and `>` as sent. A prop such as `<!--<script>` kept the real
+`</script>` from closing the element, so the mount element became script
+text and the client could not start.
+
+**Now:** `<` and `>` are written as `\u003c` and `\u003e` beside the `/`
+escaping, as Laravel's `JSON_HEX_TAG` does. The client reads the same
+values.
+
+**Do:** Nothing to do. A test that searches the first visit's HTML for a
+prop holding `<` or `>` searches for the escaped form.
+
+### An empty SSR answer renders on the client.
+
+**Before:** A worker answer of `{}`, or an object without `body`, was
+inlined as an empty body, so the first visit's document had neither the
+page data nor the mount element and the client could not start. An answer
+of `null`, `false`, another value that is not an object, or bytes that are
+not JSON, was a failure: the visit rendered on the client and
+`on_ssr_error` fired, or it answered `500` under `ssr_throw_on_error(true)`.
+
+**Now:** Each of those answers, and any answer without a non-empty `body`
+string, renders on the client from the page data, as Laravel's does, and is
+not reported as a failure.
+
+**Do:** Nothing to do. A test that expected `on_ssr_error`, or a `500` under
+`ssr_throw_on_error`, for such an answer gets neither.
+
+### SSR workers at `https` URLs are reached.
+
+**Before:** The SSR client spoke plain HTTP only and refused an `https` URL
+in `.ssr(...)`, so the worker was never contacted: every first visit
+rendered on the client and `on_ssr_error` fired, or the visit answered
+`500` under `ssr_throw_on_error(true)`.
+
+**Now:** The client speaks TLS through rustls, as the HTTP client facade
+does, and verifies the worker's certificate against the platform's trust
+store. The timeout, the response cap and the refusal of an oversized
+`Content-Length` are unchanged.
+
+**Do:** Nothing to do. If your SSR URL is `https`, first visits now render
+on the worker, so check that it renders your pages before you deploy.
+
+### A DevTools entry and `Request::route_name` name the route that matched by its method.
+
+**Before:** `Request::route_name` looked the name up by the matched pattern
+alone, so `GET /users` named `users.index` and `POST /users` named
+`users.store` both reported whichever name was listed first, and an unnamed
+`PUT /users` reported one of them too. `Request::route_is` read the same
+name.
+
+**Now:** The router records each name against its method and pattern, and
+the server sets the matched route's name on the request, so each method
+reports its own and an unnamed route reports `None`. `route_is` and the
+DevTools entry follow it. A request that never went through dispatch, such
+as one a test builds with `with_route_pattern`, still falls back to the
+pattern lookup.
+
+**Do:** Nothing to do. A `route_is` check on a path that several methods
+share now matches only the method whose route carries the name.
+
 ### `Request::full_url` and `url::full` normalise their query as Laravel's `fullUrl` does.
 
 **Before:** `Request::full_url` and `url::full` returned the query as it
@@ -2215,41 +2513,29 @@ and `suprnova::render_cache::store` re-export them.
 
 **Do:** Nothing to do.
 
-### The component allowlist refuses test fakes, app-wide hooks and installs.
-
-**Before:** The scan admitted `Http::fake`, `Queue::fake`, `Mail::fake`,
-`Storage::fake`, `Process::fake`, `Http::global_options`, the global
-request and response middleware, `Queue::set_driver`,
-`Cache::set_connection`, a service's `install`, and the test container and
-clock.
-
-**Now:** The generator refuses them by name. The embedded allowlist is also
-regenerated from the documented surface: documented paths it lacked are
-admitted, and the Live engine's private paths and Magnetar's engine
-internals are dropped.
-
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, move the
-call it names out of the component.
-
 ### The script scan refuses every write to a member of the global object.
 
-**Before:** The `live:add` scan admitted a write such as
+**Before:** `live:add` installed a component's script without scanning it,
+including one that wrote a member of the global object, such as
 `window.AcmeState = {}`, `window.onload = f` or `delete window.fetch`.
 
 **Now:** Every write to a member of the global object, or of a window that
 `window.open` returns, is refused (`script-global`), `delete` included.
 
-**Do:** Keep a component's state in its module scope, not on `window`.
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one it installed on 3.2.1, its author keeps the
+component's state in its module scope, not on `window`.
 
 ### What the script scan learns from member writes does not depend on statement order.
 
-**Before:** The scan admitted a script in one statement order and refused
-it in another.
+**Before:** `live:add` installed a component's script without scanning it,
+including one that read a global name nothing declared or wrote.
 
-**Now:** It settles names after its first walk, so the order no longer
-matters, and a read of a global name nothing wrote is refused.
+**Now:** The scan settles names after its first walk, so its verdict does
+not depend on the script's statement order, and a read of a global name
+nothing wrote is refused.
 
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, change the
+**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
 component as the refusal says.
 
 ### A CLI built between two releases pins the framework commit it was built from.
@@ -2267,9 +2553,63 @@ tag when you move to a release:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.0" }
 ```
 
+## Fixes with no upgrade step
+
+These `### Fixed` entries change nothing an application upgrading from 3.2.1
+observes, or touch only the framework's own tooling and tests.
+
+- **The Laravel parity map holds the Inertia adapter and client.** The parity map is the framework's own tooling.
+- **Images are no longer copied on their way through a driver.** It removes copies inside the drivers and counts the memory of ICC profiles, which 3.2.1 did not carry.
+- **The Inertia CRUD tutorial compiles** The fix is to the manual's tutorial, not to the framework.
+- **Live upload and async routes follow the configured endpoint** Serving under a path prefix is new in 4.0.0, and at the host root the routes are the same `/__live` routes.
+- **Batch settlement counts work on MySQL** It concerns a `job_batches` table Laravel created, which 4.0.0 is the first release to support.
+- **On Postgres, a session write for a guest** It concerns Laravel's `sessions` layout, new in 4.0.0; on 3.2.1 `sessions.user_id` was text.
+- **Magnetar's API documentation builds without the `two-factor` feature.** It changes API documentation only.
+- **API documentation writes ranges in words.** It changes API documentation only.
+- **An Inertia page that cannot be encoded answers an error.** Encoding a page does not fail in practice, so no response changes.
+- **DevTools redacts a flattened key by its parts.** DevTools is new in 4.0.0.
+- **DevTools redacts the URLs in headers and bodies.** DevTools is new in 4.0.0.
+- **A lost DevTools index no longer drops the entries it listed.** DevTools is new in 4.0.0.
+- **A commented-out augmentation no longer hides the generated one.** The generated `@inertiajs/core` augmentation is new in 4.0.0.
+- **A hook-shared prop names a file and line.** It changes only what DevTools records, and DevTools is new in 4.0.0.
+- **A page whose document fails is recorded as the error the client got.** It changes only what DevTools records, and DevTools is new in 4.0.0.
+- **Every render prop has a `renderSource`.** It changes only what DevTools records, and DevTools is new in 4.0.0.
+- **DevTools reads a request body as the handler would.** DevTools is new in 4.0.0, and without it the handler reads its body as on 3.2.1.
+- **A DevTools JSON request body is recorded whatever it parses to.** DevTools is new in 4.0.0.
+- **DevTools no longer reads an upload before its authorization.** DevTools is new in 4.0.0.
+- **The DevTools id tag finds a closing body tag in any case.** DevTools is new in 4.0.0.
+- **A tagged first visit no longer carries the untagged page's length.** The DevTools id tag is new in 4.0.0.
+- **The Laravel-database tests run each SQLite test on one connection.** It changes the framework's own tests.
+- **The component allowlist refuses test fakes, app-wide hooks and installs.** A component's Rust, and the allowlist that reads it, are new in 4.0.0; a 3.2.1 component carried no Rust.
+- **Every Live and Magnetar type a public signature leads to is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
+
 ## Added entries that change behaviour
 
 These `### Added` entries change a path that 3.2.1 already had.
+
+### Third-party Live component libraries.
+
+**Before:** `live:add` installed a component of the shipped library by
+name, or a third-party one with `--manifest`, by copying the view,
+stylesheet and script its `manifest.json` named under `templates/<root>/`,
+with no scan and no question. A component carried no Rust.
+
+**Now:** `live:add` also installs from a library's git repository by
+address, from an `https://` URL and from a `./path`, and a component can
+carry the Rust of a Live component. Before it writes anything, it scans
+every view, stylesheet, script and Rust file as data, admits only what it
+can classify, and shows a plan. For a third-party component it asks you on
+a terminal to approve each capability the component uses, to pin the
+library's key on its first install and to confirm the plan; without a
+terminal it refuses unless you pass `--yes`, and `--allow <capability>`
+approves a capability. A shipped component still installs with no
+questions.
+
+**Do:** Nothing to do for the shipped library. Run a third-party install on
+a terminal, or pin the library's key in `suprnova.toml` yourself and pass
+`--yes` and `--allow` for each capability the plan names. If the scan
+refuses a component you installed on 3.2.1, its author changes it as the
+refusal says. See [Installing Live Components](live-add.md).
 
 ### A timebox on reset links.
 
