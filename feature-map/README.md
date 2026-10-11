@@ -80,12 +80,13 @@ item by item instead of argued row by row.
 
 | File | What it is | Who writes it |
 |---|---|---|
-| `laravel/surface.jsonl` | 21,758 records: every public piece of laravel/framework v13.33.0, filed under its Laravel docs page | `tools/laravel/generate.sh` |
+| `laravel/surface.jsonl` | 22,867 records: every public piece of laravel/framework v13.34.0, the inertia-laravel 3.5.1 adapter and the Inertia.js 3.8.0 client, filed under its Laravel docs page | `tools/laravel/generate.sh` |
 | `laravel/parity.jsonl` | for each Laravel item: the parity status, the Suprnova ids that implement it, a note | `fmap parity` only |
-| `laravel/meta.json`, `laravel/exclusions.json` | the Laravel version, the pinned docs commit, and what was left out and why | `tools/laravel/generate.sh` |
+| `laravel/meta.json`, `laravel/exclusions.json` | each package's version, the pinned docs commit, and what was left out and why | `tools/laravel/generate.sh` |
 
-The Laravel records come from Laravel's source at the release tag, read
-through PHP reflection: classes, interfaces, traits and enums with the
+Every record carries `package`: `laravel/framework`,
+`inertiajs/inertia-laravel` or `inertiajs/inertia`. The Laravel records come
+from Laravel's source at the release tag, read through PHP reflection: classes, interfaces, traits and enums with the
 methods, properties and constants each declares (public, plus protected on
 extendable types, since subclassing is how Laravel exposes them), facade
 methods from each facade's `@method` declarations, global helpers, Artisan
@@ -93,6 +94,21 @@ commands (parsed with Laravel's own signature parser), Blade directives (the
 `compile*` methods Blade's `@` dispatch reaches, minus its own compile
 passes), validation rules, and the framework's config keys and the env vars
 they read. The docs index only names the pages records are filed under.
+
+inertia-laravel is read through the same reflection, loaded beside the
+framework it extends: its classes, the `Inertia` facade's `@method` lines,
+its helpers, Artisan commands and config keys, and what its service
+providers register when Laravel registers them (macros such as
+`Illuminate\Http\Request::inertia`, the `@inertia` and `@inertiaHead`
+directives, the `<x-inertia::app>` and `<x-inertia::head>` components, the
+`inertia.encrypt` middleware alias). No PHP reflection reaches Inertia.js, so
+`tools/laravel/inertia_js.cjs` reads it with TypeScript's own parser: every
+name each package's `exports` map publishes (`@inertiajs/core
+objectToFormData`, `@inertiajs/react Link`), followed to its declaration, and
+every `X-Inertia*` header the client sends or reads (`header
+X-Inertia-Version`), the protocol a server adapter answers. All Inertia
+records are filed under `frontend`, the docs page whose Inertia section
+covers both.
 
 ```
 feature-map/fmap laravel summary                    parity progress per docs page
@@ -106,6 +122,7 @@ feature-map/fmap exclusive --chapter cache          Suprnova items with no Larav
 Parity statuses: `shipped` and `diverged` (both must name the Suprnova ids
 that implement the item; every id is checked against the Suprnova surface),
 `not_built`, `by_design_no` and `not_applicable` (the last two need a note).
+A row stores the version of the package its Laravel side comes from.
 Recording a link stores both sides' signature hashes, so a link reads
 `stale` when either side changes and `broken` when a linked Suprnova item
 disappears. `fmap show <suprnova id>` lists the Laravel items linked to it.
@@ -187,9 +204,12 @@ feature-map/tools/generate.sh             the Suprnova surface
 feature-map/tools/laravel/generate.sh     the Laravel surface (optionally a version: 13.34.0)
 ```
 
-The Laravel driver needs PHP 8.3+, Composer and git. It clones the framework
-at the release tag and the docs at the last commit on or before that
-release, and never touches `laravel/parity.jsonl`. Moving to a new Laravel
+The Laravel driver needs PHP 8.3+, Composer, git and Node with npm. It
+clones the framework at the release tag and the docs at the last commit on
+or before that release, clones inertia-laravel and Inertia.js at the
+versions `laravel/meta.json` records (`INERTIA_LARAVEL_VERSION` and
+`INERTIA_VERSION` override them), installs the TypeScript version
+Inertia's lockfile pins, and never touches `laravel/parity.jsonl`. Moving to a new Laravel
 release is a regeneration: parity links whose Laravel signature changed read
 `stale`, and new Laravel items read `unmapped`.
 
@@ -226,6 +246,15 @@ for removed items shows up in `fmap orphans`.
   pipeline, not guessed. Records carry no machine paths (the clone root reads
   `<laravel>`), clones at different paths give identical records, and two
   driver runs give a byte-identical `laravel/surface.jsonl`.
+- inertia-laravel: all 56 classes, 13 interfaces, 6 traits and 3 enums under
+  `src/` load and are extracted; the providers add 8 macros, 2 directives, 2
+  component tags and 1 middleware alias. Adding the two Inertia packages
+  changed no laravel/framework record but for its `package` field.
+- Inertia.js: every export of the five packages' 11 entry points resolves to
+  a declaration, and every `X-Inertia*` literal in `@inertiajs/core` is a send
+  or a read; anything else stops the run with its file and line
+  (`tools/laravel/test_inertia_js.py`). Clones at different paths give
+  identical records.
 - Both builds refuse a filing rule that names a missing chapter or docs page,
   or that matches no record.
 - Parity links read `stale` after a real signature change on either side and
