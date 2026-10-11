@@ -729,16 +729,18 @@ mod inssr {
              mkfifo '{worker_ready}'\n\
              (\n\
              \x20 trap 'echo \"worker got HUP\"; : > \"{worker_hup}\"; exit 0' HUP\n\
-             \x20 trap 'kill \"$inner\" 2>/dev/null; exit 0' TERM\n\
-             \x20 sleep 1000 >/dev/null 2>&1 &\n\
+             \x20 trap 'exit 0' TERM\n\
+             \x20 ( while kill -0 $$ 2>/dev/null; do sleep 0.1; done ) >/dev/null 2>&1 &\n\
              \x20 inner=$!\n\
+             \x20 trap 'kill \"$inner\" 2>/dev/null' EXIT\n\
              \x20 echo > '{worker_ready}'\n\
              \x20 wait \"$inner\"\n\
              ) &\n\
              worker=$!\n\
              read _ < '{worker_ready}'\n\
-             sleep 1000 >/dev/null 2>&1 &\n\
+             ( while kill -0 $$ 2>/dev/null; do sleep 0.1; done ) >/dev/null 2>&1 &\n\
              sleeper=$!\n\
+             trap 'kill \"$sleeper\" \"$worker\" 2>/dev/null' EXIT\n\
              echo \"$$ $sleeper $worker\" > '{pids}'\n\
              echo ready\n\
              while kill -0 \"$sleeper\" 2>/dev/null; do wait \"$sleeper\"; done",
