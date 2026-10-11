@@ -3515,3 +3515,39 @@ Falsifier: a handler calling `Concurrency::defer([task])` answers only after the
 Mechanism: `par-laravel-gaps-concurrency`.
 Rationale: `reference/docs-13.x/concurrency.md` ("Deferring Concurrent Tasks"); the bus module's after-response facility (framework/src/bus/after_response.rs) is the hook.
 Status: Agreed 2026-10-10
+
+[PAR-191] The CLI MUST provide the artisan generators `make:factory`,
+`make:seeder`, `make:cast`, `make:channel`, `make:class`, `make:enum`,
+`make:event`, `make:listener`, `make:job`, `make:job-middleware`,
+`make:mail`, `make:notification`, `make:observer`, `make:policy`,
+`make:provider`, `make:resource`, `make:rule`, `make:scope`, `make:test`,
+`make:trait` and `make:interface`. Each MUST take a name, write one file
+under the project directory the manual names for that kind, holding a
+stub of the shape the manual documents for it (the attribute macro or
+trait implementation an application writes by hand), declare the module in
+that directory's `mod.rs` (`make:test` writes under `tests/` and declares
+nothing), refuse a name that is not a valid Rust identifier, leave an
+existing file untouched unless `--force` is passed, and print the path it
+wrote; every stub MUST compile in a fresh scaffold.
+Falsifier: one of the twenty-one commands is missing or writes nothing; a stub fails `cargo check` in a fresh scaffold; an existing file is overwritten without `--force`; a module is not declared; a name that is not an identifier is accepted.
+Mechanism: `par-cli-generators`.
+Rationale: the developer's words of 2026-10-11 10:19 ("Why doesn't the suprnova cli have make:model if we are doing artisan parity? or make controller etc etc") and 18:00 ("Yes add them"); the parity map's twenty-one `*MakeCommand` rows marked not_built; `make:model` stays `db:sync` with `#[suprnova::model]`.
+Status: Agreed 2026-10-11
+
+[PAR-192] `suprnova new` MUST offer `live` as a fourth frontend beside
+`svelte`, `react` and `vue` (`--frontend live`, and the prompt's fourth
+choice): a starter kit without a Node toolchain whose pages are
+server-rendered Live documents using the framework's browser runtime and
+the shipped component library, with the Inertia kits' pages (home,
+register, login, forgot and reset password, verify email, dashboard, the
+notes index and show pages, the profile name) and PAR-080's backend behind
+the same authentication, a guest layout for the auth pages and an
+application layout (navigation, the signed-in user, the flash toast) for
+the rest, the dashboard's stats refreshing without a page load, and the
+notes index with a search filter, a create form and a load-more list, each
+through Live; a fresh `--frontend live` scaffold MUST compile against the
+framework it pins and its documents MUST render in the kit tests.
+Falsifier: `--frontend live` is refused, or the kit writes a Vite project under `frontend/` or depends on Node; a kit page renders through Inertia; a fresh live scaffold fails `cargo check`; a kit document fails to render in the kit tests; the flash toast, the dashboard refresh, the search filter, the create form or the load-more list is missing.
+Mechanism: `par-live-kit`.
+Rationale: the developer's words of 2026-10-11 18:01 ("You also need to add a Live scaffold just like the react, vue and svelte"); the dogfood application's Live documents (app/src/live/pages.rs) and the shipped library (crates/suprnova-live/components) are the pattern.
+Status: Agreed 2026-10-11

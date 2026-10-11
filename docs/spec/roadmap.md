@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: release-4-0-0
+Current: cli-generators-and-live-kit
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1073,6 +1073,29 @@ Requirements: MAN-002, MAN-108
    committed tree and the review is recorded; the tag v4.0.0 then follows
    through `scripts/release.sh`, which runs the whole gate, on a pushed
    main.
+
+## cli-generators-and-live-kit
+
+Requirements: PAR-191, PAR-192
+
+53. cli-generators-and-live-kit - the twenty-one artisan generators the
+   parity map marks not built and a Live starter kit beside the Svelte,
+   React and Vue kits, in 4.0.0 before the tag, under the developer's
+   words of 2026-10-11 18:00 ("Yes add them") and 18:01 ("You also need
+   to add a Live scaffold just like the react, vue and svelte").
+   Delivery: the twenty-one `make:*` commands in `suprnova-cli/src/commands/`
+   with their templates, each run against a fresh scaffold by
+   `suprnova-cli/tests/make_generators.rs`, and a manual chapter for the
+   generators linked from the documentation index and the CLI chapter; the
+   `live` frontend in `suprnova-cli/src/templates/` (the kit's documents,
+   components, views and layouts) behind `suprnova new --frontend live`,
+   checked by `suprnova-cli/tests/kit_live.rs` and the scaffold compile
+   check, documented in `manual/cli-new.md` and `manual/starter-kits.md`;
+   changelog entries under 4.0.0 `### Added`. Mechanisms:
+   par-cli-generators (PAR-191) and par-live-kit (PAR-192), both declared
+   in this phase with a violating example. Done when both requirements
+   have a current pass on a committed tree and the review is recorded; the
+   tag v4.0.0 then follows through `scripts/release.sh` on a pushed main.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
