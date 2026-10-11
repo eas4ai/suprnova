@@ -15,13 +15,17 @@
 //!
 //! It also records the commit the CLI is built from, for the framework pin
 //! `suprnova new` writes (PAR-080): `SUPRNOVA_CLI_BUILD_COMMIT`, HEAD's
-//! full hash, and `SUPRNOVA_CLI_BUILD_TAGGED`, whether the local tag
-//! `v<version>` names HEAD. A CLI built from main between two releases has
-//! templates that may already use API the last tag lacks, so its scaffold
-//! must pin the commit, not the tag; so does any build without the release
-//! tag on HEAD. When git cannot answer, the script records nothing and the
-//! scaffold pins the tag. `build_commit.rs` holds the classification, so
-//! `tests/build_commit.rs` can check it on real repositories.
+//! full hash, and `SUPRNOVA_CLI_BUILD_TAGGED`, whether the tag `v<version>`
+//! names HEAD: the local tag, or with none, the tag an `origin` on this
+//! machine lists. That second source is Cargo's git database for the
+//! checkout `cargo install --git --tag` builds, which carries no tags of
+//! its own; a network `origin` is never asked. A CLI built from main
+//! between two releases has templates that may already use API the last
+//! tag lacks, so its scaffold must pin the commit, not the tag; so does any
+//! build without the release tag on HEAD. When git cannot answer, the
+//! script records nothing and the scaffold pins the tag. `build_commit.rs`
+//! holds the classification, so `tests/build_commit.rs` can check it on
+//! real repositories.
 
 use std::env;
 use std::fs;
@@ -137,7 +141,9 @@ fn record_build_commit(manifest_dir: &Path) {
 /// The git files whose change can change [`build_commit`]'s answer: HEAD,
 /// the branch it names, the packed refs and the tags. Only paths that
 /// exist are returned, because cargo runs a script again on every build
-/// while a path it watches is missing.
+/// while a path it watches is missing. A local `origin`'s tags are not
+/// watched: Cargo builds each of its checkouts once, from a directory
+/// named for the commit.
 fn watched_git_paths(workspace: &Path) -> Vec<PathBuf> {
     let mut names = vec![
         "HEAD".to_owned(),

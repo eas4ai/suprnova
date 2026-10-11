@@ -1,9 +1,11 @@
 //! The build script's answer to "which commit is this CLI built from, and
 //! is it the release?" (PAR-080), checked on real git repositories. HEAD is
-//! the release only when the local tag `v<version>` names it. Every other
-//! build is untagged, a one-commit-deep clone included, so `suprnova new`
-//! pins the commit the templates were written for rather than a tag that
-//! may lack their API.
+//! the release when the local tag `v<version>` names it, or, with no local
+//! tag, when an `origin` on this machine lists that tag on HEAD, as Cargo's
+//! git database does for the checkout `cargo install --git --tag` builds.
+//! Every other build is untagged, a one-commit-deep clone included, so
+//! `suprnova new` pins the commit the templates were written for rather
+//! than a tag that may lack their API.
 
 #[path = "../build_commit.rs"]
 mod build_commit;
@@ -11,6 +13,7 @@ mod build_commit;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use build_commit::build_commit;
 
@@ -98,6 +101,57 @@ impl Fixture {
             release,
             head,
         }
+    }
+
+    /// A checkout laid out as Cargo lays out a git dependency, built from
+    /// `source`: a bare database repository that fetched `main` and the
+    /// source's tags, storing the tags under `tag_namespace`
+    /// (`refs/remotes/origin/tags/` as current Cargo does, `refs/tags/` as
+    /// older Cargo did), and a full checkout cloned from the database by
+    /// its `file://` URL with no tags of its own. HEAD is the later commit.
+    fn cargo_checkout(&self, source: &Repository, tag_namespace: &str) -> PathBuf {
+        let database = self.temp.path().join("database");
+        let database_path = database.to_str().expect("the temporary path is UTF-8");
+        self.git(
+            self.temp.path(),
+            &["init", "-q", "--bare", "-b", "main", database_path],
+        );
+        let source_url = format!("file://{}", source.path.display());
+        let tags = format!("+refs/tags/*:{tag_namespace}*");
+        self.git(
+            &database,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                &source_url,
+                "+refs/heads/main:refs/heads/main",
+                &tags,
+            ],
+        );
+        let checkout = self.temp.path().join("checkout");
+        let database_url = format!("file://{database_path}");
+        let checkout_path = checkout.to_str().expect("the temporary path is UTF-8");
+        self.git(
+            self.temp.path(),
+            &["clone", "-q", "--no-tags", &database_url, checkout_path],
+        );
+        assert_eq!(
+            self.git(&checkout, &["rev-parse", "--is-shallow-repository"]),
+            "false",
+            "Cargo's checkouts are not shallow"
+        );
+        assert_eq!(
+            self.git(&checkout, &["for-each-ref", "refs/tags"]),
+            "",
+            "the checkout must carry no tags of its own"
+        );
+        let listing = self.git(&checkout, &["ls-remote", "origin"]);
+        assert!(
+            listing.contains(&format!("{tag_namespace}v{VERSION}")),
+            "the database must hold the release tag under {tag_namespace}; it lists:\n{listing}"
+        );
+        checkout
     }
 }
 
@@ -195,4 +249,101 @@ fn build_commit_is_none_below_the_top_of_a_repository() {
     let vendored = repository.path.join("vendored");
     fs::create_dir(&vendored).expect("create the vendored directory");
     assert!(build_commit(&vendored, VERSION).is_none());
+}
+
+/// The checkout `cargo install --git --tag v<version>` builds from: Cargo's
+/// checkouts carry no tags, but their `origin` is Cargo's git database on
+/// disk, which stores the fetched tags under `refs/remotes/origin/tags/`
+/// and answers `git ls-remote` offline.
+#[test]
+fn build_commit_is_tagged_in_a_cargo_checkout_whose_database_tags_head() {
+    let fixture = Fixture::new();
+    let source = fixture.repository("source");
+    fixture.git(&source.path, &["tag", "v9.9.9", &source.release]);
+    let checkout = fixture.cargo_checkout(&source, "refs/remotes/origin/tags/");
+    fixture.git(&checkout, &["checkout", "-q", "--detach", &source.release]);
+    assert_eq!(classify(&checkout), (source.release, true));
+}
+
+/// Older Cargo versions stored the tags they fetched as `refs/tags/`.
+#[test]
+fn build_commit_is_tagged_in_a_cargo_checkout_whose_database_keeps_refs_tags() {
+    let fixture = Fixture::new();
+    let source = fixture.repository("source");
+    fixture.git(&source.path, &["tag", "v9.9.9", &source.release]);
+    let checkout = fixture.cargo_checkout(&source, "refs/tags/");
+    fixture.git(&checkout, &["checkout", "-q", "--detach", &source.release]);
+    assert_eq!(classify(&checkout), (source.release, true));
+}
+
+/// Suprnova's release tags are annotated, so the database's tag names a
+/// tag object and only its peeled `^{}` entry names the commit.
+#[test]
+fn build_commit_is_tagged_in_a_cargo_checkout_with_an_annotated_release_tag() {
+    let fixture = Fixture::new();
+    let source = fixture.repository("source");
+    fixture.git(
+        &source.path,
+        &[
+            "tag",
+            "-a",
+            "v9.9.9",
+            "-m",
+            "Release 9.9.9",
+            &source.release,
+        ],
+    );
+    let checkout = fixture.cargo_checkout(&source, "refs/remotes/origin/tags/");
+    fixture.git(&checkout, &["checkout", "-q", "--detach", &source.release]);
+    assert_eq!(classify(&checkout), (source.release, true));
+}
+
+/// The database's release tag names another commit than HEAD, as for a
+/// checkout of a commit made after the release.
+#[test]
+fn build_commit_is_untagged_in_a_cargo_checkout_past_the_release() {
+    let fixture = Fixture::new();
+    let source = fixture.repository("source");
+    fixture.git(
+        &source.path,
+        &[
+            "tag",
+            "-a",
+            "v9.9.9",
+            "-m",
+            "Release 9.9.9",
+            &source.release,
+        ],
+    );
+    let checkout = fixture.cargo_checkout(&source, "refs/remotes/origin/tags/");
+    assert_eq!(classify(&checkout), (source.head, false));
+}
+
+/// An `origin` reached over the network is never asked for its tags, so
+/// no build waits on the network. The URL is never contacted: the call
+/// must answer untagged at once.
+#[test]
+fn build_commit_is_untagged_without_waiting_when_origin_is_a_network_url() {
+    let fixture = Fixture::new();
+    let source = fixture.repository("source");
+    fixture.git(&source.path, &["tag", "v9.9.9", &source.release]);
+    let checkout = fixture.cargo_checkout(&source, "refs/remotes/origin/tags/");
+    fixture.git(&checkout, &["checkout", "-q", "--detach", &source.release]);
+    fixture.git(
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    );
+    let started = Instant::now();
+    let classified = classify(&checkout);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "classifying a checkout with a network origin took {elapsed:?}"
+    );
+    assert_eq!(classified, (source.release, false));
 }

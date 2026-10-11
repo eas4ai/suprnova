@@ -38,10 +38,13 @@ pub fn framework_tag() -> String {
 pub struct BuildCommit<'a> {
     /// The commit's full hash.
     pub sha: &'a str,
-    /// Whether the local tag `v<version>` of the CLI named the commit when
-    /// it was built. Only the tag proves a commit is the release: the
-    /// history cannot, because in a clone one commit deep, HEAD seems to
-    /// add the version line whatever commit it is.
+    /// Whether the tag `v<version>` of the CLI named the commit when it was
+    /// built: the checkout's own tag or, with none, the tag its `origin` on
+    /// the same machine listed, as Cargo's git database does for the
+    /// checkout `cargo install --git --tag` builds. Only the tag proves a
+    /// commit is the release: the history cannot, because in a clone one
+    /// commit deep, HEAD seems to add the version line whatever commit it
+    /// is.
     pub tagged: bool,
 }
 
@@ -65,8 +68,9 @@ pub enum FrameworkPin {
     Tag(String),
     /// A commit hash: what any other build pins. A CLI built between two
     /// releases may have templates that use API the last tag does not
-    /// have. A release built from a checkout without its tag pins the
-    /// release commit, which names the same source as the tag.
+    /// have. A release built from a checkout with no tag information, such
+    /// as a shallow clone, pins the release commit, which names the same
+    /// source as the tag.
     Rev(String),
 }
 
