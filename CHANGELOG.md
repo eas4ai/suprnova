@@ -8,6 +8,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The artisan generators.** Twenty-one `suprnova make:*` commands each
+  write one file from a stub and declare its module in `src/lib.rs` and the
+  directory's `mod.rs`: `make:factory` (a `Factory` for a model, in
+  `src/factories/`), `make:seeder` (a `Seeder`, `src/seeders/`), `make:cast`
+  (a `Cast`, `src/casts/`), `make:channel` (a private broadcast `Channel`,
+  `src/broadcasting/`), `make:class` (a plain struct, `src/`), `make:enum`
+  (`src/enums/`), `make:event` (an `Event`, `src/events/`), `make:listener`
+  (a `Listener` of one event or any event, `src/listeners/`), `make:job` (a
+  queued `Job`, `src/jobs/`), `make:job-middleware` (a `JobMiddleware`,
+  `src/jobs/middleware/`), `make:mail` (a `Mailable`, `src/mail/`),
+  `make:notification` (a mail `Notification`, `src/notifications/`),
+  `make:observer` (an `Observer` of a model, `src/observers/`),
+  `make:policy` (a `#[policy]` with the seven model abilities,
+  `src/policies/`), `make:provider` (the `register` function the bootstrap
+  calls, `src/providers/`), `make:resource` (a JSON:API `Data` struct,
+  `src/resources/`), `make:rule` (a validation `Rule`, `src/rules/`),
+  `make:scope` (a `GlobalScope`, `src/scopes/`), `make:test` (an integration
+  test in `tests/`, which declares nothing), `make:trait` (a trait with a
+  default method, `src/concerns/`) and `make:interface` (a trait with
+  required methods only, `src/contracts/`). A name that is not a Rust
+  identifier is refused with exit status 1, an existing file is kept unless
+  `--force` is given, and each command prints the path it wrote.
+  `make:factory`, `make:observer`, `make:policy` and `make:scope` take
+  `--model`, and `make:listener` takes `--event`.
 - **MongoDB connections.** The `database-mongodb` feature (off by default)
   adds the `Mongo` facade on the official `mongodb` driver: `MONGODB_URI` and
   `MONGODB_DATABASE` (or `MongoConfig::builder()`, with pool options and

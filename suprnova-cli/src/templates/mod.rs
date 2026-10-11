@@ -601,6 +601,57 @@ pub struct {struct_name};
     )
 }
 
+/// The stubs of the artisan generators that write one file, from
+/// `make:factory` to `make:interface`. Each is Rust source with
+/// `{placeholder}` names that `make:*` fills through `render_placeholders`;
+/// the generators' compile check builds every one in a fresh project.
+pub mod stubs {
+    /// `make:factory`: a `Factory` for a model.
+    pub const FACTORY: &str = include_str!("files/generators/factory.rs.tpl");
+    /// `make:seeder`: a `Seeder` that `db:seed` runs.
+    pub const SEEDER: &str = include_str!("files/generators/seeder.rs.tpl");
+    /// `make:cast`: a custom attribute `Cast`.
+    pub const CAST: &str = include_str!("files/generators/cast.rs.tpl");
+    /// `make:channel`: a private broadcast `Channel` and who may join it.
+    pub const CHANNEL: &str = include_str!("files/generators/channel.rs.tpl");
+    /// `make:class`: a plain struct with an `impl` block.
+    pub const CLASS: &str = include_str!("files/generators/class.rs.tpl");
+    /// `make:enum`: a plain enum.
+    pub const ENUM: &str = include_str!("files/generators/enum.rs.tpl");
+    /// `make:event`: an `Event`.
+    pub const EVENT: &str = include_str!("files/generators/event.rs.tpl");
+    /// `make:listener --event`: a `Listener` of one event.
+    pub const LISTENER_EVENT: &str = include_str!("files/generators/listener_event.rs.tpl");
+    /// `make:listener` without `--event`: a `Listener` of any event.
+    pub const LISTENER_ANY: &str = include_str!("files/generators/listener_any.rs.tpl");
+    /// `make:job`: a queued `Job`.
+    pub const JOB: &str = include_str!("files/generators/job.rs.tpl");
+    /// `make:job-middleware`: a `JobMiddleware`.
+    pub const JOB_MIDDLEWARE: &str = include_str!("files/generators/job_middleware.rs.tpl");
+    /// `make:mail`: a `Mailable`.
+    pub const MAIL: &str = include_str!("files/generators/mail.rs.tpl");
+    /// `make:notification`: a `Notification` with its mail rendering.
+    pub const NOTIFICATION: &str = include_str!("files/generators/notification.rs.tpl");
+    /// `make:observer`: an `Observer` of a model.
+    pub const OBSERVER: &str = include_str!("files/generators/observer.rs.tpl");
+    /// `make:policy`: a `#[policy]` for a model.
+    pub const POLICY: &str = include_str!("files/generators/policy.rs.tpl");
+    /// `make:provider`: the `register` function a bootstrap calls.
+    pub const PROVIDER: &str = include_str!("files/generators/provider.rs.tpl");
+    /// `make:resource`: a JSON:API resource, a `Data` struct.
+    pub const RESOURCE: &str = include_str!("files/generators/resource.rs.tpl");
+    /// `make:rule`: a custom validation `Rule`.
+    pub const RULE: &str = include_str!("files/generators/rule.rs.tpl");
+    /// `make:scope`: a `GlobalScope` of a model.
+    pub const SCOPE: &str = include_str!("files/generators/scope.rs.tpl");
+    /// `make:test`: an integration test under `tests/`.
+    pub const TEST: &str = include_str!("files/generators/test.rs.tpl");
+    /// `make:trait`: a trait with a default method.
+    pub const TRAIT: &str = include_str!("files/generators/trait.rs.tpl");
+    /// `make:interface`: a trait with required methods only.
+    pub const INTERFACE: &str = include_str!("files/generators/interface.rs.tpl");
+}
+
 /// Template for models/mod.rs
 pub fn models_mod() -> &'static str {
     include_str!("files/backend/models/mod.rs.tpl")

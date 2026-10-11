@@ -81,6 +81,27 @@ The same list `suprnova --help` prints, grouped the same way.
 | `suprnova make:error <name>` | Scaffold a domain error in `src/errors/`. |
 | `suprnova make:task <name>` | Scaffold a scheduled task in `src/tasks/`. |
 | `suprnova make:command <name>` | Scaffold a `#[derive(Command)]` console command in `src/commands/`. |
+| `suprnova make:factory <name>` | Scaffold a model factory in `src/factories/`. `--model` names the model. |
+| `suprnova make:seeder <name>` | Scaffold a database seeder in `src/seeders/`. |
+| `suprnova make:cast <name>` | Scaffold a custom attribute cast in `src/casts/`. |
+| `suprnova make:channel <name>` | Scaffold a private broadcast channel in `src/broadcasting/`. |
+| `suprnova make:class <name>` | Scaffold a plain struct in `src/`. |
+| `suprnova make:enum <name>` | Scaffold an enum in `src/enums/`. |
+| `suprnova make:event <name>` | Scaffold an event in `src/events/`. |
+| `suprnova make:listener <name>` | Scaffold an event listener in `src/listeners/`. `--event` names the event. |
+| `suprnova make:job <name>` | Scaffold a queued job in `src/jobs/`. |
+| `suprnova make:job-middleware <name>` | Scaffold job middleware in `src/jobs/middleware/`. |
+| `suprnova make:mail <name>` | Scaffold a mailable in `src/mail/`. |
+| `suprnova make:notification <name>` | Scaffold a notification in `src/notifications/`. |
+| `suprnova make:observer <name>` | Scaffold a model observer in `src/observers/`. `--model` names the model. |
+| `suprnova make:policy <name>` | Scaffold a `#[policy]` in `src/policies/`. `--model` names the model. |
+| `suprnova make:provider <name>` | Scaffold a service registration the bootstrap calls in `src/providers/`. |
+| `suprnova make:resource <name>` | Scaffold a JSON:API resource in `src/resources/`. |
+| `suprnova make:rule <name>` | Scaffold a validation rule in `src/rules/`. |
+| `suprnova make:scope <name>` | Scaffold a global query scope in `src/scopes/`. `--model` names the model. |
+| `suprnova make:test <name>` | Scaffold an integration test in `tests/`. |
+| `suprnova make:trait <name>` | Scaffold a trait with a default method in `src/concerns/`. |
+| `suprnova make:interface <name>` | Scaffold a trait with required methods in `src/contracts/`. |
 | `suprnova generate-types` | Emit TypeScript types from every `#[derive(InertiaProps)]` struct. `-o <path>` to override output, `-w` to watch and regenerate. |
 
 See [Generators](cli-generators.md) for the full scaffold details and what
