@@ -844,7 +844,7 @@ mod backend {
 
     /// PAR-080: a fresh scaffold compiles against the framework it pins,
     /// so it pins the framework the CLI's templates were written for: the
-    /// commit the CLI was built from when the local tag `v<version>` does
+    /// commit the CLI was built from when the release tag `v<version>` does
     /// not name that commit, as on main between two releases, and the tag
     /// otherwise. Both the dependency and the dev-dependency carry the pin
     /// this build recorded.

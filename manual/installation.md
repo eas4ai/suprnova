@@ -191,16 +191,22 @@ dependency in `Cargo.toml`:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.2.1" }
 ```
 
-A CLI pins the release tag only when it was built from a checkout where
-that tag names the commit being built. A CLI built from any other checkout
-pins its commit instead, as `rev = "<commit hash>"`:
+A CLI pins the release tag when that tag names the commit the CLI was
+built from. The build reads the tag from its own checkout, or, when the
+checkout has no such tag, from the checkout's `origin` if `origin` is a
+repository on the same machine. That covers the install command above:
+`cargo install --git ... --tag v<version>` builds from a Cargo checkout
+that carries no tags, so the build reads the release tag from Cargo's git
+database on disk, without the network. Any other CLI pins its commit
+instead, as `rev = "<commit hash>"`:
 
 - A CLI built from `main` between two releases pins its commit because its
   templates can use framework API that the last release tag does not have
   yet. The scaffold needs the framework from the same commit.
-- `cargo install --git` builds from a checkout that usually carries no
-  tags. A CLI installed that way, even with `--tag`, pins the release
-  commit's hash, which names the same source as the tag.
+- A CLI built from a checkout where git can read no release tag offline,
+  such as a shallow clone or a clone of `main` made without tags, pins its
+  commit even at the release. The release commit's hash names the same
+  source as the tag.
 
 Replace `rev` with a release `tag` when you move to a release.
 
@@ -220,8 +226,8 @@ there's no need to hand-pin a `rev` in `Cargo.toml`.
 Suprnova is distributed through git, not crates.io - both the framework
 and the CLI install from GitHub. Each version is published as a tagged
 GitHub Release (e.g. `v2.1.0`), and the tag is what your app depends on:
-a scaffolded `Cargo.toml` pins `tag = "v3.2.1"` when the CLI was built from
-a checkout carrying that tag, or the release commit's hash otherwise (see
+a scaffolded `Cargo.toml` pins `tag = "v3.2.1"` when the CLI was installed
+from that release, or the commit the CLI was built from otherwise (see
 above), and `Cargo.lock` records the exact commit, so builds are
 reproducible until you choose to move. Updating is deliberate, never incidental - bump the tag and
 run `cargo update -p suprnova`; the section on updating your app's

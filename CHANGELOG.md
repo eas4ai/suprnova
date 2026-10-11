@@ -2913,12 +2913,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   last tag lacked (`DevToolsConfig`, `InertiaConfig::devtools`,
   `Inertia::flash`), so the scaffold failed `cargo check` until the next
   release. The CLI's build script now records the commit it is built from
-  and whether the local tag `v<version>` names that commit. Only then does
-  the scaffold pin `tag = "v<version>"`. With no such tag, or with the tag
-  on another commit, it pins `rev = "<commit hash>"`, so a release built
-  from a checkout without its tag, as `cargo install --git` usually
-  builds, pins the release commit's hash, which names the same source. A
-  build where git cannot answer pins the tag.
+  and whether the tag `v<version>` names that commit. Only then does the
+  scaffold pin `tag = "v<version>"`. The script reads the tag from its own
+  checkout, or, when the checkout has none, from an `origin` on the same
+  machine, so a release installed with `cargo install --git --tag` pins
+  the tag: Cargo's checkout carries no tags, and the script reads the
+  release tag offline from Cargo's git database. An `origin` reached over
+  the network is never asked. With the tag on another commit, or in a
+  checkout with no tag information, such as a shallow clone, the scaffold
+  pins `rev = "<commit hash>"`, which at the release names the same source
+  as the tag. A build where git cannot answer pins the tag.
   `templates::framework_pin` returns the choice, and
   `templates::cargo_toml_pinned` and `templates::api::cargo_toml_pinned`
   render a manifest with a pin you give.
