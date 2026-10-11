@@ -641,8 +641,10 @@ impl Inertia {
 
     /// Install the standard Inertia protocol middleware globally.
     ///
-    /// When Inertia DevTools is enabled ([`InertiaConfig::devtools`], on
-    /// by default only when `APP_ENV` names the `local` environment), the
+    /// When Inertia DevTools is configured ([`InertiaConfig::devtools`];
+    /// without the call nothing is recorded, and a configured instance
+    /// records only when `APP_ENV` names the `local` environment, or as
+    /// its `enabled(..)` says), the
     /// [`DevToolsMiddleware`](crate::DevToolsMiddleware) that records each
     /// request for the browser extension and answers its entry endpoints
     /// is registered first, outermost of the Inertia layer. Then it
