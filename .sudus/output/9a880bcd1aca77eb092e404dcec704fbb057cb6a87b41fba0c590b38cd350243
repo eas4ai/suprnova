@@ -1,0 +1,16 @@
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+    Finished `test` profile [unoptimized] target(s) in 22.13s
+────────────
+ Nextest run ID b26a039a-90dc-4f87-8bc2-da0bbbf3b05a with nextest profile: default
+    Starting 22 tests across 1 binary
+────────────
+     Summary [   0.048s] 22 tests run: 22 passed, 0 skipped
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 36s
+────────────
+ Nextest run ID 6a91b50b-9225-4b92-80e3-d5cc533f60ac with nextest profile: default
+    Starting 21 tests across 1 binary (28 tests skipped)
+────────────
+     Summary [   5.443s] 21 tests run: 21 passed, 28 skipped

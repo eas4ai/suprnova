@@ -1,0 +1,32 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 09s
+────────────
+ Nextest run ID 7ec9f0a6-5a56-478a-895f-8d590cbb6d88 with nextest profile: default
+    Starting 96 tests across 4 binaries (3365 tests skipped)
+        FAIL [   0.010s] (63/96) suprnova::inertia ssr_gateway::inssr_a_404_from_the_hot_endpoint_is_a_reported_failure
+  stdout ───
+
+    running 1 test
+    test ssr_gateway::inssr_a_404_from_the_hot_endpoint_is_a_reported_failure ... FAILED
+
+    failures:
+
+    failures:
+        ssr_gateway::inssr_a_404_from_the_hot_endpoint_is_a_reported_failure
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 516 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'ssr_gateway::inssr_a_404_from_the_hot_endpoint_is_a_reported_failure' (1123619) panicked at framework/tests/inertia/ssr_gateway.rs:537:5:
+    assertion `left == right` failed: the dev server was asked
+      left: 0
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [   0.510s] 74/96 tests run: 73 passed, 1 failed, 3365 skipped
+        FAIL [   0.010s] (63/96) suprnova::inertia ssr_gateway::inssr_a_404_from_the_hot_endpoint_is_a_reported_failure
+warning: 22/96 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

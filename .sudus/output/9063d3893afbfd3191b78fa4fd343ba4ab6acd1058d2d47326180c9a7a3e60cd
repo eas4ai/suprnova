@@ -1,0 +1,63 @@
+    Finished `test` profile [unoptimized] target(s) in 0.36s
+────────────
+ Nextest run ID d4240147-37e2-42a7-a123-b6a93337c379 with nextest profile: default
+    Starting 12 tests across 1 binary (73 tests skipped)
+────────────
+     Summary [   0.167s] 12 tests run: 12 passed, 73 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.40s
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-8eb14c03e7b009bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/documented_call.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/documented_call_probe-44ee5cf32ac2b54f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-6206a3074e5d1aeb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/plain.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/plain_probe-3fc647dd65c9f2a3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/settings.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/settings-75b62e7ef72f8531)
+
+running 3 tests
+test sqlite_settings_reach_models_and_migrations ... ok
+test mysql_settings_reach_models_and_migrations ... ok
+test postgres_settings_reach_models_and_migrations ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+   Doc-tests laravel_defaults_probe
+
+running 4 tests
+test src/lib.rs - ProbePost::without_global_scope (line 37) ... ignored
+test src/lib.rs - ProbePost::without_global_scopes (line 37) ... ignored
+test src/lib.rs - ProbeUser::without_global_scope (line 24) ... ignored
+test src/lib.rs - ProbeUser::without_global_scopes (line 24) ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.17s; merged doctests compilation took 0.17s
+    Finished `test` profile [unoptimized] target(s) in 0.27s
+────────────
+ Nextest run ID 650b1006-177a-408e-8d48-4f60526850b8 with nextest profile: default
+    Starting 5 tests across 6 binaries (202 tests skipped)
+────────────
+     Summary [   2.145s] 5 tests run: 5 passed, 202 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.31s
+────────────
+ Nextest run ID ec50a4db-e81a-48ac-9c5d-901801724274 with nextest profile: default
+    Starting 1 test across 1 binary (2 tests skipped)
+────────────
+     Summary [   0.012s] 1 test run: 1 passed, 2 skipped

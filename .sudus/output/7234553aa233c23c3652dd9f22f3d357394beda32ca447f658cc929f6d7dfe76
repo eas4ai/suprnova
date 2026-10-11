@@ -1,0 +1,17 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 2.05s
+────────────
+ Nextest run ID 7ff34a15-e6a0-4a5a-975f-b57c2ab0cbc6 with nextest profile: default
+    Starting 13 tests across 1 binary (38 tests skipped)
+────────────
+     Summary [   0.022s] 13 tests run: 13 passed, 38 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.29s
+   Doc-tests suprnova
+
+running 2 tests
+test framework/src/authorization/mod.rs - authorization (line 36) - compile fail ... ok
+test framework/src/authorization/mod.rs - authorization (line 17) - compile ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.36s
+
+all doctests ran in 4.46s; merged doctests compilation took 4.09s

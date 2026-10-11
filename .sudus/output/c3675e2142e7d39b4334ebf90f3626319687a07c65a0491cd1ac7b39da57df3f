@@ -1,0 +1,29 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 0.66s
+────────────
+ Nextest run ID 8ce3d268-c62c-416b-879b-7986d861e6e4 with nextest profile: default
+    Starting 1 test across 3 binaries (63 tests skipped)
+        FAIL [   0.009s] (1/1) suprnova-cli::new_project rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html
+  stdout ───
+
+    running 1 test
+    test rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html ... FAILED
+
+    failures:
+
+    failures:
+        rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html' (2384267) panicked at suprnova-cli/tests/new_project.rs:65:5:
+    the scaffold still writes frontend/index.html, a shell the server never serves
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.010s] 1 test run: 0 passed, 1 failed, 63 skipped
+        FAIL [   0.009s] (1/1) suprnova-cli::new_project rdoc_the_scaffold_ships_a_root_template_in_place_of_frontend_index_html
+error: test run failed

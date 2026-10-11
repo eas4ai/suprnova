@@ -1,0 +1,15 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 58.11s
+────────────
+ Nextest run ID 0d886f01-8c62-433a-b177-6fb5e0be577c with nextest profile: default
+    Starting 7 tests across 3 binaries (63 tests skipped)
+────────────
+     Summary [   0.017s] 7 tests run: 7 passed, 63 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3.52s
+────────────
+ Nextest run ID 2f689fa6-d795-4e89-bac8-81e6da66635e with nextest profile: default
+    Starting 22 tests across 3 binaries (3290 tests skipped)
+────────────
+     Summary [   1.099s] 22 tests run: 22 passed, 3290 skipped

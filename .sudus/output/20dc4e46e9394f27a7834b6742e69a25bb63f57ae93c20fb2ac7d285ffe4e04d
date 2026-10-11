@@ -1,0 +1,58 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+warning: unused import: `Mutex`
+ --> framework/tests/routing/laravel_delta.rs:6:22
+  |
+6 | use std::sync::{Arc, Mutex};
+  |                      ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> framework/tests/routing/laravel_delta.rs:8:5
+  |
+8 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `serial_test::serial`
+  --> framework/tests/routing/laravel_delta.rs:16:5
+   |
+16 | use serial_test::serial;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::OnceLock`
+  --> framework/tests/routing/laravel_delta.rs:17:5
+   |
+17 | use std::sync::OnceLock;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: `suprnova` (test "routing") generated 4 warnings (run `cargo fix --test "routing" -p suprnova` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 28.83s
+────────────
+ Nextest run ID 9601b713-7d9b-435c-beaa-f66f7514fe94 with nextest profile: default
+    Starting 1 test across 10 binaries (2452 tests skipped)
+        FAIL [   0.012s] (1/1) suprnova::routing laravel_delta::query_reaches_an_any_route
+  stdout ───
+
+    running 1 test
+    test laravel_delta::query_reaches_an_any_route ... FAILED
+
+    failures:
+
+    failures:
+        laravel_delta::query_reaches_an_any_route
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 222 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_delta::query_reaches_an_any_route' (3181846) panicked at framework/tests/routing/laravel_delta.rs:32:5:
+    assertion `left == right` failed: body: 404 Not Found
+      left: 404
+     right: 200
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.015s] 1 test run: 0 passed, 1 failed, 2452 skipped
+        FAIL [   0.012s] (1/1) suprnova::routing laravel_delta::query_reaches_an_any_route
+error: test run failed

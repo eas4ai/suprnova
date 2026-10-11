@@ -1,0 +1,32 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3.37s
+────────────
+ Nextest run ID 9977cb88-55a8-4780-8fa6-a657a5d4da10 with nextest profile: default
+    Starting 310 tests across 3 binaries (3024 tests skipped)
+        FAIL [   0.007s] (274/310) suprnova::inertia protocol::inp_a_truthy_x_inertia_header_counts_as_an_inertia_visit
+  stdout ───
+
+    running 1 test
+    test protocol::inp_a_truthy_x_inertia_header_counts_as_an_inertia_visit ... FAILED
+
+    failures:
+
+    failures:
+        protocol::inp_a_truthy_x_inertia_header_counts_as_an_inertia_visit
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 309 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'protocol::inp_a_truthy_x_inertia_header_counts_as_an_inertia_visit' (2372174) panicked at framework/tests/inertia/protocol.rs:36:5:
+    assertion `left == right` failed: X-Inertia: 1 is an Inertia visit, so the response is the JSON page with X-Inertia: true
+      left: None
+     right: Some("true")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 10 tests still running
+────────────
+     Summary [   0.239s] 284/310 tests run: 283 passed, 1 failed, 3024 skipped
+        FAIL [   0.007s] (274/310) suprnova::inertia protocol::inp_a_truthy_x_inertia_header_counts_as_an_inertia_visit
+warning: 26/310 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

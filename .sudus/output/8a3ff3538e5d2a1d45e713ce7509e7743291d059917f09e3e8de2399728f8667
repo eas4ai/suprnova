@@ -1,0 +1,155 @@
+   Compiling smallvec v1.16.2
+   Compiling serde_json v1.0.151
+   Compiling futures-util v0.3.34
+   Compiling quick-xml v0.41.0
+   Compiling askama_parser v0.16.0
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling icu_normalizer v2.2.0
+   Compiling tokio v1.53.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling futures-intrusive v0.5.0
+   Compiling oxideav-core v0.1.34
+   Compiling string_cache v0.9.0
+   Compiling web_atoms v0.2.5
+   Compiling sea-query v1.0.2
+   Compiling markup5ever v0.39.0
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling fixed_decimal v0.7.2
+   Compiling futures-executor v0.3.32
+   Compiling axum-core v0.4.5
+   Compiling askama_derive v0.16.0
+   Compiling futures v0.3.32
+   Compiling reqsign-core v3.1.0 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling tracing-subscriber v0.3.23
+   Compiling webauthn-rs-core v0.5.5
+   Compiling icu_plurals v2.2.0
+   Compiling html5ever v0.39.0
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling h2 v0.4.16
+   Compiling tokio-stream v0.1.18
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tower-http v0.6.11
+   Compiling sqlx-core v0.9.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling askama_macros v0.16.0
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling backon v1.6.0
+   Compiling tower v0.4.13
+   Compiling askama v0.16.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling prometheus-client v0.25.0
+   Compiling icu_decimal v2.2.0
+   Compiling jsonwebtoken v9.3.1
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling hyper v1.9.0
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling charts-rs v1.0.0
+   Compiling hyper-util v0.1.20
+   Compiling totp-rs v5.7.1
+   Compiling sea-orm-cli v2.0.2
+   Compiling syntect v5.3.0
+   Compiling tokio-tungstenite v0.29.0
+   Compiling ece v2.3.1
+   Compiling cssparser v0.37.0
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling hyper-rustls v0.27.9
+   Compiling sqlx v0.9.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling reqwest v0.12.28
+   Compiling axum v0.7.9
+   Compiling sea-schema v0.18.1
+   Compiling hyper-timeout v0.5.2
+   Compiling reqwest v0.13.4
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling sea-orm v2.0.2
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tonic v0.12.3
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling chrono-tz v0.9.0
+   Compiling object v0.37.3
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling combine v4.6.7
+   Compiling webauthn-rs v0.5.5
+   Compiling oxideav-vp8 v0.2.6
+   Compiling fluent-syntax v0.12.0
+   Compiling comrak v0.52.0
+   Compiling fluent-bundle v0.16.0
+   Compiling backtrace v0.3.76
+   Compiling oxideav-webp v0.2.3
+   Compiling deadpool v0.12.3
+   Compiling redis v1.2.1
+   Compiling ammonia v4.1.4
+   Compiling lettre v0.11.22
+   Compiling oxideav-png v0.1.8
+   Compiling qdrant-client v1.18.0
+   Compiling tera v1.20.1
+   Compiling multer v3.1.0
+   Compiling icu_experimental v0.5.0
+   Compiling icu_datetime v2.2.0
+   Compiling aws-sigv4 v1.4.4
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling hyper-tungstenite v0.20.0
+   Compiling validator v0.20.0
+   Compiling oxideav-image-filter v0.1.2
+   Compiling oxideav-pixfmt v0.1.7
+   Compiling oxideav-bmp v0.1.6
+   Compiling oxideav-mjpeg v0.1.8
+   Compiling assert-json-diff v2.0.2
+   Compiling dashmap v5.5.3
+   Compiling dashmap v6.2.1
+   Compiling dhat v0.3.3
+   Compiling webauthn-authenticator-rs v0.5.5
+   Compiling tracing-test v0.2.6
+   Compiling serial_test v2.0.0
+   Compiling wiremock v0.6.5
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 47s
+────────────
+ Nextest run ID aafec54d-22da-4918-a1f6-e3f662a39746 with nextest profile: default
+    Starting 10 tests across 1 binary (144 tests skipped)
+        FAIL [   0.009s] ( 3/10) suprnova::live registry_assets::reg_017_nothing_but_a_component_stylesheet_or_script_is_served
+  stdout ───
+
+    running 1 test
+    test registry_assets::reg_017_nothing_but_a_component_stylesheet_or_script_is_served ... FAILED
+
+    failures:
+
+    failures:
+        registry_assets::reg_017_nothing_but_a_component_stylesheet_or_script_is_served
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'registry_assets::reg_017_nothing_but_a_component_stylesheet_or_script_is_served' (464039) panicked at framework/tests/live/registry_assets.rs:302:9:
+    assertion `left == right` failed: /acme-ui/widget/widget.html is served
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.031s] 10 tests run: 9 passed, 1 failed, 144 skipped
+        FAIL [   0.009s] ( 3/10) suprnova::live registry_assets::reg_017_nothing_but_a_component_stylesheet_or_script_is_served
+error: test run failed

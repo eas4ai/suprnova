@@ -1,0 +1,46 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 19.81s
+────────────
+ Nextest run ID bcac9e93-07f7-43e0-8bde-e100f755d79f with nextest profile: default
+    Starting 21 tests across 1 binary (461 tests skipped)
+        FAIL [   1.183s] (21/21) suprnova::queue fake_parity::revised_without_chain_assertion_accepts_a_predicate
+  stdout ───
+
+    running 1 test
+    test fake_parity::revised_without_chain_assertion_accepts_a_predicate ... FAILED
+
+    failures:
+
+    failures:
+        fake_parity::revised_without_chain_assertion_accepts_a_predicate
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 481 filtered out; finished in 1.16s
+
+  stderr ───
+
+    thread 'fake_parity::revised_without_chain_assertion_accepts_a_predicate' (2648602) panicked at framework/tests/queue/fake_parity.rs:696:9:
+    PAR-009 without-chain assertions accept a job predicate; control=false: error[E0061]: this function takes 0 arguments but 1 argument was supplied
+     --> /home/shawn/workspace2/scratchpads/tmp/.tmpvK9ZBC/probe.rs:1:44
+      |
+    1 | fn accepts_predicate<J: suprnova::Job>() { suprnova::queue::testing::assert_pushed_without_chain::<J>(|_job: &J| true); }
+      |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ --------------- unexpected argument of type `{closure@/home/shawn/workspace2/scratchpads/tmp/.tmpvK9ZBC/probe.rs:1:103: 1:113}`
+      |
+    note: function defined here
+     --> framework/src/queue/testing.rs:710:7
+    help: remove the extra argument
+      |
+    1 - fn accepts_predicate<J: suprnova::Job>() { suprnova::queue::testing::assert_pushed_without_chain::<J>(|_job: &J| true); }
+    1 + fn accepts_predicate<J: suprnova::Job>() { suprnova::queue::testing::assert_pushed_without_chain::<J>(); }
+      |
+
+    error: aborting due to 1 previous error
+
+    For more information about this error, try `rustc --explain E0061`.
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   1.221s] 21 tests run: 20 passed, 1 failed, 461 skipped
+        FAIL [   1.183s] (21/21) suprnova::queue fake_parity::revised_without_chain_assertion_accepts_a_predicate
+error: test run failed

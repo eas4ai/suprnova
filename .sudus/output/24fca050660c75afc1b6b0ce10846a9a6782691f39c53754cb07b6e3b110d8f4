@@ -1,0 +1,17 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+error: expected item after doc comment
+   --> framework/tests/routing/laravel_delta.rs:115:1
+    |
+104 | / /// HEAD against a GET-only route succeeds (RFC 9110 §9.3.2 fallback)
+105 | | /// and returns the GET status with the body stripped to zero bytes.
+106 | | ///
+107 | | /// Also pins the wire-level Content-Length behavior. Per RFC 9110
+...   |
+113 | | /// size_hint is its wire-encoding decision. This assertion pins
+114 | | /// whichever value hyper actually emits so a future hyper bump
+    | |_______________________________________________________________- other attributes here
+115 |   /// that changes the behavior surfaces here.
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this doc comment doesn't document anything
+
+error: could not compile `suprnova` (test "routing") due to 1 previous error
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test schedule --test database --test eloquent --test queue --test bus --test http --test routing --test auth --test notifications --test filesystem` exited with code 101

@@ -1,0 +1,47 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1.96s
+────────────
+ Nextest run ID 5c3fa8cd-611b-4668-8552-78a7781dda0e with nextest profile: default
+    Starting 57 tests across 1 binary
+────────────
+     Summary [   0.276s] 57 tests run: 57 passed, 0 skipped
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID c6595ad8-9bdf-45e0-8259-caeb9697e4c9 with nextest profile: default
+    Starting 4 tests across 1 binary (53 tests skipped)
+────────────
+     Summary [   0.005s] 4 tests run: 4 passed, 53 skipped
+
+> @suprnova/live@0.1.0 test:unit
+> node scripts/run-unit-tests.mjs -t PFX-
+
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  1 passed | 98 skipped (99)
+      Tests  6 passed | 962 skipped (968)
+   Start at  14:48:24
+   Duration  1.80s (transform 4.64s, setup 0ms, import 9.17s, tests 34ms, environment 5ms)
+
+
+> @suprnova/live@0.1.0 build
+> node scripts/build.mjs
+
+artifact role=core-classic file=suprnova-live.classic.js bytes=223862 brotli=53183
+artifact role=core-esm file=suprnova-live.esm.js bytes=223672 brotli=53211
+artifact role=stimulus-classic file=suprnova-live.stimulus.classic.js bytes=10637 brotli=3091
+artifact role=stimulus-esm file=suprnova-live.stimulus.esm.js bytes=10767 brotli=3147
+artifact role=uploads-classic file=suprnova-live.uploads.classic.js bytes=60827 brotli=16622
+artifact role=uploads-esm file=suprnova-live.uploads.esm.js bytes=61832 brotli=16832
+artifact role=async-classic file=suprnova-live.async.classic.js bytes=104324 brotli=25002
+artifact role=async-esm file=suprnova-live.async.esm.js bytes=104620 brotli=25088
+artifact role=ui-styles file=suprnova-ui.css bytes=18017 brotli=3153
+
+> @suprnova/live@0.1.0 build:check
+> node scripts/check-build.mjs
+
+reproducible build: index.d.ts, suprnova-live.assets.json, suprnova-live.async.classic.js, suprnova-live.async.esm.js, suprnova-live.classic.js, suprnova-live.esm.js, suprnova-live.stimulus.classic.js, suprnova-live.stimulus.esm.js, suprnova-live.uploads.classic.js, suprnova-live.uploads.esm.js, suprnova-ui.css

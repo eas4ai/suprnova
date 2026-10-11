@@ -1,0 +1,62 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 6.37s
+────────────
+ Nextest run ID 0f34dff5-730c-4bb7-9b7f-7a759273dacc with nextest profile: default
+    Starting 14 tests across 1 binary
+        FAIL [   0.007s] ( 1/14) suprnova-cli::live_registry_scan reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line
+  stdout ───
+
+    running 1 test
+    test reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line ... FAILED
+
+    failures:
+
+    failures:
+        reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line' (423659) panicked at suprnova-cli/tests/live_registry_scan.rs:67:13:
+    no finding names std::fs in widget.rs: [Finding { check: "rust-path", file: "widget.rs", line: Some(2), message: "`suprnova::live::LiveComponent` is not on the allowlist of Suprnova's documented API" }, Finding { check: "rust-path", file: "widget.rs", line: Some(2), message: "`suprnova::live::live` is not on the allowlist of Suprnova's documented API" }, Finding { check: "rust-derive", file: "widget.rs", line: Some(6), message: "`#[derive(LiveComponent)]` is not an admitted derive" }, Finding { check: "rust-attribute", file: "widget.rs", line: Some(7), message: "`#[live]` invokes a macro that is not admitted" }, Finding { check: "rust-attribute", file: "widget.rs", line: Some(14), message: "`#[live]` invokes a macro that is not admitted" }, Finding { check: "rust-attribute", file: "widget.rs", line: Some(17), message: "`#[mount]` is not an admitted attribute here" }, Finding { check: "rust-method", file: "widget.rs", line: Some(20), message: "`.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.351s] (13/14) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+  stdout ───
+
+    running 1 test
+    test reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line ... FAILED
+
+    failures:
+
+    failures:
+        reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.35s
+
+  stderr ───
+
+    thread 'reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line' (423662) panicked at suprnova-cli/tests/live_registry_scan.rs:336:5:
+    14 failures:
+    rust-live-events: no `rust-path` finding at widget.rs:6; got widget.rs:7: [view-contract] the Live contract of `Widget` cannot be read from its source: the Event payload `File` has no `impl EventPayloadMetadata` in the component with literal constants
+    rust-raw-ident: no `rust-path` finding at widget.rs:19; got widget.rs:19: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-reexport-chain: no `rust-path` finding at widget.rs:26; got widget.rs:31: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-reexport-chain: no `rust-path` finding at widget.rs:31; got widget.rs:31: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-serde-with: admitted
+    rust-std-crate-alias: no `rust-path` finding at widget.rs:20; got widget.rs:20: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-std-fs-alias: no `rust-path` finding at widget.rs:3; got widget.rs:20: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-std-fs-direct: no `rust-path` finding at widget.rs:19; got widget.rs:19: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-std-fs-nested-use: no `rust-path` finding at widget.rs:3; got widget.rs:20: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-turbofish: admitted
+    rust-type-alias: admitted
+    rust-use-in-block: no `rust-path` finding at widget.rs:26; got widget.rs:27: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    rust-use-in-block: no `rust-path` finding at widget.rs:27; got widget.rs:27: [rust-method] `.unwrap_or_default()` is called on a value whose type the scan cannot name; annotate the binding's type
+    view-std-fs-call: admitted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.353s] 14 tests run: 12 passed, 2 failed, 0 skipped
+        FAIL [   0.007s] ( 1/14) suprnova-cli::live_registry_scan reg_030_std_fs_under_an_alias_is_refused_naming_the_file_and_line
+        FAIL [   0.351s] (13/14) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+error: test run failed

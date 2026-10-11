@@ -1,0 +1,85 @@
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 11s
+────────────
+ Nextest run ID 1be67ab2-84e5-453c-aa74-0ced531972af with nextest profile: default
+    Starting 61 tests across 2 binaries (2837 tests skipped)
+        FAIL [   0.008s] (30/61) suprnova::error debug_error_page::replacement::with_debug_off_a_browser_request_gets_a_minimal_html_error_view
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_off_a_browser_request_gets_a_minimal_html_error_view ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_off_a_browser_request_gets_a_minimal_html_error_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_off_a_browser_request_gets_a_minimal_html_error_view' (2732969) panicked at framework/tests/error/debug_error_page/replacement.rs:264:5:
+    {"message":"Internal Server Error","request_id":"fbb28863-dc9a-4bad-be83-834ebf812dd0"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.011s] (31/61) suprnova::error debug_error_page::replacement::production_html_keeps_head_semantics_and_ignores_false_inertia_flags
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::production_html_keeps_head_semantics_and_ignores_false_inertia_flags ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::production_html_keeps_head_semantics_and_ignores_false_inertia_flags
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::production_html_keeps_head_semantics_and_ignores_false_inertia_flags' (2732970) panicked at framework/tests/error/debug_error_page/replacement.rs:264:5:
+    {"message":"Internal Server Error","request_id":"9c4f149d-7177-4cea-af27-2221a2c49f5e"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.011s] (33/61) suprnova::error debug_error_page::replacement::with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page' (2732974) panicked at framework/tests/error/debug_error_page/replacement.rs:269:5:
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="test_csrf_token">
+    <title>Suprnova</title>
+    <script type="module" src="http://localhost:5765/@vite/client"></script>
+    <script type="module" src="http://localhost:5765/src/main.ts"></script>
+    </head>
+    <body>
+    <script type="application/json" data-page="app">{"component":"Error","props":{"errors":{},"status":500,"message":"Internal Server Error","request_id":"3a641c68-f91c-4fa9-892f-20fa52987942"},"url":"\/posts","version":"","sharedProps":["errors"]}</script>
+    <div id="app"></div>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.198s] 41/61 tests run: 38 passed, 3 failed, 2837 skipped
+        FAIL [   0.008s] (30/61) suprnova::error debug_error_page::replacement::with_debug_off_a_browser_request_gets_a_minimal_html_error_view
+        FAIL [   0.011s] (31/61) suprnova::error debug_error_page::replacement::production_html_keeps_head_semantics_and_ignores_false_inertia_flags
+        FAIL [   0.011s] (33/61) suprnova::error debug_error_page::replacement::with_debug_off_inertia_requests_still_get_the_apps_inertia_error_page
+warning: 20/61 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

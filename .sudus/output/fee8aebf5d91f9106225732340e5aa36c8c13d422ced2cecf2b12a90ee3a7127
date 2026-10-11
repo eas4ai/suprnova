@@ -1,0 +1,29 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 06s
+────────────
+ Nextest run ID 60229cbb-2cea-409e-99f7-86578e4796d7 with nextest profile: default
+    Starting 1 test across 1 binary
+        FAIL [   0.003s] (1/1) suprnova::concurrency the_concurrency_chapter_is_linked_from_the_documentation_index
+  stdout ───
+
+    running 1 test
+    test the_concurrency_chapter_is_linked_from_the_documentation_index ... FAILED
+
+    failures:
+
+    failures:
+        the_concurrency_chapter_is_linked_from_the_documentation_index
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'the_concurrency_chapter_is_linked_from_the_documentation_index' (2602055) panicked at framework/tests/concurrency/main.rs:7:5:
+    manual/documentation.md links the concurrency chapter, as every subsystem's chapter is linked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.004s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.003s] (1/1) suprnova::concurrency the_concurrency_chapter_is_linked_from_the_documentation_index
+error: test run failed

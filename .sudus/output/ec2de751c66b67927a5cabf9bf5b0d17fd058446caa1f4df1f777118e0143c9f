@@ -1,0 +1,8 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 2m 00s
+────────────
+ Nextest run ID 99cfb3a8-9194-43bb-bab0-3cb3de8738fe with nextest profile: default
+    Starting 677 tests across 3 binaries (3248 tests skipped)
+[> 60.000s] (───────) suprnova::inertia root_template::rdoc_001_a_template_naming_an_unsupplied_value_does_not_compile
+────────────
+     Summary [  93.477s] 677 tests run: 677 passed (1 slow), 3248 skipped

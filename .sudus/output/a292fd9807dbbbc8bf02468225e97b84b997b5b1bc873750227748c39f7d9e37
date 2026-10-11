@@ -1,0 +1,11 @@
+   Compiling suprnova-macros v3.0.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::authorize`
+  --> framework/tests/authorization/handler_authorize.rs:31:51
+   |
+31 |     Request, Response, RouteParam, Router, attrs, authorize, handle_request, handler, model,
+   |                                                   ^^^^^^^^^ no `authorize` in the root
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "authorization") due to 1 previous error
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test authorization` exited with code 101

@@ -1,0 +1,162 @@
+   Compiling zeroize_derive v1.5.0
+   Compiling tokio-macros v2.7.0
+   Compiling futures-util v0.3.34
+   Compiling serde v1.0.229
+   Compiling askama_parser v0.16.0
+   Compiling thiserror-impl v1.0.69
+   Compiling web_atoms v0.2.5
+   Compiling tokio v1.53.1
+   Compiling zeroize v1.9.0
+   Compiling markup5ever v0.39.0
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling block-buffer v0.12.0
+   Compiling html5ever v0.39.0
+   Compiling charts-rs v1.0.0
+   Compiling digest v0.11.3
+   Compiling thiserror v1.0.69
+   Compiling hmac v0.13.0
+   Compiling tungstenite v0.24.0
+   Compiling sha2 v0.11.0
+   Compiling hkdf v0.13.0
+   Compiling axum-core v0.4.5
+   Compiling askama_derive v0.16.0
+   Compiling hyper v1.9.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling tower v0.5.3
+   Compiling askama_macros v0.16.0
+   Compiling hyper-util v0.1.20
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling axum v0.7.9
+   Compiling suprnova-live-test-support v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 9.42s
+────────────
+ Nextest run ID daad57f5-4546-409b-96ba-2108fa9a7eac with nextest profile: default
+    Starting 6 tests across 1 binary (6 tests skipped)
+        FAIL [   0.003s] (1/6) suprnova-live::view_charts chart_tokens_chart_css_colors_every_chart_class_from_a_token
+  stdout ───
+
+    running 1 test
+    test chart_tokens_chart_css_colors_every_chart_class_from_a_token ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_chart_css_colors_every_chart_class_from_a_token
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'chart_tokens_chart_css_colors_every_chart_class_from_a_token' (3708965) panicked at crates/suprnova-live/tests/view_charts.rs:512:9:
+    chart.css does not color .sn-chart-text
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 5 tests still running
+        FAIL [   0.004s] (2/6) suprnova-live::view_charts chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark
+  stdout ───
+
+    running 1 test
+    test chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark' (3708964) panicked at crates/suprnova-live/tests/view_charts.rs:556:13:
+    suprnova-ui.css does not define --sn-color-chart-1 for light (:root)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.020s] (3/6) suprnova-live::view_charts chart_tokens_series_marks_take_the_series_classes_in_order_and_wrap_after_six
+  stdout ───
+
+    running 1 test
+    test chart_tokens_series_marks_take_the_series_classes_in_order_and_wrap_after_six ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_series_marks_take_the_series_classes_in_order_and_wrap_after_six
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'chart_tokens_series_marks_take_the_series_classes_in_order_and_wrap_after_six' (3708962) panicked at crates/suprnova-live/tests/view_charts.rs:466:17:
+    assertion `left == right` failed: bar chart: the series mark <rect x="0" y="0" width="600" height="400" fill="#FFFFFF"> carries {}, not one sn-chart-series-N class
+      left: 0
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.021s] (4/6) suprnova-live::view_charts chart_tokens_the_svg_draws_no_background
+  stdout ───
+
+    running 1 test
+    test chart_tokens_the_svg_draws_no_background ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_the_svg_draws_no_background
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'chart_tokens_the_svg_draws_no_background' (3708961) panicked at crates/suprnova-live/tests/view_charts.rs:403:13:
+    bar chart: <rect x="0" y="0" width="600" height="400" fill="#FFFFFF"> fills the whole canvas, so the background is not transparent
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.021s] (5/6) suprnova-live::view_charts chart_tokens_text_axis_and_grid_lines_carry_their_classes
+  stdout ───
+
+    running 1 test
+    test chart_tokens_text_axis_and_grid_lines_carry_their_classes ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_text_axis_and_grid_lines_carry_their_classes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'chart_tokens_text_axis_and_grid_lines_carry_their_classes' (3708966) panicked at crates/suprnova-live/tests/view_charts.rs:417:13:
+    bar chart: <text font-size="14" x="42" y="19" font-family="Roboto" fill="#464646"> carries no sn-chart-text class
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.022s] (6/6) suprnova-live::view_charts chart_tokens_the_svg_carries_no_literal_color_or_font_family
+  stdout ───
+
+    running 1 test
+    test chart_tokens_the_svg_carries_no_literal_color_or_font_family ... FAILED
+
+    failures:
+
+    failures:
+        chart_tokens_the_svg_carries_no_literal_color_or_font_family
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'chart_tokens_the_svg_carries_no_literal_color_or_font_family' (3708963) panicked at crates/suprnova-live/tests/view_charts.rs:365:17:
+    bar chart: fill="#FFFFFF" is a literal color on <rect x="0" y="0" width="600" height="400" fill="#FFFFFF">
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.023s] 6 tests run: 0 passed, 6 failed, 6 skipped
+        FAIL [   0.003s] (1/6) suprnova-live::view_charts chart_tokens_chart_css_colors_every_chart_class_from_a_token
+        FAIL [   0.004s] (2/6) suprnova-live::view_charts chart_tokens_the_token_stylesheet_defines_the_chart_palette_for_light_and_dark
+        FAIL [   0.020s] (3/6) suprnova-live::view_charts chart_tokens_series_marks_take_the_series_classes_in_order_and_wrap_after_six
+        FAIL [   0.021s] (4/6) suprnova-live::view_charts chart_tokens_the_svg_draws_no_background
+        FAIL [   0.021s] (5/6) suprnova-live::view_charts chart_tokens_text_axis_and_grid_lines_carry_their_classes
+        FAIL [   0.022s] (6/6) suprnova-live::view_charts chart_tokens_the_svg_carries_no_literal_color_or_font_family
+error: test run failed

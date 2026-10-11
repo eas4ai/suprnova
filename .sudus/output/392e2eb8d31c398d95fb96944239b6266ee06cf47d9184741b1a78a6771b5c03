@@ -1,0 +1,135 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved imports `suprnova::Redis`, `suprnova::RedisCommandExecuted`, `suprnova::RedisCommandFailed`, `suprnova::RedisValue`
+ --> framework/tests/redis/commands.rs:9:16
+  |
+9 | use suprnova::{Redis, RedisCommandExecuted, RedisCommandFailed, RedisValue};
+  |                ^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^ no `RedisValue` in the root
+  |                |      |                     |
+  |                |      |                     no `RedisCommandFailed` in the root
+  |                |      no `RedisCommandExecuted` in the root
+  |                no `Redis` in the root
+  |
+help: a similar name exists in the module
+  |
+9 - use suprnova::{Redis, RedisCommandExecuted, RedisCommandFailed, RedisValue};
+9 + use suprnova::{Redis, RedisCommandExecuted, RedisCommandFailed, RedisCache};
+  |
+
+error[E0432]: unresolved imports `suprnova::Redis`, `suprnova::RedisValue`
+ --> framework/tests/redis/connections.rs:7:16
+  |
+7 | use suprnova::{Redis, RedisValue};
+  |                ^^^^^  ^^^^^^^^^^ no `RedisValue` in the root
+  |                |
+  |                no `Redis` in the root
+  |
+help: a similar name exists in the module
+  |
+7 - use suprnova::{Redis, RedisValue};
+7 + use suprnova::{Redis, RedisCache};
+  |
+
+error[E0432]: unresolved imports `suprnova::Redis`, `suprnova::RedisValue`
+ --> framework/tests/redis/pipelines.rs:6:16
+  |
+6 | use suprnova::{Redis, RedisValue};
+  |                ^^^^^  ^^^^^^^^^^ no `RedisValue` in the root
+  |                |
+  |                no `Redis` in the root
+  |
+help: a similar name exists in the module
+  |
+6 - use suprnova::{Redis, RedisValue};
+6 + use suprnova::{Redis, RedisCache};
+  |
+
+error[E0432]: unresolved imports `suprnova::RedisSide`, `suprnova::RedisValue`
+ --> framework/tests/redis/subscriptions.rs:7:16
+  |
+7 | use suprnova::{RedisSide, RedisValue};
+  |                ^^^^^^^^^  ^^^^^^^^^^ no `RedisValue` in the root
+  |                |
+  |                no `RedisSide` in the root
+  |
+help: a similar name exists in the module
+  |
+7 - use suprnova::{RedisSide, RedisValue};
+7 + use suprnova::{RedisSide, RedisCache};
+  |
+
+error[E0432]: unresolved imports `suprnova::Redis`, `suprnova::RedisConnection`, `suprnova::RedisValue`
+ --> framework/tests/redis/support.rs:7:16
+  |
+7 | use suprnova::{Redis, RedisConnection, RedisValue};
+  |                ^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^ no `RedisValue` in the root
+  |                |      |
+  |                |      no `RedisConnection` in the root
+  |                no `Redis` in the root
+  |
+help: a similar name exists in the module
+  |
+7 - use suprnova::{Redis, RedisConnection, RedisValue};
+7 + use suprnova::{Redis, DbConnection, RedisValue};
+  |
+help: a similar name exists in the module
+  |
+7 - use suprnova::{Redis, RedisConnection, RedisValue};
+7 + use suprnova::{Redis, RedisConnection, RedisCache};
+  |
+
+error[E0433]: cannot find `redis` in `suprnova`
+   --> framework/tests/redis/commands.rs:149:43
+    |
+149 |     let value: Option<String> = suprnova::redis::cmd("GET")
+    |                                           ^^^^^ could not find `redis` in `suprnova`
+
+error[E0433]: cannot find `redis` in `suprnova`
+  --> framework/tests/redis/connections.rs:65:28
+   |
+65 |     let client = suprnova::redis::Client::open(url()).unwrap();
+   |                            ^^^^^ could not find `redis` in `suprnova`
+
+error[E0433]: cannot find `redis` in `suprnova`
+  --> framework/tests/redis/connections.rs:67:43
+   |
+67 |     let value: Option<String> = suprnova::redis::cmd("GET")
+   |                                           ^^^^^ could not find `redis` in `suprnova`
+
+error[E0425]: cannot find type `RedisConnection` in crate `suprnova`
+  --> framework/tests/redis/connections.rs:42:45
+   |
+42 | async fn client_info(connection: &suprnova::RedisConnection) -> String {
+   |                                             ^^^^^^^^^^^^^^^
+   |
+  ::: framework/src/database/connection.rs:24:1
+   |
+24 | pub struct DbConnection {
+   | ----------------------- similarly named struct `DbConnection` defined here
+   |
+help: a struct with a similar name exists
+   |
+42 - async fn client_info(connection: &suprnova::RedisConnection) -> String {
+42 + async fn client_info(connection: &suprnova::DbConnection) -> String {
+   |
+
+error[E0425]: cannot find type `RedisConnection` in crate `suprnova`
+  --> framework/tests/redis/subscriptions.rs:85:40
+   |
+85 | async fn subscribers(redis: &suprnova::RedisConnection, channel: &str) -> i64 {
+   |                                        ^^^^^^^^^^^^^^^
+   |
+  ::: framework/src/database/connection.rs:24:1
+   |
+24 | pub struct DbConnection {
+   | ----------------------- similarly named struct `DbConnection` defined here
+   |
+help: a struct with a similar name exists
+   |
+85 - async fn subscribers(redis: &suprnova::RedisConnection, channel: &str) -> i64 {
+85 + async fn subscribers(redis: &suprnova::DbConnection, channel: &str) -> i64 {
+   |
+
+Some errors have detailed explanations: E0425, E0432, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `suprnova` (test "redis") due to 10 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test redis` exited with code 101

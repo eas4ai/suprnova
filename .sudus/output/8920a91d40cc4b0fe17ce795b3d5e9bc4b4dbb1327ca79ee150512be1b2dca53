@@ -1,0 +1,1512 @@
+   Compiling suprnova-live v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-macros v3.0.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova-live-test-support v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0599]: no method named `left_join` found for struct `DbTableBuilder` in the current scope
+  --> framework/tests/database/joins.rs:71:10
+   |
+70 |       let built = DB::table("pj_posts")
+   |  _________________-
+71 | |         .left_join(
+   | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+   | |_________|
+   |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:114:10
+    |
+112 |       let totals = DB::table("pj_orders")
+    |  __________________-
+113 | |         .select(["status_id"])
+114 | |         .select_raw("COUNT(*) AS total")
+    | |_________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+114 -         .select_raw("COUNT(*) AS total")
+114 +         .select("COUNT(*) AS total")
+    |
+
+error[E0599]: no method named `left_join_sub` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:117:10
+    |
+116 |       let built = DB::table("pj_statuses")
+    |  _________________-
+117 | |         .left_join_sub(
+    | |         -^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `left_join_sub` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:155:14
+    |
+154 |           let matching = DB::table("pj_statuses")
+    |  ________________________-
+155 | |             .left_join_sub(
+    | |             -^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_____________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:158:22
+    |
+156 | /                 DB::table("pj_orders")
+157 | |                     .select(["status_id"])
+158 | |                     .select_raw("COUNT(*) AS total")
+    | |_____________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+158 -                     .select_raw("COUNT(*) AS total")
+158 +                     .select("COUNT(*) AS total")
+    |
+
+error[E0599]: no method named `left_join_sub` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:173:10
+    |
+172 |       let without_orders = DB::table("pj_statuses")
+    |  __________________________-
+173 | |         .left_join_sub(
+    | |         -^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `group_by` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:174:58
+    |
+174 |             DB::table("pj_orders").select(["status_id"]).group_by("status_id"),
+    |                                                          ^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_exists` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:190:10
+    |
+189 |       let has_posts = DB::table("pj_users")
+    |  _____________________-
+190 | |         .where_exists(
+    | |         -^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:192:18
+    |
+191 | /             DB::table("pj_posts")
+192 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+192 -                 .select_raw("1")
+192 +                 .select("1")
+    |
+
+error[E0599]: no method named `where_not_exists` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:211:10
+    |
+210 |       let without_posts = DB::table("pj_users")
+    |  _________________________-
+211 | |         .where_not_exists(
+    | |         -^^^^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:213:18
+    |
+212 | /             DB::table("pj_posts")
+213 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+213 -                 .select_raw("1")
+213 +                 .select("1")
+    |
+
+error[E0599]: no method named `join_with` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:237:10
+    |
+236 |       let built = DB::table("pj_posts")
+    |  _________________-
+237 | |         .join_with("pj_users", |join| {
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join_with` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:263:10
+    |
+262 |       let either_key = DB::table("pj_posts")
+    |  ______________________-
+263 | |         .join_with("pj_categories", |join| {
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:298:10
+    |
+297 |       let inner = DB::table("pj_posts")
+    |  _________________-
+298 | |         .join("pj_users as u", "u.id", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `right_join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:318:10
+    |
+317 |       let right = DB::table("pj_posts")
+    |  _________________-
+318 | |         .right_join(
+    | |         -^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `cross_join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:346:10
+    |
+345 |       let cross = DB::table("pj_statuses")
+    |  _________________-
+346 | |         .cross_join("pj_categories")
+    | |         -^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join_sub` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:365:10
+    |
+364 |       let busy_authors = DB::table("pj_users")
+    |  ________________________-
+365 | |         .join_sub(
+    | |         -^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:368:18
+    |
+366 | /             DB::table("pj_posts")
+367 | |                 .select(["author_id"])
+368 | |                 .select_raw("COUNT(*) AS post_count")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+368 -                 .select_raw("COUNT(*) AS post_count")
+368 +                 .select("COUNT(*) AS post_count")
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:404:10
+    |
+402 |       let large_orders = DB::table("pj_orders")
+    |  ________________________-
+403 | |         .select(["status_id"])
+404 | |         .select_raw("COUNT(*) AS large")
+    | |_________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+404 -         .select_raw("COUNT(*) AS large")
+404 +         .select("COUNT(*) AS large")
+    |
+
+error[E0599]: no method named `left_join_sub_with` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:408:10
+    |
+407 |       let built = DB::table("pj_statuses")
+    |  _________________-
+408 | |         .left_join_sub_with(large_orders, "big", |join| {
+    | |         -^^^^^^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:414:18
+    |
+413 | /             DB::table("pj_categories")
+414 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+414 -                 .select_raw("1")
+414 +                 .select("1")
+    |
+
+error[E0599]: no method named `join_with` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:447:10
+    |
+446 |       let rows = DB::table("pj_posts")
+    |  ________________-
+447 | |         .join_with("pj_users", |join| {
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:460:18
+    |
+459 | /             DB::table("pj_statuses")
+460 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+460 -                 .select_raw("1")
+460 +                 .select("1")
+    |
+
+error[E0599]: no method named `where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:85:36
+    |
+ 85 |             items().filter("a", 1).where_any(["b", "c"], "=", 2),
+    |                                    ^^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:204:5
+    |
+204 |     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:93:21
+    |
+ 93 |             items().where_any(["b", "c"], "=", 2).filter("a", 1),
+    |                     ^^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:204:5
+    |
+204 |     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_all` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:102:36
+    |
+102 |             items().filter("a", 0).where_all(["b", "c"], "=", 2),
+    |                                    ^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_none` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:110:36
+    |
+110 |             items().filter("a", 1).where_none(["b", "c"], "=", 2),
+    |                                    ^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:118:21
+    |
+118 |             items().where_any(["code", "description"], "like", "%ab%"),
+    |                     ^^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:204:5
+    |
+204 |     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:130:37
+    |
+130 |             items().filter("id", 5).or_where_any(["b", "c"], "=", 2),
+    |                                     ^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_all` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:138:37
+    |
+138 |             items().filter("id", 5).or_where_all(["b", "c"], "=", 2),
+    |                                     ^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_none` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:146:37
+    |
+146 |             items().filter("id", 1).or_where_none(["b", "c"], "=", 2),
+    |                                     ^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:156:18
+    |
+154 | /             items()
+155 | |                 .filter("label", "z")
+156 | |                 .or_where_any(["b", "c"], "=", 2)
+    | |                 -^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________________|
+    |
+
+error[E0599]: no method named `or_where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:169:36
+    |
+169 |             items().filter("a", 0).or_where_in("id", [1i64, 2]),
+    |                                    ^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_not_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:177:37
+    |
+177 |             items().filter("id", 1).or_where_not_in("id", [1i64, 2, 3, 4]),
+    |                                     ^^^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:184:30
+    |
+184 |         ids_matching(items().where_in("id", [3i64, 5]), "id IN (3, 5)").await,
+    |                              ^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name
+    |
+184 -         ids_matching(items().where_in("id", [3i64, 5]), "id IN (3, 5)").await,
+184 +         ids_matching(items().where_binary("id", [3i64, 5]), "id IN (3, 5)").await,
+    |
+
+error[E0599]: no method named `where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:188:30
+    |
+188 |         ids_matching(items().where_in("id", Vec::<i64>::new()), "1 = 0").await,
+    |                              ^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name
+    |
+188 -         ids_matching(items().where_in("id", Vec::<i64>::new()), "1 = 0").await,
+188 +         ids_matching(items().where_binary("id", Vec::<i64>::new()), "1 = 0").await,
+    |
+
+error[E0599]: no method named `where_not_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:193:30
+    |
+193 |         ids_matching(items().where_not_in("id", Vec::<i64>::new()), "1 = 1").await,
+    |                              ^^^^^^^^^^^^
+    |
+help: there is a method `where_not_binary` with a similar name
+    |
+193 -         ids_matching(items().where_not_in("id", Vec::<i64>::new()), "1 = 1").await,
+193 +         ids_matching(items().where_not_binary("id", Vec::<i64>::new()), "1 = 1").await,
+    |
+
+error[E0599]: no method named `where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:206:18
+    |
+204 | /             items()
+205 | |                 .filter("c", 2)
+206 | |                 .where_in("id", slots_on("mon"))
+    | |_________________-^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name
+    |
+206 -                 .where_in("id", slots_on("mon"))
+206 +                 .where_binary("id", slots_on("mon"))
+    |
+
+error[E0599]: no method named `where_not_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:215:21
+    |
+215 |             items().where_not_in("id", slots_on("mon")),
+    |                     ^^^^^^^^^^^^
+    |
+help: there is a method `where_not_binary` with a similar name
+    |
+215 -             items().where_not_in("id", slots_on("mon")),
+215 +             items().where_not_binary("id", slots_on("mon")),
+    |
+
+error[E0599]: no method named `or_where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:223:37
+    |
+223 |             items().filter("id", 1).or_where_in("id", slots_on("tue")),
+    |                                     ^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_not_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:233:18
+    |
+231 | /             items()
+232 | |                 .filter("id", 2)
+233 | |                 .or_where_not_in("id", DB::table("pq_slots").select(["item_id"])),
+    | |                 -^^^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________________|
+    |
+
+error[E0599]: no method named `or_where_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:244:37
+    |
+244 |             items().filter("id", 1).or_where_raw("b + c = ?", vec![4.into()]),
+    |                                     ^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:253:18
+    |
+252 | /             items()
+253 | |                 .where_raw("a + b = ?", vec![2.into()])
+    | |                 -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________________|
+    |
+
+error[E0599]: no method named `or_where_null` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:264:37
+    |
+264 |             items().filter("id", 1).or_where_null("label"),
+    |                                     ^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `or_where_not_null` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:272:37
+    |
+272 |             items().filter("id", 2).or_where_not_null("label"),
+    |                                     ^^^^^^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_null` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:279:30
+    |
+279 |         ids_matching(items().where_null("label"), "label IS NULL").await,
+    |                              ^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `where_not_null` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:283:30
+    |
+283 |         ids_matching(items().where_not_null("label"), "label IS NOT NULL").await,
+    |                              ^^^^^^^^^^^^^^
+    |
+help: there is a method `where_not_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:216:5
+    |
+216 |     pub fn where_not_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `reorder_by` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:298:10
+    |
+295 |       let replaced = items()
+    |  ____________________-
+296 | |         .order_by_desc("a")
+297 | |         .order_by_desc("id")
+298 | |         .reorder_by("id", Direction::Asc)
+    | |         -^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `reorder` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:307:10
+    |
+305 |       let dropped_then_added = items()
+    |  ______________________________-
+306 | |         .order_by_desc("id")
+307 | |         .reorder()
+    | |         -^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `reorder_by` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:322:10
+    |
+320 |       let descending = items()
+    |  ______________________-
+321 | |         .order_by_asc("id")
+322 | |         .reorder_by("id", Direction::Desc)
+    | |         -^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:336:21
+    |
+336 |             items().where_in("id", base.reorder()),
+    |                     ^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name
+    |
+336 -             items().where_in("id", base.reorder()),
+336 +             items().where_binary("id", base.reorder()),
+    |
+
+error[E0599]: no method named `reorder` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:336:41
+    |
+336 |             items().where_in("id", base.reorder()),
+    |                                         ^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:585:14
+    |
+584 | /         DB::table("pj_posts")
+585 | |             .join("pj_users as authors", "authors.id", "=", "pj_posts.author_id")
+    | |_____________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:593:52
+    |
+593 |             .where_exists(DB::table("pj_statuses").select_raw("1"))
+    |                                                    ^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+593 -             .where_exists(DB::table("pj_statuses").select_raw("1"))
+593 +             .where_exists(DB::table("pj_statuses").select("1"))
+    |
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:620:10
+    |
+619 |       let bad_table = DB::table("pj_posts")
+    |  _____________________-
+620 | |         .join("pj_users; DROP TABLE pj_posts", "pj_users.id", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `left_join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:626:10
+    |
+625 |       let bad_alias = DB::table("pj_posts")
+    |  _____________________-
+626 | |         .left_join("pj_users as a b", "a.id", "=", "pj_posts.author_id")
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:632:10
+    |
+631 |       let bad_column = DB::table("pj_posts")
+    |  ______________________-
+632 | |         .join("pj_users", "pj_users.id) OR (1", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:638:10
+    |
+637 |       let bad_operator = DB::table("pj_posts")
+    |  ________________________-
+638 | |         .join("pj_users", "pj_users.id", "= 1 OR 1 =", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join_sub` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:644:10
+    |
+643 |       let bad_sub_alias = DB::table("pj_posts")
+    |  _________________________-
+644 | |         .join_sub(
+    | |         -^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `where_exists` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:656:10
+    |
+655 |       let bad_inner = DB::table("pj_users")
+    |  _____________________-
+656 | |         .where_exists(DB::table("pj_posts").where_column("pj_posts.author_id", "1=1; --"))
+    | |         -^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `where_column` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:656:45
+    |
+656 |         .where_exists(DB::table("pj_posts").where_column("pj_posts.author_id", "1=1; --"))
+    |                                             ^^^^^^^^^^^^ method not found in `DbTableBuilder`
+
+error[E0599]: no method named `join_with` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:669:10
+    |
+668 |       let result = DB::table("pj_posts")
+    |  __________________-
+669 | |         .join_with("pj_users", |join| join)
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:683:10
+    |
+682 |       let updated = DB::table("pj_posts")
+    |  ___________________-
+683 | |         .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:690:10
+    |
+689 |       let deleted = DB::table("pj_posts")
+    |  ___________________-
+690 | |         .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `group_by` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:710:10
+    |
+708 |       let groups = DB::table("pj_orders")
+    |  __________________-
+709 | |         .select(["status_id"])
+710 | |         .group_by("status_id")
+    | |         -^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `join` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/joins.rs:717:10
+    |
+716 |       let joined = DB::table("pj_posts")
+    |  __________________-
+717 | |         .join("pj_users", "pj_users.id", "=", "pj_posts.author_id")
+    | |_________-^^^^
+    |
+help: there is a method `on` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:145:5
+    |
+145 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:404:18
+    |
+402 | /             items()
+403 | |                 .filter("a", 1)
+404 | |                 .where_any(Vec::<&str>::new(), "=", 2)
+    | |_________________-^^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:204:5
+    |
+204 |     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_any` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:417:32
+    |
+417 |     let bad_operator = items().where_any(["b", "c"], "= 2 OR 1 =", 2).get().await;
+    |                                ^^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name, but with different arguments
+   --> framework/src/database/db_facade.rs:204:5
+    |
+204 |     pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_all` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:421:10
+    |
+420 |       let bad_column = items()
+    |  ______________________-
+421 | |         .where_all(["b", "c; DROP TABLE pq_items"], "=", 2)
+    | |         -^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+error[E0599]: no method named `where_in` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:427:10
+    |
+426 |       let bad_subquery = items()
+    |  ________________________-
+427 | |         .where_in("id", DB::table("pq_slots").select(["item_id; --"]))
+    | |_________-^^^^^^^^
+    |
+help: there is a method `where_binary` with a similar name
+    |
+427 -         .where_in("id", DB::table("pq_slots").select(["item_id; --"]))
+427 +         .where_binary("id", DB::table("pq_slots").select(["item_id; --"]))
+    |
+
+error[E0599]: no method named `or_where_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/database/query_helpers.rs:433:10
+    |
+432 |       let bad_raw = items()
+    |  ___________________-
+433 | |         .or_where_raw("b = ? AND c = ?", vec![1.into()])
+    | |         -^^^^^^^^^^^^ method not found in `DbTableBuilder`
+    | |_________|
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `suprnova` (test "database") due to 71 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:74:10
+     |
+  73 |       let posts = JmPost::query()
+     |  _________________-
+  74 | |         .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+     | |_________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `left_join` found for struct `suprnova::Builder<M>` in the current scope
+  --> framework/tests/eloquent/joins_model.rs:93:10
+   |
+92 |       let left = JmUser::query()
+   |  ________________-
+93 | |         .left_join("jm_posts as p", "p.author_id", "=", "jm_users.id")
+   | |         -^^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmUser>`
+   | |_________|
+   |
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:106:10
+     |
+ 105 |       let star = JmPost::query()
+     |  ________________-
+ 106 | |         .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+     | |_________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:115:10
+     |
+ 114 |       let theirs = JmPost::query()
+     |  __________________-
+ 115 | |         .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+     | |_________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:138:10
+    |
+137 |       let popular = DB::table("jm_posts")
+    |  ___________________-
+138 | |         .select_raw("1")
+    | |_________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+138 -         .select_raw("1")
+138 +         .select("1")
+    |
+
+error[E0599]: no method named `where_exists` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:142:10
+     |
+ 141 |       let with = JmUser::query()
+     |  ________________-
+ 142 | |         .where_exists(popular.clone())
+     | |_________-^^^^^^^^^^^^
+     |
+help: there is a method `exists` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:4042:5
+     |
+4042 |     pub async fn exists(self) -> Result<bool, FrameworkError> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_not_exists` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:159:10
+     |
+ 158 |       let without = JmUser::query()
+     |  ___________________-
+ 159 | |         .where_not_exists(popular)
+     | |_________-^^^^^^^^^^^^^^^^
+     |
+help: there is a method `where_not` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1342:5
+     |
+1342 |     pub fn where_not(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:172:10
+    |
+170 |       let live_post_counts = DB::table("jm_posts")
+    |  ____________________________-
+171 | |         .select(["author_id"])
+172 | |         .select_raw("COUNT(*) AS post_count")
+    | |_________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+172 -         .select_raw("COUNT(*) AS post_count")
+172 +         .select("COUNT(*) AS post_count")
+    |
+
+error[E0599]: no method named `join_sub` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:176:10
+    |
+175 |       let prolific = JmUser::query()
+    |  ____________________-
+176 | |         .join_sub(
+    | |         -^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmUser>`
+    | |_________|
+    |
+
+error[E0599]: no method named `left_join` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:193:10
+    |
+192 |       let joined_rows = JmUser::query()
+    |  _______________________-
+193 | |         .left_join("jm_posts", "jm_posts.author_id", "=", "jm_users.id")
+    | |         -^^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmUser>`
+    | |_________|
+    |
+
+error[E0599]: no method named `join_with` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:202:10
+    |
+201 |       let with_closure = JmPost::query()
+    |  ________________________-
+202 | |         .join_with("jm_users", |join| {
+    | |         -^^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmPost>`
+    | |_________|
+    |
+
+error[E0599]: no method named `join_with` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:222:10
+    |
+221 |       let query = JmPost::query()
+    |  _________________-
+222 | |         .join_with("jm_users", |join| {
+    | |         -^^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmPost>`
+    | |_________|
+    |
+
+error[E0599]: no method named `where_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:99:36
+     |
+  99 |             items().filter("a", 1).where_any(["b", "c"], "=", 2),
+     |                                    ^^^^^^^^^
+     |
+help: there is a method `where_day` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1608:5
+     |
+1608 |     pub fn where_day(self, col: impl IntoColumn, val: u32) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `filter_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:107:36
+     |
+ 107 |             items().filter("a", 1).filter_any(["b", "c"], "=", 2),
+     |                                    ^^^^^^^^^^
+     |
+help: there is a method `filter` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1265:5
+     |
+1265 |     pub fn filter(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_all` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:116:21
+     |
+ 116 |             items().where_all(["b", "c"], "=", 2),
+     |                     ^^^^^^^^^
+     |
+help: there is a method `where_null` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1460:5
+     |
+1460 |     pub fn where_null(self, col: impl IntoColumn) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `filter_none` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:124:36
+     |
+ 124 |             items().filter("a", 1).filter_none(["b", "c"], "=", 2),
+     |                                    ^^^^^^^^^^^
+     |
+help: there is a method `filter` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1265:5
+     |
+1265 |     pub fn filter(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:132:21
+     |
+ 132 |             items().where_any(["code", "description"], "like", "%ab%"),
+     |                     ^^^^^^^^^
+     |
+help: there is a method `where_day` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1608:5
+     |
+1608 |     pub fn where_day(self, col: impl IntoColumn, val: u32) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_where_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:143:37
+     |
+ 143 |             items().filter("id", 5).or_where_any(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^
+     |
+help: there is a method `or_where` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1326:5
+     |
+1326 |     pub fn or_where(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_filter_all` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:151:37
+     |
+ 151 |             items().filter("id", 5).or_filter_all(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^^
+     |
+help: there is a method `or_filter` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1304:5
+     |
+1304 |     pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_where_none` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:159:37
+     |
+ 159 |             items().filter("id", 1).or_where_none(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^^
+     |
+help: there is a method `or_where` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1326:5
+     |
+1326 |     pub fn or_where(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_where_all` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:167:37
+     |
+ 167 |             items().filter("id", 1).or_where_all(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^
+     |
+help: there is a method `or_where` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1326:5
+     |
+1326 |     pub fn or_where(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_filter_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:175:37
+     |
+ 175 |             items().filter("id", 1).or_filter_any(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^^
+     |
+help: there is a method `or_filter` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1304:5
+     |
+1304 |     pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_filter_none` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:183:37
+     |
+ 183 |             items().filter("id", 2).or_filter_none(["b", "c"], "=", 2),
+     |                                     ^^^^^^^^^^^^^^
+     |
+help: there is a method `or_filter` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1304:5
+     |
+1304 |     pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `or_where_in` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:191:36
+    |
+191 |             items().filter("a", 0).or_where_in("id", [1i64, 2]),
+    |                                    ^^^^^^^^^^^
+    |
+help: there is a method `or_where` with a similar name
+    |
+191 -             items().filter("a", 0).or_where_in("id", [1i64, 2]),
+191 +             items().filter("a", 0).or_where("id", [1i64, 2]),
+    |
+
+error[E0599]: no method named `or_filter_not_in` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:199:37
+    |
+199 |             items().filter("id", 1).or_filter_not_in("id", [1i64, 2, 3, 4]),
+    |                                     ^^^^^^^^^^^^^^^^
+    |
+help: there is a method `filter_not_in` with a similar name
+    |
+199 -             items().filter("id", 1).or_filter_not_in("id", [1i64, 2, 3, 4]),
+199 +             items().filter("id", 1).filter_not_in("id", [1i64, 2, 3, 4]),
+    |
+
+error[E0599]: no method named `or_where_raw` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:207:37
+    |
+207 |             items().filter("id", 1).or_where_raw("b + c = ?", vec![json!(4)]),
+    |                                     ^^^^^^^^^^^^
+    |
+help: there is a method `where_raw` with a similar name
+    |
+207 -             items().filter("id", 1).or_where_raw("b + c = ?", vec![json!(4)]),
+207 +             items().filter("id", 1).where_raw("b + c = ?", vec![json!(4)]),
+    |
+
+error[E0599]: no method named `or_filter_raw` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:215:37
+    |
+215 |             items().filter("id", 1).or_filter_raw("a = ?", vec![json!(0)]),
+    |                                     ^^^^^^^^^^^^^
+    |
+help: there is a method `filter_raw` with a similar name
+    |
+215 -             items().filter("id", 1).or_filter_raw("a = ?", vec![json!(0)]),
+215 +             items().filter("id", 1).filter_raw("a = ?", vec![json!(0)]),
+    |
+
+error[E0599]: no method named `or_where_null` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:223:37
+    |
+223 |             items().filter("id", 1).or_where_null("label"),
+    |                                     ^^^^^^^^^^^^^
+    |
+help: there is a method `where_null` with a similar name
+    |
+223 -             items().filter("id", 1).or_where_null("label"),
+223 +             items().filter("id", 1).where_null("label"),
+    |
+
+error[E0599]: no method named `or_filter_not_null` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:231:37
+    |
+231 |             items().filter("id", 2).or_filter_not_null("label"),
+    |                                     ^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `filter_not_null` with a similar name
+    |
+231 -             items().filter("id", 2).or_filter_not_null("label"),
+231 +             items().filter("id", 2).filter_not_null("label"),
+    |
+
+error[E0599]: no method named `or_filter_null` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:239:37
+    |
+239 |             items().filter("id", 3).or_filter_null("label"),
+    |                                     ^^^^^^^^^^^^^^
+    |
+help: there is a method `filter_null` with a similar name
+    |
+239 -             items().filter("id", 3).or_filter_null("label"),
+239 +             items().filter("id", 3).filter_null("label"),
+    |
+
+error[E0599]: no method named `or_where_not_null` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:247:37
+    |
+247 |             items().filter("id", 4).or_where_not_null("label"),
+    |                                     ^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `where_not_null` with a similar name
+    |
+247 -             items().filter("id", 4).or_where_not_null("label"),
+247 +             items().filter("id", 4).where_not_null("label"),
+    |
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:261:33
+     |
+ 261 |                 .where_in("id", slots_on("mon"))
+     |                  --------       ^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |                  |
+     |                  required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::where_in`
+    --> framework/src/eloquent/builder.rs:1365:12
+     |
+1363 |     pub fn where_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
+     |            -------- required by a bound in this associated function
+1364 |     where
+1365 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::where_in`
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:270:37
+     |
+ 270 |             items().filter_in("id", slots_on("tue")),
+     |                     ---------       ^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |                     |
+     |                     required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::filter_in`
+    --> framework/src/eloquent/builder.rs:1353:12
+     |
+1351 |     pub fn filter_in<V, I>(mut self, col: impl IntoColumn, vals: I) -> Self
+     |            --------- required by a bound in this associated function
+1352 |     where
+1353 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::filter_in`
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:278:40
+     |
+ 278 |             items().where_not_in("id", slots_on("mon")),
+     |                     ------------       ^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |                     |
+     |                     required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::where_not_in`
+    --> framework/src/eloquent/builder.rs:1388:12
+     |
+1386 |     pub fn where_not_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
+     |            ------------ required by a bound in this associated function
+1387 |     where
+1388 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::where_not_in`
+
+error[E0599]: no method named `or_where_in` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:286:37
+    |
+286 |             items().filter("id", 1).or_where_in("id", slots_on("tue")),
+    |                                     ^^^^^^^^^^^
+    |
+help: there is a method `or_where` with a similar name
+    |
+286 -             items().filter("id", 1).or_where_in("id", slots_on("tue")),
+286 +             items().filter("id", 1).or_where("id", slots_on("tue")),
+    |
+
+error[E0599]: no method named `or_where_not_in` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:296:18
+    |
+294 | /             items()
+295 | |                 .filter("id", 2)
+296 | |                 .or_where_not_in("id", DB::table("qh_slots").select(["item_id"])),
+    | |_________________-^^^^^^^^^^^^^^^
+    |
+help: there is a method `where_not_in` with a similar name
+    |
+296 -                 .or_where_not_in("id", DB::table("qh_slots").select(["item_id"])),
+296 +                 .where_not_in("id", DB::table("qh_slots").select(["item_id"])),
+    |
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:305:25
+     |
+ 305 |         .where_in("id", slots_on("mon"))
+     |          --------       ^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |          |
+     |          required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::where_in`
+    --> framework/src/eloquent/builder.rs:1365:12
+     |
+1363 |     pub fn where_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
+     |            -------- required by a bound in this associated function
+1364 |     where
+1365 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::where_in`
+
+error[E0599]: no method named `reorder_by` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:327:10
+    |
+324 |       let replaced = items()
+    |  ____________________-
+325 | |         .order_by_desc("a")
+326 | |         .order_by_desc("id")
+327 | |         .reorder_by("id", Direction::Asc)
+    | |_________-^^^^^^^^^^
+    |
+help: there is a method `order_by` with a similar name
+    |
+327 -         .reorder_by("id", Direction::Asc)
+327 +         .order_by("id", Direction::Asc)
+    |
+
+error[E0599]: no method named `reorder` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:335:10
+    |
+333 |       let dropped = items()
+    |  ___________________-
+334 | |         .latest_by("id")
+335 | |         .reorder()
+    | |         -^^^^^^^ method not found in `suprnova::Builder<query_helpers_model::QhItem>`
+    | |_________|
+    |
+
+error[E0599]: no method named `reorder` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:345:10
+    |
+343 |       let (sql, _) = items()
+    |  ____________________-
+344 | |         .order_by_desc("id")
+345 | |         .reorder()
+    | |         -^^^^^^^ method not found in `suprnova::Builder<query_helpers_model::QhItem>`
+    | |_________|
+    |
+
+error[E0599]: no method named `filter_exists` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:316:10
+     |
+ 315 |       let both = JmUser::query()
+     |  ________________-
+ 316 | |         .filter_exists(
+     | |_________-^^^^^^^^^^^^^
+     |
+help: there is a method `filter_in` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1351:5
+     |
+1351 | /     pub fn filter_in<V, I>(mut self, col: impl IntoColumn, vals: I) -> Self
+1352 | |     where
+1353 | |         I: IntoIterator<Item = V>,
+1354 | |         V: IntoVal,
+     | |___________________^
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:318:18
+    |
+317 | /             DB::table("jm_posts")
+318 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+318 -                 .select_raw("1")
+318 +                 .select("1")
+    |
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:323:18
+    |
+322 | /             DB::table("jm_posts")
+323 | |                 .select_raw("1")
+    | |_________________-^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+323 -                 .select_raw("1")
+323 +                 .select("1")
+    |
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:350:14
+     |
+ 349 | /         JmPost::query()
+ 350 | |             .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+     | |_____________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:382:14
+     |
+ 381 | /         JmPost::query()
+ 382 | |             .join("jm_users", "jm_users.id", "=", "jm_posts.author_id")
+     | |_____________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_exists` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:387:14
+     |
+ 386 | /         JmUser::query()
+ 387 | |             .where_exists(DB::table("jm_posts").select_raw("1"))
+     | |_____________-^^^^^^^^^^^^
+     |
+help: there is a method `exists` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:4042:5
+     |
+4042 |     pub async fn exists(self) -> Result<bool, FrameworkError> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `select_raw` found for struct `DbTableBuilder` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:387:49
+    |
+387 |             .where_exists(DB::table("jm_posts").select_raw("1"))
+    |                                                 ^^^^^^^^^^
+    |
+help: there is a method `select` with a similar name
+    |
+387 -             .where_exists(DB::table("jm_posts").select_raw("1"))
+387 +             .where_exists(DB::table("jm_posts").select("1"))
+    |
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:407:10
+     |
+ 406 |       let bad_table = JmPost::query()
+     |  _____________________-
+ 407 | |         .join("jm_users u", "u.id", "=", "jm_posts.author_id")
+     | |_________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/joins_model.rs:412:10
+     |
+ 411 |       let bad_operator = JmPost::query()
+     |  ________________________-
+ 412 | |         .join("jm_users", "jm_users.id", "<=>", "jm_posts.author_id")
+     | |_________-^^^^
+     |
+help: there is a method `on` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1032:5
+     |
+1032 |     pub fn on(mut self, name: impl Into<String>) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `join_with` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/joins_model.rs:417:10
+    |
+416 |       let empty_on = JmPost::query()
+    |  ____________________-
+417 | |         .join_with("jm_users", |join| join)
+    | |         -^^^^^^^^^ method not found in `suprnova::Builder<joins_model::JmPost>`
+    | |_________|
+    |
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:387:38
+     |
+ 387 |                 .filter_not_in("id", slots_on("mon"))
+     |                  -------------       ^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |                  |
+     |                  required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::filter_not_in`
+    --> framework/src/eloquent/builder.rs:1376:12
+     |
+1374 |     pub fn filter_not_in<V, I>(mut self, col: impl IntoColumn, vals: I) -> Self
+     |            ------------- required by a bound in this associated function
+1375 |     where
+1376 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::filter_not_in`
+
+error[E0599]: no method named `or_filter_in` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:388:18
+    |
+386 | /             items()
+387 | |                 .filter_not_in("id", slots_on("mon"))
+388 | |                 .or_filter_in("id", slots_on("tue")),
+    | |_________________-^^^^^^^^^^^^
+    |
+help: there is a method `filter_in` with a similar name
+    |
+388 -                 .or_filter_in("id", slots_on("tue")),
+388 +                 .filter_in("id", slots_on("tue")),
+    |
+
+error[E0599]: no method named `where_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:407:17
+     |
+ 407 |         items().where_any(["b", "c"], "= 2 OR 1 =", 2).get().await.is_err(),
+     |                 ^^^^^^^^^
+     |
+help: there is a method `where_day` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1608:5
+     |
+1608 |     pub fn where_day(self, col: impl IntoColumn, val: u32) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `where_none` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:411:17
+     |
+ 411 |         items().where_none(["b; --"], "=", 2).get().await.is_err(),
+     |                 ^^^^^^^^^^
+     |
+help: there is a method `where_not` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1342:5
+     |
+1342 |     pub fn where_not(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: `DbTableBuilder` is not an iterator
+    --> framework/tests/eloquent/query_helpers_model.rs:416:29
+     |
+ 416 |             .where_in("id", DB::table("qh_slots").select(["item_id) OR (1"]))
+     |              --------       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `DbTableBuilder` is not an iterator
+     |              |
+     |              required by a bound introduced by this call
+     |
+     = help: the trait `Iterator` is not implemented for `DbTableBuilder`
+     = note: required for `DbTableBuilder` to implement `IntoIterator`
+note: required by a bound in `suprnova::Builder::<M>::where_in`
+    --> framework/src/eloquent/builder.rs:1365:12
+     |
+1363 |     pub fn where_in<V, I>(self, col: impl IntoColumn, vals: I) -> Self
+     |            -------- required by a bound in this associated function
+1364 |     where
+1365 |         I: IntoIterator<Item = V>,
+     |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Builder::<M>::where_in`
+
+error[E0599]: no method named `or_where_raw` found for struct `suprnova::Builder<M>` in the current scope
+   --> framework/tests/eloquent/query_helpers_model.rs:424:14
+    |
+423 | /         items()
+424 | |             .or_where_raw("a = ? AND b = ?", vec![json!(1)])
+    | |_____________-^^^^^^^^^^^^
+    |
+help: there is a method `where_raw` with a similar name
+    |
+424 -             .or_where_raw("a = ? AND b = ?", vec![json!(1)])
+424 +             .where_raw("a = ? AND b = ?", vec![json!(1)])
+    |
+
+error[E0599]: no method named `where_any` found for struct `suprnova::Builder<M>` in the current scope
+    --> framework/tests/eloquent/query_helpers_model.rs:439:18
+     |
+ 437 | /             items()
+ 438 | |                 .filter("a", 1)
+ 439 | |                 .where_any(Vec::<&str>::new(), "=", 2)
+     | |_________________-^^^^^^^^^
+     |
+help: there is a method `where_day` with a similar name, but with different arguments
+    --> framework/src/eloquent/builder.rs:1608:5
+     |
+1608 |     pub fn where_day(self, col: impl IntoColumn, val: u32) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0277, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `suprnova` (test "eloquent") due to 57 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test database --test eloquent` exited with code 101

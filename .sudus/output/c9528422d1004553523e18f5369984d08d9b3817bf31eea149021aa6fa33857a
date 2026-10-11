@@ -1,0 +1,13 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized] target(s) in 0.77s
+────────────
+ Nextest run ID be2a8134-8610-4488-9db8-02c767a88fd3 with nextest profile: default
+    Starting 91 tests across 2 binaries (3308 tests skipped)
+────────────
+     Summary [   0.402s] 91 tests run: 91 passed, 3308 skipped

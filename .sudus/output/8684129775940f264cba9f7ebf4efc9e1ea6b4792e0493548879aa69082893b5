@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized] target(s) in 0.38s
+────────────
+ Nextest run ID 1fe51882-44b2-47a8-8396-788a58fa2c8e with nextest profile: default
+    Starting 1 test across 27 binaries (4703 tests skipped)
+        FAIL [   0.008s] (1/1) suprnova::schedule laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+  stdout ───
+
+    running 1 test
+    test laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour ... FAILED
+
+    failures:
+
+    failures:
+        laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour' (2267549) panicked at framework/tests/schedule/laravel_infra_gaps.rs:11:5:
+    assertion `left == right` failed: Laravel's dailyAt reads "9" as 09:00, so monthlyOn(15, '9') runs at 09:00 on the 15th
+      left: "0 0 15 * *"
+     right: "0 9 15 * *"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.013s] 1 test run: 0 passed, 1 failed, 4703 skipped
+        FAIL [   0.008s] (1/1) suprnova::schedule laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+error: test run failed

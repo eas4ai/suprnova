@@ -1,0 +1,256 @@
+   Compiling syn v3.0.4
+   Compiling tokio v1.53.1
+   Compiling icu_normalizer v2.2.0
+   Compiling tungstenite v0.24.0
+   Compiling web_atoms v0.2.5
+   Compiling fixed_decimal v0.7.2
+   Compiling strum v0.28.0
+   Compiling prometheus-client v0.25.0
+   Compiling icu_plurals v2.2.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling icu_decimal v2.2.0
+   Compiling icu_experimental v0.5.0
+   Compiling icu_datetime v2.2.0
+   Compiling proc-macro-error3 v3.1.1
+   Compiling serde_derive v1.0.229
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.20
+   Compiling async-trait v0.1.92
+   Compiling validator_derive v0.20.1
+   Compiling futures-util v0.3.34
+   Compiling thiserror v2.0.20
+   Compiling oxideav-core v0.1.34
+   Compiling simple_asn1 v0.6.4
+   Compiling tungstenite v0.29.0
+   Compiling fluent-syntax v0.12.0
+   Compiling sea-query-derive v1.0.0
+   Compiling fluent-bundle v0.16.0
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling backon v1.6.0
+   Compiling oxideav-vp8 v0.2.6
+   Compiling oxideav-image-filter v0.1.2
+   Compiling oxideav-mjpeg v0.1.8
+   Compiling oxideav-pixfmt v0.1.7
+   Compiling oxideav-png v0.1.8
+   Compiling h2 v0.4.16
+   Compiling tokio-stream v0.1.18
+   Compiling combine v4.6.7
+   Compiling oxideav-bmp v0.1.6
+   Compiling deadpool v0.12.3
+   Compiling serde v1.0.229
+   Compiling askama_parser v0.16.0
+   Compiling oxideav-webp v0.2.3
+   Compiling futures-executor v0.3.32
+   Compiling tower v0.5.3
+   Compiling futures v0.3.32
+   Compiling reqsign-core v3.1.0 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling url v2.5.8
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling rust_decimal v1.42.0
+   Compiling quick-xml v0.41.0
+   Compiling bigdecimal v0.4.10
+   Compiling tower-http v0.6.11
+   Compiling base64urlsafedata v0.5.5
+   Compiling serde_cbor_2 v0.13.0
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling askama_derive v0.16.0
+   Compiling tracing-serde v0.2.0
+   Compiling tokio-tungstenite v0.24.0
+   Compiling axum-core v0.4.5
+   Compiling hyper v1.9.0
+   Compiling sqlx-core v0.9.0
+   Compiling sea-query v1.0.2
+   Compiling aws-smithy-async v1.2.14
+   Compiling webauthn-rs-core v0.5.5
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling hyper-util v0.1.20
+   Compiling charts-rs v1.0.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling jsonwebtoken v9.3.1
+   Compiling bincode v1.3.3
+   Compiling askama_macros v0.16.0
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.7.9
+   Compiling hyper-timeout v0.5.2
+   Compiling askama v0.16.0
+   Compiling tower v0.4.13
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling syntect v5.3.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling sea-orm-cli v2.0.2
+   Compiling webauthn-rs v0.5.5
+   Compiling aws-credential-types v1.2.14
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sqlx v0.9.0
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sea-query-sqlx v0.9.1
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sea-schema v0.18.1
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tonic v0.12.3
+   Compiling aws-smithy-http v0.63.6
+   Compiling chrono-tz v0.9.0
+   Compiling totp-rs v5.7.1
+   Compiling secrecy v0.10.3
+   Compiling ece v2.3.1
+   Compiling tokio-tungstenite v0.29.0
+   Compiling aws-sigv4 v1.4.4
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling comrak v0.52.0
+   Compiling redis v1.2.1
+   Compiling sea-orm v2.0.2
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling hyper-tungstenite v0.20.0
+   Compiling fake v5.1.0
+   Compiling ammonia v4.1.4
+   Compiling lettre v0.11.22
+   Compiling validator v0.20.0
+   Compiling tera v1.20.1
+   Compiling qdrant-client v1.18.0
+   Compiling assert-json-diff v2.0.2
+   Compiling envy v0.4.2
+   Compiling iso_currency v0.5.3
+   Compiling multer v3.1.0
+   Compiling wiremock v0.6.5
+   Compiling tracing-test v0.2.6
+   Compiling webauthn-authenticator-rs v0.5.5
+   Compiling dhat v0.3.3
+   Compiling trybuild v1.0.120
+   Compiling serial_test v2.0.0
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 46s
+────────────
+ Nextest run ID 1b93143d-d432-4611-8a7a-1e983186d9e3 with nextest profile: default
+    Starting 144 tests across 1 binary (74 tests skipped)
+────────────
+     Summary [   2.271s] 144 tests run: 144 passed, 74 skipped
+   Compiling tokio v1.53.1
+   Compiling aws-lc-rs v1.18.1
+   Compiling openssl v0.10.80
+   Compiling sea-query-derive v1.0.0
+   Compiling unic-langid-macros v0.9.6
+   Compiling web_atoms v0.2.5
+   Compiling askama_parser v0.16.0
+   Compiling basic-toml v0.1.10
+   Compiling prost v0.13.5
+   Compiling axum-core v0.4.5
+   Compiling jsonwebtoken v9.3.1
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling unic-langid v0.9.6
+   Compiling syntect v5.3.0
+   Compiling prost-types v0.13.5
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling intl-memoizer v0.5.3
+   Compiling sea-query v1.0.2
+   Compiling chrono-tz v0.9.0
+   Compiling fluent-langneg v0.13.1
+   Compiling intl_pluralrules v7.0.2
+   Compiling ammonia v4.1.4
+   Compiling fluent-bundle v0.16.0
+   Compiling rustls-webpki v0.103.15
+   Compiling comrak v0.52.0
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling syn v2.0.117
+   Compiling rustls v0.23.45
+   Compiling askama_derive v0.16.0
+   Compiling tera v1.20.1
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling ece v2.3.1
+   Compiling webauthn-rs-core v0.5.5
+   Compiling tokio-util v0.7.18
+   Compiling tokio-stream v0.1.18
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling tower-http v0.6.11
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling backon v1.6.0
+   Compiling h2 v0.4.16
+   Compiling tower v0.4.13
+   Compiling axum v0.7.9
+   Compiling tokio-rustls v0.26.4
+   Compiling sqlx-core v0.9.0
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling webauthn-rs v0.5.5
+   Compiling askama_macros v0.16.0
+   Compiling combine v4.6.7
+   Compiling tokio-tungstenite v0.29.0
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling askama v0.16.0
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sea-orm-cli v2.0.2
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling aws-sigv4 v1.4.4
+   Compiling lettre v0.11.22
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling hyper v1.9.0
+   Compiling hyper-util v0.1.20
+   Compiling redis v1.2.1
+   Compiling sqlx v0.9.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-timeout v0.5.2
+   Compiling hyper-tungstenite v0.20.0
+   Compiling tonic v0.12.3
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling sea-orm v2.0.2
+   Compiling qdrant-client v1.18.0
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 18s
+────────────
+ Nextest run ID a61a7260-fbc3-494f-b673-1ad088d31877 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [  81.265s] 13 tests run: 13 passed (1 slow), 0 skipped
+   Compiling chrono-tz v0.9.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling tera v1.20.1
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID e7a84199-54b6-49be-abf5-8252c995cc26 with nextest profile: default
+    Starting 42 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   1.828s] 42 tests run: 42 passed, 166 skipped

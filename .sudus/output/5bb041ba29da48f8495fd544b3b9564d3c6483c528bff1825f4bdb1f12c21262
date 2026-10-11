@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3.07s
+────────────
+ Nextest run ID 54efb3b2-2ce1-43fb-9e74-110816d63a34 with nextest profile: default
+    Starting 1 test across 6 binaries (457 tests skipped)
+        FAIL [   0.007s] (1/1) suprnova::rate_limit laravel_auth_gaps::hit_counts_a_key_and_its_entity_free_spelling_in_one_bucket
+  stdout ───
+
+    running 1 test
+    test laravel_auth_gaps::hit_counts_a_key_and_its_entity_free_spelling_in_one_bucket ... FAILED
+
+    failures:
+
+    failures:
+        laravel_auth_gaps::hit_counts_a_key_and_its_entity_free_spelling_in_one_bucket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_auth_gaps::hit_counts_a_key_and_its_entity_free_spelling_in_one_bucket' (2792518) panicked at framework/tests/rate_limit/laravel_auth_gaps.rs:20:5:
+    assertion `left == right` failed: Laravel cleans "café" to "cafe" before counting, so the second hit shares its bucket
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.009s] 1 test run: 0 passed, 1 failed, 457 skipped
+        FAIL [   0.007s] (1/1) suprnova::rate_limit laravel_auth_gaps::hit_counts_a_key_and_its_entity_free_spelling_in_one_bucket
+error: test run failed

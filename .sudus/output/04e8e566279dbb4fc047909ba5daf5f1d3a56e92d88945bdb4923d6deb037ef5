@@ -1,0 +1,8 @@
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 44s
+────────────
+ Nextest run ID d0fd2df4-004a-4338-a22f-8150b3e5248b with nextest profile: default
+    Starting 85 tests across 10 binaries (2452 tests skipped)
+────────────
+     Summary [   2.179s] 85 tests run: 85 passed, 2452 skipped

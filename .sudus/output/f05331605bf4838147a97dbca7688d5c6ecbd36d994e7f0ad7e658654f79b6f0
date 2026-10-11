@@ -1,0 +1,82 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID cf80a5f3-14e9-424a-b391-e2d0d29bd38d with nextest profile: default
+    Starting 25 tests across 1 binary (64 tests skipped)
+        FAIL [   0.007s] ( 4/25) suprnova::testing request_diagnostics::a_handler_error_stays_out_of_the_response_headers_and_body
+  stdout ───
+
+    running 1 test
+    test request_diagnostics::a_handler_error_stays_out_of_the_response_headers_and_body ... FAILED
+
+    failures:
+
+    failures:
+        request_diagnostics::a_handler_error_stays_out_of_the_response_headers_and_body
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'request_diagnostics::a_handler_error_stays_out_of_the_response_headers_and_body' (3303593) panicked at framework/tests/testing/request_diagnostics.rs:244:9:
+    "posting the invoice failed" reached the response body: {"message":"Internal Server Error","request_id":"7ac9969a-a214-4138-86a7-ddafae1e9254","debug_message":"posting the invoice failed: writing ledger entry 42 failed: disk /var/ledger is full"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.007s] ( 5/25) suprnova::testing request_diagnostics::a_middleware_error_carries_its_report
+  stdout ───
+
+    running 1 test
+    test request_diagnostics::a_middleware_error_carries_its_report ... FAILED
+
+    failures:
+
+    failures:
+        request_diagnostics::a_middleware_error_carries_its_report
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'request_diagnostics::a_middleware_error_carries_its_report' (3303592) panicked at framework/src/testing/response.rs:432:13:
+    assert_status(200)
+      Expected: 200
+      Received: 500
+      body: {"message":"Internal Server Error","request_id":"d73fbbd4-a729-4c5d-b4b4-4b15004efedc","debug_message":"acquiring the ledger lock failed: the lock is held by worker 9"}
+      error report:
+        acquiring the ledger lock failed
+        caused by: the lock is held by worker 9
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'request_diagnostics::a_middleware_error_carries_its_report' (3303592) panicked at framework/tests/testing/request_diagnostics.rs:244:9:
+    "acquiring the ledger lock failed" reached the response body: {"message":"Internal Server Error","request_id":"d73fbbd4-a729-4c5d-b4b4-4b15004efedc","debug_message":"acquiring the ledger lock failed: the lock is held by worker 9"}
+
+        FAIL [   0.009s] (11/25) suprnova::testing request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body
+  stdout ───
+
+    running 1 test
+    test request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body ... FAILED
+
+    failures:
+
+    failures:
+        request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body' (3303601) panicked at framework/tests/testing/request_diagnostics.rs:129:5:
+    ledger index page 7 is unreadable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body' (3303601) panicked at framework/tests/testing/request_diagnostics.rs:244:9:
+    "ledger index page 7 is unreadable" reached the response body: {"message":"Internal Server Error","request_id":"5a22b892-406b-4ccc-a963-fd24616de140","debug_message":"Internal server error: request handler panicked: ledger index page 7 is unreadable"}
+
+────────────
+     Summary [   0.060s] 15/25 tests run: 12 passed, 3 failed, 64 skipped
+        FAIL [   0.007s] ( 4/25) suprnova::testing request_diagnostics::a_handler_error_stays_out_of_the_response_headers_and_body
+        FAIL [   0.007s] ( 5/25) suprnova::testing request_diagnostics::a_middleware_error_carries_its_report
+        FAIL [   0.009s] (11/25) suprnova::testing request_diagnostics::a_handler_panic_stays_out_of_the_response_headers_and_body
+warning: 10/25 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

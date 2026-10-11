@@ -1,0 +1,29 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 2.00s
+────────────
+ Nextest run ID d728b50e-38d2-4966-a15b-832bd9664de9 with nextest profile: default
+    Starting 9 tests across 1 binary (129 tests skipped)
+        FAIL [   0.008s] (9/9) suprnova::filesystem default_disk::revised_unset_disk_defaults_to_local
+  stdout ───
+
+    running 1 test
+    test default_disk::revised_unset_disk_defaults_to_local ... FAILED
+
+    failures:
+
+    failures:
+        default_disk::revised_unset_disk_defaults_to_local
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'default_disk::revised_unset_disk_defaults_to_local' (2652675) panicked at framework/tests/filesystem/default_disk.rs:204:40:
+    PAR-016 unset default resolves local: Internal { message: "no default disk is named: set FILESYSTEM_DISK or call Storage::set_default_disk in the bootstrap" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.009s] 9 tests run: 8 passed, 1 failed, 129 skipped
+        FAIL [   0.008s] (9/9) suprnova::filesystem default_disk::revised_unset_disk_defaults_to_local
+error: test run failed

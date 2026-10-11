@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+────────────
+ Nextest run ID bec8ec5c-39df-440f-abee-0edf7c86d37c with nextest profile: default
+    Starting 18 tests across 1 binary
+────────────
+     Summary [   0.010s] 18 tests run: 18 passed, 0 skipped
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 52s
+────────────
+ Nextest run ID 8aff308b-dd1d-463b-99f8-f4fd4fcba572 with nextest profile: default
+    Starting 17 tests across 1 binary (28 tests skipped)
+────────────
+     Summary [   1.582s] 17 tests run: 17 passed, 28 skipped

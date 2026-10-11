@@ -1,0 +1,39 @@
+   Compiling syn v2.0.117
+   Compiling futures-util v0.3.34
+   Compiling serde v1.0.229
+   Compiling askama_parser v0.16.0
+   Compiling web_atoms v0.2.5
+   Compiling serde_urlencoded v0.7.1
+   Compiling charts-rs v1.0.0
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling axum-core v0.4.5
+   Compiling askama_derive v0.16.0
+   Compiling zeroize_derive v1.5.0
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v1.0.69
+   Compiling zeroize v1.9.0
+   Compiling tokio v1.53.1
+   Compiling block-buffer v0.12.0
+   Compiling thiserror v1.0.69
+   Compiling digest v0.11.3
+   Compiling tungstenite v0.24.0
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling hkdf v0.13.0
+   Compiling askama_macros v0.16.0
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling hyper v1.9.0
+   Compiling tower v0.5.3
+   Compiling tokio-tungstenite v0.24.0
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.7.9
+   Compiling suprnova-live-test-support v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 11.07s
+────────────
+ Nextest run ID 5c36a3e7-f486-43f8-9e69-2d88d1c62362 with nextest profile: default
+    Starting 2 tests across 5 binaries (56 tests skipped)
+────────────
+     Summary [   0.045s] 2 tests run: 2 passed, 56 skipped

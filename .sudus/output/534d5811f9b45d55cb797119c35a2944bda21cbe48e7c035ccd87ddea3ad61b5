@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 0.95s
+────────────
+ Nextest run ID 4cf2f437-b900-41d3-a963-6d3b40b2f851 with nextest profile: default
+    Starting 17 tests across 1 binary
+        FAIL [   0.009s] (11/17) suprnova::strings helpers::revised_excerpt_trims_invisible_characters
+  stdout ───
+
+    running 1 test
+    test helpers::revised_excerpt_trims_invisible_characters ... FAILED
+
+    failures:
+
+    failures:
+        helpers::revised_excerpt_trims_invisible_characters
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'helpers::revised_excerpt_trims_invisible_characters' (2685386) panicked at framework/tests/strings/helpers.rs:145:5:
+    assertion `left == right` failed: PAR-035 excerpt trims invisible characters beside the phrase
+      left: Some("...\u{200b}hitb...")
+     right: Some("...hitb...")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 6 tests still running
+────────────
+     Summary [   0.158s] 17 tests run: 16 passed, 1 failed, 0 skipped
+        FAIL [   0.009s] (11/17) suprnova::strings helpers::revised_excerpt_trims_invisible_characters
+error: test run failed

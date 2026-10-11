@@ -1,0 +1,34 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 09s
+────────────
+ Nextest run ID 852da5f6-54ac-4e52-9e02-757c6ad058a6 with nextest profile: default
+    Starting 95 tests across 9 binaries (3562 tests skipped)
+        FAIL [   0.258s] (46/95) suprnova::memory images::mem_audit_a_whole_profile_is_carried_without_a_copy
+  stdout ───
+
+    running 1 test
+    test images::mem_audit_a_whole_profile_is_carried_without_a_copy ... FAILED
+
+    failures:
+
+    failures:
+        images::mem_audit_a_whole_profile_is_carried_without_a_copy
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.25s
+
+  stderr ───
+
+    thread 'images::mem_audit_a_whole_profile_is_carried_without_a_copy' (2066153) panicked at framework/tests/memory/images.rs:1942:13:
+    WebP to WebP: 2215733 bytes with a 1048576-byte profile against 111689 with none: it was copied on the way to the output
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [  20.891s] 57/95 tests run: 56 passed, 1 failed, 3562 skipped
+        FAIL [   0.258s] (46/95) suprnova::memory images::mem_audit_a_whole_profile_is_carried_without_a_copy
+warning: 38/95 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

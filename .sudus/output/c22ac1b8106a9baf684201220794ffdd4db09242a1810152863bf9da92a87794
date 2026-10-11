@@ -1,0 +1,49 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 02s
+────────────
+ Nextest run ID 7c70d999-d5a5-4e22-9ed1-1ce0dc28c984 with nextest profile: default
+    Starting 96 tests across 6 binaries (3169 tests skipped)
+        FAIL [   0.013s] (14/96) suprnova::http rtc_streaming::rtc_a_streamed_file_arrives_in_chunks_of_at_least_256_kib
+  stdout ───
+
+    running 1 test
+    test rtc_streaming::rtc_a_streamed_file_arrives_in_chunks_of_at_least_256_kib ... FAILED
+
+    failures:
+
+    failures:
+        rtc_streaming::rtc_a_streamed_file_arrives_in_chunks_of_at_least_256_kib
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 245 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'rtc_streaming::rtc_a_streamed_file_arrives_in_chunks_of_at_least_256_kib' (59057) panicked at framework/tests/http/rtc_streaming.rs:53:5:
+    assertion `left == right` failed: 63 of 64 chunks before the last one are under 256 KiB: [65536, 65536, 65536, 65536]
+      left: 63
+     right: 0
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+     SIGTERM [  73.613s] (25/96) suprnova::hashing rtc_gate::rtc_hash_work_past_the_limit_waits_as_a_task
+  stdout ───
+
+    running 1 test
+    test rtc_gate::rtc_hash_work_past_the_limit_waits_as_a_task has been running for over 60 seconds
+  stderr ───
+
+    thread 'rtc_gate::rtc_hash_work_past_the_limit_waits_as_a_task' (59047) panicked at framework/tests/hashing/rtc_gate.rs:75:5:
+    assertion `left == right` failed: a third piece of hash work entered the hasher while two held the permits
+      left: 3
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    (test aborted with signal 15: SIGTERM)
+
+────────────
+     Summary [  73.626s] 25/96 tests run: 23 passed, 2 failed, 3169 skipped
+        FAIL [   0.013s] (14/96) suprnova::http rtc_streaming::rtc_a_streamed_file_arrives_in_chunks_of_at_least_256_kib
+     SIGTERM [  73.613s] (25/96) suprnova::hashing rtc_gate::rtc_hash_work_past_the_limit_waits_as_a_task
+warning: 71/96 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+sudus: the declared inputs, a requirement text or the mechanism definition changed while the command ran; every result of this run is unverified

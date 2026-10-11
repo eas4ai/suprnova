@@ -1,0 +1,17 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 36.57s
+────────────
+ Nextest run ID 9895e05b-0604-4775-be43-6c85343ecafa with nextest profile: default
+    Starting 125 tests across 6 binaries (1411 tests skipped)
+────────────
+     Summary [   0.243s] 125 tests run: 125 passed, 1411 skipped
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 19s
+────────────
+ Nextest run ID e64ee1bc-b52e-47a6-bab8-124612dfd1a8 with nextest profile: default
+    Starting 15 tests across 1 binary
+────────────
+     Summary [   0.034s] 15 tests run: 15 passed, 0 skipped

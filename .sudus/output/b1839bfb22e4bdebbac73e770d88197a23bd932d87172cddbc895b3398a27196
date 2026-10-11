@@ -1,0 +1,49 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 55.14s
+────────────
+ Nextest run ID ca19124d-adb2-4a66-92ad-c45b0d7ece35 with nextest profile: default
+    Starting 114 tests across 1 binary
+        FAIL [   0.071s] ( 76/114) suprnova-cli::live_registries reg_024_a_new_key_is_pinned_only_on_a_terminal
+  stdout ───
+
+    running 1 test
+    test reg_024_a_new_key_is_pinned_only_on_a_terminal ... FAILED
+
+    failures:
+
+    failures:
+        reg_024_a_new_key_is_pinned_only_on_a_terminal
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.07s
+
+  stderr ───
+
+    thread 'reg_024_a_new_key_is_pinned_only_on_a_terminal' (3391436) panicked at suprnova-cli/tests/live_registries.rs:535:18:
+    installed, expected a refusal naming `needs a terminal`
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.091s] (109/114) suprnova-cli::live_registries reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal
+  stdout ───
+
+    running 1 test
+    test reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal ... FAILED
+
+    failures:
+
+    failures:
+        reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.09s
+
+  stderr ───
+
+    thread 'reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal' (3391583) panicked at suprnova-cli/tests/live_registries.rs:535:18:
+    installed, expected a refusal naming `needs a terminal`
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   2.098s] 114 tests run: 112 passed, 2 failed, 0 skipped
+        FAIL [   0.071s] ( 76/114) suprnova-cli::live_registries reg_024_a_new_key_is_pinned_only_on_a_terminal
+        FAIL [   0.091s] (109/114) suprnova-cli::live_registries reg_033_a_vouched_key_change_is_re_pinned_only_on_a_terminal
+error: test run failed

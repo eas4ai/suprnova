@@ -1,0 +1,262 @@
+   Compiling suprnova-live v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 57.92s
+────────────
+ Nextest run ID 5e09ec83-eed6-418f-80df-b615c5bce158 with nextest profile: default
+    Starting 23 tests across 2 binaries (2387 tests skipped)
+        FAIL [   0.008s] ( 5/23) suprnova::error debug_error_page::replacement::with_debug_on_a_browser_request_to_a_failing_handler_gets_html_not_json
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_a_browser_request_to_a_failing_handler_gets_html_not_json ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_a_browser_request_to_a_failing_handler_gets_html_not_json
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_a_browser_request_to_a_failing_handler_gets_html_not_json' (3286053) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"7bd2d5fa-37ca-4b68-800c-6de6119745d6","debug_message":"posting the invoice failed: writing ledger entry 42 failed: disk ledger-volume-3 is full"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.009s] ( 6/23) suprnova::error debug_error_page::frames::a_panicking_function_is_a_shown_frame
+  stdout ───
+
+    running 1 test
+    test debug_error_page::frames::a_panicking_function_is_a_shown_frame ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::frames::a_panicking_function_is_a_shown_frame
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::frames::a_panicking_function_is_a_shown_frame' (3286050) panicked at framework/tests/error/debug_error_page/mod.rs:195:5:
+    ledger index page 7 is unreadable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'debug_error_page::frames::a_panicking_function_is_a_shown_frame' (3286050) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"8b2e0a9d-23f9-4001-8303-3d93e1f55f9b","debug_message":"Internal server error: request handler panicked: ledger index page 7 is unreadable"}
+
+        FAIL [   0.009s] ( 7/23) suprnova::error debug_error_page::frames::a_handler_whose_question_mark_turns_a_database_error_into_a_framework_error_is_a_shown_frame
+  stdout ───
+
+    running 1 test
+    test debug_error_page::frames::a_handler_whose_question_mark_turns_a_database_error_into_a_framework_error_is_a_shown_frame ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::frames::a_handler_whose_question_mark_turns_a_database_error_into_a_framework_error_is_a_shown_frame
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::frames::a_handler_whose_question_mark_turns_a_database_error_into_a_framework_error_is_a_shown_frame' (3286049) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"49f61f5d-1e89-40ba-b28e-f5ea623e4634","debug_message":"Database error: Execution Error: error returned from database: (code: 1) no such table: ledger_rows_never_migrated"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] ( 9/23) suprnova::error debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups
+  stdout ───
+
+    running 1 test
+    test debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups' (3286052) panicked at framework/tests/error/debug_error_page/mod.rs:195:5:
+    ledger index page 7 is unreadable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups' (3286052) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"4349273c-8fa6-4f60-a59a-a86fedb290ba","debug_message":"Database error: Execution Error: error returned from database: (code: 1) no such table: ledger_rows_never_migrated"}
+
+        FAIL [   0.009s] (10/23) suprnova::error debug_error_page::replacement::with_debug_on_a_browser_navigation_gets_the_page_not_the_apps_inertia_error_page
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_a_browser_navigation_gets_the_page_not_the_apps_inertia_error_page ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_a_browser_navigation_gets_the_page_not_the_apps_inertia_error_page
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_a_browser_navigation_gets_the_page_not_the_apps_inertia_error_page' (3286058) panicked at framework/tests/error/debug_error_page/mod.rs:390:5:
+    the development error page is not an Inertia response or the Inertia HTML shell; headers:
+    content-type: text/html; charset=utf-8
+    vary: X-Inertia
+    cache-control: no-cache, private
+    x-request-id: 9f0809e5-82a8-42d4-ac0a-2a75847ea552
+    content-length: 637
+    date: Fri, 02 Oct 2026 14:35:13 GMT
+    body: <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="test_csrf_token">
+    <title>Suprnova</title>
+    <script type="module" src="http://localhost:5765/@vite/client"></script>
+    <script type="module" src="http://localhost:5765/src/main.ts"></script>
+    </head>
+    <body>
+    <script type="application/json" data-page="app">{"component":"Error","props":{"errors":{},"status":500,"message":"Internal Server Error","request_id":"9f0809e5-82a8-42d4-ac0a-2a75847ea552"},"url":"\/posts","version":"1.0"}</script>
+    <div id="app"></div>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] (11/23) suprnova::error debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location' (3286060) panicked at framework/tests/error/debug_error_page/mod.rs:195:5:
+    ledger index page 7 is unreadable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location' (3286060) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"d4582ec8-c137-43f4-a9de-bb9c0034b5fb","debug_message":"Internal server error: request handler panicked: ledger index page 7 is unreadable"}
+
+        FAIL [   0.007s] (12/23) suprnova::error debug_error_page::request_context::a_url_password_in_the_error_chain_is_redacted
+  stdout ───
+
+    running 1 test
+    test debug_error_page::request_context::a_url_password_in_the_error_chain_is_redacted ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::request_context::a_url_password_in_the_error_chain_is_redacted
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::request_context::a_url_password_in_the_error_chain_is_redacted' (3286065) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"aeafc471-3c0d-431e-83d5-09e14f842790","debug_message":"connecting to postgres://app:hunter2@db/app failed: the replica refused the session: the server at postgres://ledger:swordfish@replica:5432/app closed the connection"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.008s] (13/23) suprnova::error debug_error_page::replacement::with_debug_on_the_page_keeps_a_503_status_and_shows_its_message
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_the_page_keeps_a_503_status_and_shows_its_message ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_the_page_keeps_a_503_status_and_shows_its_message
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_the_page_keeps_a_503_status_and_shows_its_message' (3286068) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"25b77d5e-9ea4-4574-9356-20040f9406d5","debug_message":"the ledger is closed for the nightly reconciliation"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.008s] (14/23) suprnova::error debug_error_page::replacement::with_debug_on_the_page_shows_the_error_chain_and_keeps_the_500_status
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_the_page_shows_the_error_chain_and_keeps_the_500_status ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_the_page_shows_the_error_chain_and_keeps_the_500_status
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_the_page_shows_the_error_chain_and_keeps_the_500_status' (3286067) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"3228f54c-b7cb-4098-adb7-679d2a0fbbea","debug_message":"posting the invoice failed: writing ledger entry 42 failed: disk ledger-volume-3 is full"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.008s] (15/23) suprnova::error debug_error_page::request_context::a_request_carrying_credentials_yields_a_page_without_their_values
+  stdout ───
+
+    running 1 test
+    test debug_error_page::request_context::a_request_carrying_credentials_yields_a_page_without_their_values ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::request_context::a_request_carrying_credentials_yields_a_page_without_their_values
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::request_context::a_request_carrying_credentials_yields_a_page_without_their_values' (3286066) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"message":"Internal Server Error","request_id":"600a0330-b64a-4db2-93aa-fee80efc22e5","debug_message":"posting the invoice failed: writing ledger entry 42 failed: disk ledger-volume-3 is full"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.033s] (16/23) suprnova::error debug_error_page::replacement::with_debug_on_an_inertia_visit_gets_the_page_not_the_apps_inertia_error_page
+  stdout ───
+
+    running 1 test
+    test debug_error_page::replacement::with_debug_on_an_inertia_visit_gets_the_page_not_the_apps_inertia_error_page ... FAILED
+
+    failures:
+
+    failures:
+        debug_error_page::replacement::with_debug_on_an_inertia_visit_gets_the_page_not_the_apps_inertia_error_page
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'debug_error_page::replacement::with_debug_on_an_inertia_visit_gets_the_page_not_the_apps_inertia_error_page' (3286070) panicked at framework/tests/error/debug_error_page/mod.rs:383:5:
+    with debug on, the error must be the development error page, an HTML document; got content-type "application/json" and body: {"component":"Error","props":{"errors":{},"status":500,"message":"Internal Server Error","request_id":"c2cecdeb-88d2-4009-8692-e3aab6844dca"},"url":"/posts","version":"1.0"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.035s] 16/23 tests run: 5 passed, 11 failed, 2387 skipped
+        FAIL [   0.008s] ( 5/23) suprnova::error debug_error_page::replacement::with_debug_on_a_browser_request_to_a_failing_handler_gets_html_not_json
+        FAIL [   0.009s] ( 6/23) suprnova::error debug_error_page::frames::a_panicking_function_is_a_shown_frame
+        FAIL [   0.009s] ( 7/23) suprnova::error debug_error_page::frames::a_handler_whose_question_mark_turns_a_database_error_into_a_framework_error_is_a_shown_frame
+        FAIL [   0.009s] ( 9/23) suprnova::error debug_error_page::frames::std_tokio_and_hyper_frames_are_shown_only_inside_collapsed_groups
+        FAIL [   0.009s] (10/23) suprnova::error debug_error_page::replacement::with_debug_on_a_browser_navigation_gets_the_page_not_the_apps_inertia_error_page
+        FAIL [   0.009s] (11/23) suprnova::error debug_error_page::replacement::with_debug_on_a_panicking_handler_gets_a_page_with_the_panic_message_and_location
+        FAIL [   0.007s] (12/23) suprnova::error debug_error_page::request_context::a_url_password_in_the_error_chain_is_redacted
+        FAIL [   0.008s] (13/23) suprnova::error debug_error_page::replacement::with_debug_on_the_page_keeps_a_503_status_and_shows_its_message
+        FAIL [   0.008s] (14/23) suprnova::error debug_error_page::replacement::with_debug_on_the_page_shows_the_error_chain_and_keeps_the_500_status
+        FAIL [   0.008s] (15/23) suprnova::error debug_error_page::request_context::a_request_carrying_credentials_yields_a_page_without_their_values
+        FAIL [   0.033s] (16/23) suprnova::error debug_error_page::replacement::with_debug_on_an_inertia_visit_gets_the_page_not_the_apps_inertia_error_page
+warning: 7/23 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

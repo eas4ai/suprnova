@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 19.25s
+────────────
+ Nextest run ID bcfae68c-019e-4596-b3e2-bef0c9066f4c with nextest profile: default
+    Starting 1 test across 7 binaries (1338 tests skipped)
+        FAIL [   0.005s] (1/1) suprnova::pagination laravel_gaps::an_empty_result_reports_one_last_page
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::an_empty_result_reports_one_last_page ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::an_empty_result_reports_one_last_page
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::an_empty_result_reports_one_last_page' (3685922) panicked at framework/tests/pagination/laravel_gaps.rs:10:5:
+    assertion `left == right` failed: Laravel reports one page for an empty result
+      left: Number(0)
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.007s] 1 test run: 0 passed, 1 failed, 1338 skipped
+        FAIL [   0.005s] (1/1) suprnova::pagination laravel_gaps::an_empty_result_reports_one_last_page
+error: test run failed

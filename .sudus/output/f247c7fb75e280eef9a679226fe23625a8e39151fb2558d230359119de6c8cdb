@@ -1,0 +1,53 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 54.77s
+────────────
+ Nextest run ID 16c74ed2-b500-465b-85ec-2f15a83e6070 with nextest profile: default
+    Starting 114 tests across 1 binary
+        FAIL [   0.005s] ( 68/114) suprnova-cli::live_registries reg_025_a_library_json_key_outside_the_set_is_refused
+  stdout ───
+
+    running 1 test
+    test reg_025_a_library_json_key_outside_the_set_is_refused ... FAILED
+
+    failures:
+
+    failures:
+        reg_025_a_library_json_key_outside_the_set_is_refused
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'reg_025_a_library_json_key_outside_the_set_is_refused' (2080504) panicked at suprnova-cli/tests/live_registries.rs:1218:5:
+    assertion `left == right` failed: github.com/acme/acme-ui library.json: library.json holds the key `postInstall`, which is not one of license, namespace, source, version, framework, publicKey, previousKeys, title, description
+      left: {"description", "framework", "license", "namespace", "previousKeys", "publicKey", "source", "title", "version"}
+     right: {"description", "framework", "namespace", "previousKeys", "publicKey", "source", "title", "version"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.003s] ( 69/114) suprnova-cli::live_registries reg_025_library_json_admits_exactly_its_eight_keys
+  stdout ───
+
+    running 1 test
+    test reg_025_library_json_admits_exactly_its_eight_keys ... FAILED
+
+    failures:
+
+    failures:
+        reg_025_library_json_admits_exactly_its_eight_keys
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'reg_025_library_json_admits_exactly_its_eight_keys' (2080508) panicked at suprnova-cli/tests/live_registries.rs:1252:9:
+    assertion `left == right` failed: library.json holds the key `postInstall`, which is not one of license, namespace, source, version, framework, publicKey, previousKeys, title, description
+      left: {"description", "framework", "license", "namespace", "previousKeys", "publicKey", "source", "title", "version"}
+     right: {"description", "framework", "namespace", "previousKeys", "publicKey", "source", "title", "version"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   2.106s] 114 tests run: 112 passed, 2 failed, 0 skipped
+        FAIL [   0.005s] ( 68/114) suprnova-cli::live_registries reg_025_a_library_json_key_outside_the_set_is_refused
+        FAIL [   0.003s] ( 69/114) suprnova-cli::live_registries reg_025_library_json_admits_exactly_its_eight_keys
+error: test run failed

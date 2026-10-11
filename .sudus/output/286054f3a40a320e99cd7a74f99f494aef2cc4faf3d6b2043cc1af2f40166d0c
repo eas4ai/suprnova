@@ -1,0 +1,37 @@
+error: no test target named `kit_pages` in `suprnova-cli` package
+help: available test targets:
+    db_sync_cli
+    dev_tls_trust
+    docker_scaffold
+    generate_routes_keys
+    generate_types_data
+    generate_types_deterministic
+    generate_types_eof
+    generate_types_up_to_date
+    help_flag
+    live_add
+    live_assets
+    live_cli
+    live_generated_app
+    live_registries
+    live_registry_compile
+    live_registry_scan
+    live_scaffold
+    make_command_scaffolds
+    make_inertia_data
+    migrate_fresh_gate
+    new_cli
+    new_git_init
+    new_project
+    new_scaffolds_app_key
+    new_scaffolds_console
+    scaffold_account_flows
+    scaffold_snapshot
+    schema_dump_cli
+    serve_dev_processes
+    ssr_e2e
+    template_drift
+    version_flag
+    workflow_install
+    workflow_install_cli
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova-cli --test kit_pages` exited with code 101

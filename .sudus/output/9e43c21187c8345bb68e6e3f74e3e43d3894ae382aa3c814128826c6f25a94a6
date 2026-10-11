@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 56s
+────────────
+ Nextest run ID 60251e36-1680-4475-ae9a-bd5bb9cdca87 with nextest profile: default
+    Starting 16 tests across 2 binaries (985 tests skipped)
+        FAIL [   0.156s] (16/16) suprnova::database query_helpers::revised_bound_null_means_is_null
+  stdout ───
+
+    running 1 test
+    test query_helpers::revised_bound_null_means_is_null ... FAILED
+
+    failures:
+
+    failures:
+        query_helpers::revised_bound_null_means_is_null
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 175 filtered out; finished in 0.14s
+
+  stderr ───
+
+    thread 'query_helpers::revised_bound_null_means_is_null' (2635515) panicked at framework/tests/database/query_helpers.rs:63:5:
+    assertion `left == right` failed: the builder and `label IS NULL` disagree
+      left: []
+     right: [Object {"id": Number(2), "a": Number(1), "b": Number(0), "c": Number(2), "label": Null, "code": String("cd-2"), "description": String("beta")}, Object {"id": Number(4), "a": Number(0), "b": Number(2), "c": Number(2), "label": Null, "code": String("gh-4"), "description": String("delta")}]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.159s] 16 tests run: 15 passed, 1 failed, 985 skipped
+        FAIL [   0.156s] (16/16) suprnova::database query_helpers::revised_bound_null_means_is_null
+error: test run failed

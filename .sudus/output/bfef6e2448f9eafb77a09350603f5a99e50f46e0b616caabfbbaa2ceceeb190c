@@ -1,0 +1,49 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 4.99s
+────────────
+ Nextest run ID a3c1979e-6254-4c82-86a3-a51ba9e5afa0 with nextest profile: default
+    Starting 22 tests across 1 binary
+        FAIL [   0.058s] (15/22) suprnova-cli::live_registry_scan reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
+  stdout ───
+
+    running 1 test
+    test reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency ... FAILED
+
+    failures:
+
+    failures:
+        reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency' (2083432) panicked at suprnova-cli/tests/live_registry_scan.rs:375:32:
+    `/acme-ui/x/x.js` was admitted: []
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.271s] (19/22) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+  stdout ───
+
+    running 1 test
+    test reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line ... FAILED
+
+    failures:
+
+    failures:
+        reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.27s
+
+  stderr ───
+
+    thread 'reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line' (2083231) panicked at suprnova-cli/tests/live_registry_scan.rs:537:5:
+    1 failures:
+    script-static-import-absolute: admitted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.788s] 22 tests run: 20 passed, 2 failed, 0 skipped
+        FAIL [   0.058s] (15/22) suprnova-cli::live_registry_scan reg_032_a_static_import_is_a_relative_path_into_the_component_or_a_dependency
+        FAIL [   0.271s] (19/22) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+error: test run failed

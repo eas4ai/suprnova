@@ -1,0 +1,15 @@
+.F
+======================================================================
+FAIL: test_a_map_stamped_behind_the_source_is_refused_before_anything_runs (__main__.StaleSurfaceRefusal.test_a_map_stamped_behind_the_source_is_refused_before_anything_runs)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/shawn/workspace2/suprnova/feature-map/tools/test_manual_check.py", line 61, in test_a_map_stamped_behind_the_source_is_refused_before_anything_runs
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0 : {"references": 0, "by_outcome": {}, "most_missing": []}
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.208s
+
+FAILED (failures=1)

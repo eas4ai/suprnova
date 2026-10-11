@@ -1,0 +1,52 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 56.69s
+────────────
+ Nextest run ID 2def49d7-5502-45c6-bc8e-259b3e3483c9 with nextest profile: default
+    Starting 492 tests across 3 binaries (3016 tests skipped)
+        FAIL [   0.006s] (142/492) suprnova::inertia inertia::inertia_location_returns_409_with_x_inertia_location
+  stdout ───
+
+    running 1 test
+    test inertia::inertia_location_returns_409_with_x_inertia_location ... FAILED
+
+    failures:
+
+    failures:
+        inertia::inertia_location_returns_409_with_x_inertia_location
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'inertia::inertia_location_returns_409_with_x_inertia_location' (3287104) panicked at framework/tests/inertia/inertia.rs:2106:5:
+    assertion `left == right` failed
+      left: 302
+     right: 409
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.006s] (145/492) suprnova::inertia inertia::inertia_redirect_distinct_from_location
+  stdout ───
+
+    running 1 test
+    test inertia::inertia_redirect_distinct_from_location ... FAILED
+
+    failures:
+
+    failures:
+        inertia::inertia_redirect_distinct_from_location
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'inertia::inertia_redirect_distinct_from_location' (3287105) panicked at framework/tests/inertia/inertia.rs:2183:5:
+    assertion failed: location.headers().get("X-Inertia-Location").is_some()
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.135s] 153/492 tests run: 151 passed, 2 failed, 3016 skipped
+        FAIL [   0.006s] (142/492) suprnova::inertia inertia::inertia_location_returns_409_with_x_inertia_location
+        FAIL [   0.006s] (145/492) suprnova::inertia inertia::inertia_redirect_distinct_from_location
+warning: 339/492 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

@@ -1,0 +1,68 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 06s
+────────────
+ Nextest run ID 78b292b4-ae28-45c1-8fe9-d8fb6ea32707 with nextest profile: default
+    Starting 162 tests across 1 binary (1 test skipped)
+        FAIL [   1.529s] (  3/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_sqlite
+  stdout ───
+
+    running 1 test
+    test failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_sqlite ... FAILED
+
+    failures:
+
+    failures:
+        failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_sqlite
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 162 filtered out; finished in 1.52s
+
+  stderr ───
+
+    thread 'failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_sqlite' (4071640) panicked at framework/tests/laravel_database/failed_jobs.rs:115:17:
+    Laravel: a second dead letter of one envelope is written: Internal server error: failed_jobs insert: Execution Error: error returned from database: (code: 2067) UNIQUE constraint failed: failed_jobs.uuid
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.249s] ( 10/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_postgres
+  stdout ───
+
+    running 1 test
+    test failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_postgres ... FAILED
+
+    failures:
+
+    failures:
+        failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_postgres
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 162 filtered out; finished in 0.24s
+
+  stderr ───
+
+    thread 'failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_postgres' (4071779) panicked at framework/tests/laravel_database/failed_jobs.rs:115:17:
+    Laravel: a second dead letter of one envelope is written: Internal server error: failed_jobs insert: Execution Error: error returned from database: duplicate key value violates unique constraint "failed_jobs_uuid_unique" at line 666
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.623s] ( 30/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_mysql
+  stdout ───
+
+    running 1 test
+    test failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_mysql ... FAILED
+
+    failures:
+
+    failures:
+        failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_mysql
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 162 filtered out; finished in 0.61s
+
+  stderr ───
+
+    thread 'failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_mysql' (4071985) panicked at framework/tests/laravel_database/failed_jobs.rs:115:17:
+    Laravel: a second dead letter of one envelope is written: Internal server error: failed_jobs insert: Execution Error: error returned from database: 1062 (23000): Duplicate entry '3a899efc-6027-43ae-b02b-6f705ad0bfb2' for key 'failed_jobs.failed_jobs_uuid_unique'
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  92.502s] 162 tests run: 159 passed, 3 failed, 1 skipped
+        FAIL [   1.529s] (  3/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_sqlite
+        FAIL [   0.249s] ( 10/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_postgres
+        FAIL [   0.623s] ( 30/162) suprnova::laravel_database failed_jobs::ldb_002_a_dead_letter_gets_a_fresh_uuid_mysql
+error: test run failed

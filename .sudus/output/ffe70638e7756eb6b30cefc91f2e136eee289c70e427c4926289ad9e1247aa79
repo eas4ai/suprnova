@@ -1,0 +1,32 @@
+    Blocking waiting for file lock on package cache
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 41.60s
+────────────
+ Nextest run ID 4efac793-82d2-441f-9c71-f2e6aa4c8237 with nextest profile: default
+    Starting 1 test across 27 binaries (4703 tests skipped)
+        FAIL [   0.015s] (1/1) suprnova::schedule laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+  stdout ───
+
+    running 1 test
+    test laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour ... FAILED
+
+    failures:
+
+    failures:
+        laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour' (2264130) panicked at framework/tests/schedule/laravel_infra_gaps.rs:11:5:
+    assertion `left == right` failed: Laravel's dailyAt reads "9" as 09:00, so monthlyOn(15, '9') runs at 09:00 on the 15th
+      left: "0 0 15 * *"
+     right: "0 9 15 * *"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.028s] 1 test run: 0 passed, 1 failed, 4703 skipped
+        FAIL [   0.015s] (1/1) suprnova::schedule laravel_infra_gaps::at_reads_a_bare_hour_as_that_hour_on_the_hour
+error: test run failed

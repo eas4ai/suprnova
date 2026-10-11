@@ -1,0 +1,117 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::Str`
+ --> framework/tests/strings/helpers.rs:3:5
+  |
+3 | use suprnova::Str;
+  |     ^^^^^^^^^^---
+  |               |
+  |               no `Str` in the root
+
+error[E0432]: unresolved import `suprnova::Str`
+ --> framework/tests/strings/plural.rs:3:5
+  |
+3 | use suprnova::Str;
+  |     ^^^^^^^^^^---
+  |               |
+  |               no `Str` in the root
+
+error[E0432]: unresolved import `suprnova::Str`
+  --> framework/tests/strings/plural.rs:27:34
+   |
+27 |     use suprnova::{Lang, Locale, Str, scope_locale};
+   |                                  ^^^ no `Str` in the root
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:11:41
+   |
+11 |     assert_eq!(in_locale("en", || Lang::percentage(10.0, 0)).await, "10%");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:12:41
+   |
+12 |     assert_eq!(in_locale("en", || Lang::percentage(12.345, 1)).await, "12.3%");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:13:41
+   |
+13 |     assert_eq!(in_locale("en", || Lang::percentage(0.5, 2)).await, "0.50%");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:14:43
+   |
+14 |     let german = in_locale("de", || Lang::percentage(10.0, 0)).await;
+   |                                           ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:19:41
+   |
+19 |     assert_eq!(in_locale("de", || Lang::percentage(12.5, 1)).await.chars().next(), Some('1'));
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `percentage` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:20:38
+   |
+20 |     assert!(in_locale("de", || Lang::percentage(12.5, 1)).await.contains("12,5"));
+   |                                      ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:25:41
+   |
+25 |     assert_eq!(in_locale("en", || Lang::abbreviate(1000.0, 0)).await, "1K");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:26:41
+   |
+26 |     assert_eq!(in_locale("en", || Lang::abbreviate(489_939.0, 0)).await, "490K");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:27:41
+   |
+27 |     assert_eq!(in_locale("en", || Lang::abbreviate(1_230_000.0, 2)).await, "1.23M");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:28:41
+   |
+28 |     assert_eq!(in_locale("en", || Lang::abbreviate(-2500.0, 1)).await, "-2.5K");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:29:41
+   |
+29 |     assert_eq!(in_locale("en", || Lang::abbreviate(999.0, 0)).await, "999");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:30:41
+   |
+30 |     assert_eq!(in_locale("en", || Lang::abbreviate(5_000_000_000.0, 0)).await, "5B");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:31:41
+   |
+31 |     assert_eq!(in_locale("en", || Lang::abbreviate(7.2e12, 1)).await, "7.2T");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:32:41
+   |
+32 |     assert_eq!(in_locale("en", || Lang::abbreviate(3e15, 0)).await, "3Q");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+error[E0599]: no associated function or constant named `abbreviate` found for struct `Lang` in the current scope
+  --> framework/tests/strings/numbers.rs:33:41
+   |
+33 |     assert_eq!(in_locale("de", || Lang::abbreviate(1_230_000.0, 2)).await, "1,23M");
+   |                                         ^^^^^^^^^^ associated function or constant not found in `Lang`
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "strings") due to 18 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test strings` exited with code 101

@@ -1,0 +1,30 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 8.60s
+────────────
+ Nextest run ID 07dd6c52-eb1a-4e3b-9ab3-6c0e30219a4a with nextest profile: default
+    Starting 49 tests across 1 binary (433 tests skipped)
+        FAIL [   0.022s] (37/49) suprnova::queue sqs::revised_fifo_queue_is_accepted_with_default_group
+  stdout ───
+
+    running 1 test
+    test sqs::revised_fifo_queue_is_accepted_with_default_group ... FAILED
+
+    failures:
+
+    failures:
+        sqs::revised_fifo_queue_is_accepted_with_default_group
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 481 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'sqs::revised_fifo_queue_is_accepted_with_default_group' (2658830) panicked at framework/tests/queue/sqs.rs:112:32:
+    the SQS driver builds from the environment: Internal { message: "the sqs queue 'https://sqs.us-east-1.amazonaws.com/123456789012/jobs.fifo' is a FIFO queue, and the sqs driver sends to standard queues only: a FIFO queue needs a message group and a deduplication ID on each job. Name a standard queue in SQS_QUEUE or on the job" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [   0.516s] 48/49 tests run: 47 passed, 1 failed, 433 skipped
+        FAIL [   0.022s] (37/49) suprnova::queue sqs::revised_fifo_queue_is_accepted_with_default_group
+warning: 1/49 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

@@ -1,0 +1,36 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0599]: no associated function or constant named `after_commit` found for struct `DB` in the current scope
+  --> framework/tests/database/after_commit_callback.rs:42:9
+   |
+42 |     DB::after_commit(move || async move {
+   |         ^^^^^^^^^^^^ associated function or constant not found in `DB`
+
+error[E0599]: no associated function or constant named `after_commit` found for struct `DB` in the current scope
+   --> framework/tests/database/after_commit_callback.rs:297:17
+    |
+297 |             DB::after_commit(move || async move {
+    |                 ^^^^^^^^^^^^ associated function or constant not found in `DB`
+
+error[E0599]: no associated function or constant named `after_commit` found for struct `DB` in the current scope
+  --> framework/tests/database/after_commit_callback.rs:78:19
+   |
+78 |     let err = DB::after_commit(|| async { Err(FrameworkError::internal("callback failed")) })
+   |                   ^^^^^^^^^^^^ associated function or constant not found in `DB`
+
+error[E0599]: no associated function or constant named `after_commit` found for struct `DB` in the current scope
+  --> framework/tests/database/after_commit_callback.rs:97:17
+   |
+97 |             DB::after_commit(move || async move {
+   |                 ^^^^^^^^^^^^ associated function or constant not found in `DB`
+
+error[E0599]: no associated function or constant named `after_commit` found for struct `DB` in the current scope
+   --> framework/tests/database/after_commit_callback.rs:205:17
+    |
+205 |             DB::after_commit(|| async { Err(FrameworkError::internal("callback failed")) })
+    |                 ^^^^^^^^^^^^ associated function or constant not found in `DB`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `suprnova` (test "database") due to 5 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test database` exited with code 101

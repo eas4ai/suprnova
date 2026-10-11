@@ -1,0 +1,712 @@
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 10.71s
+────────────
+ Nextest run ID d75571e9-e514-4755-b5ad-287f619dfa22 with nextest profile: default
+    Starting 12 tests across 1 binary (73 tests skipped)
+────────────
+     Summary [   0.201s] 12 tests run: 12 passed, 73 skipped
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling libc v0.2.186
+   Compiling memchr v2.8.0
+   Compiling serde_core v1.0.229
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.20.0
+   Compiling pin-project-lite v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling subtle v2.6.1
+   Compiling bytes v1.11.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling lock_api v0.4.14
+   Compiling futures-core v0.3.34
+   Compiling either v1.16.0
+   Compiling log v0.4.33
+   Compiling equivalent v1.0.2
+   Compiling futures-sink v0.3.34
+   Compiling slab v0.4.12
+   Compiling writeable v0.6.3
+   Compiling hashbrown v0.17.1
+   Compiling futures-channel v0.3.34
+   Compiling percent-encoding v2.3.2
+   Compiling litemap v0.8.2
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling utf8_iter v1.0.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling zmij v1.0.21
+   Compiling shlex v1.3.0
+   Compiling const-oid v0.9.6
+   Compiling pkg-config v0.3.33
+   Compiling icu_properties_data v2.2.0
+   Compiling syn v2.0.117
+   Compiling syn v3.0.4
+   Compiling form_urlencoded v1.2.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling num-traits v0.2.19
+   Compiling bytemuck v1.25.0
+   Compiling base64 v0.22.1
+   Compiling http v1.4.1
+   Compiling bitflags v2.11.1
+   Compiling tracing-core v0.1.36
+   Compiling getrandom v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling rand_core v0.6.4
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling jobserver v0.1.34
+   Compiling cpufeatures v0.3.0
+   Compiling hybrid-array v0.4.12
+   Compiling rand_core v0.10.1
+   Compiling powerfmt v0.2.0
+   Compiling sha1_smol v1.0.1
+   Compiling cmov v0.5.3
+   Compiling cc v1.2.62
+   Compiling atomic v0.6.1
+   Compiling const-oid v0.10.2
+   Compiling getrandom v0.4.3
+   Compiling chacha20 v0.10.2
+   Compiling ctutils v0.4.2
+   Compiling indexmap v2.14.0
+   Compiling deranged v0.5.8
+   Compiling crypto-common v0.2.2
+   Compiling num-integer v0.1.46
+   Compiling cpufeatures v0.2.17
+   Compiling regex-syntax v0.8.10
+   Compiling hex v0.4.3
+   Compiling rand v0.10.1
+   Compiling untrusted v0.9.0
+   Compiling ryu v1.0.23
+   Compiling cmake v0.1.58
+   Compiling libm v0.2.16
+   Compiling rustls v0.23.45
+   Compiling num-bigint v0.4.6
+   Compiling http-body v1.0.1
+   Compiling serde_json v1.0.151
+   Compiling zerocopy v0.8.48
+   Compiling anyhow v1.0.103
+   Compiling crossbeam-utils v0.8.21
+   Compiling lazy_static v1.5.0
+   Compiling time v0.3.47
+   Compiling iana-time-zone v0.1.65
+   Compiling byteorder v1.5.0
+   Compiling synstructure v0.13.2
+   Compiling aws-lc-sys v0.45.0
+   Compiling ring v0.17.14
+   Compiling tower-service v0.3.3
+   Compiling tower-layer v0.3.3
+   Compiling allocator-api2 v0.2.21
+   Compiling darling_core v0.20.11
+   Compiling httparse v1.10.1
+   Compiling http-body-util v0.1.3
+   Compiling spin v0.9.9
+   Compiling aho-corasick v1.1.4
+   Compiling parking v2.2.1
+   Compiling base64ct v1.8.3
+   Compiling event-listener v5.4.2
+   Compiling jiff v0.2.32
+   Compiling serde_derive v1.0.229
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.20
+   Compiling async-trait v0.1.92
+   Compiling rust_decimal v1.42.0
+   Compiling zeroize_derive v1.5.0
+   Compiling displaydoc v0.2.5
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling zeroize v1.9.0
+   Compiling tokio-macros v2.7.0
+   Compiling futures-util v0.3.34
+   Compiling tracing-attributes v0.1.31
+   Compiling generic-array v0.14.7
+   Compiling thiserror v2.0.20
+   Compiling tokio v1.53.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling block-buffer v0.12.0
+   Compiling rustls-pki-types v1.14.1
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerofrom v0.1.8
+   Compiling digest v0.10.7
+   Compiling digest v0.11.3
+   Compiling tracing v0.1.44
+   Compiling yoke v0.8.2
+   Compiling sha2 v0.11.0
+   Compiling md-5 v0.10.6
+   Compiling uuid v1.23.1
+   Compiling hmac v0.13.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling sha1 v0.11.0
+   Compiling serde v1.0.229
+   Compiling webpki-roots v1.0.7
+   Compiling md-5 v0.11.0
+   Compiling thiserror-impl v1.0.69
+   Compiling sha2 v0.10.9
+   Compiling darling_macro v0.20.11
+   Compiling regex-automata v0.4.14
+   Compiling futures-executor v0.3.32
+   Compiling chrono v0.4.44
+   Compiling httpdate v1.0.3
+   Compiling darling v0.20.11
+   Compiling futures v0.3.32
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling atomic-waker v1.1.2
+   Compiling fastrand v2.4.1
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling try-lock v0.2.5
+   Compiling phf_generator v0.13.1
+   Compiling thiserror v1.0.69
+   Compiling want v0.3.1
+   Compiling reqsign-core v3.1.0 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling getrandom v0.3.4
+   Compiling openssl-sys v0.9.116
+   Compiling minimal-lexical v0.2.1
+   Compiling crc32fast v1.5.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling icu_provider v2.2.0
+   Compiling simd-adler32 v0.3.9
+   Compiling foldhash v0.2.0
+   Compiling arrayvec v0.7.6
+   Compiling hashbrown v0.16.1
+   Compiling tokio-util v0.7.18
+   Compiling regex v1.12.3
+   Compiling tokio-stream v0.1.18
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling tinyvec v1.11.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling nom v7.1.3
+   Compiling bigdecimal v0.4.10
+   Compiling idna_adapter v1.2.2
+   Compiling h2 v0.4.16
+   Compiling quick-xml v0.41.0
+   Compiling pem-rfc7468 v0.7.0
+   Compiling sync_wrapper v1.0.2
+   Compiling idna v1.1.0
+   Compiling ipnet v2.12.0
+   Compiling adler2 v2.0.1
+   Compiling crc-catalog v2.5.0
+   Compiling miniz_oxide v0.8.9
+   Compiling der v0.7.10
+   Compiling crc v3.4.0
+   Compiling url v2.5.8
+   Compiling unicode-normalization v0.1.25
+   Compiling hashlink v0.11.1
+   Compiling rand_core v0.9.5
+   Compiling phf_codegen v0.13.1
+   Compiling crossbeam-queue v0.3.12
+   Compiling futures-intrusive v0.5.0
+   Compiling mea v0.6.3
+   Compiling rustc-hash v2.1.2
+   Compiling rustversion v1.0.22
+   Compiling cfg_aliases v0.2.1
+   Compiling rand_chacha v0.9.0
+   Compiling itertools v0.14.0
+   Compiling spki v0.7.3
+   Compiling flate2 v1.1.9
+   Compiling tower v0.5.3
+   Compiling serde_urlencoded v0.7.1
+   Compiling hmac v0.12.1
+   Compiling inout v0.1.4
+   Compiling libsqlite3-sys v0.30.1
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling winnow v1.0.3
+   Compiling dotenvy v0.15.7
+   Compiling mime v0.3.17
+   Compiling cipher v0.4.4
+   Compiling pkcs8 v0.10.2
+   Compiling rand v0.9.4
+   Compiling icu_locale_data v2.2.0
+   Compiling hkdf v0.13.0
+   Compiling oxideav-core v0.1.34
+   Compiling core_maths v0.1.1
+   Compiling ff v0.13.1
+   Compiling atoi v2.0.0
+   Compiling base16ct v0.2.0
+   Compiling foreign-types-shared v0.1.1
+   Compiling openssl v0.10.80
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling base64 v0.21.7
+   Compiling rand v0.8.6
+   Compiling foreign-types v0.3.2
+   Compiling const-random-macro v0.1.16
+   Compiling sec1 v0.7.3
+   Compiling group v0.13.0
+   Compiling icu_locale v2.2.0
+   Compiling stringprep v0.1.5
+   Compiling unic-langid-impl v0.9.6
+   Compiling hyper v1.9.0
+   Compiling rusticata-macros v4.1.0
+   Compiling string_cache_codegen v0.6.1
+   Compiling crypto-bigint v0.5.5
+   Compiling openssl-macros v0.1.1
+   Compiling asn1-rs-impl v0.2.0
+   Compiling asn1-rs-derive v0.5.1
+   Compiling flume v0.12.0
+   Compiling data-encoding v2.11.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling openssl-probe v0.2.1
+   Compiling whoami v2.1.3
+   Compiling rustls-native-certs v0.8.3
+   Compiling hyper-util v0.1.20
+   Compiling asn1-rs v0.6.2
+   Compiling web_atoms v0.2.5
+   Compiling unic-langid-macros-impl v0.9.6
+   Compiling sea-query-derive v1.0.0
+   Compiling elliptic-curve v0.13.8
+   Compiling const-random v0.1.18
+   Compiling phf_generator v0.11.3
+   Compiling tower-http v0.6.11
+   Compiling nix v0.29.0
+   Compiling rand_chacha v0.3.1
+   Compiling universal-hash v0.5.1
+   Compiling async-stream-impl v0.3.6
+   Compiling phf v0.13.1
+   Compiling ordered-float v4.6.0
+   Compiling http v0.2.12
+   Compiling precomputed-hash v0.1.1
+   Compiling vsimd v0.8.0
+   Compiling dtoa v1.0.11
+   Compiling outref v0.5.2
+   Compiling glob v0.3.3
+   Compiling opaque-debug v0.3.1
+   Compiling same-file v1.0.6
+   Compiling hashbrown v0.14.5
+   Compiling utf8parse v0.2.2
+   Compiling crossbeam-epoch v0.9.20
+   Compiling anstyle-parse v1.0.0
+   Compiling http-body v0.4.6
+   Compiling walkdir v2.5.0
+   Compiling base64-simd v0.8.0
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling base64urlsafedata v0.5.5
+   Compiling async-stream v0.3.6
+   Compiling sea-query v1.0.2
+   Compiling string_cache v0.9.0
+   Compiling unic-langid-macros v0.9.6
+   Compiling phf_codegen v0.11.3
+   Compiling dlv-list v0.5.2
+   Compiling memoffset v0.9.1
+   Compiling rfc6979 v0.4.0
+   Compiling combine v4.6.7
+   Compiling parse-zoneinfo v0.3.1
+   Compiling fdeflate v0.3.7
+   Compiling signature v2.2.0
+   Compiling sha1 v0.10.6
+   Compiling onig_sys v69.9.3
+   Compiling bytes-utils v0.1.4
+   Compiling indexmap v1.9.3
+   Compiling pin-utils v0.1.0
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling linux-raw-sys v0.12.1
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling pxfm v0.1.29
+   Compiling chrono-tz-build v0.3.0
+   Compiling aws-smithy-types v1.4.8
+   Compiling rustix v1.1.4
+   Compiling anstream v1.0.0
+   Compiling pest v2.8.6
+   Compiling derive_more-impl v2.1.1
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling png v0.18.1
+   Compiling ecdsa v0.16.9
+   Compiling ordered-multimap v0.7.3
+   Compiling ouroboros_macro v0.18.5
+   Compiling unic-langid v0.9.6
+   Compiling icu_plurals_data v2.2.0
+   Compiling oid-registry v0.7.1
+   Compiling der-parser v9.0.0
+   Compiling primeorder v0.13.6
+   Compiling askama_parser v0.16.0
+   Compiling tendril v0.5.1
+   Compiling prost-derive v0.13.5
+   Compiling sea-streamer-types v0.5.2
+   Compiling half v2.7.1
+   Compiling pluralizer v0.5.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling sea-streamer-runtime v0.5.0
+   Compiling moxcms v0.8.1
+   Compiling sea-schema-derive v0.3.0
+   Compiling sea-bae v0.2.2
+   Compiling fixed_decimal v0.7.2
+   Compiling pin-project-internal v1.1.13
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling flume v0.11.1
+   Compiling darling_core v0.23.0
+   Compiling bstr v1.12.1
+   Compiling thread_local v1.1.9
+   Compiling clap_lex v1.1.0
+   Compiling static_assertions v1.1.0
+   Compiling prometheus-client v0.25.0
+   Compiling byteorder-lite v0.1.0
+   Compiling hashbrown v0.12.3
+   Compiling aliasable v0.1.3
+   Compiling foldhash v0.1.5
+   Compiling webauthn-rs-core v0.5.5
+   Compiling globset v0.4.18
+   Compiling prost v0.13.5
+   Compiling pin-project v1.1.13
+   Compiling hashbrown v0.15.5
+   Compiling ouroboros v0.18.5
+   Compiling clap_builder v4.6.0
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling sea-orm-macros v2.0.2
+   Compiling icu_plurals v2.2.0
+   Compiling serde_cbor_2 v0.13.0
+   Compiling markup5ever v0.39.0
+   Compiling x509-parser v0.16.0
+   Compiling p256 v0.13.2
+   Compiling redis v0.25.5
+   Compiling darling_macro v0.23.0
+   Compiling askama_derive v0.16.0
+   Compiling image v0.25.10
+   Compiling pest_meta v2.8.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling derive_more v2.1.1
+   Compiling rust-ini v0.21.3
+   Compiling mac_address v1.1.8
+   Compiling chrono-tz v0.9.0
+   Compiling icu_decimal_data v2.2.0
+   Compiling icu_calendar_data v2.2.0
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling backon v1.6.0
+   Compiling polyval v0.6.2
+   Compiling clap_derive v4.6.1
+   Compiling axum-core v0.4.5
+   Compiling arc-swap v1.9.2
+   Compiling ttf-parser v0.25.1
+   Compiling calendrical_calculations v0.2.4
+   Compiling matchers v0.2.0
+   Compiling icu_pattern v0.4.2
+   Compiling derive_builder_core v0.20.2
+   Compiling tracing-serde v0.2.0
+   Compiling aead v0.5.2
+   Compiling simple_asn1 v0.6.4
+   Compiling derive-where v1.6.1
+   Compiling prometheus-client-derive-encode v0.5.0
+   Compiling sharded-slab v0.1.7
+   Compiling phf_shared v0.11.3
+   Compiling inout v0.2.2
+   Compiling tracing-log v0.2.0
+   Compiling pem v3.0.6
+   Compiling proc-macro-error-attr3 v3.1.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling deunicode v1.6.2
+   Compiling ixdtf v0.6.5
+   Compiling strum v0.28.0
+   Compiling spin v0.10.1
+   Compiling matchit v0.7.3
+   Compiling qrcodegen v1.8.0
+   Compiling comrak v0.52.0
+   Compiling icu_calendar v2.2.1
+   Compiling proc-macro-error3 v3.1.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling crc-fast v1.10.0
+   Compiling axum v0.7.9
+   Compiling qrcodegen-image v1.5.1
+   Compiling jsonwebtoken v9.3.1
+   Compiling derive_builder_macro v0.20.2
+   Compiling phf v0.11.3
+   Compiling cipher v0.5.2
+   Compiling clap v4.6.1
+   Compiling fontdue v0.9.4
+   Compiling askama_macros v0.16.0
+   Compiling sea-streamer-redis v0.5.2
+   Compiling icu_decimal v2.2.0
+   Compiling onig v6.5.3
+   Compiling ghash v0.5.1
+   Compiling mime_guess v2.0.5
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling pest_generator v2.8.6
+   Compiling ignore v0.4.25
+   Compiling darling v0.23.0
+   Compiling html5ever v0.39.0
+   Compiling tower v0.4.13
+   Compiling icu_list_data v2.2.0
+   Compiling icu_casemap_data v2.2.0
+   Compiling icu_time_data v2.2.1
+   Compiling sea-streamer-stdio v0.5.0
+   Compiling xattr v1.6.1
+   Compiling tungstenite v0.29.0
+   Compiling dtoa-short v0.3.5
+   Compiling hyper-timeout v0.5.2
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling blowfish v0.9.1
+   Compiling hkdf v0.12.4
+   Compiling nix v0.31.3
+   Compiling type-map v0.5.1
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling bincode v1.3.3
+   Compiling rustls-pemfile v2.2.0
+   Compiling blake2 v0.10.6
+   Compiling tinystr v0.7.6
+   Compiling event-listener-strategy v0.5.4
+   Compiling password-hash v0.5.0
+   Compiling socket2 v0.5.10
+   Compiling iso_currency v0.5.3
+   Compiling litemap v0.7.5
+   Compiling ryu-js v1.0.3
+   Compiling urlencoding v2.1.3
+   Compiling base32 v0.5.1
+   Compiling constant_time_eq v0.3.1
+   Compiling writeable v0.5.5
+   Compiling sea-orm-cli v2.0.2
+   Compiling argon2 v0.5.3
+   Compiling totp-rs v5.7.1
+   Compiling async-lock v3.4.2
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling syntect v5.3.0
+   Compiling icu_locid v1.5.0
+   Compiling webauthn-rs v0.5.5
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling intl-memoizer v0.5.3
+   Compiling ece v2.3.1
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling bcrypt v0.17.1
+   Compiling aes-gcm v0.10.3
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sea-streamer-socket v0.5.2
+   Compiling tokio-tungstenite v0.29.0
+   Compiling cssparser v0.37.0
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling pest_derive v2.8.6
+   Compiling globwalk v0.9.1
+   Compiling icu_time v2.2.0
+   Compiling icu_list v2.2.0
+   Compiling icu_casemap v2.2.0
+   Compiling validator_derive v0.20.1
+   Compiling askama v0.16.0
+   Compiling charts-rs v1.0.0
+   Compiling blowfish v0.10.0
+   Compiling derive_builder v0.20.2
+   Compiling jetscii v0.5.3
+   Compiling icu_datetime_data v2.2.0
+   Compiling icu_experimental_data v0.5.0
+   Compiling slug v0.1.6
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling prost-types v0.13.5
+   Compiling intl_pluralrules v7.0.2
+   Compiling fluent-langneg v0.13.1
+   Compiling poly1305 v0.8.0
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling oxideav-vp8 v0.2.6
+   Compiling salsa20 v0.10.2
+   Compiling caseless v0.2.2
+   Compiling dummy v0.12.0
+   Compiling secrecy v0.10.3
+   Compiling cfb v0.7.3
+   Compiling fluent-syntax v0.12.0
+   Compiling num-rational v0.4.2
+   Compiling iso_country v0.1.4
+   Compiling humansize v2.1.3
+   Compiling email-encoding v0.4.1
+   Compiling hostname v0.4.2
+   Compiling nom v8.0.0
+   Compiling encoding_rs v0.8.35
+   Compiling email_address v0.2.9
+   Compiling inventory v0.3.24
+   Compiling finl_unicode v1.4.0
+   Compiling compcol v0.6.10
+   Compiling unicode-segmentation v1.13.2
+   Compiling typed-arena v2.0.2
+   Compiling semver v1.0.28
+   Compiling maplit v1.0.2
+   Compiling self_cell v1.3.0
+   Compiling quoted_printable v0.5.2
+   Compiling imagesize v0.15.0
+   Compiling arcstr v1.2.0
+   Compiling xxhash-rust v0.8.15
+   Compiling tera v1.20.1
+   Compiling oxideav-png v0.1.8
+   Compiling oxideav-webp v0.2.3
+   Compiling fluent-bundle v0.16.0
+   Compiling ammonia v4.1.4
+   Compiling multer v3.1.0
+   Compiling suprnova-live v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling featureflag v0.0.3
+   Compiling icu_experimental v0.5.0
+   Compiling infer v0.19.0
+   Compiling fake v5.1.0
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling crypto_secretbox v0.1.1
+   Compiling validator v0.20.0
+   Compiling aws-sigv4 v1.4.4
+   Compiling icu_datetime v2.2.0
+   Compiling bcrypt v0.19.2
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling sea-streamer v0.5.0
+   Compiling hyper-tungstenite v0.20.0
+   Compiling fluent-langneg v0.14.2
+   Compiling tempfile v3.27.0
+   Compiling dashmap v6.2.1
+   Compiling oxideav-image-filter v0.1.2
+   Compiling oxideav-bmp v0.1.6
+   Compiling oxideav-pixfmt v0.1.7
+   Compiling oxideav-mjpeg v0.1.8
+   Compiling oxideav-gif v0.0.11
+   Compiling envy v0.4.2
+   Compiling matchit v0.9.2
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls-webpki v0.103.15
+   Compiling tokio-rustls v0.26.4
+   Compiling sqlx-core v0.9.0
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling tonic v0.12.3
+   Compiling redis v1.2.1
+   Compiling lettre v0.11.22
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling suprnova-web-push v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling qdrant-client v1.18.0
+   Compiling sqlx v0.9.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling sea-orm v2.0.2
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+   Compiling laravel-defaults-probe v0.0.0 (/home/shawn/workspace2/suprnova/framework/tests/fixtures/laravel-defaults-probe)
+    Finished `test` profile [unoptimized] target(s) in 2m 00s
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-8eb14c03e7b009bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/documented_call.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/documented_call_probe-44ee5cf32ac2b54f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-6206a3074e5d1aeb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/plain.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/plain_probe-3fc647dd65c9f2a3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/settings.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/settings-75b62e7ef72f8531)
+
+running 3 tests
+test sqlite_settings_reach_models_and_migrations ... ok
+test mysql_settings_reach_models_and_migrations ... ok
+test postgres_settings_reach_models_and_migrations ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+   Doc-tests laravel_defaults_probe
+
+running 4 tests
+test src/lib.rs - ProbePost::without_global_scope (line 37) ... ignored
+test src/lib.rs - ProbePost::without_global_scopes (line 37) ... ignored
+test src/lib.rs - ProbeUser::without_global_scope (line 24) ... ignored
+test src/lib.rs - ProbeUser::without_global_scopes (line 24) ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.24s; merged doctests compilation took 0.24s
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova-live v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 09s
+────────────
+ Nextest run ID 0d9fae56-b8b8-4bf4-b360-006c3648d3d3 with nextest profile: default
+    Starting 5 tests across 6 binaries (202 tests skipped)
+────────────
+     Summary [  52.851s] 5 tests run: 5 passed, 202 skipped
+   Compiling tokio v1.53.1
+   Compiling syn v2.0.117
+   Compiling tokio-util v0.7.18
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-rustls v0.26.4
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling tower v0.5.3
+   Compiling sea-streamer-runtime v0.5.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling sea-orm-cli v2.0.2
+   Compiling backon v1.6.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling tokio-tungstenite v0.29.0
+   Compiling sea-streamer-stdio v0.5.0
+   Compiling lettre v0.11.22
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling sqlx-core v0.9.0
+   Compiling h2 v0.4.16
+   Compiling combine v4.6.7
+   Compiling tower v0.4.13
+   Compiling tower-http v0.6.11
+   Compiling axum v0.7.9
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-sigv4 v1.4.4
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling hyper v1.9.0
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling redis v0.25.5
+   Compiling redis v1.2.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-timeout v0.5.2
+   Compiling hyper-tungstenite v0.20.0
+   Compiling sqlx v0.9.0
+   Compiling tonic v0.12.3
+   Compiling sea-query-sqlx v0.9.1
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sea-schema v0.18.1
+   Compiling sea-streamer-redis v0.5.2
+   Compiling sea-streamer-socket v0.5.2
+   Compiling suprnova-web-push v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling sea-streamer v0.5.0
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-cli v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 10s
+────────────
+ Nextest run ID 3e725a40-28fc-4779-8af6-f0b7e0afa333 with nextest profile: default
+    Starting 1 test across 1 binary (2 tests skipped)
+────────────
+     Summary [   0.008s] 1 test run: 1 passed, 2 skipped

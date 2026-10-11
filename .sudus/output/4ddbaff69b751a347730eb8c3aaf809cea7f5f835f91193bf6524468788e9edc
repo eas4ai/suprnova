@@ -1,0 +1,228 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 5m 23s
+────────────
+ Nextest run ID fed3c8f1-02a4-42d8-93cc-fe745fd876fe with nextest profile: default
+    Starting 143 tests across 7 binaries (1342 tests skipped)
+        FAIL [   0.011s] ( 84/143) suprnova::eloquent laravel_gaps::self_reference::a_qualified_column_in_the_predicate_still_names_the_parent
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_qualified_column_in_the_predicate_still_names_the_parent ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_qualified_column_in_the_predicate_still_names_the_parent
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_qualified_column_in_the_predicate_still_names_the_parent' (2856245) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:208:5:
+    assertion `left == right` failed
+      left: []
+     right: ["a"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.014s] ( 85/143) suprnova::eloquent laravel_gaps::self_reference::a_nested_predicate_finds_the_grandparents
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_nested_predicate_finds_the_grandparents ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_nested_predicate_finds_the_grandparents
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_nested_predicate_finds_the_grandparents' (2856235) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:219:5:
+    assertion `left == right` failed
+      left: []
+     right: ["root"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.014s] ( 86/143) suprnova::eloquent laravel_gaps::self_reference::a_joined_query_correlates_to_its_own_table
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_joined_query_correlates_to_its_own_table ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_joined_query_correlates_to_its_own_table
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_joined_query_correlates_to_its_own_table' (2856239) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:275:5:
+    assertion `left == right` failed
+      left: []
+     right: ["a"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.013s] ( 88/143) suprnova::eloquent laravel_gaps::self_reference::a_note_that_owns_notes_reads_its_morph_relations
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_note_that_owns_notes_reads_its_morph_relations ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_note_that_owns_notes_reads_its_morph_relations
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_note_that_owns_notes_reads_its_morph_relations' (2856238) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:452:5:
+    assertion `left == right` failed
+      left: []
+     right: ["reply"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.011s] ( 89/143) suprnova::eloquent laravel_gaps::self_reference::a_self_referential_many_to_many_reads_the_pivot
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_self_referential_many_to_many_reads_the_pivot ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_self_referential_many_to_many_reads_the_pivot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_self_referential_many_to_many_reads_the_pivot' (2856248) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:397:5:
+    assertion `left == right` failed
+      left: []
+     right: ["ann"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.010s] ( 90/143) suprnova::eloquent laravel_gaps::self_reference::has_count_counts_the_children_of_each_row
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::has_count_counts_the_children_of_each_row ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::has_count_counts_the_children_of_each_row
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::has_count_counts_the_children_of_each_row' (2856252) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:162:9:
+    assertion `left == right` failed: >= 2
+      left: []
+     right: ["root"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.010s] ( 91/143) suprnova::eloquent laravel_gaps::self_reference::a_through_relation_over_its_own_table_reads_the_grandchildren
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_through_relation_over_its_own_table_reads_the_grandchildren ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_through_relation_over_its_own_table_reads_the_grandchildren
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_through_relation_over_its_own_table_reads_the_grandchildren' (2856251) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:243:10:
+    has through: Database("Query Error: error returned from database: (code: 1) ambiguous column name: sr_categories.parent_id")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.006s] ( 92/143) suprnova::eloquent laravel_gaps::self_reference::only_a_self_referential_probe_is_aliased
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::only_a_self_referential_probe_is_aliased ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::only_a_self_referential_probe_is_aliased
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::only_a_self_referential_probe_is_aliased' (2856260) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:481:5:
+    assertion `left == right` failed
+      left: "SELECT * FROM sr_categories WHERE EXISTS (SELECT 1 FROM sr_categories WHERE sr_categories.parent_id = sr_categories.id)"
+     right: "SELECT * FROM sr_categories WHERE EXISTS (SELECT 1 FROM sr_categories AS __suprnova_related WHERE __suprnova_related.parent_id = sr_categories.id)"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.011s] ( 93/143) suprnova::eloquent laravel_gaps::self_reference::has_and_doesnt_have_split_a_tree_into_parents_and_leaves
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::has_and_doesnt_have_split_a_tree_into_parents_and_leaves ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::has_and_doesnt_have_split_a_tree_into_parents_and_leaves
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::has_and_doesnt_have_split_a_tree_into_parents_and_leaves' (2856255) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:145:9:
+    assertion `left == right` failed
+      left: []
+     right: ["a", "root"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.012s] ( 94/143) suprnova::eloquent laravel_gaps::self_reference::a_trashed_child_does_not_count
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::self_reference::a_trashed_child_does_not_count ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::self_reference::a_trashed_child_does_not_count
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_gaps::self_reference::a_trashed_child_does_not_count' (2856256) panicked at framework/tests/eloquent/laravel_gaps/self_reference.rs:364:5:
+    assertion `left == right` failed
+      left: []
+     right: ["kept"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.121s] 95/143 tests run: 85 passed, 10 failed, 1342 skipped
+        FAIL [   0.011s] ( 84/143) suprnova::eloquent laravel_gaps::self_reference::a_qualified_column_in_the_predicate_still_names_the_parent
+        FAIL [   0.014s] ( 85/143) suprnova::eloquent laravel_gaps::self_reference::a_nested_predicate_finds_the_grandparents
+        FAIL [   0.014s] ( 86/143) suprnova::eloquent laravel_gaps::self_reference::a_joined_query_correlates_to_its_own_table
+        FAIL [   0.013s] ( 88/143) suprnova::eloquent laravel_gaps::self_reference::a_note_that_owns_notes_reads_its_morph_relations
+        FAIL [   0.011s] ( 89/143) suprnova::eloquent laravel_gaps::self_reference::a_self_referential_many_to_many_reads_the_pivot
+        FAIL [   0.010s] ( 90/143) suprnova::eloquent laravel_gaps::self_reference::has_count_counts_the_children_of_each_row
+        FAIL [   0.010s] ( 91/143) suprnova::eloquent laravel_gaps::self_reference::a_through_relation_over_its_own_table_reads_the_grandchildren
+        FAIL [   0.006s] ( 92/143) suprnova::eloquent laravel_gaps::self_reference::only_a_self_referential_probe_is_aliased
+        FAIL [   0.011s] ( 93/143) suprnova::eloquent laravel_gaps::self_reference::has_and_doesnt_have_split_a_tree_into_parents_and_leaves
+        FAIL [   0.012s] ( 94/143) suprnova::eloquent laravel_gaps::self_reference::a_trashed_child_does_not_count
+warning: 48/143 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

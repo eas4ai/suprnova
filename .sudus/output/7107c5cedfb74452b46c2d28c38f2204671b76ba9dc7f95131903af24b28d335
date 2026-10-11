@@ -1,0 +1,28 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 11.13s
+────────────
+ Nextest run ID a8f04ab7-b09a-442d-b8e1-5ccbb3379feb with nextest profile: default
+    Starting 45 tests across 1 binary (261 tests skipped)
+        FAIL [   0.010s] (37/45) suprnova::http multipart_validation::revised_classic_html_form_validation_redirects
+  stdout ───
+
+    running 1 test
+    test multipart_validation::revised_classic_html_form_validation_redirects ... FAILED
+
+    failures:
+
+    failures:
+        multipart_validation::revised_classic_html_form_validation_redirects
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 305 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'multipart_validation::revised_classic_html_form_validation_redirects' (2711690) panicked at framework/tests/http/multipart_validation.rs:2627:5:
+    PAR-042 invalid classic HTML forms redirect, got 422: {"message":"The file must be an image.","errors":{"files.1":["The file must be an image."]},"request_id":"212f63fe-9c08-478a-af08-cec07c5ffb36"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.235s] 45 tests run: 44 passed, 1 failed, 261 skipped
+        FAIL [   0.010s] (37/45) suprnova::http multipart_validation::revised_classic_html_form_validation_redirects
+error: test run failed

@@ -1,0 +1,29 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 4.90s
+────────────
+ Nextest run ID a3f96479-0a14-49b2-a6d6-c69a313830f1 with nextest profile: default
+    Starting 31 tests across 1 binary
+        FAIL [   0.372s] (29/31) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+  stdout ───
+
+    running 1 test
+    test reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line ... FAILED
+
+    failures:
+
+    failures:
+        reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.37s
+
+  stderr ───
+
+    thread 'reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line' (3395727) panicked at suprnova-cli/tests/live_registry_scan.rs:1002:5:
+    1 failures:
+    script-replaces-builtin-function: admitted
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.607s] 31 tests run: 30 passed, 1 failed, 0 skipped
+        FAIL [   0.372s] (29/31) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+error: test run failed

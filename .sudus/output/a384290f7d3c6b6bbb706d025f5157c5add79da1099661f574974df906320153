@@ -1,0 +1,34 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 1m 21s
+────────────
+ Nextest run ID cd41cd11-923b-4710-97bc-a06d80fb5cdb with nextest profile: default
+    Starting 69 tests across 9 binaries (3463 tests skipped)
+        FAIL [   0.044s] (26/69) suprnova::memory files::mem_audit_appending_does_not_copy_the_file_twice
+  stdout ───
+
+    running 1 test
+    test files::mem_audit_appending_does_not_copy_the_file_twice ... FAILED
+
+    failures:
+
+    failures:
+        files::mem_audit_appending_does_not_copy_the_file_twice
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.04s
+
+  stderr ───
+
+    thread 'files::mem_audit_appending_does_not_copy_the_file_twice' (3191381) panicked at framework/tests/memory/files.rs:26:5:
+    appending one byte to 16777216 bytes allocated 33562874 bytes
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [  22.750s] 37/69 tests run: 36 passed, 1 failed, 3463 skipped
+        FAIL [   0.044s] (26/69) suprnova::memory files::mem_audit_appending_does_not_copy_the_file_twice
+warning: 32/69 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

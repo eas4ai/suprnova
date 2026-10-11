@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+────────────
+ Nextest run ID 991b66d0-e909-48df-9721-9019e267acd1 with nextest profile: default
+    Starting 141 tests across 1 binary (74 tests skipped)
+────────────
+     Summary [   2.699s] 141 tests run: 141 passed, 74 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.28s
+────────────
+ Nextest run ID cc2cbe58-c880-4e0e-91c3-f05747511db8 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [  10.813s] 13 tests run: 13 passed, 0 skipped
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized] target(s) in 0.27s
+────────────
+ Nextest run ID b4b3701b-bec3-40c8-8e28-b8d108aed62c with nextest profile: default
+    Starting 42 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   1.822s] 42 tests run: 42 passed, 166 skipped

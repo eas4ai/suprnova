@@ -1,0 +1,32 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1.45s
+────────────
+ Nextest run ID 10ef9e90-0d53-4e4a-933a-20440caeb108 with nextest profile: default
+    Starting 48 tests across 1 binary
+        FAIL [   0.010s] (28/48) suprnova::redis connections::zzz_revised_typed_commands_use_configured_prefix
+  stdout ───
+
+    running 1 test
+    test connections::zzz_revised_typed_commands_use_configured_prefix ... FAILED
+
+    failures:
+
+    failures:
+        connections::zzz_revised_typed_commands_use_configured_prefix
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'connections::zzz_revised_typed_commands_use_configured_prefix' (2681782) panicked at framework/tests/redis/connections.rs:363:5:
+    assertion `left == right` failed: PAR-031 typed SET applies REDIS_PREFIX
+      left: None
+     right: Some("from the child")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   2.322s] 28/48 tests run: 27 passed, 1 failed, 0 skipped
+        FAIL [   0.010s] (28/48) suprnova::redis connections::zzz_revised_typed_commands_use_configured_prefix
+warning: 20/48 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

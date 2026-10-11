@@ -1,0 +1,30 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 7.90s
+────────────
+ Nextest run ID b70f48c2-08cd-42a0-a8f2-0f8751d64da1 with nextest profile: default
+    Starting 17 tests across 1 binary
+        FAIL [   0.280s] (11/17) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+  stdout ───
+
+    running 1 test
+    test reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line ... FAILED
+
+    failures:
+
+    failures:
+        reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.28s
+
+  stderr ───
+
+    thread 'reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line' (3114045) panicked at suprnova-cli/tests/live_registry_scan.rs:478:5:
+    2 failures:
+    view-filter-block-safe: no `view-escape` finding at widget.html:2; got widget.html:2: [view-filter] the filter `safe` is neither Askama's own nor the framework's
+    view-safe: no `view-escape` finding at widget.html:2; got widget.html:2: [view-filter] the filter `safe` is neither Askama's own nor the framework's
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.475s] 17 tests run: 16 passed, 1 failed, 0 skipped
+        FAIL [   0.280s] (11/17) suprnova-cli::live_registry_scan reg_022_every_bypass_in_the_corpus_is_refused_with_its_check_file_and_line
+error: test run failed

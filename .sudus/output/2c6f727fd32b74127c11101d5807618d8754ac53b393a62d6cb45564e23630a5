@@ -1,0 +1,29 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 12.66s
+────────────
+ Nextest run ID c6f14daf-a347-4b75-8d13-c24852962214 with nextest profile: default
+    Starting 28 tests across 2 binaries (415 tests skipped)
+        FAIL [   1.009s] (28/28) suprnova::http file_responses::revised_file_response_advertises_byte_ranges
+  stdout ───
+
+    running 1 test
+    test file_responses::revised_file_response_advertises_byte_ranges ... FAILED
+
+    failures:
+
+    failures:
+        file_responses::revised_file_response_advertises_byte_ranges
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 305 filtered out; finished in 1.00s
+
+  stderr ───
+
+    thread 'file_responses::revised_file_response_advertises_byte_ranges' (2558695) panicked at framework/tests/http/file_responses.rs:76:28:
+    response must carry `accept-ranges`; it had {"content-type": "text/plain; charset=utf-8", "content-length": "10", "content-disposition": "inline; filename=\"ranges.txt\"", "x-request-id": "4dab67a3-951c-4e53-abdb-152d8f21e7b0"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   1.052s] 28 tests run: 27 passed, 1 failed, 415 skipped
+        FAIL [   1.009s] (28/28) suprnova::http file_responses::revised_file_response_advertises_byte_ranges
+error: test run failed

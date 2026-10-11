@@ -1,0 +1,24 @@
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_json v1.0.151
+   Compiling askama_parser v0.16.0
+   Compiling hyper v1.9.0
+   Compiling parking_lot v0.12.5
+   Compiling string_cache v0.9.0
+   Compiling web_atoms v0.2.5
+   Compiling hyper-util v0.1.20
+   Compiling charts-rs v1.0.0
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling axum v0.7.9
+   Compiling askama_derive v0.16.0
+   Compiling askama_macros v0.16.0
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 14.26s
+────────────
+ Nextest run ID 36db6bd1-cf39-43de-a265-8daf6e18628f with nextest profile: default
+    Starting 2 tests across 5 binaries (62 tests skipped)
+────────────
+     Summary [   0.019s] 2 tests run: 2 passed, 62 skipped

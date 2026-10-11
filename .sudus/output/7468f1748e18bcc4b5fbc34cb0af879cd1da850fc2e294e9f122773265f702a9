@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized] target(s) in 0.71s
+────────────
+ Nextest run ID 41c9530f-87fc-45ff-b3e3-e8178b45cf6f with nextest profile: default
+    Starting 22 tests across 1 binary
+────────────
+     Summary [   0.059s] 22 tests run: 22 passed, 0 skipped
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova-live-test-support v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3m 44s
+────────────
+ Nextest run ID 6316ef39-018e-459d-b5e5-5d2a02e00173 with nextest profile: default
+    Starting 21 tests across 1 binary (28 tests skipped)
+────────────
+     Summary [   5.525s] 21 tests run: 21 passed, 28 skipped

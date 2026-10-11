@@ -1,0 +1,76 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 08s
+────────────
+ Nextest run ID 99dd2efd-ce7b-4ab4-b406-454845d85428 with nextest profile: default
+    Starting 79 tests across 3 binaries (2815 tests skipped)
+        FAIL [   0.014s] (10/79) suprnova media::magick::tests::img_001_orientation_is_applied_after_the_input_or_at_its_step
+  stdout ───
+
+    running 1 test
+    test media::magick::tests::img_001_orientation_is_applied_after_the_input_or_at_its_step ... FAILED
+
+    failures:
+
+    failures:
+        media::magick::tests::img_001_orientation_is_applied_after_the_input_or_at_its_step
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2758 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'media::magick::tests::img_001_orientation_is_applied_after_the_input_or_at_its_step' (418155) panicked at framework/src/media/magick.rs:1920:9:
+    assertion `left == right` failed: the tag the framework read, applied with a fixed transform
+      left: ["-auto-orient", "+profile", "!icc,*"]
+     right: ["-rotate", "90", "+repage"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.072s] (37/79) suprnova::media images::img_001_magick_reads_the_orientation_from_the_shared_sources
+  stdout ───
+
+    running 1 test
+    test images::img_001_magick_reads_the_orientation_from_the_shared_sources ... FAILED
+
+    failures:
+
+    failures:
+        images::img_001_magick_reads_the_orientation_from_the_shared_sources
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.07s
+
+  stderr ───
+
+    thread 'images::img_001_magick_reads_the_orientation_from_the_shared_sources' (418202) panicked at framework/tests/media/images.rs:846:5:
+    assertion `left == right` failed: a PNG with EXIF only in a text chunk through magick must be turned by orientation 1
+      left: (5, 7, [10, 165, 63, 255, 10, 125, 48, 255, 10, 85, 33, 255, 10, 45, 18, 255, 10, 5, 3, 255, 40, 165, 78, 255, 40, 125, 63, 255, 40, 85, 48, 255, 40, 45, 33, 255, 40, 5, 18, 255, 70, 165, 93, 255, 70, 125, 78, 255, 70, 85, 63, 255, 70, 45, 48, 255, 70, 5, 33, 255, 100, 165, 108, 255, 100, 125, 93, 255, 100, 85, 78, 255, 100, 45, 63, 255, 100, 5, 48, 255, 130, 165, 123, 255, 130, 125, 108, 255, 130, 85, 93, 255, 130, 45, 78, 255, 130, 5, 63, 255, 160, 165, 138, 255, 160, 125, 123, 255, 160, 85, 108, 255, 160, 45, 93, 255, 160, 5, 78, 255, 190, 165, 153, 255, 190, 125, 138, 255, 190, 85, 123, 255, 190, 45, 108, 255, 190, 5, 93, 255])
+     right: (7, 5, [10, 5, 3, 255, 40, 5, 18, 255, 70, 5, 33, 255, 100, 5, 48, 255, 130, 5, 63, 255, 160, 5, 78, 255, 190, 5, 93, 255, 10, 45, 18, 255, 40, 45, 33, 255, 70, 45, 48, 255, 100, 45, 63, 255, 130, 45, 78, 255, 160, 45, 93, 255, 190, 45, 108, 255, 10, 85, 33, 255, 40, 85, 48, 255, 70, 85, 63, 255, 100, 85, 78, 255, 130, 85, 93, 255, 160, 85, 108, 255, 190, 85, 123, 255, 10, 125, 48, 255, 40, 125, 63, 255, 70, 125, 78, 255, 100, 125, 93, 255, 130, 125, 108, 255, 160, 125, 123, 255, 190, 125, 138, 255, 10, 165, 63, 255, 40, 165, 78, 255, 70, 165, 93, 255, 100, 165, 108, 255, 130, 165, 123, 255, 160, 165, 138, 255, 190, 165, 153, 255])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.072s] (38/79) suprnova::media images::img_001_orient_after_a_custom_step_under_magick
+  stdout ───
+
+    running 1 test
+    test images::img_001_orient_after_a_custom_step_under_magick ... FAILED
+
+    failures:
+
+    failures:
+        images::img_001_orient_after_a_custom_step_under_magick
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.07s
+
+  stderr ───
+
+    thread 'images::img_001_orient_after_a_custom_step_under_magick' (418205) panicked at framework/tests/media/images.rs:1568:9:
+    assertion `left == right` failed: JPEG through magick
+      left: (7, 5, [13, 5, 3, 255, 35, 10, 16, 255, 68, 10, 32, 255, 101, 6, 46, 255, 134, 5, 62, 255, 164, 6, 80, 255, 184, 8, 91, 255, 16, 39, 19, 255, 39, 42, 31, 255, 70, 44, 47, 255, 105, 40, 62, 255, 139, 38, 78, 255, 168, 41, 96, 255, 188, 42, 107, 255, 14, 83, 36, 255, 37, 87, 49, 255, 69, 89, 64, 255, 103, 84, 78, 255, 136, 82, 95, 255, 165, 85, 112, 255, 186, 86, 124, 255, 11, 126, 49, 255, 34, 131, 64, 255, 67, 131, 79, 255, 100, 127, 94, 255, 133, 126, 110, 255, 163, 127, 127, 255, 182, 129, 139, 255, 14, 159, 64, 255, 35, 163, 76, 255, 68, 164, 92, 255, 101, 160, 106, 255, 134, 158, 122, 255, 166, 161, 141, 255, 185, 162, 154, 255])
+     right: (5, 7, [14, 159, 64, 255, 11, 126, 49, 255, 14, 83, 36, 255, 16, 39, 19, 255, 13, 5, 3, 255, 35, 163, 76, 255, 34, 131, 64, 255, 37, 87, 49, 255, 39, 42, 31, 255, 35, 10, 16, 255, 68, 164, 92, 255, 67, 131, 79, 255, 69, 89, 64, 255, 70, 44, 47, 255, 68, 10, 32, 255, 101, 160, 106, 255, 100, 127, 94, 255, 103, 84, 78, 255, 105, 40, 62, 255, 101, 6, 46, 255, 134, 158, 122, 255, 133, 126, 110, 255, 136, 82, 95, 255, 139, 38, 78, 255, 134, 5, 62, 255, 166, 161, 141, 255, 163, 127, 127, 255, 165, 85, 112, 255, 168, 41, 96, 255, 164, 6, 80, 255, 185, 162, 154, 255, 182, 129, 139, 255, 186, 86, 124, 255, 188, 42, 107, 255, 184, 8, 91, 255])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  82.581s] 79 tests run: 76 passed (1 slow), 3 failed, 2815 skipped
+        FAIL [   0.014s] (10/79) suprnova media::magick::tests::img_001_orientation_is_applied_after_the_input_or_at_its_step
+        FAIL [   0.072s] (37/79) suprnova::media images::img_001_magick_reads_the_orientation_from_the_shared_sources
+        FAIL [   0.072s] (38/79) suprnova::media images::img_001_orient_after_a_custom_step_under_magick
+error: test run failed

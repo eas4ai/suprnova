@@ -1,0 +1,27 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 0.67s
+────────────
+ Nextest run ID 0fd31e7c-46de-4cec-9d68-f7392c849e8e with nextest profile: default
+    Starting 52 tests across 1 binary
+────────────
+     Summary [   0.110s] 52 tests run: 52 passed, 0 skipped
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 0.48s
+     Running tests/kit_browser.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/kit_browser-7f1a25edfbdcee92)
+
+running 3 tests
+test kit_react_in_a_browser ... ok
+test kit_svelte_in_a_browser ... ok
+test kit_vue_in_a_browser ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 296.39s
+
+     Running tests/kit_typecheck.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/kit_typecheck-bc659b6e41352313)
+
+running 3 tests
+test kit_svelte_type_checks_and_builds ... ok
+test react::kit_react_type_checks_and_builds ... ok
+test vue::kit_vue_type_checks_and_builds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.40s
+

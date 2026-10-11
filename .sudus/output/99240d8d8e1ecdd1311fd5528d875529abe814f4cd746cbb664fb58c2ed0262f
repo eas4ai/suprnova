@@ -1,0 +1,207 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved imports `suprnova::queue::testing::assert_pushed_without_chain`, `suprnova::queue::testing::pushed_raw`, `suprnova::queue::testing::raw_pushes`
+  --> framework/tests/queue/fake_parity.rs:14:61
+   |
+14 |     assert_batched, assert_chained, assert_nothing_chained, assert_pushed_without_chain,
+   |                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `assert_pushed_without_chain` in `queue::testing`
+15 |     forget_connections, pushed, pushed_raw, raw_pushes,
+   |                                 ^^^^^^^^^^  ^^^^^^^^^^ no `raw_pushes` in `queue::testing`
+   |                                 |
+   |                                 no `pushed_raw` in `queue::testing`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:137:25
+    |
+137 |     let _guard = Queue::fake_except(&["Farewell"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no method named `except` found for struct `QueueFakeGuard` in the current scope
+   --> framework/tests/queue/fake_parity.rs:163:32
+    |
+163 |     let _guard = Queue::fake().except(&["Greet"]).except(&["Farewell"]);
+    |                                ^^^^^^ method not found in `QueueFakeGuard`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:196:25
+    |
+196 |     let _guard = Queue::fake_except(&["Farewell", "Ticket"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:244:25
+    |
+244 |     let _guard = Queue::fake_except(&["Farewell"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:276:25
+    |
+276 |     let _guard = Queue::fake_except(&["Farewell"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:308:25
+    |
+308 |     let _guard = Queue::fake_except(&["Farewell"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:375:25
+    |
+375 |     let _guard = Queue::fake_except(&["Farewell"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:394:12
+    |
+394 |     Queue::push_raw(&payload, Some("imports")).await.unwrap();
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:395:12
+    |
+395 |     Queue::push_raw(&payload, None).await.unwrap();
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:415:12
+    |
+415 |     Queue::push_raw(&raw_payload(Greet { name: "Ada".into() }), Some("imports"))
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:418:12
+    |
+418 |     Queue::push_raw(
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:426:12
+    |
+426 |     Queue::push_raw(&raw_payload(Greet { name: "Lin".into() }), Some("exports"))
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `fake_except` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:453:25
+    |
+453 |     let _guard = Queue::fake_except(&["Greet"]);
+    |                         ^^^^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:455:12
+    |
+455 |     Queue::push_raw(&raw_payload(Greet { name: "Ada".into() }), None)
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:475:12
+    |
+475 |     Queue::push_raw(&env.to_json().unwrap(), Some("imports"))
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:506:12
+    |
+506 |     Queue::push_raw(&env.to_json().unwrap(), None)
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:525:12
+    |
+525 |     Queue::push_raw(&raw_payload(Counted), None).await.unwrap();
+    |            ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:539:16
+    |
+539 |         Queue::push_raw(r#"{"job":"SendInvoice","data":{}}"#, None)
+    |                ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:544:20
+    |
+544 |     assert!(Queue::push_raw("not json", None).await.is_err());
+    |                    ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `push_raw` found for struct `suprnova::Queue` in the current scope
+   --> framework/tests/queue/fake_parity.rs:550:16
+    |
+550 |         Queue::push_raw(&newer.to_json().unwrap(), None)
+    |                ^^^^^^^^ associated function or constant not found in `suprnova::Queue`
+    |
+help: there is an associated function `push` with a similar name
+   --> framework/src/queue/mod.rs:328:5
+    |
+328 |     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "queue") due to 21 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test queue` exited with code 101

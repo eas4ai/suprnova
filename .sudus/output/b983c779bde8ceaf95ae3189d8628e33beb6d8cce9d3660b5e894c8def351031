@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+────────────
+ Nextest run ID 518c21ae-39b8-4000-bce6-04533ca4ffc9 with nextest profile: default
+    Starting 492 tests across 3 binaries (3016 tests skipped)
+        FAIL [   0.008s] (162/492) suprnova::inertia inertia::location_keeps_its_always_409_shape
+  stdout ───
+
+    running 1 test
+    test inertia::location_keeps_its_always_409_shape ... FAILED
+
+    failures:
+
+    failures:
+        inertia::location_keeps_its_always_409_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'inertia::location_keeps_its_always_409_shape' (3309458) panicked at framework/tests/inertia/inertia.rs:4384:5:
+    assertion `left == right` failed
+      left: 302
+     right: 409
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [   0.283s] 173/492 tests run: 172 passed, 1 failed, 3016 skipped
+        FAIL [   0.008s] (162/492) suprnova::inertia inertia::location_keeps_its_always_409_shape
+warning: 319/492 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

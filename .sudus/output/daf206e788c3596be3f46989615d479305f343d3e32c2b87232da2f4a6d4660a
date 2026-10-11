@@ -1,0 +1,91 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1.64s
+────────────
+ Nextest run ID 2fc7601a-3cef-43c5-a997-44d962244f57 with nextest profile: default
+    Starting 22 tests across 1 binary
+        FAIL [   0.157s] ( 4/22) suprnova::schema_dump engines::mysql_dumps_loads_and_prunes
+  stdout ───
+
+    running 1 test
+    test engines::mysql_dumps_loads_and_prunes ... FAILED
+
+    failures:
+
+    failures:
+        engines::mysql_dumps_loads_and_prunes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.15s
+
+  stderr ───
+
+    thread 'engines::mysql_dumps_loads_and_prunes' (2690068) panicked at framework/tests/schema_dump/cases.rs:129:30:
+    drop every table: Query(SqlxError(Database(MySqlDatabaseError { code: Some("42S02"), number: 1146, message: "Table 'suprnova_test_2689869_sd.seaql_migrations' doesn't exist" })))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.344s] ( 6/22) suprnova::schema_dump engines::postgres_dumps_loads_and_prunes
+  stdout ───
+
+    running 1 test
+    test engines::postgres_dumps_loads_and_prunes ... FAILED
+
+    failures:
+
+    failures:
+        engines::postgres_dumps_loads_and_prunes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.34s
+
+  stderr ───
+
+    thread 'engines::postgres_dumps_loads_and_prunes' (2690063) panicked at framework/tests/schema_dump/cases.rs:166:10:
+    insert a row: Exec(SqlxError(Database(PgDatabaseError { severity: Error, code: "23505", message: "duplicate key value violates unique constraint \"sd_users_pkey\"", detail: Some("Key (id)=(1) already exists."), hint: None, position: None, where: None, schema: Some("public"), table: Some("sd_users"), column: None, data_type: None, constraint: Some("sd_users_pkey"), file: Some("nbtinsert.c"), line: Some(666), routine: Some("_bt_check_unique") })))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   4.078s] 22 tests run: 20 passed, 2 failed, 0 skipped
+        FAIL [   0.157s] ( 4/22) suprnova::schema_dump engines::mysql_dumps_loads_and_prunes
+        FAIL [   0.344s] ( 6/22) suprnova::schema_dump engines::postgres_dumps_loads_and_prunes
+error: test run failed
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 1m 06s
+────────────
+ Nextest run ID a8c133de-52df-4561-84b7-92e5c6e05126 with nextest profile: default
+    Starting 4 tests across 1 binary
+────────────
+     Summary [   0.062s] 4 tests run: 4 passed, 0 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling app v3.2.1 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized] target(s) in 1m 25s
+────────────
+ Nextest run ID 7422febc-de06-4b7e-98c2-0146dc1143d4 with nextest profile: default
+    Starting 3 tests across 1 binary
+        FAIL [   6.420s] (2/3) app::schema_dump_binary revised_schema_only_dump_omits_migration_rows
+  stdout ───
+
+    running 1 test
+    test revised_schema_only_dump_omits_migration_rows ... FAILED
+
+    failures:
+
+    failures:
+        revised_schema_only_dump_omits_migration_rows
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 6.42s
+
+  stderr ───
+
+    thread 'revised_schema_only_dump_omits_migration_rows' (2700670) panicked at app/tests/schema_dump_binary.rs:38:5:
+    ["schema:dump", "--without-migration-data"] failed:
+    error: unexpected argument '--without-migration-data' found
+
+    Usage: app schema:dump [OPTIONS]
+
+    For more information, try '--help'.
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   7.504s] 3 tests run: 2 passed, 1 failed, 0 skipped
+        FAIL [   6.420s] (2/3) app::schema_dump_binary revised_schema_only_dump_omits_migration_rows
+error: test run failed

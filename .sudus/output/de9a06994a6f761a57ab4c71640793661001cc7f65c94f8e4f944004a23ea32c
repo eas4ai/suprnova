@@ -1,0 +1,112 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 32s
+────────────
+ Nextest run ID b9f4736d-f9e1-489d-84be-f84d443a48d3 with nextest profile: default
+    Starting 112 tests across 1 binary (74 tests skipped)
+        FAIL [   0.010s] (106/112) suprnova::routing route_binding::urls::bind_012_a_bound_value_fills_its_route_key_or_its_binding_field
+  stdout ───
+
+    running 1 test
+    test route_binding::urls::bind_012_a_bound_value_fills_its_route_key_or_its_binding_field ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::urls::bind_012_a_bound_value_fills_its_route_key_or_its_binding_field
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'route_binding::urls::bind_012_a_bound_value_fills_its_route_key_or_its_binding_field' (3092784) panicked at framework/tests/routing/route_binding/urls.rs:140:5:
+    assertion `left == right` failed
+      left: Some("/ur/slugs/1")
+     right: Some("/ur/slugs/a%20b%2Fc")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.011s] (108/112) suprnova::routing route_binding::urls::bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value
+  stdout ───
+
+    running 1 test
+    test route_binding::urls::bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::urls::bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'route_binding::urls::bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value' (3092796) panicked at framework/tests/routing/route_binding/urls.rs:266:5:
+    assertion `left == right` failed
+      left: Some("/ur/regions/by-name/eu-west")
+     right: Some("/ur/regions/by-name/Western%20Europe")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.012s] (110/112) suprnova::routing route_binding::urls::bind_012_named_values_mix_strings_and_bound_values
+  stdout ───
+
+    running 1 test
+    test route_binding::urls::bind_012_named_values_mix_strings_and_bound_values ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::urls::bind_012_named_values_mix_strings_and_bound_values
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'route_binding::urls::bind_012_named_values_mix_strings_and_bound_values' (3092814) panicked at framework/tests/routing/route_binding/urls.rs:165:5:
+    assertion `left == right` failed
+      left: Some("/ur/users/1/posts/1")
+     right: Some("/ur/users/1/posts/hello")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] (111/112) suprnova::routing route_binding::urls::bind_012_try_route_takes_bound_values_and_reports_missing_ones
+  stdout ───
+
+    running 1 test
+    test route_binding::urls::bind_012_try_route_takes_bound_values_and_reports_missing_ones ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::urls::bind_012_try_route_takes_bound_values_and_reports_missing_ones
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'route_binding::urls::bind_012_try_route_takes_bound_values_and_reports_missing_ones' (3092824) panicked at framework/tests/routing/route_binding/urls.rs:179:5:
+    assertion `left == right` failed
+      left: "/ur/slugs/1"
+     right: "/ur/slugs/hello"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   2.713s] 112 tests run: 108 passed, 4 failed, 74 skipped
+        FAIL [   0.010s] (106/112) suprnova::routing route_binding::urls::bind_012_a_bound_value_fills_its_route_key_or_its_binding_field
+        FAIL [   0.011s] (108/112) suprnova::routing route_binding::urls::bind_012_a_hand_written_binding_and_a_bare_model_are_bound_values_through_route_value
+        FAIL [   0.012s] (110/112) suprnova::routing route_binding::urls::bind_012_named_values_mix_strings_and_bound_values
+        FAIL [   0.009s] (111/112) suprnova::routing route_binding::urls::bind_012_try_route_takes_bound_values_and_reports_missing_ones
+error: test run failed
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 04s
+────────────
+ Nextest run ID eaa4dcf2-a157-41fe-9d04-bf994a83fa37 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [  99.153s] 13 tests run: 13 passed (1 slow), 0 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 05s
+────────────
+ Nextest run ID 577604e2-de46-40da-87bf-19dfabf58105 with nextest profile: default
+    Starting 37 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   1.898s] 37 tests run: 37 passed, 166 skipped

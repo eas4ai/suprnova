@@ -1,0 +1,102 @@
+   Compiling generic-array v0.14.7
+   Compiling serde v1.0.229
+   Compiling tokio v1.53.1
+   Compiling zerofrom v0.1.8
+   Compiling futures-util v0.3.34
+   Compiling darling_core v0.20.11
+   Compiling rand_chacha v0.9.0
+   Compiling asn1-rs v0.6.2
+   Compiling openssl v0.10.80
+   Compiling simple_asn1 v0.6.4
+   Compiling sea-orm-macros v2.0.2
+   Compiling rand_chacha v0.3.1
+   Compiling yoke v0.8.2
+   Compiling rand v0.9.4
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling base64urlsafedata v0.5.5
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling inout v0.1.4
+   Compiling crypto-bigint v0.5.5
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling sec1 v0.7.3
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling hmac v0.12.1
+   Compiling signature v2.2.0
+   Compiling rfc6979 v0.4.0
+   Compiling universal-hash v0.5.1
+   Compiling oid-registry v0.7.1
+   Compiling der-parser v9.0.0
+   Compiling elliptic-curve v0.13.8
+   Compiling polyval v0.6.2
+   Compiling sha2 v0.10.9
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling ghash v0.5.1
+   Compiling aes v0.8.4
+   Compiling primeorder v0.13.6
+   Compiling ecdsa v0.16.9
+   Compiling ctr v0.9.2
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling icu_provider v2.2.0
+   Compiling x509-parser v0.16.0
+   Compiling futures-executor v0.3.32
+   Compiling p256 v0.13.2
+   Compiling blowfish v0.9.1
+   Compiling blake2 v0.10.6
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling futures v0.3.32
+   Compiling aead v0.5.2
+   Compiling darling_macro v0.20.11
+   Compiling jsonwebtoken v9.3.1
+   Compiling serde_cbor_2 v0.13.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling aes-gcm v0.10.3
+   Compiling argon2 v0.5.3
+   Compiling darling v0.20.11
+   Compiling bcrypt v0.17.1
+   Compiling secrecy v0.10.3
+   Compiling sea-query-derive v1.0.0
+   Compiling rand v0.8.6
+   Compiling trybuild v1.0.120
+   Compiling hyper v1.9.0
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling idna_adapter v1.2.2
+   Compiling tokio-util v0.7.18
+   Compiling hyper-util v0.1.20
+   Compiling idna v1.1.0
+   Compiling sea-query v1.0.2
+   Compiling tokio-stream v0.1.18
+   Compiling tracing-test v0.2.6
+   Compiling url v2.5.8
+   Compiling hyper-rustls v0.27.9
+   Compiling tower-http v0.6.11
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling reqwest v0.12.28
+   Compiling sea-orm v2.0.2
+   Compiling webauthn-rs-core v0.5.5
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling webauthn-authenticator-rs v0.5.5
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+    Finished `test` profile [unoptimized] target(s) in 15.50s
+────────────
+ Nextest run ID e7ca1153-0058-47af-ad86-8dfa14d142e0 with nextest profile: default
+    Starting 18 tests across 1 binary
+────────────
+     Summary [   0.043s] 18 tests run: 18 passed, 0 skipped
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-live-test-support v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 38s
+────────────
+ Nextest run ID 9a8da6e0-9f67-4e83-9f96-3ca00dd477bb with nextest profile: default
+    Starting 17 tests across 1 binary (28 tests skipped)
+────────────
+     Summary [   1.710s] 17 tests run: 17 passed, 28 skipped

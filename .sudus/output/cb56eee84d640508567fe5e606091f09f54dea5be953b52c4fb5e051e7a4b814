@@ -1,0 +1,271 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling trybuild v1.0.120
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 32s
+────────────
+ Nextest run ID 59eca5e4-a994-456e-9fc3-7c8e3e4aefdf with nextest profile: default
+    Starting 98 tests across 1 binary (74 tests skipped)
+        FAIL [   0.085s] (55/98) suprnova::routing route_binding::missing::bind_009_a_group_missing_handler_reaches_its_routes
+  stdout ───
+
+    running 1 test
+    test route_binding::missing::bind_009_a_group_missing_handler_reaches_its_routes ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::missing::bind_009_a_group_missing_handler_reaches_its_routes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::missing::bind_009_a_group_missing_handler_reaches_its_routes' (4015409) panicked at framework/tests/routing/route_binding/missing.rs:106:5:
+    assertion `left == right` failed
+      left: 200
+     right: 302
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.158s] (57/98) suprnova::routing route_binding::contract::bind_001_the_trait_has_both_soft_deletable_lookups
+  stdout ───
+
+    running 1 test
+    test route_binding::contract::bind_001_the_trait_has_both_soft_deletable_lookups ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::contract::bind_001_the_trait_has_both_soft_deletable_lookups
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.15s
+
+  stderr ───
+
+    thread 'route_binding::contract::bind_001_the_trait_has_both_soft_deletable_lookups' (4015317) panicked at framework/tests/routing/route_binding/contract.rs:148:5:
+    assertion failed: ada.resolve_child_route_binding("essay", "cobol",
+                    None).await.unwrap().is_none()
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.086s] (58/98) suprnova::routing route_binding::resources::bind_011_scoped_gives_a_field_and_scopes_the_child
+  stdout ───
+
+    running 1 test
+    test route_binding::resources::bind_011_scoped_gives_a_field_and_scopes_the_child ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::resources::bind_011_scoped_gives_a_field_and_scopes_the_child
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::resources::bind_011_scoped_gives_a_field_and_scopes_the_child' (4015455) panicked at framework/tests/routing/route_binding/resources.rs:222:5:
+    assertion `left == right` failed
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.084s] (59/98) suprnova::routing route_binding::scoped::bind_006_a_group_scopes_its_routes
+  stdout ───
+
+    running 1 test
+    test route_binding::scoped::bind_006_a_group_scopes_its_routes ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::scoped::bind_006_a_group_scopes_its_routes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::scoped::bind_006_a_group_scopes_its_routes' (4015471) panicked at framework/tests/routing/route_binding/scoped.rs:166:5:
+    assertion `left == right` failed
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.087s] (60/98) suprnova::routing route_binding::scoped::bind_006_a_child_with_a_binding_field_is_found_through_its_parent
+  stdout ───
+
+    running 1 test
+    test route_binding::scoped::bind_006_a_child_with_a_binding_field_is_found_through_its_parent ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::scoped::bind_006_a_child_with_a_binding_field_is_found_through_its_parent
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::scoped::bind_006_a_child_with_a_binding_field_is_found_through_its_parent' (4015474) panicked at framework/tests/routing/route_binding/scoped.rs:133:5:
+    assertion `left == right` failed: Grace's post is not Ada's
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.162s] (82/98) suprnova::routing route_binding::missing::bind_009_a_route_missing_handler_replaces_the_404
+  stdout ───
+
+    running 1 test
+    test route_binding::missing::bind_009_a_route_missing_handler_replaces_the_404 ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::missing::bind_009_a_route_missing_handler_replaces_the_404
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.16s
+
+  stderr ───
+
+    thread 'route_binding::missing::bind_009_a_route_missing_handler_replaces_the_404' (4015411) panicked at framework/tests/routing/route_binding/missing.rs:89:5:
+    assertion `left == right` failed
+      left: (200, "ada grace-post")
+     right: (302, "missing at /users/1/posts/grace-post")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.085s] (85/98) suprnova::routing route_binding::scoped::bind_006_scoping_through_a_belongs_to_many_relation
+  stdout ───
+
+    running 1 test
+    test route_binding::scoped::bind_006_scoping_through_a_belongs_to_many_relation ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::scoped::bind_006_scoping_through_a_belongs_to_many_relation
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::scoped::bind_006_scoping_through_a_belongs_to_many_relation' (4015502) panicked at framework/tests/routing/route_binding/scoped.rs:231:5:
+    assertion `left == right` failed
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.084s] (93/98) suprnova::routing route_binding::scoped::bind_006_scoping_through_a_has_many_through_relation
+  stdout ───
+
+    running 1 test
+    test route_binding::scoped::bind_006_scoping_through_a_has_many_through_relation ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::scoped::bind_006_scoping_through_a_has_many_through_relation
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.08s
+
+  stderr ───
+
+    thread 'route_binding::scoped::bind_006_scoping_through_a_has_many_through_relation' (4015505) panicked at framework/tests/routing/route_binding/scoped.rs:249:5:
+    assertion `left == right` failed
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.183s] (97/98) suprnova::routing route_binding::scoped::bind_006_scope_bindings_scopes_a_child_without_a_field
+  stdout ───
+
+    running 1 test
+    test route_binding::scoped::bind_006_scope_bindings_scopes_a_child_without_a_field ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::scoped::bind_006_scope_bindings_scopes_a_child_without_a_field
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.17s
+
+  stderr ───
+
+    thread 'route_binding::scoped::bind_006_scope_bindings_scopes_a_child_without_a_field' (4015499) panicked at framework/tests/routing/route_binding/scoped.rs:154:5:
+    assertion `left == right` failed
+      left: 200
+     right: 404
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.319s] 98 tests run: 89 passed, 9 failed, 74 skipped
+        FAIL [   0.085s] (55/98) suprnova::routing route_binding::missing::bind_009_a_group_missing_handler_reaches_its_routes
+        FAIL [   0.158s] (57/98) suprnova::routing route_binding::contract::bind_001_the_trait_has_both_soft_deletable_lookups
+        FAIL [   0.086s] (58/98) suprnova::routing route_binding::resources::bind_011_scoped_gives_a_field_and_scopes_the_child
+        FAIL [   0.084s] (59/98) suprnova::routing route_binding::scoped::bind_006_a_group_scopes_its_routes
+        FAIL [   0.087s] (60/98) suprnova::routing route_binding::scoped::bind_006_a_child_with_a_binding_field_is_found_through_its_parent
+        FAIL [   0.162s] (82/98) suprnova::routing route_binding::missing::bind_009_a_route_missing_handler_replaces_the_404
+        FAIL [   0.085s] (85/98) suprnova::routing route_binding::scoped::bind_006_scoping_through_a_belongs_to_many_relation
+        FAIL [   0.084s] (93/98) suprnova::routing route_binding::scoped::bind_006_scoping_through_a_has_many_through_relation
+        FAIL [   0.183s] (97/98) suprnova::routing route_binding::scoped::bind_006_scope_bindings_scopes_a_child_without_a_field
+error: test run failed
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-rustls v0.26.4
+   Compiling sea-query v1.0.2
+   Compiling askama_parser v0.16.0
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling jsonwebtoken v9.3.1
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling syntect v5.3.0
+   Compiling ece v2.3.1
+   Compiling chrono-tz v0.9.0
+   Compiling ammonia v4.1.4
+   Compiling fluent-bundle v0.16.0
+   Compiling hyper-rustls v0.27.9
+   Compiling sqlx-core v0.9.0
+   Compiling webauthn-rs-core v0.5.5
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling tonic v0.12.3
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling comrak v0.52.0
+   Compiling redis v1.2.1
+   Compiling tera v1.20.1
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling askama_derive v0.16.0
+   Compiling webauthn-rs v0.5.5
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling lettre v0.11.22
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling syn v2.0.117
+   Compiling sqlx v0.9.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling askama_macros v0.16.0
+   Compiling sea-schema v0.18.1
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 16s
+────────────
+ Nextest run ID 32c8bd98-748a-4fbf-a424-ca51a8c64ea4 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [ 144.692s] 13 tests run: 13 passed (3 slow), 0 skipped
+   Compiling chrono-tz v0.9.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling tera v1.20.1
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 03s
+────────────
+ Nextest run ID 6c279c83-ef4f-4f55-bb70-d61f861c8304 with nextest profile: default
+    Starting 37 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   1.801s] 37 tests run: 37 passed, 166 skipped

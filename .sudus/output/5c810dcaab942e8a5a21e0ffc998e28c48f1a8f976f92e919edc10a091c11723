@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized] target(s) in 0.29s
+────────────
+ Nextest run ID 585b191b-b8f3-407b-a335-45bd2f129d07 with nextest profile: default
+    Starting 68 tests across 3 binaries (3659 tests skipped)
+────────────
+     Summary [   0.091s] 68 tests run: 68 passed, 3659 skipped
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 4.40s
+────────────
+ Nextest run ID b1d4f011-acf1-4c90-a262-66712a4c24ec with nextest profile: default
+    Starting 48 tests across 4 binaries (88 tests skipped)
+────────────
+     Summary [   0.118s] 48 tests run: 48 passed, 88 skipped

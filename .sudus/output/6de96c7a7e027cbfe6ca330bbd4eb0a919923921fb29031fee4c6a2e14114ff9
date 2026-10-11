@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running tests/live_registry_compile.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/live_registry_compile-abeafd115f66d6bb)
+
+running 4 tests
+test reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the_project ... ok
+test reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application has been running for over 60 seconds
+test reg_018_the_preview_passes_its_own_test_and_live_check has been running for over 60 seconds
+test reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify has been running for over 60 seconds
+test reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application ... ok
+test reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify ... ok
+test reg_018_the_preview_passes_its_own_test_and_live_check ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 101.18s
+

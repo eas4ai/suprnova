@@ -1,0 +1,119 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 54.42s
+────────────
+ Nextest run ID 74d5816e-0512-4a4c-b099-6229631826e6 with nextest profile: default
+    Starting 7 tests across 3 binaries (63 tests skipped)
+────────────
+     Summary [   0.015s] 7 tests run: 7 passed, 63 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID 68a604f1-0046-4c34-9505-62c9ebbe2eca with nextest profile: default
+    Starting 22 tests across 3 binaries (3294 tests skipped)
+        FAIL [   0.008s] ( 6/22) suprnova::inertia root_template::rdoc_001_the_mount_id_names_the_page_data_and_mount_elements
+  stdout ───
+
+    running 1 test
+    test root_template::rdoc_001_the_mount_id_names_the_page_data_and_mount_elements ... FAILED
+
+    failures:
+
+    failures:
+        root_template::rdoc_001_the_mount_id_names_the_page_data_and_mount_elements
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'root_template::rdoc_001_the_mount_id_names_the_page_data_and_mount_elements' (3383909) panicked at framework/tests/inertia/root_template.rs:329:5:
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="">
+    <title>Suprnova</title>
+    <script type="module" src="http://localhost:5765/@vite/client"></script>
+    <script type="module" src="http://localhost:5765/src/main.ts"></script>
+    </head>
+    <body>
+    <script type="application/json" data-page="root">{"component":"Home","props":{"errors":{},"message":"\u003c\/script\u003e & café"},"url":"\/home","version":"pinned","sharedProps":["errors"]}</script>
+
+    <div id="root"></div>
+    </body>
+    </html>
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+        FAIL [   0.009s] ( 7/22) suprnova::inertia root_template::rdoc_002_the_development_document_with_the_react_preamble_is_unchanged
+  stdout ───
+
+    running 1 test
+    test root_template::rdoc_002_the_development_document_with_the_react_preamble_is_unchanged ... FAILED
+
+    failures:
+
+    failures:
+        root_template::rdoc_002_the_development_document_with_the_react_preamble_is_unchanged
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'root_template::rdoc_002_the_development_document_with_the_react_preamble_is_unchanged' (3383914) panicked at framework/tests/inertia/root_template.rs:173:5:
+    assertion `left == right` failed
+      left: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Pinned &amp; &lt;Title&gt;</title>\n<script type=\"module\">\nimport RefreshRuntime from 'http://localhost:5765/@react-refresh'\nRefreshRuntime.injectIntoGlobalHook(window)\nwindow.$RefreshReg$ = () => {}\nwindow.$RefreshSig$ = () => (type) => type\nwindow.__vite_plugin_react_preamble_installed__ = true\n</script>\n<script type=\"module\" src=\"http://localhost:5765/@vite/client\"></script>\n<script type=\"module\" src=\"http://localhost:5765/src/main.tsx\"></script>\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n\n<div id=\"app\"></div>\n</body>\n</html>"
+     right: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Pinned &amp; &lt;Title&gt;</title>\n<script type=\"module\">\nimport RefreshRuntime from 'http://localhost:5765/@react-refresh'\nRefreshRuntime.injectIntoGlobalHook(window)\nwindow.$RefreshReg$ = () => {}\nwindow.$RefreshSig$ = () => (type) => type\nwindow.__vite_plugin_react_preamble_installed__ = true\n</script>\n<script type=\"module\" src=\"http://localhost:5765/@vite/client\"></script>\n<script type=\"module\" src=\"http://localhost:5765/src/main.tsx\"></script>\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n<div id=\"app\"></div>\n</body>\n</html>"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.007s] (14/22) suprnova::inertia root_template::rdoc_002_the_production_document_with_a_manifest_is_unchanged
+  stdout ───
+
+    running 1 test
+    test root_template::rdoc_002_the_production_document_with_a_manifest_is_unchanged ... FAILED
+
+    failures:
+
+    failures:
+        root_template::rdoc_002_the_production_document_with_a_manifest_is_unchanged
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'root_template::rdoc_002_the_production_document_with_a_manifest_is_unchanged' (3383930) panicked at framework/tests/inertia/root_template.rs:217:5:
+    assertion `left == right` failed
+      left: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Suprnova</title>\n<link rel=\"stylesheet\" href=\"/assets/main-3R4lN-AT.css\">\n<script type=\"module\" src=\"/assets/main-Q9zSqcUL.js\"></script>\n<link rel=\"modulepreload\" href=\"/assets/runtime-DTQbz0Cz.js\">\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n\n<div id=\"app\"></div>\n</body>\n</html>"
+     right: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Suprnova</title>\n<link rel=\"stylesheet\" href=\"/assets/main-3R4lN-AT.css\">\n<script type=\"module\" src=\"/assets/main-Q9zSqcUL.js\"></script>\n<link rel=\"modulepreload\" href=\"/assets/runtime-DTQbz0Cz.js\">\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n<div id=\"app\"></div>\n</body>\n</html>"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.008s] (16/22) suprnova::inertia root_template::rdoc_002_the_legacy_fallback_document_is_unchanged
+  stdout ───
+
+    running 1 test
+    test root_template::rdoc_002_the_legacy_fallback_document_is_unchanged ... FAILED
+
+    failures:
+
+    failures:
+        root_template::rdoc_002_the_legacy_fallback_document_is_unchanged
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 458 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'root_template::rdoc_002_the_legacy_fallback_document_is_unchanged' (3383931) panicked at framework/tests/inertia/root_template.rs:246:5:
+    assertion `left == right` failed
+      left: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Suprnova</title>\n<script type=\"module\" src=\"/assets/main.js\"></script>\n<link rel=\"stylesheet\" href=\"/assets/main.css\">\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n\n<div id=\"app\"></div>\n</body>\n</html>"
+     right: "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"csrf-token\" content=\"\">\n<title>Suprnova</title>\n<script type=\"module\" src=\"/assets/main.js\"></script>\n<link rel=\"stylesheet\" href=\"/assets/main.css\">\n</head>\n<body>\n<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\",\"props\":{\"errors\":{},\"message\":\"\\u003c\\/script\\u003e & café\"},\"url\":\"\\/home\",\"version\":\"pinned\",\"sharedProps\":[\"errors\"]}</script>\n<div id=\"app\"></div>\n</body>\n</html>"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  63.557s] 17/22 tests run: 13 passed (1 slow), 4 failed, 3294 skipped
+        FAIL [   0.008s] ( 6/22) suprnova::inertia root_template::rdoc_001_the_mount_id_names_the_page_data_and_mount_elements
+        FAIL [   0.009s] ( 7/22) suprnova::inertia root_template::rdoc_002_the_development_document_with_the_react_preamble_is_unchanged
+        FAIL [   0.007s] (14/22) suprnova::inertia root_template::rdoc_002_the_production_document_with_a_manifest_is_unchanged
+        FAIL [   0.008s] (16/22) suprnova::inertia root_template::rdoc_002_the_legacy_fallback_document_is_unchanged
+warning: 5/22 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

@@ -1,0 +1,32 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3.81s
+────────────
+ Nextest run ID f693dbe2-f8f1-45d4-9561-8a1387d97a48 with nextest profile: default
+    Starting 58 tests across 1 binary
+        FAIL [   0.006s] (24/58) suprnova::process run::revised_result_command_quotes_arguments
+  stdout ───
+
+    running 1 test
+    test run::revised_result_command_quotes_arguments ... FAILED
+
+    failures:
+
+    failures:
+        run::revised_result_command_quotes_arguments
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'run::revised_result_command_quotes_arguments' (2668263) panicked at framework/tests/process/run.rs:293:5:
+    assertion `left == right` failed: PAR-021 command quotes each argument as POSIX requires
+      left: "printf a b"
+     right: "printf 'a b'"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [   3.054s] 35/58 tests run: 34 passed, 1 failed, 0 skipped
+        FAIL [   0.006s] (24/58) suprnova::process run::revised_result_command_quotes_arguments
+warning: 23/58 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

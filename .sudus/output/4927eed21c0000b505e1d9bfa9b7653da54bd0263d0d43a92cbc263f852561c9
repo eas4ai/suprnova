@@ -1,0 +1,76 @@
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 16s
+────────────
+ Nextest run ID d200991a-ff2d-4acc-a07d-089b17ba18df with nextest profile: default
+    Starting 95 tests across 9 binaries (3564 tests skipped)
+────────────
+     Summary [  40.242s] 95 tests run: 95 passed, 3564 skipped
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling app v3.2.1 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized] target(s) in 1m 17s
+────────────
+ Nextest run ID 1651ebb2-6b35-4c55-8811-7fb03205cde6 with nextest profile: default
+    Starting 5 tests across 2 binaries
+────────────
+     Summary [   4.630s] 5 tests run: 5 passed, 0 skipped
+
+> @suprnova/live@0.1.0 test:unit
+> node scripts/run-unit-tests.mjs
+
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  99 passed (99)
+      Tests  969 passed (969)
+   Start at  23:25:40
+   Duration  14.15s (transform 3.44s, setup 0ms, import 7.41s, tests 44.96s, environment 6ms)
+
+
+Running 21 tests using 1 worker
+
+  ✓   1 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (210ms)
+  ✓   2 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (116ms)
+  ✓   3 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (62ms)
+  ✓   4 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (104ms)
+  ✓   5 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (63ms)
+  ✓   6 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.4s)
+  ✓   7 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (83ms)
+  ✓   8 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (812ms)
+  ✓   9 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (221ms)
+  ✓  10 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (166ms)
+  ✓  11 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (212ms)
+  ✓  12 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (178ms)
+  ✓  13 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.5s)
+  ✓  14 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (186ms)
+  ✓  15 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (352ms)
+  ✓  16 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (277ms)
+  ✓  17 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (233ms)
+  ✓  18 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (279ms)
+  ✓  19 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (252ms)
+  ✓  20 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.5s)
+  ✓  21 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (247ms)
+
+  21 passed (10.3s)
+
+> @suprnova/live@0.1.0 build
+> node scripts/build.mjs
+
+artifact role=core-classic file=suprnova-live.classic.js bytes=223862 brotli=53183
+artifact role=core-esm file=suprnova-live.esm.js bytes=223672 brotli=53211
+artifact role=stimulus-classic file=suprnova-live.stimulus.classic.js bytes=10637 brotli=3091
+artifact role=stimulus-esm file=suprnova-live.stimulus.esm.js bytes=10767 brotli=3147
+artifact role=uploads-classic file=suprnova-live.uploads.classic.js bytes=60827 brotli=16622
+artifact role=uploads-esm file=suprnova-live.uploads.esm.js bytes=61832 brotli=16832
+artifact role=async-classic file=suprnova-live.async.classic.js bytes=104324 brotli=25002
+artifact role=async-esm file=suprnova-live.async.esm.js bytes=104620 brotli=25088
+artifact role=ui-styles file=suprnova-ui.css bytes=18017 brotli=3153
+
+> @suprnova/live@0.1.0 build:check
+> node scripts/check-build.mjs
+
+reproducible build: index.d.ts, suprnova-live.assets.json, suprnova-live.async.classic.js, suprnova-live.async.esm.js, suprnova-live.classic.js, suprnova-live.esm.js, suprnova-live.stimulus.classic.js, suprnova-live.stimulus.esm.js, suprnova-live.uploads.classic.js, suprnova-live.uploads.esm.js, suprnova-ui.css

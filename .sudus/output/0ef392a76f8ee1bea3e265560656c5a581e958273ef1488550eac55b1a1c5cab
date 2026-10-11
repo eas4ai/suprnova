@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized] target(s) in 0.24s
+────────────
+ Nextest run ID 28427685-5da0-4c70-9186-9b41d290f80a with nextest profile: default
+    Starting 19 tests across 1 binary (56 tests skipped)
+────────────
+     Summary [   0.028s] 19 tests run: 19 passed, 56 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+   Doc-tests suprnova
+
+running 2 tests
+test framework/src/authorization/mod.rs - authorization (line 36) - compile fail ... ok
+test framework/src/authorization/mod.rs - authorization (line 17) - compile ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 691 filtered out; finished in 0.46s
+
+all doctests ran in 5.43s; merged doctests compilation took 4.95s

@@ -1,0 +1,55 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 5.81s
+     Running tests/live_registry_compile.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/live_registry_compile-abeafd115f66d6bb)
+
+running 4 tests
+test reg_018_the_preview_passes_its_own_test_and_live_check ... FAILED
+test reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application ... FAILED
+test reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify ... FAILED
+test reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the_project ... FAILED
+
+failures:
+
+---- reg_018_the_preview_passes_its_own_test_and_live_check stdout ----
+
+thread 'reg_018_the_preview_passes_its_own_test_and_live_check' (429978) panicked at suprnova-cli/tests/live_registry_compile.rs:91:9:
+`suprnova live:registry new acme --source github.com/acme-test/acme-ui` failed:
+  ✗ nothing was signed:
+  counter: the preview does not register crate::live::acme::counter::Counter; add `.register::<crate::live::acme::counter::Counter>()?` to preview/src/live/mod.rs, the line live:add writes into an application
+
+
+---- reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application stdout ----
+
+thread 'reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application' (429976) panicked at suprnova-cli/tests/live_registry_compile.rs:91:9:
+`suprnova live:registry new acme --source github.com/acme-test/acme-ui` failed:
+  ✗ nothing was signed:
+  counter: the preview does not register crate::live::acme::counter::Counter; add `.register::<crate::live::acme::counter::Counter>()?` to preview/src/live/mod.rs, the line live:add writes into an application
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify stdout ----
+
+thread 'reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify' (429979) panicked at suprnova-cli/tests/live_registry_compile.rs:91:9:
+`suprnova live:registry new acme --source github.com/acme-test/acme-ui` failed:
+  ✗ nothing was signed:
+  counter: the preview does not register crate::live::acme::counter::Counter; add `.register::<crate::live::acme::counter::Counter>()?` to preview/src/live/mod.rs, the line live:add writes into an application
+
+
+---- reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the_project stdout ----
+
+thread 'reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the_project' (429977) panicked at suprnova-cli/tests/live_registry_compile.rs:91:9:
+`suprnova live:registry new acme --source github.com/acme-test/acme-ui` failed:
+  ✗ nothing was signed:
+  counter: the preview does not register crate::live::acme::counter::Counter; add `.register::<crate::live::acme::counter::Counter>()?` to preview/src/live/mod.rs, the line live:add writes into an application
+
+
+
+failures:
+    reg_005_reg_021_a_signed_library_installs_compiles_and_renders_in_a_scaffolded_application
+    reg_018_registry_new_scaffolds_the_tree_with_an_example_and_a_key_outside_the_project
+    reg_018_the_preview_passes_its_own_test_and_live_check
+    reg_033_a_rotated_key_installs_after_a_terminal_re_pin_and_former_records_still_verify
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `-p suprnova-cli --test live_registry_compile`

@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 29.19s
+────────────
+ Nextest run ID 0427a7a9-6567-4864-bbfe-9346d61e46ac with nextest profile: default
+    Starting 1 test across 6 binaries (1408 tests skipped)
+        FAIL [   0.007s] (1/1) suprnova::session laravel_http_gaps::regenerating_the_session_issues_a_new_csrf_token
+  stdout ───
+
+    running 1 test
+    test laravel_http_gaps::regenerating_the_session_issues_a_new_csrf_token ... FAILED
+
+    failures:
+
+    failures:
+        laravel_http_gaps::regenerating_the_session_issues_a_new_csrf_token
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_http_gaps::regenerating_the_session_issues_a_new_csrf_token' (2412299) panicked at framework/tests/session/laravel_http_gaps.rs:15:9:
+    assertion `left != right` failed: Laravel's Session::regenerate issues a new CSRF token
+      left: "test_csrf_token"
+     right: "test_csrf_token"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.009s] 1 test run: 0 passed, 1 failed, 1408 skipped
+        FAIL [   0.007s] (1/1) suprnova::session laravel_http_gaps::regenerating_the_session_issues_a_new_csrf_token
+error: test run failed

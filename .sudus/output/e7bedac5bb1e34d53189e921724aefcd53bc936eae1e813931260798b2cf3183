@@ -1,0 +1,29 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 03s
+────────────
+ Nextest run ID 7786b98f-22ee-4e8a-9fb6-b431b8a81ebf with nextest profile: default
+    Starting 1 test across 1 binary
+        FAIL [   0.003s] (1/1) suprnova::mongodb the_mongodb_chapter_is_linked_from_the_documentation_index
+  stdout ───
+
+    running 1 test
+    test the_mongodb_chapter_is_linked_from_the_documentation_index ... FAILED
+
+    failures:
+
+    failures:
+        the_mongodb_chapter_is_linked_from_the_documentation_index
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'the_mongodb_chapter_is_linked_from_the_documentation_index' (1939481) panicked at framework/tests/mongodb/main.rs:7:5:
+    manual/documentation.md links the MongoDB chapter, as every subsystem's chapter is linked
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.004s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.003s] (1/1) suprnova::mongodb the_mongodb_chapter_is_linked_from_the_documentation_index
+error: test run failed

@@ -1,0 +1,19 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0599]: no variant, associated function, or constant named `Id` found for enum `payments::entities::transaction::transaction::Column` in the current scope
+  --> framework/src/payments/entities/transaction.rs:19:9
+   |
+16 | #[suprnova::model(table = "payments_transactions", timestamps)]
+   | --------------------------------------------------------------- variant, associated function, or constant `Id` not found for this enum
+...
+19 |     pub id: i64,
+   |         ^^ variant, associated function, or constant not found in `payments::entities::transaction::transaction::Column`
+   |
+help: there is a variant with a similar name (notice the capitalization)
+   |
+19 -     pub id: i64,
+19 +     pub Id: i64,
+   |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `suprnova` (lib test) due to 1 previous error
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --lib --test error` exited with code 101

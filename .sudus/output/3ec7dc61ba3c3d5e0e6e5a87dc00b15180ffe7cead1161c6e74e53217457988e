@@ -1,0 +1,17 @@
+   Compiling serde v1.0.229
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling askama_parser v0.16.0
+   Compiling basic-toml v0.1.10
+   Compiling suprnova-macros v3.0.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling askama_derive v0.16.0
+   Compiling askama_macros v0.16.0
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3m 15s
+────────────
+ Nextest run ID 04e85198-f531-41dd-9a27-28292bd8d75d with nextest profile: default
+    Starting 21 tests across 2 binaries (897 tests skipped)
+────────────
+     Summary [   0.047s] 21 tests run: 21 passed, 897 skipped

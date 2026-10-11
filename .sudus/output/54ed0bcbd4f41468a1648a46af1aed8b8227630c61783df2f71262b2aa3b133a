@@ -1,0 +1,32 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 05s
+────────────
+ Nextest run ID 846589f9-ae41-4ae8-b3f2-6f47c7edde71 with nextest profile: default
+    Starting 79 tests across 3 binaries (2815 tests skipped)
+        FAIL [   0.035s] (38/79) suprnova::media images::img_002_magick_output_keeps_no_exif_xmp_iptc_or_text
+  stdout ───
+
+    running 1 test
+    test images::img_002_magick_output_keeps_no_exif_xmp_iptc_or_text ... FAILED
+
+    failures:
+
+    failures:
+        images::img_002_magick_output_keeps_no_exif_xmp_iptc_or_text
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 95 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'images::img_002_magick_output_keeps_no_exif_xmp_iptc_or_text' (4057090) panicked at framework/tests/media/images.rs:1003:13:
+    assertion `left == right` failed: JPEG to Jpeg through magick
+      left: ["COM"]
+     right: []
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  99.297s] 79 tests run: 78 passed (1 slow), 1 failed, 2815 skipped
+        FAIL [   0.035s] (38/79) suprnova::media images::img_002_magick_output_keeps_no_exif_xmp_iptc_or_text
+error: test run failed

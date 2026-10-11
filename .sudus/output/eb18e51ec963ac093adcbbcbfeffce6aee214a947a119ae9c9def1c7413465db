@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 5.78s
+────────────
+ Nextest run ID a36f5a55-de91-4ad0-8ab1-02b63032b51a with nextest profile: default
+    Starting 7 tests across 3 binaries (545 tests skipped)
+        FAIL [   0.008s] (1/7) suprnova::http precognition::precognition_empty_validate_only_validates_nothing
+  stdout ───
+
+    running 1 test
+    test precognition::precognition_empty_validate_only_validates_nothing ... FAILED
+
+    failures:
+
+    failures:
+        precognition::precognition_empty_validate_only_validates_nothing
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 263 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'precognition::precognition_empty_validate_only_validates_nothing' (510951) panicked at framework/tests/http/precognition.rs:200:5:
+    assertion `left == right` failed
+      left: 422
+     right: 204
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 6 tests still running
+────────────
+     Summary [   0.010s] 7 tests run: 6 passed, 1 failed, 545 skipped
+        FAIL [   0.008s] (1/7) suprnova::http precognition::precognition_empty_validate_only_validates_nothing
+error: test run failed

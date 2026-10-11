@@ -1,0 +1,6 @@
+    Finished `test` profile [unoptimized] target(s) in 0.24s
+────────────
+ Nextest run ID 2ac32a4e-28c3-4e08-a84b-61261554b7a3 with nextest profile: default
+    Starting 492 tests across 3 binaries (3016 tests skipped)
+────────────
+     Summary [   1.409s] 492 tests run: 492 passed, 3016 skipped

@@ -1,0 +1,8 @@
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 5m 28s
+────────────
+ Nextest run ID 55cb9957-1325-4c71-a67a-84b26c6a3b6f with nextest profile: default
+    Starting 100 tests across 8 binaries (2518 tests skipped)
+────────────
+     Summary [   0.607s] 100 tests run: 100 passed, 2518 skipped

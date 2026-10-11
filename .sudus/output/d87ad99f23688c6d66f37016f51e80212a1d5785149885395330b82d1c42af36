@@ -1,0 +1,29 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 34s
+────────────
+ Nextest run ID 7d3d680a-b591-45f0-aaf1-cfaef1a35ed9 with nextest profile: default
+    Starting 9 tests across 1 binary (817 tests skipped)
+        FAIL [   0.020s] (5/9) suprnova::eloquent sync_without_detaching::revised_pivot_filtered_sync_accepts_writes
+  stdout ───
+
+    running 1 test
+    test sync_without_detaching::revised_pivot_filtered_sync_accepts_writes ... FAILED
+
+    failures:
+
+    failures:
+        sync_without_detaching::revised_pivot_filtered_sync_accepts_writes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 825 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'sync_without_detaching::revised_pivot_filtered_sync_accepts_writes' (2610088) panicked at framework/tests/eloquent/sync_without_detaching.rs:454:12:
+    PAR-005 filtered pivot sync may attach missing ids: ParamError { param_name: "where_pivot filters constrain reads only (get / first / count); drop them before attach / attach_with / detach / sync" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 4 tests still running
+────────────
+     Summary [   0.071s] 9 tests run: 8 passed, 1 failed, 817 skipped
+        FAIL [   0.020s] (5/9) suprnova::eloquent sync_without_detaching::revised_pivot_filtered_sync_accepts_writes
+error: test run failed

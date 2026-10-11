@@ -1,0 +1,8 @@
+  error: operator didn't match any binary names
+   ╭────
+ 1 │ test(/^inertia_pages::/) | test(/^inertia::tests::/) | binary(inertia_page_lookup)
+   ·                                                               ─────────┬─────────
+   ·                                                                        ╰── no binary names matched this
+   ╰────
+
+error: failed to parse filterset

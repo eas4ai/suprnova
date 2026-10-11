@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 38s
+────────────
+ Nextest run ID bcb9afbb-274a-4165-94eb-4a64bc6a0700 with nextest profile: default
+    Starting 1 test across 8 binaries (2508 tests skipped)
+        FAIL [   0.007s] (1/1) suprnova::testing laravel_testing_gaps::a_200_with_an_empty_body_is_not_no_content
+  stdout ───
+
+    running 1 test
+    test laravel_testing_gaps::a_200_with_an_empty_body_is_not_no_content ... FAILED
+
+    failures:
+
+    failures:
+        laravel_testing_gaps::a_200_with_an_empty_body_is_not_no_content
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 181 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'laravel_testing_gaps::a_200_with_an_empty_body_is_not_no_content' (733867) panicked at framework/tests/testing/laravel_testing_gaps.rs:11:5:
+    assertion `left == right` failed: Laravel's assertNoContent fails a 200: only an empty 204 is no content
+      left: 200
+     right: 204
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.011s] 1 test run: 0 passed, 1 failed, 2508 skipped
+        FAIL [   0.007s] (1/1) suprnova::testing laravel_testing_gaps::a_200_with_an_empty_body_is_not_no_content
+error: test run failed

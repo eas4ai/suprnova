@@ -1,0 +1,541 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::ContentDisposition`
+  --> framework/tests/http/file_responses.rs:18:5
+   |
+18 |     ContentDisposition, FrameworkError, HttpResponse, MiddlewareRegistry, Router, handle_request,
+   |     ^^^^^^^^^^^^^^^^^^ no `ContentDisposition` in the root
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:283:27
+    |
+283 |             HttpResponse::file(&path, None)
+    |                           ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+  --> framework/tests/filesystem/disk_responses.rs:98:18
+   |
+98 |         Storage::download("local", "reports/q3.pdf", None)
+   |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:308:27
+    |
+308 |             HttpResponse::file(&path, Some("Logo P\u{e9}rez.png"))
+    |                           ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `response` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:120:18
+    |
+120 |         Storage::response("local", "reports/q3.pdf", Some("Informe P\u{e9}rez.pdf"))
+    |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `response` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:134:29
+    |
+134 |     let response = Storage::response("local", "reports/q3.pdf", None)
+    |                             ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:342:38
+    |
+342 |         let response = HttpResponse::file(&path, None)
+    |                                      ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:153:28
+    |
+153 |         let err = Storage::download("local", path, None)
+    |                            ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:365:34
+    |
+365 |     let response = HttpResponse::file(&path, None).await.unwrap();
+    |                                  ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `response` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:157:28
+    |
+157 |         let err = Storage::response("local", path, None)
+    |                            ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:374:27
+    |
+374 |             HttpResponse::download(&path, None)
+    |                           ^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:164:18
+    |
+164 |         Storage::download("local", "../secret.txt", Some("secret.txt"))
+    |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/filesystem/disk_responses.rs:163:28
+    |
+163 |     let (status, _headers, body) = serve("/secret", || async {
+    |                            ^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/filesystem/disk_responses.rs:163:36
+    |
+163 |       let (status, _headers, body) = serve("/secret", || async {
+    |  ____________________________________^
+164 | |         Storage::download("local", "../secret.txt", Some("secret.txt"))
+165 | |             .await
+166 | |             .map_err(HttpResponse::from)
+167 | |     })
+168 | |     .await;
+    | |__________^ doesn't have a size known at compile-time
+    |
+    = help: within `(_, _, [u8])`, the trait `Sized` is not implemented for `[u8]`
+    = note: required because it appears within the type `(_, _, [u8])`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/filesystem/disk_responses.rs:168:6
+    |
+168 |     .await;
+    |      ^^^^^ doesn't have a size known at compile-time
+    |
+    = help: within `(_, _, [u8])`, the trait `Sized` is not implemented for `[u8]`
+    = note: required because it appears within the type `(_, _, [u8])`
+note: required by an implicit `Sized` bound in `Poll`
+   --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/task/poll.rs:14:0
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:393:29
+    |
+393 |     let err = HttpResponse::file(&missing, None)
+    |                             ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:181:24
+    |
+181 |     let err = Storage::download("local", "reports/q4.pdf", None)
+    |                        ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:397:29
+    |
+397 |     let err = HttpResponse::download(&missing, Some("x.pdf"))
+    |                             ^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `response` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:185:24
+    |
+185 |     let err = Storage::response("local", "reports", None)
+    |                        ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:191:18
+    |
+191 |         Storage::download("local", "reports/q4.pdf", None)
+    |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:406:27
+    |
+406 |             HttpResponse::file(&missing, None)
+    |                           ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/http/file_responses.rs:403:28
+    |
+403 |     let (status, _headers, body) = serve("/gone", move || {
+    |                            ^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/http/file_responses.rs:403:36
+    |
+403 |       let (status, _headers, body) = serve("/gone", move || {
+    |  ____________________________________^
+404 | |         let missing = missing.clone();
+405 | |         async move {
+406 | |             HttpResponse::file(&missing, None)
+...   |
+410 | |     })
+411 | |     .await;
+    | |__________^ doesn't have a size known at compile-time
+    |
+    = help: within `(_, _, [u8])`, the trait `Sized` is not implemented for `[u8]`
+    = note: required because it appears within the type `(_, _, [u8])`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> framework/tests/http/file_responses.rs:411:6
+    |
+411 |     .await;
+    |      ^^^^^ doesn't have a size known at compile-time
+    |
+    = help: within `(_, _, [u8])`, the trait `Sized` is not implemented for `[u8]`
+    = note: required because it appears within the type `(_, _, [u8])`
+note: required by an implicit `Sized` bound in `Poll`
+   --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/task/poll.rs:14:0
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:202:24
+    |
+202 |     let err = Storage::download("nowhere", "a.pdf", None)
+    |                        ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `file` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:423:29
+    |
+423 |     let err = HttpResponse::file(dir.path(), None)
+    |                             ^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `response` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:221:18
+    |
+221 |         Storage::response("objects", "img/logo.png", None)
+    |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:441:27
+    |
+441 |             HttpResponse::download(&path, None)
+    |                           ^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:235:18
+    |
+235 |         Storage::download("objects", "blobs/upload.xyz", Some("upload"))
+    |                  ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:465:27
+    |
+465 |             HttpResponse::download(&path, Some(CATALAN_NAME))
+    |                           ^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:247:24
+    |
+247 |     let err = Storage::download("objects", "img/missing.png", None)
+    |                        ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:490:27
+    |
+490 |             HttpResponse::download(
+    |                           ^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:268:33
+    |
+268 |         let response = Storage::download(disk, "exports/big.zip", None)
+    |                                 ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download` found for struct `Storage` in the current scope
+   --> framework/tests/filesystem/disk_responses.rs:279:22
+    |
+279 |             Storage::download(disk, "exports/big.zip", Some("export.zip"))
+    |                      ^^^^^^^^ associated function or constant not found in `Storage`
+
+error[E0599]: no associated function or constant named `download_bytes` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:525:26
+    |
+525 |         Ok(HttpResponse::download_bytes(
+    |                          ^^^^^^^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `download_bytes` found for struct `HttpResponse` in the current scope
+   --> framework/tests/http/file_responses.rs:545:26
+    |
+545 |         Ok(HttpResponse::download_bytes(
+    |                          ^^^^^^^^^^^^^^ associated function or constant not found in `HttpResponse`
+    |
+note: if you're trying to build a new `HttpResponse` consider using one of the following associated functions:
+      HttpResponse::new
+      HttpResponse::text
+      HttpResponse::json
+      HttpResponse::bytes
+      and 7 others
+   --> framework/src/http/response.rs:70:5
+    |
+ 70 |     pub fn new() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+ 79 |     pub fn text(body: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub fn json(body: serde_json::Value) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub fn bytes(body: Bytes, content_type: impl Into<String>) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0277, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `suprnova` (test "filesystem") due to 18 previous errors
+warning: build failed, waiting for other jobs to finish...
+Some errors have detailed explanations: E0277, E0432, E0599.
+error: could not compile `suprnova` (test "http") due to 18 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test http --test filesystem` exited with code 101

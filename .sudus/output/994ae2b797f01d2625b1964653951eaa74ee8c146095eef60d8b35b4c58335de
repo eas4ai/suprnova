@@ -1,0 +1,33 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::logging::build_subscriber`
+  --> framework/tests/logging/channels.rs:16:36
+   |
+16 | use suprnova::logging::{LogConfig, build_subscriber};
+   |                                    ^^^^^^^^^^^^^^^^ no `build_subscriber` in `logging`
+   |
+help: a similar name exists in the module
+   |
+16 - use suprnova::logging::{LogConfig, build_subscriber};
+16 + use suprnova::logging::{LogConfig, init_subscriber};
+   |
+
+error[E0432]: unresolved imports `suprnova::Log`, `suprnova::LogChannel`, `suprnova::LogLevel`, `suprnova::LogRecord`, `suprnova::LogSink`
+  --> framework/tests/logging/channels.rs:18:32
+   |
+18 | use suprnova::{FrameworkError, Log, LogChannel, LogLevel, LogRecord, LogSink};
+   |                                ^^^  ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^  ^^^^^^^ no `LogSink` in the root
+   |                                |    |           |         |
+   |                                |    |           |         no `LogRecord` in the root
+   |                                |    |           no `LogLevel` in the root
+   |                                |    no `LogChannel` in the root
+   |                                no `Log` in the root
+   |
+help: a similar name exists in the module
+   |
+18 - use suprnova::{FrameworkError, Log, LogChannel, LogLevel, LogRecord, LogSink};
+18 + use suprnova::{FrameworkError, Log, Channel, LogLevel, LogRecord, LogSink};
+   |
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "logging") due to 2 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test logging` exited with code 101

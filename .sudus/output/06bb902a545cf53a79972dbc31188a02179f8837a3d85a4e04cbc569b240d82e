@@ -1,0 +1,7 @@
+   Compiling suprnova-live-test-support v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 7.08s
+────────────
+ Nextest run ID d2bc9fb5-f733-4e02-81bc-39757d695f8d with nextest profile: default
+    Starting 2 tests across 5 binaries (53 tests skipped)
+────────────
+     Summary [   0.159s] 2 tests run: 2 passed, 53 skipped

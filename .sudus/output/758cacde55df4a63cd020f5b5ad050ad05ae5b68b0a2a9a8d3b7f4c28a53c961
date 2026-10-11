@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized] target(s) in 0.61s
+────────────
+ Nextest run ID 1b006676-5989-4aad-9679-651bb4910bb8 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [   3.453s] 13 tests run: 13 passed, 0 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.28s
+────────────
+ Nextest run ID a5f20bc7-fbd7-4a41-bd71-44d28b7ed913 with nextest profile: default
+    Starting 2 tests across 1 binary
+────────────
+     Summary [   0.032s] 2 tests run: 2 passed, 0 skipped

@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 27s
+────────────
+ Nextest run ID 2e92fd7d-663e-4a4d-8d07-4a11a3024dcf with nextest profile: default
+    Starting 23 tests across 2 binaries (978 tests skipped)
+        FAIL [   1.034s] (23/23) suprnova::database joins::revised_or_conditions_keep_laravel_precedence
+  stdout ───
+
+    running 1 test
+    test joins::revised_or_conditions_keep_laravel_precedence ... FAILED
+
+    failures:
+
+    failures:
+        joins::revised_or_conditions_keep_laravel_precedence
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 175 filtered out; finished in 1.03s
+
+  stderr ───
+
+    thread 'joins::revised_or_conditions_keep_laravel_precedence' (2547408) panicked at framework/tests/database/joins.rs:785:5:
+    assertion `left == right` failed: PAR-001 requires flat OR conditions
+      left: [Object {"id": Number(1), "name": String("Ada"), "active": Number(1)}]
+     right: [Object {"id": Number(1), "name": String("Ada"), "active": Number(1)}, Object {"id": Number(3), "name": String("Grace"), "active": Number(0)}]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   1.035s] 23 tests run: 22 passed, 1 failed, 978 skipped
+        FAIL [   1.034s] (23/23) suprnova::database joins::revised_or_conditions_keep_laravel_precedence
+error: test run failed

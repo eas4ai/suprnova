@@ -1,0 +1,77 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 50.11s
+────────────
+ Nextest run ID 3ba18295-7e1a-404c-95ce-9fd92b73c0e5 with nextest profile: default
+    Starting 12 tests across 1 binary (106 tests skipped)
+────────────
+     Summary [   0.496s] 12 tests run: 12 passed, 106 skipped
+   Compiling suprnova-live v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+   Compiling laravel-defaults-probe v0.0.0 (/home/shawn/workspace2/suprnova/framework/tests/fixtures/laravel-defaults-probe)
+    Finished `test` profile [unoptimized] target(s) in 4m 29s
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-8eb14c03e7b009bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/documented_call.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/documented_call_probe-44ee5cf32ac2b54f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-6206a3074e5d1aeb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/plain.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/plain_probe-3fc647dd65c9f2a3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/settings.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/settings-75b62e7ef72f8531)
+
+running 3 tests
+test mysql_settings_reach_models_and_migrations ... ok
+test sqlite_settings_reach_models_and_migrations ... ok
+test postgres_settings_reach_models_and_migrations ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+   Doc-tests laravel_defaults_probe
+
+running 4 tests
+test src/lib.rs - ProbePost::without_global_scope (line 37) ... ignored
+test src/lib.rs - ProbePost::without_global_scopes (line 37) ... ignored
+test src/lib.rs - ProbeUser::without_global_scope (line 24) ... ignored
+test src/lib.rs - ProbeUser::without_global_scopes (line 24) ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.35s; merged doctests compilation took 0.35s
+   Compiling suprnova-macros v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 3m 29s
+────────────
+ Nextest run ID c2c5b702-1ab6-4f9a-a83c-2e0576152078 with nextest profile: default
+    Starting 5 tests across 6 binaries (204 tests skipped)
+────────────
+     Summary [  96.248s] 5 tests run: 5 passed (4 slow), 204 skipped
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.1.0 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 3m 13s
+────────────
+ Nextest run ID da06e3ff-110d-4851-9874-06a269b59030 with nextest profile: default
+    Starting 1 test across 1 binary (2 tests skipped)
+────────────
+     Summary [   0.113s] 1 test run: 1 passed, 2 skipped

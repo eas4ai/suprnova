@@ -1,0 +1,89 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID a9f99be4-1ec7-4f33-aae5-c284d3a067e9 with nextest profile: default
+    Starting 57 tests across 1 binary
+        FAIL [   0.013s] (42/57) suprnova::path_prefix root::pfx_002_outside_a_request_the_root_is_the_app_url_path
+  stdout ───
+
+    running 1 test
+    test root::pfx_002_outside_a_request_the_root_is_the_app_url_path ... FAILED
+
+    failures:
+
+    failures:
+        root::pfx_002_outside_a_request_the_root_is_the_app_url_path
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'root::pfx_002_outside_a_request_the_root_is_the_app_url_path' (449202) panicked at framework/tests/path_prefix/../support/own_process.rs:79:5:
+    the child failed
+    stdout:
+
+    running 1 test
+    test root::pfx_002_outside_a_request_the_root_is_the_app_url_path ... FAILED
+
+    failures:
+
+    failures:
+        root::pfx_002_outside_a_request_the_root_is_the_app_url_path
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.00s
+
+
+    stderr:
+
+    thread 'root::pfx_002_outside_a_request_the_root_is_the_app_url_path' (449209) panicked at framework/tests/path_prefix/root.rs:152:5:
+    assertion `left == right` failed
+      left: "https://example.org/invoices"
+     right: "https://example.org/billing/invoices"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.189s] 57 tests run: 56 passed, 1 failed, 0 skipped
+        FAIL [   0.013s] (42/57) suprnova::path_prefix root::pfx_002_outside_a_request_the_root_is_the_app_url_path
+error: test run failed
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 16s
+────────────
+ Nextest run ID 99417e65-47d0-4342-8d45-ea4f4eba984b with nextest profile: default
+    Starting 4 tests across 1 binary (53 tests skipped)
+────────────
+     Summary [   0.007s] 4 tests run: 4 passed, 53 skipped
+
+> @suprnova/live@0.1.0 test:unit
+> node scripts/run-unit-tests.mjs -t PFX-
+
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  1 passed | 98 skipped (99)
+      Tests  6 passed | 962 skipped (968)
+   Start at  16:50:37
+   Duration  1.81s (transform 6.40s, setup 0ms, import 11.02s, tests 32ms, environment 6ms)
+
+
+> @suprnova/live@0.1.0 build
+> node scripts/build.mjs
+
+artifact role=core-classic file=suprnova-live.classic.js bytes=223862 brotli=53183
+artifact role=core-esm file=suprnova-live.esm.js bytes=223672 brotli=53211
+artifact role=stimulus-classic file=suprnova-live.stimulus.classic.js bytes=10637 brotli=3091
+artifact role=stimulus-esm file=suprnova-live.stimulus.esm.js bytes=10767 brotli=3147
+artifact role=uploads-classic file=suprnova-live.uploads.classic.js bytes=60827 brotli=16622
+artifact role=uploads-esm file=suprnova-live.uploads.esm.js bytes=61832 brotli=16832
+artifact role=async-classic file=suprnova-live.async.classic.js bytes=104324 brotli=25002
+artifact role=async-esm file=suprnova-live.async.esm.js bytes=104620 brotli=25088
+artifact role=ui-styles file=suprnova-ui.css bytes=18017 brotli=3153
+
+> @suprnova/live@0.1.0 build:check
+> node scripts/check-build.mjs
+
+reproducible build: index.d.ts, suprnova-live.assets.json, suprnova-live.async.classic.js, suprnova-live.async.esm.js, suprnova-live.classic.js, suprnova-live.esm.js, suprnova-live.stimulus.classic.js, suprnova-live.stimulus.esm.js, suprnova-live.uploads.classic.js, suprnova-live.uploads.esm.js, suprnova-ui.css

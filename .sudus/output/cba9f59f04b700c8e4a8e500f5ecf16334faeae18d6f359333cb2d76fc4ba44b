@@ -1,0 +1,12 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::testing::TestClient`
+ --> framework/tests/testing/intt_red.rs:5:5
+  |
+5 | use suprnova::testing::TestClient;
+  |     ^^^^^^^^^^^^^^^^^^^----------
+  |                        |
+  |                        no `TestClient` in `testing`
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "testing") due to 1 previous error
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --lib --test testing --test inertia` exited with code 101

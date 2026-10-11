@@ -1,0 +1,19 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized] target(s) in 0.49s
+────────────
+ Nextest run ID a4e03d5b-387d-4646-be5e-92213f1486e7 with nextest profile: default
+    Starting 19 tests across 1 binary (56 tests skipped)
+────────────
+     Summary [   0.093s] 19 tests run: 19 passed, 56 skipped
+    Finished `test` profile [unoptimized] target(s) in 0.25s
+   Doc-tests suprnova
+
+running 2 tests
+test framework/src/authorization/mod.rs - authorization (line 17) - compile ... ok
+test framework/src/authorization/mod.rs - authorization (line 36) - compile fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 691 filtered out; finished in 0.67s
+
+all doctests ran in 6.02s; merged doctests compilation took 5.34s

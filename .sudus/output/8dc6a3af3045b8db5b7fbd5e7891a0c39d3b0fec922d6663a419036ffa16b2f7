@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 42s
+────────────
+ Nextest run ID 2ed51dbd-c24b-4f52-a4ca-349076784667 with nextest profile: default
+    Starting 18 tests across 1 binary (808 tests skipped)
+        FAIL [   1.018s] (18/18) suprnova::eloquent model_changes::revised_clean_save_does_not_issue_an_update
+  stdout ───
+
+    running 1 test
+    test model_changes::revised_clean_save_does_not_issue_an_update ... FAILED
+
+    failures:
+
+    failures:
+        model_changes::revised_clean_save_does_not_issue_an_update
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 825 filtered out; finished in 1.01s
+
+  stderr ───
+
+    thread 'model_changes::revised_clean_save_does_not_issue_an_update' (2589816) panicked at framework/tests/eloquent/model_changes.rs:788:5:
+    assertion `left == right` failed: PAR-004 clean saves issue no UPDATE
+      left: 1
+     right: 0
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   1.040s] 18 tests run: 17 passed, 1 failed, 808 skipped
+        FAIL [   1.018s] (18/18) suprnova::eloquent model_changes::revised_clean_save_does_not_issue_an_update
+error: test run failed

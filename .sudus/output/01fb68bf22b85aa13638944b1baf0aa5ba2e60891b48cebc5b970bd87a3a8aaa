@@ -1,0 +1,267 @@
+   Compiling tokio v1.53.1
+   Compiling aws-lc-rs v1.18.1
+   Compiling url v2.5.8
+   Compiling string_cache_codegen v0.6.1
+   Compiling sea-query-derive v1.0.0
+   Compiling openssl v0.10.80
+   Compiling axum-core v0.4.5
+   Compiling phf_macros v0.13.1
+   Compiling askama_parser v0.16.0
+   Compiling basic-toml v0.1.10
+   Compiling phf_generator v0.11.3
+   Compiling unic-langid-macros-impl v0.9.6
+   Compiling phf_codegen v0.11.3
+   Compiling sea-orm-macros v2.0.2
+   Compiling web_atoms v0.2.5
+   Compiling phf v0.13.1
+   Compiling hyper-util v0.1.20
+   Compiling chrono-tz-build v0.3.0
+   Compiling unic-langid-macros v0.9.6
+   Compiling prost-derive v0.13.5
+   Compiling unic-langid v0.9.6
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tower v0.5.3
+   Compiling rustls-webpki v0.103.15
+   Compiling chrono-tz v0.9.0
+   Compiling oxideav-core v0.1.39
+   Compiling rustls v0.23.45
+   Compiling markup5ever v0.39.0
+   Compiling askama_derive v0.16.0
+   Compiling prost v0.13.5
+   Compiling html5ever v0.39.0
+   Compiling sea-query v1.0.2
+   Compiling syntect v5.3.0
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling webauthn-rs-core v0.5.5
+   Compiling ece v2.3.1
+   Compiling intl-memoizer v0.5.3
+   Compiling prost-types v0.13.5
+   Compiling tower-http v0.6.11
+   Compiling tokio-util v0.7.18
+   Compiling tokio-tungstenite v0.24.0
+   Compiling h2 v0.4.16
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-rustls v0.26.4
+   Compiling sqlx-core v0.9.0
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling hyper-rustls v0.27.9
+   Compiling intl_pluralrules v7.0.2
+   Compiling fluent-langneg v0.13.1
+   Compiling phf_macros v0.14.0
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling backon v1.6.0
+   Compiling jsonwebtoken v9.3.1
+   Compiling dhat v0.3.3
+   Compiling phf v0.14.0
+   Compiling askama_macros v0.16.0
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling webauthn-rs v0.5.5
+   Compiling tower v0.4.13
+   Compiling askama v0.16.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling reqsign-aws-v4 v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling cssparser v0.37.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling hyper v1.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling axum v0.7.9
+   Compiling sqlx v0.9.0
+   Compiling reqwest v0.12.28
+   Compiling sea-query-sqlx v0.9.1
+   Compiling hyper-timeout v0.5.2
+   Compiling reqwest v0.13.4
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sea-schema v0.18.1
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling sea-orm-cli v2.0.2
+   Compiling combine v4.6.7
+   Compiling tokio-tungstenite v0.29.0
+   Compiling oxideav-vp8 v0.2.6
+   Compiling tonic v0.12.3
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling proptest v1.11.0
+   Compiling hyper-tungstenite v0.20.0
+   Compiling tera v1.20.1
+   Compiling sea-orm v2.0.2
+   Compiling oxideav-webp v0.3.1 (https://github.com/eas4ai/oxideav-webp?rev=65a9c8ad5d6ce945cd4f3aac5b3279936eb42629#65a9c8ad)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+   Compiling qdrant-client v1.18.0
+   Compiling redis v1.2.1
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling oxc_regular_expression v0.139.0
+   Compiling oxc_syntax v0.139.0
+   Compiling aws-sigv4 v1.4.4
+   Compiling ammonia v4.1.4
+   Compiling fluent-bundle v0.16.0
+   Compiling lettre v0.11.22
+   Compiling comrak v0.52.0
+   Compiling oxideav-png v0.1.12 (https://github.com/eas4ai/oxideav-png?rev=d29d4b25d790e08c04e7d56b27726c58daac7cfd#d29d4b25)
+   Compiling oxideav-bmp v0.1.8 (https://github.com/eas4ai/oxideav-bmp?rev=a640fa7e061c1897fdce020af3896e843a94f613#a640fa7e)
+   Compiling oxideav-image-filter v0.1.2
+   Compiling oxideav-pixfmt v0.1.7
+   Compiling oxideav-mjpeg v0.1.8
+   Compiling tracing-subscriber v0.3.23
+   Compiling webauthn-authenticator-rs v0.5.5
+   Compiling deadpool v0.12.3
+   Compiling tracing-test v0.2.6
+   Compiling oxc_ast v0.139.0
+   Compiling charts-rs v1.0.0
+   Compiling trybuild v1.0.120
+   Compiling totp-rs v5.7.1
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling dashmap v5.5.3
+   Compiling assert-json-diff v2.0.2
+   Compiling serial_test v2.0.0
+   Compiling wiremock v0.6.5
+   Compiling oxc_ecmascript v0.139.0
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling validator v0.20.0
+   Compiling oxc_parser v0.139.0
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 1m 36s
+────────────
+ Nextest run ID bb5ffc9a-78b4-460f-b8f1-52a411f3b1cc with nextest profile: default
+    Starting 95 tests across 9 binaries (3562 tests skipped)
+────────────
+     Summary [  38.497s] 95 tests run: 95 passed, 3562 skipped
+   Compiling tokio v1.53.1
+   Compiling oxideav-core v0.1.39
+   Compiling axum-core v0.4.5
+   Compiling oxideav-vp8 v0.2.6
+   Compiling oxideav-bmp v0.1.8 (https://github.com/eas4ai/oxideav-bmp?rev=a640fa7e061c1897fdce020af3896e843a94f613#a640fa7e)
+   Compiling oxideav-pixfmt v0.1.7
+   Compiling oxideav-mjpeg v0.1.8
+   Compiling oxideav-image-filter v0.1.2
+   Compiling oxideav-png v0.1.12 (https://github.com/eas4ai/oxideav-png?rev=d29d4b25d790e08c04e7d56b27726c58daac7cfd#d29d4b25)
+   Compiling oxideav-webp v0.3.1 (https://github.com/eas4ai/oxideav-webp?rev=65a9c8ad5d6ce945cd4f3aac5b3279936eb42629#65a9c8ad)
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling backon v1.6.0
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling tokio-tungstenite v0.29.0
+   Compiling sea-orm-cli v2.0.2
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling lettre v0.11.22
+   Compiling tower-http v0.6.11
+   Compiling axum v0.7.9
+   Compiling h2 v0.4.16
+   Compiling tokio-stream v0.1.18
+   Compiling tower v0.4.13
+   Compiling combine v4.6.7
+   Compiling sqlx-core v0.9.0
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-sigv4 v1.4.4
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling hyper v1.9.0
+   Compiling redis v1.2.1
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=83f5a495a11f40885af02c3306fec0e1fda06bc2#83f5a495)
+   Compiling hyper-util v0.1.20
+   Compiling sqlx v0.9.0
+   Compiling sea-query-sqlx v0.9.1
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-timeout v0.5.2
+   Compiling hyper-tungstenite v0.20.0
+   Compiling tonic v0.12.3
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling sea-schema v0.18.1
+   Compiling suprnova-web-push v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling qdrant-client v1.18.0
+   Compiling sea-orm v2.0.2
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling app v3.2.1 (/home/shawn/workspace2/suprnova/app)
+    Finished `test` profile [unoptimized] target(s) in 1m 29s
+────────────
+ Nextest run ID 3ab8ed0f-ae1f-4796-8206-74da7a459b33 with nextest profile: default
+    Starting 5 tests across 2 binaries
+────────────
+     Summary [   4.810s] 5 tests run: 5 passed, 0 skipped
+
+> @suprnova/live@0.1.0 test:unit
+> node scripts/run-unit-tests.mjs
+
+
+ RUN  v4.1.11 /home/shawn/workspace2/suprnova/crates/suprnova-live/browser
+
+
+ Test Files  99 passed (99)
+      Tests  969 passed (969)
+   Start at  22:03:22
+   Duration  14.34s (transform 3.30s, setup 0ms, import 7.71s, tests 44.97s, environment 9ms)
+
+
+Running 21 tests using 1 worker
+
+  ✓   1 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (223ms)
+  ✓   2 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (115ms)
+  ✓   3 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (72ms)
+  ✓   4 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (95ms)
+  ✓   5 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (71ms)
+  ✓   6 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.4s)
+  ✓   7 [chromium] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (99ms)
+  ✓   8 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (902ms)
+  ✓   9 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (218ms)
+  ✓  10 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (171ms)
+  ✓  11 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (208ms)
+  ✓  12 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (181ms)
+  ✓  13 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.5s)
+  ✓  14 [firefox] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (188ms)
+  ✓  15 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:22:3 › FDB-007: the toast region holds a toast's timer › while the pointer moves from the text to the padding (447ms)
+  ✓  16 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:40:3 › FDB-007: the toast region holds a toast's timer › while focus is on its dismiss button and the pointer leaves (271ms)
+  ✓  17 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:81:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets a toast a morph removed (234ms)
+  ✓  18 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:88:3 › FDB-007: the toast region holds a toast's timer › MEM-001 forgets toasts removed while the region is held (254ms)
+  ✓  19 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:100:3 › FDB-007: the toast region holds a toast's timer › MEM-001 keeps the timer of a toast a morph moved (244ms)
+  ✓  20 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:116:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the hovered toast is removed under a still pointer (1.5s)
+  ✓  21 [webkit] › e2e/components/feedback-navigation-overlays.spec.ts:140:3 › FDB-007: the toast region holds a toast's timer › MEM-006 resumes the timers when the focused toast is removed (245ms)
+
+  21 passed (10.6s)
+
+> @suprnova/live@0.1.0 build
+> node scripts/build.mjs
+
+artifact role=core-classic file=suprnova-live.classic.js bytes=223862 brotli=53183
+artifact role=core-esm file=suprnova-live.esm.js bytes=223672 brotli=53211
+artifact role=stimulus-classic file=suprnova-live.stimulus.classic.js bytes=10637 brotli=3091
+artifact role=stimulus-esm file=suprnova-live.stimulus.esm.js bytes=10767 brotli=3147
+artifact role=uploads-classic file=suprnova-live.uploads.classic.js bytes=60827 brotli=16622
+artifact role=uploads-esm file=suprnova-live.uploads.esm.js bytes=61832 brotli=16832
+artifact role=async-classic file=suprnova-live.async.classic.js bytes=104324 brotli=25002
+artifact role=async-esm file=suprnova-live.async.esm.js bytes=104620 brotli=25088
+artifact role=ui-styles file=suprnova-ui.css bytes=18017 brotli=3153
+
+> @suprnova/live@0.1.0 build:check
+> node scripts/check-build.mjs
+
+reproducible build: index.d.ts, suprnova-live.assets.json, suprnova-live.async.classic.js, suprnova-live.async.esm.js, suprnova-live.classic.js, suprnova-live.esm.js, suprnova-live.stimulus.classic.js, suprnova-live.stimulus.esm.js, suprnova-live.uploads.classic.js, suprnova-live.uploads.esm.js, suprnova-ui.css

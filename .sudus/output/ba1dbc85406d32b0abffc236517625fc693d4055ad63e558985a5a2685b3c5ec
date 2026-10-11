@@ -1,0 +1,44 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0432]: unresolved import `suprnova::ErrorReport`
+  --> framework/tests/testing/request_diagnostics.rs:30:5
+   |
+30 |     ErrorReport, FrameworkError, Middleware, MiddlewareRegistry, Next, Request, Response, Router,
+   |     ^^^^^^^^^^^ no `ErrorReport` in the root
+
+error[E0599]: no associated function or constant named `from_response` found for struct `TestResponse` in the current scope
+   --> framework/tests/testing/request_diagnostics.rs:176:20
+    |
+176 |     (TestResponse::from_response(response).await, wire_headers)
+    |                    ^^^^^^^^^^^^^ associated function or constant not found in `TestResponse`
+    |
+note: if you're trying to build a new `TestResponse`, consider using `TestResponse::new` which returns `TestResponse`
+   --> framework/src/testing/response.rs:36:5
+    |
+ 36 | /     pub fn new(
+ 37 | |         status: u16,
+ 38 | |         headers: impl IntoIterator<Item = (String, String)>,
+ 39 | |         body: impl Into<Bytes>,
+ 40 | |     ) -> Self {
+    | |_____________^
+help: there is an associated function `from_ref` with a similar name
+    |
+176 -     (TestResponse::from_response(response).await, wire_headers)
+176 +     (TestResponse::from_ref(response).await, wire_headers)
+    |
+
+error[E0599]: no method named `error_report` found for reference `&TestResponse` in the current scope
+   --> framework/tests/testing/request_diagnostics.rs:194:14
+    |
+194 |     response.error_report().unwrap_or_else(|| {
+    |              ^^^^^^^^^^^^ method not found in `&TestResponse`
+
+error[E0599]: no method named `error_report` found for struct `TestResponse` in the current scope
+   --> framework/tests/testing/request_diagnostics.rs:435:18
+    |
+435 |         response.error_report().is_none(),
+    |                  ^^^^^^^^^^^^ method not found in `TestResponse`
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `suprnova` (test "testing") due to 4 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test testing` exited with code 101

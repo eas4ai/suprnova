@@ -1,0 +1,48 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling thiserror v1.0.69
+   Compiling thiserror v2.0.20
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling syn v3.0.4
+   Compiling string_cache_codegen v0.6.1
+   Compiling web_atoms v0.2.5
+   Compiling markup5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling serde_derive v1.0.229
+   Compiling futures-macro v0.3.34
+   Compiling async-trait v0.1.92
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-util v0.3.34
+   Compiling zeroize_derive v1.5.0
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v1.0.69
+   Compiling tokio v1.53.1
+   Compiling zeroize v1.9.0
+   Compiling block-buffer v0.12.0
+   Compiling digest v0.11.3
+   Compiling tungstenite v0.24.0
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling hkdf v0.13.0
+   Compiling serde v1.0.229
+   Compiling askama_parser v0.16.0
+   Compiling axum-core v0.4.5
+   Compiling charts-rs v1.0.0
+   Compiling serde_json_canonicalizer v0.3.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling askama_derive v0.16.0
+   Compiling hyper v1.9.0
+   Compiling tower v0.5.3
+   Compiling tokio-tungstenite v0.24.0
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.7.9
+   Compiling askama_macros v0.16.0
+   Compiling askama v0.16.0
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 13.13s
+────────────
+ Nextest run ID 0841d970-7867-4310-a1e2-e064523445d6 with nextest profile: default
+    Starting 2 tests across 5 binaries (62 tests skipped)
+────────────
+     Summary [   0.035s] 2 tests run: 2 passed, 62 skipped

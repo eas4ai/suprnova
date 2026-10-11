@@ -1,0 +1,28 @@
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 2.59s
+────────────
+ Nextest run ID bc15bec5-3f09-452a-9a3a-5e20903d6c6e with nextest profile: default
+    Starting 45 tests across 1 binary
+        FAIL [   0.498s] (36/45) suprnova-cli::live_registry_scan reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map
+  stdout ───
+
+    running 1 test
+    test reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map ... FAILED
+
+    failures:
+
+    failures:
+        reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.49s
+
+  stderr ───
+
+    thread 'reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map' (1776716) panicked at suprnova-cli/tests/live_registry_scan.rs:108:5:
+    suprnova-cli/src/registry/scan/allowlist.jsonl is out of date; run feature-map/tools/registry_allowlist.py
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.788s] 45 tests run: 44 passed, 1 failed, 0 skipped
+        FAIL [   0.498s] (36/45) suprnova-cli::live_registry_scan reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map
+error: test run failed

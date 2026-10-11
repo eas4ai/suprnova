@@ -1,0 +1,27 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-live-test-support v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live/crates/suprnova-live-test-support)
+    Finished `test` profile [unoptimized] target(s) in 1m 24s
+────────────
+ Nextest run ID 87062350-abdc-4e7c-9bf4-2ff4203a4dae with nextest profile: default
+    Starting 144 tests across 1 binary (74 tests skipped)
+────────────
+     Summary [   2.230s] 144 tests run: 144 passed, 74 skipped
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 57.54s
+────────────
+ Nextest run ID 7d74a07b-048e-4e2f-9674-85eccddaf5ba with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [  72.000s] 13 tests run: 13 passed (1 slow), 0 skipped
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 00s
+────────────
+ Nextest run ID 15478e46-473a-4f2c-afd6-04ecd1ab1a69 with nextest profile: default
+    Starting 42 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   1.698s] 42 tests run: 42 passed, 166 skipped

@@ -1,0 +1,701 @@
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0599]: no method named `get_changes` found for struct `model_changes::LiveChangeUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:588:30
+    |
+ 86 | pub struct LiveChangeUser {
+    | ------------------------- method `get_changes` not found for this struct
+...
+588 |         sorted_changes(&user.get_changes()),
+    |                              ^^^^^^^^^^^ method not found in `model_changes::LiveChangeUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::LiveChangeUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:597:30
+    |
+ 86 | pub struct LiveChangeUser {
+    | ------------------------- method `get_changes` not found for this struct
+...
+597 |         sorted_changes(&user.get_changes()),
+    |                              ^^^^^^^^^^^ method not found in `model_changes::LiveChangeUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::LiveChangeUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:600:21
+    |
+ 86 | pub struct LiveChangeUser {
+    | ------------------------- method `get_raw_original` not found for this struct
+...
+600 |     assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::LiveChangeUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::LiveChangeUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:601:21
+    |
+ 86 | pub struct LiveChangeUser {
+    | ------------------------- method `get_original` not found for this struct
+...
+601 |     assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::LiveChangeUser`
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:413:10
+    |
+412 | /     user.roles()
+413 | |         .sync_without_detaching([r2.id, r3.id])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `was_changed` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:133:35
+    |
+133 |         is_admin_changed: current.was_changed("is_admin"),
+    |                                   ^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `was_changed` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:134:31
+    |
+134 |         name_changed: current.was_changed("name"),
+    |                               ^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `was_changed_any` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:135:40
+    |
+135 |         name_or_email_changed: current.was_changed_any(&["name", "email"]),
+    |                                        ^^^^^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `was_changed_any` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:136:43
+    |
+136 |         name_or_is_admin_changed: current.was_changed_any(&["name", "is_admin"]),
+    |                                           ^^^^^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `was_changed_any` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:137:35
+    |
+137 |         anything_changed: current.was_changed_any(&[]),
+    |                                   ^^^^^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `get_changes` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:138:42
+    |
+138 |         changes: sorted_changes(&current.get_changes()),
+    |                                          ^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `get_raw_original` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:139:40
+    |
+139 |         raw_original_is_admin: current.get_raw_original("is_admin"),
+    |                                        ^^^^^^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `get_original` found for reference `&M` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:140:36
+    |
+140 |         original_is_admin: current.get_original("is_admin")?,
+    |                                    ^^^^^^^^^^^^ method not found in `&M`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:302:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+302 |     assert!(user.was_changed("is_admin"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:303:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+303 |     assert!(!user.was_changed("name"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:304:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+304 |     assert!(!user.was_changed("email"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:305:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+305 |     assert!(!user.was_changed_any(&["name", "email"]));
+    |                   ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:306:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+306 |     assert!(user.was_changed_any(&["email", "is_admin"]));
+    |                  ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:307:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+307 |     assert!(user.was_changed_any(&[]));
+    |                  ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:309:30
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+309 |         sorted_changes(&user.get_changes()),
+    |                              ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:312:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+312 |     assert_eq!(user.get_raw_original("is_admin"), Some(json!(0)));
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:313:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+313 |     assert_eq!(user.get_original("is_admin").unwrap(), Some(json!(false)));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:314:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+314 |     assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:326:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+326 |     assert!(updated.was_changed("name"));
+    |                     ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:327:22
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+327 |     assert!(!updated.was_changed("is_admin"));
+    |                      ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:329:33
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+329 |         sorted_changes(&updated.get_changes()),
+    |                                 ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:332:24
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+332 |     assert_eq!(updated.get_raw_original("name"), Some(json!("Ada")));
+    |                        ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:333:24
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+333 |     assert_eq!(updated.get_original("name").unwrap(), Some(json!("Ada")));
+    |                        ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:342:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+342 |     assert!(user.was_changed("name"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:347:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+347 |     assert!(user.was_changed("email"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:349:15
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+349 |         !user.was_changed("name"),
+    |               ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:353:30
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+353 |         sorted_changes(&user.get_changes()),
+    |                              ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:357:14
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+357 |         user.get_original("email").unwrap(),
+    |              ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:362:14
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+362 |         user.get_original("name").unwrap(),
+    |              ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:374:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+374 |     assert!(user.was_changed("name"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:378:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+378 |     assert!(!user.was_changed_any(&[]));
+    |                   ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:379:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+379 |     assert!(!user.was_changed("name"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:380:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+380 |     assert!(user.get_changes().is_empty());
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:388:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+388 |     assert!(!user.was_changed_any(&[]));
+    |                   ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:389:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+389 |     assert!(user.get_changes().is_empty());
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:390:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+390 |     assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:395:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+395 |     assert!(!user.was_changed("name"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:396:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+396 |     assert_eq!(user.get_original("name").unwrap(), Some(json!("Ada")));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:397:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+397 |     assert_eq!(user.get_raw_original("is_admin"), Some(json!(0)));
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:411:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+411 |     assert!(!user.was_changed_any(&[]));
+    |                   ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:412:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+412 |     assert!(user.get_changes().is_empty());
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:413:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+413 |     assert_eq!(user.get_raw_original("is_admin"), Some(json!(1)));
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:414:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+414 |     assert_eq!(user.get_original("is_admin").unwrap(), Some(json!(true)));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:424:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+424 |     assert!(!user.was_changed("no_such_column"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:425:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+425 |     assert!(!user.was_changed_any(&["no_such_column"]));
+    |                   ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:426:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+426 |     assert_eq!(user.get_raw_original("no_such_column"), None);
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:427:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+427 |     assert_eq!(user.get_original("no_such_column").unwrap(), None);
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::ChangePost` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:442:50
+    |
+ 70 | pub struct ChangePost {
+    | --------------------- method `get_changes` not found for this struct
+...
+442 |     let keys: Vec<String> = sorted_changes(&post.get_changes())
+    |                                                  ^^^^^^^^^^^ method not found in `model_changes::ChangePost`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::ChangePost` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:447:18
+    |
+ 70 | pub struct ChangePost {
+    | --------------------- method `was_changed` not found for this struct
+...
+447 |     assert!(post.was_changed("updated_at"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::ChangePost`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::ChangePost` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:448:19
+    |
+ 70 | pub struct ChangePost {
+    | --------------------- method `was_changed` not found for this struct
+...
+448 |     assert!(!post.was_changed("created_at"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::ChangePost`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:467:22
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+467 |         assert!(user.was_changed(column), "{column} counts as changed");
+    |                      ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:469:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+469 |     assert_eq!(user.get_raw_original("is_admin"), None);
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:470:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+470 |     assert_eq!(user.get_original("is_admin").unwrap(), None);
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:489:31
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+489 |         sorted_changes(&first.get_changes()),
+    |                               ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:492:22
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+492 |     assert_eq!(first.get_raw_original("is_admin"), Some(json!(0)));
+    |                      ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_changes` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:494:32
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_changes` not found for this struct
+...
+494 |         sorted_changes(&second.get_changes()),
+    |                                ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:497:23
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+497 |     assert_eq!(second.get_original("name").unwrap(), Some(json!("Grace")));
+    |                       ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:514:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+514 |     assert!(user.was_changed("name"), "the earlier save's record stands");
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:515:19
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+515 |     assert!(!user.was_changed("email"));
+    |                   ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:516:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_original` not found for this struct
+...
+516 |     assert_eq!(user.get_original("email").unwrap(), Some(json!("mine@example.com")));
+    |                     ^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:527:18
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed` not found for this struct
+...
+527 |     assert!(copy.was_changed("is_admin"));
+    |                  ^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:528:21
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+528 |     assert_eq!(copy.get_raw_original("is_admin"), Some(json!(0)));
+    |                     ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `was_changed_any` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:531:22
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `was_changed_any` not found for this struct
+...
+531 |     assert!(!replica.was_changed_any(&[]));
+    |                      ^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `get_raw_original` found for struct `model_changes::PlainUser` in the current scope
+   --> framework/tests/eloquent/model_changes.rs:532:24
+    |
+ 61 | pub struct PlainUser {
+    | -------------------- method `get_raw_original` not found for this struct
+...
+532 |     assert_eq!(replica.get_raw_original("is_admin"), None);
+    |                        ^^^^^^^^^^^^^^^^ method not found in `model_changes::PlainUser`
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:175:18
+    |
+175 |     user.roles().sync_without_detaching([r3.id]).await.unwrap();
+    |                  ^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:204:10
+    |
+203 | /     user.roles()
+204 | |         .sync_without_detaching([r2.id, r3.id, r1.id])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:220:10
+    |
+219 | /     user.roles()
+220 | |         .sync_without_detaching(Vec::<i64>::new())
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:234:10
+    |
+233 | /     user.roles()
+234 | |         .sync_without_detaching([r3.id, r3.id])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:249:10
+    |
+248 | /     user.roles()
+249 | |         .sync_without_detaching([r3.id, REFUSED_ROLE_ID])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:271:18
+    |
+269 | /             relation_owner
+270 | |                 .roles()
+271 | |                 .sync_without_detaching([r3.id])
+    | |                 -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::BelongsToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:290:10
+    |
+287 |       let err = user
+    |  _______________-
+288 | |         .roles()
+289 | |         .where_pivot("note", "first")
+290 | |         .sync_without_detaching([r3.id])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `BelongsToMany<SwdUser, SwdRole, SwdRoleUser>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-11072190348133813739.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: no method named `sync_without_detaching` found for struct `suprnova::MorphToMany<L, R, P>` in the current scope
+   --> framework/tests/eloquent/sync_without_detaching.rs:344:10
+    |
+343 | /     post.tags()
+344 | |         .sync_without_detaching([tags[1].id, tags[2].id])
+    | |         -^^^^^^^^^^^^^^^^^^^^^^ method not found in `MorphToMany<SwdPost, SwdTag, SwdTaggable>`
+    | |_________|
+    |
+    |
+    = note: the full name for the type has been written to '/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/eloquent-677a58fcabb6a34a.long-type-12600841044065528040.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `suprnova` (test "eloquent") due to 77 previous errors
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test eloquent` exited with code 101

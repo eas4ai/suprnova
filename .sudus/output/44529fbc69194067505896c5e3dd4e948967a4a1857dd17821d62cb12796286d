@@ -1,0 +1,9 @@
+   Compiling suprnova-live v3.2.1 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 01s
+────────────
+ Nextest run ID 4945b622-8d58-4225-8e7f-f0ff5101c60b with nextest profile: default
+    Starting 21 tests across 1 binary
+────────────
+     Summary [   0.649s] 21 tests run: 21 passed, 0 skipped

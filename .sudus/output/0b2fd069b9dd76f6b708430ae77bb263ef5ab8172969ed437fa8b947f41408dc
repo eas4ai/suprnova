@@ -1,0 +1,8 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 41s
+────────────
+ Nextest run ID 985b6584-48a8-4dca-b135-11e5772c8828 with nextest profile: default
+    Starting 140 tests across 1 binary (50 tests skipped)
+[> 60.000s] (───────) suprnova::mongodb relations::relation_key_types_that_cannot_match_fail_to_compile_naming_both_models
+────────────
+     Summary [ 106.248s] 140 tests run: 140 passed (1 slow), 50 skipped

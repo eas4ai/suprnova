@@ -1,0 +1,32 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4m 17s
+────────────
+ Nextest run ID 8dd5dfa1-75ac-421c-a833-8b27e85d1b11 with nextest profile: default
+    Starting 115 tests across 7 binaries (1340 tests skipped)
+        FAIL [   0.010s] ( 33/115) suprnova::eloquent laravel_gaps::exists::has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner
+  stdout ───
+
+    running 1 test
+    test laravel_gaps::exists::has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner ... FAILED
+
+    failures:
+
+    failures:
+        laravel_gaps::exists::has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 930 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'laravel_gaps::exists::has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner' (2564329) panicked at framework/tests/eloquent/laravel_gaps/exists.rs:545:5:
+    assertion `left == right` failed
+      left: 0
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 11 tests still running
+────────────
+     Summary [   0.065s] 44/115 tests run: 43 passed, 1 failed, 1340 skipped
+        FAIL [   0.010s] ( 33/115) suprnova::eloquent laravel_gaps::exists::has_on_a_morph_to_relation_matches_a_comment_with_an_existing_owner
+warning: 71/115 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

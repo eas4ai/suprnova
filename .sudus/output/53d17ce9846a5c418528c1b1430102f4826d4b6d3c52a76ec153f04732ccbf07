@@ -1,0 +1,73 @@
+   Compiling serde v1.0.229
+   Compiling zerofrom v0.1.8
+   Compiling tokio v1.53.1
+   Compiling futures-util v0.3.34
+   Compiling darling_core v0.20.11
+   Compiling asn1-rs v0.6.2
+   Compiling rand_chacha v0.9.0
+   Compiling openssl v0.10.80
+   Compiling yoke v0.8.2
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling base64urlsafedata v0.5.5
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling rand v0.9.4
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling der-parser v9.0.0
+   Compiling oid-registry v0.7.1
+   Compiling icu_provider v2.2.0
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling darling_macro v0.20.11
+   Compiling simple_asn1 v0.6.4
+   Compiling darling v0.20.11
+   Compiling sea-query-derive v1.0.0
+   Compiling x509-parser v0.16.0
+   Compiling sea-orm-macros v2.0.2
+   Compiling sea-query v1.0.2
+   Compiling serde_cbor_2 v0.13.0
+   Compiling idna_adapter v1.2.2
+   Compiling hyper v1.9.0
+   Compiling idna v1.1.0
+   Compiling futures-executor v0.3.32
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling url v2.5.8
+   Compiling futures v0.3.32
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling tokio-util v0.7.18
+   Compiling jsonwebtoken v9.3.1
+   Compiling rand_chacha v0.3.1
+   Compiling tower-http v0.6.11
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling hyper-util v0.1.20
+   Compiling tracing-subscriber v0.3.23
+   Compiling rand v0.8.6
+   Compiling tokio-stream v0.1.18
+   Compiling secrecy v0.10.3
+   Compiling trybuild v1.0.120
+   Compiling webauthn-rs-core v0.5.5
+   Compiling hyper-rustls v0.27.9
+   Compiling tracing-test v0.2.6
+   Compiling reqwest v0.12.28
+   Compiling sea-orm v2.0.2
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling webauthn-authenticator-rs v0.5.5
+   Compiling suprnova-magnetar v3.1.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+    Finished `test` profile [unoptimized] target(s) in 12.14s
+────────────
+ Nextest run ID a198a869-188e-4c58-8cce-d302329d54dd with nextest profile: default
+    Starting 18 tests across 1 binary
+────────────
+     Summary [   0.008s] 18 tests run: 18 passed, 0 skipped
+   Compiling suprnova v3.1.0 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 9.03s
+────────────
+ Nextest run ID f2ec7e3f-5f09-4df1-a662-d04c2b47e72f with nextest profile: default
+    Starting 17 tests across 1 binary (28 tests skipped)
+────────────
+     Summary [   1.590s] 17 tests run: 17 passed, 28 skipped

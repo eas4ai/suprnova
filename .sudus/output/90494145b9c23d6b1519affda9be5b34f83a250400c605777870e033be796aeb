@@ -1,0 +1,157 @@
+upgrade guide for 4.0.0: 156 problem(s), 0 of 154 entries covered
+  manual/upgrade-4.0.md does not exist
+  manual/documentation.md does not link upgrade-4.0.md
+  no section for the changelog entry: Typed factory counts.
+  no section for the changelog entry: Laravel boolean storage.
+  no section for the changelog entry: Default float precision.
+  no section for the changelog entry: Whole-second zoned timestamps.
+  no section for the changelog entry: Production seeding requires force.
+  no section for the changelog entry: Console test assertions check every expectation.
+  no section for the changelog entry: The console binary ends with the command's exit code.
+  no section for the changelog entry: A wrong method answers 405.
+  no section for the changelog entry: Collection metadata belongs to the collection.
+  no section for the changelog entry: Empty results have page one.
+  no section for the changelog entry: Model ordering follows timestamp declarations.
+  no section for the changelog entry: Force destruction includes trashed rows.
+  no section for the changelog entry: Model visibility applies to serde and appends.
+  no section for the changelog entry: `Storage::purge` takes the disk name.
+  no section for the changelog entry: Excerpts trim invisible characters.
+  no section for the changelog entry: Redis prefixes typed keys.
+  no section for the changelog entry: Redis events reach application listeners.
+  no section for the changelog entry: Daily logs keep seven files by default.
+  no section for the changelog entry: Syslog names the application.
+  no section for the changelog entry: Percentages round decimal ties half up.
+  no section for the changelog entry: Special number spellings.
+  no section for the changelog entry: File and disk responses answer byte ranges.
+  no section for the changelog entry: Production browser failures show a minimal HTML view.
+  no section for the changelog entry: Debug frames show source and separate error traces.
+  no section for the changelog entry: The implicit default disk is local.
+  no section for the changelog entry: S3 accepts Laravel's AWS variables.
+  no section for the changelog entry: Nullable-user policies authorize guests.
+  no section for the changelog entry: Handler authorization accepts enum abilities.
+  no section for the changelog entry: Merged validation hook errors.
+  no section for the changelog entry: Classic form validation redirects.
+  no section for the changelog entry: Unsigned MySQL IDs by default.
+  no section for the changelog entry: Nullable default timestamps.
+  no section for the changelog entry: Query conditions follow SQL precedence.
+  no section for the changelog entry: Null equality values compile to `IS NULL`.
+  no section for the changelog entry: Joined builders update and delete matching rows.
+  no section for the changelog entry: A clean model save skips the update.
+  no section for the changelog entry: Pivot sync returns the changed ids.
+  no section for the changelog entry: Pivot sync updates per-id columns.
+  no section for the changelog entry: Pivot filters constrain sync.
+  no section for the changelog entry: Pivot sync touches a configured parent.
+  no section for the changelog entry: Queue assertions filter unchained jobs.
+  no section for the changelog entry: Queue counts and clearing accept a queue name.
+  no section for the changelog entry: SQS accepts FIFO queues.
+  no section for the changelog entry: SQS overflow supports named cache stores.
+  no section for the changelog entry: Processes remove inherited environment variables.
+  no section for the changelog entry: TTY processes require terminal input and output.
+  no section for the changelog entry: Process diagnostics quote command arguments.
+  no section for the changelog entry: Stopping a process accepts a signal.
+  no section for the changelog entry: Process fake handlers accept closures.
+  no section for the changelog entry: Described process fakes replay mixed streams in order.
+  no section for the changelog entry: Process run-count assertions default to once.
+  no section for the changelog entry: Precognition requires the route middleware.
+  no section for the changelog entry: Inertia DevTools recording is opt-in.
+  no section for the changelog entry: The starter keeps an existing notes table.
+  no section for the changelog entry: The project file is `suprnova.toml`, all lowercase.
+  no section for the changelog entry: `live:add --manifest` installs only from a signed library tree.
+  no section for the changelog entry: Scaffolds ignore `live:add`'s lock and journal.
+  no section for the changelog entry: `RouteBinding` is the one binding trait
+  no section for the changelog entry: A `#[handler]` inside an `impl` block names its type
+  no section for the changelog entry: Some string-pair `route()` calls need `.as_str()`.
+  no section for the changelog entry: A dotted resource name nests.
+  no section for the changelog entry: A route key that does not parse answers 404.
+  no section for the changelog entry: The bare `x::Model` form no longer binds a soft-deleted row
+  no section for the changelog entry: Bound arguments are bound before every other argument
+  no section for the changelog entry: The router refuses a route it cannot run, at startup.
+  no section for the changelog entry: URLs carry the public root.
+  no section for the changelog entry: `Redirect::intended` ignores a stored network-path reference.
+  no section for the changelog entry: Cookies follow the root.
+  no section for the changelog entry: Images are upright and carry no metadata.
+  no section for the changelog entry: The image types changed shape.
+  no section for the changelog entry: The shipped migrations upgrade an existing application in place.
+  no section for the changelog entry: Workers check `failed_jobs` before they start.
+  no section for the changelog entry: Laravel's `$2y$` hashes verify
+  no section for the changelog entry: Suprnova never writes `users.remember_token`.
+  no section for the changelog entry: Schema-qualified table names.
+  no section for the changelog entry: The naive date-time casts read MySQL `TIMESTAMP` columns.
+  no section for the changelog entry: Password hashing runs under one process-wide limit.
+  no section for the changelog entry: A WebSocket upgrade no longer waits behind the shutdown drain.
+  no section for the changelog entry: A streamed file is one blocking task, not one per chunk.
+  no section for the changelog entry: The in-memory rate limiter keeps answering while it sweeps.
+  no section for the changelog entry: `Prop::match_on` replaces the match fields on each call
+  no section for the changelog entry: `until` on a once prop reads an integer as seconds from now
+  no section for the changelog entry: Scroll props merge under the wrapper `data` by default
+  no section for the changelog entry: `sharedProps` lists `errors`, and a setting turns the list off.
+  no section for the changelog entry: `suprnova new` ships a root template in place of `frontend/index.html`.
+  no section for the changelog entry: Partial reload headers are parsed as Laravel parses them.
+  no section for the changelog entry: The Inertia page `url` carries the query as Laravel normalises it.
+  no section for the changelog entry: An empty Inertia response redirects back as Laravel's does.
+  no section for the changelog entry: A redirect with a fragment keeps it on an Inertia visit.
+  no section for the changelog entry: Inertia visits record the previous URL.
+  no section for the changelog entry: `errors` under `X-Inertia-Error-Bag` takes Laravel's shape.
+  no section for the changelog entry: Inertia flash data lives in the session until a page shows it.
+  no section for the changelog entry: `clearHistory` and `preserveFragment` survive any number of redirects.
+  no section for the changelog entry: A dotted shared key nests when it is shared.
+  no section for the changelog entry: SSR exclusion patterns match as Laravel's `ExcludesPaths` does.
+  no section for the changelog entry: `InertiaResponse::location` answers a hard navigation with a redirect.
+  no section for the changelog entry: A component's script can no longer replace a built-in.
+  no section for the changelog entry: A handler panic reaches the Inertia error page.
+  no section for the changelog entry: SSR is on by default, behind bundle detection.
+  no section for the changelog entry: A missing SSR bundle is no longer logged.
+  no section for the changelog entry: `suprnova ssr:start` makes Laravel's checks before it starts a worker.
+  no section for the changelog entry: `suprnova ssr:check` asks the SSR gateway's health check.
+  no section for the changelog entry: `TestResponse::assert_inertia()` reads a first visit.
+  no section for the changelog entry: An image wildcard leaves SVG out.
+  no section for the changelog entry: `has` and its kin read a polymorphic owner relation.
+  no section for the changelog entry: `url::current` is the absolute URL without the query.
+  no section for the changelog entry: `Redirect::guest` stores a page to come back to.
+  no section for the changelog entry: Errors are reported through `Exceptions`.
+  no section for the changelog entry: The frame that created an error shows where.
+  no section for the changelog entry: The numeric max message.
+  no section for the changelog entry: `ImageFile` accepts Laravel's image types.
+  no section for the changelog entry: Generated middleware passes the request on.
+  no section for the changelog entry: CSRF checks every method but GET, HEAD and OPTIONS.
+  no section for the changelog entry: Regenerating the session issues a new CSRF token.
+  no section for the changelog entry: `Request::ajax()` compares exactly.
+  no section for the changelog entry: `Request::host()` reads the host as Symfony does.
+  no section for the changelog entry: Deletion cookies follow the session configuration.
+  no section for the changelog entry: Denial codes survive `authorize`.
+  no section for the changelog entry: Rate-limiter keys are cleaned as Laravel cleans them.
+  no section for the changelog entry: Named limiters rename shared keys.
+  no section for the changelog entry: One rate-limit header pair.
+  no section for the changelog entry: Refused requests are not counted.
+  no section for the changelog entry: `throttle:60,1` counts signed-in users by user.
+  no section for the changelog entry: The verified gate answers each request.
+  no section for the changelog entry: Verification refusals tell the two cases apart.
+  no section for the changelog entry: Verifying a verified account keeps its time.
+  no section for the changelog entry: Checking a password writes nothing.
+  no section for the changelog entry: One attachment per name and bytes.
+  no section for the changelog entry: Notification mail without a subject.
+  no section for the changelog entry: Unique queued listeners take the lock.
+  no section for the changelog entry: The after-commit decision follows an order.
+  no section for the changelog entry: `down` prints Laravel's lines.
+  no section for the changelog entry: Single-server tasks need a cache store.
+  no section for the changelog entry: Day helpers keep the schedule.
+  no section for the changelog entry: Hour-only and seconds times.
+  no section for the changelog entry: `migrate:status` prints its list.
+  no section for the changelog entry: `make_directory` takes a path without its trailing slash.
+  no section for the changelog entry: No image driver receives a zero side.
+  no section for the changelog entry: `ImagePipeline` carries the settings of its custom steps.
+  no section for the changelog entry: A started fake process reveals its output a line at a time.
+  no section for the changelog entry: The HTTP fake records a request as it is sent.
+  no section for the changelog entry: Development pages load an existing build when no hot file exists.
+  no section for the changelog entry: Database rules in hooks follow the Precognition selection.
+  no section for the changelog entry: The CSRF field turns autocomplete off.
+  no section for the changelog entry: A default middleware priority.
+  no section for the changelog entry: `lang/vendor` is not a locale.
+  no section for the changelog entry: `#[service(impl = ...)]` parses.
+  no section for the changelog entry: An unset `APP_ENV` is production.
+  no section for the changelog entry: `CacheConfig` gained `connection` and `lock_connection`.
+  no section for the changelog entry: The Redis cache moves to the `cache` connection and `CACHE_PREFIX`.
+  no section for the changelog entry: MySQL tables default to `utf8mb4_unicode_ci`.
+  no section for the changelog entry: File and stream log channels keep `LOG_LEVEL`'s bare level.
+  no section for the changelog entry: `queue::testing::pushed::<J>()` fails on a payload that does not decode.
+  no section for the changelog entry: `Queue::reserved_jobs` under `Queue::fake()` answers the fake.

@@ -1,0 +1,45 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1m 26s
+────────────
+ Nextest run ID 41730adf-9943-4e9e-971f-354636444723 with nextest profile: default
+    Starting 112 tests across 1 binary (74 tests skipped)
+        FAIL [   0.010s] ( 79/112) suprnova::routing route_binding::startup::bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused
+  stdout ───
+
+    running 1 test
+    test route_binding::startup::bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused ... FAILED
+
+    failures:
+
+    failures:
+        route_binding::startup::bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'route_binding::startup::bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused' (3159996) panicked at framework/tests/routing/route_binding/mod.rs:142:10:
+    the startup checks must refuse this router: ()
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   2.443s] 112 tests run: 111 passed, 1 failed, 74 skipped
+        FAIL [   0.010s] ( 79/112) suprnova::routing route_binding::startup::bind_004_a_field_whose_type_cannot_be_parsed_from_a_segment_is_refused
+error: test run failed
+    Blocking waiting for file lock on package cache
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 59.27s
+────────────
+ Nextest run ID 4b1a8e28-a986-4600-b6e4-c63628caee24 with nextest profile: default
+    Starting 13 tests across 1 binary
+────────────
+     Summary [  76.215s] 13 tests run: 13 passed (1 slow), 0 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 06s
+────────────
+ Nextest run ID 1b56697d-b940-4200-a643-eb46af57d92a with nextest profile: default
+    Starting 37 tests across 1 binary (166 tests skipped)
+────────────
+     Summary [   2.242s] 37 tests run: 37 passed, 166 skipped

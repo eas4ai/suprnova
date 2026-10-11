@@ -1,0 +1,31 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 1.82s
+────────────
+ Nextest run ID 9ff77ec0-a7e2-4ee0-b834-c0f7a2dfe9d1 with nextest profile: default
+    Starting 52 tests across 1 binary (10 tests skipped)
+        FAIL [   0.014s] (46/52) suprnova::logging channels::revised_daily_default_keeps_seven_files
+  stdout ───
+
+    running 1 test
+    test channels::revised_daily_default_keeps_seven_files ... FAILED
+
+    failures:
+
+    failures:
+        channels::revised_daily_default_keeps_seven_files
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'channels::revised_daily_default_keeps_seven_files' (2675110) panicked at framework/tests/logging/channels.rs:1320:5:
+    assertion `left == right` failed: PAR-027 daily default retention is seven files
+      left: 10
+     right: 7
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 6 tests still running
+────────────
+     Summary [   2.021s] 52 tests run: 51 passed, 1 failed, 10 skipped
+        FAIL [   0.014s] (46/52) suprnova::logging channels::revised_daily_default_keeps_seven_files
+error: test run failed

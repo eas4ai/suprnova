@@ -1,0 +1,17 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 4.58s
+────────────
+ Nextest run ID 485e1776-9a24-42fe-85c4-0c4af624cf7b with nextest profile: default
+    Starting 162 tests across 6 binaries (1479 tests skipped)
+────────────
+     Summary [   2.169s] 162 tests run: 162 passed, 1479 skipped
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 0.95s
+────────────
+ Nextest run ID ba6bbffb-e673-4e69-920c-5f80f932ca59 with nextest profile: default
+    Starting 15 tests across 1 binary
+────────────
+     Summary [   0.032s] 15 tests run: 15 passed, 0 skipped

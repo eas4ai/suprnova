@@ -1,0 +1,195 @@
+   Compiling tokio v1.53.1
+   Compiling suprnova-macros v3.0.0 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova-live v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-live)
+   Compiling syn v2.0.117
+   Compiling tokio-util v0.7.18
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling sqlx-core v0.9.0
+   Compiling opendal-core v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling h2 v0.4.16
+   Compiling tower-http v0.6.11
+   Compiling combine v4.6.7
+   Compiling aws-smithy-async v1.2.14
+   Compiling sea-streamer-runtime v0.5.0
+   Compiling aws-smithy-runtime-api v1.12.1
+   Compiling sqlx-mysql v0.9.0
+   Compiling hyper v1.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-postgres v0.9.0
+   Compiling hyper-util v0.1.20
+   Compiling redis v0.25.5
+   Compiling hyper-rustls v0.27.9
+   Compiling backon v1.6.0
+   Compiling reqwest v0.12.28
+   Compiling hyper-timeout v0.5.2
+   Compiling opendal-layer-observe-metrics-common v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sea-streamer-stdio v0.5.0
+   Compiling axum v0.7.9
+   Compiling sqlx v0.9.0
+   Compiling sea-streamer-redis v0.5.2
+   Compiling sea-query-sqlx v0.9.1
+   Compiling sea-schema v0.18.1
+   Compiling tower v0.4.13
+   Compiling reqsign-file-read-tokio v3.0.2 (https://github.com/apache/opendal-reqsign.git?rev=b49cd2996b9d2d9944e84481f8835ff55b188b97#b49cd299)
+   Compiling opendal-service-s3 v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sea-streamer-socket v0.5.2
+   Compiling apple v0.3.1 (https://github.com/eas4ai/suprnova-apple-rs.git?tag=v0.3.1#bc969e97)
+   Compiling opendal-layer-prometheus-client v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-retry v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling reqwest v0.13.4
+   Compiling tonic v0.12.3
+   Compiling opendal-service-fs v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-tracing v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling opendal-layer-timeout v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sea-orm v2.0.2
+   Compiling opendal-layer-logging v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling tokio-tungstenite v0.29.0
+   Compiling sea-orm-cli v2.0.2
+   Compiling hyper-tungstenite v0.20.0
+   Compiling suprnova-web-push v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-web-push)
+   Compiling aws-sigv4 v1.4.4
+   Compiling opendal v0.58.0 (https://github.com/eas4ai/opendal.git?rev=88717391eb72c9839d3f8e79fccad9f22fc3a1b4#88717391)
+   Compiling sea-streamer v0.5.0
+   Compiling redis v1.2.1
+   Compiling lettre v0.11.22
+   Compiling qdrant-client v1.18.0
+   Compiling sea-orm-migration v2.0.2
+   Compiling suprnova-magnetar v3.0.0 (/home/shawn/workspace2/suprnova/crates/suprnova-magnetar)
+   Compiling suprnova v3.0.0 (/home/shawn/workspace2/suprnova/framework)
+error[E0425]: cannot find type `PagePattern` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:18:31
+   |
+18 |     fn pattern(text: &str) -> PagePattern {
+   |                               ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `PageLookup` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:32:34
+   |
+32 |     fn lookup(manifest: &str) -> PageLookup {
+   |                                  ^^^^^^^^^^ not found in this scope
+
+warning: unused import: `super::*`
+ --> suprnova-macros/src/inertia_pages.rs:5:9
+  |
+5 |     use super::*;
+  |         ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0425]: cannot find function `track_inputs` in this scope
+   --> suprnova-macros/src/inertia.rs:481:24
+    |
+481 |         let rendered = track_inputs(
+    |                        ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `track_inputs` in this scope
+   --> suprnova-macros/src/inertia.rs:510:13
+    |
+510 |             track_inputs(expansion.clone(), &[]).to_string(),
+    |             ^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `PagePattern` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:19:15
+   |
+19 |         match PagePattern::parse(text) {
+   |               ^^^^^^^^^^^ use of undeclared type `PagePattern`
+
+error[E0433]: cannot find type `PagePattern` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:26:15
+   |
+26 |         match PagePattern::parse(text) {
+   |               ^^^^^^^^^^^ use of undeclared type `PagePattern`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:33:15
+   |
+33 |         match PageLookup::from_manifest(manifest) {
+   |               ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+  --> suprnova-macros/src/inertia_pages.rs:41:15
+   |
+41 |         match PageLookup::from_manifest(manifest) {
+   |               ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:164:13
+    |
+164 |             PageLookup::from_manifest("[package]\nname = \"app\"\n"),
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:168:13
+    |
+168 |             PageLookup::from_manifest(
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:174:13
+    |
+174 |             PageLookup::from_manifest(
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:184:13
+    |
+184 |             PageLookup::starter().candidates("Users/Index"),
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:235:13
+    |
+235 |             PageLookup::starter().candidates("Home")
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0425]: cannot find function `starter_not_found_message` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:285:13
+    |
+285 |             starter_not_found_message("Hom", &available),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `starter_not_found_message` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:299:13
+    |
+299 |             starter_not_found_message("Home", &[]),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:433:22
+    |
+433 |         let lookup = PageLookup::starter();
+    |                      ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0433]: cannot find type `PageLookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:470:13
+    |
+470 |             PageLookup::starter().available(dir.path()),
+    |             ^^^^^^^^^^ use of undeclared type `PageLookup`
+
+error[E0425]: cannot find function `read_lookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:478:20
+    |
+478 |         assert_eq!(read_lookup(dir.path()), Ok(None));
+    |                    ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `read_lookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:485:20
+    |
+485 |         assert_eq!(read_lookup(dir.path()), Ok(Some(lookup(ISSUE_LOOKUP))));
+    |                    ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `read_lookup` in this scope
+   --> suprnova-macros/src/inertia_pages.rs:496:29
+    |
+496 |         let problem = match read_lookup(dir.path()) {
+    |                             ^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+warning: `suprnova-macros` (lib test) generated 1 warning
+error: could not compile `suprnova-macros` (lib test) due to 20 previous errors; 1 warning emitted
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova-macros --lib --test inertia_page_lookup` exited with code 101

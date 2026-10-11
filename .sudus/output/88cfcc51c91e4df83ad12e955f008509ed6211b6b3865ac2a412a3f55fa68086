@@ -1,0 +1,7 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 22.79s
+────────────
+ Nextest run ID cd9ceb64-7551-453d-a78e-bd9273b6ced8 with nextest profile: default
+    Starting 130 tests across 7 binaries (1342 tests skipped)
+────────────
+     Summary [   0.371s] 130 tests run: 130 passed, 1342 skipped

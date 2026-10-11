@@ -1,0 +1,16 @@
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+error[E0428]: the name `laravel_gaps` is defined multiple times
+  --> framework/tests/eloquent/main.rs:99:1
+   |
+38 | pub mod laravel_gaps;
+   | --------------------- previous definition of the module `laravel_gaps` here
+...
+99 | pub mod laravel_gaps;
+   | ^^^^^^^^^^^^^^^^^^^^^ `laravel_gaps` redefined here
+   |
+   = note: `laravel_gaps` must be defined only once in the type namespace of this module
+
+For more information about this error, try `rustc --explain E0428`.
+error: could not compile `suprnova` (test "eloquent") due to 1 previous error
+error: command `/home/shawn/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package suprnova --test database --test eloquent --test factory --test pagination --test resources --test schema --test seed` exited with code 101

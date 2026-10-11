@@ -1,0 +1,69 @@
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+    Finished `test` profile [unoptimized] target(s) in 19.94s
+────────────
+ Nextest run ID 2ba87ce1-7dc0-4a75-aa89-f57b5d25db4c with nextest profile: default
+    Starting 12 tests across 1 binary (134 tests skipped)
+────────────
+     Summary [   0.538s] 12 tests run: 12 passed, 134 skipped
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling laravel-defaults-probe v0.0.0 (/home/shawn/workspace2/suprnova/framework/tests/fixtures/laravel-defaults-probe)
+    Finished `test` profile [unoptimized] target(s) in 1m 02s
+     Running unittests src/lib.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-018512b2660404cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/documented_call.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/documented_call_probe-478a924ae55bdb74)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/laravel_defaults_probe-156c9acb934c2a04)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/plain.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/plain_probe-3c4d82b35fb91e01)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/settings.rs (/home/shawn/workspace2/scratchpads/targets/suprnova/main/debug/deps/settings-d187679db141d3e3)
+
+running 3 tests
+test sqlite_settings_reach_models_and_migrations ... ok
+test mysql_settings_reach_models_and_migrations ... ok
+test postgres_settings_reach_models_and_migrations ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+   Doc-tests laravel_defaults_probe
+
+running 4 tests
+test src/lib.rs - ProbePost::without_global_scope (line 37) ... ignored
+test src/lib.rs - ProbePost::without_global_scopes (line 37) ... ignored
+test src/lib.rs - ProbeUser::without_global_scope (line 24) ... ignored
+test src/lib.rs - ProbeUser::without_global_scopes (line 24) ... ignored
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.12s; merged doctests compilation took 0.12s
+   Compiling suprnova v3.2.1 (/home/shawn/workspace2/suprnova/framework)
+   Compiling suprnova-macros v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-macros)
+    Finished `test` profile [unoptimized] target(s) in 1m 04s
+────────────
+ Nextest run ID b75a9d71-4256-4ca9-b49a-a0d0b192f10f with nextest profile: default
+    Starting 6 tests across 9 binaries (255 tests skipped)
+────────────
+     Summary [  28.190s] 6 tests run: 6 passed, 255 skipped
+   Compiling suprnova-cli v3.2.1 (/home/shawn/workspace2/suprnova/suprnova-cli)
+    Finished `test` profile [unoptimized] target(s) in 0.65s
+────────────
+ Nextest run ID f1505438-2205-452f-96f4-cabde4945285 with nextest profile: default
+    Starting 1 test across 1 binary (2 tests skipped)
+────────────
+     Summary [   0.015s] 1 test run: 1 passed, 2 skipped

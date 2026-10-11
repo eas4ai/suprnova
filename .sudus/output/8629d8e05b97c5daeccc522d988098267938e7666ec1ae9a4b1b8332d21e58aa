@@ -1,0 +1,6 @@
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+────────────
+ Nextest run ID db9075f1-f197-4e61-8f8c-a0352a6e8456 with nextest profile: default
+    Starting 12 tests across 1 binary (134 tests skipped)
+────────────
+     Summary [   0.009s] 12 tests run: 12 passed, 134 skipped
