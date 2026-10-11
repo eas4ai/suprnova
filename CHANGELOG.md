@@ -303,15 +303,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
     and side effects.
 
 - **The Svelte kit on Inertia 3.8 and its Vite plugin.** The kit pinned
-  `@inertiajs/svelte` and `@inertiajs/core` to the 3.6 client, globbed its
-  pages by hand in both entries, and passed `createInertiaApp` no `title`,
-  `serverHead` or `nonce`. It now declares both packages and
-  `@inertiajs/vite` at `^3.8.0`. The plugin resolves `pages: './pages'`
-  and wraps `src/ssr.ts`, a single `createInertiaApp` call, into the SSR
-  server, which `npm run build:ssr` still writes to
-  `frontend/bootstrap/ssr/ssr.js`. The entry reads its `nonce` from
-  `<meta property="csp-nonce">` when the document has one (K01, K05, K18,
-  K19).
+  `@inertiajs/svelte` to the 3.6 client, globbed its pages by hand in both
+  entries, and passed `createInertiaApp` no `title`, `serverHead` or `nonce`.
+  It now declares `@inertiajs/svelte`, `@inertiajs/core` and `@inertiajs/vite`
+  at `^3.8.0`. The plugin resolves `pages: './pages'` and wraps `src/ssr.ts`,
+  a single `createInertiaApp` call, into the SSR server, which
+  `npm run build:ssr` still writes to `frontend/bootstrap/ssr/ssr.js`. The
+  entry reads its `nonce` from `<meta property="csp-nonce">` when the document
+  has one (K01, K05, K18, K19).
 - **Svelte kit layouts, links and titles.** Every page drew its own frame,
   reached other pages through anchors that reloaded the document, and set
   no tab title. `layouts/AppLayout.svelte` and `layouts/GuestLayout.svelte`
@@ -338,19 +337,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with a prefetched, instant `Link`. The auth pages submit through `Form`
   instead of `useForm`, and Login turns its `remember` checkbox into a
   boolean with `transform` (K11, K12, K13, K14, K15, K21).
-- **The React starter runs on Inertia 3.8 through its Vite plugin.** The
-  kit pinned `@inertiajs/react` and `@inertiajs/core` at `^3.6.1`, resolved
-  pages with its own `import.meta.glob` in both entries, and passed
-  `createInertiaApp` no title callback, no server head and no CSP nonce.
-  It now declares the adapter, `@inertiajs/core` and `@inertiajs/vite` at
-  `^3.8.0`, resolves pages through the plugin's `pages: './pages'`, and
-  builds `src/ssr.tsx` through the plugin, so `npm run build:ssr` still
-  lands `frontend/bootstrap/ssr/ssr.js` for `suprnova ssr:start`. Both
-  entries pass a `title` callback that appends the project's name (from
-  `frontend/src/lib/app.ts`) and `serverHead: true`; the browser entry
-  passes the nonce of `<meta property="csp-nonce">` when the document
-  carries one. A new `npm run check` script type-checks the kit (K01, K05,
-  K18, K19).
+- **The React starter runs on Inertia 3.8 through its Vite plugin.** The kit
+  pinned `@inertiajs/react` at `^3.6.1`, resolved pages with its own
+  `import.meta.glob` in both entries, and passed `createInertiaApp` no title
+  callback, no server head and no CSP nonce. It now declares the adapter,
+  `@inertiajs/core` and `@inertiajs/vite` at `^3.8.0`, resolves pages through
+  the plugin's `pages: './pages'`, and builds `src/ssr.tsx` through the
+  plugin, so `npm run build:ssr` still lands `frontend/bootstrap/ssr/ssr.js`
+  for `suprnova ssr:start`. Both entries pass a `title` callback that appends
+  the project's name (from `frontend/src/lib/app.ts`) and `serverHead: true`;
+  the browser entry passes the nonce of `<meta property="csp-nonce">` when the
+  document carries one. A new `npm run check` script type-checks the kit (K01,
+  K05, K18, K19).
 - **The React starter has persistent layouts, `Link` navigation and page
   titles.** Each page drew its own frame and reached other pages through
   `<a href>`, which reloaded the document on every click, and no page set a
@@ -724,21 +722,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   directory, passing `--graceful` through, so it stops the worker at the
   URL the application installed (CM-02).
 - **`suprnova generate-types` types wide integers as `number | bigint` in a
-  project that preserves big integers.** Every integer and float was
-  `number`, so with `preserve_big_integers` on, an `i64` past 2^53 reached
-  the page as a `BigInt` its type called a `number`. `i64`, `u64`, `i128`,
-  `u128`, `isize` and `usize` are now `number | bigint` when a `.rs` file
-  under `src/` calls `preserve_big_integers(..)` with anything but a literal
-  `false` (parenthesized or not), such as `true` or a variable, or with the
-  new `--big-integers` flag, which `generate-types` and `serve` both take
-  and `serve` keeps for every regeneration on save, and `number` otherwise.
-  Narrower integers and floats stay `number`, and a wide map key stays
-  `number` (T03).
-- **`suprnova generate-types` writes page types and types `usePage()`.**
-  `inertia-props.ts` held only the props interfaces, so a page picked its
-  interface by hand and typed the shared props, `root` included, with an
-  inline `usePage<{ root: string }>()`. The file now opens with
-  `import '@inertiajs/core'` and ends with `Pages`, which maps each
+  project that preserves big integers.** With `preserve_big_integers` on, an
+  `i64` past 2^53 reaches the page as a `BigInt`, which a `number` type
+  misnames, so `i64`, `u64`, `i128`, `u128`, `isize` and `usize` are
+  `number | bigint` when a `.rs` file under `src/` calls
+  `preserve_big_integers(..)` with anything but a literal `false`
+  (parenthesized or not), such as `true` or a variable, or with the new
+  `--big-integers` flag, which `generate-types` and `serve` both take and
+  `serve` keeps for every regeneration on save, and `number` otherwise, as
+  every integer and float was in 3.2.1. Narrower integers and floats stay
+  `number`, and a wide map key stays `number` (T03).
+- **`suprnova generate-types` writes page types and types `usePage()`.** In
+  3.2.1 `inertia-props.ts` held only the props interfaces, so a page picked
+  its interface by hand and typed any shared props inline. The file now opens
+  with `import '@inertiajs/core'` and ends with `Pages`, which maps each
   component to the struct a handler renders it with (read from
   `inertia_response!`, `InertiaResponse::new(..).with_data(..)` and
   `Inertia::data`, given the struct itself or a local binding or parameter
@@ -751,12 +748,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Record<string, string>` and `errorValueType` is `string`, or both say
   `string[]` when a `with_all_errors(..)` call under `src/` passes anything
   but a literal `false` (read as `preserve_big_integers(..)` is), since the
-  server then sends every message per field as an array. The
-  `InertiaProps` derive takes the two markers and refuses any other form.
-  A component rendered with two structs, two shared or two
-  flash structs, or a struct named like a generated declaration fails the
-  command with every conflict named and leaves the file as it was (T01,
-  T02).
+  server then sends every message per field as an array. The `InertiaProps`
+  derive takes the two markers and refuses any other form. A component
+  rendered with two structs, two shared or two flash structs, or a struct
+  named like a generated declaration fails the command with every conflict
+  named and leaves the file as it was (T01, T02).
 - **A route helper names the page its route renders.** `routes.ts` helpers
   returned only `url` and `method`, so `<Link instant>` and `<Form
   instant>` could not make an instant visit through one. A helper now
@@ -772,25 +768,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Router::inertia` routes, which `routes.ts` left out, now get helpers
   under `controllers.inertia`, and `RouteConfig` declares
   `component?: string` (T05).
-- **`suprnova::testing::TestClient`, one in-process test client.** Every
-  HTTP test copied its own loopback harness - a port, a hyper client and
+- **`suprnova::testing::TestClient`, one in-process test client.** Every HTTP
+  test copied its own loopback harness - a port, a hyper client and
   hand-carried session cookies - because `handle_request` takes a body only
   hyper builds. `TestClient::new(router, registry)` sends `get`, `post`,
-  `put`, `patch`, `delete` and `send(method, path)` requests with
-  `header`, `json`, `form` and `inertia()` (an Inertia visit's headers with
-  the installed asset version) over an in-memory connection, never a port,
-  in the task that awaits it, so a `TestContainer` scope still applies. It
-  carries every cookie a response sets to the next request and drops the
-  ones a response expires, keeps each response's error report, gives every
+  `put`, `patch`, `delete` and `send(method, path)` requests with `header`,
+  `json`, `form` and `inertia()` (an Inertia visit's headers with the
+  installed asset version) over an in-memory connection, never a port, in the
+  task that awaits it, so a `TestContainer` scope still applies. It carries
+  every cookie a response sets to the next request and drops the ones a
+  response expires, keeps each response's error report, gives every
   `TestResponse` the session store `with_session_store` names, and fails a
-  request that has not answered after 10 seconds, naming its method and
-  path. Under a public path prefix (`APP_URL=https://example.test/billing`)
-  a page's url is the public `/billing/users` while the router matches
-  `/users`, so a reload of a client response sent `/billing/users` and got
-  a 404. The client now keeps the root each request was served under and
-  replays a reload to the internal path, `/users` with the page's query,
-  sending again the `X-Forwarded-Prefix` header the page's request sent.
-  See [HTTP Tests](manual/http-tests.md#the-test-client) (TS-01, TS-10).
+  request that has not answered after 10 seconds, naming its method and path.
+  Under a public path prefix (`APP_URL=https://example.test/billing`) a page's
+  url is the public `/billing/users` while the router matches `/users`, so the
+  client keeps the root each request was served under and replays a reload to
+  the internal path, `/users` with the page's query, sending again the
+  `X-Forwarded-Prefix` header the page's request sent. See [HTTP
+  Tests](manual/http-tests.md#the-test-client) (TS-01, TS-10).
 - **Laravel's prop assertions and scopes on `AssertableInertia`.** It had
   `has`, `missing`, `where_` and `count` only. It now has `has_all`,
   `has_any`, `missing_all`, `count_between`, `where_not`, `where_null`,
@@ -818,18 +813,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `encryptHistory` and `clearHistory` only when the page set them),
   `encrypt_history()` and `clear_history()`, and `TestResponse` gains
   `inertia_page()` and `inertia_props(path)`. A handler that flashes and
-  redirects leaves its Inertia flash in the session, and the redirect
-  carries no page to assert it on; `assert_inertia_flash(key, expected)`
-  and `assert_inertia_flash_missing(key)` read it through the attached
-  session store. A page with `preserveBigIntegers` sends integers beyond
-  2^53 - 1 as `{"$bigint": "<digits>"}` markers, so
-  `where_("id", 9007199254740993_i64)` failed against the page the handler
-  built; the markers in props and flash are now decoded before any
-  assertion or reader sees them. A marker whose digits fit no 64-bit
-  integer, such as `{"$bigint": "18446744073709551616"}`, which only a
-  hand-built page object carries, fails naming its path and digits rather
-  than staying an object that `where_type("id", "integer")` rejects and
-  `to_page()` shows (TS-12, TS-13, TS-14, TS-15, TS-16).
+  redirects leaves its Inertia flash in the session, and the redirect carries
+  no page to assert it on; `assert_inertia_flash(key, expected)` and
+  `assert_inertia_flash_missing(key)` read it through the attached session
+  store. A page with `preserveBigIntegers` sends integers beyond 2^53 - 1 as
+  `{"$bigint": "<digits>"}` markers, and the markers in props and flash are
+  decoded before any assertion or reader sees them, so
+  `where_("id", 9007199254740993_i64)` passes against the page the handler
+  built. A marker whose digits fit no 64-bit integer, such as
+  `{"$bigint": "18446744073709551616"}`, which only a hand-built page object
+  carries, fails naming its path and digits rather than staying an object that
+  `where_type("id", "integer")` rejects and `to_page()` shows (TS-12, TS-13,
+  TS-14, TS-15, TS-16).
 - **`InertiaConfig::testing_ensure_pages_exist`, on by default.**
   `AssertableInertia::component(name)` passed for a component with no page
   file, so a test stayed green while the browser showed a blank page. With
@@ -952,22 +947,21 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   frontend chapter and the CSRF chapter name 3.8.0, and the frontend
   chapter lists `@inertiajs/vite` (K01).
 - **The Vue kit runs on Inertia 3.8 and its Vite plugin.** The kit pinned
-  `@inertiajs/vue3` and `@inertiajs/core` at `^3.6.1`, found its pages
-  with a hand-written `import.meta.glob` in each entry, and passed
-  `createInertiaApp` no title, no server head and no nonce. It now declares
-  both packages and `@inertiajs/vite` at `^3.8.0`, and `vite.config.ts`
-  runs `inertia()`. Both entries name their pages with `pages: './pages'`.
-  The SSR entry is the `createInertiaApp(..)` statement the plugin wraps
-  with `createServer`, so `npm run build:ssr` still writes
+  `@inertiajs/vue3` at `^3.6.1`, found its pages with a hand-written
+  `import.meta.glob` in each entry, and passed `createInertiaApp` no title, no
+  server head and no nonce. It now declares `@inertiajs/vue3`,
+  `@inertiajs/core` and `@inertiajs/vite` at `^3.8.0`, and `vite.config.ts`
+  runs `inertia()`. Both entries name their pages with `pages: './pages'`. The
+  SSR entry is the `createInertiaApp(..)` statement the plugin wraps with
+  `createServer`, so `npm run build:ssr` still writes
   `frontend/bootstrap/ssr/ssr.js`. Because the kit declares the plugin,
   `suprnova serve` writes the hot file, and with SSR on, a first visit in
-  development renders through the dev server's `/__inertia_ssr` with no
-  worker running. The browser entry
-  passes a `title` callback that appends the application's name, the same
-  name the server's `default_title` uses, `serverHead: true`, and the
-  nonce from `<meta property="csp-nonce">` when the document has one.
-  `npm run check`, `npm run build` and `npm run build:ssr` pass on a fresh
-  scaffold (K01, K05, K18, K19).
+  development renders through the dev server's `/__inertia_ssr` with no worker
+  running. The browser entry passes a `title` callback that appends the
+  application's name, the same name the server's `default_title` uses,
+  `serverHead: true`, and the nonce from `<meta property="csp-nonce">` when
+  the document has one. `npm run check`, `npm run build` and
+  `npm run build:ssr` pass on a fresh scaffold (K01, K05, K18, K19).
 - **Vue kit pages navigate with `Link`, title themselves with `Head`, and
   share two persistent layouts.** Every page drew its own frame, reached
   other pages through `<a href>`, which reloads the whole document, and
@@ -1612,9 +1606,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Joined builders update and delete matching rows.** Both builders
   preserve the join when writing the base table; model deletion still
   honors soft deletes. The model builder also exposes `update` and `delete`.
-- **A clean model save skips the update.** Dirtiness comes from the
-  instance's original values in memory, with no re-read. `Saving` and
-  `Saved` still fire, while `Updating` and `Updated` fire only for a dirty save.
+- **A clean model save skips the update.** Dirtiness comes from the instance's
+  original values in memory, and a clean save runs no update, where 3.2.1 ran
+  the update and fired `Updating` and `Updated` on every save. `Saving` and
+  `Saved` still fire, while `Updating` and `Updated` fire only for a dirty
+  save.
 - **Pivot sync returns the changed ids.** `sync` and
   `sync_without_detaching` return `SyncChanges` with attached, detached and
   updated id lists instead of `()`.
@@ -1655,51 +1651,48 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   answered the header; a route without the middleware now handles it as
   a real request.
 
-- **Inertia DevTools recording is opt-in.** `APP_ENV=local` used to turn
-  recording and the entries endpoints on without configuration. An
-  application now needs `.devtools(DevToolsConfig::new())`; without the
-  call, upgrading the framework records nothing and serves no entries.
-  The scaffold and dogfood application opt in. A configured instance
-  keeps the same environment and `enabled(..)` rules (DT-01).
-- **The starter keeps an existing notes table.** The notes migration now
-  checks for the table before creating it, like the users migration, so
-  a project using an existing Laravel database keeps its own notes schema
-  and rows (K21).
+- **Inertia DevTools recording is opt-in.** 3.2.1 had no Inertia DevTools. An
+  application records requests and serves the entries endpoints only when it
+  passes `.devtools(DevToolsConfig::new())` to its `InertiaConfig`; without
+  the call nothing is recorded and no entries are served. The scaffold and
+  dogfood application opt in. A configured instance records when `APP_ENV`
+  names `local`, or as its `enabled(..)` says (DT-01).
+- **The starter keeps an existing notes table.** The scaffold's notes
+  migration, new in 4.0.0, checks for the table before creating it, like the
+  users migration, so a project using an existing Laravel database keeps its
+  own notes schema and rows (K21).
 
 - **The built-in image driver's PNG, BMP and WebP codecs come from the
-  eas4ai forks** of `oxideav-png`, `oxideav-bmp` and `oxideav-webp` while
-  the upstream pull requests are open (OxideAV/oxideav-png #18 to #25,
-  oxideav-bmp #11 to #17, oxideav-webp #35 to #43). The encoders copy
-  less: a PNG is written into a buffer with room for the metadata added
-  after it, so keeping an orientation tag on a 512 x 512 noise PNG no
-  longer moves its 1 MiB file once more, and a BMP into a buffer reserved
-  at the file's exact size; lossy WebP is encoded from the converted
-  planes where they lie, and lossless WebP from the pixels, instead of
-  from a copy of each. Lossless WebP chooses its transforms in one pass
-  rather than by exhaustive search: a 1024 x 1024 photo encodes in about
-  half a second instead of 47.8 s in a release build, and processing a
-  64 x 64 image to lossless WebP allocates 0.76 MB in all instead of
-  1.23 GB. Its files are at most 8.7 percent larger. The forks carry
-  three fixes of their own, each offered upstream (oxideav-png #26,
-  oxideav-bmp #18 and #19): a PNG is decoded
-  without inflating its `iCCP` profile or XMP packet, which
-  `oxideav-png` 0.1.11 and later inflated, up to 64 MiB each, before
-  `IMAGE_MAX_ALLOC_BYTES` could count them (a crafted profile held
-  118,213,096 bytes under a 4 MiB budget); a BMP is decoded without a
-  copy of its embedded profile (5,242,912 bytes allocated for a
-  1024 x 1024 RGBA file with a 1 MiB profile, now 4,194,336); and a BMP
-  with a profile is written by an encoder that borrows the profile. An
-  RGBA PNG is also decoded without the second copy of its pixels the
-  crate's RGBA entry made (1 MiB for a 512 x 512 image). The forks
-  follow upstream master, which changes three kinds of output: an image
-  decoded from a lossy WebP, whose colour conversion `oxideav-webp` 0.3
-  corrected to within one level of libwebp's (pixels move by up to 16
-  levels); a PNG with more than 1 MiB of filtered data, which
-  `oxideav-png` 0.1.12 deflates in 1 MiB pieces, so its bytes can differ
-  (a 1024 x 1024 noise PNG is 4,196,716 bytes instead of 4,196,676); and
-  lossless WebP with transparency, written in the simple lossless layout,
-  its alpha declared in the `VP8L` header, rather than behind a `VP8X`
-  header.
+  eas4ai forks** of `oxideav-png`, `oxideav-bmp` and `oxideav-webp` while the
+  upstream pull requests are open (OxideAV/oxideav-png #18 to #25, oxideav-bmp
+  #11 to #17, oxideav-webp #35 to #43). The encoders copy less: a PNG is
+  written into a buffer with room for the metadata added after it, so adding
+  an orientation tag to a 512 x 512 noise PNG does not move its 1 MiB file a
+  second time, and a BMP into a buffer reserved at the file's exact size;
+  lossy WebP is encoded from the converted planes where they lie, and lossless
+  WebP from the pixels, instead of from a copy of each. Lossless WebP chooses
+  its transforms in one pass rather than by exhaustive search: a 1024 x 1024
+  photo encodes in about half a second instead of 47.8 s in a release build,
+  and processing a 64 x 64 image to lossless WebP allocates 0.76 MB in all
+  instead of 1.23 GB. Its files are at most 8.7 percent larger. The forks
+  carry three fixes of their own, each offered upstream (oxideav-png #26,
+  oxideav-bmp #18 and #19): a PNG is decoded without inflating its `iCCP`
+  profile or XMP packet, which `oxideav-png` 0.1.11 and later inflated, up to
+  64 MiB each, before `IMAGE_MAX_ALLOC_BYTES` could count them (a crafted
+  profile held 118,213,096 bytes under a 4 MiB budget); a BMP is decoded
+  without a copy of its embedded profile (5,242,912 bytes allocated for a 1024
+  x 1024 RGBA file with a 1 MiB profile, now 4,194,336); and a BMP with a
+  profile is written by an encoder that borrows the profile. An RGBA PNG is
+  also decoded without the second copy of its pixels the crate's RGBA entry
+  made (1 MiB for a 512 x 512 image). The forks follow upstream master, which
+  changes three kinds of output: an image decoded from a lossy WebP, whose
+  colour conversion `oxideav-webp` 0.3 corrected to within one level of
+  libwebp's (pixels move by up to 16 levels); a PNG with more than 1 MiB of
+  filtered data, which `oxideav-png` 0.1.12 deflates in 1 MiB pieces, so its
+  bytes can differ (a 1024 x 1024 noise PNG is 4,196,716 bytes instead of
+  4,196,676); and lossless WebP with transparency, written in the simple
+  lossless layout, its alpha declared in the `VP8L` header, rather than behind
+  a `VP8X` header.
 - **The project file is `suprnova.toml`, all lowercase.** `suprnova serve`
   reads its extra dev processes from `suprnova.toml`, and `live:add` keeps
   its records there. A project that holds a `Suprnova.toml` must rename it:
@@ -1742,10 +1735,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **A dotted resource name nests.** `Router::resource("users.posts", ...)`
   registers `/users/{user}/posts/{post}`, as Laravel's `Route::resource`
   does; it registered `/users.posts/{users.post}`.
-- **A route key that does not parse answers 404.** A key that does not
-  parse, or breaks a `unique_id` key's format, gets the body a missing row
-  gets, naming the model and never the value. It was a 400 that repeated
-  the value.
+- **A route key that does not parse answers 404.** A key that does not parse,
+  or breaks a `unique_id` key's format, gets the body a missing row gets,
+  naming the model and never the value. On 3.2.1 a key that did not parse
+  answered 400 and repeated the value, and a key that broke a `unique_id`
+  key's format was looked up as given and answered 404.
 - **The bare `x::Model` form no longer binds a soft-deleted row** of a
   soft-deleting `#[model]`'s table unless the route calls `with_trashed()`.
 - **Bound arguments are bound before every other argument**, after the
@@ -1760,12 +1754,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Request` arguments, still a compile error.
 - **URLs carry the public root.** When `APP_URL` has a path or a trusted
   prefix arrives, `route()`, `try_route`, `route_with_params` and
-  `try_route_with_params` return the root in front, so an application
-  whose own routes begin with its `APP_URL` path gets that path twice.
-  Signed URLs cover the root, so a link signed before an application
-  gained a root stops verifying. `url::current` returns the root, path and
-  query, and `LiveAssetCatalog::url` includes the root. `RenderKeyInput`
-  has a public `root` field.
+  `try_route_with_params` return the root in front, so an application whose
+  own routes begin with its `APP_URL` path gets that path twice. Signed URLs
+  cover the root, so a link signed before an application gained a root stops
+  verifying. `url::current` and `LiveAssetCatalog::url` include the root.
+  `RenderKeyInput` has a public `root` field.
 - **`Redirect::intended` ignores a stored network-path reference.** A
   stored intended URL that starts with `//`, `/\` or `\`, or that holds a
   control character, is ignored in favour of the fallback. Store an
@@ -2052,68 +2045,62 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   route the server dispatches, the Inertia middleware installed or not;
   `location_for(&req, url)` stays for code outside a dispatched request
   (RF-16).
-- **A component's script can no longer replace a built-in.** The
-  `live:add` scan refused a change to a built-in prototype, but admitted
-  `Object.keys = f`, `JSON.parse = f` and `Math.random = f`, and a write to
-  a member of a parameter given a built-in member, as
-  `function f(p) { p.call = g } f(Array.prototype.slice)` changes the
-  `call` every other script borrows `slice` with. A write to a member of a
-  built-in object or function is now refused (`script-builtin`) in every
-  form a prototype's is (`=`, `??=`, `+=`, `++`, a destructuring or `for`
-  loop target, `delete`), named directly, through the global object
-  (`globalThis.Object.keys`, `window.JSON.parse`), or through a name that
-  holds one: a variable, a parameter's default, or a parameter a call of
-  its function by name hands one. A member read under a built-in method's
-  name from a value the script did not make (`[].slice`, an element's
-  `addEventListener`) counts as that method, and a method of `document`,
-  `location` or `history` may not be assigned. A built-in is refused where
-  the scan stops following it: passed to anything but a function the
-  script calls by name or a browser API that only calls it back, put in an
+- **A component's script can no longer replace a built-in.** The `live:add`
+  scan, new in 4.0.0, refuses a write to a member of a built-in object or
+  function (`script-builtin`): `Object.keys = f`, `JSON.parse = f`,
+  `Math.random = f`, and a write to a member of a parameter given a built-in
+  member, as `function f(p) { p.call = g } f(Array.prototype.slice)` would
+  change the `call` every other script borrows `slice` with. It refuses such a
+  write in every form it refuses a write to a prototype's member (`=`, `??=`,
+  `+=`, `++`, a destructuring or `for` loop target, `delete`), named directly,
+  through the global object (`globalThis.Object.keys`, `window.JSON.parse`),
+  or through a name that holds one: a variable, a parameter's default, or a
+  parameter a call of its function by name hands one. A member read under a
+  built-in method's name from a value the script did not make (`[].slice`, an
+  element's `addEventListener`) counts as that method, and a method of
+  `document`, `location` or `history` may not be assigned. A built-in is
+  refused where the scan stops following it: passed to anything but a function
+  the script calls by name or a browser API that only calls it back, put in an
   array or object, written to a member, destructured, returned, thrown or
   exported. That also names the built-in in
   `Object.defineProperty(Object, "keys", ...)` and
-  `Reflect.set(Math, "random", f)`, whose calls other checks already
-  refused. The parameter form through a prototype's member is refused as
-  `script-prototype`, as the variable form already was. Calls, reads,
-  comparisons, `map(Number)`, constants such as
-  `Number.MAX_SAFE_INTEGER`, the page's own properties (`document.title`,
-  `location.hash`) and writes to the script's own objects and functions
-  stay admitted. Nineteen bypass fixtures pin it (`script-builtin-alias`,
-  `script-builtin-compound`, `script-builtin-default-parameter`,
-  `script-builtin-define-property`, `script-builtin-delete`,
-  `script-builtin-destructured`, `script-builtin-export`,
-  `script-builtin-function-member`, `script-builtin-globalthis`,
-  `script-builtin-handed-back`, `script-builtin-inherited-method`,
-  `script-builtin-math-random`, `script-builtin-namespace-member`,
-  `script-builtin-page-method`, `script-builtin-parameter`,
-  `script-builtin-reflect-set`, `script-builtin-window`,
-  `script-prototype-member-alias` and
-  `script-prototype-member-parameter`), and the `own-members` accepted
-  fixture pins what stays admitted. Two ways past the rule stayed open and
-  are closed. `(0).toPrecision.call = f` was admitted, because a member
-  read off a value counted as a built-in method only under a name the
-  scan's lists hold, and `toPrecision` is not one; the same held for
-  `"".anchor`, `[].copyWithin` and `/x/.compile`. A member read off a
-  literal, an operator's result (`-1`, `"a" + b`), a constant that holds
-  one, or a class that extends a built-in and does not declare that static
-  is now the built-in it inherits, whatever its name, and `call`, `apply`
-  and `bind`, through which every script borrows a built-in method, may be
-  written only on a value the script made, which also refuses
-  `Math.random().toPrecision.call = f` and an element's
-  `requestFullscreen.call = f`. `document.getRootNode().createElement = f`
-  was admitted, because what a call returns traced to nothing, though a
-  document's root node is itself. `getRootNode()` on any node is now the
-  page, as `ownerDocument` is, `Object(value)` is the value, and a method
-  of the page whose name is never ordinary data (62 of them, from
-  `createElement` and `querySelector` to `addEventListener` and
-  `pushState`) may be assigned only on a value the script made, which also
-  refuses it through a `parentNode`, an event's `currentTarget`, an array,
-  a promise, a function that returns `document`, and `this` in a method the
-  page calls as a listener. The window `window.open` returns is a global
-  object too, so `window.open("/x").JSON.parse = f` is refused. Writing
-  `call` on a value the scan cannot trace (`api.call = f` on a parameter,
-  `this.state.call = c`) is refused as well, since the scan cannot tell it
-  from a built-in method's. Eighteen bypass fixtures pin the closed ways
+  `Reflect.set(Math, "random", f)`, whose calls other checks refuse too. The
+  parameter form through a prototype's member is refused as
+  `script-prototype`, as the variable form is. Calls, reads, comparisons,
+  `map(Number)`, constants such as `Number.MAX_SAFE_INTEGER`, the page's own
+  properties (`document.title`, `location.hash`) and writes to the script's
+  own objects and functions stay admitted. Nineteen bypass fixtures pin it
+  (`script-builtin-alias`, `script-builtin-compound`,
+  `script-builtin-default-parameter`, `script-builtin-define-property`,
+  `script-builtin-delete`, `script-builtin-destructured`,
+  `script-builtin-export`, `script-builtin-function-member`,
+  `script-builtin-globalthis`, `script-builtin-handed-back`,
+  `script-builtin-inherited-method`, `script-builtin-math-random`,
+  `script-builtin-namespace-member`, `script-builtin-page-method`,
+  `script-builtin-parameter`, `script-builtin-reflect-set`,
+  `script-builtin-window`, `script-prototype-member-alias` and
+  `script-prototype-member-parameter`), and the `own-members` accepted fixture
+  pins what stays admitted. A member read off a literal, an operator's result
+  (`-1`, `"a" + b`), a constant that holds one, or a class that extends a
+  built-in and does not declare that static is the built-in it inherits,
+  whatever its name, so `(0).toPrecision`, `"".anchor`, `[].copyWithin` and
+  `/x/.compile` are built-in methods though no list of the scan names them.
+  `call`, `apply` and `bind`, through which every script borrows a built-in
+  method, may be written only on a value the script made, which refuses
+  `(0).toPrecision.call = f`, `Math.random().toPrecision.call = f` and an
+  element's `requestFullscreen.call = f`. `getRootNode()` on any node is the
+  page, as `ownerDocument` is, so `document.getRootNode().createElement = f`
+  is refused, `Object(value)` is the value, and a method of the page whose
+  name is never ordinary data (62 of them, from `createElement` and
+  `querySelector` to `addEventListener` and `pushState`) may be assigned only
+  on a value the script made, which also refuses it through a `parentNode`, an
+  event's `currentTarget`, an array, a promise, a function that returns
+  `document`, and `this` in a method the page calls as a listener. The window
+  `window.open` returns is a global object too, so
+  `window.open("/x").JSON.parse = f` is refused. Writing `call` on a value the
+  scan cannot trace (`api.call = f` on a parameter, `this.state.call = c`) is
+  refused as well, since the scan cannot tell it from a built-in method's.
+  Eighteen more bypass fixtures pin these cases
   (`script-builtin-literal-number`, `script-builtin-literal-string`,
   `script-builtin-literal-template`, `script-builtin-literal-regexp`,
   `script-builtin-literal-array`, `script-builtin-literal-name`,
@@ -2122,14 +2109,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `script-builtin-root-node`, `script-builtin-root-node-this`,
   `script-builtin-object-of-page`, `script-builtin-page-method-held`,
   `script-builtin-page-method-parent-node`,
-  `script-builtin-page-method-listener-this`,
-  `script-builtin-opened-window` and
-  `script-builtin-opened-window-name`), and the `ordinary-writes` accepted
+  `script-builtin-page-method-listener-this`, `script-builtin-opened-window`
+  and `script-builtin-opened-window-name`), and the `ordinary-writes` accepted
   fixture pins what an ordinary component still writes: `textContent`,
   `value`, `classList`, `this.state.open`, `o.call` on its own object.
 
-- **A handler panic reaches the Inertia error page.** The panic boundary
-  wraps the whole middleware chain, so a panic unwound past the error-page
+- **A handler panic reaches the Inertia error page.** The panic boundary wraps
+  the whole middleware chain, so a panic unwound past the error-page
   middleware: an Inertia visit to a panicking handler got the JSON
   `{"message":"Internal Server Error"}` `500` and the client's "plain JSON
   response" modal, even with `error_page` set. The middleware now runs the
@@ -2137,10 +2123,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   panic's error report, reaches the error callback, and with
   `error_page("Error")` the visit gets the `Error` page at status `500`. An
   API client still gets the JSON `500`. `Inertia::install` now registers the
-  error-response middleware whatever the config says, five middlewares
-  rather than four, because the callback can be installed after it; with
-  neither a callback nor an `error_page` it hands every request on and
-  changes nothing.
+  error-response middleware whatever the config says, where 3.2.1 registered
+  it only when `error_page` was set, because the callback can be installed
+  after it; with neither a callback nor an `error_page` it hands every request
+  on and changes nothing.
 - **SSR is on by default, behind bundle detection.** `SsrConfig::enabled`
   defaulted to `false`, so an application had to opt in to SSR, where
   Laravel's `inertia.ssr.enabled` is `true`. It is now `true`, with the
@@ -2166,19 +2152,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   [Dashboard]: window is not defined at resources/js/Pages/Dashboard.vue:12:5`
   (SS-04, SS-08).
 - **`suprnova ssr:start` makes Laravel's checks before it starts a worker.**
-  It ran `runtime bundle` with any configuration: it started a worker with
-  SSR switched off, looked for one bundle path only, never checked the
+  It checked that one bundle path existed and then ran `runtime bundle`
+  whatever the application's SSR configuration said: it started a worker with
+  SSR switched off, looked for no other bundle path, never checked the
   runtime, started a second worker beside a running one, and died of a
-  `SIGTERM` that left its worker running. It now runs the application
-  binary's `ssr:start`, which reads the installed Inertia configuration: it
-  finds the bundle as the SSR dispatch does (the configured path, then the
-  six conventional paths, warning when the configured one is missing and a
+  `SIGTERM` that left its worker running. It now runs the application binary's
+  `ssr:start`, which reads the installed Inertia configuration: it finds the
+  bundle as the SSR dispatch does (the configured path, then the six
+  conventional paths, warning when the configured one is missing and a
   conventional one runs), refuses a runtime it cannot find when
-  `ssr_ensure_runtime_exists` is set, asks the worker at the configured URL
-  to shut down first and refuses to start while that worker is still
-  running, forwards Ctrl-C and `SIGTERM` to the worker as the signal
-  received (a second one kills it), and reports each line of the worker's
-  stderr as an error (CM-01).
+  `ssr_ensure_runtime_exists` is set, asks the worker at the configured URL to
+  shut down first and refuses to start while that worker is still running,
+  forwards Ctrl-C and `SIGTERM` to the worker as the signal received (a second
+  one kills it), and reports each line of the worker's stderr as an error
+  (CM-01).
 - **`suprnova ssr:check` asks the SSR gateway's health check.** It probed
   `/health` with a client of its own, so its answer could differ from the
   health check the framework uses, and its messages and exit codes were
@@ -2192,39 +2179,37 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   own SSR settings from `--bundle`, `--url`, `--timeout-ms` and the
   `SUPRNOVA_SSR_URL`, `SUPRNOVA_SSR_RUNTIME` and `SUPRNOVA_SSR_BUNDLE`
   variables, so it could start or check a worker other than the one the
-  application's first visits dispatch to. Each command now runs `cargo run
-  --bin <package> -- ssr:<command>` from the project directory, as `suprnova
-  serve` runs the backend, with `--runtime` and `--graceful` passed through:
-  the application's output reaches the CLI's stdout and stderr, and the CLI
-  exits with its status, or 128 plus the signal number when a signal ended
-  it. The application runs in a process group of its own, so a terminal's
-  Ctrl-C reaches it once, through the CLI, which forwards each `SIGINT` and
-  `SIGTERM` it receives to the application and each `SIGHUP`, `SIGQUIT`,
-  `SIGTSTP` and `SIGCONT` to the application's process group, worker
-  included, and stops with it at a `SIGTSTP`, so Ctrl-Z and `fg` stop and
-  resume them together. The flags and the variables are gone: set the URL,
+  application's first visits dispatch to. Each command now runs
+  `cargo run --bin <package> -- ssr:<command>` from the project directory, as
+  `suprnova serve` runs the backend, with `--runtime` and `--graceful` passed
+  through: the application's output reaches the CLI's stdout and stderr, and
+  the CLI exits with its status, or 128 plus the signal number when a signal
+  ended it. The application runs in a process group of its own, so a
+  terminal's Ctrl-C reaches it once, through the CLI, which forwards each
+  `SIGINT` and `SIGTERM` it receives to the application and each `SIGHUP`,
+  `SIGQUIT`, `SIGTSTP` and `SIGCONT` to the application's process group,
+  worker included, and stops with it at a `SIGTSTP`, so Ctrl-Z and `fg` stop
+  and resume them together. The flags and the variables are gone: set the URL,
   the bundle, the runtime and the timeout with `InertiaConfig::ssr`,
-  `ssr_bundle_path`, `ssr_runtime` and `ssr_timeout`. The developer ruled
-  that compiling the framework into the CLI for commands the application
-  binary already has makes no sense, so the CLI's manifest names the
-  framework crate for its tests only (CM-01, CM-02, CM-03).
+  `ssr_bundle_path`, `ssr_runtime` and `ssr_timeout`. The CLI's manifest names
+  the framework crate for its tests only, as in 3.2.1, since the application
+  binary already has these commands (CM-01, CM-02, CM-03).
 - **The starter kits declare `@inertiajs/core` and read `root` through the
-  generated types.** A kit reached `@inertiajs/core` only because its
-  adapter depends on it and npm hoists it, and the generated
-  `inertia-props.ts` now augments that package. Each kit's `package.json`
-  declares `@inertiajs/core` at `^3.6.1` beside its adapter, and the 21 kit
-  pages that build URLs from `root` read it with a bare `usePage()` in
-  place of `usePage<{ root: string }>()`, typed by the augmentation. The
-  `Error` page keeps its inline props, since no handler renders it with a
-  struct. A project upgrading with its own `declare module
-  '@inertiajs/core'` block, in a `.ts`, `.tsx`, `.mts` or `.cts` file
-  under `frontend/src` such as `global.d.ts`, keeps it: `generate-types` and
-  `serve` then write `inertia-props.ts` without the augmentation or its
-  `import '@inertiajs/core'` and print a notice naming that file (`serve`
-  once, not on every save), since two augmentations merge key by key and
-  fail the type check on any key they set to different types. Delete the
-  hand-written block and regenerate to get the generated augmentation, with
-  `root` and the shared struct typed (T06).
+  generated types.** In 3.2.1 a kit reached `@inertiajs/core` only because its
+  adapter depends on it and npm hoists it, and no page had a `root` prop. Each
+  kit's `package.json` now declares `@inertiajs/core` at `^3.8.0` beside its
+  adapter, the generated `inertia-props.ts` augments that package, and every
+  kit page that builds URLs from `root` reads it with a bare `usePage()`,
+  typed by the augmentation. The `Error` page keeps its inline props, since no
+  handler renders it with a struct. A project upgrading with its own
+  `declare module '@inertiajs/core'` block, in a `.ts`, `.tsx`, `.mts` or
+  `.cts` file under `frontend/src` such as `global.d.ts`, keeps it:
+  `generate-types` and `serve` then write `inertia-props.ts` without the
+  augmentation or its `import '@inertiajs/core'` and print a notice naming
+  that file (`serve` once, not on every save), since two augmentations merge
+  key by key and fail the type check on any key they set to different types.
+  Delete the hand-written block and regenerate to get the generated
+  augmentation, with `root` and the shared struct typed (T06).
 - **`TestResponse::assert_inertia()` reads a first visit.** It refused any
   response without `X-Inertia: true`, so the HTML document a plain `GET` of
   a page route returns could only be asserted through
@@ -2239,12 +2224,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   server-rendered first visit, which Inertia 3.8's `buildSSRBody` writes as
   `<script data-page="app" type="application/json">`, failed with "no
   Inertia page object" (TS-01).
-- **An image wildcard leaves SVG out.** A `MimeType` allowlist entry such as
-  `image/*` admitted an SVG document, which is markup that can run script. A
-  `type/*` wildcard now admits every subtype of its type except
-  `image/svg+xml`, as Laravel's `image` rule leaves SVG out unless asked: an
-  SVG passes only when the allowlist names `image/svg+xml`. `text/*` and
-  `application/*` still admit every subtype.
+- **An image wildcard leaves SVG out.** A `MimeType` allowlist takes `type/*`
+  wildcards, new in 4.0.0, and a wildcard admits every subtype of its type
+  except `image/svg+xml`, since an SVG document is markup that can run script,
+  as Laravel's `image` rule leaves SVG out unless asked. An SVG passes only
+  when the allowlist names `image/svg+xml`, as in 3.2.1, whose entries matched
+  the type exactly. `text/*` and `application/*` admit every subtype.
 - **`has` and its kin read a polymorphic owner relation.** On a `MorphTo`,
   `has`, `or_has`, `has_count`, `doesnt_have` and `or_doesnt_have` rendered
   a probe that is always false, so `has` matched no row and `doesnt_have`
@@ -2258,11 +2243,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `where_doesnt_have` and their `or_` forms apply the closure to the owners
   of `R`'s type, as `where_has_morph` with that one type does.
 - **`url::current` is the absolute URL without the query.** It returned the
-  public root, the path and the query, where Laravel's `current()` returns
-  the `APP_URL` origin, the root and the path. It now does the same; use
-  `url::full` for the URL with its query. The framework's own redirects,
-  the session's previous URL and signature verification still read the
-  path and the query.
+  path and the query, such as `/posts?page=2`, where Laravel's `current()`
+  returns the `APP_URL` origin, the root and the path. It now does the same;
+  use `url::full` for the URL with its query. The framework's own redirects,
+  the session's previous URL and signature verification still read the path
+  and the query.
 - **`Redirect::guest` stores a page to come back to.** It stored the
   request's own URL for every request, so a sign-in after a `POST` or a
   JSON call sent the browser back to a form submission or an API
@@ -2344,10 +2329,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Verifying a verified account keeps its time.** `verify` consumes the token
   and returns the user ID without a new stamp and without `EmailVerified`.
 - **Checking a password writes nothing.** `validate_credentials` on
-  `EloquentUserProvider` and `DatabaseUserProvider` no longer rewrites the hash
-  for a database shared with Laravel, so `Auth::validate` and a guard's
-  `validate` leave it as it is; the sign-in rewrites it, and a rewrite that
-  fails still fails the sign-in.
+  `EloquentUserProvider` and `DatabaseUserProvider` verifies the password and
+  writes nothing, as in 3.2.1, so `Auth::validate` and a guard's `validate`
+  leave the hash as it is. The sign-in (`attempt`, `once` and
+  `Auth::logout_other_devices`) rewrites an outdated hash, the one a database
+  shared with Laravel needs included, through
+  `UserProvider::rehash_password_if_required`, and a rewrite that fails fails
+  the sign-in.
 - **One attachment per name and bytes.** A message drops an attachment
   whose name and bytes equal an earlier one's, from the mailable's
   `attachments()` or the builder, on the send and the queued path; two
@@ -2455,8 +2443,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   or above it, `debug` when it names none, and a bare level that is no level
   fails the boot.
 - **`queue::testing::pushed::<J>()` fails on a payload that does not decode.**
-  It panics, naming the job and the decode error, where it left the push out,
-  so `assert_not_pushed` no longer passes over a push it cannot read.
+  It panics, naming the job and the decode error, where 3.2.1 left the push
+  out of the list, so neither the list, `assert_pushed` nor the new
+  `assert_not_pushed` passes over a push it cannot read.
 - **`Queue::reserved_jobs` under `Queue::fake()` answers the fake.** It lists
   the reservations workers made from the fake instead of reading the
   installed driver.
@@ -2475,34 +2464,34 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   decisions are in `feature-map/laravel/inertia-protocol-parity.jsonl` for
   `fmap parity-import`.
 - **The error callback sees the error responses from outside the Inertia
-  stack.** `Inertia::handle_exceptions_using` and `InertiaConfig::error_page`
-  decided only what passed through the error-response middleware
-  `Inertia::install` registers. A middleware registered before `install`
-  that answers without calling `next` - `CsrfMiddleware`'s `419`,
-  `TimeoutMiddleware`'s `503`, an outer rate limiter's `429` - and a panic
-  that only the server's boundary caught never reached the callback, so an
-  Inertia visit still got the plain-JSON modal for them. The server now runs
-  the same decision after the whole stack, the panic boundary and the
-  development error page, for every error response nothing inside the stack
-  decided, at each of the three places it dispatches a request. A page
-  decided there carries the shared registry and the shared providers, but
-  no session data, no detected locale and none of the middleware hooks'
-  shares, since every scope a middleware opened has closed. A JSON
-  client's validation `422`, `{message, errors}`, was also kept from the
-  callback: the error-response middleware sat inside the validation
-  redirect and skipped every `422` with an `errors` object so it would not
-  replace an Inertia visit's before the redirect back. It now sits outside
-  the redirect, which turns an Inertia visit's `422` into the `303` first,
-  and the `422` exclusion is gone; the default callback still keeps every
-  `422`.
+  stack.** In 3.2.1, `InertiaConfig::error_page` decided only what passed
+  through the error-response middleware `Inertia::install` registers. A
+  middleware registered before `install` that answers without calling
+  `next` - `CsrfMiddleware`'s `419`, `TimeoutMiddleware`'s `503`, an outer
+  rate limiter's `429` - and a panic that only the server's boundary caught
+  never reached it, so an Inertia visit got the plain-JSON modal for them. The
+  server now runs the same decision after the whole stack, the panic boundary
+  and the development error page, for every error response nothing inside the
+  stack decided, at each of the three places it dispatches a request. A page
+  decided there carries the shared registry and the shared providers, but no
+  session data, no detected locale and none of the middleware hooks' shares,
+  since every scope a middleware opened has closed. A JSON client's validation
+  `422`, `{message, errors}`, was also kept from it: the error-response
+  middleware sat inside the validation redirect and skipped every `422` with
+  an `errors` object so it would not replace an Inertia visit's before the
+  redirect back. It now sits outside the redirect, which turns an Inertia
+  visit's `422` into the `303` first, and the `422` exclusion is gone; the
+  default callback still keeps every `422`.
 - **An error page placed outside the Inertia stack follows a fragment
-  redirect.** An `InertiaErrorPageMiddleware` an app registered before
-  `Inertia::install` saw the headers middleware's `409` with
-  `X-Inertia-Redirect`, read its empty body as an error, and sent the error
-  page in its place, so the client never followed a redirect to a
-  `#fragment`. Inertia protocol responses (`X-Inertia`, `X-Inertia-Location`,
-  `X-Inertia-Redirect`) are never handed to an error callback now, the
-  default one included.
+  redirect.** In 3.2.1, with `error_page` set, `InertiaErrorPageMiddleware`
+  passed a response carrying `X-Inertia-Location` through but not one carrying
+  `X-Inertia-Redirect`: it read the empty body of the `409` that
+  `InertiaResponse::redirect` builds as an error and sent the error page in
+  its place, so the client never followed the redirect. In 4.0.0 that `409`
+  also carries an Inertia visit's redirect to a `#fragment`. Inertia protocol
+  responses (`X-Inertia`, `X-Inertia-Location`, `X-Inertia-Redirect`) are
+  never handed to an error callback now, the default one included, wherever
+  the middleware is registered.
 
 - **A drop-in Inertia form with a file, and a `GET` filter form, read as the
   client shapes them.** The Inertia client sends a form that holds a file
@@ -2560,93 +2549,84 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Live upload and async routes follow the configured endpoint**, and the
   header bar's default brand link carries the root.
 - **Batch settlement counts work on MySQL** against a `job_batches` table
-  Laravel created (`Illegal mix of collations`): `job_batch_settlements`
-  takes that table's collation.
-- **On Postgres, a session write for a guest** no longer binds a text NULL
-  to `sessions.user_id`, which a `bigint` or `uuid` column refuses.
-- **A component's scripts import by relative path only.** The `live:add`
-  scan admitted a static `import` of an absolute path such as
-  `/acme-ui/x/x.js`, which breaks when the application serves under a path
-  prefix. It now refuses an absolute path, even to the component's own
-  script, as it refuses a URL (`script-import`), and the refusal says the
-  specifier must be a relative path (`./` or `../`) to a script of the
-  component or of a component it depends on. A relative path with one
-  `../` more than the component is deep (`../../../acme-ui/x/x.js` from
-  `acme-ui/x/`) is refused for the same reason: the browser resolves it
-  outside the prefix, while the scan used to drop the extra step and
-  compare the rest as if it had stayed inside.
+  Laravel created: `job_batch_settlements`, new in 4.0.0, takes that table's
+  collation, so a count never compares two collations.
+- **On Postgres, a session write for a guest** binds `sessions.user_id` as a
+  NULL that the `bigint` or `uuid` column of Laravel's `sessions` layout, new
+  in 4.0.0, accepts.
+- **A component's scripts import by relative path only.** The `live:add` scan
+  refuses a static `import` of an absolute path such as `/acme-ui/x/x.js`,
+  even to the component's own script, as it refuses a URL (`script-import`),
+  since an absolute path breaks when the application serves under a path
+  prefix. The refusal says the specifier must be a relative path (`./` or
+  `../`) to a script of the component or of a component it depends on. A
+  relative path with one `../` more than the component is deep
+  (`../../../acme-ui/x/x.js` from `acme-ui/x/`) is refused for the same
+  reason: the browser resolves it outside the prefix.
 - **A component's script can no longer reach a built-in prototype through
-  a computed key or a name.** The `live:add` scan refused
-  `Array.prototype.map = ...` but admitted `Array["prototype"].polluted = 1`
-  and `const p = Array.prototype; p.polluted = 1;`, and each of them adds
-  a property to every array on the page. A script may now read a member of
-  a prototype (`Array.prototype.slice.call(list)`) but not keep or pass on
-  the prototype: the scan refuses it in every position where it is a value
-  (an initializer, an assignment, an argument, a `return`, an array or
-  object element, a default, a template substitution), under a computed
-  key that traces to `prototype`, and from `getPrototypeOf`
-  (`script-prototype`). The refusal of a write to a prototype's member
-  covered only `=`; `??=`, `+=`, `++`, a destructuring or `for` loop
-  target and `delete` passed, and each is refused now, as is a method
-  called on the prototype itself (`Array.prototype.push(1)`), which runs
-  with the prototype as `this`, and destructuring `prototype` out of an
-  object (`const { prototype: p } = Array`). Twelve bypass fixtures pin
-  it: `script-prototype-computed`, `script-prototype-template-key`,
+  a computed key or a name.** The `live:add` scan refuses
+  `Array.prototype.map = ...`, and also `Array["prototype"].polluted = 1` and
+  `const p = Array.prototype; p.polluted = 1;`, each of which adds a property
+  to every array on the page. A script may read a member of a prototype
+  (`Array.prototype.slice.call(list)`) but not keep or pass on the prototype:
+  the scan refuses it in every position where it is a value (an initializer,
+  an assignment, an argument, a `return`, an array or object element, a
+  default, a template substitution), under a computed key that traces to
+  `prototype`, and from `getPrototypeOf` (`script-prototype`). A write to a
+  prototype's member is refused in every form (`=`, `??=`, `+=`, `++`, a
+  destructuring or `for` loop target, `delete`), as is a method called on the
+  prototype itself (`Array.prototype.push(1)`), which runs with the prototype
+  as `this`, and destructuring `prototype` out of an object
+  (`const { prototype: p } = Array`). Twelve bypass fixtures pin it:
+  `script-prototype-computed`, `script-prototype-template-key`,
   `script-prototype-alias`, `script-prototype-argument`,
   `script-prototype-getprototypeof`, `script-prototype-parameter`,
   `script-prototype-destructured`, `script-prototype-compound`,
   `script-prototype-destructuring-target`, `script-prototype-delete`,
   `script-prototype-receiver` and `script-prototype-destructured-key`.
 - **A destructuring assignment's defaults, nested keys and shorthand
-  targets are scanned.** The `live:add` script scan never walked the
-  default in `[a = eval("alert(1)")] = []` or `({ a = ... } = {})`, nor
-  the keys of a nested target, so `eval`, a prototype or any other refused
-  expression passed there. It now walks every key and default of the
-  target at any depth, as it walks any value, and a nested or shorthand
-  key gets the property checks a top-level key gets (`({ constructor } =
-  [])` is refused as `script-eval`). A shorthand target (`u` in
-  `({ u } = o)`) was not treated as a target at all: the scan still traced
-  `u` to its earlier constant, so `img.src = u` passed with any URL after
-  it, and `({ location } = { location: "javascript:alert(1)" })` wrote the
-  global `location` unchecked. It is now a target like any other: the name
-  holds a value the scan does not follow, and a name the script does not
-  declare is a global write (`script-url` for `location`, `script-global`
-  otherwise). Four bypass fixtures pin it:
-  `script-destructuring-default-eval`,
-  `script-prototype-assignment-default`,
-  `script-destructuring-shorthand-url` and
-  `script-destructuring-shorthand-global`.
-- **The script scan follows a value by the names it was written with.**
-  To check a URL, a timer handler or a computed key, the `live:add` scan
-  follows a name to its initializer, its assignments and the arguments of
-  its function's calls, but it looked up each name it met there where the
-  value was used, so a shadowing name stood in for the real one:
+  targets are scanned.** The `live:add` script scan walks every key and
+  default of a destructuring target at any depth, as it walks any value, so
+  `eval`, a prototype or any other refused expression is refused in the
+  default of `[a = eval("alert(1)")] = []` or `({ a = ... } = {})` and in the
+  keys of a nested target, and a nested or shorthand key gets the property
+  checks a top-level key gets (`({ constructor } = [])` is refused as
+  `script-eval`). A shorthand target (`u` in `({ u } = o)`) is a target like
+  any other: after it the scan does not trace `u` to the constant it held
+  before, since the name holds a value the scan does not follow, and a name
+  the script does not declare is a global write, so
+  `({ location } = { location: "javascript:alert(1)" })` is refused
+  (`script-url` for `location`, `script-global` otherwise). Four bypass
+  fixtures pin it: `script-destructuring-default-eval`,
+  `script-prototype-assignment-default`, `script-destructuring-shorthand-url`
+  and `script-destructuring-shorthand-global`.
+- **The script scan follows a value by the names it was written with.** To
+  check a URL, a timer handler or a computed key, the `live:add` scan follows
+  a name to its initializer, its assignments and the arguments of its
+  function's calls, and each name in a followed value names the binding it had
+  where it is written, not a name that shadows it where the value is used. So
   `const y = "https://evil.example/x"; const x = y;` followed by
-  `function show() { const y = "/ok"; img.src = x; }` passed the URL rule,
-  and a timer could be handed a string the same way. Each name in a
-  followed value now names the binding it had where it is written, so that
-  input is refused (`script-url`), and the reverse, a constant shadowed by
-  a remote URL where it is used, is no longer refused by mistake. The
+  `function show() { const y = "/ok"; img.src = x; }` is refused
+  (`script-url`), a timer cannot be handed a string that way, and a constant
+  shadowed by a remote URL where it is used is not refused. The
   `script-trace-shadowed-initializer` fixture pins it.
 - **The script scan sees the global object through an expression.** The
-  `live:add` scan refused `window.localStorage`, a global it does not
-  admit, but admitted `(0, window).localStorage`, `(0, self)["localStorage"]`
-  and `(0, globalThis).fetch = f`, which replaces a browser API: its rules
-  about the global object's members recognised only the bare name.
-  They now see through a sequence's last expression, a conditional's
-  branches, a logical expression's sides and an assignment's value, so
-  each is refused as the bare form is (`script-global`), and
-  `(flag ? window : self).localStorage` and
-  `(w || globalThis).localStorage` name `localStorage` in their refusal.
-  A write through such an expression still does not make a global of the
-  script's own. The `script-global-sequence` fixture pins it.
-- **Writing a browser global no longer unlocks reading it.** A name a
-  script wrote on the global object became a global of its own that it
-  could read back, so `try { window.localStorage = 1 } catch {}` made
-  `window.localStorage` readable: the write throws, the `catch` swallows
-  it, and the read returned the browser's storage, which the scan
-  otherwise refuses. A written name no longer becomes the script's own,
-  so the read stays refused, and the write itself is now refused too. The
+  `live:add` scan refuses `window.localStorage`, a global it does not admit,
+  and its rules about the global object's members see through a sequence's
+  last expression, a conditional's branches, a logical expression's sides and
+  an assignment's value. So `(0, window).localStorage`,
+  `(0, self)["localStorage"]` and `(0, globalThis).fetch = f`, which would
+  replace a browser API, are refused as the bare form is (`script-global`),
+  and `(flag ? window : self).localStorage` and
+  `(w || globalThis).localStorage` name `localStorage` in their refusal. A
+  write through such an expression does not make a global of the script's own.
+  The `script-global-sequence` fixture pins it.
+- **Writing a browser global no longer unlocks reading it.** A name a script
+  writes on the global object does not become a global of its own that it
+  could read back. So `try { window.localStorage = 1 } catch {}`, whose write
+  throws into a `catch` that swallows it, does not make `window.localStorage`
+  readable: the read, which would return the browser's storage, stays refused,
+  and the `live:add` scan refuses the write too. The
   `script-global-write-unlocks-read` fixture pins it.
 - **Magnetar's API documentation builds without the `two-factor`
   feature.** The doc comments on `LockoutFields::IDENTITY_IS_EMAIL` and
@@ -2689,137 +2669,112 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   uses, and keeps the 5 second whole-call timeout over headers and body,
   the 8 MiB response cap and the refusal of an oversized `Content-Length`
   (SS-14).
-- **DevTools redacts a flattened key by its parts.** A multipart field
-  keeps its flat name, so `user[password]=hunter2` was stored under that
-  name, and a dotted prop path such as `auth.password` kept its own
-  `propValues` leaf beside the nested page value. Redaction compared the
-  whole name with each key, so both values reached the entry file as sent.
-  A key is now sensitive when the whole name, or any part of it split on
-  `[`, `]` and `.`, names a redaction key, at any depth of the entry and
-  in query parameter names alike; a longer word such as `passwords` is
-  still kept (DT-07, DT-08).
-- **DevTools redacts the URLs in headers and bodies.** Only a string
-  under a `url` or `redirectLocation` key had its query redacted, so a
-  response's `Location: /reset?token=abc` and `X-Inertia-Location`, a
-  request's `Referer`, and a `redirect_to` field carrying `?token=`
-  reached the entry file as sent. The query of every string that is a URL
-  (it holds a `?` and starts with a scheme, `/` or `?`) is now redacted
-  wherever the entry holds it. In both header bags so is the whole value
-  of `Location`, `X-Inertia-Location`, `Referer` and `Content-Location`,
-  each `<...>` target of a `Link` and the target of a `Refresh`; a header
-  that is not a URL is stored as sent (DT-07, DT-08).
-- **A lost DevTools index no longer drops the entries it listed.** When
-  `_meta.json` was missing or empty, the next recorded request started a
-  new index holding only its own entry, so the older entry files left the
-  list and escaped the 24-hour prune and the per-tab limit for good. An
-  in-place rewrite interrupted between truncating the file and writing it
-  left exactly such an empty index. The index is now rebuilt from the
-  entry files whenever it is missing, empty or not a JSON list, before a
-  rewrite as well as a read, and each rewrite writes a new file and
-  renames it over `_meta.json` under a lock on `_meta.lock`, so an
-  interruption leaves the previous index in place (DT-07, DT-08).
+- **DevTools redacts a flattened key by its parts.** A multipart field keeps
+  its flat name, so `user[password]=hunter2` is stored under that name, and a
+  dotted prop path such as `auth.password` keeps its own `propValues` leaf
+  beside the nested page value. A key is sensitive when the whole name, or any
+  part of it split on `[`, `]` and `.`, names a redaction key, at any depth of
+  the entry and in query parameter names alike, so both values are redacted; a
+  longer word such as `passwords` is kept (DT-07, DT-08).
+- **DevTools redacts the URLs in headers and bodies.** The query of every
+  string that is a URL (it holds a `?` and starts with a scheme, `/` or `?`)
+  is redacted wherever the entry holds it, not only under a `url` or
+  `redirectLocation` key, so a response's `Location: /reset?token=abc` and
+  `X-Inertia-Location`, a request's `Referer`, and a `redirect_to` field
+  carrying `?token=` never reach the entry file as sent. In both header bags
+  so is the whole value of `Location`, `X-Inertia-Location`, `Referer` and
+  `Content-Location`, each `<...>` target of a `Link` and the target of a
+  `Refresh`; a header that is not a URL is stored as sent (DT-07, DT-08).
+- **A lost DevTools index no longer drops the entries it listed.** The index,
+  `_meta.json`, is rebuilt from the entry files whenever it is missing, empty
+  or not a JSON list, before a rewrite as well as a read, so the older entry
+  files stay in the list and under the 24-hour prune and the per-tab limit.
+  Each rewrite writes a new file and renames it over `_meta.json` under a lock
+  on `_meta.lock`, so an interruption leaves the previous index in place,
+  never an empty one (DT-07, DT-08).
 - **A commented-out augmentation no longer hides the generated one.**
-  `generate-types` and `serve` looked for `declare module
-  '@inertiajs/core'` as plain text, so a `frontend/src/global.d.ts` holding
-  only `// declare module '@inertiajs/core' {}` counted as the project's
-  own augmentation: the generated file left out the augmentation and its
-  `import`, and the notice said a comment typed `usePage()`. The scan now
-  reads the file as TypeScript tokens, with `//` and `/* */` comments and
-  the text of `'...'`, `"..."` and template literals set aside, so only a
-  declaration in code counts, and a comment between `declare`, `module`
-  and the name no longer hides a real one (T02).
+  `generate-types` and `serve` read a project's files as TypeScript tokens
+  when they look for its own `declare module '@inertiajs/core'`, with `//` and
+  `/* */` comments and the text of `'...'`, `"..."` and template literals set
+  aside, so only a declaration in code counts. A `frontend/src/global.d.ts`
+  holding only `// declare module '@inertiajs/core' {}` keeps the generated
+  augmentation and its `import`, and a comment between `declare`, `module` and
+  the name hides no real one (T02).
 - **A DevTools entry and `Request::route_name` name the route that
-  matched by its method.** The router kept one process-wide table from
-  name to pattern, and a request's name was looked up by its pattern
-  alone, so `GET /users` named `users.index` and `POST /users` named
-  `users.store` both reported whichever name the table listed first, and
-  an unnamed `PUT /users` reported one of them too. The router now records
-  each name against the method and pattern it was given for, through
-  `.name(..)`, a route group's names and a resource's names, and the
-  server sets the matched route's name on the request, so each method
-  reports its own and an unnamed one reports none. A request that never
-  went through dispatch still falls back to the pattern lookup (DT-04).
-  `MatchedRoute::name`, which a `Router::bind` resolver reads, had the
-  same pattern-only lookup and now reports the name the request carries.
-- **A hook-shared prop names a file and line.** A prop the middleware
-  hooks' `share` supplied had the hooks' Rust type name as its
-  `shareSource` file, at line `0`, which the extension cannot open.
-  `InertiaConfig::hooks` now takes its caller's location through
-  `#[track_caller]`, and every hook-shared key names that call's file and
-  line (DT-03).
+  matched by its method.** The router kept one process-wide table from name to
+  pattern, and a request's name was looked up by its pattern alone, so
+  `GET /users` named `users.index` and `POST /users` named `users.store` both
+  reported whichever name the table listed first, and an unnamed `PUT /users`
+  reported one of them too. The router now records each name against the
+  method and pattern it was given for, through `.name(..)`, a route group's
+  names and a resource's names, and the server sets the matched route's name
+  on the request, so each method reports its own and an unnamed one reports
+  none. A request that never went through dispatch still falls back to the
+  pattern lookup (DT-04). `MatchedRoute::name`, which a `Router::bind`
+  resolver reads, reports the name the request carries too.
+- **A hook-shared prop names a file and line.** `InertiaConfig::hooks` takes
+  its caller's location through `#[track_caller]`, and every key the
+  middleware hooks' `share` supplies names that call's file and line as its
+  `shareSource`, a place the extension can open (DT-03).
 - **A page whose document fails is recorded as the error the client
-  got.** The render handed DevTools its page before the JSON encoding, the
-  SSR dispatch and the root template ran, so when the root template failed
-  to render the client got a `500` while the entry kept the component, the
-  page object as the response body and `propValues` the client never
-  received. The page is now handed over only once the response is built;
-  when any of those steps fails, the entry records the `500` and its body
-  as a response with no page, no `component` and no prop values (DT-03,
-  DT-04).
-- **Every render prop has a `renderSource`.** A render prop's source was
-  the line below the render call that names its key, and the prop had none
-  when no such line existed: a page rendered with
-  `InertiaResponse::new("Home").with_data(props)` whose struct is defined
-  in another file, or a deployment without its Rust sources. Such a prop
-  now names the render call's own file and line (DT-03).
-- **DevTools reads a request body as the handler would.** The recorder
-  read a body before the handler only when its length was declared and at
-  most 256,000 bytes, so a longer body was recorded as `too-large` and a
-  chunked one as `streamed`, omissions PAR-072 allows for the response
-  body only. A body whose stream failed answered with the recorder's own
-  `500`, even for a handler that ignores its body. The recorder now reads
-  up to the request body cap (8 MiB by default), with or without a
-  declared length. A body over the cap records `too-large` and reaches the
-  handler whole: unread when its length is declared, else as the bytes
-  read and the rest of the stream, the new `BodyState::Partial`. A failed
-  read records `unreadable` and leaves its error in the new
+  got.** The render hands DevTools its page only once the response is built,
+  after the JSON encoding, the SSR dispatch and the root template. When any of
+  those steps fails, the entry records the `500` the client got and its body
+  as a response with no page, no `component` and no prop values, never the
+  page object or `propValues` the client did not receive (DT-03, DT-04).
+- **Every render prop has a `renderSource`.** A render prop's source is the
+  line below the render call that names its key. When no such line exists, as
+  for a page rendered with `InertiaResponse::new("Home").with_data(props)`
+  whose struct is defined in another file, or in a deployment without its Rust
+  sources, the prop names the render call's own file and line (DT-03).
+- **DevTools reads a request body as the handler would.** The recorder reads a
+  request body up to the request body cap (8 MiB by default), with or without
+  a declared length, so a long or chunked body is recorded; PAR-072 allows an
+  omission for the response body only. A body over the cap records `too-large`
+  and reaches the handler whole: unread when its length is declared, else as
+  the bytes read and the rest of the stream, the new `BodyState::Partial`. A
+  failed read records `unreadable` and leaves its error in the new
   `BodyState::Failed`, which the handler meets only when it reads the body
   (DT-02, DT-10).
-- **A DevTools JSON request body is recorded whatever it parses to.** A
-  body of `{}`, `[]` or `null`, and JSON that did not parse, were recorded
-  as `empty`. A parsed body is now present whatever its value, one that
-  does not parse is kept as its text, and only a body of 0 bytes is
-  `empty` (DT-02).
+- **A DevTools JSON request body is recorded whatever it parses to.** A parsed
+  JSON body is present in the entry whatever its value, `{}`, `[]` and `null`
+  included, one that does not parse is kept as its text, and only a body of 0
+  bytes is `empty` (DT-02).
 - **DevTools no longer reads an upload before its authorization.** The
-  recorder read a multipart body before the handler, so a
-  `MultipartRequestHooks::authorize` that refused the upload ran after the
-  body was read. A body it could not parse, such as one without its
-  closing boundary, was stored as raw text, which redaction does not look
-  into, a password field included. The multipart extractor now hands
-  DevTools a summary of what it parsed, after authorization. An upload no
-  extractor read records `not-read`, and one whose parse failed records
-  `unparsed`, both with the declared length as `size`; the raw text is
-  never stored. A name sent more than once, or one that ends in `[]`, is
-  now the list of its parts: the entry kept only the last of the three
-  files of a `photos[]` field (DT-02, DT-10).
-- **The DevTools id tag finds a closing body tag in any case.** The tag
-  went before the last literal `</body>`, so a first visit whose root
-  template closed with `</BODY>` or `</Body >` went out with no tag. The
-  closing body tag is now found in any case and with space before its
-  `>`, and a document with none gets the tag at its end (DT-02).
-- **A tagged first visit no longer carries the untagged page's length.**
-  A `Content-Length` the handler set on its page stayed on the longer,
-  tagged document. hyper sent it as it was in a release build, which
-  breaks the HTTP/1 framing, and asserted on the mismatch in a debug
-  build. The header is now dropped when the tag is added, and the server
-  sends the tagged document's length (DT-02, DT-10).
+  recorder does not read a multipart body itself: the multipart extractor
+  hands DevTools a summary of what it parsed, after
+  `MultipartRequestHooks::authorize` has passed the upload. An upload no
+  extractor read records `not-read`, and one whose parse failed, such as one
+  without its closing boundary, records `unparsed`, both with the declared
+  length as `size`; the raw text, which redaction does not look into, is never
+  stored. A name sent more than once, or one that ends in `[]`, is the list of
+  its parts, so all three files of a `photos[]` field are recorded (DT-02,
+  DT-10).
+- **The DevTools id tag finds a closing body tag in any case.** The tag goes
+  before the closing body tag, found in any case and with space before its
+  `>`, so a first visit whose root template closes with `</BODY>` or
+  `</Body >` carries it, and a document with none gets the tag at its end
+  (DT-02).
+- **A tagged first visit no longer carries the untagged page's length.** A
+  `Content-Length` the handler set on its page is dropped when the tag is
+  added, and the server sends the tagged document's length, since the untagged
+  length on the longer document breaks the HTTP/1 framing in a release build
+  and fails hyper's assertion in a debug build (DT-02, DT-10).
 - **A console command whose boot fails is reported.** A failure before the
-  handler ran left `Exceptions::report` unreached: a bootstrap that
-  panicked, as `DB::init().await.expect(..)` panics when the database does
-  not answer, and a framework boot that returned an error, such as a log
-  channel nothing defines. The console dispatcher and the application
-  binary's commands now catch a panic in the bootstrap, report the
-  failure, so the callbacks the bootstrap registered before it failed see
-  it, and then print it and stop the supervisors, as Laravel's console
-  kernel reports a failure of its bootstrap. The application binary's
-  commands also report their own errors now, as the console's do; a silent
-  error is still not reported (PAR-111).
-- **`schedule:interrupt` boots the cache it writes its mark to.** The
-  command booted no cache store, so in a real process it failed with
-  `ServiceNotFound` whatever `CACHE_DRIVER` named, unless the bootstrap
-  bound a store. It now boots the store `CACHE_DRIVER` names, after the
-  MongoDB connections with `database-mongodb`, and keeps a store the
-  bootstrap bound (PAR-089).
+  handler runs reaches `Exceptions::report`: a bootstrap that panics, as
+  `DB::init().await.expect(..)` panics when the database does not answer, and
+  a framework boot that returns an error, such as a log channel nothing
+  defines. The console dispatcher and the application binary's commands catch
+  a panic in the bootstrap, report the failure, so the callbacks the bootstrap
+  registered before it failed see it, and then print it and stop the
+  supervisors, as Laravel's console kernel reports a failure of its bootstrap.
+  The application binary's commands report their own errors as the console's
+  do; a silent error is not reported (PAR-111).
+- **`schedule:interrupt` boots the cache it writes its mark to.** The command,
+  new in 4.0.0, boots the store `CACHE_DRIVER` names, after the MongoDB
+  connections with `database-mongodb`, and keeps a store the bootstrap bound,
+  so it writes its mark in a real process whose bootstrap binds no store
+  (PAR-089).
 - **A queue driver installed in the bootstrap survives the boot.** The
   server and the worker commands ran `queue::bootstrap_from_env` after the
   application's bootstrap, and it replaced the driver `Queue::set_driver`
@@ -2850,11 +2805,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `suprnova::render_cache::store` the L1 store contract (`RenderStore`,
   `PublicationFence`, `PublishOutcome`, `StoreInspection`, `StoredEntry`).
 - **The Inertia DevTools gate's `GateEvaluated` event names the signed-in
-  user.** The entry endpoints checked their gate with the user erased to
-  `dyn Any`, so the event named a user type that registered no gate or hook
-  as the erased trait object, and carried no user identifier. The endpoints
-  now check the user as `Gate::inspect_current` and `#[authorize]` do: the
-  event carries the user's own type name and identifier.
+  user.** The DevTools entry endpoints check their gate with the user as
+  `Gate::inspect_current` and `#[authorize]` do, so the event carries the
+  user's own type name and identifier, for a user type that registered no gate
+  or hook too.
 - **`where_relation` on a `MorphTo` relation matches the owners.**
   `where_relation`, `where_relation_op` and `or_where_relation` on a
   polymorphic owner relation built the generic probe, which has no table
@@ -2862,20 +2816,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   as `has` and `where_has` do: the condition runs against every owner
   type the relation declares, under each owner's own scopes, as Laravel's
   `whereRelation` reaches `hasMorph` through `whereHas` (PAR-121).
-- **`cursor_paginate` keeps the query's order.** A query with one
-  `order_by`, such as `latest()`, was paged by the primary key ascending,
-  so a newest-first list came back oldest first. Every ordering is now
-  kept and carried in the cursor: a descending order walks downward, the
-  primary key breaks ties, and a query with no order still walks the
-  primary key ascending. An ordering the cursor cannot carry, such as
-  `order_by_raw` alone, now fails with a 400 error instead of being
-  dropped. An ordering on a joined table's column, such as `owners.id`,
-  fails the same way instead of putting the model's own `id` in the cursor
-  and repeating the page, and in a joined query the primary key that
-  breaks ties names the model's table. A joined query now quotes the
-  columns it orders by, as it already quoted its other references to the
-  model's table, so an ordering on a table whose name has capitals no
-  longer fails on Postgres (PAR-080).
+- **`cursor_paginate` keeps the query's order.** It replaced every ordering
+  with the primary key, ascending, so a newest-first query such as `latest()`
+  came back oldest first. Every ordering is now kept and carried in the
+  cursor: a descending order walks downward, the primary key breaks ties, and
+  a query with no order still walks the primary key ascending. An ordering the
+  cursor cannot carry, such as `order_by_raw` alone, fails with a 400 error
+  instead of being dropped, and so does an ordering on a joined table's
+  column, such as `owners.id`. In a joined query the primary key that breaks
+  ties names the model's table, and the query quotes the columns it orders by,
+  as it quotes its other references to the model's table, so an ordering on a
+  table whose name has capitals works on Postgres (PAR-080).
 - **`#[model(timestamps = true)]` without the columns fails the build.**
   An explicit `timestamps = true`, or the bare `timestamps` flag, on a
   struct with neither `created_at` nor `updated_at` was accepted and
@@ -2883,15 +2834,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   columns, as `#[suprnova::document]` reports it. The default and
   `timestamps = false` compile as before (PAR-183).
 - **An Inertia visit the fallback route answers records the previous
-  URL.** The server built the fallback route's request with no route
-  pattern, and the Inertia middleware records only a visit that matched a
-  route, so an Inertia `GET` the fallback answered left the session's
-  previous URL where it was. Laravel's `shouldStoreCurrentUrl` reads a
-  fallback route as a matched route. The request now carries a fallback
-  mark, `Request::is_fallback_route`, which the middleware reads beside
-  the pattern; the request still has no route pattern and no route name,
-  so RenderCache, the debug page and DevTools see no routed match
-  (PAR-048).
+  URL.** An Inertia `GET` the fallback answered left the session's previous
+  URL where it was, where Laravel's `shouldStoreCurrentUrl` reads a fallback
+  route as a matched route. The fallback route's request now carries a
+  fallback mark, `Request::is_fallback_route`, which the Inertia middleware
+  reads beside the route pattern when it records a visit; the request still
+  has no route pattern and no route name, so RenderCache, the debug page and
+  DevTools see no routed match (PAR-048).
 - **`Request::full_url` and `url::full` normalise their query as
   Laravel's `fullUrl` does.** They returned the query as it arrived,
   where Laravel's `fullUrl()` and `url()->full()` sort the pairs by key
@@ -2914,79 +2863,74 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `current_cursor`, which the scroll metadata reports as the current
   page (PAR-052).
 - **A CLI built between two releases pins the framework commit it was
-  built from.** `suprnova new` pinned a new project's `suprnova` dependency
-  at `v<CLI version>` even when the CLI was built from a later commit, as
-  on `main` between two releases, whose templates already used API the
-  last tag lacked (`DevToolsConfig`, `InertiaConfig::devtools`,
-  `Inertia::flash`), so the scaffold failed `cargo check` until the next
-  release. The CLI's build script now records the commit it is built from
-  and whether the tag `v<version>` names that commit. Only then does the
-  scaffold pin `tag = "v<version>"`. The script reads the tag from its own
-  checkout, or, when the checkout has none, from an `origin` on the same
-  machine, so a release installed with `cargo install --git --tag` pins
-  the tag: Cargo's checkout carries no tags, and the script reads the
-  release tag offline from Cargo's git database. An `origin` reached over
-  the network is never asked. With the tag on another commit, or in a
-  checkout with no tag information, such as a shallow clone, the scaffold
-  pins `rev = "<commit hash>"`, which at the release names the same source
-  as the tag. A build where git cannot answer pins the tag.
-  `templates::framework_pin` returns the choice, and
+  built from.** `suprnova new` pinned a new project's `suprnova` dependency at
+  `v<CLI version>` even when the CLI was built from a later commit, as on
+  `main` between two releases, whose templates can use API the last tag lacks,
+  so such a scaffold could fail `cargo check` until the next release. The
+  CLI's build script now records the commit it is built from and whether the
+  tag `v<version>` names that commit. Only then does the scaffold pin
+  `tag = "v<version>"`. The script reads the tag from its own checkout, or,
+  when the checkout has none, from an `origin` on the same machine, so a
+  release installed with `cargo install --git --tag` pins the tag: Cargo's
+  checkout carries no tags, and the script reads the release tag offline from
+  Cargo's git database. An `origin` reached over the network is never asked.
+  With the tag on another commit, or in a checkout with no tag information,
+  such as a shallow clone, the scaffold pins `rev = "<commit hash>"`, which at
+  the release names the same source as the tag. A build where git cannot
+  answer pins the tag. `templates::framework_pin` returns the choice, and
   `templates::cargo_toml_pinned` and `templates::api::cargo_toml_pinned`
   render a manifest with a pin you give.
 - **What the script scan learns from member writes does not depend on
-  statement order.** A member a class writes on `this` is the instance's
-  own, a name a script writes on an object of its own may be its method
-  rather than a browser API's, and a write on the global object
-  (`window[key] = value`) is refused under the name its key traces to. The
-  scan traced a computed key's name during its first walk, while a name
-  the walk had not reached yet resolved where the walk stood and a
-  function's calls counted only once reached, so the same script was
-  admitted in one statement order and refused in another, and a read of a
-  global name nothing wrote could pass. The scan now settles those names
-  after the first walk has met every name and every call. It never
-  admitted `eval`, `Worker` or another property refused by name.
+  statement order.** A member a class writes on `this` is the instance's own,
+  a name a script writes on an object of its own may be its method rather than
+  a browser API's, and a write on the global object (`window[key] = value`) is
+  refused under the name its key traces to. The `live:add` scan settles those
+  names after its first walk has met every name and every call, so a computed
+  key's name, a name the script defines further on and a function's later
+  calls count wherever they stand: a script is admitted or refused in any
+  statement order, and a read of a global name nothing wrote is refused.
+  `eval`, `Worker` and every other property refused by name are refused in any
+  order.
 - **The script scan refuses every write to a member of the global
-  object.** REG-032 refuses a write to a member of a global object, but
-  the `live:add` scan admitted a capitalised name the browser does not
-  define (`window.AcmeState = {}`, `globalThis["Acme" + "State"] = 1`) as
-  a global of the script's own, which the script could then read back. It
-  also admitted a write of other names its lists do not hold
-  (`window.onload = f`, `window.name = "x"`) and `delete window.fetch`. A
-  component could overwrite a name the application or the Live runtime
-  keeps on `window`. A write to a member of the global object, or of the
-  window `window.open` returns, is now refused (`script-global`) whatever
-  the name, in every form of write, `delete` included, and a later read of
-  the name is refused as a read of any global the scan does not admit is.
-  A component keeps its state in its module scope. The shipped `combobox`
-  no longer writes `globalThis.SuprnovaCombobox`: its script's function
-  returns the stale-suppression decisions, and the fixture that evaluates
-  the file takes them from the script's completion value.
+  object.** As REG-032 requires, the `live:add` scan refuses a write to a
+  member of the global object, or of the window `window.open` returns
+  (`script-global`), whatever the name, in every form of write, `delete`
+  included, so a component cannot overwrite a name the application or the Live
+  runtime keeps on `window`. That covers a capitalised name the browser does
+  not define (`window.AcmeState = {}`, `globalThis["Acme" + "State"] = 1`),
+  which does not become a global of the script's own, names the scan's lists
+  do not hold (`window.onload = f`, `window.name = "x"`) and
+  `delete window.fetch`, and a later read of the name is refused as a read of
+  any global the scan does not admit is. A component keeps its state in its
+  module scope. The shipped `combobox` no longer writes
+  `globalThis.SuprnovaCombobox`: its script's function returns the
+  stale-suppression decisions, and the fixture that evaluates the file takes
+  them from the script's completion value.
 - **`#[derive(MultipartRequest)]` reads indexed and bracketed part names.**
   The derive matched a part's name to `#[field(...)]` letter for letter, so
   the Inertia client's `photos[0]` and `photos[1]` never reached a
-  `#[field("photos[]")]` list and `user[name]` never reached a field, while
-  a form request read them as nested data (PAR-055). A part now goes to the
-  field its name addresses, read as a form request reads it: `photos[0]` and
-  `photos[]` fill the list declared as `photos[]` or `photos`, in index
-  order, and `user[name]` fills the field declared as `user.name`. A name
-  sent exactly as declared still matches. A failure is named by the index
-  the part was sent under (`photos.3`), and `max_count` and the file checks
-  that run while the body streams apply to every part the field takes,
-  whatever name it was sent under. Parts are read in the order they were
-  sent, as PHP reads them: a later part sent under a parent name, such as
-  `user` or a bare `photos`, replaces what `user.name` or `photos[]` held,
-  and a later `user[name][first]` or `photos[0][caption]` makes `user.name`
-  or that element an array, which fails as the wrong kind of value.
-- **`suprnova generate-types` pairs a page built with the builder.** A page
-  whose chain starts with `Inertia::paginate(..)` got no `Pages` entry,
-  however its chain gave the props struct, and a field the chain deferred
-  or marked optional was written as required, though the first response
-  leaves it out (PAR-068). The component named in the first call of a
-  chain (`InertiaResponse::new`, `Inertia::paginate`, `Inertia::data`,
+  `#[field("photos[]")]` list and `user[name]` never reached a field. A part
+  now goes to the field its name addresses, read as a form request reads it
+  (PAR-055): `photos[0]` and `photos[]` fill the list declared as `photos[]`
+  or `photos`, in index order, and `user[name]` fills the field declared as
+  `user.name`. A name sent exactly as declared still matches. A failure is
+  named by the index the part was sent under (`photos.3`), and `max_count` and
+  the file checks that run while the body streams apply to every part the
+  field takes, whatever name it was sent under. Parts are read in the order
+  they were sent, as PHP reads them: a later part sent under a parent name,
+  such as `user` or a bare `photos`, replaces what `user.name` or `photos[]`
+  held, and a later `user[name][first]` or `photos[0][caption]` makes
+  `user.name` or that element an array, which fails as the wrong kind of
+  value.
+- **`suprnova generate-types` pairs a page built with the builder.** In 3.2.1
+  `generate-types` wrote no `Pages` map, and a field a handler deferred or
+  marked optional was written as required, though the first response leaves it
+  out (PAR-068). The component named in the first call of a chain
+  (`InertiaResponse::new`, `Inertia::paginate`, `Inertia::data`,
   `Inertia::try_data`) now pairs with the struct `.with_data(..)` gives
   anywhere in it, and a key the chain passes to `.defer(..)`,
-  `.defer_with(..)` or `.optional(..)` after it gives the struct is
-  optional in the struct's interface.
+  `.defer_with(..)` or `.optional(..)` after it gives the struct is optional
+  in the struct's interface.
 - **A database session read keeps a session another request refreshed.**
   `DatabaseSessionDriver::read` found a row idle past the lifetime and then
   deleted it by id alone, so a request that loaded and refreshed the same
@@ -2994,32 +2938,32 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   read found no session. The delete now matches the row only while its
   `last_activity` is still older than the lifetime, as the MongoDB driver's
   does; the read that saw it expired still answers no session (PAR-188).
-- **The Laravel-database tests run each SQLite test on one connection.**
-  The fixture's SQLite pool held up to four connections, and sqlx returns a
-  released connection to the pool on a spawned task, so a test that awaited
-  every statement in turn still spread the fixture, the migrator's
-  `CREATE TABLE` and a model's first write over connections the runtime
-  chose. `kit_scaffold_notes_belong_to_laravels_users_sqlite`, whose first
-  write goes to a table the migrator created, could run that write on a
-  connection other than the one that created the table. The SQLite fixture
-  now holds one connection, and that test checks it (PAR-080).
-- **The `Inertia` facade shares a once prop.** Laravel's
-  `Inertia::shareOnce($key, fn () => ...)` had no facade form: only
+- **The Laravel-database tests run each SQLite test on one connection.** The
+  SQLite fixture of the Laravel-database tests holds one connection. sqlx
+  returns a released connection to the pool on a spawned task, so with more
+  than one connection a test that awaits every statement in turn can still
+  spread the fixture, the migrator's `CREATE TABLE` and a model's first write
+  over connections the runtime chooses, and run that write on a connection
+  other than the one that created its table.
+  `kit_scaffold_notes_belong_to_laravels_users_sqlite` checks that the fixture
+  holds one (PAR-080).
+- **The `Inertia` facade shares a once prop.** In 3.2.1 only
   `App::inertia_share_once` and `InertiaRegistry::share_once` registered a
-  shared once prop, though the facade carried `share`, `share_many`,
-  `share_data` and `share_provider` (PAR-052). `Inertia::share_once(key,
-  resolver)` now makes the same registration and returns the same
-  `SharedOnceProp`, which takes `as_key`, `until`, `fresh` and `once_with`
-  as any once prop does.
+  shared once prop, so Laravel's `Inertia::shareOnce($key, fn () => ...)` had
+  no facade form (PAR-052). `Inertia::share_once(key, resolver)`, beside the
+  facade's `share`, `share_many`, `share_data` and `share_provider`, makes the
+  same registration and returns the same `SharedOnceProp`, which takes
+  `as_key`, `until`, `fresh` and `once_with` as any once prop does.
 - **The component allowlist refuses test fakes, app-wide hooks and
-  installs.** The scan admitted `Http::fake`, `Queue::fake`, `Mail::fake`,
-  `Storage::fake`, `Process::fake` and their siblings, `Http::global_options`
-  and the global request and response middleware, `Queue::set_driver`,
-  `Cache::set_connection`, the `install` of a service, and the test container
-  and clock under the capability of the facade's chapter, so a component
-  granted `network` could rewrite every request the application makes or
-  swap a driver for every caller (REG-030). The generator refuses them by
-  name, and the embedded allowlist carries the refusal.
+  installs.** The `live:add` scan of a component's Rust refuses `Http::fake`,
+  `Queue::fake`, `Mail::fake`, `Storage::fake`, `Process::fake` and their
+  siblings, `Http::global_options` and the global request and response
+  middleware, `Queue::set_driver`, `Cache::set_connection`, the `install` of a
+  service, and the test container and clock, whatever capability the facade's
+  chapter grants, so a component granted `network` cannot rewrite every
+  request the application makes or swap a driver for every caller (REG-030).
+  The allowlist generator refuses them by name, and the embedded allowlist
+  carries the refusal.
 - **Every Live and Magnetar type a public signature leads to is named
   through `suprnova`.** A public signature of `suprnova`, or of an engine
   item it re-exports, names only types an application can write down; 330
