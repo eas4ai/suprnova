@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.load-more",
+  "version": 1,
+  "root": "suprnova-ui/load-more",
+  "files": [
+    "load-more.html",
+    "load-more.css"
+  ],
+  "elements": []
+}
