@@ -26,6 +26,15 @@ fn manual_pages() -> Vec<(PathBuf, String)> {
         .expect("read the manual")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        // An upgrade chapter names removed surface by design: it tells an
+        // application coming from an earlier release what is gone and what
+        // replaces it. It teaches nothing as current.
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("upgrade-"))
+        })
         .map(|path| {
             let text = std::fs::read_to_string(&path).expect("read a chapter");
             (path, text)
