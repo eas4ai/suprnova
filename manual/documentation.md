@@ -2,6 +2,7 @@
 
 - ## Prologue
     - [Changelog](../CHANGELOG.md)
+    - [Upgrading to 4.0](upgrade-4.0.md)
     - [Contribution Guide](contributions.md)
 - ## Getting Started
     - [Introduction](introduction.md)
