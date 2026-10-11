@@ -163,6 +163,65 @@ fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
     );
 }
 
+/// The engine surfaces the framework holds for the host are not a
+/// component's to name: the host ports a bootstrap installs, the trusted
+/// contexts and fingerprints the engine verifies, the snapshot key material,
+/// the wire protocol and proposal application, and the component hooks the
+/// macros implement. A component names what the engine hands it: identities,
+/// limits, errors, upload inspection results, metadata and payload contracts.
+#[test]
+fn reg_030_host_ports_trusted_contexts_and_key_material_are_refused() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    for path in [
+        "suprnova::live::HostCapabilities",
+        "suprnova::live::HostCapabilities::with_action_authorization",
+        "suprnova::live::SubscriptionAuthorizationPort",
+        "suprnova::live::UploadAuthorizationPort",
+        "suprnova::live::action::ActionAuthorizationPort",
+        "suprnova::live::TrustedLiveRequestContext",
+        "suprnova::live::TrustedMountParameters::new",
+        "suprnova::live::PrincipalFingerprint::from_bytes",
+        "suprnova::live::TenantFingerprint::from_bytes",
+        "suprnova::live::TransportCredential::from_host_authority_bearer",
+        "suprnova::live::BrowserNonce::from_bytes",
+        "suprnova::render_cache::RootKey::new",
+        "suprnova::render_cache::SnapshotKeyRing::sign",
+        "suprnova::render_cache::PrivateMaterial",
+        "suprnova::live::UpdateRequestV2",
+        "suprnova::live::ProposalBatch::apply_required",
+        "suprnova::live::ComponentDescriptor::new",
+        "suprnova::live::ComponentInstance",
+        "suprnova::live::RenderContext",
+        "suprnova::live::action::RawActionArguments",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused; got {:?}",
+            list.admit(path)
+        );
+    }
+    // What the engine hands a component stays admitted.
+    for path in [
+        "suprnova::live::ActionName",
+        "suprnova::live::InputLimits",
+        "suprnova::live::UploadInspection",
+        "suprnova::live::MountFailure",
+        "suprnova::live::validation::ValidationBagError",
+        "suprnova::live::action::RegisteredEmission",
+        "suprnova::live::metadata::PayloadContractIdentity",
+        "suprnova::render_cache::QueryUnknown",
+    ] {
+        assert!(
+            matches!(
+                list.admit(path),
+                Some(Admission::Item { .. }) | Some(Admission::Prefix { .. })
+            ),
+            "{path} must be admitted; got {:?}",
+            list.admit(path)
+        );
+    }
+}
+
 fn capability_of(list: &Allowlist, path: &str) -> Option<Capability> {
     match list.admit(path) {
         Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
