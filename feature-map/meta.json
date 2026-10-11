@@ -11,5 +11,5 @@
   ":(exclude)suprnova-cli/tests",
   ":(exclude,glob)crates/*/tests/**"
  ],
- "source_rev": "410c4ed4f"
+ "source_rev": "00d0a6bb1"
 }
