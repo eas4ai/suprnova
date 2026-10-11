@@ -12,10 +12,13 @@ head a section of the chapter (`### <lead>` or deeper); every entry under
 documented) or appear as a bold list item of the chapter (`- **<lead>**`,
 under the chapter's list of fixes with no upgrade step), so that the
 judgment on each fix is written down where the check can see it; and the
-chapter must be linked from manual/documentation.md. Prints each missing
-entry and exits 1 when one is missing; exits 0 when the chapter accounts
-for them all. Written for a person and an agent alike: the bold lead of a
-changelog entry is the heading or the list item to search for.
+chapter must be linked from manual/documentation.md by a Markdown link.
+The check reads Markdown structure: a heading, a list item or a link
+inside a fenced code block or an HTML comment is example text and counts
+for nothing. Prints each missing entry and exits 1 when one is missing;
+exits 0 when the chapter accounts for them all. Written for a person and
+an agent alike: the bold lead of a changelog entry is the heading or the
+list item to search for.
 """
 import re
 import sys
@@ -40,6 +43,56 @@ def release_section(changelog: str, version: str) -> str:
     return rest[: end.start()] if end else rest
 
 
+def outside_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """`line` without its HTML comments, and whether a comment stays open
+    after it. A `<!--` inside a code span is code, not a comment."""
+    masked = re.sub(r"`[^`]*`", lambda span: "x" * len(span.group()), line)
+    kept: list[str] = []
+    position = 0
+    while position < len(line):
+        if in_comment:
+            end = masked.find("-->", position)
+            if end < 0:
+                return "".join(kept), True
+            position = end + 3
+            in_comment = False
+        else:
+            start = masked.find("<!--", position)
+            if start < 0:
+                kept.append(line[position:])
+                break
+            kept.append(line[position:start])
+            position = start + 4
+            in_comment = True
+    return "".join(kept), in_comment
+
+
+def prose_lines(text: str) -> list[str]:
+    """The lines of a Markdown document outside fenced code blocks and HTML
+    comments. A fence line is dropped with its block, and a comment is cut
+    out of its line, so a heading, a list item or a link that is example
+    text never passes for the chapter's structure."""
+    lines: list[str] = []
+    fence: str | None = None
+    in_comment = False
+    for line in text.splitlines():
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if fence is not None:
+            closing = stripped.rstrip()
+            if indent < 4 and closing.startswith(fence) and closing.strip(fence[0]) == "":
+                fence = None
+            continue
+        if not in_comment:
+            opening = re.match(r"(`{3,}|~{3,})", stripped)
+            if opening and indent < 4:
+                fence = opening.group(1)
+                continue
+        kept, in_comment = outside_comments(line, in_comment)
+        lines.append(kept)
+    return lines
+
+
 def bold_item(lines: list[str], index: int) -> str | None:
     """The bold text opening the list item at `index`, or None.
 
@@ -62,7 +115,7 @@ def bold_leads(section: str, headings: tuple[str, ...]) -> list[str]:
     """The bold lead sentence of every entry under the given `###` headings."""
     leads: list[str] = []
     current = None
-    lines = section.splitlines()
+    lines = prose_lines(section)
     for index, line in enumerate(lines):
         if line.startswith("### "):
             current = line[4:].strip()
@@ -75,18 +128,25 @@ def bold_leads(section: str, headings: tuple[str, ...]) -> list[str]:
 
 
 def chapter_items(chapter: str) -> set[str]:
-    """The bold text of every list item of the chapter."""
-    lines = chapter.splitlines()
+    """The bold text of every list item of the chapter, outside code and comments."""
+    lines = prose_lines(chapter)
     return {item for item in (bold_item(lines, index) for index in range(len(lines))) if item is not None}
 
 
 def chapter_headings(chapter: str) -> set[str]:
-    """Every heading of the chapter, without its marks."""
+    """Every heading of the chapter, without its marks, outside code and comments."""
     return {
-        re.sub(r"^#+\s*", "", line).strip()
-        for line in chapter.splitlines()
-        if line.startswith("#")
+        re.sub(r"^#+\s+", "", line).strip()
+        for line in prose_lines(chapter)
+        if re.match(r"^#{1,6}\s+\S", line)
     }
+
+
+def links_chapter(index: str, chapter_name: str) -> bool:
+    """Whether the index holds a Markdown link to the chapter, outside code
+    and comments; a fragment after the file name is allowed."""
+    pattern = re.compile(r"\]\((?:\./)?" + re.escape(chapter_name) + r"(?:#[^)\s]*)?\)")
+    return any(pattern.search(line) for line in prose_lines(index))
 
 
 def main() -> int:
@@ -113,7 +173,7 @@ def main() -> int:
         headings = chapter_headings(chapter)
         items = chapter_items(chapter)
     index = (root / "manual" / "documentation.md").read_text()
-    if f"({chapter_path.name})" not in index:
+    if not links_chapter(index, chapter_path.name):
         problems.append(f"manual/documentation.md does not link {chapter_path.name}")
     missing = [lead for lead in leads if lead not in headings]
     for lead in missing:
