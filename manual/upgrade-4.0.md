@@ -1118,13 +1118,14 @@ printf '%s\n' '/.suprnova-live.lock' '/.suprnova-live-journal.json' >> .gitignor
 
 ### A component's script can no longer replace a built-in.
 
-**Before:** The `live:add` scan admitted a write to a built-in's member,
-such as `Object.keys = f` or `Math.random = f`.
+**Before:** `live:add` installed a component's script without scanning it,
+including one that replaced a built-in's member, such as `Object.keys = f`
+or `Math.random = f`.
 
 **Now:** A write to a member of a built-in object or function is refused
 (`script-builtin`) in every form.
 
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, change the
+**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
 component as the refusal says.
 
 ## Authentication
@@ -2054,6 +2055,22 @@ and locale, register `InertiaErrorPageMiddleware` yourself, before
 as [Inertia Responses](frontend-inertia-responses.md#where-the-page-is-rendered)
 shows.
 
+### An error page placed outside the Inertia stack follows a fragment redirect.
+
+**Before:** `InertiaErrorPageMiddleware` passed a response carrying
+`X-Inertia-Location` through, but not one carrying `X-Inertia-Redirect`.
+With `error_page` set, a handler's `InertiaResponse::redirect`, a `409`
+with `X-Inertia-Redirect` and an empty body, was read as an error and
+answered with the error page, so the client never followed the soft
+redirect.
+
+**Now:** An Inertia protocol response, one carrying `X-Inertia`,
+`X-Inertia-Location` or `X-Inertia-Redirect`, is never handed to an error
+callback, the default one included, wherever the middleware is registered,
+so the client follows the redirect to its target, a `#fragment` included.
+
+**Do:** Nothing to do.
+
 ### A drop-in Inertia form with a file, and a `GET` filter form, read as the client shapes them.
 
 **Before:** A form request answered `415` for a `multipart/form-data` body.
@@ -2496,41 +2513,29 @@ and `suprnova::render_cache::store` re-export them.
 
 **Do:** Nothing to do.
 
-### The component allowlist refuses test fakes, app-wide hooks and installs.
-
-**Before:** The scan admitted `Http::fake`, `Queue::fake`, `Mail::fake`,
-`Storage::fake`, `Process::fake`, `Http::global_options`, the global
-request and response middleware, `Queue::set_driver`,
-`Cache::set_connection`, a service's `install`, and the test container and
-clock.
-
-**Now:** The generator refuses them by name. The embedded allowlist is also
-regenerated from the documented surface: documented paths it lacked are
-admitted, and the Live engine's private paths and Magnetar's engine
-internals are dropped.
-
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, move the
-call it names out of the component.
-
 ### The script scan refuses every write to a member of the global object.
 
-**Before:** The `live:add` scan admitted a write such as
+**Before:** `live:add` installed a component's script without scanning it,
+including one that wrote a member of the global object, such as
 `window.AcmeState = {}`, `window.onload = f` or `delete window.fetch`.
 
 **Now:** Every write to a member of the global object, or of a window that
 `window.open` returns, is refused (`script-global`), `delete` included.
 
-**Do:** Keep a component's state in its module scope, not on `window`.
+**Do:** Nothing to do for an application that installs no such component.
+If `live:add` refuses one it installed on 3.2.1, its author keeps the
+component's state in its module scope, not on `window`.
 
 ### What the script scan learns from member writes does not depend on statement order.
 
-**Before:** The scan admitted a script in one statement order and refused
-it in another.
+**Before:** `live:add` installed a component's script without scanning it,
+including one that read a global name nothing declared or wrote.
 
-**Now:** It settles names after its first walk, so the order no longer
-matters, and a read of a global name nothing wrote is refused.
+**Now:** The scan settles names after its first walk, so its verdict does
+not depend on the script's statement order, and a read of a global name
+nothing wrote is refused.
 
-**Do:** If `live:add` refuses a component it admitted on 3.2.1, change the
+**Do:** If `live:add` refuses a component it installed on 3.2.1, change the
 component as the refusal says.
 
 ### A CLI built between two releases pins the framework commit it was built from.
@@ -2554,7 +2559,6 @@ These `### Fixed` entries change nothing an application upgrading from 3.2.1
 observes, or touch only the framework's own tooling and tests.
 
 - **The Laravel parity map holds the Inertia adapter and client.** The parity map is the framework's own tooling.
-- **An error page placed outside the Inertia stack follows a fragment redirect.** The fragment redirect's `409` is new in 4.0.0, and the 3.2.1 manual described no response this changes.
 - **Images are no longer copied on their way through a driver.** It removes copies inside the drivers and counts the memory of ICC profiles, which 3.2.1 did not carry.
 - **The Inertia CRUD tutorial compiles** The fix is to the manual's tutorial, not to the framework.
 - **Live upload and async routes follow the configured endpoint** Serving under a path prefix is new in 4.0.0, and at the host root the routes are the same `/__live` routes.
@@ -2576,11 +2580,36 @@ observes, or touch only the framework's own tooling and tests.
 - **The DevTools id tag finds a closing body tag in any case.** DevTools is new in 4.0.0.
 - **A tagged first visit no longer carries the untagged page's length.** The DevTools id tag is new in 4.0.0.
 - **The Laravel-database tests run each SQLite test on one connection.** It changes the framework's own tests.
+- **The component allowlist refuses test fakes, app-wide hooks and installs.** A component's Rust, and the allowlist that reads it, are new in 4.0.0; a 3.2.1 component carried no Rust.
 - **Every Live and Magnetar type a public signature leads to is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
 
 ## Added entries that change behaviour
 
 These `### Added` entries change a path that 3.2.1 already had.
+
+### Third-party Live component libraries.
+
+**Before:** `live:add` installed a component of the shipped library by
+name, or a third-party one with `--manifest`, by copying the view,
+stylesheet and script its `manifest.json` named under `templates/<root>/`,
+with no scan and no question. A component carried no Rust.
+
+**Now:** `live:add` also installs from a library's git repository by
+address, from an `https://` URL and from a `./path`, and a component can
+carry the Rust of a Live component. Before it writes anything, it scans
+every view, stylesheet, script and Rust file as data, admits only what it
+can classify, and shows a plan. For a third-party component it asks you on
+a terminal to approve each capability the component uses, to pin the
+library's key on its first install and to confirm the plan; without a
+terminal it refuses unless you pass `--yes`, and `--allow <capability>`
+approves a capability. A shipped component still installs with no
+questions.
+
+**Do:** Nothing to do for the shipped library. Run a third-party install on
+a terminal, or pin the library's key in `suprnova.toml` yourself and pass
+`--yes` and `--allow` for each capability the plan names. If the scan
+refuses a component you installed on 3.2.1, its author changes it as the
+refusal says. See [Installing Live Components](live-add.md).
 
 ### A timebox on reset links.
 
