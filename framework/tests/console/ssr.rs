@@ -1044,10 +1044,11 @@ async fn signal_a_running_start(signal: nix::sys::signal::Signal) -> Ran {
     let runtime = script(
         dir.path(),
         "runtime",
-        "trap 'echo \"worker got TERM\"; kill $sleeper; exit 0' TERM\n\
-         trap 'echo \"worker got INT\"; kill $sleeper; exit 0' INT\n\
-         sleep 1000 >/dev/null 2>&1 &\n\
+        "trap 'echo \"worker got TERM\"; exit 0' TERM\n\
+         trap 'echo \"worker got INT\"; exit 0' INT\n\
+         ( while kill -0 $$ 2>/dev/null; do sleep 0.1; done ) >/dev/null 2>&1 &\n\
          sleeper=$!\n\
+         trap 'kill $sleeper 2>/dev/null' EXIT\n\
          echo ready\n\
          wait $sleeper",
     );
