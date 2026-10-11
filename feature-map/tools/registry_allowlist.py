@@ -330,6 +330,48 @@ ITEMS = {
     # Reaches database on its own path.
     "suprnova::live::verify_ledger_backend": "database",
     "suprnova::live::verify_ledger_driver_for_test": "database",
+    # Test fakes and app-wide hooks (REG-030). A fake swaps a facade's driver
+    # for every caller in the process, a global hook rewrites every request
+    # the application makes, an install or a set_driver rebinds a service
+    # for the whole application, and the test container or clock changes
+    # what every other caller sees: none of that is a component's to do,
+    # whatever capability the facade's chapter grants, as App::bind and the
+    # global middleware registration are refused above.
+    "suprnova::Bus::fake": REFUSE,
+    "suprnova::Cache::set_connection": REFUSE,
+    "suprnova::CacheStore::set_connection": REFUSE,
+    "suprnova::EventFacade::fake": REFUSE,
+    "suprnova::EventFacade::fake_except": REFUSE,
+    "suprnova::EventFacade::fake_only": REFUSE,
+    "suprnova::FailOnRealCallsGuard": REFUSE,
+    "suprnova::FakeDescription": REFUSE,
+    "suprnova::FakeHandler": REFUSE,
+    "suprnova::FakeResult": REFUSE,
+    "suprnova::FakeSequence": REFUSE,
+    "suprnova::Http::allow_stray_requests": REFUSE,
+    "suprnova::Http::fake": REFUSE,
+    "suprnova::Http::fake_response_text": REFUSE,
+    "suprnova::Http::fake_sequence": REFUSE,
+    "suprnova::Http::fake_url": REFUSE,
+    "suprnova::Http::fake_using": REFUSE,
+    "suprnova::Http::global_options": REFUSE,
+    "suprnova::Http::global_request_middleware": REFUSE,
+    "suprnova::Http::global_response_middleware": REFUSE,
+    "suprnova::Http::prevent_stray_requests": REFUSE,
+    "suprnova::Inertia::install": REFUSE,
+    "suprnova::Mail::fake": REFUSE,
+    "suprnova::MailFake": REFUSE,
+    "suprnova::Process::fake": REFUSE,
+    "suprnova::ProcessFake": REFUSE,
+    "suprnova::Queue::fake": REFUSE,
+    "suprnova::Queue::fake_except": REFUSE,
+    "suprnova::Queue::set_driver": REFUSE,
+    "suprnova::RenderCache::install": REFUSE,
+    "suprnova::SessionMiddleware::install": REFUSE,
+    "suprnova::Storage::fake": REFUSE,
+    "suprnova::VectorRegistry::install": REFUSE,
+    "suprnova::testing::TestClock": REFUSE,
+    "suprnova::testing::TestContainer": REFUSE,
 }
 
 # Item names whose effect is the same wherever they sit: a constructor that

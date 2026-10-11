@@ -2980,6 +2980,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   resolver)` now makes the same registration and returns the same
   `SharedOnceProp`, which takes `as_key`, `until`, `fresh` and `once_with`
   as any once prop does.
+- **The component allowlist refuses test fakes, app-wide hooks and
+  installs.** The scan admitted `Http::fake`, `Queue::fake`, `Mail::fake`,
+  `Storage::fake`, `Process::fake` and their siblings, `Http::global_options`
+  and the global request and response middleware, `Queue::set_driver`,
+  `Cache::set_connection`, the `install` of a service, and the test container
+  and clock under the capability of the facade's chapter, so a component
+  granted `network` could rewrite every request the application makes or
+  swap a driver for every caller (REG-030). The generator refuses them by
+  name, and the embedded allowlist carries the refusal.
 
 ## 3.2.1 - 2026-10-05
 

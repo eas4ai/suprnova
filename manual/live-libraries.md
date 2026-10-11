@@ -531,6 +531,13 @@ that has no effects. The scan refuses:
   framework built from typed data.
 - A method call whose receiver type it cannot name, and a service resolved
   from the container whose type it cannot name.
+- A test fake, an app-wide hook or an install, whatever capability the
+  facade's chapter grants: `Http::fake` and its siblings, `Queue::fake`,
+  `Mail::fake`, `Storage::fake`, `Process::fake`, `Http::global_options`
+  and the global request and response middleware, `Queue::set_driver`,
+  `Cache::set_connection`, the `install` of a service, the test container
+  and the test clock. Each changes what every other caller in the process
+  sees, which is the application's to decide, not a component's.
 
 Each capability the admitted paths carry goes into the plan. Resolving a
 trait your own library defines carries none, because the application binds
