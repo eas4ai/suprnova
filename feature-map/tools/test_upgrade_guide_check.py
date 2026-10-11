@@ -146,5 +146,64 @@ class WrappedLeads(unittest.TestCase):
         self.assertIn("2 Fixed entries accounted for", result.stdout)
 
 
+class MarkdownStructure(unittest.TestCase):
+    """The check reads the chapter's Markdown structure: a heading or a list
+    item inside a fenced code block is example text, not a section, and the
+    index links the chapter only through a Markdown link outside a comment."""
+
+    COMPLETE = (
+        "# Upgrading to 4.0\n\n### Typed factory counts.\n\nText.\n\n"
+        f"### {WRAPPED_LEAD}\n\nText.\n\n### {FIXED_LEAD}\n\nText.\n\n{NO_STEP_LIST}"
+    )
+
+    def test_a_heading_inside_a_fenced_code_block_is_not_a_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(
+                root,
+                "# Upgrading to 4.0\n\nAn example of the chapter's shape:\n\n```markdown\n"
+                f"### Typed factory counts.\n### {WRAPPED_LEAD}\n```\n\n"
+                f"### {FIXED_LEAD}\n\nText.\n\n{NO_STEP_LIST}",
+            )
+            result = run(root)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("0 of 2 entries covered", result.stdout)
+        self.assertIn("no section for the changelog entry: Typed factory counts.", result.stdout)
+
+    def test_a_list_item_inside_a_fenced_code_block_is_not_a_listing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(
+                root,
+                "# Upgrading to 4.0\n\n### Typed factory counts.\n\nText.\n\n"
+                f"### {WRAPPED_LEAD}\n\nText.\n\n### {FIXED_LEAD}\n\nText.\n\n"
+                "## Fixes with no upgrade step\n\n~~~\n- **A fix.** Shown as an example only.\n~~~\n",
+            )
+            result = run(root)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no section and no listing for the fixed entry: A fix.", result.stdout)
+
+    def test_a_link_inside_an_html_comment_does_not_link_the_chapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, self.COMPLETE)
+            (root / "manual" / "documentation.md").write_text(
+                "- [Introduction](introduction.md)\n<!-- - [Upgrading to 4.0](upgrade-4.0.md) -->\n"
+            )
+            result = run(root)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("manual/documentation.md does not link upgrade-4.0.md", result.stdout)
+
+    def test_a_markdown_link_outside_a_comment_links_the_chapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, self.COMPLETE)
+            (root / "manual" / "documentation.md").write_text(
+                "<!-- the prologue -->\n- [Upgrading to 4.0](upgrade-4.0.md#upgrade-in-this-order)\n"
+            )
+            result = run(root)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

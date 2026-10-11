@@ -1949,15 +1949,19 @@ InertiaConfig::new()
 
 ### Inertia DevTools recording is opt-in.
 
-**Before:** `APP_ENV=local` turned recording and the entries endpoints on
-without configuration.
+**Before:** 3.2.1 had no Inertia DevTools: nothing recorded requests, and
+no entries endpoint existed. A development build between 3.2.1 and 4.0.0
+recorded under `APP_ENV=local` without configuration; no release did.
 
-**Now:** An application needs `.devtools(DevToolsConfig::new())`; without
-it, nothing is recorded and no entries are served. A configured instance
-keeps the same environment and `enabled(..)` rules.
+**Now:** Inertia DevTools records and serves its entries only for an
+application that passes `.devtools(DevToolsConfig::new())` to its
+`InertiaConfig`; without the call nothing is recorded and no entries are
+served. A configured instance records when `APP_ENV` names `local`, or as
+its `enabled(..)` says.
 
-**Do:** Add the call to the `InertiaConfig` you pass to `Inertia::install`,
-as [Inertia DevTools](frontend-inertia-devtools.md) shows:
+**Do:** Nothing to do. To record, add the call to the `InertiaConfig` you
+pass to `Inertia::install`, as [Inertia DevTools](frontend-inertia-devtools.md)
+shows:
 
 ```rust
 .devtools(DevToolsConfig::new())
@@ -1970,16 +1974,17 @@ as [Inertia DevTools](frontend-inertia-devtools.md) shows:
 **Before:** A kit reached `@inertiajs/core` only through its adapter, and
 pages typed `root` with `usePage<{ root: string }>()`.
 
-**Now:** Each kit's `package.json` declares `@inertiajs/core` at `^3.6.1`,
+**Now:** Each kit's `package.json` declares `@inertiajs/core` at `^3.8.0`,
 and the generated `inertia-props.ts` augments it, so a bare `usePage()`
 types `root`. A hand-written `declare module '@inertiajs/core'` block under
 `frontend/src` turns the generated augmentation off, with a notice.
 
-**Do:** Declare `@inertiajs/core`, delete a hand-written augmentation block,
-and regenerate:
+**Do:** Declare `@inertiajs/core` at the kits' range, delete a hand-written
+augmentation block, and regenerate from the application root, where
+`suprnova generate-types` reads `Cargo.toml`:
 
 ```bash
-cd frontend && npm install @inertiajs/core@^3.6.1
+(cd frontend && npm install @inertiajs/core@^3.8.0)
 suprnova generate-types
 ```
 
