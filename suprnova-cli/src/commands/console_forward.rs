@@ -9,8 +9,8 @@ use crate::ui;
 /// One console command, with the arguments the operator typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsoleCommand {
-    /// `db:seed [--class=<Name>]`
-    Seed { class: Option<String> },
+    /// `db:seed [--class=<Name>] [--force]`
+    Seed { class: Option<String>, force: bool },
     /// `model:prune [--model=<Name>] [--pretend]`
     Prune {
         model: Option<String>,
@@ -25,12 +25,19 @@ impl ConsoleCommand {
     /// so the console cannot read a value that starts with a hyphen as an
     /// option of its own. No value is checked here: the console knows the
     /// seeders and the models, and it is the one that can say a name is
-    /// unknown.
+    /// unknown. `--force` goes over as typed: the console is the one that
+    /// refuses a production seed without it.
     fn console_args(&self) -> Vec<String> {
         match self {
-            Self::Seed { class: None } => vec!["db:seed".into()],
-            Self::Seed { class: Some(class) } => {
-                vec!["db:seed".into(), format!("--class={class}")]
+            Self::Seed { class, force } => {
+                let mut args = vec!["db:seed".to_owned()];
+                if let Some(class) = class {
+                    args.push(format!("--class={class}"));
+                }
+                if *force {
+                    args.push("--force".into());
+                }
+                args
             }
             Self::Prune { model, pretend } => {
                 let mut args = vec!["model:prune".to_owned()];
@@ -68,15 +75,42 @@ mod tests {
     #[test]
     fn db_seed_forwards_the_seeder_as_the_class_option() {
         assert_eq!(
-            ConsoleCommand::Seed { class: None }.console_args(),
+            ConsoleCommand::Seed {
+                class: None,
+                force: false
+            }
+            .console_args(),
             ["db:seed"]
         );
         assert_eq!(
             ConsoleCommand::Seed {
-                class: Some("UserSeeder".into())
+                class: Some("UserSeeder".into()),
+                force: false
             }
             .console_args(),
             ["db:seed", "--class=UserSeeder"]
+        );
+    }
+
+    /// The console refuses `db:seed` in production without `--force`, so
+    /// the CLI passes the flag through, after the seeder name.
+    #[test]
+    fn db_seed_forwards_force_for_a_production_run() {
+        assert_eq!(
+            ConsoleCommand::Seed {
+                class: None,
+                force: true
+            }
+            .console_args(),
+            ["db:seed", "--force"]
+        );
+        assert_eq!(
+            ConsoleCommand::Seed {
+                class: Some("UserSeeder".into()),
+                force: true
+            }
+            .console_args(),
+            ["db:seed", "--class=UserSeeder", "--force"]
         );
     }
 

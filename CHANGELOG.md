@@ -1519,7 +1519,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Whole-second zoned timestamps.** Postgres uses `timestamp(0) with time zone`
   by default, and SQLite declares `datetime` for zoned timestamp columns.
 - **Production seeding requires force.** `db:seed` returns an error in
-  production unless you pass `--force`.
+  production unless you pass `--force`; `suprnova db:seed --force` passes
+  the flag through to the console binary.
 - **Console test assertions check every expectation.**
   `ConsoleRun::assert_successful` fails on a prepared question the command did
   not ask and on every unmet output expectation, which `unmet_expectations()`

@@ -1393,8 +1393,9 @@ standard output.
 
 **Now:** It returns an error in production unless you pass `--force`.
 
-**Do:** Pass `--force` to `db:seed` in production deploy scripts, as
-[Seeding](seeding.md) shows.
+**Do:** Pass `--force` to `db:seed` in production deploy scripts, to the
+console binary or as `suprnova db:seed --force`, as [Seeding](seeding.md)
+shows.
 
 ## Running on a Laravel database
 

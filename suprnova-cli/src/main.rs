@@ -462,6 +462,9 @@ enum Commands {
         /// Name of the one seeder to run, as an option: --class=UserSeeder
         #[arg(long, conflicts_with = "seeder")]
         class: Option<String>,
+        /// Seed a production database; without it the console refuses
+        #[arg(long)]
+        force: bool,
     },
     /// Delete the rows that prunable models no longer need
     #[command(name = "model:prune")]
@@ -781,9 +784,14 @@ fn main() {
         } => {
             commands::docker_compose::run(with_mailpit, with_minio);
         }
-        Commands::DbSeed { seeder, class } => {
+        Commands::DbSeed {
+            seeder,
+            class,
+            force,
+        } => {
             commands::console_forward::run(ConsoleCommand::Seed {
                 class: class.or(seeder),
+                force,
             });
         }
         Commands::ModelPrune { model, pretend } => {
@@ -1085,7 +1093,7 @@ mod tests {
             let cli = Cli::try_parse_from(&argv)
                 .unwrap_or_else(|e| panic!("`{}` must parse: {e}", argv.join(" ")));
             match cli.command {
-                Some(Commands::DbSeed { seeder, class }) => {
+                Some(Commands::DbSeed { seeder, class, .. }) => {
                     assert_eq!(class.or(seeder).as_deref(), Some("UserSeeder"));
                 }
                 _ => panic!("`{}` must be db:seed", argv.join(" ")),
@@ -1097,7 +1105,19 @@ mod tests {
             cli.command,
             Some(Commands::DbSeed {
                 seeder: None,
-                class: None
+                class: None,
+                force: false
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["suprnova", "db:seed", "UserSeeder", "--force"])
+            .expect("db:seed takes --force for a production run");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::DbSeed {
+                seeder: Some(_),
+                class: None,
+                force: true
             })
         ));
 
