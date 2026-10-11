@@ -1109,8 +1109,8 @@ the fragment survives; the fragment of a `Location` is lost inside the XHR
 that follows it. A prefetch keeps its plain redirect, since it is never
 shown. `InertiaResponse::redirect(url)` builds the same `409` by hand.
 
-For non-GET Inertia visits, the framework auto-converts the response to
-`303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
+For Inertia `PUT`, `PATCH` and `DELETE` visits, the framework converts a
+`302` redirect to `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
 
@@ -1366,8 +1366,8 @@ with it.
    [Redirect helpers](#redirect-helpers).
 3. Registers `InertiaVersionMiddleware` - emits the `409` + `X-Inertia-Location`
    when client and server disagree on the asset version.
-4. Registers `Inertia303Middleware` - upgrades `302` to `303` on non-GET
-   Inertia redirects.
+4. Registers `Inertia303Middleware` - upgrades `302` to `303` on `PUT`,
+   `PATCH` and `DELETE` Inertia redirects.
 5. Registers `InertiaErrorPageMiddleware` - hands the framework's own
    error responses to your error callback, or turns them into the page
    `cfg` names with `.error_page(...)`. With neither, it changes nothing.
