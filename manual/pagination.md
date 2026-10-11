@@ -379,7 +379,13 @@ order: `latest()` walks `created_at DESC, id ASC`. Select every ordered
 column and use non-null values. A missing cursor parameter, a null
 boundary, or an order the cursor cannot carry (`order_by_raw`,
 `in_random_order`) returns a 400 error rather than a page in another
-order.
+order. An order on a joined table's column, such as `teams.name`, also
+returns a 400 error, because the cursor reads each boundary from the model
+row, which holds none of the joined table's values. Order by the model's
+own columns instead, bare or qualified with the model's table
+(`users.created_at`); in a joined query, the builder qualifies the primary
+key it adds the same way and quotes each ordered column, so a table name
+with capitals also works on Postgres.
 An `OFFSET` on the builder positions the first page only, the page
 requested without a cursor. Every later page starts at its cursor, so
 an offset never skips rows between two pages.
