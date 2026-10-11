@@ -4557,14 +4557,23 @@ impl<M> Builder<M> {
     /// `row` is the row's SQLite rowid written as this ORDER BY can
     /// reach it, which a seeded SQLite order reads: see
     /// [`Self::own_row`].
+    ///
+    /// `joined` is the model's table when the ORDER BY sits in a query
+    /// that joins another, and `None` otherwise, as for a WHERE term: a
+    /// joined query quotes the columns it orders by, as it quotes its
+    /// other references to the model's table, so on Postgres an ordering
+    /// on `Authors.name` names the table its FROM writes as `"Authors"`.
+    /// A query without a join, and a union's derived table, keep the
+    /// spelling.
     fn render_orders(
         &self,
         backend: DbBackend,
         row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
+        joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
-        self.render_order_terms(&self.orders, backend, row, values, n)
+        self.render_order_terms(&self.orders, backend, row, values, n, joined)
     }
 
     /// Render `orders` as an ORDER BY list, the shared body of
@@ -4577,6 +4586,7 @@ impl<M> Builder<M> {
         row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
+        joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
         if orders.is_empty() {
             return Ok(String::new());
@@ -4584,7 +4594,9 @@ impl<M> Builder<M> {
         let mut parts: Vec<String> = Vec::with_capacity(orders.len());
         for o in orders {
             let rendered = match o {
-                OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
+                OrderTerm::Col(col, dir) => {
+                    format!("{} {}", joined_column(backend, joined, col), dir.sql())
+                }
                 OrderTerm::Raw(sql) => sql.clone(),
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
                 OrderTerm::Random(seed) => random_order(backend, *seed, row),
@@ -4595,6 +4607,7 @@ impl<M> Builder<M> {
                     sql
                 }
                 OrderTerm::InOrderOf(col, vs) => {
+                    let column = joined_column(backend, joined, col);
                     let mut cases = String::new();
                     for (idx, v) in vs.iter().enumerate() {
                         // A value no row holds matches no row, so its arm
@@ -4607,7 +4620,7 @@ impl<M> Builder<M> {
                         let ph =
                             crate::database::placeholder::typed_placeholder(backend, *n, &bound)?;
                         values.push(bound);
-                        cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
+                        cases.push_str(&format!(" WHEN {column} = {ph} THEN {idx}"));
                     }
                     if cases.is_empty() {
                         // No arm is left: every row ties, so the term
@@ -4887,15 +4900,24 @@ impl<M> Builder<M> {
         let mut sql =
             this.render_select_core(backend, table, column_expr, project_row, values, n)?;
         let own_row = this.own_row(backend, table);
+        let from = this.own_table(backend, table);
+        let joined = this.joined_table(table, &from);
         if this.unions.is_empty() {
-            sql.push_str(&this.render_orders(backend, &own_row, values, n)?);
+            sql.push_str(&this.render_orders(backend, &own_row, values, n, joined)?);
             sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
             return Ok(sql);
         }
 
         let head = &this.union_head;
         if head.is_bounded() {
-            sql.push_str(&this.render_order_terms(&head.orders, backend, &own_row, values, n)?);
+            sql.push_str(&this.render_order_terms(
+                &head.orders,
+                backend,
+                &own_row,
+                values,
+                n,
+                joined,
+            )?);
             sql.push_str(&render_limit_offset(backend, head.limit, head.offset));
             sql = format!("SELECT * FROM ({sql}) AS {UNION_ARM_ALIAS}");
         }
@@ -4939,7 +4961,7 @@ impl<M> Builder<M> {
             whole.push_str(" WHERE ");
             whole.push_str(&parts.join(" AND "));
         }
-        whole.push_str(&this.render_orders(backend, UNION_ROW_ALIAS, values, n)?);
+        whole.push_str(&this.render_orders(backend, UNION_ROW_ALIAS, values, n, None)?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
     }
@@ -4974,7 +4996,13 @@ impl<M> Builder<M> {
         } else {
             UNION_ROW_ALIAS.to_owned()
         };
-        let orders = self.render_orders(backend, &window_row, values, n)?;
+        let from = self.own_table(backend, table);
+        let joined = if self.unions.is_empty() {
+            self.joined_table(table, &from)
+        } else {
+            None
+        };
+        let orders = self.render_orders(backend, &window_row, values, n, joined)?;
         let mut inner = self.clone();
         inner.eager_partition = None;
         inner.limit = None;
@@ -6961,11 +6989,14 @@ where
     /// downward and `latest()` pages newest first. The primary key,
     /// ascending, breaks ties when no ordering names it. A query with no
     /// order walks the primary key ascending. An ordering the cursor cannot
-    /// carry (`order_by_raw`, `in_random_order`) fails the call rather than
-    /// being dropped. Select non-null ordered columns so the keyset can
-    /// advance. An `OFFSET` positions the first page only, the one
-    /// requested without a cursor; every later page starts at its cursor,
-    /// so the offset never skips rows between two pages.
+    /// carry (`order_by_raw`, `in_random_order`, or a joined table's column
+    /// such as `owners.id`) fails the call rather than being dropped or
+    /// bounded by the model's own value. An ordering on the model's column
+    /// may be bare or qualified with the model's table. Select non-null
+    /// ordered columns so the keyset can advance. An `OFFSET` positions the
+    /// first page only, the one requested without a cursor; every later
+    /// page starts at its cursor, so the offset never skips rows between
+    /// two pages.
     ///
     /// On a union the cursor bounds the rows of the whole union, written
     /// as a derived table, and the order is the union's; the first query
@@ -6975,8 +7006,9 @@ where
     ///
     /// - `per_page == 0` → `FrameworkError::param("per_page")` (400).
     /// - Invalid / tampered cursor → `FrameworkError::ParamParse`.
-    /// - An ordering that is not a column, or a cursor that lacks one of
-    ///   the ordered columns → `FrameworkError::bad_request` (400).
+    /// - An ordering that is not a column of the model's table, or a cursor
+    ///   that lacks one of the ordered columns → `FrameworkError::bad_request`
+    ///   (400).
     pub async fn cursor_paginate(
         self,
         per_page: u64,
@@ -7041,35 +7073,70 @@ where
 
     /// The columns `cursor_paginate` orders by and puts in the cursor, each
     /// with `true` for ascending: the query's orderings in their own
-    /// directions, or the primary key ascending when there are none, with
-    /// the primary key appended when no ordering names it, so ties keep a
-    /// stable final order.
+    /// directions, then the primary key ascending when no ordering names
+    /// it, so ties keep a stable final order and a query with no order
+    /// walks the key.
+    ///
+    /// Each ordering must name the model's own column (see
+    /// [`Self::own_column`]): the cursor's boundary is read from the
+    /// fetched model row, which holds no joined table's values, so an
+    /// ordering on `owners.id` would be bounded by the row's own `id` and
+    /// repeat a page. In a joined query the appended key is qualified with
+    /// the model's table, so the boundary never reads a joined table's
+    /// `id`; over a union it stays bare, as the union's derived table
+    /// knows no other name for it.
     fn cursor_orders(&self) -> Result<Vec<(String, bool)>, FrameworkError> {
-        let mut orders: Vec<(String, bool)> = if !self.orders.is_empty() {
-            self.orders
-                .iter()
-                .map(|order| match order {
-                    OrderTerm::Col(name, direction) => {
-                        crate::database::validate_identifier(name)?;
-                        Ok((name.clone(), matches!(direction, Direction::Asc)))
+        let pk = M::primary_key_name();
+        let mut orders: Vec<(String, bool)> = self
+            .orders
+            .iter()
+            .map(|order| match order {
+                OrderTerm::Col(name, direction) => {
+                    crate::database::validate_identifier(name)?;
+                    if Self::own_column(name).is_none() {
+                        return Err(FrameworkError::bad_request(format!(
+                            "Cursor pagination needs ordered columns of the model's table, \
+                             and `{name}` belongs to another table"
+                        )));
                     }
-                    _ => Err(FrameworkError::bad_request(
-                        "Cursor pagination needs ordered columns",
-                    )),
-                })
-                .collect::<Result<_, _>>()?
-        } else {
-            vec![(M::primary_key_name().to_string(), true)]
-        };
+                    Ok((name.clone(), matches!(direction, Direction::Asc)))
+                }
+                _ => Err(FrameworkError::bad_request(
+                    "Cursor pagination needs ordered columns",
+                )),
+            })
+            .collect::<Result<_, _>>()?;
         if !orders
             .iter()
-            .any(|(name, _)| name.rsplit('.').next() == Some(M::primary_key_name()))
+            .any(|(name, _)| Self::own_column(name) == Some(pk))
         {
-            orders.push((M::primary_key_name().to_string(), true));
+            let key = if self.joins.is_empty() || !self.unions.is_empty() {
+                pk.to_string()
+            } else {
+                format!("{}.{pk}", M::TABLE)
+            };
+            orders.push((key, true));
         }
         Ok(orders)
     }
 
+    /// The model's own column an ordering names, or `None` when it names
+    /// another table's. A bare name is the model's; a name qualified with
+    /// the model's table is that column. A name qualified with any other
+    /// table, a joined table or its alias, is not, even when the column
+    /// name matches one of the model's: `owners.id` is never the model's
+    /// `id`. The model's `bind_column` reads a qualified name the same way.
+    fn own_column(name: &str) -> Option<&str> {
+        match name.rsplit_once('.') {
+            Some((table, column)) if table == M::TABLE => Some(column),
+            Some(_) => None,
+            None => Some(name),
+        }
+    }
+
+    /// Encode `row`'s cursor in `direction`: one named boundary per entry
+    /// of `orders`, each read from the row's own column, the primary key
+    /// from the row's key.
     fn cursor_for_row(
         row: &M,
         orders: &[(String, bool)],
@@ -7080,7 +7147,11 @@ where
         let parameters = orders
             .iter()
             .map(|(name, _)| {
-                let column = name.rsplit('.').next().unwrap_or(name);
+                let column = Self::own_column(name).ok_or_else(|| {
+                    FrameworkError::internal(format!(
+                        "Cursor column `{name}` is not a column of the model's table"
+                    ))
+                })?;
                 let value = if column == pk {
                     row.primary_key_value().into()
                 } else {
