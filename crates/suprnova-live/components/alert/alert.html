@@ -1,0 +1,12 @@
+{#
+  suprnova.alert - a persistent contextual message (FDB-001). The role
+  follows the urgency of the variant: error is announced assertively, the
+  other variants politely. Every variant carries a glyph and a hidden
+  label besides its color tokens, so severity never rests on color alone.
+#}
+{% macro alert(id, variant="info", title="") %}
+<div class="sn-alert" id="{{ id }}" data-sn-variant="{{ variant }}" {% if variant == "error" %}role="alert"{% else %}role="status"{% endif %}>
+{% if variant == "info" %}<span class="sn-alert-icon" aria-hidden="true">i</span><span class="sn-alert-label">Information:</span>{% elif variant == "success" %}<span class="sn-alert-icon" aria-hidden="true">&#10003;</span><span class="sn-alert-label">Success:</span>{% elif variant == "warning" %}<span class="sn-alert-icon" aria-hidden="true">!</span><span class="sn-alert-label">Warning:</span>{% elif variant == "error" %}<span class="sn-alert-icon" aria-hidden="true">&#215;</span><span class="sn-alert-label">Error:</span>{% endif %}
+<div class="sn-alert-body">{% if title != "" %}<p class="sn-alert-title">{{ title }}</p>{% endif %}{{ caller() }}</div>
+</div>
+{% endmacro %}
