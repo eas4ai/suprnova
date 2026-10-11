@@ -268,8 +268,8 @@ That registers, in order: `InertiaHeadersMiddleware` (sets `Vary: X-Inertia`
 on every response and turns an empty `200` on an Inertia visit into a
 redirect back), `InertiaVersionMiddleware` (emits 409 + `X-Inertia-Location` on
 asset-version mismatch so stale clients reload), `Inertia303Middleware`
-(rewrites 302 → 303 on non-GET Inertia visits so the follow-up is
-unambiguously a GET), `InertiaErrorPageMiddleware` (hands the framework's
+(rewrites 302 → 303 on Inertia `PUT`, `PATCH` and `DELETE` visits so the
+follow-up is unambiguously a GET), `InertiaErrorPageMiddleware` (hands the framework's
 own error responses to your error callback or the configured error page,
 and changes nothing without either), and
 `InertiaValidationRedirectMiddleware` (turns a `422` on an Inertia visit
