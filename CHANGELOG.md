@@ -1519,7 +1519,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Whole-second zoned timestamps.** Postgres uses `timestamp(0) with time zone`
   by default, and SQLite declares `datetime` for zoned timestamp columns.
 - **Production seeding requires force.** `db:seed` returns an error in
-  production unless you pass `--force`.
+  production unless you pass `--force`; `suprnova db:seed --force` passes
+  the flag through to the console binary.
 - **Console test assertions check every expectation.**
   `ConsoleRun::assert_successful` fails on a prepared question the command did
   not ask and on every unmet output expectation, which `unmet_expectations()`
@@ -3019,6 +3020,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   granted `network` could rewrite every request the application makes or
   swap a driver for every caller (REG-030). The generator refuses them by
   name, and the embedded allowlist carries the refusal.
+- **Every Live and Magnetar type a public signature leads to is named
+  through `suprnova`.** A public signature of `suprnova`, or of an engine
+  item it re-exports, names only types an application can write down; 330
+  of them had no `suprnova` path. `suprnova::live` re-exports the 212 Live
+  engine types those signatures lead to: the typed identities, input limits,
+  upload inspection, finalize evidence and field policy, the host context,
+  component hooks and child composition, snapshot schemas, model state and
+  proposals, the update protocol, the asynchronous stream contracts and the
+  mount failure, with the engine registry's error kind as
+  `EngineRegistryErrorKind`; `suprnova::live::action` the action table, its
+  dispatch and the registered emissions; `suprnova::live::metadata` the
+  component, field, action, event and effect metadata;
+  `suprnova::live::validation` `ValidationBagError` and
+  `ValidationSelection`; and `suprnova::render_cache` the render key input
+  and variance, `Generation`, `QueryUnknown`, `ResponseSignals` and the
+  snapshot key ring. The 118 Magnetar types are re-exported under
+  `suprnova::magnetar_integration`: the factor gate, sessions, schema,
+  storage, password verifier and lockout, passkey ceremony, lifecycle event,
+  first email proof and two-factor types, and with `magnetar-oauth` the
+  OAuth ceremony, error and verified identity types, the broker error and
+  Apple's ID token claims. The Live engine exports `ValidationBagError`,
+  which `ErrorBag::from_issues` and `ValidationMessageId::parse` return.
 
 ## 3.2.1 - 2026-10-05
 

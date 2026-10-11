@@ -24,10 +24,13 @@ login, registration, and protected routes work the day you run
 
 Framework guard/provider code lives in `framework/src/auth/`. The Magnetar host
 adapters and facades live in `framework/src/magnetar_integration/`; the engine
-crate lives in `crates/suprnova-magnetar/`. Higher-level email verification,
-password reset, lockout, and TOTP flows live in `framework/src/auth_flows/` and
-are covered by [Auth flows](auth-flows.md). OAuth, Apple, and magic-link login
-are covered by [OAuth and passwordless login](oauth.md).
+crate lives in `crates/suprnova-magnetar/`. An application never depends on
+that crate: every Magnetar type a public signature of the framework names is
+re-exported under `suprnova::magnetar_integration`. Higher-level email
+verification, password reset, lockout, and TOTP flows live in
+`framework/src/auth_flows/` and are covered by [Auth flows](auth-flows.md).
+OAuth, Apple, and magic-link login are covered by
+[OAuth and passwordless login](oauth.md).
 
 ## Identifier model
 

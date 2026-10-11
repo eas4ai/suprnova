@@ -327,11 +327,13 @@ the one you name:
 suprnova db:seed
 suprnova db:seed UsersSeeder
 suprnova db:seed --class=UsersSeeder
+suprnova db:seed --force
 ```
 
 The CLI runs `cargo run --quiet --bin console -- db:seed` and passes the name
-as `--class=<name>`. It does not check the name: your `console` binary owns the
-seeder registry and reports an unknown seeder. The seeder registry, ordering
+as `--class=<name>` and `--force` as typed. It does not check the name: your
+`console` binary owns the seeder registry and reports an unknown seeder, and
+it is the one that refuses a production seed without `--force`. The seeder registry, ordering
 rules, and the `--class` matching are covered in [Seeding](seeding.md). The
 framework ships `db:seed` as a built-in console command, so your scaffold gets
 it without any wiring on your side. You can also run it with
@@ -348,7 +350,7 @@ it without any wiring on your side. You can also run it with
 | `suprnova migrate:fresh` | Drop all tables and re-run every migration |
 | `suprnova schema:dump [--path <file>] [--prune] [--database <name>] [--without-migration-data]` | Write the schema and migration ledger to a dump file |
 | `suprnova db:sync [--skip-migrations] [--regenerate-models]` | Regenerate SeaORM entities from the live schema |
-| `suprnova db:seed [<seeder>]` | Run registered seeders, through the per-project `console` binary |
+| `suprnova db:seed [<seeder>] [--force]` | Run registered seeders, through the per-project `console` binary; `--force` for a production database |
 
 ## Next
 
