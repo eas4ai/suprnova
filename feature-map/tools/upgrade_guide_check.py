@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check a release's upgrade chapter against its changelog section (MAN-108).
 
-Usage: upgrade_guide_check.py <version> [<repo root>]
+Usage: upgrade_guide_check.py <version>|--newest [<repo root>]
 
-Reads the `## <version> - <date>` section of CHANGELOG.md and the chapter
+Reads the `## <version> - <date>` section of CHANGELOG.md (`--newest`: the
+first such section, the release being prepared) and the chapter
 manual/upgrade-<major>.<minor>.md. Every entry under `### Changed` and
 `### Removed` in that section, identified by its bold lead sentence, must
 head a section of the chapter (`### <lead>` or deeper), and the chapter
@@ -15,6 +16,14 @@ entry is the heading to search for in the chapter.
 import re
 import sys
 from pathlib import Path
+
+
+def newest_version(changelog: str) -> str:
+    """The version of the changelog's first release section."""
+    match = re.search(r"^## (\d+\.\d+\.\d+) - \S+\s*$", changelog, re.M)
+    if not match:
+        raise SystemExit("CHANGELOG.md has no release section")
+    return match.group(1)
 
 
 def release_section(changelog: str, version: str) -> str:
@@ -68,9 +77,11 @@ def main() -> int:
         return 2
     version = sys.argv[1]
     root = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).resolve().parents[2]
+    changelog = (root / "CHANGELOG.md").read_text()
+    if version == "--newest":
+        version = newest_version(changelog)
     major_minor = ".".join(version.split(".")[:2])
     chapter_path = root / "manual" / f"upgrade-{major_minor}.md"
-    changelog = (root / "CHANGELOG.md").read_text()
     section = release_section(changelog, version)
     leads = bold_leads(section, ("Changed", "Removed"))
     problems: list[str] = []

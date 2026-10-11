@@ -38,9 +38,11 @@ WRAPPED_LEAD = (
 )
 
 
-def run(root: Path) -> subprocess.CompletedProcess:
+def run(root: Path, *version: str) -> subprocess.CompletedProcess:
+    """Run the tool against `root`, for `version` or, with none given, the
+    changelog's newest section."""
     return subprocess.run(
-        [sys.executable, str(TOOL), "4.0.0", str(root)],
+        [sys.executable, str(TOOL), *(version or ("4.0.0",)), str(root)],
         capture_output=True,
         text=True,
     )
@@ -53,6 +55,17 @@ def write_repo(root: Path, chapter: str) -> None:
         "- [Upgrading to 4.0](upgrade-4.0.md)\n"
     )
     (root / "manual" / "upgrade-4.0.md").write_text(chapter)
+
+
+class NewestSection(unittest.TestCase):
+    def test_without_a_version_the_newest_changelog_section_is_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, "# Upgrading to 4.0\n\n### Typed factory counts.\n\nText.\n")
+            result = run(root, "--newest", str(root))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("upgrade guide for 4.0.0:", result.stdout)
+        self.assertIn("1 of 2 entries covered", result.stdout)
 
 
 class WrappedLeads(unittest.TestCase):
