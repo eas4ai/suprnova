@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-reexport-chain",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
