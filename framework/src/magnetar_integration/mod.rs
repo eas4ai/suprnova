@@ -36,6 +36,125 @@ pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 pub use engine::MagnetarFactorAuthEngine;
 pub use sign_in::{Registration, SignInOutcome};
 
+// The Magnetar types the public signatures of this module's engines name,
+// and the types those name in turn. An application reaches Magnetar only
+// through the framework, so each is re-exported here.
+
+/// The factor gate every sign-in passes through and what it reads and
+/// answers: the gate contract and its opaque-session implementation, the
+/// host-owned second-factor verifier and the proof it prepares, the verified
+/// principal with its authentication context and sign-in method, and the
+/// gate's decision. A [`MagnetarHostEngine`](engine::MagnetarHostEngine) and
+/// its [`MagnetarHostEngineParts`](engine::MagnetarHostEngineParts) hand them
+/// to an application.
+pub use magnetar::auth::{
+    AuthenticationContext, FactorGate, FactorVerifier, OpaqueFactorGate, PreparedFactorProof,
+    SignInDecision, SignInMethod, VerifiedPrincipal,
+};
+/// The token broker's terminal or retriable failure, which Magnetar's error
+/// carries.
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar::broker::BrokerError;
+/// The encryption boundary Magnetar features use and the purpose a value is
+/// encrypted for, which a
+/// [`MagnetarHostEngineParts`](engine::MagnetarHostEngineParts) holds.
+pub use magnetar::crypto::{CryptoPurpose, Encryptor};
+/// The host-owned store that applies a first mailbox proof atomically, and
+/// the mutations, outcomes and commits it works with, which a
+/// [`MagnetarHostEngineParts`](engine::MagnetarHostEngineParts) holds.
+pub use magnetar::first_email_proof::{
+    FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
+    FirstEmailProofStore, NewVerifiedProviderAccount, VerifiedProviderAccountCommit,
+};
+/// How an OAuth ceremony is bound to its caller and what the caller intends,
+/// which a [`MagnetarOAuthBegin`](engine::MagnetarOAuthBegin) carries; the
+/// identity a provider verified, which a
+/// [`MagnetarHostOAuthEngine`](engine::MagnetarHostOAuthEngine) returns; and
+/// the status class and redacted trace context an OAuth protocol error
+/// reports.
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar::oauth::{
+    CeremonyBinding, OAuthErrorClass, OAuthErrorTraceContext, OAuthIntent, VerifiedProviderIdentity,
+};
+/// The wire halves of a begun passkey registration and authentication, and
+/// the intent a registration begins with, which a
+/// [`MagnetarPasskeyAuthEngine`](engine::MagnetarPasskeyAuthEngine) takes and
+/// returns.
+pub use magnetar::passkey::{BegunAuthentication, BegunRegistration, RegistrationIntent};
+/// The lockout configuration a [`MagnetarConfig`] carries and its policy for
+/// a storage backend that fails, and the reservation token a
+/// [`LockoutAdmission`](engine::LockoutAdmission) holds.
+pub use magnetar::password::{AttemptReservationToken, BackendErrorPolicy, LockoutConfig};
+/// Magnetar's password verifier and the hash work it drives: the verifier a
+/// [`MagnetarHostEngineParts`](engine::MagnetarHostEngineParts) holds, its
+/// hash configuration, driver and migration target, the work profile,
+/// algorithm and parameters of each call, and the verdict and rehash outcome
+/// of an attempt.
+pub use magnetar::password::{
+    AttemptVerdict, CallProvenance, HashAlgorithm, HashParameters, HashWorkProfile,
+    PasswordHashConfig, PasswordHashDriver, PasswordTarget, PasswordVerifier, RehashOutcome,
+    VerificationCall,
+};
+/// The lifecycle event Magnetar emits after a commit and its kind, which a
+/// [`MagnetarLifecycleEvent`](engine::MagnetarLifecycleEvent) is built from,
+/// and a plugin's failure, which Magnetar's error carries.
+pub use magnetar::plugin::{LifecycleEvent, LifecycleEventKind, PluginError};
+/// The claims Apple's verified ID token carries, which an Apple public key
+/// source's `verify` returns.
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar::plugins::oauth_apple::AppleClaims;
+/// The password provider contract and what it takes and returns: one sign-in
+/// attempt, a registration's input and outcome, and the rehash report of a
+/// successful sign-in. A [`MagnetarHostEngine`](engine::MagnetarHostEngine)
+/// hands them to an application.
+pub use magnetar::plugins::password::{
+    PasswordAttempt, PasswordAuthProvider, RegisterInput, RegistrationOutcome, RehashReport,
+};
+/// The outcome of one completed password reset, which a
+/// [`MagnetarPasswordAuthEngine`](engine::MagnetarPasswordAuthEngine)
+/// returns.
+pub use magnetar::plugins::password_management::PasswordResetFlowOutcome;
+/// The application-owned schema Magnetar's storage reads and writes: the
+/// schema contract and its token broker extension, the binding of each
+/// entity, and the fields each table exposes. A
+/// [`MagnetarAuthStore`](engine::MagnetarAuthStore) and a
+/// [`MagnetarBinding`](engine::MagnetarBinding) name them.
+pub use magnetar::schema::{
+    AuthSchema, BrokerSchema, CeremonyFields, EntityBinding, LinkedAccountFields, LockoutFields,
+    PasskeyFields, ProviderTokenFields, SessionEpoch, SessionFields, TokenFields, UserFields,
+    UserOptionalFields,
+};
+/// Magnetar's sessions: the opaque session provider, its store and
+/// configuration, the grant an issuance returns with its bearer and web
+/// bindings, the verified session and its carrier, the metadata and summary
+/// of a session, the host approval a web binding is resolved with, the
+/// remember-me credential and row, and the epoch store JWT sessions read. A
+/// [`MagnetarHostEngine`](engine::MagnetarHostEngine) and the
+/// [`MagnetarFactorAuthEngine`] contract hand them to an application.
+pub use magnetar::sessions::{
+    BearerSession, HostSessionApproval, JwtEpochStore, OpaqueConfig, OpaqueSessionProvider,
+    OpaqueSessionStore, RememberCredential, RememberPostRotationDisposition, RememberRow,
+    SessionCarrier, SessionGrant, SessionMetadata, SessionQueries, SessionSummary, StoredSession,
+    VerifiedSession, WebSessionBinding,
+};
+/// Magnetar's storage over the application's schema: the SeaORM storage a
+/// [`MagnetarAuthStore`](engine::MagnetarAuthStore) returns, the store
+/// contracts it implements, and the records, inputs and outcomes their
+/// methods take and return.
+pub use magnetar::storage::{
+    AttemptFinalization, AttemptReservation, AttemptStats, AuthTransaction, CeremonyRecord,
+    CeremonyRef, CeremonyStore, CommitProviderToken, ConsumedToken, CredentialActor, DeviceRecord,
+    DeviceStore, IssueToken, IssuedToken, LinkedAccountInitializer, LinkedAccountRecord,
+    LinkedAccountStore, LockoutStore, MethodStore, NewCeremony, NewLinkedAccount, NewProviderToken,
+    NewUser, PasskeyRow, PasskeyStore, PasswordResetCommit, PasswordResetInput, PasswordResetStore,
+    PresentedToken, ProviderTokenRow, ProviderTokenStore, SeaOrmStorage, TokenStore,
+    TransitionAndConsume, UserRecord, UserStore,
+};
+/// The two-factor configuration a [`MagnetarConfig`] carries, and the
+/// contract of a second factor kept outside the TOTP service, which
+/// [`FrameworkTotpEnrollment`](engine::FrameworkTotpEnrollment) implements.
+pub use magnetar::two_factor::{OtherSecondFactor, TwoFactorConfig};
+
 /// Completion facade for factor challenges returned by Magnetar sign-in providers.
 pub struct FactorAuth;
 

@@ -66,16 +66,34 @@ pub use config::{
 pub use file_store::SweepOutcome;
 pub use middleware::{RenderCacheMiddleware, RenderCacheRuntime};
 pub use providers::{RedisRenderStore, SqlRenderStore};
+/// The snapshot key ring [`RenderKey::derive`] and a private variance
+/// dimension's material are derived with: its key records and root key
+/// material, the purpose a MAC key is derived for, the signed MAC and the
+/// signature the ring produces, and the failure, with its closed reason, a
+/// key reports.
+pub use suprnova_live::crypto::{
+    KeyError, KeyErrorKind, KeyRecord, RootKey, SignedMac, SnapshotKeyRing, SnapshotPurpose,
+    SnapshotSignature,
+};
 /// How a render consulted authorization, as
 /// [`CollectedContext::authorization`](crate::render_cache::collector::CollectedContext::authorization)
 /// reports it.
 pub use suprnova_live::render_cache::AuthorizationConsult;
+/// A dependency's version, which a [`GenerationSet`] reads and records.
+pub use suprnova_live::render_cache::Generation;
 pub use suprnova_live::render_cache::entry::{EntryInspection, EntryKind};
 pub use suprnova_live::render_cache::generation::DependencyIdentity;
 pub use suprnova_live::render_cache::{
     CoherenceMode, DeclineReason, Eligibility, FreshnessPolicy, NegotiatedPolicy, PolicyPatch,
     QueryPolicy, RenderCachePolicy, RenderCachePolicyBuilder, RepresentationClass,
     SharedCachePolicy, StorageLayers, VarianceDimension,
+};
+/// What [`RenderKey::derive`] derives a key from: everything that
+/// identifies one representation, its declared variance, each dimension's
+/// normalized value and the private key material a private dimension
+/// carries.
+pub use suprnova_live::render_cache::{
+    DimensionValue, PrivateMaterial, RenderKeyInput, VarianceDescriptor,
 };
 /// The generation ledger contract
 /// [`SqlGenerationLedger`](crate::render_cache::ledger::SqlGenerationLedger)
@@ -85,6 +103,10 @@ pub use suprnova_live::render_cache::{GenerationLedger, GenerationSet};
 /// [`providers`] implement, and what an
 /// acquisition attempt answers.
 pub use suprnova_live::render_cache::{LeaseAttempt, LeaseStore};
+/// What an undeclared query parameter does to a lookup, as
+/// [`QueryPolicy::unknown`] reports, and the safety signals of one response
+/// that [`RenderCachePolicy::eligibility`] reads.
+pub use suprnova_live::render_cache::{QueryUnknown, ResponseSignals};
 /// The failure every RenderCache contract reports, and its closed
 /// category.
 pub use suprnova_live::render_cache::{RenderCacheError, RenderCacheErrorKind};
