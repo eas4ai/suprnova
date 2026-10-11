@@ -106,9 +106,9 @@ pub const ADMITTED_GLOBALS: &[&str] = &[
 ];
 
 /// The global object under its names. A script may use one only to read
-/// an admitted global from it, to write a global of its own, or in a
-/// `typeof` or comparison, so the global object never reaches a variable
-/// through which an unlisted global could be read.
+/// an admitted global from it or in a `typeof` or comparison, so the
+/// global object never reaches a variable through which an unlisted global
+/// could be read. A write to a member of it is refused, whatever the name.
 pub const GLOBAL_OBJECTS: &[&str] = &["window", "self", "globalThis"];
 
 /// The globals that hold the page itself: its document, its URL and its
