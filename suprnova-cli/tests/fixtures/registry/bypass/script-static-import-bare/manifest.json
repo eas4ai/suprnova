@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-static-import-bare",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
