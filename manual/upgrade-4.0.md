@@ -2027,8 +2027,9 @@ suprnova generate-types
 
 ### The project file is `suprnova.toml`, all lowercase.
 
-**Before:** `suprnova serve` read its extra dev processes from
-`Suprnova.toml`; `live:add` read no project file.
+**Before:** `suprnova serve` read its extra dev processes from the file
+`Suprnova.toml` that 4.0.0 asks you to rename; `live:add` read no project
+file.
 
 **Now:** They read `suprnova.toml`, and refuse to run while a
 `Suprnova.toml` exists, naming the rename.
@@ -2036,7 +2037,7 @@ suprnova generate-types
 **Do:**
 
 ```bash
-git mv Suprnova.toml suprnova.toml
+git mv Suprnova.toml suprnova.toml  # the rename
 ```
 
 ### `suprnova new` ships a root template in place of `frontend/index.html`.
