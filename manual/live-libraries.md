@@ -538,6 +538,14 @@ that has no effects. The scan refuses:
   `Cache::set_connection`, the `install` of a service, the test container
   and the test clock. Each changes what every other caller in the process
   sees, which is the application's to decide, not a component's.
+- The engine surfaces the framework holds for the host: the host ports a
+  bootstrap installs (`HostCapabilities` and the action, subscription and
+  upload authorization, continuity, credential and registry ports), the
+  trusted contexts and fingerprints the engine mints, the snapshot key
+  material, the wire protocol and proposal application, and the component
+  hooks the macros implement. A component names what the engine hands it:
+  identities, limits, errors, upload inspection results, metadata and
+  payload contracts. Magnetar's types are refused as a module.
 
 Each capability the admitted paths carry goes into the plan. Resolving a
 trait your own library defines carries none, because the application binds
