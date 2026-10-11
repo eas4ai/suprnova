@@ -55,11 +55,11 @@ pub type ProviderIdentity = VerifiedProviderIdentity;
 /// `device_authorization_endpoint`/`device_token_endpoint` exist for a
 /// first-party provider that itself exposes an RFC 8628 device-authorization
 /// grant this engine would call into as a *client*. None of this crate's
-/// five dossiers do. Magnetar's own device-authorization endpoints -- this
-/// crate acting as the authorization *server*, per
-/// [`crate::oauth::device`] -- are configured through
-/// [`crate::oauth::device::DeviceAuthorizationConfig`] instead, since the
-/// engine serves those rather than calling them.
+/// five dossiers do. Magnetar's own device-authorization endpoints, this
+/// crate acting as the authorization *server* through the `oauth::device`
+/// module of the `device-authorization` feature, are configured through
+/// that module's `DeviceAuthorizationConfig` instead, since the engine
+/// serves those rather than calling them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EndpointOverrides {
     /// Overrides [`OAuthProvider::authorization_endpoint`].
