@@ -906,8 +906,9 @@ Name it on a model field:
 Writes `src/broadcasting/<snake>.rs`, a private
 [broadcast channel](broadcasting.md#channels) and who may join it. The
 channel name is the type's words without `Channel`, joined by dots:
-`OrderUpdates` is `order.updates`. Its `authorize` admits a subscriber the
-session authenticated on the WebSocket upgrade.
+`OrderUpdates` is `order.updates`. Its `authorize` denies every subscriber
+until you write the rule, as Laravel's channel stub does; `req.auth_user_id()`
+names the user the session authenticated on the WebSocket upgrade.
 
 ```bash
 suprnova make:channel OrderUpdates
@@ -928,8 +929,8 @@ impl Channel for OrderUpdates {
         "order.updates"
     }
 
-    async fn authorize(&self, req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
-        req.auth_user_id().is_some()
+    async fn authorize(&self, _req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
+        false
     }
 }
 
