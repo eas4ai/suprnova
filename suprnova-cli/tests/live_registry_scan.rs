@@ -111,6 +111,58 @@ fn reg_030_the_allowlist_matches_a_fresh_generation_from_the_feature_map() {
     );
 }
 
+/// REG-030: a test fake, an app-wide hook or an install is refused whatever
+/// capability the facade's chapter grants, because each changes what every
+/// other caller in the process sees: a fake swaps a facade's driver, a
+/// global HTTP hook rewrites every request the application makes, an
+/// install or `set_driver` rebinds a service, and the test container and
+/// clock replace the container and the time for everyone.
+#[test]
+fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    for path in [
+        "suprnova::Http::fake",
+        "suprnova::Http::fake_using",
+        "suprnova::Http::fake_url",
+        "suprnova::Http::fake_sequence",
+        "suprnova::Http::allow_stray_requests",
+        "suprnova::Http::prevent_stray_requests",
+        "suprnova::Http::global_options",
+        "suprnova::Http::global_request_middleware",
+        "suprnova::Http::global_response_middleware",
+        "suprnova::FakeHandler::Callback",
+        "suprnova::FakeSequence::push",
+        "suprnova::Queue::fake",
+        "suprnova::Queue::set_driver",
+        "suprnova::Mail::fake",
+        "suprnova::Storage::fake",
+        "suprnova::Bus::fake",
+        "suprnova::EventFacade::fake",
+        "suprnova::Process::fake",
+        "suprnova::ProcessFake::when",
+        "suprnova::Cache::set_connection",
+        "suprnova::RenderCache::install",
+        "suprnova::SessionMiddleware::install",
+        "suprnova::testing::TestContainer::fake",
+        "suprnova::testing::TestClock::travel_to",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused; got {:?}",
+            list.admit(path)
+        );
+    }
+    // The facades' ordinary API keeps its capability.
+    assert_eq!(
+        capability_of(list, "suprnova::Http::get"),
+        Some(Capability::Network)
+    );
+    assert_eq!(
+        capability_of(list, "suprnova::Queue::push"),
+        Some(Capability::Queue)
+    );
+}
+
 fn capability_of(list: &Allowlist, path: &str) -> Option<Capability> {
     match list.admit(path) {
         Some(Admission::Item { item, .. }) | Some(Admission::Prefix { item, .. }) => {
