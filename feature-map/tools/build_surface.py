@@ -322,7 +322,7 @@ EXCL.write_text(json.dumps(excluded, indent=1, sort_keys=True) + "\n")
     "source_paths": ["framework", "crates", "suprnova-cli", "suprnova-macros", "Cargo.toml",
                      ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
                      ":(exclude)framework/tests", ":(exclude)suprnova-cli/tests",
-                     ":(exclude,glob)crates/*/tests/**"],
+                     ":(exclude,glob)crates/*/tests/**", ":(exclude,glob)**/*.md"],
 }, indent=1, sort_keys=True) + "\n")
 print(json.dumps({"raw": raw_count, "folded_reexports": raw_count - len(out), "records": len(out),
                   "chapters": len({r["chapter"] for r in out if not r["chapter"].startswith("(")}),

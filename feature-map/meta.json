@@ -9,7 +9,8 @@
   ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
   ":(exclude)framework/tests",
   ":(exclude)suprnova-cli/tests",
-  ":(exclude,glob)crates/*/tests/**"
+  ":(exclude,glob)crates/*/tests/**",
+  ":(exclude,glob)**/*.md"
  ],
  "source_rev": "00d0a6bb1"
 }
