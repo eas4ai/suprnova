@@ -101,9 +101,9 @@ src/
 └── …
 ```
 
-Generate the file by hand - there is no `make:seeder` generator (this is a
-file with about ten lines of boilerplate). The factories the seeder calls
-into get the same treatment.
+`suprnova make:seeder Users` writes `src/seeders/users_seeder.rs` and declares
+it in `src/seeders/mod.rs`, and `suprnova make:factory User` does the same for
+the factory the seeder calls. See [Code Generators](cli-generators.md).
 
 ### A seeder that runs other seeders
 

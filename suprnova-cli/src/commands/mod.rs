@@ -21,6 +21,7 @@ pub mod make_error;
 pub mod make_inertia;
 pub mod make_middleware;
 pub mod make_migration;
+pub mod make_stub;
 pub mod make_task;
 pub mod make_view;
 pub mod migrate;
