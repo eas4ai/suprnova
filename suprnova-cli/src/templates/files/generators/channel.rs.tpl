@@ -17,11 +17,11 @@ impl Channel for {name} {
         "{channel}"
     }
 
-    /// Whether the request may join the channel. This admits a subscriber
-    /// the session authenticated on the WebSocket upgrade; check that the
-    /// user may see what the channel carries.
-    async fn authorize(&self, req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
-        req.auth_user_id().is_some()
+    /// Whether the request may join the channel. Nobody may until you write
+    /// the rule, as Laravel's channel stub denies by default: check that the
+    /// user `req.auth_user_id()` names may see what the channel carries.
+    async fn authorize(&self, _req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
+        false
     }
 }
 

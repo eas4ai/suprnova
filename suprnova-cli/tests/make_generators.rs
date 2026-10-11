@@ -242,22 +242,25 @@ fn make_cast_writes_a_pass_through_cast() {
 }
 
 #[test]
-fn make_channel_writes_a_private_channel_that_authorizes_the_session_user() {
-    generates(
+fn make_channel_writes_a_private_channel_that_denies_until_written() {
+    let (_tmp, source) = generates(
         &["make:channel", "OrderUpdates"],
         "src/broadcasting/order_updates.rs",
         &[
             "pub struct OrderUpdates;",
             "impl Channel for OrderUpdates {",
             "\"order.updates\"",
-            "async fn authorize(",
-            "req.auth_user_id().is_some()",
+            "async fn authorize(&self, _req: &Request, _params: &ChannelParams, _data: &Value) -> bool {\n        false\n    }",
             "impl PrivateChannel for OrderUpdates {}",
         ],
         &[
             ("src/lib.rs", "pub mod broadcasting;"),
             ("src/broadcasting/mod.rs", "pub mod order_updates;"),
         ],
+    );
+    assert!(
+        !source.contains("auth_user_id().is_some()"),
+        "the stub admits nobody on its own:\n{source}"
     );
 }
 
