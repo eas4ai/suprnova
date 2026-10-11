@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: backlog-defects-round
+Current: release-4-0-0
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1036,6 +1036,43 @@ Requirements: MAN-002, PAR-017, PAR-048, PAR-049, PAR-052, PAR-055, PAR-056, PAR
    for `par-laravel-gaps-infra`, beside the public API test. Done when
    every requirement above has a current pass on a committed tree and the
    review is recorded.
+
+## release-4-0-0
+
+Requirements: MAN-002, MAN-108
+
+52. release-4-0-0 - the 4.0.0 release, after the backlog defects round,
+   under the developer's words of 2026-10-09 13:06 and 13:07 ("next
+   release is 4.0.0", "an upgrade guide (humans and agents) for 4.0.0 is
+   the LAST task before the release") and of 2026-10-10 16:09 ("ok" to
+   rewording PAR-042 and PAR-083 to the typed request, applied at this
+   spec phase). Delivery: the upgrade chapter `manual/upgrade-4.0.md`,
+   linked from the documentation index, with a section for every
+   `### Changed` and `### Removed` entry of the 4.0.0 changelog section and
+   for the `### Fixed` entries the release notes name as behaviour
+   changes, each with what an application observed before, what it
+   observes now and the edit to make, checked by
+   `feature-map/tools/upgrade_guide_check.py` under the `upgrade-guide`
+   mechanism (MAN-108), which the release gate runs; the backlog item
+   magnetar-engine-types-not-nameable-from-the-crate-root (item
+   01a98725846b, from MAN-002): the Magnetar types public signatures name
+   re-exported through `suprnova` with the live binary's public-signature
+   walk covering them; the feature map filed completely (the ten records
+   with no chapter rule, `app ssr:check`, `app ssr:start`, `app ssr:stop`,
+   `console concurrency:run`, `suprnova::AsBsonDateTime`,
+   `suprnova::AsDecimal128`, `suprnova::BelongsToDocument`,
+   `suprnova::BelongsToManyDocuments`, `suprnova::BelongsToModel` and
+   `suprnova::Concurrency`, get their rules in
+   `feature-map/tools/build_surface.py`) and regenerated at the final
+   source commit with the component allowlist, so the manual check runs at
+   the gate (MAN-002); the release build `cargo build --release --locked
+   -p app --bins`. Mechanisms: manual-check (MAN-002), upgrade-guide
+   (MAN-108, declared in this phase with a violating example), and the
+   live binary under par-laravel-gaps-infra through PAR-133 for the
+   Magnetar walk. Done when both requirements have a current pass on a
+   committed tree and the review is recorded; the tag v4.0.0 then follows
+   through `scripts/release.sh`, which runs the whole gate, on a pushed
+   main.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

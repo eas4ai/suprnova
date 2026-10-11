@@ -758,11 +758,15 @@ Status: Agreed 2026-10-04
 this order: `prepare_for_validation`, which MAY change the input before
 anything reads it; `authorize`, before the body is validated; extraction
 with its field validation (PAR-043 for multipart); `after_validation`;
-`after_validation_async`; the handler. On a real request the two hooks
-MUST run after the derived stage whether or not it reported errors, and
-their errors MUST be merged with the rule errors into one answer, as
-Laravel's `after` hooks run alongside the rules; on a marked request
-PAR-083 governs what runs. `MultipartRequestHooks` MUST offer
+`after_validation_async`; the handler. The two hooks take the typed
+request, so on a real request they MUST run once the typed value is built,
+whether or not the derived stage reported errors, and their errors MUST be
+merged with the rule errors into one answer, as Laravel's `after` hooks run
+alongside the rules; when a required scalar field is missing or does not
+parse, no typed value exists, the hooks do not run, and the 422 MUST carry
+the parse errors alone (Laravel's untyped hooks run on that request too; the
+typed request is the design, the developer, 2026-10-10 16:09). On a marked
+request PAR-083 governs what runs. `MultipartRequestHooks` MUST offer
 `after_validation_async`, whose default succeeds. A non-empty
 `ValidationErrors` MUST answer as a validation failure: a 422 whose body
 holds `errors` for a request that accepts JSON or sends an Inertia visit,
@@ -771,10 +775,10 @@ validation middleware; and for a request whose `Accept` prefers
 `text/html` without `X-Inertia`, a plain HTML form, a redirect back with
 the errors and the input flashed to the session, as Laravel redirects a
 failed form post. An empty set of errors counts as success.
-Falsifier: a multipart request whose `after_validation_async` returns an error reaches its handler, answers anything but a 422 with that field's error in `errors`, or through Inertia does not redirect back with it in `props.errors`; a stage runs after an earlier one failed, the async hook before the sync one, `authorize` after the body was read, or `prepare_for_validation` after `authorize`; a `prepare_for_validation` that lower-cases `email` leaves the handler or the rules with the original case; on a real request whose `email` rule fails, an `after_validation` error on `name` is missing from the 422; a classic form post with `Accept: text/html` and no `X-Inertia` answers a 422 instead of a redirect back, or redirects without the errors and the old input in the session; or an empty error set fails the request.
+Falsifier: a multipart request whose `after_validation_async` returns an error reaches its handler, answers anything but a 422 with that field's error in `errors`, or through Inertia does not redirect back with it in `props.errors`; a stage runs after an earlier one failed, the async hook before the sync one, `authorize` after the body was read, or `prepare_for_validation` after `authorize`; a `prepare_for_validation` that lower-cases `email` leaves the handler or the rules with the original case; on a real request whose `email` rule fails on a value that parses, an `after_validation` error on `name` is missing from the 422; a request whose required `age` is missing or reads `abc` answers anything but a 422 carrying that parse error, or runs a hook; a classic form post with `Accept: text/html` and no `X-Inertia` answers a 422 instead of a redirect back, or redirects without the errors and the old input in the session; or an empty error set fails the request.
 Mechanism: `par-multipart-validation`.
-Rationale: Issue #139 and row 042 of the parity log: Laravel's `FormRequest::prepareForValidation` runs before `passesAuthorization`, its `after` hooks run alongside the rules, and `failedValidation` redirects a non-JSON request back with the errors and input; the 303 for every Inertia method stays, since browsers follow it like Laravel's 302.
-Status: Agreed 2026-10-08
+Rationale: Issue #139 and row 042 of the parity log: Laravel's `FormRequest::prepareForValidation` runs before `passesAuthorization`, its `after` hooks run alongside the rules, and `failedValidation` redirects a non-JSON request back with the errors and input; the 303 for every Inertia method stays, since browsers follow it like Laravel's 302. The hooks need the typed value because they take `&self`; running them over a partial request would need a second, raw-input hook, which the developer left for a later version.
+Status: Agreed 2026-10-10
 
 [PAR-043] A multipart extraction failure that belongs to one field MUST
 answer as `ValidationErrors` under the field's form input name, the
@@ -1543,20 +1547,27 @@ Rationale: Rows 021, 022, 026 and 027 of the Precognition group; Laravel's `Prec
 Status: Agreed 2026-10-08
 
 [PAR-083] `Precognition-Validate-Only` MUST narrow the rules that run, not
-the errors reported: on a marked request only the listed fields' rules run
-through every stage (the derived rules, the synchronous hook and the
-asynchronous hook), so a listed field's database rule runs even when an
-unlisted field fails or does not parse; a listed name MUST match a field
-exactly, `*` standing for one non-empty segment (`tags.*` covers `tags.3`,
-`tags` does not); an empty header value MUST validate nothing and answer
-`204`; errors an after-validation hook adds MUST never be filtered, so any
-hook error answers `422`; and `Request::validate_only()` MUST expose the
-parsed list with `Request::should_validate(field)` applying the match, so
-a handler or rule can narrow its own checks.
-Falsifier: a listed field whose asynchronous rule fails answers `204` because an unlisted field failed an earlier stage; a parse failure on an unlisted field answers `422` for a request whose listed fields parse and pass; `tags` in the list keeps an error on `tags.3`, or `tags.*` drops one; an empty `Precognition-Validate-Only` answers `422` with every error; a hook error is dropped by the list; `should_validate("tags.3")` disagrees with the match the server applied.
+the errors reported: on a marked request the two hooks run their checks
+for the listed fields only, and the derived stage's errors are kept for the
+listed fields only, so a listed field's database rule runs even when an
+unlisted field fails; the derived stage is the derive over the whole typed
+struct, so an unlisted field's pure derived predicate still runs with its
+result dropped. An unlisted field whose type parses a string itself (a
+date, an address) and whose value does not parse accepts no placeholder,
+so its own parse error MUST answer `422` with the Precognition headers even
+when unlisted, never a `500` and never a false `204` (Laravel skips an
+unlisted field entirely; the typed request is the design, the developer,
+2026-10-10 16:09). A listed name MUST match a field exactly, `*` standing
+for one non-empty segment (`tags.*` covers `tags.3`, `tags` does not); an
+empty header value MUST validate nothing and answer `204`; errors an
+after-validation hook adds MUST never be filtered, so any hook error
+answers `422`; and `Request::validate_only()` MUST expose the parsed list
+with `Request::should_validate(field)` applying the match, so a handler or
+rule can narrow its own checks.
+Falsifier: a listed field whose asynchronous rule fails answers `204` because an unlisted field failed an earlier stage; an unlisted field whose derived predicate fails on a value that parses puts an error in the answer; an unlisted date field holding `not-a-date` answers `204`, `500`, or a `422` without the Precognition headers or without that field's parse error; `tags` in the list keeps an error on `tags.3`, or `tags.*` drops one; an empty `Precognition-Validate-Only` answers `422` with every error; a hook error is dropped by the list; `should_validate("tags.3")` disagrees with the match the server applied.
 Mechanism: `par-precognition`.
-Rationale: Rows 012, 013, 016, 018, 019, 030 and 039 of the Precognition group; Laravel's `filterPrecognitiveRules` removes unlisted attributes' rules before the validator runs and matches `^name$` with `*` as `[^.]+`, the official client sends an empty list when nothing is touched and clears errors by exact key, and `Precognition::afterValidationHook` answers `204` only when the message bag is empty after the hooks; Suprnova ran every stage with bail-on-first and filtered afterwards by prefix, answering `204` for a field whose check never ran; row 017 keeps the trimmed split.
-Status: Agreed 2026-10-08
+Rationale: Rows 012, 013, 016, 018, 019, 030 and 039 of the Precognition group; Laravel's `filterPrecognitiveRules` removes unlisted attributes' rules before the validator runs and matches `^name$` with `*` as `[^.]+`, the official client sends an empty list when nothing is touched and clears errors by exact key, and `Precognition::afterValidationHook` answers `204` only when the message bag is empty after the hooks; Suprnova ran every stage with bail-on-first and filtered afterwards by prefix, answering `204` for a field whose check never ran; row 017 keeps the trimmed split. Narrowing the derived stage per field would mean generating per-field validation in the request derive in place of the external derive, which changes every application's form request; the developer chose the text that follows the code.
+Status: Agreed 2026-10-10
 
 [PAR-084] Live validation MUST read the data the official client sends:
 a precognitive `GET` or `DELETE` MUST validate its query parameters
