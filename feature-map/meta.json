@@ -5,7 +5,8 @@
   "crates",
   "suprnova-cli",
   "suprnova-macros",
-  "Cargo.toml"
+  "Cargo.toml",
+  ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl"
  ],
  "source_rev": "9cd26e354"
 }

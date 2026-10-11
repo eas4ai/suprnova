@@ -29,7 +29,7 @@ def git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def repository(root, source_rev):
+def repository(root, source_rev, source_paths=("src",)):
     """A repository with one source commit, a surface and a manual, stamped source_rev."""
     (root / "src").mkdir()
     (root / "src" / "lib.rs").write_text("pub fn f() {}\n")
@@ -42,8 +42,17 @@ def repository(root, source_rev):
     git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "source")
     head = git(root, "log", "-1", "--format=%h", "--", "src")
     rev = head if source_rev == "current" else source_rev
-    (root / "feature-map" / "meta.json").write_text(json.dumps({"source_paths": ["src"], "source_rev": rev, "records": 0}))
+    (root / "feature-map" / "meta.json").write_text(
+        json.dumps({"source_paths": list(source_paths), "source_rev": rev, "records": 0}))
     return head
+
+
+def commit_generated_file(root):
+    """A second commit that touches only a file the source paths exclude: a
+    file generated from the map, as the component allowlist is."""
+    (root / "src" / "generated.jsonl").write_text("{}\n")
+    git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "add", ".")
+    git(root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "generated")
 
 
 def run_tool(root):
@@ -62,6 +71,15 @@ class StaleSurfaceRefusal(unittest.TestCase):
         self.assertIn("surface built from 0000000", result.stderr)
         self.assertIn(f"source is now at {head}", result.stderr)
         self.assertEqual(result.stdout, "", "the refusal must come before any finding or summary")
+
+    def test_a_commit_touching_only_an_excluded_generated_file_leaves_the_map_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository(root, "current", source_paths=("src", ":(exclude)src/generated.jsonl"))
+            commit_generated_file(root)
+            result = run_tool(root)
+        self.assertNotIn("surface built from", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_a_map_stamped_at_the_source_runs(self):
         with tempfile.TemporaryDirectory() as tmp:

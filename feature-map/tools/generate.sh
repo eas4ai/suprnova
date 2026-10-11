@@ -16,7 +16,9 @@ WORK=${1:-$REPO/target/feature-map}
 J=$WORK/rustdoc
 mkdir -p "$J"
 # The commit that last touched source, not the map's own commits.
-REV=$(git -C "$REPO" log -1 --format=%h -- framework crates suprnova-cli suprnova-macros Cargo.toml)
+# The component allowlist is generated from this map, so a commit that only
+# regenerates it leaves the map current.
+REV=$(git -C "$REPO" log -1 --format=%h -- framework crates suprnova-cli suprnova-macros Cargo.toml ':(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl')
 RAW=$WORK/raw
 mkdir -p "$RAW"
 cd "$REPO"
