@@ -11,6 +11,7 @@ pub mod ui;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::console_forward::ConsoleCommand;
+use commands::make_stub;
 use commands::queue_failed::FailedJobs;
 use commands::ssr::SsrCommand;
 
@@ -352,7 +353,7 @@ enum Commands {
     MakeInertia {
         /// Name of the page or struct (e.g., About, Admin/Users, UserProps)
         name: String,
-        /// Scaffold a #[derive(Data, Validate)] struct in app/src/props/ instead of a frontend page
+        /// Scaffold a #[derive(Data, Validate)] struct in src/props/ instead of a frontend page
         #[arg(long)]
         data: bool,
         /// Overwrite the page (or the Data struct) and its test if they exist
@@ -385,6 +386,210 @@ enum Commands {
     MakeTask {
         /// Name of the task (e.g., CleanupLogs, SendReminders)
         name: String,
+    },
+    /// Generate a model factory in src/factories/
+    #[command(name = "make:factory")]
+    MakeFactory {
+        /// Name of the factory (e.g., Post, PostFactory)
+        name: String,
+        /// The model it builds (default: the name without `Factory`)
+        #[arg(long)]
+        model: Option<String>,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a database seeder in src/seeders/
+    #[command(name = "make:seeder")]
+    MakeSeeder {
+        /// Name of the seeder (e.g., Users, UsersSeeder)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a custom attribute cast in src/casts/
+    #[command(name = "make:cast")]
+    MakeCast {
+        /// Name of the cast (e.g., AsMoney)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a broadcast channel in src/broadcasting/
+    #[command(name = "make:channel")]
+    MakeChannel {
+        /// Name of the channel (e.g., OrderUpdates, ChatChannel)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a plain struct in src/
+    #[command(name = "make:class")]
+    MakeClass {
+        /// Name of the struct (e.g., Invoice)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate an enum in src/enums/
+    #[command(name = "make:enum")]
+    MakeEnum {
+        /// Name of the enum (e.g., Status)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate an event in src/events/
+    #[command(name = "make:event")]
+    MakeEvent {
+        /// Name of the event (e.g., OrderShipped)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate an event listener in src/listeners/
+    #[command(name = "make:listener")]
+    MakeListener {
+        /// Name of the listener (e.g., SendShipmentNotification)
+        name: String,
+        /// The event it handles, from src/events/ (default: any event)
+        #[arg(long)]
+        event: Option<String>,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a queued job in src/jobs/
+    #[command(name = "make:job")]
+    MakeJob {
+        /// Name of the job (e.g., ProcessPodcast)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate job middleware in src/jobs/middleware/
+    #[command(name = "make:job-middleware")]
+    MakeJobMiddleware {
+        /// Name of the middleware (e.g., RateLimitedByUser)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a mailable in src/mail/
+    #[command(name = "make:mail")]
+    MakeMail {
+        /// Name of the mailable (e.g., OrderShipped)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a notification in src/notifications/
+    #[command(name = "make:notification")]
+    MakeNotification {
+        /// Name of the notification (e.g., InvoicePaid)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a model observer in src/observers/
+    #[command(name = "make:observer")]
+    MakeObserver {
+        /// Name of the observer (e.g., User, UserObserver)
+        name: String,
+        /// The model it observes (default: the name without `Observer`)
+        #[arg(long)]
+        model: Option<String>,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate an authorization policy in src/policies/
+    #[command(name = "make:policy")]
+    MakePolicy {
+        /// Name of the policy (e.g., Post, PostPolicy)
+        name: String,
+        /// The model it authorizes (default: the name without `Policy`)
+        #[arg(long)]
+        model: Option<String>,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a service registration in src/providers/
+    #[command(name = "make:provider")]
+    MakeProvider {
+        /// Name of the provider (e.g., PaymentServiceProvider)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a JSON:API resource in src/resources/
+    #[command(name = "make:resource")]
+    MakeResource {
+        /// Name of the resource (e.g., User, UserResource)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a validation rule in src/rules/
+    #[command(name = "make:rule")]
+    MakeRule {
+        /// Name of the rule (e.g., Uppercase)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a global query scope in src/scopes/
+    #[command(name = "make:scope")]
+    MakeScope {
+        /// Name of the scope (e.g., Active, ActiveScope)
+        name: String,
+        /// The model it scopes (default: User)
+        #[arg(long)]
+        model: Option<String>,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate an integration test in tests/
+    #[command(name = "make:test")]
+    MakeTest {
+        /// Name of the test (e.g., UserTest)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a trait with a default method in src/concerns/
+    #[command(name = "make:trait")]
+    MakeTrait {
+        /// Name of the trait (e.g., HasUuid)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a trait with required methods in src/contracts/
+    #[command(name = "make:interface")]
+    MakeInterface {
+        /// Name of the trait (e.g., PaymentGateway)
+        name: String,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
     },
     /// Run all pending database migrations, after loading the schema dump
     /// into a database that has run none
@@ -748,6 +953,107 @@ fn main() {
         }
         Commands::MakeTask { name } => {
             commands::make_task::run(name);
+        }
+        Commands::MakeFactory { name, model, force } => {
+            make_stub::run(
+                make_stub::Request::new(make_stub::Kind::Factory, name, force).with_model(model),
+            );
+        }
+        Commands::MakeSeeder { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Seeder,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeCast { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Cast, name, force));
+        }
+        Commands::MakeChannel { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Channel,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeClass { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Class, name, force));
+        }
+        Commands::MakeEnum { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Enum, name, force));
+        }
+        Commands::MakeEvent { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Event, name, force));
+        }
+        Commands::MakeListener { name, event, force } => {
+            make_stub::run(
+                make_stub::Request::new(make_stub::Kind::Listener, name, force).with_event(event),
+            );
+        }
+        Commands::MakeJob { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Job, name, force));
+        }
+        Commands::MakeJobMiddleware { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::JobMiddleware,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeMail { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Mail, name, force));
+        }
+        Commands::MakeNotification { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Notification,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeObserver { name, model, force } => {
+            make_stub::run(
+                make_stub::Request::new(make_stub::Kind::Observer, name, force).with_model(model),
+            );
+        }
+        Commands::MakePolicy { name, model, force } => {
+            make_stub::run(
+                make_stub::Request::new(make_stub::Kind::Policy, name, force).with_model(model),
+            );
+        }
+        Commands::MakeProvider { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Provider,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeResource { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Resource,
+                name,
+                force,
+            ));
+        }
+        Commands::MakeRule { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Rule, name, force));
+        }
+        Commands::MakeScope { name, model, force } => {
+            make_stub::run(
+                make_stub::Request::new(make_stub::Kind::Scope, name, force).with_model(model),
+            );
+        }
+        Commands::MakeTest { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Test, name, force));
+        }
+        Commands::MakeTrait { name, force } => {
+            make_stub::run(make_stub::Request::new(make_stub::Kind::Trait, name, force));
+        }
+        Commands::MakeInterface { name, force } => {
+            make_stub::run(make_stub::Request::new(
+                make_stub::Kind::Interface,
+                name,
+                force,
+            ));
         }
         Commands::Migrate { schema_path } => {
             commands::migrate::run(schema_path);

@@ -300,7 +300,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | Laravel | Suprnova | Status | Notes / link |
 |---|---|---|---|
 | `php artisan` | Per-app `console` binary built from `#[command]` macros | shipped | [Console](console.md), [CLI overview](cli.md) |
-| `make:controller` / `make:model` / etc. | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task` | shipped | [Generators](cli-generators.md) |
+| `make:controller` / `make:model` / etc. | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task`, and the one-file generators `make:factory / make:seeder / make:cast / make:channel / make:class / make:enum / make:event / make:listener / make:job / make:job-middleware / make:mail / make:notification / make:observer / make:policy / make:provider / make:resource / make:rule / make:scope / make:test / make:trait / make:interface` | shipped | [Generators](cli-generators.md). No `make:model`: a model is written with `#[suprnova::model]` or by `db:sync` |
 | `serve` | `suprnova serve` (backend + Vite dev server together) | shipped | [Serve](cli-serve.md). Skips the Vite pane on a `--api` project instead of refusing to start. |
 | `migrate` family | `suprnova migrate / migrate:rollback / migrate:status / migrate:fresh` | shipped | [Migrations CLI](cli-migrations.md) |
 | `db:seed` | `cargo run --bin console db:seed` (via per-app console) | shipped | Seeders registered via `Seeder` trait; a targeted run prints RUNNING / DONE with elapsed milliseconds |

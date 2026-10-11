@@ -3,9 +3,10 @@
 The `suprnova make:*` family scaffolds the conventional file for each
 piece of a project - a controller, an action, a middleware, a console
 command, a domain error, a scheduled task, a checked view, an Inertia
-page or props struct, a database migration - and wires the new module
-into its parent `mod.rs` (and where needed, `src/lib.rs` and
-`cmd/main.rs`).
+page or props struct, a database migration, and the twenty-one kinds of
+[one-file generators](#the-one-file-generators) Laravel's artisan has, from
+a factory to an interface - and wires the new module into its parent
+`mod.rs` (and where needed, `src/lib.rs` and `cmd/main.rs`).
 Reach for them when you'd otherwise be retyping the same boilerplate + `pub mod x;` import line, which is most of the time.
 
 ## make:controller
@@ -689,12 +690,12 @@ between controllers and pages, partial reloads, and shared props.
 suprnova make:inertia UserProps --data
 ```
 
-Emits a `#[derive(Data, Validate)]` struct in `app/src/props/`
-(not `src/props/` - the `app/` prefix is hardcoded so the file lands
-in the workspace's example/host app):
+Emits a `#[derive(Data, Validate)]` struct in `src/props/`, and warns
+when it creates the directory, since `src/lib.rs` has to declare
+`pub mod props;` for the struct to be reachable:
 
 ```rust
-// app/src/props/user_props.rs
+// src/props/user_props.rs
 use suprnova::Data;
 use validator::Validate;
 
@@ -741,6 +742,769 @@ The generated file uses SeaORM's builder. The
 by hand. See [Migrations](migrations.md) for both forms and
 [Database Testing](database-testing.md) for the `TestDatabase::fresh`
 pattern that runs migrations against an isolated database per test.
+
+---
+
+## The one-file generators
+
+Twenty-one generators write one file from a stub, as Laravel's artisan
+commands of the same names do: `make:factory`, `make:seeder`, `make:cast`,
+`make:channel`, `make:class`, `make:enum`, `make:event`, `make:listener`,
+`make:job`, `make:job-middleware`, `make:mail`, `make:notification`,
+`make:observer`, `make:policy`, `make:provider`, `make:resource`,
+`make:rule`, `make:scope`, `make:test`, `make:trait` and `make:interface`.
+They share these rules:
+
+- **The name is a Rust identifier**: ASCII letters, digits and `_`,
+  starting with a letter. A name whose module would be a Rust keyword
+  (`Type` would be the module `type`) is refused too. A refused name exits
+  with status 1 and a message that says why, and nothing is written. A
+  name in snake case is read as words (`order_shipped` is `OrderShipped`);
+  any other keeps its spelling, with the first letter upper-cased.
+- **One file**, `src/<directory>/<snake>.rs`, in the directory each section
+  below names. `make:class` writes `src/<snake>.rs`, and `make:test` writes
+  `tests/<snake>.rs`.
+- **The module is declared**: `pub mod <directory>;` in `src/lib.rs`, and
+  `pub mod <snake>;` in the directory's `mod.rs`, which the generator
+  creates when the project has none. A declaration that is already there
+  is left alone. `make:test` declares nothing, because every file under
+  `tests/` is a crate of its own.
+- **An existing file is kept.** The command says the file exists, writes
+  nothing and exits 0. Pass `--force` to write the stub over it.
+- **The path is printed**: `Created <path>` or `Updated <path>` for each
+  file the run writes, then the line that wires the new item in.
+- **No clash with the stub's imports.** `make:rule Rule` is refused,
+  because the stub imports the `Rule` trait under that name.
+
+Every file is checked before anything is written, and the command writes
+all of them or none. Each stub compiles in a project `suprnova new`
+creates.
+
+```bash
+suprnova make:event OrderShipped
+suprnova make:listener SendShipmentNotification --event OrderShipped
+suprnova make:job ProcessPodcast --force
+```
+
+```text
+  ✓ Created src/events/order_shipped.rs
+  ✓ Updated src/lib.rs
+  ✓ Created src/events/mod.rs
+```
+
+---
+
+## make:factory
+
+Writes `src/factories/<snake>.rs`, a [model factory](eloquent-factories.md):
+a marker struct and its `Factory` impl. A `Factory` suffix is appended when
+the name lacks one, and the model is the name without it: `make:factory
+Post` writes `PostFactory` for `crate::models::post::Post`. `--model <Model>`
+names another model. When `src/models/<snake>.rs` is missing, the command
+warns, since the project does not compile until the model exists.
+
+```bash
+suprnova make:factory Post
+```
+
+```rust
+// src/factories/post_factory.rs
+use suprnova::Factory;
+
+use crate::models::post::Post;
+
+pub struct PostFactory;
+
+impl Factory for PostFactory {
+    type Model = Post;
+
+    fn definition() -> Post {
+        Post {
+            ..Default::default()
+        }
+    }
+}
+```
+
+Set the fields a new model needs in `definition`, with a `suprnova::Faker`
+value where one should vary. Every `#[suprnova::model]` struct implements
+`Default`, so a field you leave out keeps its default.
+
+---
+
+## make:seeder
+
+Writes `src/seeders/<snake>.rs`, a [seeder](seeding.md) that `db:seed` runs.
+A `Seeder` suffix is appended when the name lacks one.
+
+```bash
+suprnova make:seeder Users
+```
+
+```rust
+// src/seeders/users_seeder.rs
+use suprnova::{FrameworkError, Seeder, async_trait};
+
+pub struct UsersSeeder;
+
+#[async_trait]
+impl Seeder for UsersSeeder {
+    fn name() -> &'static str {
+        "UsersSeeder"
+    }
+
+    async fn run() -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+Register it in `src/bootstrap.rs` with
+`suprnova::seed::register::<crate::seeders::users_seeder::UsersSeeder>();`,
+then run it with `suprnova db:seed UsersSeeder`.
+
+---
+
+## make:cast
+
+Writes `src/casts/<snake>.rs`, a custom attribute
+[cast](eloquent-mutators.md): a unit struct that implements `Cast`. The stub
+stores the value as it is, as Laravel's cast stub returns `$value`; change
+`Runtime`, `Storage` and the two conversions to the types you need.
+
+```bash
+suprnova make:cast AsMoney
+```
+
+```rust
+// src/casts/as_money.rs
+use suprnova::{Cast, FrameworkError};
+
+pub struct AsMoney;
+
+impl Cast for AsMoney {
+    type Runtime = String;
+    type Storage = String;
+
+    fn to_storage(value: &String) -> Result<String, FrameworkError> {
+        Ok(value.clone())
+    }
+
+    fn from_storage(stored: &String) -> Result<String, FrameworkError> {
+        Ok(stored.clone())
+    }
+}
+```
+
+Name it on a model field:
+`#[model(casts = { amount = crate::casts::as_money::AsMoney })]`.
+
+---
+
+## make:channel
+
+Writes `src/broadcasting/<snake>.rs`, a private
+[broadcast channel](broadcasting.md#channels) and who may join it. The
+channel name is the type's words without `Channel`, joined by dots:
+`OrderUpdates` is `order.updates`. Its `authorize` admits a subscriber the
+session authenticated on the WebSocket upgrade.
+
+```bash
+suprnova make:channel OrderUpdates
+```
+
+```rust
+// src/broadcasting/order_updates.rs
+use suprnova::async_trait;
+use suprnova::broadcasting::{Channel, ChannelParams, PrivateChannel};
+use suprnova::http::Request;
+use suprnova::serde_json::Value;
+
+pub struct OrderUpdates;
+
+#[async_trait]
+impl Channel for OrderUpdates {
+    fn name(&self) -> &'static str {
+        "order.updates"
+    }
+
+    async fn authorize(&self, req: &Request, _params: &ChannelParams, _data: &Value) -> bool {
+        req.auth_user_id().is_some()
+    }
+}
+
+impl PrivateChannel for OrderUpdates {}
+```
+
+Register it in the `ChannelRegistry` your bootstrap binds:
+`registry.register(OrderUpdates);`.
+
+---
+
+## make:class
+
+Writes `src/<snake>.rs` and declares it in `src/lib.rs`, as Laravel's
+`make:class` writes under `app/`: a plain struct with a doc comment and an
+`impl` block. The names `Lib` and `Main` are refused, because they would
+write the crate's own root.
+
+```bash
+suprnova make:class Invoice
+```
+
+```rust
+// src/invoice.rs
+/// A plain Rust type: give `Invoice` the fields and methods it needs.
+#[derive(Debug, Default)]
+pub struct Invoice;
+
+impl Invoice {
+    /// Create a new `Invoice`.
+    pub fn new() -> Self {
+        Self
+    }
+}
+```
+
+---
+
+## make:enum
+
+Writes `src/enums/<snake>.rs`, an enum with no variants yet, as Laravel's
+enum stub has no cases. Write one variant per case.
+
+```bash
+suprnova make:enum Status
+```
+
+```rust
+// src/enums/status.rs
+/// The values a `Status` can take: write one variant per case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Status {}
+```
+
+---
+
+## make:event
+
+Writes `src/events/<snake>.rs`, an [event](events.md): a struct whose fields
+every listener receives, and its `Event` impl.
+
+```bash
+suprnova make:event OrderShipped
+```
+
+```rust
+// src/events/order_shipped.rs
+use suprnova::Event;
+
+#[derive(Debug, Clone)]
+pub struct OrderShipped {}
+
+impl Event for OrderShipped {
+    fn event_name() -> &'static str {
+        "OrderShipped"
+    }
+}
+```
+
+Dispatch it with `EventFacade::dispatch(OrderShipped {}).await?`.
+
+---
+
+## make:listener
+
+Writes `src/listeners/<snake>.rs`, an [event listener](events.md). With
+`--event <Event>`, it handles that event, imported from
+`crate::events::<snake>`; the command warns when that file is missing.
+Without `--event`, it handles any event it is registered for, as Laravel's
+listener stub takes `object $event`.
+
+```bash
+suprnova make:listener SendShipmentNotification --event OrderShipped
+```
+
+```rust
+// src/listeners/send_shipment_notification.rs
+use suprnova::{FrameworkError, Listener, async_trait};
+
+use crate::events::order_shipped::OrderShipped;
+
+pub struct SendShipmentNotification;
+
+#[async_trait]
+impl Listener<OrderShipped> for SendShipmentNotification {
+    async fn handle(&self, _event: &OrderShipped) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+The listener of any event implements `Listener<E>` for every `E: Event`.
+Register a listener in `src/bootstrap.rs`:
+
+```rust
+EventFacade::listen::<OrderShipped, _>(Arc::new(SendShipmentNotification)).await;
+```
+
+---
+
+## make:job
+
+Writes `src/jobs/<snake>.rs`, a [queued job](queues.md): a struct whose
+fields go into the queue payload, and its `Job` impl.
+
+```bash
+suprnova make:job ProcessPodcast
+```
+
+```rust
+// src/jobs/process_podcast.rs
+use serde::{Deserialize, Serialize};
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessPodcast {}
+
+#[async_trait]
+impl Job for ProcessPodcast {
+    fn job_name() -> &'static str {
+        "ProcessPodcast"
+    }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+Register it at boot with
+`suprnova::queue::worker::register_job::<ProcessPodcast>();` and push it
+with `Queue::push(ProcessPodcast {}).await?`.
+
+---
+
+## make:job-middleware
+
+Writes `src/jobs/middleware/<snake>.rs`, as Laravel writes under
+`app/Jobs/Middleware`: [job middleware](queues.md#job-middleware) that passes
+the job on. It declares `pub mod jobs;` in `src/lib.rs` and
+`pub mod middleware;` in the `jobs` module when they are missing.
+
+```bash
+suprnova make:job-middleware RateLimitedByUser
+```
+
+```rust
+// src/jobs/middleware/rate_limited_by_user.rs
+use suprnova::{
+    Envelope, FrameworkError, JobMiddleware, JobMiddlewareNext, JobOutcome, async_trait,
+};
+
+pub struct RateLimitedByUser;
+
+#[async_trait]
+impl JobMiddleware for RateLimitedByUser {
+    async fn handle(
+        &self,
+        envelope: Envelope,
+        next: JobMiddlewareNext,
+    ) -> Result<JobOutcome, FrameworkError> {
+        next(envelope).await
+    }
+}
+```
+
+Return it from a job's `middleware()`: `vec![Arc::new(RateLimitedByUser)]`.
+
+---
+
+## make:mail
+
+Writes `src/mail/<snake>.rs`, a [mailable](mail.md). The subject is the
+type's words, as Laravel's mail stub uses the class name's headline, and the
+bodies are Tera templates whose context is the struct's fields.
+
+```bash
+suprnova make:mail OrderShipped
+```
+
+```rust
+// src/mail/order_shipped.rs
+use serde::{Deserialize, Serialize};
+use suprnova::async_trait;
+use suprnova::mail::Mailable;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderShipped {}
+
+#[async_trait]
+impl Mailable for OrderShipped {
+    fn mailable_name() -> &'static str {
+        "OrderShipped"
+    }
+
+    fn subject(&self) -> String {
+        "Order Shipped".to_string()
+    }
+
+    fn html_template_source(&self) -> Option<String> {
+        Some("<p>Order Shipped</p>".to_string())
+    }
+
+    fn text_template_source(&self) -> Option<String> {
+        Some("Order Shipped".to_string())
+    }
+}
+```
+
+Send it with `Mail::to("user@example.com").send(OrderShipped {}).await?`.
+
+---
+
+## make:notification
+
+Writes `src/notifications/<snake>.rs`, a [notification](notifications.md)
+sent on the `mail` channel, with the mail rendering
+`#[derive(NotificationMailable)]` builds from its `#[mail(...)]` attribute.
+
+```bash
+suprnova make:notification InvoicePaid
+```
+
+```rust
+// src/notifications/invoice_paid.rs
+use serde::{Deserialize, Serialize};
+use suprnova::serde_json;
+use suprnova::{Notification, NotificationMailable};
+
+#[derive(Debug, Clone, Serialize, Deserialize, NotificationMailable)]
+#[mail(
+    subject = "Invoice Paid",
+    html = "<p>The introduction to the notification.</p><p>Thank you for using our application!</p>",
+    text = "The introduction to the notification.\nThank you for using our application!"
+)]
+pub struct InvoicePaid {}
+
+impl Notification for InvoicePaid {
+    fn notification_name() -> &'static str {
+        "InvoicePaid"
+    }
+
+    fn channels(&self) -> Vec<&'static str> {
+        vec!["mail"]
+    }
+
+    fn data(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+```
+
+Register its mail renderer at boot with
+`suprnova::register_mail_renderer::<InvoicePaid>()?;`, then send it with
+`Notify::send(&user, &InvoicePaid {}).await?`.
+
+---
+
+## make:observer
+
+Writes `src/observers/<snake>.rs`, a model [observer](eloquent.md#observers-and-lifecycle-events)
+with the `created`, `updated`, `deleted`, `restored` and `force_deleted`
+hooks Laravel's observer stub has. An `Observer` suffix is appended when the
+name lacks one, and the model is the name without it; `--model <Model>`
+names another. `#[suprnova::observer]` installs it when the application
+boots. The attribute names the model by its full path, because the macro
+reaches the model's events through the module the model is in.
+
+```bash
+suprnova make:observer User
+```
+
+```rust
+// src/observers/user_observer.rs
+use suprnova::{FrameworkError, Observer, async_trait};
+
+use crate::models::user::User;
+
+pub struct UserObserver;
+
+#[suprnova::observer(crate::models::user::User)]
+#[async_trait]
+impl Observer<User> for UserObserver {
+    async fn created(&self, _user: &User) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn updated(&self, _previous: &User, _current: &User) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    // `deleted`, `restored` and `force_deleted` follow the same shape.
+}
+```
+
+---
+
+## make:policy
+
+Writes `src/policies/<snake>.rs`, a `#[policy]` for a model with the seven
+abilities of Laravel's model policy stub. A `Policy` suffix is appended when
+the name lacks one, and the model is the name without it; `--model <Model>`
+names another. The user is `crate::models::user::User`. Every method
+denies until you write its rule, as Laravel's stub returns `false`.
+
+```bash
+suprnova make:policy Note
+```
+
+```rust
+// src/policies/note_policy.rs
+use suprnova::policy;
+
+use crate::models::user::User;
+use crate::models::note::Note;
+
+pub struct NotePolicy;
+
+#[policy(User, Note)]
+impl NotePolicy {
+    fn view_any(_user: &User, _note: &Note) -> bool {
+        false
+    }
+
+    fn view(_user: &User, _note: &Note) -> bool {
+        false
+    }
+
+    // `create`, `update`, `delete`, `restore` and `force_delete` follow.
+}
+```
+
+`update` registers the gate `update-note`; see
+[Authorization](authorization.md#policies-with-policy). A policy of `User`
+itself names its second parameter `_model`, as Laravel's stub does.
+
+---
+
+## make:provider
+
+Writes `src/providers/<snake>.rs`: a `pub async fn register()` for a group
+of service registrations, which your bootstrap calls.
+
+```bash
+suprnova make:provider PaymentServiceProvider
+```
+
+```rust
+// src/providers/payment_service_provider.rs
+pub async fn register() {
+    // `App::singleton`, `App::bind` and `EventFacade::listen` calls go here.
+}
+```
+
+Call it from `register` in `src/bootstrap.rs`:
+
+```rust
+crate::providers::payment_service_provider::register().await;
+```
+
+### Why Suprnova diverges
+
+Laravel's `make:provider` writes a `ServiceProvider` class with `register`
+and `boot` methods and adds it to `bootstrap/providers.php`. Suprnova has no
+provider class: [Application Bootstrap](bootstrap.md#why-suprnova-diverges)
+explains why `register` and `register_http_stack` replace the provider
+list. What plays a provider's part is a public `register` function that
+`src/bootstrap.rs` calls, so that is the stub. The command does not edit
+your bootstrap, because where the call goes in the boot order is your
+decision; it prints the line to add.
+
+---
+
+## make:resource
+
+Writes `src/resources/<snake>.rs`, a [JSON:API resource](eloquent-resources.md):
+a `#[derive(Data)]` struct with `#[json_resource]`. A `Resource` suffix is
+appended when the name lacks one. The JSON:API type is the plural of the
+name's words in kebab case: `User` is `users`, `UserProfile` is
+`user-profiles`.
+
+```bash
+suprnova make:resource User
+```
+
+```rust
+// src/resources/user_resource.rs
+use suprnova::Data;
+use validator::Validate;
+
+#[derive(Debug, Clone, Data, Validate)]
+#[json_resource("users")]
+pub struct UserResource {
+    pub id: u64,
+}
+```
+
+Add the attributes as fields, and render it with
+`Resource::single(resource).render().await` or `Resource::collection`.
+
+---
+
+## make:rule
+
+Writes `src/rules/<snake>.rs`, a custom [validation rule](validation.md#writing-your-own-rule)
+that passes every value until you write its check, as Laravel's rule stub
+does.
+
+```bash
+suprnova make:rule Uppercase
+```
+
+```rust
+// src/rules/uppercase.rs
+use suprnova::{Rule, ValidationMessage};
+
+pub struct Uppercase;
+
+impl Rule for Uppercase {
+    fn passes(&self, _value: &str) -> Result<(), ValidationMessage> {
+        Ok(())
+    }
+}
+```
+
+Use it in a `validate!` row: `name => Required, Uppercase;`.
+
+---
+
+## make:scope
+
+Writes `src/scopes/<snake>.rs`, a [global scope](eloquent.md#global-scopes)
+that adds nothing to the query yet. A `Scope` suffix is appended when the
+name lacks one. A scope's name does not say which model it scopes, so the
+model is `User` unless `--model <Model>` names another.
+
+```bash
+suprnova make:scope Published --model Post
+```
+
+```rust
+// src/scopes/published_scope.rs
+use suprnova::{Builder, GlobalScope};
+
+use crate::models::post::Post;
+
+pub struct PublishedScope;
+
+impl GlobalScope<Post> for PublishedScope {
+    fn apply(&self, query: Builder<Post>) -> Builder<Post> {
+        query
+    }
+}
+```
+
+Register it at boot: `ScopeRegistry::register::<Post, _>(PublishedScope);`.
+
+---
+
+## make:test
+
+Writes `tests/<snake>.rs`, an integration test that sends a request through
+`TestClient` and asserts the answer, as Laravel's feature test stub does.
+It declares no module. See [HTTP Tests](http-tests.md) for the client.
+
+```bash
+suprnova make:test UserTest
+cargo test --test user_test
+```
+
+```rust
+// tests/user_test.rs
+use suprnova::testing::TestClient;
+use suprnova::{MiddlewareRegistry, Request, Response, Router};
+
+async fn home(_req: Request) -> Response {
+    suprnova::http::text("Hello")
+}
+
+#[tokio::test]
+async fn example() {
+    let client = TestClient::new(Router::new().get("/", home), MiddlewareRegistry::new());
+
+    client.get("/").send().await.assert_ok().assert_see("Hello");
+}
+```
+
+---
+
+## make:trait
+
+Writes `src/concerns/<snake>.rs`, as Laravel writes traits under
+`app/Concerns`: a trait with a default method, which every implementor gets
+without writing it.
+
+```bash
+suprnova make:trait HasUuid
+```
+
+```rust
+// src/concerns/has_uuid.rs
+pub trait HasUuid {
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+```
+
+---
+
+## make:interface
+
+Writes `src/contracts/<snake>.rs`, as Laravel writes interfaces under
+`app/Contracts`: a trait whose methods are all required, with `Send + Sync`
+so an implementor can be bound in the container as `Arc<dyn PaymentGateway>`.
+
+```bash
+suprnova make:interface PaymentGateway
+```
+
+```rust
+// src/contracts/payment_gateway.rs
+pub trait PaymentGateway: Send + Sync {
+    fn name(&self) -> &str;
+}
+```
+
+### Why Suprnova diverges
+
+PHP has two constructs where Rust has one. A PHP trait carries method
+bodies that are copied into the class that uses it; a PHP interface names
+methods without bodies. Rust's `trait` does both: a method with a body is a
+default that an implementor may override, and a method without one is
+required. So `make:trait` and `make:interface` both write a `trait`.
+`make:trait` gives it a default method and `make:interface` gives it
+required methods only, and each goes in the directory Laravel uses for its
+construct.
+
+---
+
+## make:model
+
+There is no `make:model`. Write the model by hand with `#[suprnova::model]`,
+or let `db:sync --regenerate-models` write it from the schema after a
+migration runs. See [Eloquent](eloquent.md) and
+[CLI Migrations](cli-migrations.md).
+
+### Why Suprnova diverges
+
+Laravel's `make:model` writes an empty class, because Eloquent reads the
+columns from the database at run time. A Suprnova model is a struct whose
+fields are its columns, checked when the crate compiles, so an empty model
+is not a model. The struct has to name the columns, which either you or
+`db:sync` know and a generator does not. `make:migration` writes the schema
+change, and `db:sync` turns the migrated schema into model files.
 
 ---
 
@@ -830,8 +1594,29 @@ not a follow-up step you remember on your own.
 | `make:task <Name>` | `src/tasks/<snake>_task.rs` | `tasks/mod.rs`, `schedule.rs`, `lib.rs`, `main.rs` |
 | `make:inertia <Name>` | `frontend/src/pages/<Name>Page.<ext>` | (no module wiring) |
 | `make:inertia <Dir>/<Name> --test` | `frontend/src/pages/<Dir>/<Name>Page.<ext>`, `tests/<dir>_<name>_page.rs` | (no module wiring) |
-| `make:inertia <Name> --data` | `app/src/props/<snake>.rs` | (no module wiring) |
+| `make:inertia <Name> --data` | `src/props/<snake>.rs` | (no module wiring; warns when `src/props/` is new) |
 | `make:migration <name>` | `migrations/YYYYMMDDHHMMSS_<name>.rs` | (no module wiring) |
+| `make:factory <Name> [--model <Model>]` | `src/factories/<snake>_factory.rs` | `factories/mod.rs`, `lib.rs` |
+| `make:seeder <Name>` | `src/seeders/<snake>_seeder.rs` | `seeders/mod.rs`, `lib.rs` |
+| `make:cast <Name>` | `src/casts/<snake>.rs` | `casts/mod.rs`, `lib.rs` |
+| `make:channel <Name>` | `src/broadcasting/<snake>.rs` | `broadcasting/mod.rs`, `lib.rs` |
+| `make:class <Name>` | `src/<snake>.rs` | `lib.rs` |
+| `make:enum <Name>` | `src/enums/<snake>.rs` | `enums/mod.rs`, `lib.rs` |
+| `make:event <Name>` | `src/events/<snake>.rs` | `events/mod.rs`, `lib.rs` |
+| `make:listener <Name> [--event <Event>]` | `src/listeners/<snake>.rs` | `listeners/mod.rs`, `lib.rs` |
+| `make:job <Name>` | `src/jobs/<snake>.rs` | `jobs/mod.rs`, `lib.rs` |
+| `make:job-middleware <Name>` | `src/jobs/middleware/<snake>.rs` | `jobs/middleware/mod.rs`, `jobs/mod.rs`, `lib.rs` |
+| `make:mail <Name>` | `src/mail/<snake>.rs` | `mail/mod.rs`, `lib.rs` |
+| `make:notification <Name>` | `src/notifications/<snake>.rs` | `notifications/mod.rs`, `lib.rs` |
+| `make:observer <Name> [--model <Model>]` | `src/observers/<snake>_observer.rs` | `observers/mod.rs`, `lib.rs` |
+| `make:policy <Name> [--model <Model>]` | `src/policies/<snake>_policy.rs` | `policies/mod.rs`, `lib.rs` |
+| `make:provider <Name>` | `src/providers/<snake>.rs` | `providers/mod.rs`, `lib.rs` |
+| `make:resource <Name>` | `src/resources/<snake>_resource.rs` | `resources/mod.rs`, `lib.rs` |
+| `make:rule <Name>` | `src/rules/<snake>.rs` | `rules/mod.rs`, `lib.rs` |
+| `make:scope <Name> [--model <Model>]` | `src/scopes/<snake>_scope.rs` | `scopes/mod.rs`, `lib.rs` |
+| `make:test <Name>` | `tests/<snake>.rs` | (no module wiring) |
+| `make:trait <Name>` | `src/concerns/<snake>.rs` | `concerns/mod.rs`, `lib.rs` |
+| `make:interface <Name>` | `src/contracts/<snake>.rs` | `contracts/mod.rs`, `lib.rs` |
 | `generate-types` | `frontend/src/types/inertia-props.ts` | n/a |
 
 ## Next
@@ -845,3 +1630,7 @@ not a follow-up step you remember on your own.
   register tasks generated by `make:task`
 - [CLI Migrations](cli-migrations.md) - the migrate / db:sync
   commands that pair with `make:migration`
+- [Eloquent Factories](eloquent-factories.md) and [Seeding](seeding.md) -
+  what `make:factory` and `make:seeder` write fills in
+- [Events](events.md) and [Queues](queues.md) - registering the events,
+  listeners and jobs the generators write

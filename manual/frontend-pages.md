@@ -168,7 +168,7 @@ To generate a typed props struct on the Rust side instead, pass `--data`:
 
 ```bash
 suprnova make:inertia Dashboard --data
-# Creates app/src/props/dashboard.rs with #[derive(Data, Validate)]
+# Creates src/props/dashboard.rs with #[derive(Data, Validate)]
 ```
 
 ## A page in each starter
