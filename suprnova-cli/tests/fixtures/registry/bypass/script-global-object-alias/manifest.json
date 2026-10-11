@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-global-object-alias",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

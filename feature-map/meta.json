@@ -1,0 +1,15 @@
+{
+ "records": 13887,
+ "source_paths": [
+  "framework",
+  "crates",
+  "suprnova-cli",
+  "suprnova-macros",
+  "Cargo.toml",
+  ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl",
+  ":(exclude)framework/tests",
+  ":(exclude)suprnova-cli/tests",
+  ":(exclude,glob)crates/*/tests/**"
+ ],
+ "source_rev": "410c4ed4f"
+}
