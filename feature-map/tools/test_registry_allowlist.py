@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for registry_allowlist.py's engine boundary (REG-030).
+"""Tests for registry_allowlist.py's guarded boundary (REG-030).
 
-A type of an engine crate (the Live engine, its macros, Magnetar) reaches a
-component only when a rule admits it: the framework re-exports engine types
-so an application can name every type a public signature leads to, and a new
-re-export must not land on the component allowlist by default.
+A type of an engine crate (the Live engine, its macros, Magnetar), and any
+item under suprnova::live, suprnova::render_cache or suprnova::view, reaches
+a component only when a rule admits it: the framework re-exports engine
+types so an application can name every type a public signature leads to and
+adds Live items of its own, and neither lands on the component allowlist by
+default.
 """
 import sys
 import unittest
@@ -43,14 +45,32 @@ class EngineBoundary(unittest.TestCase):
         record = engine_record("suprnova::live::HostCapabilities")
         self.assertEqual(tool.admission(record, "suprnova::live::HostCapabilities", "suprnova::live"), tool.REFUSE)
 
-    def test_a_framework_type_is_decided_by_its_chapter_and_module(self):
+    def test_a_new_framework_live_item_is_refused_until_a_rule_admits_it(self):
+        record = {"id": "suprnova::live::BrandNewInstaller", "crate": "suprnova", "kind": "fn", "chapter": "live",
+                  "module": "suprnova::live", "details": {}}
+        self.assertEqual(tool.admission(record, "suprnova::live::BrandNewInstaller", "suprnova::live"), tool.REFUSE)
+        cache = {"id": "suprnova::render_cache::BrandNewStore", "crate": "suprnova", "kind": "struct",
+                 "chapter": "render-cache", "module": "suprnova::render_cache", "details": {}}
+        self.assertEqual(tool.admission(cache, "suprnova::render_cache::BrandNewStore", "suprnova::render_cache"), tool.REFUSE)
+
+    def test_an_admitted_framework_live_type_keeps_its_decision(self):
         record = {"id": "suprnova::live::LiveRegistry", "crate": "suprnova", "kind": "struct", "chapter": "live",
                   "module": "suprnova::live", "details": {}}
         self.assertIsNone(tool.admission(record, "suprnova::live::LiveRegistry", "suprnova::live"))
+        member = {"id": "suprnova::live::LiveRegistry::builder", "crate": "suprnova", "kind": "fn", "chapter": "live",
+                  "module": "suprnova::live", "details": {}}
+        self.assertIsNone(tool.admission(member, "suprnova::live::LiveRegistry::builder", "suprnova::live"))
 
-    def test_every_admit_rule_names_an_engine_path(self):
-        for path in tool.ENGINE_ADMIT:
+    def test_a_framework_type_outside_the_guarded_paths_is_decided_by_its_chapter_and_module(self):
+        record = {"id": "suprnova::Cache", "crate": "suprnova", "kind": "struct", "chapter": "cache",
+                  "module": "suprnova::cache", "details": {}}
+        self.assertEqual(tool.admission(record, "suprnova::Cache", "suprnova::cache"), tool.decide("suprnova::Cache", "suprnova::cache", "cache"))
+        self.assertNotEqual(tool.admission(record, "suprnova::Cache", "suprnova::cache"), tool.REFUSE)
+
+    def test_every_admit_rule_names_an_item_path_and_no_guarded_root(self):
+        for path in tool.ADMIT:
             self.assertTrue(path.startswith("suprnova::"), path)
+            self.assertNotIn(path, tool.GATED_PREFIXES, path)
 
 
 if __name__ == "__main__":

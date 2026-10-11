@@ -167,9 +167,11 @@ fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
 /// component's to name: the host ports a bootstrap installs, the trusted
 /// contexts and fingerprints the engine verifies, the snapshot key material,
 /// the wire protocol and proposal application, and the component hooks the
-/// macros implement. Beyond those, an engine type reaches a component only
-/// by a rule in the generator's ENGINE_ADMIT table, so a re-export made for
-/// applications never lands on the component allowlist by default.
+/// macros implement. Beyond those, an engine type, and any item under
+/// suprnova::live, suprnova::render_cache or suprnova::view, reaches a
+/// component only by a rule in the generator's ADMIT table, so neither a
+/// re-export made for applications nor a new framework Live item lands on
+/// the component allowlist by default.
 #[test]
 fn reg_030_host_ports_trusted_contexts_and_key_material_are_refused() {
     let list = allowlist::embedded().expect("the embedded allowlist parses");
