@@ -8,5 +8,5 @@
   "Cargo.toml",
   ":(exclude)suprnova-cli/src/registry/scan/allowlist.jsonl"
  ],
- "source_rev": "410c4ed4f"
+ "source_rev": "1e5e04225"
 }
