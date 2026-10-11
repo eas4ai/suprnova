@@ -96,7 +96,8 @@ a keyword.
 ### A wrong method answers 405.
 
 **Before:** A path that only a route of another method matched answered
-`404`, an `OPTIONS` request included.
+`404`, an `OPTIONS` request included, or ran the fallback route when one
+was registered.
 
 **Now:** It answers `405` with `Allow` and Laravel's message, and an
 `OPTIONS` request answers `200` with `Allow`. Both pass through the global
@@ -153,8 +154,9 @@ where handlers read `users.post`.
 
 ### A route key that does not parse answers 404.
 
-**Before:** A route key that did not parse, or broke a `unique_id` key's
-format, answered `400` and repeated the value.
+**Before:** A route key that did not parse as the key's type answered `400`
+and repeated the value. A key that broke a `unique_id` key's format was
+looked up as given and answered the `404` a missing row gets.
 
 **Now:** It gets the `404` body a missing row gets, naming the model and
 never the value.
@@ -185,8 +187,9 @@ bound row is missing expects `404`.
 
 ### The router refuses a route it cannot run, at startup.
 
-**Before:** These mistakes surfaced at request time, and two body readers
-were a compile error.
+**Before:** A handler that read a parameter its path did not declare failed
+at request time, and two body readers were a compile error. 3.2.1 had no
+binding fields, scoped child bindings or route binders.
 
 **Now:** A handler that reads an undeclared parameter, reads the body twice,
 names a binding field that is not a parseable column, scopes a child through
@@ -256,7 +259,8 @@ stale token into it.
 
 ### `Request::host()` reads the host as Symfony does.
 
-**Before:** `Request::host()` returned the host as sent.
+**Before:** `Request::host()` kept the letter case the host was sent in, cut
+everything after its last `:`, port or not, and refused no character.
 
 **Now:** It lowercases the host, strips only a numeric port, and returns
 `None` for a host with a character no host has, so `http_host()`,
@@ -403,11 +407,15 @@ to the session.
 
 ### An image wildcard leaves SVG out.
 
-**Before:** `image/*` in a `MimeType` allowlist admitted an SVG document.
+**Before:** 3.2.1 had no `type/*` wildcards: `MimeType` compared each
+allowlist entry with the file's type exactly, and an SVG passed only when
+the allowlist named `image/svg+xml`. A development build between 3.2.1 and
+4.0.0 read `image/*` as a wildcard that admitted SVG; no release did.
 
 **Now:** A `type/*` wildcard admits every subtype except `image/svg+xml`.
 
-**Do:** To accept SVG, name `image/svg+xml` in the allowlist.
+**Do:** Nothing to do. To accept every image type but SVG, name `image/*`;
+to accept SVG too, name `image/svg+xml` as well.
 
 ### The numeric max message.
 
@@ -478,14 +486,17 @@ readable, and each recorded source error has its own trace.
 
 ### Errors are reported through `Exceptions`.
 
-**Before:** A 5xx response, a failed queued job attempt and a console
-command's error reached the `framework error` log line without your
-reportable callbacks.
+**Before:** 3.2.1 had no `Exceptions` and no reportable callbacks. A 5xx
+response wrote the `framework error` log line, and a console command's error
+was printed but not logged.
 
-**Now:** They run your reportable callbacks first, and a console command's
-error is logged as well as printed.
+**Now:** A 5xx response, each failed attempt of a queued job and a console
+command's error run your `Exceptions::reportable` callbacks before the
+`framework error` log line, and a console command's error is logged as well
+as printed.
 
-**Do:** Check that your `Exceptions` callbacks expect these reports.
+**Do:** Nothing to do. To act on these errors, register a callback with
+`Exceptions::reportable`, as [Errors](errors.md) describes.
 
 ### The frame that created an error shows where.
 
@@ -634,7 +645,11 @@ Storage::purge_all(); // was Storage::purge()
 
 ### S3 accepts Laravel's AWS variables.
 
-**Before:** S3 disks read their own variable names only.
+**Before:** S3 disks read the `S3_*` names, with two exceptions: the region
+fell back to `AWS_REGION` and `AWS_DEFAULT_REGION`, and a disk with no
+`S3_ACCESS_KEY` took its credentials from the AWS provider chain, which
+reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. `AWS_BUCKET`,
+`AWS_URL`, `AWS_ENDPOINT` and `AWS_USE_PATH_STYLE_ENDPOINT` were not read.
 
 **Now:** When an S3 name is unset, the bucket, region, credentials, public
 URL, endpoint and path-style settings read Laravel's AWS names. Each explicit
@@ -656,14 +671,15 @@ that ends in `/` reach the backend unchanged.
 
 ### The HTTP fake records a request as it is sent.
 
-**Before:** The fake recorded a request before its body's `Content-Type`,
-the user agent, the global middleware's headers, the base URL, URL
-parameters and query were applied.
+**Before:** The fake recorded the headers you added and the URL as you
+passed it, without the `Content-Type` a JSON or form body set or the
+client's user agent. 3.2.1 had no base URL, URL parameters, query builder,
+multipart body or global middleware.
 
 **Now:** It records the request as it is sent.
 
-**Do:** Update assertions on recorded headers or URLs that expected the
-request before those steps.
+**Do:** Update assertions on recorded headers that did not expect the body's
+`Content-Type` or the user agent.
 
 ## Images
 
@@ -682,8 +698,11 @@ decoded lossy WebP pixels exactly.
 
 ### Images are upright and carry no metadata.
 
-**Before:** Images kept their orientation tag and metadata, and rotation
-corners and flattened transparency were black in JPEG and GIF.
+**Before:** Neither driver applied the EXIF orientation. The built-in driver
+wrote output with no metadata, the orientation tag included, so a photo that
+relied on the tag came out as stored; the `magick` driver kept the tag and
+the metadata. Rotation corners and flattened transparency were black in JPEG
+and GIF.
 
 **Now:** Images are oriented by their EXIF tag on decode, and processed
 output keeps only the ICC profile. Those corners are white, and GIF output
@@ -880,11 +899,12 @@ inside the excerpt stay.
 ### Special number spellings.
 
 **Before:** Number formats had no spelling for values without a finite
-decimal representation.
+decimal representation: a `try_*` form returned an error, and the
+infallible forms wrote Rust's `inf` or `NaN`.
 
 **Now:** They use `∞` and `NaN`.
 
-**Do:** Nothing to do.
+**Do:** Nothing to do. A test that asserted `inf` asserts `∞`.
 
 ## Queues
 
@@ -1043,8 +1063,10 @@ commands stay outside these events.
 
 ### Single-server tasks need a cache store.
 
-**Before:** An `on_one_server()` task ran on every server when no cache
-store was bound.
+**Before:** With no shared cache store, an `on_one_server()` task ran on
+every server outside production, with a warning. In production,
+`schedule:work` and `schedule:run` refused to start unless
+`SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true`.
 
 **Now:** A schedule with such a task and no cache store refuses to start, in
 every environment, and a tick with no store skips the task with an error
@@ -1105,8 +1127,8 @@ earlier record.
 
 ### Scaffolds ignore `live:add`'s lock and journal.
 
-**Before:** A new project's `.gitignore` did not list `live:add`'s lock and
-journal.
+**Before:** 3.2.1's `live:add` had no lock or journal, and a new project's
+`.gitignore` listed neither.
 
 **Now:** It lists `/.suprnova-live.lock` and `/.suprnova-live-journal.json`.
 
@@ -1132,8 +1154,9 @@ component as the refusal says.
 
 ### Suprnova never writes `users.remember_token`.
 
-**Before:** The scaffold's `User` carried `update_remember_token`, read `id`
-as `i64` and its timestamps as `DateTime<Utc>`.
+**Before:** The scaffold's `User` carried `update_remember_token` (the
+`api` scaffold's did not), read `id` as `i64` and its timestamps as
+`DateTime<Utc>`.
 
 **Now:** Suprnova never writes `users.remember_token`. The scaffold's `User`
 drops `update_remember_token`, reads `id` as `u64` and its timestamps as
@@ -1178,9 +1201,11 @@ stamp and no `EmailVerified`.
 
 ### Checking a password writes nothing.
 
-**Before:** `validate_credentials` on `EloquentUserProvider` and
-`DatabaseUserProvider` rewrote an outdated hash, so `Auth::validate` could
-write to the database.
+**Before:** 3.2.1 rewrote no password hash: `validate_credentials` on
+`EloquentUserProvider` and `DatabaseUserProvider` only verified the
+password, and a sign-in left an outdated hash as it was. A development build
+between 3.2.1 and 4.0.0 rewrote the hash in `validate_credentials`; no
+release did.
 
 **Now:** It writes nothing. The sign-in (`attempt`, `once` and
 `Auth::logout_other_devices`) rewrites the hash through
@@ -1194,14 +1219,15 @@ fails the sign-in.
 
 ### Nullable-user policies authorize guests.
 
-**Before:** A guest got `401` before any policy ran.
+**Before:** 3.2.1 had no nullable-user policies: a policy took `&User`, and
+handler authorization answered a guest `401` before any policy ran.
 
 **Now:** A policy accepting `Option<&User>` receives `None` for a guest and
 decides whether the handler runs. A policy that requires a user keeps the
 `401`.
 
-**Do:** Check that each `Option<&User>` policy refuses guests where it
-should.
+**Do:** Nothing to do. To let a policy decide for guests, take the user as
+`Option<&User>`, as [Authorization](authorization.md) shows.
 
 ### Handler authorization accepts enum abilities.
 
@@ -1273,14 +1299,16 @@ which matches no row.
 
 ### Joined builders update and delete matching rows.
 
-**Before:** An update or delete on a joined builder did not keep the join.
+**Before:** `DB::table` and the model builder refused an update or delete on
+a joined builder with an error, since the statement would have ignored the
+join.
 
 **Now:** Both builders keep the join when they write the base table, and
 model deletion still honours soft deletes. The model builder also has
 `update` and `delete`.
 
-**Do:** Check joined updates and deletes: they touch only the rows the join
-matches.
+**Do:** Nothing to do. A joined update or delete now runs and touches only
+the rows the join matches.
 
 ### Empty results have page one.
 
@@ -1489,8 +1517,8 @@ gone from it.
 
 ### A clean model save skips the update.
 
-**Before:** A save re-read the row and ran the update, firing `Updating` and
-`Updated`, even when nothing had changed.
+**Before:** `save` ran the update and fired `Updating` and `Updated` even
+when nothing had changed.
 
 **Now:** Dirtiness comes from the instance's original values in memory, and
 a clean save skips the update. `Saving` and `Saved` still fire; `Updating`
@@ -1525,14 +1553,14 @@ only when its supplied columns change.
 
 ### Pivot filters constrain sync.
 
-**Before:** Both methods ignored `where_pivot` filters, so they could detach
-rows outside the filter.
+**Before:** Both methods refused a relation with `where_pivot` filters: they
+returned an error and wrote nothing.
 
 **Now:** They honour `where_pivot` and its companions, and rows outside the
 filter are untouched.
 
-**Do:** Check a sync on a filtered relation: it no longer detaches rows
-outside the filter.
+**Do:** Nothing to do. Where you dropped a relation's `where_pivot` filters
+to sync it, you can keep them now.
 
 ### Pivot sync touches a configured parent.
 
@@ -1568,9 +1596,10 @@ refuses an operator other than `=`, `<>`, `!=`, `<`, `<=`, `>` and `>=`.
 
 ### Console test assertions check every expectation.
 
-**Before:** `ConsoleRun::assert_successful` passed with a prepared question
-the command did not ask or an unmet output expectation, and an unexpected
-question failed nothing.
+**Before:** `ConsoleRun::assert_successful` checked the exit code alone, so
+it passed with a prepared question the command did not ask. An unexpected
+question made `ask` return an error, which failed the run only when the
+command passed the error on. 3.2.1 had no output expectations.
 
 **Now:** Each of these fails `assert_successful`, and an unexpected question
 also fails `assert_failed` and the exit-code assertions, naming it.
@@ -1604,7 +1633,8 @@ and `assert_inertia_with(callback)` runs a callback over the page.
 ### `queue::testing::pushed::<J>()` fails on a payload that does not decode.
 
 **Before:** `queue::testing::pushed::<J>()` left out a push it could not
-decode, so `assert_not_pushed` passed over it.
+decode, so a test that read the list, or called `assert_pushed`, saw no such
+push. 3.2.1 had no `assert_not_pushed`.
 
 **Now:** It panics, naming the job and the decode error.
 
@@ -1865,7 +1895,8 @@ visit got the JSON `500` and the client's plain-JSON modal.
 
 **Now:** The same `500` reaches the error callback, and with
 `error_page("Error")` the visit gets the `Error` page. `Inertia::install`
-registers five middlewares, not four.
+always registers the error-page middleware now; 3.2.1 registered it only
+when `error_page` was set.
 
 **Do:** Nothing to do.
 
@@ -1884,8 +1915,9 @@ and a first visit goes to the worker only when a bundle is found at
 
 ### A missing SSR bundle is no longer logged.
 
-**Before:** With a `bundle_path` set and no file there, each first visit
-logged "SSR bundle not found".
+**Before:** With SSR on and a `bundle_path` set but no file there, each
+first visit printed "SSR bundle not found" on the standard error, or passed
+that message to `on_ssr_error` when one was set.
 
 **Now:** The visit renders on the client quietly, and `ssr:start` reports a
 missing bundle. Under `ssr_throw_on_error`, a worker failure fails with
@@ -1906,7 +1938,8 @@ full URL.
 
 ### `suprnova ssr:start` makes Laravel's checks before it starts a worker.
 
-**Before:** `suprnova ssr:start` ran the runtime with any configuration.
+**Before:** `suprnova ssr:start` checked that the bundle file existed, then
+ran the runtime on it, whatever the application's SSR configuration said.
 
 **Now:** It runs the application binary's `ssr:start`, which reads the
 installed Inertia configuration, checks the bundle and the runtime, refuses
@@ -1972,16 +2005,18 @@ shows:
 ### The starter kits declare `@inertiajs/core` and read `root` through the generated types.
 
 **Before:** A kit reached `@inertiajs/core` only through its adapter, and
-pages typed `root` with `usePage<{ root: string }>()`.
+the generated `inertia-props.ts` did not augment it. 3.2.1 had no `root`
+prop. A development build between 3.2.1 and 4.0.0 typed `root` with
+`usePage<{ root: string }>()`; no release did.
 
 **Now:** Each kit's `package.json` declares `@inertiajs/core` at `^3.8.0`,
 and the generated `inertia-props.ts` augments it, so a bare `usePage()`
 types `root`. A hand-written `declare module '@inertiajs/core'` block under
 `frontend/src` turns the generated augmentation off, with a notice.
 
-**Do:** Declare `@inertiajs/core` at the kits' range, delete a hand-written
-augmentation block, and regenerate from the application root, where
-`suprnova generate-types` reads `Cargo.toml`:
+**Do:** Declare `@inertiajs/core` at the kits' range, delete any
+hand-written augmentation block, and regenerate from the application root,
+where `suprnova generate-types` reads `Cargo.toml`:
 
 ```bash
 (cd frontend && npm install @inertiajs/core@^3.8.0)
@@ -1992,7 +2027,8 @@ suprnova generate-types
 
 ### The project file is `suprnova.toml`, all lowercase.
 
-**Before:** `suprnova serve` and `live:add` read `Suprnova.toml`.
+**Before:** `suprnova serve` read its extra dev processes from
+`Suprnova.toml`; `live:add` read no project file.
 
 **Now:** They read `suprnova.toml`, and refuse to run while a
 `Suprnova.toml` exists, naming the rename.
@@ -2019,7 +2055,9 @@ describes, and copy `templates/` in your Dockerfile's build stage.
 
 ### The starter keeps an existing notes table.
 
-**Before:** The starter's notes migration created `notes` unconditionally.
+**Before:** 3.2.1's starter had no notes migration. A development build
+between 3.2.1 and 4.0.0 shipped one that created `notes` unconditionally; no
+release did.
 
 **Now:** It checks for the table first, as the users migration does.
 
@@ -2405,19 +2443,23 @@ commands report their errors too.
 
 ### `schedule:interrupt` boots the cache it writes its mark to.
 
-**Before:** `schedule:interrupt` booted no cache store, so it failed with
-`ServiceNotFound` unless the bootstrap bound one.
+**Before:** 3.2.1 had no `schedule:interrupt`. A development build between
+3.2.1 and 4.0.0 booted no cache store for it, so it failed with
+`ServiceNotFound` unless the bootstrap bound one; no release did.
 
 **Now:** It boots the store `CACHE_DRIVER` names, and keeps a store the
 bootstrap bound.
 
-**Do:** Nothing to do.
+**Do:** Nothing to do. To stop the current schedule run before its next
+task, run your application binary with `schedule:interrupt`, as
+[Scheduling Commands](cli-scheduling.md) shows.
 
 ### `cursor_paginate` keeps the query's order.
 
-**Before:** A query with one `order_by`, such as `latest()`, was paged by
-the primary key ascending, and an ordering the cursor could not carry was
-dropped.
+**Before:** `cursor_paginate` replaced every ordering with the primary key,
+ascending, so a newest-first query such as `latest()` came back oldest
+first. A development build between 3.2.1 and 4.0.0 kept two or more
+orderings but still replaced a single `order_by`; no release did.
 
 **Now:** Every ordering is kept and carried in the cursor. An ordering the
 cursor cannot carry, such as `order_by_raw`, and an ordering on a joined
@@ -2430,15 +2472,17 @@ use `paginate` for raw and joined orderings.
 
 ### `simple_paginate` takes a page name, and `cursor_paginate` records its cursor.
 
-**Before:** `simple_paginate` left `page_name` as `None`, and a
-`cursor_paginate` page did not record the cursor it was fetched with.
+**Before:** The simple `Paginator` had no `page_name` field, and a
+`CursorPaginator` had no `current_cursor`. A development build between 3.2.1
+and 4.0.0 had both fields and left `page_name` as `None` after
+`simple_paginate`; no release did.
 
 **Now:** `simple_paginate` sets `page_name` to `page`,
 `Builder::simple_paginate_using(page_name, per_page)` reads another
 parameter, and a cursor page keeps `current_cursor`.
 
-**Do:** Nothing to do. Code that expected `None` in `page_name` reads
-`page`.
+**Do:** Nothing to do. To read the page from another query parameter, call
+`simple_paginate_using(page_name, per_page)`.
 
 ### `where_relation` on a `MorphTo` relation matches the owners.
 
@@ -2483,9 +2527,11 @@ and returns the same `SharedOnceProp`.
 
 ### `suprnova generate-types` pairs a page built with the builder.
 
-**Before:** A page whose chain started with `Inertia::paginate(..)` got no
-`Pages` entry, and a field the chain deferred or marked optional was written
-as required.
+**Before:** `generate-types` wrote one interface per
+`#[derive(InertiaProps)]` struct and no `Pages` map, and a field a handler
+deferred or marked optional was written as required. A development build
+between 3.2.1 and 4.0.0 wrote `Pages` but gave no entry to a page whose
+chain started with `Inertia::paginate(..)`; no release did.
 
 **Now:** A chain that starts with `InertiaResponse::new`,
 `Inertia::paginate`, `Inertia::data` or `Inertia::try_data` pairs its
@@ -2500,13 +2546,14 @@ suprnova generate-types
 
 ### The Inertia DevTools gate's `GateEvaluated` event names the signed-in user.
 
-**Before:** The DevTools entry endpoints' `GateEvaluated` event named the
-erased `dyn Any` user type and carried no user identifier.
+**Before:** 3.2.1 had no Inertia DevTools and no `GateEvaluated` event. A
+development build between 3.2.1 and 4.0.0 named the erased `dyn Any` user
+type in the event the DevTools entry endpoints dispatched, with no user
+identifier; no release did.
 
 **Now:** It names the signed-in user's own type and carries the identifier.
 
-**Do:** Nothing to do. A listener that matched the erased type name
-matches the user's type.
+**Do:** Nothing to do.
 
 ### Every Live engine type a public signature names is named through `suprnova`.
 
@@ -2564,7 +2611,7 @@ These `### Fixed` entries change nothing an application upgrading from 3.2.1
 observes, or touch only the framework's own tooling and tests.
 
 - **The Laravel parity map holds the Inertia adapter and client.** The parity map is the framework's own tooling.
-- **Images are no longer copied on their way through a driver.** It removes copies inside the drivers and counts the memory of ICC profiles, which 3.2.1 did not carry.
+- **Images are no longer copied on their way through a driver.** It removes copies inside the drivers, and counts the memory of the ICC profiles 4.0.0 reads and keeps: on 3.2.1 the built-in driver dropped a profile, and the `magick` driver left it to ImageMagick.
 - **The Inertia CRUD tutorial compiles** The fix is to the manual's tutorial, not to the framework.
 - **Live upload and async routes follow the configured endpoint** Serving under a path prefix is new in 4.0.0, and at the host root the routes are the same `/__live` routes.
 - **Batch settlement counts work on MySQL** It concerns a `job_batches` table Laravel created, which 4.0.0 is the first release to support.
@@ -2704,6 +2751,29 @@ height read from the part.
 **Now:** `validate_received` also runs, with what the extractor received.
 
 **Do:** Nothing to do. Its default calls `validate_final`.
+
+### `Paginator` has a `page_name` field.
+
+**Before:** The simple `Paginator` had `data`, `current_page`, `per_page`,
+`has_more` and `path`.
+
+**Now:** It also has `page_name: Option<String>`, the query parameter the
+page is read from, `None` for `page`. It is not serialized by itself.
+
+**Do:** A struct literal that builds a `Paginator` names `page_name`. Code
+that reads the fields is unchanged.
+
+### `CursorPaginator` has a `current_cursor` field.
+
+**Before:** `CursorPaginator` had `data`, `per_page`, `next_cursor`,
+`prev_cursor`, `path` and `cursor_name`.
+
+**Now:** It also has `current_cursor: Option<String>`, the cursor the page
+was fetched with, `None` for the first page. It is not serialized by
+itself.
+
+**Do:** A struct literal that builds a `CursorPaginator` names
+`current_cursor`. Code that reads the fields is unchanged.
 
 ## Next
 
