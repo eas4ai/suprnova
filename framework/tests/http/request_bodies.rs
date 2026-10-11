@@ -832,8 +832,8 @@ async fn inp_a_multipart_request_names_a_failure_by_the_index_it_was_sent_under(
         "The photos.3 field must be a file."
     );
 
-    // A part whose name reads as no field's is left alone: an object
-    // under a list element, and a name with nothing before its bracket.
+    // A part whose name reads as no field's is left alone: a name with
+    // nothing before its bracket.
     let reply = send(
         trip_route(),
         "POST",
@@ -842,7 +842,6 @@ async fn inp_a_multipart_request_names_a_failure_by_the_index_it_was_sent_under(
         multipart_body(&[
             ("title", None, b"Trip"),
             ("user[name]", None, b"Ada"),
-            ("photos[0][caption]", None, b"x"),
             ("[tags]", None, b"x"),
             ("tags[1]", None, b"x"),
             ("tags[1]", None, b"y"),
@@ -852,6 +851,253 @@ async fn inp_a_multipart_request_names_a_failure_by_the_index_it_was_sent_under(
     assert_eq!(reply.status, 200, "{}", reply.text());
     assert_eq!(reply.json()["photos"], json!([]));
     assert_eq!(reply.json()["tags"], json!(["y"]));
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_drops_a_nested_field_a_later_parent_part_replaces() {
+    // PHP reads the parts in order: `user=other` after `user[name]=Ada`
+    // makes `user` the string "other", so `user.name` is absent.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("user", None, b"other"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["user.name"]);
+    assert_eq!(
+        reply.json()["errors"]["user.name"][0],
+        "The user.name field is required."
+    );
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_empties_a_list_a_later_bare_name_replaces() {
+    // A bare `photos` after `photos[0]` makes `photos` a string, so the
+    // list holds nothing.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("photos[0]", Some("a.png"), b"first"),
+            ("photos", None, b"x"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["photos"], json!([]));
+
+    // A later element starts a new list: `[]` takes index 0 again.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("photos[3]", Some("a.png"), b"first"),
+            ("photos", None, b"x"),
+            ("photos[]", Some("b.png"), b"second"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["photos"], json!(["b.png"]));
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_reads_a_nested_field_sent_after_its_parent() {
+    // Order matters: a member sent after its parent makes the parent an
+    // array again, and the field reads it. A file field the parent part
+    // replaced takes the next file sent for it.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[avatar]", Some("old.png"), b"old"),
+            ("user", None, b"other"),
+            ("user[name]", None, b"Ada"),
+            ("user[avatar]", Some("new.png"), b"new"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["name"], "Ada");
+    assert_eq!(reply.json()["avatar"], "new.png");
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_reports_a_field_given_members_as_not_a_string() {
+    // `user[name][first]` after `user[name]=Ada` makes `user.name` an
+    // array, which is not a string.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("user[name][first]", None, b"A"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 422, "{}", reply.text());
+    assert_eq!(reply.error_fields(), ["user.name"]);
+    assert_eq!(
+        reply.json()["errors"]["user.name"][0],
+        "The user.name field must be a string."
+    );
+
+    // A later value at the field's own name replaces the array.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name][first]", None, b"A"),
+            ("user[name]", None, b"Ada"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["name"], "Ada");
+}
+
+/// The names a member part under the list element at index 0 is sent
+/// under: a key, an append, and an index.
+const ELEMENT_MEMBERS: [&str; 3] = ["[0][caption]", "[0][]", "[0][0]"];
+
+#[tokio::test]
+async fn inp_a_multipart_request_reports_a_file_element_given_members_as_not_a_file() {
+    // A member part under `photos[0]` makes that element an array, as a
+    // form request reads it, so `photos.0` is no file, whether or not a
+    // file was sent at that index first. The other elements stand.
+    for member in ELEMENT_MEMBERS {
+        let member = format!("photos{member}");
+        for file_first in [true, false] {
+            let mut parts: Vec<(&str, Option<&str>, &[u8])> = Vec::new();
+            parts.push(("title", None, b"Trip"));
+            parts.push(("user[name]", None, b"Ada"));
+            if file_first {
+                parts.push(("photos[0]", Some("a.png"), b"first"));
+            }
+            parts.push(("photos[1]", Some("b.png"), b"second"));
+            parts.push((&member, None, b"x"));
+            for (route, path) in [(trip_route(), "/trip"), (album_route(), "/album")] {
+                let reply = send(
+                    route,
+                    "POST",
+                    path,
+                    Some(&multipart()),
+                    multipart_body(&parts),
+                )
+                .await;
+                assert_eq!(reply.status, 422, "{path} `{member}`: {}", reply.text());
+                assert_eq!(reply.error_fields(), ["photos.0"], "{path} `{member}`");
+                assert_eq!(
+                    reply.json()["errors"]["photos.0"][0],
+                    "The photos.0 field must be a file.",
+                    "{path} `{member}`"
+                );
+            }
+        }
+    }
+
+    // A later file at that index replaces the array.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("photos[0]", Some("a.png"), b"first"),
+            ("photos[0][caption]", None, b"x"),
+            ("photos[0]", Some("c.png"), b"third"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["photos"], json!(["c.png"]));
+}
+
+#[tokio::test]
+async fn inp_a_multipart_request_reports_a_text_element_given_members_as_its_type() {
+    // A member part under `tags[0]` makes that element an array, which a
+    // `Vec<String>` element fails as not a string, as a form request does.
+    for member in ELEMENT_MEMBERS {
+        let member = format!("tags{member}");
+        let derive: [(&str, Option<&str>, &[u8]); 5] = [
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("tags[0]", None, b"a"),
+            ("tags[1]", None, b"b"),
+            (&member, None, b"y"),
+        ];
+        let form: [(&str, Option<&str>, &[u8]); 5] = [
+            ("user[name]", None, b"Ada"),
+            ("user[email]", None, b"ada@example.com"),
+            ("tags[0]", None, b"a"),
+            ("tags[1]", None, b"b"),
+            (&member, None, b"y"),
+        ];
+        for (route, path, parts) in [
+            (trip_route(), "/trip", &derive),
+            (profile_route(), "/profile", &form),
+        ] {
+            let reply = send(
+                route,
+                "POST",
+                path,
+                Some(&multipart()),
+                multipart_body(parts),
+            )
+            .await;
+            assert_eq!(reply.status, 422, "{path} `{member}`: {}", reply.text());
+            assert_eq!(reply.error_fields(), ["tags.0"], "{path} `{member}`");
+            assert_eq!(
+                reply.json()["errors"]["tags.0"][0],
+                "The tags.0 field must be a string.",
+                "{path} `{member}`"
+            );
+        }
+    }
+
+    // A later value at that index replaces the array.
+    let reply = send(
+        trip_route(),
+        "POST",
+        "/trip",
+        Some(&multipart()),
+        multipart_body(&[
+            ("title", None, b"Trip"),
+            ("user[name]", None, b"Ada"),
+            ("tags[0]", None, b"a"),
+            ("tags[0][x]", None, b"y"),
+            ("tags[0]", None, b"c"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.json()["tags"], json!(["c"]));
 }
 
 /// A list of small files with a count ceiling.

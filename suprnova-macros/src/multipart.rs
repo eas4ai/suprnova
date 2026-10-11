@@ -100,6 +100,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
     // elements in index order: a later part at an index replaces an
     // earlier one, as PHP keeps it.
     let mut list_takes = Vec::new();
+    // The check of each field that holds one value, and of each list's
+    // elements, run once every part is read: when a part sent under a
+    // member of the field's name or of an element came last, PHP reads that
+    // place as an array, and it fails as a value of the wrong kind, as a
+    // form request fails it.
+    let mut nested_checks = Vec::new();
     let mut struct_init = Vec::new();
     // `(name a hook may use, input name)` pairs for renaming hook errors:
     // each field's Rust name, and its `#[field]` name when that carries
@@ -304,6 +310,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 field_decls.push(quote! {
                     let mut #ident: ::core::option::Option<::suprnova::http::upload::UploadedFile<#validator>> = ::core::option::Option::None;
                 });
+                nested_checks.push(nested_check(
+                    &position,
+                    &field_name_str,
+                    &quote! { ::suprnova::http::upload::FieldFailure::File },
+                    &invalid_ident,
+                ));
                 push_required(
                     required,
                     &ident,
@@ -340,6 +352,11 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     let mut #staged_ident: ::std::collections::BTreeMap<i64, ::suprnova::http::upload::MultipartValue> = ::std::collections::BTreeMap::new();
                     let mut #ident: ::std::vec::Vec<::suprnova::http::upload::UploadedFile<#validator>> = ::std::vec::Vec::new();
                 });
+                nested_checks.push(nested_element_check(
+                    &position,
+                    &field_name_str,
+                    &quote! { ::suprnova::http::upload::FieldFailure::File },
+                ));
                 struct_init.push(quote! { #ident, });
             }
             FieldShape::TextScalar {
@@ -366,6 +383,12 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     let mut #last_ident: ::core::option::Option<(i64, ::suprnova::http::upload::MultipartValue)> = ::core::option::Option::None;
                     let mut #ident: ::core::option::Option<#inner_ty> = ::core::option::Option::None;
                 });
+                nested_checks.push(nested_check(
+                    &position,
+                    &field_name_str,
+                    &failure,
+                    &invalid_ident,
+                ));
                 text_takes.push(quote! {
                     if let ::core::option::Option::Some((__index, __value)) = #last_ident {
                         match ::suprnova::http::upload::take_text_at::<#inner_ty>(
@@ -449,6 +472,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     let mut #staged_ident: ::std::collections::BTreeMap<i64, ::suprnova::http::upload::MultipartValue> = ::std::collections::BTreeMap::new();
                     let mut #ident: ::std::vec::Vec<#element_ty> = ::std::vec::Vec::new();
                 });
+                nested_checks.push(nested_element_check(&position, &field_name_str, &failure));
                 struct_init.push(quote! { #ident, });
             }
         }
@@ -562,6 +586,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                     }
                 }
 
+                #(#nested_checks)*
                 #(#list_takes)*
                 #(#text_takes)*
 
@@ -672,6 +697,58 @@ fn push_required(
             }
         })?,
     });
+}
+
+/// The check of one field that holds one value, at `position` among the
+/// fields: when the parser marked it given an array, which happens when a
+/// part sent under a member of its name came last, it files `failure`
+/// under the field's input name and marks the field invalid, so a required
+/// field is not also reported missing. The parser leaves such a field no
+/// part, so nothing else fills it.
+fn nested_check(
+    position: &proc_macro2::Literal,
+    field_name_str: &str,
+    failure: &proc_macro2::TokenStream,
+    invalid_ident: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    quote! {
+        if __parts.nested.contains(&(#position, ::core::option::Option::None)) {
+            ::suprnova::http::upload::add_field_failure(
+                &mut __errors,
+                #field_name_str,
+                ::core::option::Option::None,
+                #failure,
+            );
+            #invalid_ident = true;
+        }
+    }
+}
+
+/// The check of the elements of one list, at `position` among the fields:
+/// each element the parser marked given an array, which happens when a
+/// part sent under a member of the element came last, files `failure`
+/// under the element's key, as any element that fails does. The parser
+/// leaves such an element no part, so the list does not hold it.
+fn nested_element_check(
+    position: &proc_macro2::Literal,
+    field_name_str: &str,
+    failure: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        for (__field, __index) in __parts.nested.iter().copied() {
+            if __field != #position {
+                continue;
+            }
+            if let ::core::option::Option::Some(__index) = __index {
+                ::suprnova::http::upload::add_field_failure_at(
+                    &mut __errors,
+                    #field_name_str,
+                    ::core::option::Option::Some(__index),
+                    #failure,
+                );
+            }
+        }
+    }
 }
 
 /// The validator instance declaration and the `validate_chunk` arm for
@@ -992,6 +1069,59 @@ mod tests {
         let at = |name: &str| rendered.find(&format!("name:\"{name}\"")).expect(name);
         assert!(at("scan") < at("extra") && at("extra") < at("pages[]"));
         assert!(at("pages[]") < at("user.name") && at("user.name") < at("tags[]"));
+    }
+
+    #[test]
+    fn a_place_fails_when_a_member_name_came_last() {
+        let input: DeriveInput = parse_quote! {
+            struct Trip {
+                #[field("user.avatar")]
+                avatar: Option<UploadedFile>,
+                #[field("user.name")]
+                name: String,
+                #[field("user.age")]
+                age: Option<u32>,
+                #[field("photos[]")]
+                photos: Vec<UploadedFile>,
+                #[field("tags[]")]
+                tags: Vec<u32>,
+            }
+        };
+        let rendered = render(input).replace(' ', "");
+        // A field that holds one value fails under its name.
+        let check = |position: usize, name: &str, failure: &str| {
+            format!(
+                "if__parts.nested.contains(&({position},::core::option::Option::None)){{\
+                 ::suprnova::http::upload::add_field_failure(&mut__errors,\"{name}\",\
+                 ::core::option::Option::None,::suprnova::http::upload::FieldFailure::{failure},);\
+                 __invalid_"
+            )
+        };
+        for (position, name, failure) in [
+            (0, "user.avatar", "File"),
+            (1, "user.name", "String"),
+            (2, "user.age", "Integer"),
+        ] {
+            assert!(
+                rendered.contains(&check(position, name, failure)),
+                "`{name}` fails with {failure} when a member name came last; got: {rendered}"
+            );
+        }
+        // A list's element fails under the element's key.
+        let element_check = |position: usize, name: &str, failure: &str| {
+            format!(
+                "if__field!={position}{{continue;}}\
+                 iflet::core::option::Option::Some(__index)=__index{{\
+                 ::suprnova::http::upload::add_field_failure_at(&mut__errors,\"{name}\",\
+                 ::core::option::Option::Some(__index),::suprnova::http::upload::FieldFailure::{failure},);"
+            )
+        };
+        for (position, name, failure) in [(3, "photos[]", "File"), (4, "tags[]", "Integer")] {
+            assert!(
+                rendered.contains(&element_check(position, name, failure)),
+                "`{name}` elements fail with {failure} when a member name came last; got: {rendered}"
+            );
+        }
     }
 
     #[test]

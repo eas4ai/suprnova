@@ -497,7 +497,7 @@ fn key_from(text: Cow<'_, str>) -> Key<'_> {
 /// `text` as an integer when PHP reads an array key as one: decimal digits
 /// with an optional `-`, no leading zero but in `0` itself, no `-0`, and
 /// within an `i64`.
-fn php_integer(text: &str) -> Option<i64> {
+pub(crate) fn php_integer(text: &str) -> Option<i64> {
     let digits = text.strip_prefix('-').unwrap_or(text);
     let canonical = match digits.as_bytes() {
         [] => false,
