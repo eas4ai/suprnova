@@ -136,6 +136,10 @@ COPY --from=backend-builder /app/{package_name}/database/schema ./database/schem
 # Copy public assets
 COPY --from=backend-builder /app/{package_name}/public ./public
 
+# The localization catalogs `Localization::bootstrap` reads at boot, which
+# the pages' `lang` share and `__!` lookups read from.
+COPY lang/ ./lang/
+
 # Set ownership
 RUN chown -R appuser:appuser /app
 

@@ -189,6 +189,34 @@ mod backend {
     }
 
     /// The configuration call opts each kit into DevTools recording.
+    /// PAR-080: the Dockerfile `docker:init` writes carries `lang/` into
+    /// the runtime image, since `Localization::bootstrap` reads the
+    /// catalogs from the working directory at boot.
+    #[test]
+    fn kit_full_stack_dockerfile_copies_lang_into_the_runtime_image() {
+        let app = Scaffold::new("svelte");
+        let output = Command::new(BIN)
+            .arg("docker:init")
+            .current_dir(&app.root)
+            .output()
+            .expect("spawn suprnova docker:init");
+        assert!(
+            output.status.success(),
+            "`docker:init` failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let dockerfile = app.read("Dockerfile");
+        let runtime = dockerfile
+            .find("AS runtime")
+            .expect("the Dockerfile has a runtime stage");
+        assert!(
+            dockerfile[runtime..].contains("COPY lang/ ./lang/"),
+            "the runtime stage copies lang/:\n{dockerfile}"
+        );
+        assert!(app.path("lang/en/app.ftl").is_file());
+    }
+
     #[test]
     fn kit_bootstrap_opts_into_inertia_devtools() {
         each_kit(|app| {

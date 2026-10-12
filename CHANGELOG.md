@@ -2501,6 +2501,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The full-stack Dockerfile copies the localization catalogs.** The
+  Dockerfile `docker:init` writes for a Svelte, React or Vue project copies
+  `lang/` into the runtime image, which 3.2.1's left out, so
+  `Localization::bootstrap` finds the catalogs the pages' `lang` share and
+  `__!` lookups read.
 - **The Laravel parity map holds the Inertia adapter and client.**
   `feature-map/laravel/surface.jsonl` held laravel/framework alone, so no
   Inertia protocol row (HD-01, MW-06, RF-16 and the rest) could name its

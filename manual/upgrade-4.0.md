@@ -2081,6 +2081,19 @@ describes, and copy `templates/` in your Dockerfile's build stage.
 These `### Fixed` entries change what an application observes, so they
 appear here in the same shape.
 
+### The full-stack Dockerfile copies the localization catalogs.
+
+**Before:** The Dockerfile 3.2.1's `docker:init` wrote for a Svelte, React
+or Vue project copied the binary, the schema dumps and `public/` into the
+runtime image and not `lang/`, so a container started without the
+catalogs `Localization::bootstrap` reads at boot.
+
+**Now:** The generated Dockerfile's runtime stage copies `lang/` beside
+`public/`.
+
+**Do:** In a Dockerfile `docker:init` wrote before 4.0.0, add
+`COPY lang/ ./lang/` to the runtime stage, after the `COPY` of `public`.
+
 ### The error callback sees the error responses from outside the Inertia stack.
 
 **Before:** `InertiaConfig::error_page` decided only the responses that
