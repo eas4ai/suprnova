@@ -113,15 +113,50 @@ stores whatever the browser handed back. A maliciously stored
 subscription can point the HTTP POST anywhere reachable, turning the
 push sender into an SSRF gadget.
 
-`WebPushClient` defaults to `EndpointPolicy::Strict`:
+`WebPushClient` defaults to `EndpointPolicy::Strict`, which checks the
+endpoint before anything is sent:
 
-- Scheme must be `https`
-- Host must be a named domain, not an IP literal
-- Cloud-metadata hostnames and RFC 2606 reserved TLDs (`.localhost`,
-  `.local`, `.internal`, `.test`, `.example`, `.invalid`) are rejected
+- The scheme must be `https`.
+- The host must be a name, not an IP address.
+- The name must not be `localhost`, a cloud metadata name such as
+  `metadata.google.internal`, or a name under an RFC 2606 reserved
+  top-level domain (`.localhost`, `.local`, `.internal`, `.test`,
+  `.example`, `.invalid`).
+- Every address the name resolves to must be on the public internet. The
+  client looks the name up and refuses the send when any answer is a
+  loopback, private, link-local, multicast, unspecified, documentation
+  or reserved address, or a cloud metadata address (`169.254.169.254`,
+  `fd00:ec2::254`, `100.100.100.200`). Private covers RFC 1918, the RFC
+  6598 shared address space and IPv6 unique local addresses.
 
-This blocks the obvious SSRF probes without breaking real push
-services (FCM, Mozilla Autopush, Apple's `web.push.apple.com`).
+The last check matters because the name in a stored endpoint is not
+yours: a name someone else registered can resolve to `127.0.0.1` or to
+`10.0.0.5`. After the check, the client connects to one of the addresses
+it checked. TLS and the `Host` header still use the name, and the name
+is not looked up a second time, so a DNS answer that changes between the
+check and the connection (DNS rebinding) cannot move the request.
+
+Real push services (FCM, Mozilla Autopush, Apple's `web.push.apple.com`)
+pass every check.
+
+A refused address returns `WebPushError::RefusedDestination`. It names
+the class of the address, such as `AddressClass::Private`, and never the
+address itself. A lookup that fails, or a name that resolves to no
+address, returns `WebPushError::Lookup`, which `is_retryable()` reports as
+retryable.
+
+The connection goes to the checked address when the client builds its
+own transport, with `WebPushClient::new` or
+`WebPushClient::with_client_builder`. In two cases the name is resolved
+again when the request connects:
+
+- Through an HTTP proxy, including one set by the `HTTPS_PROXY`
+  environment variable, the proxy opens the connection to the push
+  service and resolves the name itself. The client still refuses a name
+  that resolves, where the client runs, to a refused address.
+- A client you pass to `WebPushClient::with_client` resolves the name
+  itself when it connects. The client checks the answers its own lookup
+  got, but cannot pin the connection to them.
 
 For local integration tests against a `wiremock` mock server you have
 to opt out:
@@ -136,6 +171,11 @@ let client = WebPushClient::new(signer, "mailto:test@example.org")?
 Do not use `AllowAny` in production. The strict checks exist to keep
 a tampered subscriptions table from being weaponised.
 
+If your push service runs on a private network, `Strict` refuses it,
+because its name resolves to a private address. The only policy that
+reaches it is `AllowAny`, which turns off every check, so use it only when
+your application, not a browser, decides which endpoints are stored.
+
 ### Custom transport
 
 `WebPushClient::new` applies a 30-second per-request timeout. If you
@@ -144,7 +184,11 @@ shorter timeout - pass a `reqwest::ClientBuilder` to
 `WebPushClient::with_client_builder`. Every builder option is
 honoured, but the redirect policy is forcibly disabled: a validated
 endpoint that answers 3xx must not bounce the POST to an unvalidated
-URL, so the library does not accept the caller's redirect setting.
+URL, so the library does not accept the caller's redirect setting. The
+builder's DNS resolver is replaced too, by the one that connects a
+checked name to its checked addresses and looks any other name, such as
+a proxy's, up as usual. A name you map with
+`ClientBuilder::resolve` still connects where you mapped it.
 
 ```rust
 use reqwest::Client;
@@ -457,14 +501,18 @@ subscription. Two groups of checks raise it:
   because it is not `https`, has no host, names an IP address in place of a
   host, or names a host that is no push service (`localhost`, a cloud
   metadata host, or a reserved name such as `.local` or `.internal`).
+  When its host name resolves to an address the policy refuses, the error
+  is `WebPushError::RefusedDestination`, which carries the class of the
+  address in place of a text.
 - The keys. `p256dh` is no base64url, does not decode to 65 bytes, is not
   in uncompressed form or is no point of the P-256 curve. `auth` is no
   base64url or does not decode to 16 bytes.
 
 The stored data is wrong, so a retry cannot help. `is_retryable()` returns
-`false`. `WebPushChannel` handles the error as it handles a gone
+`false`. `WebPushChannel` handles both errors as it handles a gone
 subscription: it logs a warning and dispatch returns `Ok(())`, so a queue
-does not send the job again.
+does not send the job again. For a refused address, the reason is the
+class, such as `its host name resolves to a private address`.
 
 ```text
 WARN webpush subscription cannot be used; caller should remove
@@ -489,7 +537,11 @@ yourself, match on `WebPushError::InvalidSubscription`:
 ```rust
 match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
     Ok(_) => (),
-    Err(WebPushError::SubscriptionGone | WebPushError::InvalidSubscription(_)) => {
+    Err(
+        WebPushError::SubscriptionGone
+        | WebPushError::InvalidSubscription(_)
+        | WebPushError::RefusedDestination(_),
+    ) => {
         // remove the subscription
     }
     Err(e) => return Err(e.into()),
@@ -522,6 +574,14 @@ match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
 
 The `Retry-After` hint is capped at 24 hours so a hostile server
 can't park a worker on a multi-year sleep.
+
+`PushServiceRejected` carries the status and the hint, and no part of the
+body the push service sent. The body is remote data, and an error is what
+your code logs, stores and shows. The client reads the first 200 bytes of
+the body and writes them to its `debug` log, with control characters
+escaped, and `WebPushChannel` fails the delivery with an error that names
+the status alone, such as
+`WebPushChannel: push service rejected (status 500)`.
 
 When you use `Notify::queue`, the queue retries the job for you. A
 `PushServiceRejected` that carries a `Retry-After` hint leaves
@@ -634,7 +694,10 @@ mock server, no encryption round-trip.
 - Client: `suprnova::WebPushClient`, `suprnova::EndpointPolicy`,
   `suprnova::PushResponse`, `suprnova::SubscriptionInfo`
 - Error: `suprnova::WebPushError` - `.is_retryable()`, `.retry_after()`,
-  `WebPushError::SubscriptionGone`, `WebPushError::InvalidSubscription`
+  `WebPushError::SubscriptionGone`, `WebPushError::InvalidSubscription`,
+  `WebPushError::RefusedDestination`, `WebPushError::Lookup`,
+  `WebPushError::PushServiceRejected`
+- Refused address classes: `suprnova::AddressClass`
 - Encoding: `suprnova::ContentEncoding` (Aes128Gcm; 3992-byte plaintext cap)
 - Channel: `suprnova::WebPushChannel`
 - Facade: `suprnova::Notify`

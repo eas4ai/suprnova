@@ -10,11 +10,13 @@
 //!
 //! A subscription that nothing can be sent to is logged at WARN and
 //! skipped, and the dispatch succeeds: the push service answered that it
-//! is gone (HTTP 404/410), the stored route is no subscription, or its
-//! endpoint or its keys are refused. There is nobody to retry against, and
-//! a failed dispatch would make a queue send the job again, with every
-//! channel that delivered before this one. The framework does not remove
-//! the stored subscription. The warning is what an operator acts on.
+//! is gone (HTTP 404/410), the stored route is no subscription, its
+//! endpoint or its keys are refused, or its host name resolves to an
+//! address the strict endpoint policy refuses. There is nobody to retry
+//! against, and a failed dispatch would make a queue send the job again,
+//! with every channel that delivered before this one. The framework does
+//! not remove the stored subscription. The warning is what an operator
+//! acts on.
 //!
 //! ## What a warning says of the endpoint
 //!
@@ -23,6 +25,14 @@
 //! `endpoint_sha256`: the first 16 hexadecimal digits of the SHA-256 of
 //! the endpoint as it is stored. Compare it with the same digest of the
 //! stored endpoints to find the row.
+//!
+//! ## What an error says of the push service
+//!
+//! A push service that rejects the message fails the delivery with a
+//! `FrameworkError` that carries the status, never the body the service
+//! sent: the body is remote data, and the error reaches the dispatcher's
+//! log and every `NotificationFailed` listener. The client writes the
+//! body's first 200 bytes to its debug log.
 //!
 //! ## Why `Arc<WebPushClient>`
 //!
@@ -70,6 +80,22 @@ fn endpoint_for_log(endpoint: &str) -> (String, String) {
         .unwrap_or_default();
     let digest = hex::encode(&Sha256::digest(endpoint.as_bytes())[..8]);
     (host, digest)
+}
+
+/// Log a stored subscription that cannot be sent to, and that nothing was
+/// sent to. It is the same end as a subscription that is gone: there is
+/// nobody to retry against, so the dispatch does not fail and a queue does
+/// not send the job again. `reason` names the rule that refused it.
+fn warn_unusable(endpoint: &str, notification: &dyn DynNotification, reason: &str) {
+    let (host, endpoint_sha256) = endpoint_for_log(endpoint);
+    tracing::warn!(
+        channel = "webpush",
+        host = %host,
+        endpoint_sha256 = %endpoint_sha256,
+        notification = %notification.name(),
+        reason = %reason,
+        "webpush subscription cannot be used; caller should remove"
+    );
 }
 
 #[async_trait]
@@ -132,29 +158,33 @@ impl Channel for WebPushChannel {
                 Ok(())
             }
             Err(WebPushError::InvalidSubscription(reason)) => {
-                // The stored subscription cannot be sent to, and nothing
-                // was sent. It is the same end as a subscription that is
-                // gone: there is nobody to retry against, so the dispatch
-                // does not fail and a queue does not send the job again.
-                let (host, endpoint_sha256) = endpoint_for_log(&subscription.endpoint);
-                tracing::warn!(
-                    channel = "webpush",
-                    host = %host,
-                    endpoint_sha256 = %endpoint_sha256,
-                    notification = %notification.name(),
-                    reason = %reason,
-                    "webpush subscription cannot be used; caller should remove"
+                warn_unusable(&subscription.endpoint, notification, &reason);
+                Ok(())
+            }
+            Err(WebPushError::RefusedDestination(class)) => {
+                // The class of the address, never the address itself.
+                warn_unusable(
+                    &subscription.endpoint,
+                    notification,
+                    &format!("its host name resolves to {class}"),
                 );
                 Ok(())
             }
             Err(WebPushError::PushServiceRejected {
                 retry_after: Some(retry_after),
                 status,
-                ..
             }) => Err(FrameworkError::rate_limited(
                 Some(retry_after),
                 format!("WebPushChannel: push service rejected (status {status})"),
             )),
+            // The status alone: the body the push service sent is remote
+            // data and stays out of an error a listener receives.
+            Err(WebPushError::PushServiceRejected {
+                retry_after: None,
+                status,
+            }) => Err(FrameworkError::internal(format!(
+                "WebPushChannel: push service rejected (status {status})"
+            ))),
             Err(e) => Err(FrameworkError::internal(format!("WebPushChannel: {e}"))),
         }
     }
