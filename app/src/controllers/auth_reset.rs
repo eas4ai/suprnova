@@ -7,8 +7,10 @@
 //!   always returns 200, dispatches mail only when the email is on
 //!   file - the facade itself enforces this).
 //! - `POST /auth/password/reset` - body is form-urlencoded
-//!   `token=...&new_password=...`. Calls `PasswordReset::complete`,
-//!   redirects to `/?reset=ok` on success.
+//!   `token=...&new_password=...`. Calls
+//!   `PasswordReset::complete_with_outcome` and redirects to `/?reset=ok`
+//!   only when the password changed and the user's other sessions and
+//!   remember-me tokens were revoked.
 //!
 //! Both endpoints are public - they consume tokens minted out-of-
 //! band, so they don't sit behind `SessionAuthMiddleware`. Token
@@ -56,8 +58,21 @@ async fn request_reset_inner(req: Request) -> Result<HttpResponse, FrameworkErro
     ))
 }
 
-/// `POST /auth/password/reset` - consume the token + apply the new
-/// password.
+/// The message of the error a failed revocation answers with, for the user
+/// whose password changed. The framework's error path logs it, and a debug
+/// build shows it as `debug_message`; a production `500` body stays
+/// generic.
+const REVOCATION_FAILED: &str = "Your password was changed, but signing you out of your \
+    other devices failed. Sign in again on every device, and contact support.";
+
+/// `POST /auth/password/reset` - consume the token, apply the new
+/// password, and revoke the user's other sessions and remember-me tokens.
+///
+/// The redirect to `/?reset=ok` means all three happened. A changed
+/// password is not enough while a stolen session or remember-me cookie
+/// still works, so a revocation that fails is logged at error level with
+/// the user's id and answered as a `500` through the framework's error
+/// path. The password stays changed.
 ///
 /// On success the facade also dispatches a `PasswordChangedMail`
 /// security notification and fires `PasswordResetCompleted`. Both
@@ -77,7 +92,21 @@ async fn complete_reset_inner(req: Request) -> Result<HttpResponse, FrameworkErr
         ));
     }
 
-    PasswordReset::complete(&form.token, &form.new_password).await?;
+    let outcome = PasswordReset::complete_with_outcome(&form.token, &form.new_password).await?;
+    // Both are checked, so a failure of each one is logged.
+    let sessions_failed = revocation_failed(
+        &outcome.user_id,
+        "other sessions",
+        &outcome.sessions_revoked,
+    );
+    let remember_failed = revocation_failed(
+        &outcome.user_id,
+        "remember-me tokens",
+        &outcome.remember_tokens_revoked,
+    );
+    if sessions_failed || remember_failed {
+        return Err(FrameworkError::internal(REVOCATION_FAILED));
+    }
 
     // 302 → /?reset=ok . Built directly so the inner function's
     // `Result<HttpResponse, ...>` shape composes - see the matching
@@ -85,4 +114,24 @@ async fn complete_reset_inner(req: Request) -> Result<HttpResponse, FrameworkErr
     Ok(HttpResponse::new()
         .status(302)
         .header("Location", "/?reset=ok"))
+}
+
+/// Log `revoked` at error level with the user's id when it failed, and say
+/// whether it did.
+fn revocation_failed(
+    user_id: &str,
+    credentials: &str,
+    revoked: &Result<u64, FrameworkError>,
+) -> bool {
+    match revoked {
+        Ok(_) => false,
+        Err(error) => {
+            tracing::error!(
+                user_id,
+                error = %error,
+                "password reset: the password changed, but revoking the user's {credentials} failed"
+            );
+            true
+        }
+    }
 }
