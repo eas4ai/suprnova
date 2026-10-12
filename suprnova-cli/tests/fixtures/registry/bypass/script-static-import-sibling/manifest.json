@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-static-import-sibling",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

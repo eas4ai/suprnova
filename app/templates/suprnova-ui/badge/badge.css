@@ -1,0 +1,36 @@
+@layer suprnova-ui {
+  .sn-badge {
+    display: inline-flex;
+    align-items: center;
+    padding-block: var(--sn-space-1);
+    padding-inline: var(--sn-space-2);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-full);
+    background: var(--sn-color-surface-sunken);
+    color: var(--sn-color-text);
+    font-size: var(--sn-font-size-sm);
+    font-weight: var(--sn-font-weight-medium);
+    line-height: var(--sn-font-leading-tight);
+    white-space: nowrap;
+  }
+
+  .sn-badge[data-sn-variant="success"] {
+    border-color: var(--sn-color-success);
+    color: var(--sn-color-success);
+  }
+
+  .sn-badge[data-sn-variant="warning"] {
+    border-color: var(--sn-color-warning);
+    color: var(--sn-color-warning);
+  }
+
+  .sn-badge[data-sn-variant="error"] {
+    border-color: var(--sn-color-danger);
+    color: var(--sn-color-danger);
+  }
+
+  .sn-badge[data-sn-variant="info"] {
+    border-color: var(--sn-color-primary);
+    color: var(--sn-color-primary);
+  }
+}
