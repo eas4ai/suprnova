@@ -4897,7 +4897,6 @@
 {"path":"suprnova::RevocationRequest","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::RevocationRetry","kind":"enum","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":["suprnova::auth_flows::RevocationRetry","suprnova::auth_flows::password_reset::RevocationRetry"],"implements":[]}
 {"path":"suprnova::RevocationRetry::NotNeeded","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":["suprnova::auth_flows::RevocationRetry::NotNeeded","suprnova::auth_flows::password_reset::RevocationRetry::NotNeeded"],"implements":[]}
-{"path":"suprnova::RevocationRetry::PushFailed","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":["suprnova::auth_flows::RevocationRetry::PushFailed","suprnova::auth_flows::password_reset::RevocationRetry::PushFailed"],"implements":[]}
 {"path":"suprnova::RevocationRetry::Queued","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":["suprnova::auth_flows::RevocationRetry::Queued","suprnova::auth_flows::password_reset::RevocationRetry::Queued"],"implements":[]}
 {"path":"suprnova::RevocationTransport","kind":"trait","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::RevocationTransport::send","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}

@@ -821,9 +821,9 @@
       "class": "noise",
       "evidence": "reqwest's own ClientBuilder::connector_layer (reqwest 0.13.4, src/async_impl/client.rs:2458), named in web-push.md as a builder option that decides where a connection goes; not Suprnova API."
     },
-    "After the last try the job lands in `failed_jobs`, where `queue:retry` runs it again.": {
+    "A worker started with `--tries` gives the job that bound, so after a long outage the job lands in `failed_jobs`; run `queue:retry` on it then.": {
       "class": "noise",
-      "evidence": "manual/auth-flows.md: the revocation retry job's dead-letter behaviour (after its last try it lands in failed_jobs, where queue:retry runs it again); describes how the queue treats an exhausted job, not when a release ships."
+      "evidence": "manual/upgrade-4.0.md: the revocation retry job under a worker's --tries bound (framework/src/queue/worker.rs:1033 maps the worker's --tries onto the envelope, :1286 dead-letters at that bound); describes how the queue treats a job the worker bounded, not when a release ships."
     }
   }
 }
