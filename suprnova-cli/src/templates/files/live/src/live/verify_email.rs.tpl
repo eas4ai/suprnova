@@ -8,7 +8,7 @@ use suprnova::MustVerifyEmail;
 use suprnova::auth_flows::EmailVerification;
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
 
-use super::{current_user, on_own_task, redirect};
+use super::{current_user, redirect};
 use crate::controllers::email_verification::verification_link;
 use crate::flash::Toast;
 
@@ -37,10 +37,7 @@ impl VerifyEmail {
         if user.is_email_verified() {
             return redirect("dashboard", None);
         }
-        let sent = on_own_task("sending a verification link", async move {
-            EmailVerification::send_link(&user, &verification_link()).await
-        })
-        .await?;
+        let sent = EmailVerification::send_link(&user, &verification_link()).await;
         let toast = match sent {
             Ok(_) => Toast::info("A new verification link is on its way."),
             Err(error) => {

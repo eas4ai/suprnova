@@ -556,41 +556,6 @@ mod components {
         );
     }
 
-    /// A password reset and the account mails run on their own Tokio task:
-    /// below an action sit the server, the middleware and the Live engine,
-    /// and in a debug build the reset overflowed the 2 MiB worker stack
-    /// there, which aborts the server.
-    #[test]
-    fn kit_live_deep_steps_run_on_their_own_task() {
-        let app = Scaffold::new();
-        let module = app.read("src/live/mod.rs");
-        assert!(contains(&module, "tokio::spawn(work).await"), "{module}");
-        for (file, step) in [
-            (
-                "src/live/reset_password_form.rs",
-                "PasswordReset::complete_with_outcome",
-            ),
-            (
-                "src/live/forgot_password_form.rs",
-                "PasswordReset::send_link",
-            ),
-            ("src/live/register_form.rs", "EmailVerification::send_link"),
-            ("src/live/verify_email.rs", "EmailVerification::send_link"),
-        ] {
-            let source = app.read(file);
-            let at = source
-                .find(step)
-                .unwrap_or_else(|| panic!("{file} never calls {step}"));
-            let task = source[..at]
-                .rfind("on_own_task(")
-                .unwrap_or_else(|| panic!("{file} calls {step} outside on_own_task"));
-            assert!(
-                !source[task..at].contains("\n    }\n"),
-                "{file} calls {step} outside on_own_task"
-            );
-        }
-    }
-
     #[test]
     fn kit_live_flows_toast_once_through_the_session() {
         let app = Scaffold::new();

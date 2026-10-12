@@ -10,7 +10,7 @@ use suprnova::auth_flows::EmailVerification;
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
 use suprnova::{Auth, Validate};
 
-use super::{FieldErrors, failed, on_own_task, redirect};
+use super::{FieldErrors, failed, redirect};
 use crate::controllers::email_verification::verification_link;
 use crate::flash::Toast;
 use crate::models::user::User;
@@ -79,11 +79,7 @@ impl RegisterForm {
         // be sent (nothing listening on `MAIL_SMTP_HOST`, `MAIL_FROM` unset)
         // is logged and said in the toast; the user is still signed in and
         // asks the notice page for a new link once mail works.
-        let recipient = user.clone();
-        let sent = on_own_task("sending a verification link", async move {
-            EmailVerification::send_link(&recipient, &verification_link()).await
-        })
-        .await?;
+        let sent = EmailVerification::send_link(&user, &verification_link()).await;
         Auth::login(Arc::new(user), false)
             .await
             .map_err(|error| failed("signing a new user in", error))?;

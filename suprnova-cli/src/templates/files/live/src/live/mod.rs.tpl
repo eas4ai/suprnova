@@ -25,7 +25,6 @@ pub mod reset_password_form;
 pub mod verify_email;
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -242,28 +241,6 @@ pub(crate) async fn current_user() -> Result<User, ComponentError> {
         .await
         .map_err(|error| failed("reading the signed-in user", error))?
         .ok_or_else(|| failed("reading the signed-in user", "no user is signed in"))
-}
-
-/// Runs `work` on its own Tokio task and waits for its result.
-///
-/// An action already runs deep in its worker thread's stack: the server,
-/// the middleware, the session and the Live engine sit below it, and a
-/// debug build keeps every one of those frames large. A password reset, or
-/// a mail sent over SMTP, adds enough on top to overflow Tokio's 2 MiB
-/// worker stack, which aborts the process. A new task starts at the top of
-/// a worker's stack, so the kit runs those steps here. `work` runs outside
-/// the request: it cannot read the session or the signed-in user, so hand
-/// it what it needs.
-pub(crate) async fn on_own_task<T>(
-    step: &str,
-    work: impl Future<Output = T> + Send + 'static,
-) -> Result<T, ComponentError>
-where
-    T: Send + 'static,
-{
-    tokio::spawn(work)
-        .await
-        .map_err(|error| failed(step, error))
 }
 
 /// Logs why a step of a component failed, and answers the closed failure

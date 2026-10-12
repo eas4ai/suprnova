@@ -383,13 +383,6 @@ async fn page(req: &Request) -> Result<HttpResponse, FrameworkError> {
    `templates/live/layouts/head.html`.
 4. Run `suprnova live:check` to prove every view against its component.
 
-In a debug build an action runs deep in its worker thread's stack, below
-the server, the middleware, and the Live engine, so it has little room
-left. The kit runs its deepest steps, such as a password reset or a mail
-sent over SMTP, on their own task with `live::on_own_task`. Do the same for
-a step of your own that goes deep and needs neither the session nor the
-signed-in user.
-
 ### Why Suprnova diverges
 
 Laravel's Livewire starter kit renders Blade views with Livewire

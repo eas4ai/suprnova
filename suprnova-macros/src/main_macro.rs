@@ -8,6 +8,10 @@
 //! through DNS resolution, time formatting, or a C dependency. This macro
 //! keeps the same `async fn main` ergonomics while moving the env load
 //! ahead of the runtime, where the mutation is actually sound.
+//!
+//! The runtime's threads get an 8 MiB stack. Tokio's 2 MiB default left a
+//! Live action in a debug build about 200 KiB of its own, below the
+//! server, the middleware, the session, the render cache and the engine.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -160,6 +164,12 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
 
     // `load_env` runs before the builder line on purpose, and the ordering
     // is the entire point of this macro - see the module doc.
+    // `thread_stack_size` gives every worker and blocking thread 8 MiB, the
+    // size Linux gives the main thread, in place of Tokio's 2 MiB: in a
+    // debug build the frames the framework puts under a Live action use
+    // about 1.75 MiB, and an action a little deeper overflowed the default
+    // and aborted the server. The size is reserved address space, used only
+    // as a stack is touched.
     // `set_default_build_id` runs immediately after: `env!` expands where
     // these tokens are compiled, which is the *application* crate, not
     // this macro crate, so it records the application's own
@@ -178,6 +188,7 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
 
             let __suprnova_runtime = #builder
                 #worker_threads
+                .thread_stack_size(8 * 1024 * 1024)
                 .enable_all()
                 .build()
                 .expect("failed to build the Tokio runtime");

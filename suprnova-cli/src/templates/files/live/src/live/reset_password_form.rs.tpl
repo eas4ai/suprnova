@@ -10,7 +10,7 @@ use suprnova::Validate;
 use suprnova::auth_flows::PasswordReset;
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
 
-use super::{FieldErrors, failed, on_own_task, redirect};
+use super::{FieldErrors, failed, redirect};
 use crate::flash::Toast;
 
 /// The rule the new password must pass.
@@ -69,11 +69,7 @@ impl ResetPasswordForm {
             self.errors = FieldErrors::one("password_confirmation", "Passwords do not match.");
             return Ok(ActionResult::render());
         }
-        let (token, password) = (self.token.clone(), self.password.clone());
-        let completed = on_own_task("resetting a password", async move {
-            PasswordReset::complete_with_outcome(&token, &password).await
-        })
-        .await?;
+        let completed = PasswordReset::complete_with_outcome(&self.token, &self.password).await;
         let outcome = match completed {
             Ok(outcome) => outcome,
             // An invalid, expired, or already used token is something the

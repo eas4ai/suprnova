@@ -1544,6 +1544,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **Runtime threads have an 8 MiB stack.** `#[suprnova::main]` builds its
+  Tokio runtime with `thread_stack_size` set to 8 MiB for the worker and
+  blocking threads, the size Linux gives the main thread, in place of
+  Tokio's 2 MiB default. In a debug build the frames the framework puts
+  under a Live action (the server, the middleware, the session, the render
+  cache and the Live engine) use about 1.75 MiB of a 2 MiB stack, so an
+  action a little deeper, such as a password reset, overflowed it and
+  aborted the server. The size is reserved address space; a thread uses
+  memory only as its stack is touched.
 - **Typed factory counts.** `count` and `times` make `make` and `create`
   return vectors while uncounted factories keep their single-model results.
 - **Laravel boolean storage.** MySQL and SQLite boolean columns use
