@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: cli-generators-and-live-kit
+Current: daybreak-defects-round
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1096,6 +1096,36 @@ Requirements: PAR-191, PAR-192
    in this phase with a violating example. Done when both requirements
    have a current pass on a committed tree and the review is recorded; the
    tag v4.0.0 then follows through `scripts/release.sh` on a pushed main.
+
+## daybreak-defects-round
+
+Requirements: HRD-001, HRD-002, HRD-003, HRD-004, HRD-005, HRD-006, PAR-080
+
+54. daybreak-defects-round - the six findings of the Daybreak defensive
+   audit of 2026-10-11 and one defect the Live kit lane found, fixed
+   before the 4.0.0 tag by the developer's word of 2026-10-11 19:38
+   ("confirmed"). The items:
+   - slow-request-bodies-occupy-generated-applications (HRD-001, item cc0b71be)
+   - magick-driver-autodetects-unrecognised-uploads (HRD-002, item ed74e9fb)
+   - web-push-strict-endpoint-is-dns-blind (HRD-003, item 8e4a3937)
+   - dogfood-reset-reports-success-after-revocation-failure (HRD-004, item c8dd575c)
+   - asset-serving-canonicalize-then-open-race (HRD-005, item 84080b9c)
+   - websocket-same-origin-ignores-the-scheme (HRD-006, item fda6f83a)
+   - full-stack-dockerfile-omits-lang (PAR-080, item 3e112824): the
+     Dockerfile `docker:init` writes for an Inertia kit never copies
+     `lang/` into the runtime image.
+   Delivery: one fix per item in its module with the test that failed
+   before it, merged under a lease on the item's requirement; the manual
+   passages the fixes touch; changelog entries under 4.0.0 (`### Fixed`,
+   each with its upgrade-chapter section or listing). Mechanisms: the
+   `hardening` mechanism, declared in this phase with a violating example
+   (no `hardening_` test exists on the tree before the fixes), runs the
+   `hardening_` tests of the framework's http, server, media,
+   static_files, live and ws binaries, the Web Push crate, the CLI's
+   kit_pages and the dogfood application; the Dockerfile fix lands under
+   `par-starter-kits`. Done when every requirement has a current pass on
+   a committed tree and the review is recorded; the tag v4.0.0 then
+   follows through `scripts/release.sh` on a pushed main.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
