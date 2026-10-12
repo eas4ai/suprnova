@@ -3160,8 +3160,27 @@ pub(crate) fn persisted_guard_sign_in_epoch(
 /// `user_id`: a later sign-in or logout in the same request replaced it,
 /// and the epoch of a user it no longer holds must not attach to whoever
 /// holds the guard now.
+///
+/// The write goes to the session slot directly rather than through
+/// [`session_mut`], which records a session read for the render cache and
+/// so makes the render uncacheable. This function reads the guard's
+/// identity, a principal the resolution that calls it has already observed
+/// as one (`session_identity`), and writes the epoch, which no response
+/// depends on: a render that resolves the signed-in user and records the
+/// epoch of an [`GuardSignInEpoch::Unread`] sign-in at that resolution
+/// (`Auth::login_id` under a hand-built guard, or a test's session scope)
+/// stays cacheable for that principal, as a render whose sign-in recorded
+/// the epoch earlier does. A cached response skips the handler and so this
+/// write, which leaves the mark for the next request that resolves the
+/// user; nothing is served to the wrong principal, and the comparison
+/// itself runs on every resolution.
 pub(crate) fn record_guard_sign_in_epoch(guard_name: &str, user_id: &str, epoch: Option<u64>) {
-    session_mut(|session| {
+    crate::render_cache::collector::observe_principal_read();
+    let _ = SESSION_CONTEXT.try_with(|slot| {
+        let mut slot = crate::lock::recover(slot);
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
         if session.auth_guard_id(guard_name).as_deref() != Some(user_id) {
             return;
         }
