@@ -847,8 +847,12 @@ A third-party library installs its components under its own root,
 `try_live_ui_assets_for("acme")` serves `templates/acme-ui/` at
 `/acme-ui/{component}/{file}` under the same rules, and `live:add` names
 the call when it installs the library's first component. Only stylesheets
-and scripts are served, never a view, a Rust file, a manifest or the install
-record, and never a file reached through a symbolic link below the root.
+and scripts of at most 1 MiB are served, never a view, a Rust file, a
+manifest or the install record, and never a file reached through a symbolic
+link below the root. The server opens the component directory and the file
+through the root it holds open, so a link swapped in while a request is in
+flight is refused too, and it checks the 1 MiB bound on the file it then
+reads.
 The namespace call refuses `suprnova`, whose call is `try_live_ui_assets()`,
 and the reserved `sn` and `live`; `try_live_ui_assets_for_from(namespace,
 directory)` serves the same route from an explicit directory.

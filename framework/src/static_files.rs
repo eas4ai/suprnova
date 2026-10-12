@@ -3,17 +3,25 @@
 //! [`StaticFiles`] is intended for `fallback!` registration: normal routes
 //! win first, and safe `GET` / `HEAD` misses can be resolved from a configured
 //! public directory without handing the request to application code.
+//!
+//! A request path is resolved through held directory handles, never checked
+//! and then opened again by name (HRD-005): a symbolic link is followed only
+//! while it stays inside the root, and a directory swapped for a link while
+//! the request is in flight fails the request instead of redirecting it. The
+//! length and the content type a response declares come from the handle its
+//! body is read from.
 
 use crate::app::paths::public_path;
 use crate::http::file_response::{file_body, mime_from_extension, with_charset};
 use crate::http::{HttpResponse, Request, Response};
 use bytes::Bytes;
 use hyper::Method;
+use std::fs::File;
 use std::future::Future;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 
 const SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 
@@ -66,32 +74,16 @@ impl StaticFiles {
             return not_found();
         };
 
-        let Ok(root) = tokio::fs::canonicalize(&self.root).await else {
+        let root = self.root.clone();
+        let Ok(Some(OpenedFile {
+            file,
+            length: content_length,
+            content_type,
+        })) = tokio::task::spawn_blocking(move || open_for_serving(&root, &relative_path)).await
+        else {
             return not_found();
         };
-
-        let candidate = root.join(relative_path);
-        let Ok(file_path) = tokio::fs::canonicalize(candidate).await else {
-            return not_found();
-        };
-
-        if !file_path.starts_with(&root) {
-            return not_found();
-        }
-
-        let Ok(file) = tokio::fs::File::open(&file_path).await else {
-            return not_found();
-        };
-
-        let Ok(metadata) = file.metadata().await else {
-            return not_found();
-        };
-        if !metadata.is_file() {
-            return not_found();
-        }
-
-        let content_type = content_type_for(&file_path).await;
-        let content_length = metadata.len();
+        let file = tokio::fs::File::from_std(file);
 
         let mut response = if is_head {
             // HEAD carries no body, so the stat-derived length is reported
@@ -114,6 +106,69 @@ impl StaticFiles {
 
         Ok(response)
     }
+}
+
+/// A file opened for serving, with the length and the content type its
+/// response declares, both taken from the handle the body is read from.
+struct OpenedFile {
+    file: File,
+    length: u64,
+    content_type: String,
+}
+
+/// Open the regular file at `relative` under `root` for serving. `None`
+/// when there is nothing there to serve, or it cannot be opened or read.
+fn open_for_serving(root: &Path, relative: &Path) -> Option<OpenedFile> {
+    let (mut file, length, name) = open_beneath(root, relative)?;
+    let content_type = content_type_for(&name, &mut file).ok()?;
+    Some(OpenedFile {
+        file,
+        length,
+        content_type,
+    })
+}
+
+/// Open the regular file at `relative` under `root` through held directory
+/// handles, and return it with its length and the name it has in its
+/// directory.
+///
+/// The root is resolved once, so a root that is itself a symbolic link
+/// still serves. Below it, the walk follows a symbolic link only while the
+/// link stays inside the root, and opens every directory and the file with
+/// `O_NOFOLLOW`, so a directory swapped for a link after the walk passed
+/// it fails the open instead of redirecting it. The length comes from the
+/// opened handle, and the name is the one the walk reached, so a link
+/// inside the root takes the type of the file it leads to.
+#[cfg(unix)]
+fn open_beneath(root: &Path, relative: &Path) -> Option<(File, u64, PathBuf)> {
+    use crate::confined_walk::{ConfinedRoot, Last, open_file_in};
+
+    let relative = relative.to_str()?;
+    let entry = ConfinedRoot::new(root)
+        .ok()?
+        .resolve(relative, Last::Follow, false)
+        .ok()?;
+    let (file, metadata) = open_file_in(&entry.dir, &entry.name, relative).ok()??;
+    Some((file, metadata.len(), PathBuf::from(entry.name)))
+}
+
+/// Where `openat` and `O_NOFOLLOW` are unavailable, the file is found by its
+/// canonical path and opened by that name, so a directory swapped for a
+/// symbolic link between the check and the open is followed. The length
+/// still comes from the opened handle.
+#[cfg(not(unix))]
+fn open_beneath(root: &Path, relative: &Path) -> Option<(File, u64, PathBuf)> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let file_path = std::fs::canonicalize(root.join(relative)).ok()?;
+    if !file_path.starts_with(&root) {
+        return None;
+    }
+    let file = File::open(&file_path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some((file, metadata.len(), file_path))
 }
 
 fn not_found() -> Response {
@@ -192,16 +247,24 @@ fn has_dot_component(path: &str) -> bool {
         .any(|segment| segment == "." || segment == "..")
 }
 
-async fn content_type_for(path: &Path) -> String {
-    let mime = match mime_from_extension(path) {
+/// The `Content-Type` of the file `name`, open as `file`: the type its
+/// extension implies, or else the type its first bytes show. Those bytes
+/// are read from the handle the body is sent from, which is then rewound
+/// to its start, so the type always describes the file the response sends.
+fn content_type_for(name: &Path, file: &mut File) -> std::io::Result<String> {
+    let mime = match mime_from_extension(name) {
         Some(mime) => mime,
         None => {
-            let prefix = sniff_prefix(path).await.unwrap_or_default();
+            let mut prefix = Vec::with_capacity(SNIFF_PREFIX_BYTES);
+            Read::by_ref(file)
+                .take(SNIFF_PREFIX_BYTES as u64)
+                .read_to_end(&mut prefix)?;
+            file.seek(SeekFrom::Start(0))?;
             mime_from_content(&prefix).unwrap_or("application/octet-stream")
         }
     };
 
-    with_charset(mime)
+    Ok(with_charset(mime))
 }
 
 fn mime_from_content(bytes: &[u8]) -> Option<&'static str> {
@@ -230,14 +293,6 @@ fn mime_from_content(bytes: &[u8]) -> Option<&'static str> {
     }
 
     Some("text/plain")
-}
-
-async fn sniff_prefix(path: &Path) -> Option<Vec<u8>> {
-    let mut file = tokio::fs::File::open(path).await.ok()?;
-    let mut prefix = vec![0; SNIFF_PREFIX_BYTES];
-    let read = file.read(&mut prefix).await.ok()?;
-    prefix.truncate(read);
-    Some(prefix)
 }
 
 #[cfg(test)]

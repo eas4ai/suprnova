@@ -10,7 +10,13 @@
 //! Nothing else under the template root is reachable: a name outside the
 //! closed character set, a nested path, a view, a manifest, or a file
 //! reached through a symbolic link below the root is a closed 404.
+//!
+//! The component directory and the file are opened through held directory
+//! handles, never checked and then opened again by name (HRD-005), and the
+//! 1 MiB bound is checked on the handle the bytes are then read from.
 
+use std::fs::File;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -151,28 +157,11 @@ impl LiveUiAssets {
         } else {
             "text/javascript; charset=utf-8"
         };
-        // A file is served only where it sits. Resolving both the root and
-        // the file refuses a component directory or file that is a symbolic
-        // link below the root, which could otherwise put a view, the
-        // install record, `suprnova.toml` or any file on the host behind an
-        // asset name. The root itself may be a link, as a deployment's
-        // templates directory often is.
-        let (Ok(root), Ok(path)) = (
-            tokio::fs::canonicalize(&self.root).await,
-            tokio::fs::canonicalize(self.root.join(component).join(file)).await,
-        ) else {
-            return Ok(closed(404));
-        };
-        if path != root.join(component).join(file) {
-            return Ok(closed(404));
-        }
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
-            return Ok(closed(404));
-        };
-        if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES {
-            return Ok(closed(404));
-        }
-        let Ok(bytes) = tokio::fs::read(&path).await else {
+        let root = self.root.clone();
+        let (component, file) = (component.to_owned(), file.to_owned());
+        let Ok(Some(bytes)) =
+            tokio::task::spawn_blocking(move || read_asset(&root, &component, &file)).await
+        else {
             return Ok(closed(404));
         };
         let etag = format!("\"{}\"", hex(&Sha256::digest(&bytes)));
@@ -199,6 +188,62 @@ impl LiveUiAssets {
             .header("ETag", etag)
             .header("X-Content-Type-Options", "nosniff"))
     }
+}
+
+/// The bytes of `<root>/<component>/<file>`, or `None` when it is not a
+/// regular file of at most 1 MiB that can be read.
+///
+/// The bound is checked on the metadata of the handle the bytes are then
+/// read from, and the read itself stops one byte past the bound, so a file
+/// that grows after the check is refused rather than sent past it.
+fn read_asset(root: &Path, component: &str, file: &str) -> Option<Vec<u8>> {
+    let (handle, metadata) = open_asset(root, component, file)?;
+    if metadata.len() > MAX_ASSET_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    handle
+        .take(MAX_ASSET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_ASSET_BYTES).then_some(bytes)
+}
+
+/// Open `<root>/<component>/<file>` and return it with the metadata of that
+/// handle, or `None` when it is not a regular file sitting where it is
+/// named.
+///
+/// A file is served only where it sits. The component directory and the
+/// file are opened relative to the held root with `O_NOFOLLOW`, so a
+/// component directory or a file that is a symbolic link below the root
+/// is refused, even one swapped in while the request is in flight; a link
+/// could otherwise put a view, the install record, `suprnova.toml` or any
+/// file on the host behind an asset name. The root itself may be a link,
+/// as a deployment's templates directory often is: it is resolved once.
+#[cfg(unix)]
+fn open_asset(root: &Path, component: &str, file: &str) -> Option<(File, std::fs::Metadata)> {
+    use crate::confined_walk::{ConfinedRoot, open_dir_in, open_file_in};
+    use std::ffi::OsStr;
+
+    let root = ConfinedRoot::new(root).ok()?.open_root().ok()?;
+    let directory = open_dir_in(&root, OsStr::new(component), component).ok()?;
+    open_file_in(&directory, OsStr::new(file), file).ok()?
+}
+
+/// Where `openat` and `O_NOFOLLOW` are unavailable, a symbolic link below
+/// the root is refused by comparing canonical paths, and the file is then
+/// opened by that name, so a link swapped in between the comparison and the
+/// open is followed. The bound and the bytes still come from one handle.
+#[cfg(not(unix))]
+fn open_asset(root: &Path, component: &str, file: &str) -> Option<(File, std::fs::Metadata)> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let path = std::fs::canonicalize(root.join(component).join(file)).ok()?;
+    if path != root.join(component).join(file) {
+        return None;
+    }
+    let handle = File::open(&path).ok()?;
+    let metadata = handle.metadata().ok()?;
+    metadata.is_file().then_some((handle, metadata))
 }
 
 /// One closed segment of lowercase letters, digits and hyphens.

@@ -522,3 +522,133 @@ async fn reg_017_each_namespace_installs_once_beside_the_others() {
         assert_eq!(get(&router, path).await.status, status, "{path}");
     }
 }
+
+/// How many requests a UI asset race test sends while the tree changes.
+#[cfg(unix)]
+const RACE_REQUESTS: usize = 1500;
+
+/// A client for the shipped route over `root`, driven in-process so a race
+/// test can send many requests while the tree changes under it.
+#[cfg(unix)]
+fn ui_client(root: &Path) -> suprnova::testing::TestClient {
+    ensure_crypt();
+    suprnova::testing::TestClient::new(
+        Router::new()
+            .try_live_ui_assets_from(root.to_path_buf())
+            .expect("the root installs"),
+        MiddlewareRegistry::new(),
+    )
+}
+
+/// HRD-005: the 1 MiB bound is checked on the file the server then reads.
+/// A small and an oversized version of a script are swapped in by rename
+/// while requests run; every answer must be the small version whole, with
+/// its length and its digest, or a 404. The server used to stat the path,
+/// then read it again by name, so a swap between the two sent the
+/// oversized file past the bound.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hardening_ui_assets_read_from_the_handle_they_checked() {
+    use sha2::{Digest as _, Sha256};
+
+    const SMALL: &str = "export const small = 1;\n";
+    let project = tempfile::tempdir().expect("tempdir");
+    let root = project.path().join("templates/suprnova-ui");
+    let field = root.join("field");
+    write(&field.join("field.js"), SMALL);
+    write(&field.join("small.version"), SMALL);
+    write(&field.join("huge.version"), vec![b' '; MIB + 1]);
+    let client = ui_client(&root);
+
+    let racer = crate::tree_racer::Racer::start(move || {
+        for version in ["huge.version", "small.version"] {
+            let _ = std::fs::remove_file(field.join("staged"));
+            let _ = std::fs::hard_link(field.join(version), field.join("staged"));
+            let _ = std::fs::rename(field.join("staged"), field.join("field.js"));
+        }
+    });
+
+    let mut served = 0usize;
+    let mut wrong = Vec::new();
+    for _ in 0..RACE_REQUESTS {
+        let response = client.get("/suprnova-ui/field/field.js").send().await;
+        if response.status() == 404 {
+            continue;
+        }
+        let body = response.body_text();
+        let etag = format!("\"{}\"", hex::encode(Sha256::digest(body.as_bytes())));
+        if response.status() == 200
+            && body == SMALL
+            && response.header("content-length") == Some(body.len().to_string().as_str())
+            && response.header("etag") == Some(etag.as_str())
+        {
+            served += 1;
+        } else {
+            wrong.push((
+                response.status(),
+                body.len(),
+                response.header("content-length").map(str::to_owned),
+            ));
+        }
+    }
+    let swaps = racer.finish();
+
+    assert!(
+        wrong.is_empty(),
+        "{} of {RACE_REQUESTS} answers were not the checked small file: (status, body bytes, content-length) {:?}",
+        wrong.len(),
+        &wrong[..wrong.len().min(5)]
+    );
+    assert!(swaps > 0, "the racer never swapped the script");
+    assert!(served > 0, "no request was served the small script");
+}
+
+/// HRD-005: a component directory swapped for a symlink after the path was
+/// checked cannot make the server send a file from outside the root. The
+/// server used to compare canonical paths and then stat and read the file
+/// again by name, so a swap after the comparison read whatever the symlink
+/// pointed at.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hardening_a_ui_asset_directory_swapped_for_a_symlink_is_refused() {
+    const INSIDE: &str = "export const inside = 1;\n";
+    let project = tempfile::tempdir().expect("tempdir");
+    let root = project.path().join("templates/suprnova-ui");
+    let outside = project.path().join("outside");
+    write(&root.join("field/field.js"), INSIDE);
+    write(&outside.join("field.js"), "export const SECRET = 1;\n");
+    let client = ui_client(&root);
+
+    let swapped = root.clone();
+    let racer = crate::tree_racer::Racer::start(move || {
+        let _ = std::fs::rename(swapped.join("field"), swapped.join("field.real"));
+        let _ = std::os::unix::fs::symlink(&outside, swapped.join("field"));
+        std::thread::yield_now();
+        let _ = std::fs::remove_file(swapped.join("field"));
+        let _ = std::fs::rename(swapped.join("field.real"), swapped.join("field"));
+    });
+
+    let mut served = 0usize;
+    let mut leaked = Vec::new();
+    for _ in 0..RACE_REQUESTS {
+        let response = client.get("/suprnova-ui/field/field.js").send().await;
+        match response.status() {
+            200 if response.body_text() == INSIDE => served += 1,
+            404 => {}
+            status => leaked.push((status, response.body_text())),
+        }
+    }
+    let swaps = racer.finish();
+
+    assert!(
+        leaked.is_empty(),
+        "{} of {RACE_REQUESTS} answers were not the script inside the root: {:?}",
+        leaked.len(),
+        &leaked[..leaked.len().min(5)]
+    );
+    assert!(swaps > 0, "the racer never swapped the directory");
+    assert!(
+        served > 0,
+        "no request was served the script inside the root"
+    );
+}
