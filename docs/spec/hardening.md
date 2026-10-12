@@ -155,7 +155,7 @@ PDF and XPS coders, every delegate, and `@file` path reads; a run whose
 policy cannot be written or verified MUST refuse before ImageMagick starts.
 Falsifier: the child process starts with `MAGICK_CONFIGURE_PATH` unset or naming a directory whose `policy.xml` differs from the framework's; or an MVG, MSL or `url:` input under `IMAGE_MAGICK_AUTODETECT` reaches a coder the policy names.
 Mechanism: `hardening`.
-Rationale: Daybreak DBK-02's third remedy (the developer's ruling of 2026-10-12): the opt-in exists (HRD-002) but ran under the host's policy; ImageMagick merges every `policy.xml` on its configure path and a policy only removes rights, so the framework's tightens whatever the host allows.
+Rationale: Daybreak DBK-02's third remedy (the developer's ruling of 2026-10-12): the opt-in exists (HRD-002) but ran under the host's policy; ImageMagick reads every `policy.xml` it finds and applies the last matching entry, so the framework's policy is written where ImageMagick reads last (`$HOME/.config/ImageMagick`, with HOME set for the child) and the driver verifies that order once a process.
 Status: Agreed 2026-10-12
 
 [HRD-011] `EndpointPolicy` MUST offer an allowlist: a policy that admits a

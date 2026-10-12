@@ -141,10 +141,11 @@ drivers, as they stand at that place, and MUST NOT contribute ImageMagick
 arguments, so the manual's promise that user input reaches no argument
 position holds: under `magick`, each custom step runs between two
 ImageMagick runs that pass the image over stdin and stdout, and the
-driver writes no temporary file. Output from a pipeline with a custom
+driver writes no temporary file holding image data (its ImageMagick
+policy file is the one file it writes). Output from a pipeline with a custom
 step MUST meet IMG-001 and IMG-002 as one without it does. A custom
 transformation with no registration MUST fail with an error naming it.
-Falsifier: a custom transformation registered without an `ImageDriver` impl is missing from the output, or lands at another place in the pipeline, under `oxideav` or `magick`; it receives anything but the image's pixels at its place; the `magick` argv carries anything it supplied; the driver writes a temporary file for a `magick` pipeline with a custom step, or that pipeline loses the source's ICC profile or the opt-out's `Orientation` tag; or a custom transformation with no registration does not fail with an error naming it.
+Falsifier: a custom transformation registered without an `ImageDriver` impl is missing from the output, or lands at another place in the pipeline, under `oxideav` or `magick`; it receives anything but the image's pixels at its place; the `magick` argv carries anything it supplied; the driver writes a temporary file holding image data for a `magick` pipeline with a custom step, or that pipeline loses the source's ICC profile or the opt-out's `Orientation` tag; or a custom transformation with no registration does not fail with an error naming it.
 Mechanism: `images`.
 Rationale: Laravel's `transform()` and `transformUsing`. Ruled 2026-10-05: a custom transformation works on decoded pixels under both drivers and never contributes ImageMagick arguments.
 Status: Agreed 2026-10-05
