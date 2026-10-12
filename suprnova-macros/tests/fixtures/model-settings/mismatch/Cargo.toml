@@ -1,0 +1,11 @@
+[package]
+name = "model-settings-mismatch"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+tokio.workspace = true
