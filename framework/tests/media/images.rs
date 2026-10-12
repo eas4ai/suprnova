@@ -2344,15 +2344,23 @@ fn img_004_a_magick_custom_step_adds_no_argument_and_no_file_child() {
     let magick_tmp = std::path::PathBuf::from(std::env::var("MAGICK_TEMPORARY_PATH").unwrap());
     // A stand-in binary that records every argument it is given, and what
     // both temporary directories hold as it starts, and runs the real
-    // ImageMagick with them.
+    // ImageMagick with them. The driver's checks of the policy in effect
+    // (`-list policy`, and the MVG probe that reads `mvg:-`) are not runs
+    // on the image, so they go straight through, and the directory that
+    // holds the driver's ImageMagick policy (HRD-010) is the one entry of
+    // the temporary directory the listing leaves out: it is the driver's
+    // own, and holds no image.
     let log = scratch.join("argv.log");
     let listing = scratch.join("listing.log");
     let wrapper = scratch.join("magick-recording");
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{log}'\nprintf -- '--end--\\n' >> '{log}'\n\
-             ls -A \"$TMPDIR\" \"$MAGICK_TEMPORARY_PATH\" | grep -v -e ':$' -e '^$' >> '{listing}'\n\
+            "#!/bin/sh\nif [ \"$1\" = -list ]; then exec magick \"$@\"; fi\n\
+             for arg; do if [ \"$arg\" = mvg:- ]; then exec magick \"$@\"; fi; done\n\
+             printf '%s\\n' \"$@\" >> '{log}'\nprintf -- '--end--\\n' >> '{log}'\n\
+             ls -A \"$TMPDIR\" \"$MAGICK_TEMPORARY_PATH\" | grep -v -e ':$' -e '^$' \
+             -e '^suprnova-magick-policy-' >> '{listing}'\n\
              exec magick \"$@\"\n",
             log = log.display(),
             listing = listing.display(),
@@ -2425,10 +2433,14 @@ fn img_004_a_magick_custom_step_adds_no_argument_and_no_file_child() {
         "a temporary directory held a file as a run started"
     );
     for dir in [&rust_tmp, &magick_tmp] {
-        assert_eq!(
-            std::fs::read_dir(dir).unwrap().count(),
-            0,
-            "{} holds a file after the pipeline",
+        let left: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with("suprnova-magick-policy-"))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{} holds a file after the pipeline: {left:?}",
             dir.display()
         );
     }

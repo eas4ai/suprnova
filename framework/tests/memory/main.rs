@@ -17,6 +17,10 @@ pub mod image_outputs;
 pub mod image_terminals;
 pub mod images;
 pub mod jobs;
+// The stand-in `magick` binaries that use it are unix shell scripts.
+#[cfg(all(feature = "media", unix))]
+#[path = "../support/magick_policy.rs"]
+mod magick_policy;
 pub mod media;
 pub mod rate_limit;
 pub mod root_template;

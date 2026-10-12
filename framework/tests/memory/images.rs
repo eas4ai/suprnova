@@ -1568,7 +1568,9 @@ async fn mem_audit_the_magick_driver_writes_its_input_without_copying_it() {
 
 /// A `magick` driver whose binary is a stand-in, kept in a scratch
 /// directory named `name`: it reads all of stdin and answers with `answer`,
-/// whatever it is asked. No host ImageMagick is needed.
+/// whatever it is asked, except the driver's checks of the policy in
+/// effect, which it answers as ImageMagick does under the framework's
+/// policy. No host ImageMagick is needed.
 #[cfg(unix)]
 fn magick_stand_in(name: &str, answer: &[u8]) -> suprnova::MagickCliDriver {
     use std::os::unix::fs::PermissionsExt;
@@ -1577,11 +1579,12 @@ fn magick_stand_in(name: &str, answer: &[u8]) -> suprnova::MagickCliDriver {
     std::fs::create_dir_all(&scratch).unwrap();
     let answer_file = scratch.join("answer");
     std::fs::write(&answer_file, answer).unwrap();
+    let checks = crate::magick_policy::answer_policy_checks(&scratch);
     let stand_in = scratch.join("magick-stand-in");
     std::fs::write(
         &stand_in,
         format!(
-            "#!/bin/sh\ncat > /dev/null\nexec cat '{}'\n",
+            "#!/bin/sh\n{checks}cat > /dev/null\nexec cat '{}'\n",
             answer_file.display()
         ),
     )
@@ -1756,12 +1759,13 @@ fn magick_stand_in_per_run(
     std::fs::write(&intermediate_file, intermediate).unwrap();
     let output_file = scratch.join("output");
     std::fs::write(&output_file, output).unwrap();
+    let checks = crate::magick_policy::answer_policy_checks(&scratch);
     let stand_in = scratch.join("magick-stand-in");
     std::fs::write(
         &stand_in,
         format!(
-            "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  png:-) cat > /dev/null; exec \
-             cat '{}' ;;\n  *) cat > '{}'; exec cat '{}' ;;\nesac\n",
+            "#!/bin/sh\n{checks}for last; do :; done\ncase \"$last\" in\n  png:-) cat > /dev/null; \
+             exec cat '{}' ;;\n  *) cat > '{}'; exec cat '{}' ;;\nesac\n",
             intermediate_file.display(),
             scratch.join("received").display(),
             output_file.display()
