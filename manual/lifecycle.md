@@ -277,11 +277,11 @@ A short list of invariants the lifecycle establishes:
   HTTP routes; you can apply per-route WS middleware exactly like
   HTTP middleware.
 - **The shutdown signal is never starved by the connection cap.**
-  With `SERVER_MAX_CONNECTIONS` set, waiting for a free slot races the
-  shutdown signal rather than blocking the accept loop, so a server
-  whose slots are all held by long-lived WebSocket sessions still
-  drains on `SIGTERM` instead of being SIGKILLed at the end of the
-  orchestrator's grace period.
+  Waiting for a free connection slot (`SERVER_MAX_CONNECTIONS`, 10000
+  by default) races the shutdown signal rather than blocking the accept
+  loop, so a server whose slots are all held by long-lived WebSocket
+  sessions still drains on `SIGTERM` instead of being SIGKILLed at the
+  end of the orchestrator's grace period.
 - **Every drain aborts what it abandons.** HTTP connections, WebSocket
   handlers, post-response `Terminable` hooks, and supervisors each get
   a bounded grace window and are then aborted and awaited - including
