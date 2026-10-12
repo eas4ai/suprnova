@@ -55,8 +55,8 @@ pub trait WebSocketHandler: Send + Sync + 'static {
 /// by CSRF token middleware (the upgrade carries no token), so a same-origin
 /// check on `Origin` is the only thing standing between a malicious page and
 /// a privileged WS endpoint on a logged-in user's session. The framework
-/// enforces this policy before [`hyper_tungstenite::upgrade`](https://docs.rs/hyper-tungstenite)
-/// is called; a policy-violation returns HTTP 403 with no upgrade.
+/// enforces this policy before it answers the 101 and before the middleware
+/// chain runs; a policy violation returns HTTP 403 with no upgrade.
 ///
 /// Non-browser clients (servers, CLIs, native apps) typically don't send an
 /// `Origin` header. Routes that serve non-browser clients exclusively should
@@ -65,11 +65,19 @@ pub trait WebSocketHandler: Send + Sync + 'static {
 /// frontend origins.
 #[derive(Clone, Debug, Default)]
 pub enum OriginPolicy {
-    /// Default. Allow upgrades only when the request's `Origin` host (and
-    /// port, if present in `Origin`) matches the request's `Host` header.
-    /// A missing `Origin` is rejected. Scheme is not compared (TLS is
-    /// terminated upstream of a typical Suprnova process, so the server
-    /// can't reliably tell whether the public scheme was https or http).
+    /// Default. Allow upgrades only when the `Origin` is the request's own
+    /// origin: the same scheme, host and port. The scheme is the request's
+    /// public one, [`Request::scheme`] after trusted-proxy processing, the
+    /// host is [`Request::host`], and a port the `Origin` or the request
+    /// leaves out is the scheme's default (443 for https, 80 for http).
+    ///
+    /// A missing `Origin` is rejected, and so is a request whose public
+    /// scheme cannot be determined: a trusted proxy that names no scheme in
+    /// `X-Forwarded-Proto` or `X-Forwarded-Ssl`, or names one that is
+    /// neither `http` nor `https`, and a request that carries either header
+    /// from a peer that is not a trusted proxy. Behind a TLS-terminating
+    /// proxy, list the proxy in `APP_TRUSTED_PROXIES` and have it send
+    /// `X-Forwarded-Proto`, or use [`OriginPolicy::AllowList`].
     #[default]
     SameOrigin,
     /// Skip origin validation. Suitable for non-browser endpoints (server-

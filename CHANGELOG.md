@@ -3061,6 +3061,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `Retry-After` hint and no part of the body, whose first 200 bytes go to
   the debug log, and `WebPushChannel` names the status alone and logs a
   refused destination as a subscription that cannot be used.
+- **The same-origin WebSocket policy compares the scheme.** In 3.2.1,
+  `OriginPolicy::SameOrigin`, the default policy of a WebSocket route,
+  compared the `Origin` host and port with the `Host` header and ignored the
+  scheme, so a page at `http://app.example.com` could open a socket on the
+  application served at `https://app.example.com`. It now compares the
+  complete origin: the `Origin` scheme, host and port against the request's
+  public scheme (`Request::scheme`, which reads `X-Forwarded-Proto` and
+  `X-Forwarded-Ssl` from a trusted proxy only), its host (`Request::host`)
+  and its port (`Request::port`, or 443 for `https` and 80 for `http`). It
+  refuses the upgrade with `403` when the public scheme cannot be
+  determined: a trusted proxy that sends neither header or names a scheme
+  other than `http` or `https`, or either header from a peer that is not a
+  trusted proxy. The check reads the request the handler receives, so a
+  malformed handshake is now answered `400` before its origin is checked.
+- **The dogfood application's password reset reports success only when both
+  revocations succeed.** In 3.2.1, the dogfood application's
+  `POST /auth/password/reset` called `PasswordReset::complete`, which
+  discards the outcome of revoking the user's other sessions and remember-me
+  tokens, and redirected to `/?reset=ok` once the password was written. It
+  now calls `PasswordReset::complete_with_outcome`, as the scaffold's
+  controller does, and redirects only when both revocations succeeded. A
+  failed revocation is logged at error level with the user's id and answered
+  with a `500` through the framework's error path; the password stays
+  changed.
 
 ## 3.2.1 - 2026-10-05
 

@@ -2475,6 +2475,30 @@ returns `RefusedDestination`, as you remove one that returns
 `InvalidSubscription`. If you set a DNS resolver on the builder you pass
 to `with_client_builder`, it is replaced; map a fixed address with
 `ClientBuilder::resolve` instead.
+### The same-origin WebSocket policy compares the scheme.
+
+**Before:** `OriginPolicy::SameOrigin` compared the `Origin` host and port
+with the `Host` header and ignored the scheme. A page at
+`http://app.example.com` could open a socket on the application served at
+`https://app.example.com`, and a TLS-terminating proxy needed no
+configuration for the check to pass.
+
+**Now:** It compares the `Origin` scheme, host and port with the request's
+public origin: the scheme `Request::scheme` reports, which reads
+`X-Forwarded-Proto` and `X-Forwarded-Ssl` from a trusted proxy only, the
+host `Request::host` reports, and the port `Request::port` reports or the
+scheme's default. It refuses with `403` an upgrade whose public scheme it
+cannot determine: a trusted proxy that sends neither header or names a
+scheme other than `http` or `https`, or either header from a peer that is
+not a trusted proxy. A malformed handshake is answered `400` before its
+origin is checked.
+
+**Do:** Behind a TLS-terminating proxy, list the proxy in
+`APP_TRUSTED_PROXIES` and make sure it sends `X-Forwarded-Proto`, as
+`proxy_set_header X-Forwarded-Proto $scheme;` does in nginx, or give the
+route an `OriginPolicy::AllowList` of its public origins. An application
+whose browsers reach it with no proxy in between has nothing to do. See
+[Same-origin behind a proxy](websockets.md#same-origin-behind-a-proxy).
 
 ## Fixes with no upgrade step
 
@@ -2517,6 +2541,7 @@ observes, or touch only the framework's own tooling and tests.
 - **The Laravel-database tests run each SQLite test on one connection.** It changes the framework's own tests.
 - **The component allowlist refuses test fakes, app-wide hooks and installs.** A component's Rust, and the allowlist that reads it, are new in 4.0.0; a 3.2.1 component carried no Rust.
 - **Every Live and Magnetar type a public signature leads to is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
+- **The dogfood application's password reset reports success only when both revocations succeed.** The dogfood application is not a published surface.
 
 ## Added entries that change behaviour
 

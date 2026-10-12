@@ -424,7 +424,7 @@ The first tick is consumed at task start so the peer gets at least one full inte
 
 ## Origin policy
 
-Browsers always send an `Origin` header on WebSocket handshakes. Unlike `fetch()` / `XMLHttpRequest`, WebSocket upgrades aren't protected by CSRF token middleware (the handshake carries no token), so a same-origin `Origin` check is the only thing standing between a malicious page and a privileged WS endpoint on a logged-in user's session. The framework enforces the configured policy before `hyper_tungstenite::upgrade` is called; a violation returns HTTP 403 with no upgrade.
+Browsers always send an `Origin` header on WebSocket handshakes. Unlike `fetch()` / `XMLHttpRequest`, WebSocket upgrades aren't protected by CSRF token middleware (the handshake carries no token), so a same-origin `Origin` check is the only thing standing between a malicious page and a privileged WS endpoint on a logged-in user's session. The framework enforces the configured policy before it answers the 101 and before the middleware chain runs; a violation returns HTTP 403 with no upgrade.
 
 ```rust
 use suprnova::ws::{OriginPolicy, WsConfig};
@@ -440,11 +440,34 @@ let cfg = WsConfig {
 
 | Variant      | Behavior |
 |--------------|----------|
-| `SameOrigin` (default) | Allow only when `Origin`'s host (and port if present) matches the request's `Host` header. Missing `Origin` is rejected. Scheme is not compared (TLS terminates upstream, so the server can't reliably tell whether the public scheme was https or http). |
+| `SameOrigin` (default) | Allow only when `Origin` is the request's own origin: the same scheme, host, and port. A missing `Origin` is rejected, and so is a request whose public scheme the framework cannot determine. See [Same-origin behind a proxy](#same-origin-behind-a-proxy). |
 | `AllowAny`   | Skip the check. Use only for non-browser endpoints (server-to-server, native apps, test mocks). |
 | `AllowList(Vec<String>)` | Allow only when `Origin` exactly matches (case-insensitive) one of the supplied origins. Each entry is the full `scheme://host[:port]` form a browser would send. |
 
 Non-browser clients (CLI tools, servers, native apps) typically don't send an `Origin` header. Routes that serve such clients exclusively should use `AllowAny`; routes serving both should use `AllowList` enumerating every production frontend origin.
+
+### Same-origin behind a proxy
+
+`SameOrigin` compares the whole origin. A page at `http://app.example.com` is a different origin from the application at `https://app.example.com`, so it can't open the application's socket.
+
+The framework builds the request's own origin from three parts:
+
+- **Scheme.** `Request::scheme()`, which reads `X-Forwarded-Proto` and `X-Forwarded-Ssl` only from a trusted proxy.
+- **Host.** `Request::host()`: `X-Forwarded-Host` from a trusted proxy, otherwise the `Host` header.
+- **Port.** `Request::port()`, or 443 for `https` and 80 for `http` when the request names no port. An `Origin` without a port takes the same defaults, so `https://app.example.com` and `app.example.com:443` match.
+
+The framework itself speaks plain HTTP. When it can't tell which scheme the browser used, it refuses the upgrade. That happens in three cases:
+
+- The peer is a trusted proxy and sends neither `X-Forwarded-Proto` nor `X-Forwarded-Ssl`.
+- The peer is a trusted proxy and `X-Forwarded-Proto` names a scheme other than `http` or `https`.
+- The peer isn't a trusted proxy, but the request carries `X-Forwarded-Proto` or `X-Forwarded-Ssl`. The request came through a proxy that the application doesn't trust.
+
+Behind a TLS-terminating proxy, do both of these:
+
+1. List the proxy in `APP_TRUSTED_PROXIES`, for example `APP_TRUSTED_PROXIES=127.0.0.1`.
+2. Have the proxy send `X-Forwarded-Proto`. The nginx example in [Production deployment](#production-deployment) sets it.
+
+If the proxy can't be trusted, use `AllowList` with the exact public origins instead.
 
 ## Subprotocols
 
@@ -468,9 +491,9 @@ When `accepted_protocols` is empty, negotiation is skipped entirely - the upgrad
 
 ## Production deployment
 
-The framework handles the handshake and frame I/O. You do not need any extra configuration on the framework side for production.
+The framework handles the handshake and frame I/O. On the framework side, production needs one setting: list your proxy in `APP_TRUSTED_PROXIES`, so the [same-origin check](#same-origin-behind-a-proxy) can believe the scheme the proxy reports.
 
-**TLS termination happens upstream.** Clients connect to `wss://` on nginx, Caddy, or the cloud load balancer; the proxy strips TLS and forwards plain `ws://` to the framework. The framework does not need a `rustls` feature or a TLS certificate.
+**TLS termination happens upstream.** Clients connect to `wss://` on nginx, Caddy, or the cloud load balancer; the proxy strips TLS and forwards plain `ws://` to the framework, with `X-Forwarded-Proto` naming the scheme the client used. The framework does not need a `rustls` feature or a TLS certificate.
 
 ### nginx
 
@@ -482,6 +505,7 @@ location /ws/ {
     proxy_set_header Connection "Upgrade";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
 }
@@ -498,7 +522,7 @@ reverse_proxy /ws/* localhost:3000 {
 }
 ```
 
-Caddy handles `Upgrade` / `Connection` automatically when proxying; the explicit `header_up` directives above are for clarity.
+Caddy handles `Upgrade` / `Connection` automatically when proxying; the explicit `header_up` directives above are for clarity. Caddy sends `X-Forwarded-Proto` by default.
 
 ### Cloud load balancers (AWS ALB, GCP GLB)
 
