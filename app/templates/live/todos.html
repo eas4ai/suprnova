@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Todos</title>
+</head>
+<body>
+<main>
+<h1>Todos</h1>
+<p>Todo count: {{ count }}</p>
+<ul>
+{% for title in titles %}<li>{{ title }}</li>
+{% endfor %}</ul>
+</main>
+</body>
+</html>
