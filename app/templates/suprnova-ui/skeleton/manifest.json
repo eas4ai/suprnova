@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.skeleton",
+  "version": 1,
+  "root": "suprnova-ui/skeleton",
+  "files": [
+    "skeleton.html",
+    "skeleton.css"
+  ],
+  "elements": []
+}
