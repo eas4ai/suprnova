@@ -609,7 +609,7 @@ Like Laravel, the image surface is two drivers, chosen with
 | Driver | Value | Needs | Reads |
 |---|---|---|---|
 | OxideAV | `oxideav` (default) | nothing | PNG, JPEG, WebP, GIF, BMP |
-| ImageMagick | `magick` | ImageMagick 7 on the host | whatever the host's delegates provide |
+| ImageMagick | `magick` | ImageMagick 7 on the host | PNG, JPEG, WebP, GIF, BMP, HEIC, AVIF, TIFF, and PSD, as far as the host's delegates read them; other formats only with `IMAGE_MAGICK_AUTODETECT=true` |
 
 `IMAGE_DRIVER` sets the driver for the whole process. One image can
 choose its own with `using`, which changes the driver of that image and
@@ -673,25 +673,59 @@ ImageMagick keeps are fixed strings. A custom transformation adds no
 argument: it runs on the pixels between two runs. There is no argument
 position user input can reach.
 
-When the framework recognises the input, the decoder is named on the
-command line - `png:-` rather than a bare `-`. That matters: given a
-bare `-`, ImageMagick picks a coder from the bytes it is handed, so a
-file whose magic says MVG or MSL is read as a *script* regardless of
-what your application believed it was accepting. Pinning the coder makes
-a mislabelled file fail instead of becoming something else.
+Unless you opt into autodetection, the decoder is named on the command
+line - `png:-` or `heic:-`, never a bare `-`. That matters: given a bare `-`, ImageMagick picks a
+coder from the bytes it is handed, so a file whose magic says MVG or MSL
+is read as a *script* regardless of what your application believed it
+was accepting. A named coder makes a mislabelled file fail instead of
+becoming something else.
 
-**Input the framework cannot name still relies on your `policy.xml`.**
-Reading those formats is the whole reason this driver exists, so that
-path cannot pin a coder. Harden the host's ImageMagick policy - at
-minimum disabling the `MVG`, `MSL`, `URL`, `HTTPS`, `EPHEMERAL`, and
-`TEXT` coders - if you accept arbitrary uploads under
-`IMAGE_DRIVER=magick`.
+Suprnova names the format from the input's leading bytes and hands
+ImageMagick the matching coder:
+
+| Input | Coder |
+|---|---|
+| PNG, JPEG, WebP, GIF, BMP | `png`, `jpeg`, `webp`, `gif`, `bmp` |
+| HEIC, and other HEIF images | `heic` |
+| AVIF | `avif` |
+| TIFF and BigTIFF | `tiff` |
+| Photoshop PSD and PSB | `psd`, `psb` |
+
+The first five are the formats the default driver reads too. HEIC and
+AVIF read only when the host's ImageMagick carries the libheif delegate,
+and TIFF only with libtiff.
+
+Input that matches none of these is refused before ImageMagick starts,
+with a 4xx `FrameworkError` that says the format is not one Suprnova
+names. An MVG or MSL document, and input that names a pseudo-coder such
+as `url:`, never reaches ImageMagick.
+
+**Autodetection is an opt-in, and it hands the coder choice back to
+ImageMagick.** To read a format Suprnova does not name, such as PPM or
+JPEG XL, set:
+
+```env
+IMAGE_MAGICK_AUTODETECT=true
+```
+
+Input the framework cannot name then goes to ImageMagick on a bare `-`,
+and ImageMagick chooses the coder from its bytes, MVG and MSL included.
+Your host's `policy.xml` is then the only barrier between an upload and
+those coders. Turn it on only when you need it, and harden the policy
+first - at minimum disable the `MVG`, `MSL`, `URL`, `HTTPS`,
+`EPHEMERAL`, and `TEXT` coders. The formats in the table keep their
+named coder either way. Any value other than `true`, `1`, `yes`, or
+`on` leaves autodetection off. `ImageConfig` carries the setting as its
+`magick_autodetect` field, and `ImageConfig::magick_autodetect(true)`
+sets it on a configuration you build. The default `oxideav` driver
+ignores it.
 
 Decode limits are enforced twice under this driver. For the five formats
 the framework can parse, the header check above runs before the process
-is spawned. For everything else a pre-parse is impossible, so every
-invocation carries ImageMagick's own `-limit` flags derived from the
-same configuration, including a wall-clock `-limit time`.
+is spawned. For the other formats in the table, and for any input under
+autodetection, a pre-parse is impossible, so every invocation carries
+ImageMagick's own `-limit` flags derived from the same configuration,
+including a wall-clock `-limit time`.
 
 That flag is not the whole story, because ImageMagick enforces it with
 its own resource monitor, and a process wedged inside a delegate before
@@ -774,9 +808,11 @@ you change, rather than writing a struct literal.
 If the built-in five are not enough, there are three routes, in rough
 order of how much you take on:
 
-1. **The built-in `magick` driver.** Set `IMAGE_DRIVER=magick`. Format
-   breadth comes from the host's ImageMagick delegates, and there is no
-   build dependency to manage.
+1. **The built-in `magick` driver.** Set `IMAGE_DRIVER=magick`. It
+   reads HEIC, AVIF, TIFF, and PSD through the host's ImageMagick
+   delegates, and any other format they read once you opt into
+   [autodetection](#image_drivermagick). There is no build dependency
+   to manage.
 2. **A custom driver around libvips**, for example via the
    [libvips-rust-bindings](https://github.com/olxgroup-oss/libvips-rust-bindings)
    crate (MIT). libvips is the engine behind Node's `sharp`, with a very
@@ -842,6 +878,15 @@ image. The licensing sits where it belongs, with the host.
 When the `oxideav` driver meets a HEIC file it says so by name, points
 at this chapter, and names both ways forward, rather than returning a
 generic "unsupported format".
+
+**The `magick` driver names the coder.** Laravel's Imagick driver reads
+an upload with Intervention Image, which hands Imagick the bytes without
+a format, so ImageMagick chooses the coder from them and the host's
+`policy.xml` decides whether an MVG or MSL script runs. Suprnova names
+the coder for every format it recognises and refuses other bytes before
+ImageMagick starts, so the barrier holds on a host whose policy is the
+default. `IMAGE_MAGICK_AUTODETECT=true` gives you Laravel's behaviour
+back.
 
 **No base64 or URL constructors.** Laravel's `ImageManager` has
 `->read($base64)` and `->read($url)`. `from_bytes` composes with

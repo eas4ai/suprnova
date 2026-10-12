@@ -3102,6 +3102,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   refused even when it leads back in, and `StaticFiles` answers 404 for a
   FIFO instead of holding the request open. On Windows, which has no
   `openat`, the path is still checked and then opened by name.
+- **The `magick` driver names the coder it hands ImageMagick.** In 3.2.1
+  the `magick` driver named the coder only for PNG, JPEG, WebP, GIF and
+  BMP. It handed every other input to ImageMagick on a bare `-`, so
+  ImageMagick chose the coder from the upload's bytes: an MVG or MSL
+  document ran as a script, and the host's `policy.xml` was the only
+  barrier. In 4.0.0 the driver also recognises HEIC and the other HEIF
+  images, AVIF, TIFF and BigTIFF, PSD and PSB by their leading bytes, and
+  reads them as `heic:-`, `avif:-`, `tiff:-`, `psd:-` and `psb:-`. It
+  refuses any other input before ImageMagick starts, with a 4xx
+  `FrameworkError` that says the format is not one Suprnova names, in
+  `process`, `dimensions` and `dominant_color` alike. Autodetection is an
+  opt-in by name: `IMAGE_MAGICK_AUTODETECT=true`, held as
+  `ImageConfig::magick_autodetect`, hands unrecognised input to
+  ImageMagick on a bare `-` as before. The `oxideav` driver is unchanged.
 
 ## 3.2.1 - 2026-10-05
 
