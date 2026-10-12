@@ -14,15 +14,20 @@ identical to upstream - only the transport changed.
 - `VapidSigner` + `VapidKey` + `VapidClaims` - RFC 8292 application server signing
 - `Payload` + `ContentEncoding` (aes128gcm) - RFC 8291 message encryption
 - `SubscriptionInfo` - the browser-side subscription envelope
-- `WebPushError` - typed error surface
-- `EndpointPolicy` - denylist support for blocking subscriptions to specific
-  push services (useful for compliance and abuse-control)
+- `WebPushError` - typed error surface; `AddressClass` names the class of a
+  refused address, never the address itself
+- `EndpointPolicy` - `Strict`, the default, refuses a subscription endpoint
+  that is not `https`, that names an IP address or a local or cloud metadata
+  name, or whose name resolves to a loopback, private, link-local, multicast,
+  reserved or metadata address, and the transport the client builds connects
+  only to an address it checked; `AllowAny` sends to any endpoint
 
 ## Install
 
-The framework re-exports the most common pieces under
-`suprnova::notifications::web_push`, so application code rarely depends
-on this crate directly. If you need the lower-level API:
+The framework re-exports this crate as `suprnova::web_push`, and the
+common pieces (`WebPushClient`, `SubscriptionInfo`, `VapidKey`, ...) at its
+crate root, so application code rarely depends on this crate directly. If
+you need the lower-level API:
 
 ```toml
 [dependencies]
@@ -31,25 +36,33 @@ suprnova-web-push = { git = "https://github.com/eas4ai/suprnova.git", tag = "v3.
 
 ## Usage
 
-See `manual/web-push.md` in the Suprnova repo for the full guide, plus
-`framework/src/notifications/web_push/` for higher-level integration with
-the framework's `Notification` trait.
+See `manual/web-push.md` in the Suprnova repo for the full guide, and the
+framework's `WebPushChannel`, which adapts a `WebPushClient` to the
+notifications `Channel` trait so a `Notification` that names `webpush` in
+its channels is delivered without calling the client directly.
 
 ```rust,no_run
-use suprnova_web_push::{WebPushClient, SubscriptionInfo, Payload, ContentEncoding, VapidSigner, VapidKey};
+use suprnova_web_push::{ContentEncoding, SubscriptionInfo, VapidKey, VapidSigner, WebPushClient};
 
 # async fn send() -> Result<(), Box<dyn std::error::Error>> {
-let client = WebPushClient::new();
-let vapid_key = VapidKey::from_pem(include_str!("../vapid_private.pem"))?;
-let signer = VapidSigner::new(vapid_key, "mailto:admin@example.com");
+let key = VapidKey::from_pem(&std::fs::read_to_string("vapid_private.pem")?)?;
+let client = WebPushClient::new(VapidSigner::new(key), "mailto:admin@example.com")?;
 
-let subscription: SubscriptionInfo = serde_json::from_str(/* from browser */ "{}")?;
-let payload = Payload::new(b"hello", ContentEncoding::Aes128Gcm);
-
-client.send(&subscription, &payload, &signer).await?;
+let subscription: SubscriptionInfo = serde_json::from_str(/* from the browser */ "{}")?;
+let response = client
+    .send(&subscription, b"hello", ContentEncoding::Aes128Gcm, 3600)
+    .await?;
+println!("the push service answered {}", response.status);
 # Ok(())
 # }
 ```
+
+`WebPushClient::new` builds a transport that follows no redirect and uses
+no proxy. To change timeouts or TLS, pass a `reqwest::ClientBuilder` to
+`WebPushClient::with_client_builder`; a `reqwest::Client` you built
+yourself goes to `WebPushClient::with_client`, which under `Strict` sends
+only after `allow_unconfined_redirects` and `allow_unpinned_destinations`
+accept, by name, what the library cannot see in a finished client.
 
 ## License
 
