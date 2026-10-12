@@ -1,23 +1,21 @@
 #![cfg(all(feature = "media", unix))]
 //! HRD-002: the `magick` driver names the coder it hands ImageMagick.
-//! HRD-010: every run reads the framework's ImageMagick policy, and the
-//! policy in effect is checked before the first run. A failed check refuses
-//! every run under autodetection, and is logged once while runs proceed
-//! without it, because the driver then names the coder for every input.
+//! HRD-010: every run reads the framework's ImageMagick policy, read last,
+//! and the policy in effect is checked before the first run. A failed check
+//! refuses every run, with or without autodetection.
 //!
 //! None of these tests runs ImageMagick. The driver's binary is a shell
 //! script that records each invocation, its arguments, the bytes on its
-//! stdin, its `MAGICK_CONFIGURE_PATH` and the `policy.xml` in the first
-//! directory of that path, and answers each probe the way ImageMagick
-//! would. It answers `-list policy` with a listing the test chose, and
-//! records that apart from the runs on an image. So a test sees whether a
-//! process started at all, what it was told to read, which policy it would
-//! have read, and how often the driver asked for the policy in effect.
+//! stdin, its `HOME` and `MAGICK_CONFIGURE_PATH`, and the `policy.xml` in
+//! the first directory of that path, and answers each probe the way
+//! ImageMagick would. It answers `-list policy` with a listing the test
+//! chose, with the framework's file under its own `HOME`, and records that
+//! apart from the runs on an image. So a test sees whether a process started
+//! at all, what it was told to read, which policy it would have read, and
+//! how often the driver asked for the policy in effect.
 
-use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use serial_test::serial;
 use suprnova::{
@@ -51,6 +49,9 @@ struct Recorder {
     stdin: PathBuf,
     configure: PathBuf,
     policy: PathBuf,
+    /// The `HOME` of every process, the checks of the policy in effect
+    /// included.
+    home: PathBuf,
     /// The scratch directory, which holds the answers to the driver's
     /// checks of the policy in effect.
     dir: PathBuf,
@@ -63,7 +64,7 @@ struct Recorder {
 }
 
 /// What the stand-in records for a process started without
-/// `MAGICK_CONFIGURE_PATH`.
+/// `MAGICK_CONFIGURE_PATH`, or without `HOME`.
 const UNSET: &str = "(unset)";
 
 /// What the stand-in records for a process whose first configure
@@ -103,6 +104,7 @@ impl Recorder {
         let stdin = dir.join("stdin.log");
         let configure = dir.join("configure.log");
         let policy = dir.join("policy.log");
+        let home = dir.join("home.log");
         let listings = dir.join("listings.log");
         let listing_fails = dir.join("listing-fails");
         let probes = dir.join("probes.log");
@@ -110,19 +112,25 @@ impl Recorder {
         let png = dir.join("answer.png");
         std::fs::write(&png, RED_PNG_1X1).expect("write the PNG the stand-in answers with");
         let binary = dir.join("magick-recording");
-        // `-list policy` and the MVG probe (`mvg:-`) are the driver's checks
-        // of the policy in effect: each is logged apart from the runs on an
-        // image and answered from the files the test chose, and the listing
-        // fails while the flag file exists. For a run,
-        // the policy is the one ImageMagick would read first: `policy.xml`
-        // in the first directory of the configure path, which ends at the
-        // first `:`. The last argument says what ImageMagick would write: a
-        // pixel enumeration for the colour probe, a PNG for a pipeline, and
-        // a size for `identify`.
+        // Every process logs its `HOME` first, the checks of the policy in
+        // effect included. `-list policy` and the MVG probe (`mvg:-`) are
+        // those checks: each is logged apart from the runs on an image and
+        // answered from the files the test chose, and the listing fails
+        // while the flag file exists. For a run, the policy is the one
+        // ImageMagick would read first: `policy.xml` in the first directory
+        // of the configure path, which ends at the first `:`. The last
+        // argument says what ImageMagick would write: a pixel enumeration
+        // for the colour probe, a PNG for a pipeline, and a size for
+        // `identify`.
         std::fs::write(
             &binary,
             format!(
                 "#!/bin/sh\n\
+                 if [ \"${{HOME+set}}\" = set ]; then\n\
+                 printf '%s\\n' \"$HOME\" >> '{home}'\n\
+                 else\n\
+                 printf '{UNSET}\\n' >> '{home}'\n\
+                 fi\n\
                  if [ \"$1\" = -list ] && [ \"$2\" = policy ]; then\n\
                  printf '%s\\n' \"$MAGICK_CONFIGURE_PATH\" >> '{listings}'\n\
                  if [ -e '{listing_fails}' ]; then\n\
@@ -162,6 +170,7 @@ impl Recorder {
                 stdin = stdin.display(),
                 configure = configure.display(),
                 policy = policy.display(),
+                home = home.display(),
                 listings = listings.display(),
                 listing_fails = listing_fails.display(),
                 probes = probes.display(),
@@ -178,6 +187,7 @@ impl Recorder {
             stdin,
             configure,
             policy,
+            home,
             dir,
             listings,
             listing_fails,
@@ -185,7 +195,8 @@ impl Recorder {
         }
     }
 
-    /// Answer `-list policy` with `listing` from now on.
+    /// Answer `-list policy` with `listing` from now on. The stand-in puts
+    /// its own `HOME` in place of [`crate::magick_policy::POLICY_HOME`].
     fn answer_listing(&self, listing: &str) {
         std::fs::write(self.dir.join(crate::magick_policy::LISTING), listing)
             .expect("write the listing");
@@ -247,15 +258,27 @@ impl Recorder {
         std::fs::read(&self.stdin).unwrap_or_default()
     }
 
-    /// The `MAGICK_CONFIGURE_PATH` of every process started so far, `None`
-    /// where it was unset.
-    fn configure_paths(&self) -> Vec<Option<String>> {
-        let Ok(log) = std::fs::read_to_string(&self.configure) else {
+    /// The lines of a log of an environment variable, one a process:
+    /// `None` where the process started without it.
+    fn variable_log(path: &Path) -> Vec<Option<String>> {
+        let Ok(log) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
         log.lines()
             .map(|line| (line != UNSET).then(|| line.to_string()))
             .collect()
+    }
+
+    /// The `MAGICK_CONFIGURE_PATH` of every run on an image so far, `None`
+    /// where it was unset.
+    fn configure_paths(&self) -> Vec<Option<String>> {
+        Self::variable_log(&self.configure)
+    }
+
+    /// The `HOME` of every process started so far, the checks of the
+    /// policy in effect included, `None` where it was unset.
+    fn homes(&self) -> Vec<Option<String>> {
+        Self::variable_log(&self.home)
     }
 
     /// The `policy.xml` each process started so far would have read first,
@@ -278,19 +301,34 @@ impl Recorder {
         let _ = std::fs::remove_file(&self.stdin);
         let _ = std::fs::remove_file(&self.configure);
         let _ = std::fs::remove_file(&self.policy);
+        let _ = std::fs::remove_file(&self.home);
     }
 }
 
-/// Assert that every process started so far read the framework's policy
-/// first, and return the directory each one read it from.
-fn assert_every_run_read_the_policy(recorder: &Recorder) -> Vec<PathBuf> {
+/// The directory that holds the framework's `policy.xml` inside the policy
+/// directory, which ImageMagick reads as `$HOME/.config/ImageMagick`.
+const POLICY_CONFIG_DIR: &str = ".config/ImageMagick";
+
+/// Assert that every process started so far read the framework's policy,
+/// and return the policy directory they read it from. Every process, the
+/// checks of the policy in effect included, starts with `HOME` naming that
+/// directory, so the framework's file is the last ImageMagick reads; and
+/// every run on an image starts with the first directory of its configure
+/// path at `<that directory>/.config/ImageMagick`, whose `policy.xml` is
+/// the framework's byte for byte.
+fn assert_every_run_read_the_policy(recorder: &Recorder) -> PathBuf {
     let runs = recorder.runs();
     let paths = recorder.configure_paths();
     let policies = recorder.policies();
+    let homes = recorder.homes();
     assert!(!runs.is_empty(), "no process started");
     assert_eq!(paths.len(), runs.len(), "one configure path a process");
     assert_eq!(policies.len(), runs.len(), "one policy a process");
-    paths
+    assert!(
+        homes.len() >= runs.len(),
+        "one HOME a process, the checks included: {homes:?}"
+    );
+    let roots: Vec<PathBuf> = paths
         .iter()
         .zip(&policies)
         .zip(&runs)
@@ -303,9 +341,32 @@ fn assert_every_run_read_the_policy(recorder: &Recorder) -> Vec<PathBuf> {
                 Some(MagickCliDriver::POLICY),
                 "the first directory of `{path}` did not hold the framework's policy for {run:?}"
             );
-            PathBuf::from(path.split(':').next().unwrap_or_default())
+            let first = Path::new(path.split(':').next().unwrap_or_default());
+            assert!(
+                first.ends_with(POLICY_CONFIG_DIR),
+                "the first directory of `{path}` is `{POLICY_CONFIG_DIR}` in the policy \
+                 directory for {run:?}"
+            );
+            first
+                .parent()
+                .and_then(Path::parent)
+                .expect("the policy directory holds `.config`")
+                .to_path_buf()
         })
-        .collect()
+        .collect();
+    let root = roots[0].clone();
+    assert!(
+        roots.iter().all(|other| *other == root),
+        "one policy directory a process: {roots:?}"
+    );
+    for home in &homes {
+        assert_eq!(
+            home.as_deref().map(Path::new),
+            Some(root.as_path()),
+            "every process starts with HOME naming the policy directory: {homes:?}"
+        );
+    }
+    root
 }
 
 /// A scratch directory of the test's own, empty.
@@ -558,6 +619,46 @@ fn hardening_autodetection_is_an_explicit_opt_in_child() {
     }
 }
 
+/// Assert that `root`, `root/.config` and `root/.config/ImageMagick` are
+/// each a directory, not a link, open to their owner alone.
+fn assert_closed_directories(root: &Path, what: &str) {
+    for dir in [
+        root.to_path_buf(),
+        root.join(".config"),
+        root.join(POLICY_CONFIG_DIR),
+    ] {
+        let meta = std::fs::symlink_metadata(&dir)
+            .unwrap_or_else(|e| panic!("{what}: {} exists: {e}", dir.display()));
+        assert!(
+            meta.is_dir(),
+            "{what}: {} is a directory, not a link",
+            dir.display()
+        );
+        assert_eq!(
+            meta.mode() & 0o777,
+            0o700,
+            "{what}: {} is open to its owner alone",
+            dir.display()
+        );
+    }
+}
+
+/// The names in `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("read an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 #[serial]
 fn hardening_every_run_reads_the_framework_policy() {
@@ -579,31 +680,34 @@ fn hardening_every_run_reads_the_framework_policy() {
             .process(PPM_1X1, &to_png())
             .expect("the pipeline runs");
     }
-    let dirs = assert_every_run_read_the_policy(&recorder);
-    assert!(dirs.len() >= 5, "every entry point ran: {dirs:?}");
+    let root = assert_every_run_read_the_policy(&recorder);
+    let runs = recorder.runs();
+    assert!(runs.len() >= 5, "every entry point ran: {runs:?}");
+    assert!(
+        recorder.homes().len() >= runs.len() + 2,
+        "the listing and the probe start with the same HOME as the runs"
+    );
 
     // One directory a process, under the system's temporary directory,
-    // open to its owner alone, holding the policy byte for byte.
-    let dir = &dirs[0];
+    // open to its owner alone, holding the policy byte for byte where
+    // ImageMagick reads it under HOME, and nothing else.
     assert!(
-        dirs.iter().all(|other| other == dir),
-        "one directory a process: {dirs:?}"
-    );
-    assert!(
-        dir.starts_with(std::env::temp_dir()),
+        root.starts_with(std::env::temp_dir()),
         "{} is under the temporary directory",
-        dir.display()
+        root.display()
     );
-    let name = dir.file_name().expect("a name").to_string_lossy();
+    let name = root.file_name().expect("a name").to_string_lossy();
     assert!(
         name.starts_with(&format!("suprnova-magick-policy-{}-", std::process::id())),
         "the directory names the framework and the process: {name}"
     );
-    let meta = std::fs::symlink_metadata(dir).expect("the directory exists");
-    assert!(meta.is_dir(), "a directory, not a link");
-    assert_eq!(meta.mode() & 0o777, 0o700, "open to its owner alone");
+    assert_closed_directories(&root, "a new policy directory");
+    assert_eq!(names_in(&root), [".config"]);
+    assert_eq!(names_in(&root.join(".config")), ["ImageMagick"]);
+    assert_eq!(names_in(&root.join(POLICY_CONFIG_DIR)), ["policy.xml"]);
     assert_eq!(
-        std::fs::read(dir.join("policy.xml")).expect("the policy is on disk"),
+        std::fs::read(root.join(POLICY_CONFIG_DIR).join("policy.xml"))
+            .expect("the policy is on disk"),
         MagickCliDriver::POLICY.as_bytes()
     );
 }
@@ -615,8 +719,8 @@ fn hardening_a_changed_policy_is_written_again_before_the_run() {
     let recorder = Recorder::new("policy-rewritten");
     let driver = recorder.driver();
     driver.dimensions(RED_PNG_1X1).expect("dimensions");
-    let dir = assert_every_run_read_the_policy(&recorder)[0].clone();
-    let file = dir.join("policy.xml");
+    let root = assert_every_run_read_the_policy(&recorder);
+    let file = root.join(POLICY_CONFIG_DIR).join("policy.xml");
     let policy = MagickCliDriver::POLICY.as_bytes();
 
     let elsewhere = scratch("policy-elsewhere").join("policy.xml");
@@ -653,7 +757,7 @@ fn hardening_a_changed_policy_is_written_again_before_the_run() {
         driver.dimensions(RED_PNG_1X1).expect("dimensions");
         assert_eq!(
             assert_every_run_read_the_policy(&recorder),
-            std::slice::from_ref(&dir),
+            root,
             "{what}: the run read the framework's policy from the same directory"
         );
         let meta = std::fs::symlink_metadata(&file).expect("the policy is on disk");
@@ -670,27 +774,57 @@ fn hardening_a_changed_policy_is_written_again_before_the_run() {
         "writing over the link left its target alone"
     );
 
+    // A run after `change` makes a new policy directory, closed like the
+    // first, rather than trust the one it had.
+    let replaced = |previous: &Path, what: &str| -> PathBuf {
+        recorder.clear();
+        driver.dimensions(RED_PNG_1X1).expect("dimensions");
+        let made = assert_every_run_read_the_policy(&recorder);
+        assert_ne!(made, previous, "{what}: a new directory");
+        assert_closed_directories(&made, what);
+        made
+    };
+
     // A directory removed under the driver, as a temporary-file cleaner
     // removes one, is made again.
-    std::fs::remove_dir_all(&dir).expect("remove the directory");
-    recorder.clear();
-    driver.dimensions(RED_PNG_1X1).expect("dimensions");
-    let made = assert_every_run_read_the_policy(&recorder);
-    assert_ne!(made[0], dir, "a new directory");
-    let meta = std::fs::symlink_metadata(&made[0]).expect("the new directory exists");
-    assert_eq!(meta.mode() & 0o777, 0o700, "open to its owner alone");
+    std::fs::remove_dir_all(&root).expect("remove the directory");
+    let mut current = replaced(&root, "a removed directory");
 
     // A directory opened to other users, who could then replace the
-    // policy, is not trusted: the next run makes a new one.
-    std::fs::set_permissions(&made[0], std::fs::Permissions::from_mode(0o777))
-        .expect("open the directory up");
-    recorder.clear();
-    driver.dimensions(RED_PNG_1X1).expect("dimensions");
-    let replaced = assert_every_run_read_the_policy(&recorder);
-    assert_ne!(replaced[0], made[0], "a new directory");
-    let meta = std::fs::symlink_metadata(&replaced[0]).expect("the new directory exists");
-    assert_eq!(meta.mode() & 0o777, 0o700, "open to its owner alone");
-    std::fs::remove_dir_all(&made[0]).expect("remove the opened directory");
+    // policy, is not trusted: the next run makes a new one. The same for
+    // either directory inside it.
+    for (inner, what) in [
+        ("", "the policy directory opened up"),
+        (".config", "its `.config` opened up"),
+        (POLICY_CONFIG_DIR, "its `.config/ImageMagick` opened up"),
+    ] {
+        std::fs::set_permissions(current.join(inner), std::fs::Permissions::from_mode(0o777))
+            .unwrap_or_else(|e| panic!("{what}: open the directory up: {e}"));
+        let next = replaced(&current, what);
+        std::fs::remove_dir_all(&current).expect("remove the opened directory");
+        current = next;
+    }
+
+    // A `.config` replaced by a link is not trusted either, even to a
+    // closed copy that holds the policy.
+    let copy = scratch("policy-config-copy").join(".config");
+    let copy_dir = copy.join("ImageMagick");
+    std::fs::create_dir_all(&copy_dir).expect("make the copy");
+    std::fs::write(copy_dir.join("policy.xml"), policy).expect("copy the policy");
+    for dir in [&copy, &copy_dir] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .expect("close the copy");
+    }
+    std::fs::remove_dir_all(current.join(".config")).expect("remove `.config`");
+    std::os::unix::fs::symlink(&copy, current.join(".config")).expect("link to the copy");
+    let next = replaced(&current, "its `.config` replaced by a link");
+    std::fs::remove_dir_all(&current).expect("remove the linked directory");
+    assert_closed_directories(&next, "the last policy directory");
+    assert_eq!(
+        std::fs::read(copy_dir.join("policy.xml")).expect("read the copy"),
+        policy,
+        "the link's target is left alone"
+    );
 }
 
 /// The temporary directories the refusal test starts its children with:
@@ -748,9 +882,8 @@ fn hardening_a_policy_that_cannot_be_written_refuses_the_run_child() {
     let tmpdir = std::env::var("TMPDIR").expect("the parent sets TMPDIR");
     let recorder = Recorder::new(&format!("policy-refused-{}", case.replace(':', "-")));
     let driver = recorder.driver();
-    // The policy file binds with and without the opt-in: a failed check of
-    // the policy in effect lets a run without autodetection proceed, but a
-    // policy the driver cannot put in place refuses every run.
+    // A policy the driver cannot put in place refuses every run, with and
+    // without the opt-in.
     let modes: [(&str, ImageConfig, &[&[u8]]); 2] = [
         (
             "without autodetection",
@@ -850,8 +983,9 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
         .driver()
         .dimensions(RED_PNG_1X1)
         .expect("dimensions");
-    let dirs = assert_every_run_read_the_policy(&recorder);
-    let framework = dirs[0].to_string_lossy();
+    let root = assert_every_run_read_the_policy(&recorder);
+    let framework = root.join(POLICY_CONFIG_DIR);
+    let framework = framework.to_string_lossy();
     let expected = match operator.as_deref() {
         Some(value) if !value.is_empty() => format!("{framework}:{value}:{framework}"),
         _ => framework.to_string(),
@@ -859,7 +993,8 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
     assert_eq!(
         recorder.configure_paths(),
         [Some(expected.clone())],
-        "the framework's directory first and last, the operator's between, unchanged"
+        "the directory that holds the framework's file first and last, the operator's \
+         between, unchanged"
     );
     assert_eq!(
         recorder.listings(),
@@ -870,6 +1005,11 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
         recorder.probes(),
         [expected],
         "the MVG probe runs under the same configure path"
+    );
+    assert_eq!(
+        recorder.homes().len(),
+        3,
+        "the listing, the probe and the run each start with HOME naming the policy directory"
     );
 }
 
@@ -931,8 +1071,9 @@ fn hardening_the_policy_denies_every_coder_hrd_010_names() {
     assert!(MagickCliDriver::POLICY.trim_end().ends_with("</policymap>"));
 }
 
-/// Where the listings below say the framework's policy came from.
-const FRAMEWORK_POLICY: &str = "/tmp/suprnova-magick-policy/policy.xml";
+/// Where the listings below say the framework's policy came from: the
+/// driver's `HOME`, which the stand-in fills in.
+const FRAMEWORK_POLICY: &str = crate::magick_policy::FRAMEWORK_POLICY;
 
 /// A listing of the framework's policy followed by `file`, a host policy
 /// ImageMagick read after it, holding `entries`.
@@ -943,17 +1084,86 @@ fn listing_with(file: &str, entries: &[crate::magick_policy::Entry<'_>]) -> Stri
     ])
 }
 
+/// A listing of `file`, a host policy holding `entries`, between two reads
+/// of the framework's policy: the shape ImageMagick lists under the driver,
+/// which names the directory that holds the framework's file first on
+/// `MAGICK_CONFIGURE_PATH` and `HOME` last.
+fn listing_around(file: &str, entries: &[crate::magick_policy::Entry<'_>]) -> String {
+    let framework = crate::magick_policy::framework_entries();
+    crate::magick_policy::listing(&[
+        (FRAMEWORK_POLICY, &framework),
+        (file, entries),
+        (FRAMEWORK_POLICY, &framework),
+    ])
+}
+
+/// Assert that every entry point of `driver` refuses the run in both
+/// modes: with autodetection on, for a named input and an unnamed one, and
+/// with it off, for a named input. Each error says the driver refused to
+/// run ImageMagick, names each of `named`, and carries none of `absent` and
+/// never a policy's bytes.
+fn assert_refused_in_both_modes(
+    driver: &MagickCliDriver,
+    name: &str,
+    named: &[&str],
+    absent: &[&str],
+) {
+    let modes: [(&str, ImageConfig, &[&[u8]]); 2] = [
+        (
+            "with autodetection",
+            ImageConfig::default().magick_autodetect(true),
+            &[RED_PNG_1X1, PPM_1X1],
+        ),
+        (
+            "without autodetection",
+            ImageConfig::default(),
+            &[RED_PNG_1X1],
+        ),
+    ];
+    for (mode, config, inputs) in modes {
+        let _config = ConfigGuard::set(config);
+        for &input in inputs {
+            let refusals = [
+                ("process", driver.process(input, &to_png()).map(|_| ())),
+                ("dimensions", driver.dimensions(input).map(|_| ())),
+                ("dominant_color", driver.dominant_color(input).map(|_| ())),
+            ];
+            for (entry, result) in refusals {
+                let err = result
+                    .expect_err(&format!("{name}, {mode}: {entry} refuses the run"))
+                    .to_string();
+                assert!(
+                    err.contains("refused to run ImageMagick"),
+                    "{name}, {mode}: {entry}: {err}"
+                );
+                for part in named {
+                    assert!(
+                        err.contains(part),
+                        "{name}, {mode}: {entry} names {part}: {err}"
+                    );
+                }
+                for part in absent.iter().chain(&["<policy"]) {
+                    assert!(
+                        !err.contains(part),
+                        "{name}, {mode}: {entry} never carries {part}: {err}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn hardening_a_denying_listing_lets_runs_proceed_and_is_asked_for_once() {
     // Under the opt-in a failed check refuses the run, so a run that
     // proceeds here is the listing passing the check.
     let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
-    // A web-safe host policy read after the framework's: it denies every
+    // A web-safe host policy read between the framework's: it denies every
     // coder, grants four back, denies every delegate again, grants reads
     // under one directory, and limits a resource. None of that reopens what
     // the framework denies.
-    let web_safe = listing_with(
+    let web_safe = listing_around(
         "/etc/ImageMagick-7/policy.xml",
         &[
             ("Coder", "None", "*"),
@@ -1011,8 +1221,113 @@ fn hardening_a_denying_listing_lets_runs_proceed_and_is_asked_for_once() {
 
 #[test]
 #[serial]
+fn hardening_a_grant_read_before_the_frameworks_policy_is_outranked() {
+    // The framework's file is the last ImageMagick reads, so a grant in any
+    // file before it, on the operator's configure path, in ImageMagick's
+    // own directory or in `$XDG_CONFIG_HOME/ImageMagick`, is outranked by
+    // the framework's denial: the check passes and the runs proceed.
+    let framework = crate::magick_policy::framework_entries();
+    let grants: &[crate::magick_policy::Entry<'_>] = &[
+        ("Coder", "Read Write", "MVG"),
+        ("Coder", "Read", "*"),
+        ("Delegate", "Execute", "gs"),
+        ("Path", "Read", "@*"),
+    ];
+    let listing = crate::magick_policy::listing(&[
+        (FRAMEWORK_POLICY, &framework),
+        ("/srv/operator/policy.xml", grants),
+        (FRAMEWORK_POLICY, &framework),
+        ("/etc/ImageMagick-7/policy.xml", grants),
+        ("/srv/xdg/ImageMagick/policy.xml", grants),
+        (FRAMEWORK_POLICY, &framework),
+    ]);
+    for (name, config) in [
+        (
+            "listing-grants-before-with-autodetection",
+            ImageConfig::default().magick_autodetect(true),
+        ),
+        (
+            "listing-grants-before-without-autodetection",
+            ImageConfig::default(),
+        ),
+    ] {
+        let _config = ConfigGuard::set(config);
+        let recorder = Recorder::new(name);
+        recorder.answer_listing(&listing);
+        let driver = recorder.driver();
+        driver
+            .dimensions(RED_PNG_1X1)
+            .unwrap_or_else(|e| panic!("{name}: the run proceeds: {e}"));
+        driver
+            .process(RED_PNG_1X1, &to_png())
+            .unwrap_or_else(|e| panic!("{name}: the pipeline runs: {e}"));
+        assert!(recorder.runs().len() >= 2, "{name}: {:?}", recorder.runs());
+        assert_eq!(recorder.listings().len(), 1, "{name}: one listing");
+        assert_eq!(
+            recorder.probes().len(),
+            1,
+            "{name}: the listing passed, so the probe ran"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn hardening_a_policy_file_read_after_the_frameworks_refuses_every_run() {
+    // A binary that reads a file after `$HOME/.config/ImageMagick` lets an
+    // entry there outrank the framework's. The file below only denies, so
+    // the rule for each denial passes; the order alone refuses the run, in
+    // both modes, whichever mode asks first.
+    let user = "/home/x/.config/ImageMagick/policy.xml";
+    let listing = listing_with(user, &[("Coder", "None", "MVG")]);
+    let named = [
+        user,
+        "after the framework's policy",
+        "applies the last entry that matches",
+    ];
+    for (name, first) in [
+        ("listing-file-after-asked-with-autodetection", true),
+        ("listing-file-after-asked-without-autodetection", false),
+    ] {
+        let recorder = Recorder::new(name);
+        recorder.answer_listing(&listing);
+        let driver = recorder.driver();
+        {
+            let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(first));
+            let err = driver
+                .dimensions(RED_PNG_1X1)
+                .expect_err(&format!("{name}: the first run is refused"))
+                .to_string();
+            assert!(err.contains("refused to run ImageMagick"), "{name}: {err}");
+            for part in named {
+                assert!(err.contains(part), "{name}: names {part}: {err}");
+            }
+        }
+        assert_refused_in_both_modes(&driver, name, &named, &[]);
+        assert!(
+            recorder.runs().is_empty(),
+            "{name}: a process ran on an image: {:?}",
+            recorder.runs()
+        );
+        assert!(
+            recorder.stdin().is_empty(),
+            "{name}: input reached a process"
+        );
+        assert_eq!(
+            recorder.listings().len(),
+            1,
+            "{name}: the verdict is kept for the process"
+        );
+        assert!(
+            recorder.probes().is_empty(),
+            "{name}: a refused listing needs no probe"
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn hardening_a_listing_that_reopens_a_denial_refuses_every_run() {
-    let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
     let host = "/etc/ImageMagick-7/policy.xml";
     let user = "/home/app/.config/ImageMagick/policy.xml";
     let framework = crate::magick_policy::framework_entries();
@@ -1093,30 +1408,9 @@ fn hardening_a_listing_that_reopens_a_denial_refuses_every_run() {
     for (name, listing, named) in cases {
         let recorder = Recorder::new(name);
         recorder.answer_listing(&listing);
-        let driver = recorder.driver();
-        for input in [RED_PNG_1X1, PPM_1X1] {
-            let refusals = [
-                ("process", driver.process(input, &to_png()).map(|_| ())),
-                ("dimensions", driver.dimensions(input).map(|_| ())),
-                ("dominant_color", driver.dominant_color(input).map(|_| ())),
-            ];
-            for (entry, result) in refusals {
-                let err = result
-                    .expect_err(&format!("{name}: {entry} refuses the run"))
-                    .to_string();
-                assert!(
-                    err.contains("refused to run ImageMagick"),
-                    "{name}: {entry}: {err}"
-                );
-                for part in named {
-                    assert!(err.contains(part), "{name}: {entry} names {part}: {err}");
-                }
-                assert!(
-                    !err.contains("<policy"),
-                    "{name}: {entry} never carries a policy's bytes: {err}"
-                );
-            }
-        }
+        // The verdict is made by the first run, with autodetection on, and
+        // kept: the runs without it are refused by the same verdict.
+        assert_refused_in_both_modes(&recorder.driver(), name, named, &[]);
         assert!(
             recorder.runs().is_empty(),
             "{name}: a process ran on an image: {:?}",
@@ -1141,9 +1435,8 @@ fn hardening_a_listing_that_reopens_a_denial_refuses_every_run() {
 #[test]
 #[serial]
 fn hardening_a_listing_that_cannot_be_read_refuses() {
-    let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
-    let unknown_right = crate::magick_policy::framework_listing("/tmp/suprnova-magick-policy")
-        .replacen("rights: None", "rights: Everything", 1);
+    let unknown_right =
+        crate::magick_policy::framework_listing().replacen("rights: None", "rights: Everything", 1);
     for (name, listing) in [
         (
             "listing-garbage",
@@ -1151,24 +1444,27 @@ fn hardening_a_listing_that_cannot_be_read_refuses() {
         ),
         (
             "listing-without-entries",
-            "\nPath: [built-in]\n".to_string(),
+            format!("\nPath: {FRAMEWORK_POLICY}\n\nPath: [built-in]\n"),
         ),
         ("listing-unknown-right", unknown_right),
     ] {
         let recorder = Recorder::new(name);
         recorder.answer_listing(&listing);
         let driver = recorder.driver();
-        for _ in 0..2 {
-            let err = driver
-                .dimensions(RED_PNG_1X1)
-                .expect_err(&format!("{name}: an unreadable listing refuses the run"))
-                .to_string();
-            assert!(err.contains("refused to run ImageMagick"), "{name}: {err}");
-            assert!(err.contains("cannot be verified"), "{name}: {err}");
-            assert!(
-                !err.contains("not a policy listing"),
-                "{name}: the error never repeats the listing: {err}"
-            );
+        for autodetect in [true, false] {
+            let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(autodetect));
+            for _ in 0..2 {
+                let err = driver
+                    .dimensions(RED_PNG_1X1)
+                    .expect_err(&format!("{name}: an unreadable listing refuses the run"))
+                    .to_string();
+                assert!(err.contains("refused to run ImageMagick"), "{name}: {err}");
+                assert!(err.contains("cannot be verified"), "{name}: {err}");
+                assert!(
+                    !err.contains("not a policy listing"),
+                    "{name}: the error never repeats the listing: {err}"
+                );
+            }
         }
         assert!(recorder.runs().is_empty(), "{name}: {:?}", recorder.runs());
         assert_eq!(
@@ -1178,40 +1474,49 @@ fn hardening_a_listing_that_cannot_be_read_refuses() {
         );
     }
 
-    // A listing that could not be had is refused too, and asked for again
-    // at the next run: the fault may pass.
+    // A listing that could not be had is refused too, in both modes, and
+    // asked for again at the next run: the fault may pass.
     let recorder = Recorder::new("listing-fails");
     recorder.fail_listing();
     let driver = recorder.driver();
-    for _ in 0..2 {
-        let err = driver
-            .dimensions(RED_PNG_1X1)
-            .expect_err("a failed listing refuses the run")
-            .to_string();
-        assert!(err.contains("-list policy` failed"), "{err}");
-        assert!(err.contains("cannot be verified"), "{err}");
-        assert!(err.contains("unable to list the policy"), "{err}");
+    for autodetect in [true, false] {
+        let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(autodetect));
+        for _ in 0..2 {
+            let err = driver
+                .dimensions(RED_PNG_1X1)
+                .expect_err("a failed listing refuses the run")
+                .to_string();
+            assert!(err.contains("refused to run ImageMagick"), "{err}");
+            assert!(err.contains("-list policy` failed"), "{err}");
+            assert!(err.contains("cannot be verified"), "{err}");
+            assert!(err.contains("unable to list the policy"), "{err}");
+        }
     }
     assert!(recorder.runs().is_empty(), "{:?}", recorder.runs());
-    assert_eq!(recorder.listings().len(), 2, "asked again at the next run");
+    assert_eq!(
+        recorder.listings().len(),
+        4,
+        "asked again at every run, in both modes"
+    );
 }
 
 #[test]
 #[serial]
 fn hardening_the_mvg_probe_must_meet_the_policy_refusal() {
-    let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
-
     // ImageMagick's refusal, the stand-in's default: runs proceed, and the
     // probe is asked for once a process.
-    let recorder = Recorder::new("probe-refused");
-    let driver = recorder.driver();
-    driver.dimensions(RED_PNG_1X1).expect("dimensions");
-    driver
-        .process(PPM_1X1, &to_png())
-        .expect("the pipeline runs");
-    driver.dominant_color(RED_PNG_1X1).expect("dominant_color");
-    assert!(recorder.runs().len() >= 3, "{:?}", recorder.runs());
-    assert_eq!(recorder.probes().len(), 1, "one probe a process");
+    {
+        let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
+        let recorder = Recorder::new("probe-refused");
+        let driver = recorder.driver();
+        driver.dimensions(RED_PNG_1X1).expect("dimensions");
+        driver
+            .process(PPM_1X1, &to_png())
+            .expect("the pipeline runs");
+        driver.dominant_color(RED_PNG_1X1).expect("dominant_color");
+        assert!(recorder.runs().len() >= 3, "{:?}", recorder.runs());
+        assert_eq!(recorder.probes().len(), 1, "one probe a process");
+    }
 
     // A probe ImageMagick reads, as under a stealth grant of MVG, or fails
     // for another reason, or refuses for another coder, cannot show that
@@ -1243,31 +1548,12 @@ fn hardening_the_mvg_probe_must_meet_the_policy_refusal() {
     for (name, stdout, stderr, exit, outcome) in cases {
         let recorder = Recorder::new(name);
         recorder.answer_probe(stdout, stderr, exit);
-        let driver = recorder.driver();
-        for input in [RED_PNG_1X1, PPM_1X1] {
-            let refusals = [
-                ("process", driver.process(input, &to_png()).map(|_| ())),
-                ("dimensions", driver.dimensions(input).map(|_| ())),
-                ("dominant_color", driver.dominant_color(input).map(|_| ())),
-            ];
-            for (entry, result) in refusals {
-                let err = result
-                    .expect_err(&format!("{name}: {entry} refuses the run"))
-                    .to_string();
-                for part in [
-                    "refused to run ImageMagick",
-                    "cannot be shown to deny the MVG coder",
-                    "stealth",
-                    outcome,
-                ] {
-                    assert!(err.contains(part), "{name}: {entry} names {part}: {err}");
-                }
-                assert!(
-                    !err.contains("unable to open image") && !err.contains("IsCoderAuthorized"),
-                    "{name}: {entry} never repeats what the probe wrote: {err}"
-                );
-            }
-        }
+        assert_refused_in_both_modes(
+            &recorder.driver(),
+            name,
+            &["cannot be shown to deny the MVG coder", "stealth", outcome],
+            &["unable to open image", "IsCoderAuthorized"],
+        );
         assert!(
             recorder.runs().is_empty(),
             "{name}: a process ran on an image: {:?}",
@@ -1289,288 +1575,30 @@ fn hardening_the_mvg_probe_must_meet_the_policy_refusal() {
 #[serial]
 fn hardening_a_probe_that_cannot_be_had_refuses_and_is_asked_again() {
     // The probe outlives the deadline, so the driver kills it: there is no
-    // exit status to judge, which refuses the run but is not kept.
-    let mut config = ImageConfig::default().magick_autodetect(true);
-    config.magick_timeout_secs = 1;
-    let _config = ConfigGuard::set(config);
+    // exit status to judge, which refuses the run in both modes but is not
+    // kept.
     let recorder = Recorder::new("probe-hangs");
     recorder.hang_probe();
     let driver = recorder.driver();
-    for _ in 0..2 {
-        let err = driver
-            .dimensions(RED_PNG_1X1)
-            .expect_err("a probe past the deadline refuses the run")
-            .to_string();
-        assert!(err.contains("refused to run ImageMagick"), "{err}");
-        assert!(err.contains("MVG probe"), "{err}");
-        assert!(err.contains("could not be run"), "{err}");
-        assert!(err.contains("timed out"), "{err}");
+    for (autodetect, runs) in [(true, 2), (false, 1)] {
+        let mut config = ImageConfig::default().magick_autodetect(autodetect);
+        config.magick_timeout_secs = 1;
+        let _config = ConfigGuard::set(config);
+        for _ in 0..runs {
+            let err = driver
+                .dimensions(RED_PNG_1X1)
+                .expect_err("a probe past the deadline refuses the run")
+                .to_string();
+            assert!(err.contains("refused to run ImageMagick"), "{err}");
+            assert!(err.contains("MVG probe"), "{err}");
+            assert!(err.contains("could not be run"), "{err}");
+            assert!(err.contains("timed out"), "{err}");
+        }
     }
     assert!(recorder.runs().is_empty(), "{:?}", recorder.runs());
-    assert_eq!(recorder.probes().len(), 2, "asked again at the next run");
-}
-
-/// Where the tests of a run without autodetection capture what the driver
-/// logs: the formatted events, one line each.
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Logs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("the buffer is poisoned"))?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// The part every warning about the policy in effect carries when a run
-/// without autodetection proceeds anyway.
-const NAMED_CODERS_HOLD: &str = "names the coder for every input";
-
-/// Run `body` with a subscriber of this thread's own, and return its value
-/// and the warnings about the policy in effect it logged. The driver checks
-/// the policy on the calling thread, so no other test's events are caught.
-fn policy_warnings<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
-    let logs = Logs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(logs.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .without_time()
-        .finish();
-    let value = tracing::subscriber::with_default(subscriber, body);
-    let text =
-        String::from_utf8_lossy(&logs.0.lock().expect("the buffer is not poisoned")).into_owned();
-    let warnings = text
-        .lines()
-        .filter(|line| line.contains("WARN") && line.contains(NAMED_CODERS_HOLD))
-        .map(str::to_string)
-        .collect();
-    (value, warnings)
-}
-
-/// Two runs without autodetection, under a policy in effect that fails the
-/// check: both proceed, one image process each, and the failure is logged
-/// once, naming `named`. Then the same process with autodetection on is
-/// refused from the kept verdict, without asking ImageMagick again, and a
-/// later run without it is not logged again. Returns the warning.
-fn assert_runs_proceed_without_autodetection(
-    recorder: &Recorder,
-    what: &str,
-    named: &[&str],
-) -> String {
-    let driver = recorder.driver();
-    let (results, warnings) = {
-        let _config = ConfigGuard::set(ImageConfig::default());
-        policy_warnings(|| {
-            [
-                driver.dimensions(RED_PNG_1X1).map(|_| ()),
-                driver.dimensions(RED_PNG_1X1).map(|_| ()),
-            ]
-        })
-    };
-    for result in results {
-        result.unwrap_or_else(|e| panic!("{what}: a run without autodetection proceeds: {e}"));
-    }
     assert_eq!(
-        recorder.runs().len(),
-        2,
-        "{what}: one image process a run: {:?}",
-        recorder.runs()
-    );
-    assert_eq!(
-        recorder.listings().len(),
-        1,
-        "{what}: the policy in effect is asked for once a process"
-    );
-    assert_eq!(
-        warnings.len(),
-        1,
-        "{what}: logged once for two runs: {warnings:?}"
-    );
-    let warning = warnings[0].clone();
-    for part in named.iter().chain(&["IMAGE_MAGICK_AUTODETECT"]) {
-        assert!(
-            warning.contains(part),
-            "{what}: the warning names {part}: {warning}"
-        );
-    }
-
-    // The verdict is kept for the process and decides each run by that
-    // run's own configuration: under the opt-in the same verdict refuses.
-    {
-        let _config = ConfigGuard::set(ImageConfig::default().magick_autodetect(true));
-        let err = driver
-            .dimensions(RED_PNG_1X1)
-            .expect_err(&format!("{what}: the opt-in refuses the run"))
-            .to_string();
-        assert!(err.contains("refused to run ImageMagick"), "{what}: {err}");
-        for part in named {
-            assert!(
-                err.contains(part),
-                "{what}: the refusal names {part}: {err}"
-            );
-        }
-    }
-    let (result, warnings) = {
-        let _config = ConfigGuard::set(ImageConfig::default());
-        policy_warnings(|| driver.dimensions(RED_PNG_1X1).map(|_| ()))
-    };
-    result.unwrap_or_else(|e| panic!("{what}: a later run without autodetection proceeds: {e}"));
-    assert!(
-        warnings.is_empty(),
-        "{what}: logged once a process: {warnings:?}"
-    );
-    assert_eq!(
-        recorder.runs().len(),
+        recorder.probes().len(),
         3,
-        "{what}: the refused run started no process"
+        "asked again at every run, in both modes"
     );
-    assert_eq!(
-        recorder.listings().len(),
-        1,
-        "{what}: every run read the kept verdict"
-    );
-    warning
-}
-
-#[test]
-#[serial]
-fn hardening_without_autodetection_a_granting_listing_is_logged_once_and_runs_proceed() {
-    // The common host: its system policy grants PDF, so ImageMagick can make
-    // PDF thumbnails for another program. The driver names `png:-` and
-    // `heic:-`, so the grant is not reachable through it.
-    let host = "/etc/ImageMagick-7/policy.xml";
-    let recorder = Recorder::new("off-listing-grants-pdf");
-    recorder.answer_listing(&listing_with(host, &[("Coder", "Read Write", "PDF")]));
-    let warning = assert_runs_proceed_without_autodetection(
-        &recorder,
-        "a granting listing",
-        &["the PDF coder", "`PDF`", "Read Write", host],
-    );
-    assert!(
-        !warning.contains("<policy"),
-        "never a policy's bytes: {warning}"
-    );
-    assert!(
-        recorder.probes().is_empty(),
-        "a listing that fails the check needs no probe"
-    );
-}
-
-#[test]
-#[serial]
-fn hardening_without_autodetection_an_unrefused_probe_is_logged_once_and_runs_proceed() {
-    // A stealth grant of MVG: the listing passes, and ImageMagick reads the
-    // probe.
-    let recorder = Recorder::new("off-probe-read");
-    recorder.answer_probe("1", "", 0);
-    assert_runs_proceed_without_autodetection(
-        &recorder,
-        "an unrefused probe",
-        &[
-            "cannot be shown to deny the MVG coder",
-            "ImageMagick read an MVG probe script",
-            "stealth",
-        ],
-    );
-    assert_eq!(recorder.probes().len(), 1, "one probe a process");
-}
-
-#[test]
-#[serial]
-fn hardening_without_autodetection_a_garbage_listing_is_logged_once_and_runs_proceed() {
-    let recorder = Recorder::new("off-listing-garbage");
-    recorder.answer_listing("this is not a policy listing\n");
-    let warning = assert_runs_proceed_without_autodetection(
-        &recorder,
-        "a garbage listing",
-        &["line 1 of `magick -list policy`", "cannot be verified"],
-    );
-    assert!(
-        !warning.contains("not a policy listing"),
-        "the warning never repeats the listing: {warning}"
-    );
-    assert!(
-        recorder.probes().is_empty(),
-        "an unreadable listing needs no probe"
-    );
-}
-
-#[test]
-#[serial]
-fn hardening_without_autodetection_a_check_that_cannot_be_had_is_logged_and_asked_again() {
-    // A listing that fails is a fault of the moment, never kept: each run
-    // asks again, logs the failure it met, and proceeds.
-    let recorder = Recorder::new("off-listing-fails");
-    recorder.fail_listing();
-    let driver = recorder.driver();
-    let (results, warnings) = {
-        let _config = ConfigGuard::set(ImageConfig::default());
-        policy_warnings(|| {
-            [
-                driver.dimensions(RED_PNG_1X1).map(|_| ()),
-                driver.dimensions(RED_PNG_1X1).map(|_| ()),
-            ]
-        })
-    };
-    for result in results {
-        result.unwrap_or_else(|e| panic!("a run without autodetection proceeds: {e}"));
-    }
-    assert_eq!(recorder.runs().len(), 2, "{:?}", recorder.runs());
-    assert_eq!(recorder.listings().len(), 2, "asked again at the next run");
-    assert_eq!(
-        warnings.len(),
-        2,
-        "each failed check is logged: {warnings:?}"
-    );
-    for warning in &warnings {
-        for part in [
-            "-list policy` failed",
-            "cannot be verified",
-            "unable to list the policy",
-            "checks again",
-        ] {
-            assert!(
-                warning.contains(part),
-                "the warning names {part}: {warning}"
-            );
-        }
-    }
-
-    // The same for a probe past the deadline.
-    let recorder = Recorder::new("off-probe-hangs");
-    recorder.hang_probe();
-    let driver = recorder.driver();
-    let mut config = ImageConfig::default();
-    config.magick_timeout_secs = 1;
-    let (result, warnings) = {
-        let _config = ConfigGuard::set(config);
-        policy_warnings(|| driver.dimensions(RED_PNG_1X1).map(|_| ()))
-    };
-    result.unwrap_or_else(|e| panic!("a run without autodetection proceeds: {e}"));
-    assert_eq!(recorder.runs().len(), 1, "{:?}", recorder.runs());
-    assert_eq!(recorder.probes().len(), 1);
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    for part in ["MVG probe", "could not be run", "timed out"] {
-        assert!(
-            warnings[0].contains(part),
-            "the warning names {part}: {}",
-            warnings[0]
-        );
-    }
 }

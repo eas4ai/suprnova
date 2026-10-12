@@ -2750,48 +2750,41 @@ denies nothing, PostScript or PDF on a bare `-` started Ghostscript, and
 the MVG, MSL, URL and text coders and every delegate were open.
 
 **Now:** Every run reads a policy the framework writes and checks before
-the run, from a directory of its own under the system's temporary
-directory, named first and last in `MAGICK_CONFIGURE_PATH`, with a
-`MAGICK_CONFIGURE_PATH` you set between the two. It denies the URL, HTTP,
-HTTPS, FTP, MVG, MSL, TEXT, LABEL, CAPTION, PANGO, SCREENSHOT, X,
-EPHEMERAL, PS, PS2, PS3, EPS, PDF and XPS coders, every delegate, and
-`@file` reads, with or without `IMAGE_MAGICK_AUTODETECT`. Your own
-`policy.xml` still applies. ImageMagick applies the last entry that
-matches, and reads its own configuration directory and the user's after
-that path, so before the first run of each process the driver reads the
-policy in effect with `magick -list policy`, then runs one MVG probe that
-ImageMagick's policy must refuse, since the listing leaves out an entry
-marked `stealth="true"`. The check fails when a host entry grants one of
-those denials back, when the listing is missing a denial or cannot be
-read, and when the probe is not refused. What a failed check does depends
-on `IMAGE_MAGICK_AUTODETECT`. With it on, ImageMagick chooses the coder
-from an upload's bytes, so the policy in effect is the only barrier: every
-run is refused with a 5xx `FrameworkError` that names the coder and the
-file that granted it, until the grant is removed and the process restarts.
-A listing or probe that cannot be had refuses the run too. With it off,
-the default, the driver names the coder for every input, so the grant is
-not reachable through the driver: the driver logs the failed check once
-per process at `warn`, naming the coder and the file, and runs proceed. In
-both modes, a policy directory the driver cannot make, or a policy file it
-cannot write and check, refuses the run.
+the run, at `.config/ImageMagick/policy.xml` in a directory of its own
+under the system's temporary directory. The driver starts ImageMagick
+with `HOME` naming that directory, and with `MAGICK_CONFIGURE_PATH`
+naming the directory that holds the file first and last, with a
+`MAGICK_CONFIGURE_PATH` you set between the two. The policy denies the
+URL, HTTP, HTTPS, FTP, MVG, MSL, TEXT, LABEL, CAPTION, PANGO, SCREENSHOT,
+X, EPHEMERAL, PS, PS2, PS3, EPS, PDF and XPS coders, every delegate, and
+`@file` reads, with or without `IMAGE_MAGICK_AUTODETECT`. ImageMagick
+reads `$HOME/.config/ImageMagick` after every other policy file and
+applies the last entry that matches, so the framework's policy outranks
+every other policy on the host: the system policy,
+`$XDG_CONFIG_HOME/ImageMagick`, your `MAGICK_CONFIGURE_PATH`, and an entry
+marked `stealth="true"`. Your own denials still apply. Before the first
+run of each process, the driver checks that order: `magick -list policy`
+must show the last entry that matches each denial denying and the
+framework's file as the last one read, and one MVG probe must be refused
+by ImageMagick's security policy. A check that fails refuses every run,
+with or without `IMAGE_MAGICK_AUTODETECT`, with a 5xx `FrameworkError`
+that names the cause and the file, until the host is fixed and the
+process restarts. A listing or probe that cannot be had refuses the run,
+and the next run checks again. A policy directory the driver cannot make,
+or a policy file it cannot write and check, refuses the run too.
 
-**Do:** If you set `IMAGE_MAGICK_AUTODETECT`, check the host's ImageMagick
-policy before you upgrade. Look in each `policy.xml` for `rights="read"`
-or `rights="write"` (or both, `read|write`) on PDF, PS, EPS, MVG, MSL, a
-delegate, or a pattern that matches them, such as `pattern="*"`;
-`magick -list policy` shows these rights as `Read` and `Write`. Remove
-any such grant, or the driver refuses every run. A grant of MVG marked
-`stealth="true"` is missing from that listing, but the driver's probe
-finds it and refuses every run as well, so remove it too. Without
-`IMAGE_MAGICK_AUTODETECT`, a grant needs no change: it shows as one
-`warn` line per process, and runs proceed. If your application reads
-PostScript, EPS, PDF, XPS, or another of those formats through the
-`magick` driver under `IMAGE_MAGICK_AUTODETECT`, those reads now fail
-with a security policy error, and nothing reopens them: convert such
-files before they reach the driver. The process must be able to make a
-directory in its temporary directory: in a container with a read-only
-root file system, mount a writable `/tmp` or set `TMPDIR` to a writable
-path. For details, see [Policy](images.md#policy).
+**Do:** Nothing to run, for most applications. A `policy.xml` in the
+service account's own `~/.config/ImageMagick` no longer applies to the
+driver's runs, and neither do the other ImageMagick configuration files
+there: put a policy of your own in a directory on `MAGICK_CONFIGURE_PATH`
+or in `$XDG_CONFIG_HOME/ImageMagick`, where its denials still apply. If
+your application reads PostScript, EPS, PDF, XPS, or another of those
+formats through the `magick` driver under `IMAGE_MAGICK_AUTODETECT`, those
+reads now fail with a security policy error, and nothing reopens them:
+convert such files before they reach the driver. The process must be able
+to make a directory in its temporary directory: in a container with a
+read-only root file system, mount a writable `/tmp` or set `TMPDIR` to a
+writable path. For details, see [Policy](images.md#policy).
 
 ## Fixes with no upgrade step
 

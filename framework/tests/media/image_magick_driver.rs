@@ -390,9 +390,9 @@ fn hardening_autodetected_input_meets_the_framework_policy_in_the_real_binary() 
 fn hardening_the_installed_policy_in_effect_passes_the_check() {
     // The driver reads `magick -list policy` before its first run, then
     // runs an MVG probe that the installed ImageMagick's policy must
-    // refuse. Under the autodetection opt-in it refuses every run unless
-    // both pass, so a run that succeeds is the listing passing and the
-    // probe refused.
+    // refuse. It refuses every run unless both pass, with or without the
+    // autodetection opt-in, so a run that succeeds is the listing passing
+    // and the probe refused.
     let _config = crate::image_processing::ConfigGuard::set(
         suprnova::ImageConfig::default().magick_autodetect(true),
     );
@@ -404,27 +404,46 @@ fn hardening_the_installed_policy_in_effect_passes_the_check() {
     );
 }
 
-/// The host policies the grant test starts its children under, and what
-/// each child expects.
-const HOST_GRANTS: [&str; 3] = ["operator", "user", "stealth"];
+/// The host grants of MVG and EPS the grant test starts its children
+/// under: on the operator's `MAGICK_CONFIGURE_PATH`, in
+/// `$XDG_CONFIG_HOME/ImageMagick`, the same marked stealth, and in the
+/// account's own `~/.config/ImageMagick`.
+#[cfg(unix)]
+const HOST_GRANTS: [&str; 4] = ["operator", "user", "stealth", "home"];
 
+/// The real binary the grant test's wrapper runs.
+#[cfg(unix)]
+fn driver_binary() -> String {
+    driver().binary().to_string()
+}
+
+/// Where the grant test keeps its policies and what its children record.
+#[cfg(unix)]
+fn host_grant_scratch() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-host-grant")
+}
+
+#[cfg(unix)]
 #[test]
 #[ignore = "requires a host ImageMagick 7 binary"]
-fn hardening_a_host_grant_is_refused_in_the_real_binary() {
-    let scratch =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-host-grant");
+fn hardening_a_host_grant_is_outranked_in_the_real_binary() {
+    let scratch = host_grant_scratch();
     let _ = std::fs::remove_dir_all(&scratch);
-    let grant = "<policymap>\n  <policy domain=\"coder\" rights=\"read|write\" pattern=\"MVG\" />\n</policymap>\n";
+    // MVG is the coder the driver's probe reads; EPS is one ImageMagick
+    // chooses from the bytes on a bare `-`, so an autodetected run meets it.
+    let grant = "<policymap>\n  <policy domain=\"coder\" rights=\"read|write\" pattern=\"{MVG,EPS}\" />\n</policymap>\n";
     // ImageMagick applies a stealth entry and leaves it out of
     // `magick -list policy`.
     let stealth = grant.replace(" />", " stealth=\"true\" />");
     let operator = scratch.join("operator");
     let user = scratch.join("user").join("ImageMagick");
     let hidden = scratch.join("stealth").join("ImageMagick");
+    let home = scratch.join("home").join(".config").join("ImageMagick");
     for (dir, policy) in [
         (&operator, grant),
         (&user, grant),
         (&hidden, stealth.as_str()),
+        (&home, grant),
     ] {
         std::fs::create_dir_all(dir).expect("create the policy directory");
         std::fs::write(dir.join("policy.xml"), policy).expect("write the grant");
@@ -433,18 +452,22 @@ fn hardening_a_host_grant_is_refused_in_the_real_binary() {
         let output = {
             let _env = crate::env_lock::lock_env();
             let mut child = crate::own_process::child_command(
-                "image_magick_driver::hardening_a_host_grant_is_refused_in_the_real_binary_child",
+                "image_magick_driver::hardening_a_host_grant_is_outranked_in_the_real_binary_child",
             );
             child.env("HARDENING_MAGICK_GRANT", case);
             match case {
-                // On the operator's configure path, between the framework's
-                // directory and the framework's directory again.
+                // On the operator's configure path, between two reads of
+                // the framework's directory.
                 "operator" => child.env("MAGICK_CONFIGURE_PATH", &operator),
                 // In the user's ImageMagick directory, which ImageMagick
-                // reads after every directory on the configure path.
+                // reads after its own configuration directory and before
+                // `$HOME/.config/ImageMagick`.
                 "user" => child.env("XDG_CONFIG_HOME", scratch.join("user")),
-                // The same, marked stealth, so the listing passes.
-                _ => child.env("XDG_CONFIG_HOME", scratch.join("stealth")),
+                // The same, marked stealth, so the listing does not show it.
+                "stealth" => child.env("XDG_CONFIG_HOME", scratch.join("stealth")),
+                // In the account's own `~/.config/ImageMagick`, which the
+                // driver's `HOME` takes the place of.
+                _ => child.env("HOME", scratch.join("home")),
             };
             child.output().expect("the child runs")
         };
@@ -453,130 +476,144 @@ fn hardening_a_host_grant_is_refused_in_the_real_binary() {
 }
 
 /// Runs only in the child process the grant test starts, under a host
-/// policy that grants the MVG coder, with autodetection on: the policy in
-/// effect is then the only barrier, so a grant refuses every run.
+/// policy that grants the MVG and EPS coders, with autodetection on. The
+/// driver's policy is the last ImageMagick reads, so it outranks the grant:
+/// a named run proceeds, which under the opt-in means the listing passed
+/// and the MVG probe was refused, and an EPS document on a bare `-` is
+/// refused by ImageMagick's security policy. ImageMagick 7.1.2 does not
+/// choose MVG from the bytes of a script on a bare `-`, so the test also
+/// runs the real binary on an MVG script under the environment the driver
+/// built, and sees its policy refuse it.
+#[cfg(unix)]
 #[test]
 #[ignore = "requires a host ImageMagick 7 binary"]
-fn hardening_a_host_grant_is_refused_in_the_real_binary_child() {
+fn hardening_a_host_grant_is_outranked_in_the_real_binary_child() {
+    use std::os::unix::fs::PermissionsExt;
     if !crate::own_process::is_child() {
         return;
     }
+    let case = std::env::var("HARDENING_MAGICK_GRANT").expect("the parent names the case");
+    let scratch = host_grant_scratch();
+    let recorded = scratch.join(format!("{case}-recorded"));
+    std::fs::create_dir_all(&recorded).expect("create the record directory");
+    let listing = recorded.join("listing");
+    let home = recorded.join("home");
+    let configure_path = recorded.join("configure-path");
+    // A wrapper around the real binary that keeps what `-list policy`
+    // printed, and the `HOME` and `MAGICK_CONFIGURE_PATH` it ran under, so
+    // the test reads the order ImageMagick reads its policies in under the
+    // environment the driver builds.
+    let wrapper = recorded.join("magick-recording");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = -list ] && [ \"$2\" = policy ]; then\n\
+             printf '%s' \"$HOME\" > '{home}'\n\
+             printf '%s' \"$MAGICK_CONFIGURE_PATH\" > '{configure_path}'\n\
+             '{binary}' \"$@\" > '{listing}' || exit $?\n\
+             exec cat '{listing}'\n\
+             fi\n\
+             exec '{binary}' \"$@\"\n",
+            home = home.display(),
+            configure_path = configure_path.display(),
+            listing = listing.display(),
+            binary = driver_binary(),
+        ),
+    )
+    .expect("write the wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("make the wrapper executable");
+    let driver = MagickCliDriver::new(wrapper.to_string_lossy());
+
     let _config = crate::image_processing::ConfigGuard::set(
         suprnova::ImageConfig::default().magick_autodetect(true),
     );
-    let result = driver().dimensions(RED_PNG_1X1);
-    match std::env::var("HARDENING_MAGICK_GRANT").as_deref() {
-        // The framework's directory comes last on the configure path, so
-        // the operator's grant is outranked and the check passes.
-        Ok("operator") => assert_eq!(result.expect("the grant is outranked"), (1, 1)),
-        Ok("user") => {
-            let err = result
-                .expect_err("a user policy that grants MVG refuses the run")
-                .to_string();
-            assert!(err.contains("the MVG coder"), "{err}");
-            assert!(err.contains("ImageMagick/policy.xml"), "{err}");
-        }
-        // The listing does not show the grant, and the probe catches it.
-        Ok("stealth") => {
-            let err = result
-                .expect_err("a stealth grant of MVG refuses the run")
-                .to_string();
-            assert!(
-                err.contains("cannot be shown to deny the MVG coder"),
-                "{err}"
-            );
-            assert!(
-                err.contains("ImageMagick read an MVG probe script"),
-                "{err}"
-            );
-            assert!(err.contains("stealth"), "{err}");
-        }
-        other => panic!("unknown case {other:?}"),
-    }
-}
-
-#[test]
-#[ignore = "requires a host ImageMagick 7 binary"]
-fn hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary() {
-    let scratch =
-        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-user-grant-named");
-    let _ = std::fs::remove_dir_all(&scratch);
-    let user = scratch.join("ImageMagick");
-    std::fs::create_dir_all(&user).expect("create the policy directory");
-    std::fs::write(
-        user.join("policy.xml"),
-        "<policymap>\n  <policy domain=\"coder\" rights=\"read|write\" pattern=\"MVG\" />\n</policymap>\n",
-    )
-    .expect("write the grant");
-    // A child of its own, so the verdict on the policy in effect is made
-    // under this grant and no other test's.
-    let output = {
-        let _env = crate::env_lock::lock_env();
-        crate::own_process::child_command(
-            "image_magick_driver::hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary_child",
-        )
-        .env("XDG_CONFIG_HOME", &scratch)
-        .output()
-        .expect("the child runs")
-    };
-    crate::own_process::assert_child_passed(&output);
-}
-
-/// Runs only in the child process the test above starts, under a user
-/// policy that grants the MVG coder, with autodetection off: the driver
-/// names the coder for every input, so the grant is logged and the runs
-/// proceed, and an MVG script is still refused before ImageMagick starts.
-#[test]
-#[ignore = "requires a host ImageMagick 7 binary"]
-fn hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary_child() {
-    if !crate::own_process::is_child() {
-        return;
-    }
-    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
     assert_eq!(
-        driver()
+        driver
             .dimensions(RED_PNG_1X1)
-            .expect("a `png:-` run proceeds under the grant"),
+            .unwrap_or_else(|e| panic!("{case}: the grant is outranked and the run proceeds: {e}")),
         (1, 1)
     );
-    if supports_format("heic") {
-        let heic = Command::new(driver().binary())
-            .args(["-size", "8x4", "xc:red", "heic:-"])
-            .output()
-            .expect("magick must run");
-        assert!(
-            heic.status.success() && !heic.stdout.is_empty(),
-            "could not build a HEIC fixture: {}",
-            String::from_utf8_lossy(&heic.stderr)
-        );
-        let png = driver()
-            .process(&heic.stdout, &pipeline(Vec::new(), OutputFormat::Png))
-            .expect("a `heic:-` run proceeds under the grant");
-        assert!(png.starts_with(b"\x89PNG"));
-    } else {
-        eprintln!("skipping the HEIC run: no host delegate");
-    }
-    let mvg = include_bytes!("fixtures/magick-script.mvg");
-    let err = driver()
-        .process(mvg, &pipeline(Vec::new(), OutputFormat::Png))
-        .expect_err("an MVG script is refused");
-    assert!(
-        err.to_string().contains("not one Suprnova names"),
-        "the driver's own guard refuses it, before ImageMagick starts: {err}"
-    );
-    drop(_config);
-
-    // The same process under the opt-in: the kept verdict refuses, so the
-    // runs above proceeded past a check that found the grant.
-    let _config = crate::image_processing::ConfigGuard::set(
-        suprnova::ImageConfig::default().magick_autodetect(true),
-    );
-    let err = driver()
-        .dimensions(RED_PNG_1X1)
-        .expect_err("the opt-in refuses the run under the grant")
+    let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\nshowpage\n";
+    let err = driver
+        .process(eps, &pipeline(Vec::new(), OutputFormat::Png))
+        .expect_err("an EPS document on a bare `-` is refused")
         .to_string();
-    assert!(err.contains("the MVG coder"), "{err}");
-    assert!(err.contains("ImageMagick/policy.xml"), "{err}");
+    assert!(
+        err.contains("security policy"),
+        "{case}: ImageMagick's security policy refuses the EPS document: {err}"
+    );
+
+    // The environment the driver built: ImageMagick refuses an MVG script
+    // under it, whatever the host grants.
+    let home = std::fs::read_to_string(&home).expect("the listing ran");
+    let configure_path = std::fs::read_to_string(&configure_path).expect("the listing ran");
+    let probe = {
+        let mut child = Command::new(driver_binary())
+            .args(["mvg:-", "info:"])
+            .env("HOME", &home)
+            .env("MAGICK_CONFIGURE_PATH", &configure_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("magick must run");
+        std::io::Write::write_all(
+            &mut child.stdin.take().expect("stdin"),
+            include_bytes!("fixtures/magick-script.mvg"),
+        )
+        .expect("write the script");
+        child.wait_with_output().expect("magick must finish")
+    };
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    assert!(
+        !probe.status.success()
+            && stderr.contains("not authorized by the security policy")
+            && stderr.contains("`MVG'"),
+        "{case}: ImageMagick refuses MVG under the driver's environment: {stderr}"
+    );
+
+    // The last file ImageMagick read before its built-in policy is the
+    // framework's, under the HOME the driver gave it.
+    let framework = format!("{home}/.config/ImageMagick/policy.xml");
+    let listing = std::fs::read_to_string(&listing).expect("read the listing");
+    let paths: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("Path: "))
+        .collect();
+    assert_eq!(
+        paths.last().copied(),
+        Some("[built-in]"),
+        "{case}: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().rev().nth(1).copied(),
+        Some(framework.as_str()),
+        "{case}: the framework's file is the last ImageMagick reads: {paths:?}"
+    );
+    let named = |dir: std::path::PathBuf| {
+        let file = dir.join("policy.xml");
+        paths.contains(&file.to_string_lossy().as_ref())
+    };
+    match case.as_str() {
+        "operator" => assert!(
+            named(scratch.join("operator")),
+            "{case}: the operator's file is read: {paths:?}"
+        ),
+        "user" => assert!(
+            named(scratch.join("user").join("ImageMagick")),
+            "{case}: the user's file is read: {paths:?}"
+        ),
+        // The stealth file holds no entry the listing shows, so it has no
+        // `Path:` line of its own.
+        "stealth" => {}
+        "home" => assert!(
+            !named(scratch.join("home").join(".config").join("ImageMagick")),
+            "{case}: the account's own file is not read: {paths:?}"
+        ),
+        other => panic!("unknown case {other}"),
+    }
 }
 
 /// Runs alone in a child process (see `own_process`). The facade's default
