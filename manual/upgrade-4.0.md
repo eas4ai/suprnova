@@ -1491,8 +1491,26 @@ with every row. A queued, delayed or reserved job runs once, a failed job
 keeps its id, a batch keeps its counts, and no user is signed out. A
 `migrate` that stops part way resumes on the next run.
 
-**Do:** Run the migrations. For an earlier scaffold's `users`, use the
-migration in [Running on a Laravel Database](laravel-database.md).
+**Do:** An application scaffolded before 4.0.0 lists only its own
+`create_sessions_table` migration, which keeps creating the earlier layout.
+Add the framework's `CreateSessionsTable` to your `Migrator`, after your own
+migrations. Without it, every request that stores a session fails with
+"session persistence failed", the login page included.
+
+```rust
+fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+    vec![
+        // ... your migrations, the sessions one included ...
+        Box::new(suprnova::session::migrations::CreateSessionsTable::new(
+            suprnova::session::migrations::SessionUserKey::Integer,
+        )),
+    ]
+}
+```
+
+Use `SessionUserKey::Uuid` or `SessionUserKey::Ulid` when your user model's
+key is a UUID or a ULID. Then run the migrations. For an earlier scaffold's
+`users`, use the migration in [Running on a Laravel Database](laravel-database.md).
 
 ```bash
 suprnova migrate
