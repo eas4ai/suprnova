@@ -1,0 +1,8 @@
+[package]
+name = "route-binding-ts-routes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova-cli.workspace = true
