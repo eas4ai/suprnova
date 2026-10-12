@@ -9,6 +9,7 @@
 use crate::query_fixture::Fixture;
 use crate::query_helpers_model::QhItem;
 use sea_orm::DbBackend;
+#[cfg(feature = "testing")]
 use suprnova::context::Context;
 use suprnova::{Builder, Model, model};
 
@@ -146,6 +147,8 @@ async fn seeded_order_shuffles_a_union_of_text_keyed_queries_on_sqlite() {
     );
 }
 
+// `Context::test_set_query` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn paginating_a_seeded_text_keyed_union_returns_stable_pages_on_sqlite() {
     let _fx = text_key_fixture("").await;

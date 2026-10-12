@@ -5,4 +5,6 @@ pub mod laravel_shape;
 pub mod named_connection;
 pub mod pagination;
 
+// `Context::test_set_query` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod laravel_gaps;

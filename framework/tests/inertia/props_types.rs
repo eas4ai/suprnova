@@ -157,6 +157,7 @@ async fn inp_match_on_replaces_the_list_on_each_call() {
 // ---- PAR-052: once options ----
 
 /// A fixed render moment, so an expiry computed from "now" is exact.
+#[cfg(feature = "testing")]
 fn render_moment() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(1_800_000_000, 250_000_000).expect("a valid timestamp")
 }
@@ -172,6 +173,8 @@ fn counted_rates(
     }
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_once_until_seconds_emits_now_plus_the_seconds_in_milliseconds() {
     // Laravel's `until(60)`: `expiresAt` is (now + 60 s) * 1000, the
@@ -191,6 +194,8 @@ async fn inp_once_until_seconds_emits_now_plus_the_seconds_in_milliseconds() {
     );
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_once_until_a_date_emits_that_moment_in_milliseconds() {
     let _clock = suprnova::testing::TestClock::travel_to(render_moment());
@@ -205,6 +210,8 @@ async fn inp_once_until_a_date_emits_that_moment_in_milliseconds() {
     );
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_once_until_a_duration_emits_now_plus_the_duration() {
     let _clock = suprnova::testing::TestClock::travel_to(render_moment());
@@ -233,6 +240,8 @@ async fn inp_once_until_a_duration_emits_now_plus_the_duration() {
     );
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_once_until_a_past_date_refuses_the_client_cache_claim() {
     // The server-side refusal stays: a client claiming a value whose
@@ -311,6 +320,8 @@ async fn inp_once_false_turns_the_once_flag_off() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_once_with_sets_the_flag_key_and_expiry_in_one_call() {
     // Laravel's `once(true, 'plans', 60)` on any prop.
@@ -359,6 +370,8 @@ async fn inp_once_as_key_takes_an_enum() {
     assert_eq!(page["onceProps"]["plan-pro"]["prop"], "other");
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_share_once_takes_the_same_options_as_any_once_prop() {
     // Laravel's `Inertia::shareOnce('plans', fn () => ...)` returns the
@@ -409,6 +422,8 @@ async fn inp_share_once_options_reach_only_the_share_they_were_chained_on() {
     assert!(page["onceProps"].get("stale").is_none(), "{page}");
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_the_inertia_facade_shares_a_once_prop_taking_its_options() {
     // Laravel's `Inertia::shareOnce(...)` on the facade returns the same
@@ -590,6 +605,8 @@ async fn inp_cursor_paginator_on_its_first_page_reports_current_page_one() {
     );
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_cursor_paginator_past_its_first_page_reads_the_requests_cursor() {
     // Laravel resolves the current cursor from the request under the

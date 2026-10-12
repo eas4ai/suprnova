@@ -7,6 +7,7 @@
 //! `Events/QueuedClosure.php:131-141` (a delay as a date, an interval or
 //! seconds).
 
+#[cfg(feature = "testing")]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
@@ -19,8 +20,10 @@ use suprnova::events::testing::assert_dispatched;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::events::UniqueJobSkipped;
 use suprnova::queue::memory::MemoryQueueDriver;
+#[cfg(feature = "testing")]
 use suprnova::queue::testing::pushed_with_available_at;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+#[cfg(feature = "testing")]
 use suprnova::testing::TestClock;
 use suprnova::{
     Event, EventDispatcher, EventFacade, FrameworkError, Job, Listener, Queue, QueuedListener,
@@ -35,10 +38,12 @@ struct OrderPlaced {
 
 /// An event that says when its follow-up is due.
 #[derive(Debug, Clone)]
+#[cfg(feature = "testing")]
 struct ReminderScheduled {
     send_at: DateTime<Utc>,
 }
 
+#[cfg(feature = "testing")]
 impl Event for ReminderScheduled {
     fn event_name() -> &'static str {
         "laravel_infra_gaps.ReminderScheduled"
@@ -179,11 +184,13 @@ async fn a_unique_until_processing_listener_job_releases_its_lock_when_it_starts
 
 /// Declares a delay of its own, which the listener's delay outranks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(feature = "testing")]
 struct SendReminder {
     order_id: u32,
 }
 
 #[async_trait]
+#[cfg(feature = "testing")]
 impl Job for SendReminder {
     fn job_name() -> &'static str {
         "laravel-infra-gaps-send-reminder"
@@ -196,6 +203,8 @@ impl Job for SendReminder {
     }
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn a_listener_delay_delays_the_job_and_wins_over_the_jobs_own() {
@@ -214,6 +223,8 @@ async fn a_listener_delay_delays_the_job_and_wins_over_the_jobs_own() {
     assert_eq!(pushed[0].1, clock.now() + chrono::Duration::seconds(30));
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn delay_until_delays_the_job_to_the_time_the_event_names() {
@@ -234,6 +245,8 @@ async fn delay_until_delays_the_job_to_the_time_the_event_names() {
     assert_eq!(pushed[0].1, send_at);
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn a_unique_listener_job_keeps_the_listener_delay() {

@@ -3,6 +3,8 @@
 
 pub mod casts;
 pub mod collections;
+// `Context::test_set_query` and the key ring compile with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod cursor_order;
 pub mod exists;
 pub mod hiding;

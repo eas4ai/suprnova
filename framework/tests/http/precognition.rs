@@ -342,6 +342,8 @@ async fn precognition_hooks_keep_unlisted_messages_after_selected_rules_pass() {
     }
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn precognition_selection_and_should_validate_share_exact_wildcard_match() {
     for (only, matches) in [
@@ -386,6 +388,8 @@ async fn precognition_selection_and_should_validate_share_exact_wildcard_match()
     assert_marked_selection("", Some(vec![]), &[("email", false)]).await;
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 async fn assert_marked_selection(
     only: &str,
     expected: Option<Vec<String>>,
@@ -421,6 +425,8 @@ async fn assert_marked_selection(
     assert_eq!(response.body(), b"checked");
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn precognition_unmarked_selection_includes_every_field() {
     for only in ["email", ""] {
@@ -1579,6 +1585,8 @@ async fn precognition_later_middleware_failures_keep_envelope() {
         }
     }
 }
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn precognition_request_predicates_distinguish_attempt_from_mark() {
     for value in ["true", "TRUE", "TrUe", "false", "1", "true ", ""] {

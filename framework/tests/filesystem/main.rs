@@ -21,4 +21,6 @@ pub mod read_through;
 pub mod read_through_options;
 
 /// Verifies the added Laravel behaviours through the shared delta mechanism.
+// `opendal`, `Storage` and `Storage::fake` compile with the `filesystem` and `testing` features alone.
+#[cfg(all(feature = "filesystem", feature = "testing"))]
 pub mod laravel_delta;

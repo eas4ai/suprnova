@@ -18,6 +18,10 @@
 //!
 //! Each test is named for the requirement its falsifier belongs to,
 //! `ldb_00N_...`, and ends in the engine it runs on.
+//!
+//! The key installers, `TestClock` and `SessionData::set_auth_guard_for_test`
+//! compile with the `testing` feature alone, so the binary is empty without it.
+#![cfg(feature = "testing")]
 
 mod browser;
 mod catalog;

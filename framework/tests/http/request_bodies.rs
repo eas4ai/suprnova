@@ -188,15 +188,19 @@ async fn inp_a_get_query_decodes_bracketed_names_into_an_object_and_a_list() {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(feature = "testing")]
 struct Photos {
     photos: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(feature = "testing")]
 struct Ids {
     ids: Vec<u32>,
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn inp_indexed_names_decode_in_index_order() {
     assert_eq!(

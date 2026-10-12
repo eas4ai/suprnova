@@ -1,6 +1,7 @@
 //! Schedule-wide elections and interruption between tasks.
 
 use std::sync::Arc;
+#[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use suprnova::testing::{TestContainer, TestContainerGuard};
@@ -12,6 +13,8 @@ fn cache() -> TestContainerGuard {
     guard
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn schedule_wide_election_preserves_every_server_opt_out() {
     let _clock = suprnova::clock::TestClock::freeze();

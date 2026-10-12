@@ -24,8 +24,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use sea_orm_migration::prelude::*;
 use suprnova::database::{DatabaseConfig, DbConnection};
+#[cfg(feature = "testing")]
+use suprnova::seed;
 use suprnova::testing::TestDatabase;
-use suprnova::{DB, FrameworkError, PrunedMigration, SchemaDump, Seeder, async_trait, seed};
+use suprnova::{DB, FrameworkError, PrunedMigration, SchemaDump, Seeder, async_trait};
 
 use crate::env_snapshot::{EnvSnapshot, set_env};
 
@@ -141,9 +143,11 @@ impl Seeder for LabelSeeder {
 }
 
 /// The root seeder of the registry test: one row with the label `root`.
+#[cfg(feature = "testing")]
 struct RootSeeder;
 
 #[async_trait]
+#[cfg(feature = "testing")]
 impl Seeder for RootSeeder {
     fn name() -> &'static str {
         "LaravelTestingGapsRootSeeder"
@@ -1034,6 +1038,8 @@ async fn seed_runs_the_named_seeder_before_the_body() {
 /// and is an error when no seeder is registered, instead of seeding
 /// nothing. The registry is one for the process, so the test holds the
 /// environment lock while it fills and clears it.
+// `seed::clear` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn seed_root_runs_the_registered_root_seeder() {
     let _env = crate::env_lock::lock_env_async().await;

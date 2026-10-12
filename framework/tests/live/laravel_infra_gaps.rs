@@ -14,6 +14,7 @@
 //! returns from the crate root, as the house rule says.
 
 use std::any::Any;
+#[cfg(feature = "testing")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -459,8 +460,10 @@ async fn a_request_value_read_through_shared_never_reaches_another_request_throu
 
 /// A clock an application writes against the trait `suprnova` re-exports;
 /// `u64::MAX` stands for a reading the clock cannot represent.
+#[cfg(feature = "testing")]
 struct FrozenClock(u64);
 
+#[cfg(feature = "testing")]
 impl suprnova::live::Clock for FrozenClock {
     fn now(&self) -> Result<suprnova::live::UnixMillis, suprnova::live::ClockError> {
         if self.0 == u64::MAX {
@@ -470,6 +473,8 @@ impl suprnova::live::Clock for FrozenClock {
     }
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn the_live_testing_types_are_named_through_suprnova() {
     use suprnova::live::testing::{AdjustableTestClock, request_cancellation_for_test};

@@ -124,6 +124,8 @@ async fn a_changed_query_is_refused() {
     );
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn an_expired_temporary_signed_route_is_refused_as_invalid() {
     let address = serve().await;
@@ -158,6 +160,8 @@ async fn a_request_without_a_signature_is_refused() {
     );
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn a_repeated_signature_is_refused() {
     let address = serve().await;
@@ -264,6 +268,8 @@ fn the_alias_arguments_read_relative_first_and_refuse_an_empty_name() {
     assert!(refused.is_err());
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn except_ignores_a_parameter_for_every_instance() {
     // A name no other test uses: the list is process-wide and only grows.
@@ -292,6 +298,8 @@ async fn except_ignores_a_parameter_for_every_instance() {
     assert!(url::has_valid_signature_ignoring(&request, &["par116_campaign"]).expect("verify"));
 }
 
+// `Request::for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn has_valid_signature_ignoring_leaves_the_named_parameters_out() {
     ensure_crypt();

@@ -24,6 +24,8 @@ pub mod laravel_testing_gaps;
 pub mod precognition;
 pub mod registry_clears;
 pub mod request_diagnostics;
+// `install_test_encryption_key` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod test_client;
 pub mod test_database_helpers;
 pub mod test_response;

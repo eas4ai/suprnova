@@ -12,11 +12,16 @@
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "testing")]
 use std::time::Duration;
+#[cfg(feature = "testing")]
+use suprnova::Notify;
 use suprnova::broadcasting::{BroadcastHub, InMemoryBroadcastHub};
 use suprnova::events::Listener;
 use suprnova::mail::memory::InMemoryMailTransport;
 use suprnova::mail::{Attachment, Mail};
+#[cfg(feature = "testing")]
+use suprnova::notifications::Notifiable;
 use suprnova::notifications::channels::broadcast::{
     BroadcastChannel, BroadcastMessage, BroadcastNotificationJob, NotificationBroadcast,
     register_broadcast_renderer,
@@ -24,13 +29,16 @@ use suprnova::notifications::channels::broadcast::{
 use suprnova::notifications::channels::mail::{
     AttachOptions, MailChannel, MailRendering, NotificationMailable, register_mail_renderer,
 };
+#[cfg(feature = "testing")]
 use suprnova::notifications::notify_job::SendNotificationJob;
-use suprnova::notifications::{BroadcastNotificationCreated, Channel, Notifiable, Notification};
-use suprnova::queue::testing::{
-    assert_pushed_on_connection, assert_pushed_on_queue, pushed, pushed_with_available_at,
-};
-use suprnova::testing::{TestClock, TestContainer};
-use suprnova::{EventFacade, FrameworkError, Job, Notify, Queue, async_trait};
+use suprnova::notifications::{BroadcastNotificationCreated, Channel, Notification};
+#[cfg(feature = "testing")]
+use suprnova::queue::testing::pushed_with_available_at;
+use suprnova::queue::testing::{assert_pushed_on_connection, assert_pushed_on_queue, pushed};
+#[cfg(feature = "testing")]
+use suprnova::testing::TestClock;
+use suprnova::testing::TestContainer;
+use suprnova::{EventFacade, FrameworkError, Job, Queue, async_trait};
 
 // ---- PAR-149: the subject a mail without one falls back to ----
 
@@ -313,8 +321,10 @@ async fn a_file_that_cannot_be_read_fails_the_delivery_naming_the_path() {
 
 /// Delays its mail by thirty seconds and nothing else.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg(feature = "testing")]
 struct DelayedNote;
 
+#[cfg(feature = "testing")]
 impl Notification for DelayedNote {
     fn notification_name() -> &'static str {
         "LaravelInfraGapsDelayedNote"
@@ -330,8 +340,10 @@ impl Notification for DelayedNote {
     }
 }
 
+#[cfg(feature = "testing")]
 struct Customer;
 
+#[cfg(feature = "testing")]
 impl Notifiable for Customer {
     fn route_for(&self, channel: &str) -> Option<String> {
         match channel {
@@ -342,6 +354,8 @@ impl Notifiable for Customer {
     }
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn notify_queue_delays_each_channel_by_the_notifications_delay_for_it() {

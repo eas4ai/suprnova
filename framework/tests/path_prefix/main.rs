@@ -23,10 +23,14 @@ mod own_process_async;
 
 pub mod cookies;
 pub mod inertia;
+// The translator and `Storage` compile with the `localization` and `filesystem` features alone.
+#[cfg(all(feature = "localization", feature = "filesystem"))]
 pub mod links;
 pub mod live;
 pub mod manual;
 pub mod redirects;
+// The render cache probes compile with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod render_cache;
 pub mod root;
 pub mod routes;

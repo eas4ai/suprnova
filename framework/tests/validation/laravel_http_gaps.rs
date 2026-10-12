@@ -11,11 +11,13 @@
 //! against `infer` first so a test proves the type it names.
 
 use std::cell::Cell;
+#[cfg(feature = "localization")]
 use std::sync::Arc;
 
 use crate::common::{build_multipart_body, request_from_multipart};
 use suprnova::http::upload::validators::UploadValidator;
 use suprnova::rules::{Required, RequiredIf};
+#[cfg(feature = "localization")]
 use suprnova::testing::TestContainer;
 use suprnova::{
     DimensionLimits, Dimensions, FormRequest, FrameworkError, FromRequest, ImageFile, MaxSize,
@@ -63,6 +65,7 @@ async fn english(errors: ValidationErrors, field: &str) -> Vec<String> {
 }
 
 /// One message for `field`, as a refused upload reports it.
+#[cfg(feature = "localization")]
 fn bag(field: &str, message: ValidationMessage) -> ValidationErrors {
     let mut errors = ValidationErrors::new();
     errors.add(field, message);

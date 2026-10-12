@@ -700,6 +700,8 @@ async fn full_url_without_query_removes_keys() {
 }
 
 /// A request to `uri` on the host `app.test`, with no peer and no proxy.
+// `Request::for_test_with_headers` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 fn on_app_host(uri: &str) -> Request {
     Request::for_test_with_headers("GET", uri, [("Host", "app.test")])
 }
@@ -707,6 +709,8 @@ fn on_app_host(uri: &str) -> Request {
 /// PAR-056: `full_url()` answers the query as Laravel's `fullUrl()` does
 /// through Symfony's `normalizeQueryString`: the pairs sorted by key and
 /// re-encoded per RFC 3986.
+// `Request::for_test_with_headers` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn inp_full_url_sorts_the_query_by_key_and_reencodes_it_per_rfc_3986() {
     assert_eq!(
@@ -728,6 +732,8 @@ fn inp_full_url_sorts_the_query_by_key_and_reencodes_it_per_rfc_3986() {
 
 /// A query that normalises to nothing leaves no `?`, as Laravel's
 /// `fullUrl()` omits it when `getQueryString()` is empty.
+// `Request::for_test_with_headers` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn inp_full_url_drops_a_query_that_normalises_to_nothing() {
     assert_eq!(on_app_host("/s?&").full_url(), "http://app.test/s");
@@ -738,6 +744,8 @@ fn inp_full_url_drops_a_query_that_normalises_to_nothing() {
 /// `full_url_is` matches the normalised URL, as Laravel's `fullUrlIs`
 /// reads `fullUrl()`; a pattern written in the order the pairs arrived
 /// in no longer matches.
+// `Request::for_test_with_headers` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn inp_full_url_is_matches_the_normalised_url() {
     let request = on_app_host("/s?b=2&a=1");
@@ -749,6 +757,8 @@ fn inp_full_url_is_matches_the_normalised_url() {
 /// The readers that compare the URL the client sent keep reading it as it
 /// arrived: `full_url_with_query` appends to the query in its own order,
 /// as Laravel's `fullUrlWithQuery` merges into `query()` without sorting.
+// `Request::for_test_with_headers` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[test]
 fn inp_full_url_with_query_keeps_the_query_in_the_order_it_arrived() {
     assert_eq!(

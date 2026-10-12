@@ -1,8 +1,12 @@
 //! Integration tests for the `inertia` module: one binary per module,
 //! one former top-level test file per submodule (folded 2026-09-05).
 
+// `Context::test_query_guard` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod backlog_defects;
 pub mod backlog_defects_feature_map;
+// `install_test_encryption_key` and `TestClock` compile with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod devtools;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
@@ -32,6 +36,8 @@ pub mod props_types;
 pub mod protocol_core;
 pub mod protocol_harness;
 pub mod redirect_back;
+// `scope_locale` compiles with the `localization` feature alone.
+#[cfg(feature = "localization")]
 pub mod root_template;
 pub mod shared_ergonomics;
 pub mod ssr_controls;

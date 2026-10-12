@@ -33,6 +33,8 @@ pub mod session_guard;
 /// The Laravel request-guard gap, observed by the `par-laravel-gaps-auth` mechanism.
 pub mod laravel_auth_gaps;
 /// Verifies the added Laravel behaviours through the shared delta mechanism.
+/// `SessionData::set_auth_guard_for_test` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 pub mod laravel_delta;
 /// Signing a user in for a test, observed by the `par-laravel-gaps-testing` mechanism.
 pub mod laravel_testing_gaps;

@@ -563,6 +563,8 @@ async fn a_mailables_delay_applies_to_a_queue_and_an_explicit_later_wins() {
     );
 }
 
+// `TestClock` compiles with the `testing` feature alone.
+#[cfg(feature = "testing")]
 #[tokio::test]
 #[serial]
 async fn a_mailables_delay_reaches_the_queued_job() {
