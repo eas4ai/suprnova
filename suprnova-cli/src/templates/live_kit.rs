@@ -7,7 +7,9 @@
 //! `templates/live/`, and the Live components that act under `src/live/`.
 //! The views import the shipped component library, which the scaffold
 //! installs under `templates/suprnova-ui/` the way `live:add` does
-//! ([`LIBRARY_COMPONENTS`]).
+//! ([`LIBRARY_COMPONENTS`]). `tests/documents.rs` renders every document
+//! through the test client as its visitor sees it; the kit's compile check
+//! runs it.
 
 use std::fs;
 use std::path::Path;
@@ -138,6 +140,10 @@ const FILES: &[(&str, &str)] = &[
     (
         "src/live/verify_email.rs",
         include_str!("files/live/src/live/verify_email.rs.tpl"),
+    ),
+    (
+        "tests/documents.rs",
+        include_str!("files/live/tests/documents.rs.tpl"),
     ),
     (
         "templates/live/layouts/head.html",
