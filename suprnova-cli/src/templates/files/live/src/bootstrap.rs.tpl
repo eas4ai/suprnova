@@ -79,8 +79,10 @@ pub async fn register() {
 /// version to check. Order matters: the session first, because
 /// authentication, the CSRF check and the toast all read it; the locale
 /// next, since its detection checks the session; the error page after
-/// both, so an error page knows the visitor and their language; and CSRF
-/// last, so its `419` reaches the error page on the way out.
+/// both, so an error page knows the visitor and their language; the
+/// request timeout after the error page, so its `503` reaches the error
+/// page too; and CSRF last, so its `419` reaches the error page on the way
+/// out.
 pub fn register_http_stack() {
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
@@ -106,6 +108,17 @@ pub fn register_http_stack() {
     // inside the session and locale scopes, and outside CSRF, so a `419`
     // reaches it too.
     global_middleware!(ErrorPage);
+
+    // Request timeout - a 30-second ceiling on the time to a response, so a
+    // slow handler or a hung query cannot hold a connection open
+    // indefinitely; past it the request answers `503`. Here, inside the
+    // error page, so the `503` renders as the error document; and ahead of
+    // CSRF and the handlers, so it bounds their work, the CSRF check's read
+    // of a form body included. Streaming responses and WebSocket upgrades
+    // are exempt by design - see `suprnova::timeout`. A per-route
+    // `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint; a
+    // route that takes long uploads needs a longer value here.
+    global_middleware!(suprnova::TimeoutMiddleware::default());
 
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Live
     // requests verify the browser's `Sec-Fetch-Site` proof on their own, so

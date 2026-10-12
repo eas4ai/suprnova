@@ -10,6 +10,7 @@ mod server;
 
 pub use app::{AppConfig, AppConfigBuilder};
 pub use server::{
+    DEFAULT_BODY_READ_TIMEOUT_SECS, DEFAULT_BODY_TOTAL_TIMEOUT_SECS,
     DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION, ServerConfig,
     ServerConfigBuilder,
 };

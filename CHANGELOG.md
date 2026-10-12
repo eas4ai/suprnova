@@ -3116,6 +3116,34 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   opt-in by name: `IMAGE_MAGICK_AUTODETECT=true`, held as
   `ImageConfig::magick_autodetect`, hands unrecognised input to
   ImageMagick on a bare `-` as before. The `oxideav` driver is unchanged.
+- **A request body that stops arriving is abandoned.** In 3.2.1 the
+  server bounded only the request head (`SERVER_HEADER_READ_TIMEOUT`):
+  every read of a request body waited for each piece with no deadline, so a
+  client that sent complete headers and then sent the body a byte at a
+  time, or stopped sending it, held its connection, and with
+  `SERVER_MAX_CONNECTIONS` set a connection slot, for as long as it liked
+  (HRD-001). Every body read the framework performs now waits at most
+  `SERVER_BODY_READ_TIMEOUT` (default 30 seconds) for the next piece and
+  `SERVER_BODY_TOTAL_TIMEOUT` (default 3600 seconds) for the whole body,
+  counted from when the server read the request head: `body_bytes`, `json`,
+  `form`, `input`, the form request and multipart extractors, the multipart
+  parsers and the middleware that read a body before the handler. A body
+  that misses either deadline is abandoned: the read fails with
+  `408 Request Timeout`, and the server closes the connection after the
+  response. Every `408` response carries `Connection: close`. Zero or a
+  value that does not parse falls back to the default, as for the header
+  deadline. `ServerConfig` has the fields `body_read_timeout` and
+  `body_total_timeout`, which `ServerConfig::builder()` and `Server` set.
+- **New projects install the timeout middleware.** In 3.2.1 no bootstrap
+  `suprnova new` wrote installed `TimeoutMiddleware`, so in a new project a
+  slow handler or a hung query held its connection until the client gave
+  up. Every bootstrap now installs `TimeoutMiddleware::default()`, a
+  30-second ceiling on the time to a response that answers `503`. The
+  Inertia kits install it after `Inertia::install` and the Live kit after
+  its error page, both after `SessionMiddleware` and before
+  `CsrfMiddleware`, so the `503` renders as the error page in the visitor's
+  session and locale and the deadline bounds the CSRF body read. The API
+  kit installs it first.
 
 ## 3.2.1 - 2026-10-05
 

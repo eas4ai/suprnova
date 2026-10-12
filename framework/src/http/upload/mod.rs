@@ -37,6 +37,7 @@
 //! in-memory limit - answers 413.
 
 use crate::error::{FrameworkError, ValidationErrors};
+use crate::http::body::BodyDeadline;
 use crate::validation::message::ValidationMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -521,20 +522,34 @@ enum PartBacking {
     Disk(NamedTempFile),
 }
 
+/// Why the framework cut the raw multipart stream off, if it did.
+///
+/// multer reports a failure of the stream it reads as an opaque read
+/// error, so by the time one surfaces from `next_field` or `chunk` the
+/// fact that *we* produced it is gone. The stream adapters set the cause
+/// here, and [`multipart_stream_error`] reads it back out.
+#[derive(Default)]
+struct StreamCut {
+    /// The raw byte counter passed the body cap (SEC-05).
+    over_cap: AtomicBool,
+    /// The body missed its deadline (HRD-001).
+    late: AtomicBool,
+}
+
 /// Translate a multer error into a `FrameworkError`, distinguishing "the
 /// client sent something malformed" (400) from "we cut the stream off
-/// ourselves for exceeding the raw byte cap" (413).
-///
-/// Needed because multer reports a failure in the underlying stream as an
-/// opaque read error - by the time it surfaces here, the fact that *we*
-/// produced it is gone. `tripped` carries that one bit back out.
+/// ourselves": for exceeding the raw byte cap (413), or because the body
+/// missed its deadline (408).
 fn multipart_stream_error(
     err: multer::Error,
-    tripped: &AtomicBool,
+    cut: &StreamCut,
     cap: usize,
     stage: &str,
 ) -> FrameworkError {
-    if tripped.load(Ordering::Relaxed) {
+    if cut.late.load(Ordering::Relaxed) {
+        return crate::http::body::timed_out();
+    }
+    if cut.over_cap.load(Ordering::Relaxed) {
         return FrameworkError::Domain {
             message: format!("multipart body exceeds {cap} bytes (cap)"),
             status_code: 413,
@@ -549,16 +564,16 @@ fn multipart_stream_error(
 /// The request-wide byte budget, threaded through part collection.
 ///
 /// These three always travel together - the ceiling, the running total,
-/// and the flag saying we already cut the transport off for exceeding it -
-/// so they are one parameter rather than three.
+/// and why we already cut the transport off, if we did - so they are one
+/// parameter rather than three.
 struct BodyBudget<'a> {
     /// Ceiling on accumulated payload bytes across all parts.
     cap: usize,
     /// Running total, shared across every part in this request.
     used: &'a mut usize,
-    /// Set when the raw-stream counter tripped; see
+    /// Set when a stream adapter cut the stream off; see
     /// [`multipart_stream_error`].
-    raw_cap_tripped: &'a AtomicBool,
+    cut: &'a StreamCut,
 }
 
 /// Stream a single part out of `field`, spilling a file part to a temp file
@@ -596,7 +611,7 @@ where
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| multipart_stream_error(e, budget.raw_cap_tripped, budget.cap, "chunk"))?
+        .map_err(|e| multipart_stream_error(e, budget.cut, budget.cap, "chunk"))?
     {
         size = size.saturating_add(chunk.len() as u64);
 
@@ -1214,6 +1229,37 @@ enum Checked<'a> {
     },
 }
 
+/// `stream`, each chunk waited for under `deadline`: a chunk that does not
+/// arrive by [`BodyDeadline::next_frame`] ends the stream with an error and
+/// marks `cut` late, so the parse answers `408` rather than the `400` an
+/// opaque read failure would get.
+fn within_deadline(
+    stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    deadline: BodyDeadline,
+    cut: Arc<StreamCut>,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    futures::stream::unfold(Some(stream), move |state| {
+        let cut = cut.clone();
+        async move {
+            let mut stream = state?;
+            match tokio::time::timeout_at(deadline.next_frame(), stream.next()).await {
+                Ok(Some(chunk)) => Some((chunk, Some(stream))),
+                Ok(None) => None,
+                Err(_) => {
+                    cut.late.store(true, Ordering::Relaxed);
+                    let late = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the request body did not arrive in time",
+                    );
+                    // `None` ends the stream after the error: the body is
+                    // abandoned, and its stream dropped with it.
+                    Some((Err(late), None))
+                }
+            }
+        }
+    })
+}
+
 /// The parse behind every public parser: the parts kept, and under
 /// [`Checked::Fields`] the route of each, at the same position, and the
 /// places a member name made an array. Under any other [`Checked`] both
@@ -1267,6 +1313,7 @@ where
     // request, gets the summary of what was parsed, or, from an error
     // return dropping the report, that the parse failed.
     let report = crate::inertia::MultipartReport::start();
+    let deadline = req.body_deadline();
     let (_parts, body) = req.into_parts();
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`
     // does not impl `Into<Bytes>` (multer's bound). `BodyDataStream` drops
@@ -1316,9 +1363,14 @@ where
     // Counting at the transport closes all of those at once, because every
     // byte on the wire passes through here whether or not multer ever
     // attributes it to a part.
-    let raw_cap_tripped = Arc::new(AtomicBool::new(false));
+    let cut = Arc::new(StreamCut::default());
+    // HRD-001: each chunk is waited for under the request's body
+    // deadlines, as every other read of a body is. A chunk that misses one
+    // ends the stream with an error multer reports as a read failure, and
+    // the cause is kept for the error sites below to answer `408`.
+    let incoming = within_deadline(incoming, deadline, cut.clone());
     let counted = {
-        let tripped = raw_cap_tripped.clone();
+        let tripped = cut.clone();
         let cap = max_body_bytes as u64;
         let mut raw_seen: u64 = 0;
         incoming.map(move |chunk| match chunk {
@@ -1328,7 +1380,7 @@ where
                     // multer surfaces this as an opaque stream-read failure,
                     // so record the cause out-of-band: the error sites below
                     // consult this to answer 413 rather than a misleading 400.
-                    tripped.store(true, Ordering::Relaxed);
+                    tripped.over_cap.store(true, Ordering::Relaxed);
                     Err(std::io::Error::other(format!(
                         "multipart raw body exceeds {cap} bytes (cap)"
                     )))
@@ -1379,7 +1431,7 @@ where
     while let Some(mut field) = multipart
         .next_field()
         .await
-        .map_err(|e| multipart_stream_error(e, &raw_cap_tripped, max_body_bytes, "parse"))?
+        .map_err(|e| multipart_stream_error(e, &cut, max_body_bytes, "parse"))?
     {
         let name = field.name().unwrap_or_default().to_string();
         let file_name = field.file_name().map(|s| s.to_string());
@@ -1515,7 +1567,7 @@ where
             &mut BodyBudget {
                 cap: max_body_bytes,
                 used: &mut total_bytes,
-                raw_cap_tripped: &raw_cap_tripped,
+                cut: &cut,
             },
             file_name.is_none(),
             check_as,
