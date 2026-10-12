@@ -364,6 +364,12 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | `MAIL_RESEND_API_KEY` | required-by-driver | `String` | Resend API key. |
 | `MAIL_RESEND_ENDPOINT` | Resend default | `String` | Override the API endpoint. |
 
+## Web Push
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `WEB_PUSH_ENDPOINT_ORIGINS` | unset (the client's own policy) | `String` (comma-separated origins, `https://host` or `https://host:port`) | The push services `WebPushChannel` may send to, such as `https://updates.push.services.mozilla.com,https://fcm.googleapis.com,https://web.push.apple.com,https://*.notify.windows.com`. When it names one or more origins, every send of the channel goes under `EndpointPolicy::Allowlist`, which runs the strict checks and refuses an endpoint at any other origin before its host name is looked up. A host may start with the label `*.`, which matches exactly one label. Spaces around an entry and empty entries are ignored, and a value that names no origin keeps the client's own policy. An entry that is not an origin, or a value that is not UTF-8, makes `WebPushChannel::new` return an error that names the variable. See [Endpoint allowlist](web-push.md#endpoint-allowlist). |
+
 ## Rate Limiting
 
 | Var | Default | Type | Purpose |
@@ -635,7 +641,8 @@ framework reads:
   registers concrete drivers via `App::bind` in `bootstrap()`. Pick
   your driver in Rust; pass any URLs/keys it needs as your own env
   vars. The exceptions are the table-layout variables in
-  **Laravel database** above.
+  **Laravel database** above and `WEB_PUSH_ENDPOINT_ORIGINS` in
+  **Web Push**.
 - **Vector search** registers its drivers the same way. The Qdrant,
   MariaDB and Pinecone drivers have a `from_env()` constructor that reads the
   variables in **Vector search** above.

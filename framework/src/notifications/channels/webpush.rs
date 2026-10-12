@@ -11,12 +11,12 @@
 //! A subscription that nothing can be sent to is logged at WARN and
 //! skipped, and the dispatch succeeds: the push service answered that it
 //! is gone (HTTP 404/410), the stored route is no subscription, its
-//! endpoint or its keys are refused, or its host name resolves to an
-//! address the strict endpoint policy refuses. There is nobody to retry
-//! against, and a failed dispatch would make a queue send the job again,
-//! with every channel that delivered before this one. The framework does
-//! not remove the stored subscription. The warning is what an operator
-//! acts on.
+//! endpoint or its keys are refused, its host name resolves to an
+//! address the strict endpoint policy refuses, or its origin is not in the
+//! endpoint allowlist. There is nobody to retry against, and a failed
+//! dispatch would make a queue send the job again, with every channel that
+//! delivered before this one. The framework does not remove the stored
+//! subscription. The warning is what an operator acts on.
 //!
 //! ## What a warning says of the endpoint
 //!
@@ -34,6 +34,21 @@
 //! log and every `NotificationFailed` listener. The client writes the
 //! body's first 200 bytes to its debug log.
 //!
+//! ## Which push services it sends to
+//!
+//! `WEB_PUSH_ENDPOINT_ORIGINS` names the origins of the push services the
+//! channel may send to, separated by commas, such as
+//! `https://fcm.googleapis.com,https://*.notify.windows.com`. When it names
+//! one or more, every send goes under [`EndpointPolicy::Allowlist`] with
+//! those origins, in place of the policy the client was built with: the
+//! strict checks run, and an endpoint at any other origin is refused before
+//! its host name is looked up. The refusal is logged as a subscription that
+//! cannot be used, with the origin as the reason, and the dispatch
+//! succeeds. Unset, or blank, the client's own policy applies.
+//! [`WebPushChannel::new`] reads the variable and fails when an entry is
+//! not an origin, so a typo fails where the application builds the
+//! channel, instead of leaving it open to every host.
+//!
 //! ## Why `Arc<WebPushClient>`
 //!
 //! `WebPushClient` wraps a `VapidSigner` which wraps a private
@@ -45,7 +60,10 @@
 
 use crate::error::FrameworkError;
 use crate::notifications::{Channel, DynNotification};
-use crate::web_push::{ContentEncoding, SubscriptionInfo, WebPushClient, WebPushError};
+use crate::web_push::{
+    ContentEncoding, EndpointAllowlist, EndpointPolicy, SubscriptionInfo, WebPushClient,
+    WebPushError,
+};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -61,14 +79,77 @@ use std::sync::Arc;
 pub struct WebPushChannel {
     client: Arc<WebPushClient>,
     ttl_secs: u32,
+    /// The allowlist `WEB_PUSH_ENDPOINT_ORIGINS` names, which every send
+    /// goes under in place of the client's own policy. `None` when the
+    /// variable names no origin.
+    endpoint_policy: Option<EndpointPolicy>,
 }
+
+/// The variable that names the push-service origins the channel sends to.
+const ENDPOINT_ORIGINS_ENV: &str = "WEB_PUSH_ENDPOINT_ORIGINS";
 
 impl WebPushChannel {
     /// Build a `WebPushChannel` sending via `client` with the given push
     /// `ttl_secs` (seconds the push service will retry delivery).
-    pub fn new(client: Arc<WebPushClient>, ttl_secs: u32) -> Self {
-        Self { client, ttl_secs }
+    ///
+    /// Reads `WEB_PUSH_ENDPOINT_ORIGINS`. When it names one or more
+    /// origins, every send goes under [`EndpointPolicy::Allowlist`] with
+    /// them, whatever policy `client` was built with; see the module
+    /// documentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error that names `WEB_PUSH_ENDPOINT_ORIGINS` when the
+    /// variable is not UTF-8, or when one of its entries is not an origin
+    /// of the form `https://host` or `https://host:port`. A value the
+    /// channel cannot read fails here, where the application builds the
+    /// channel at boot, rather than leaving the channel without the list.
+    pub fn new(client: Arc<WebPushClient>, ttl_secs: u32) -> Result<Self, FrameworkError> {
+        let raw = match std::env::var(ENDPOINT_ORIGINS_ENV) {
+            Ok(raw) => Some(raw),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(FrameworkError::internal(format!(
+                    "{ENDPOINT_ORIGINS_ENV} is not valid UTF-8; set it to a comma-separated \
+                     list of push service origins, such as https://fcm.googleapis.com"
+                )));
+            }
+        };
+        Ok(Self {
+            client,
+            ttl_secs,
+            endpoint_policy: endpoint_policy_from(raw.as_deref())?,
+        })
     }
+}
+
+/// The policy a value of `WEB_PUSH_ENDPOINT_ORIGINS` selects: the allowlist
+/// of the origins it names, or `None` when it is unset or names none.
+///
+/// Entries are separated by commas, and the spaces around an entry and an
+/// empty entry, as a trailing comma leaves, are ignored. Every other entry
+/// must be an origin, so one typo refuses the whole value.
+fn endpoint_policy_from(raw: Option<&str>) -> Result<Option<EndpointPolicy>, FrameworkError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let origins: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .collect();
+    if origins.is_empty() {
+        return Ok(None);
+    }
+    let allowlist = EndpointAllowlist::new(&origins).map_err(|error| {
+        FrameworkError::internal(format!(
+            "{ENDPOINT_ORIGINS_ENV} is not a comma-separated list of push service \
+             origins: {error}. An origin is https://host or https://host:port, such as \
+             https://fcm.googleapis.com, or a wildcard origin such as \
+             https://*.notify.windows.com"
+        ))
+    })?;
+    Ok(Some(EndpointPolicy::Allowlist(allowlist)))
 }
 
 /// The host of a stored endpoint and the digest that finds its row. See
@@ -130,16 +211,30 @@ impl Channel for WebPushChannel {
             FrameworkError::internal(format!("WebPushChannel: payload encode: {e}"))
         })?;
 
-        match self
-            .client
-            .send(
-                &subscription,
-                &payload,
-                ContentEncoding::Aes128Gcm,
-                self.ttl_secs,
-            )
-            .await
-        {
+        let sent = match &self.endpoint_policy {
+            Some(policy) => {
+                self.client
+                    .send_with_policy(
+                        policy,
+                        &subscription,
+                        &payload,
+                        ContentEncoding::Aes128Gcm,
+                        self.ttl_secs,
+                    )
+                    .await
+            }
+            None => {
+                self.client
+                    .send(
+                        &subscription,
+                        &payload,
+                        ContentEncoding::Aes128Gcm,
+                        self.ttl_secs,
+                    )
+                    .await
+            }
+        };
+        match sent {
             Ok(_) => Ok(()),
             Err(WebPushError::SubscriptionGone) => {
                 // The push service told us this subscription is dead (404/410).
@@ -167,6 +262,16 @@ impl Channel for WebPushChannel {
                     &subscription.endpoint,
                     notification,
                     &format!("its host name resolves to {class}"),
+                );
+                Ok(())
+            }
+            Err(WebPushError::OriginNotAllowed(origin)) => {
+                // The origin, never the path, which is the token that
+                // reaches the browser.
+                warn_unusable(
+                    &subscription.endpoint,
+                    notification,
+                    &format!("its origin {origin} is not in the endpoint allowlist"),
                 );
                 Ok(())
             }

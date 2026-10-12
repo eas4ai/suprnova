@@ -14,6 +14,8 @@
 //! 4. 5xx from the push service: propagates as a `FrameworkError` whose
 //!    message surfaces the upstream status so operators can triage, and
 //!    never the body the push service sent.
+//! 5. `WEB_PUSH_ENDPOINT_ORIGINS`: the channel sends under the allowlist it
+//!    names, and a value that names no origin fails construction.
 
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
@@ -85,7 +87,7 @@ fn build_channel() -> Arc<WebPushChannel> {
             .expect("test mailto: subject is a valid VAPID URI")
             .with_endpoint_policy(EndpointPolicy::AllowAny),
     );
-    Arc::new(WebPushChannel::new(client, 60))
+    Arc::new(WebPushChannel::new(client, 60).expect("the channel builds"))
 }
 
 #[tokio::test]
@@ -239,7 +241,8 @@ async fn webpush_channel_treats_a_route_that_is_no_subscription_as_non_fatal() {
             .with_endpoint_policy(EndpointPolicy::AllowAny),
         ),
         60,
-    );
+    )
+    .expect("the channel builds");
 
     (&channel as &dyn Channel)
         .deliver("this is not valid subscription json", &PingNote)
@@ -350,4 +353,182 @@ async fn webpush_channel_transport_error_does_not_carry_the_endpoint() {
         !msg.contains("the-capability-token-of-the-browser"),
         "the endpoint capability must not appear in the error: {msg}"
     );
+}
+
+// -------------------------------------------------------------------------
+// HRD-011: `WEB_PUSH_ENDPOINT_ORIGINS` selects the allowlist policy for the
+// channel's sends, and a value the channel cannot read fails construction.
+// -------------------------------------------------------------------------
+
+/// The variable is spelled out here, not imported: its name is what an
+/// operator types into a deployment, so a rename must break these tests.
+const ENDPOINT_ORIGINS: &str = "WEB_PUSH_ENDPOINT_ORIGINS";
+
+/// `WEB_PUSH_ENDPOINT_ORIGINS` set for one test, and put back as it was
+/// when the test ends.
+struct EndpointOriginsEnv(Option<std::ffi::OsString>);
+
+impl EndpointOriginsEnv {
+    fn set(value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let saved = std::env::var_os(ENDPOINT_ORIGINS);
+        // SAFETY: the environment is process-wide. Every test of this file
+        // that reads or writes the variable holds the binary's `#[serial]`
+        // lock, as the other tests that write the environment do.
+        unsafe { std::env::set_var(ENDPOINT_ORIGINS, value) };
+        Self(saved)
+    }
+}
+
+impl Drop for EndpointOriginsEnv {
+    fn drop(&mut self) {
+        // SAFETY: see `EndpointOriginsEnv::set`.
+        unsafe {
+            match self.0.take() {
+                Some(value) => std::env::set_var(ENDPOINT_ORIGINS, value),
+                None => std::env::remove_var(ENDPOINT_ORIGINS),
+            }
+        }
+    }
+}
+
+/// A client built with `AllowAny`, which sends to any endpoint, so a test
+/// can tell the allowlist the variable selects from the client's policy.
+fn allow_any_client() -> Arc<WebPushClient> {
+    Arc::new(
+        WebPushClient::new(
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:admin@suprnova.dev",
+        )
+        .expect("valid mailto: subject")
+        .with_endpoint_policy(EndpointPolicy::AllowAny),
+    )
+}
+
+/// With the variable set, the channel sends under the allowlist in place
+/// of the client's `AllowAny`: the mock server the client would reach gets
+/// nothing, and a public host outside the list is refused before anything
+/// is sent. The refusal is logged as a subscription that cannot be used,
+/// with the origin and never the endpoint's token, and the dispatch
+/// succeeds.
+#[tokio::test]
+#[serial]
+#[traced_test]
+async fn hardening_webpush_channel_with_endpoint_origins_refuses_an_endpoint_outside_the_list() {
+    let _env = EndpointOriginsEnv::set("https://fcm.googleapis.com, https://*.notify.windows.com,");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&server)
+        .await;
+    let channel = WebPushChannel::new(allow_any_client(), 60).expect("the origins parse");
+    let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(channel));
+
+    // The client's own policy sends here; the allowlist's strict checks
+    // refuse a plain `http` endpoint at an address.
+    dispatcher
+        .notify(
+            &Subscriber {
+                endpoint: format!("{}/push", server.uri()),
+            },
+            &PingNote,
+        )
+        .await
+        .expect("a refused subscription does not fail the dispatch");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "the allowlist, not the client's AllowAny, decided the send"
+    );
+
+    dispatcher
+        .notify(
+            &Subscriber {
+                endpoint: "https://push.example.net/push/the-capability-token-of-the-browser"
+                    .to_owned(),
+            },
+            &PingNote,
+        )
+        .await
+        .expect("a refused subscription does not fail the dispatch");
+    assert!(
+        logs_contain("subscription cannot be used"),
+        "expected the warning"
+    );
+    assert!(
+        logs_contain("its origin https://push.example.net is not in the endpoint allowlist"),
+        "expected the origin and the policy in the warning"
+    );
+    assert!(
+        !logs_contain("the-capability-token-of-the-browser"),
+        "the endpoint's token is not logged"
+    );
+}
+
+/// A value with an entry that is not an origin fails construction, and the
+/// error names the variable, so a typo stops boot instead of sending to
+/// every host.
+#[tokio::test]
+#[serial]
+async fn hardening_webpush_channel_refuses_a_malformed_endpoint_origins_value() {
+    for bad in [
+        "https://fcm.googleapis.com,http://push.example.net",
+        "fcm.googleapis.com",
+        "https://fcm.googleapis.com/fcm/send",
+        "https://*.com",
+    ] {
+        let _env = EndpointOriginsEnv::set(bad);
+        let Err(err) = WebPushChannel::new(allow_any_client(), 60) else {
+            panic!("{bad:?} must fail construction");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(ENDPOINT_ORIGINS), "{bad:?}: {msg}");
+        assert!(
+            msg.contains("is not a push service origin"),
+            "{bad:?}: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _env =
+            EndpointOriginsEnv::set(std::ffi::OsStr::from_bytes(b"https://\xff.example.org"));
+        let Err(err) = WebPushChannel::new(allow_any_client(), 60) else {
+            panic!("a value that is not UTF-8 must fail construction");
+        };
+        assert!(err.to_string().contains(ENDPOINT_ORIGINS), "{err}");
+    }
+}
+
+/// A blank value, or one of commas and spaces alone, names no origin and
+/// keeps the client's own policy, here `AllowAny`.
+#[tokio::test]
+#[serial]
+async fn hardening_webpush_channel_with_blank_endpoint_origins_keeps_the_client_policy() {
+    for blank in ["", "   ", " , ,"] {
+        let _env = EndpointOriginsEnv::set(blank);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/push"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let channel = WebPushChannel::new(allow_any_client(), 60).expect("a blank value builds");
+        (&channel as &dyn Channel)
+            .deliver(
+                &Subscriber {
+                    endpoint: format!("{}/push", server.uri()),
+                }
+                .route_for("webpush")
+                .expect("subscriber returns a webpush route"),
+                &PingNote,
+            )
+            .await
+            .expect("the client's AllowAny sends to the mock server");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{blank:?} keeps the client's policy"
+        );
+    }
 }
