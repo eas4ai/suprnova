@@ -70,8 +70,8 @@ struct WsRegistry {
 type WsTaskRegistry = std::sync::Mutex<WsRegistry>;
 
 tokio::task_local! {
-    /// Carries the accept-loop connection-cap permit (when
-    /// `SERVER_MAX_CONNECTIONS` is set) into the request that may upgrade to a
+    /// Carries the accept-loop connection-cap permit (when the server has a
+    /// cap) into the request that may upgrade to a
     /// WebSocket. `serve_connection(...).with_upgrades()` resolves at the 101
     /// handshake, so the HTTP connection task ends - and would drop the permit -
     /// while the WS session runs on for the socket's lifetime in `WS_TASKS`. The
@@ -134,7 +134,9 @@ impl Server {
             middleware: MiddlewareRegistry::from_global(),
             host: "127.0.0.1".to_string(),
             port: 8000,
-            max_connections: None,
+            // Capped however the server is built (HRD-009); `max_connections(0)`
+            // is the deliberate way to a server with no cap.
+            max_connections: Some(crate::config::providers::DEFAULT_MAX_CONNECTIONS),
             header_read_timeout: std::time::Duration::from_secs(
                 crate::config::providers::DEFAULT_HEADER_READ_TIMEOUT_SECS,
             ),
@@ -357,13 +359,16 @@ impl Server {
     ///
     /// When set, the server will not accept new connections once `n` are
     /// active. The accept loop blocks until an existing connection closes,
-    /// providing back-pressure at the TCP level. When unset (the default),
-    /// connections are unbounded. Pair with a reverse proxy and an
-    /// appropriate `LimitNOFILE` for full protection.
+    /// providing back-pressure at the TCP level. A server built with
+    /// [`Server::from_config`] starts with the cap from
+    /// [`ServerConfig::max_connections`], which is
+    /// [`DEFAULT_MAX_CONNECTIONS`](crate::config::providers::DEFAULT_MAX_CONNECTIONS)
+    /// (10000) when `SERVER_MAX_CONNECTIONS` is unset; one built with
+    /// [`Server::new`] starts with that same default. Pair with a reverse
+    /// proxy and an appropriate `LimitNOFILE` for full protection.
     ///
-    /// `n == 0` is treated as unset (unbounded), matching the
-    /// `SERVER_MAX_CONNECTIONS` env knob - a zero cap would accept no
-    /// connections at all, which is never the intent.
+    /// `n == 0` removes the cap: a zero cap would accept no connections at
+    /// all, which is never the intent.
     pub fn max_connections(mut self, n: usize) -> Self {
         self.max_connections = if n > 0 { Some(n) } else { None };
         self
@@ -515,7 +520,7 @@ impl Server {
         // share the same drain registry and shutdown handles both.
         let _ = WS_TASKS.set(WsTaskRegistry::default());
 
-        // Optional concurrency cap. `None` => unbounded (unchanged default).
+        // Concurrency cap. `None` => unbounded.
         // When set, the accept loop acquires a permit before handing the
         // connection off to a task; the permit is moved into the task and
         // released when the task completes (i.e. when the connection closes).
@@ -2229,7 +2234,7 @@ async fn handle_ws_upgrade(
     // bindings the handler resolves live as long as the socket.
     let handler_task = crate::container::scope::run_in_new_scope(handler_task);
 
-    // Take the connection-cap permit (when SERVER_MAX_CONNECTIONS is set) out of
+    // Take the connection-cap permit (when the server has a cap) out of
     // the connection task's task-local and move it into the WS session task, so
     // the slot is held for the socket's whole lifetime rather than released when
     // the HTTP connection task ends at the 101 handshake. `try_with` fails on the
@@ -2985,6 +2990,18 @@ mod tests {
     //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
+
+    /// HRD-009: a server is capped however it is built; `Server::new` starts
+    /// with the default cap, and only `max_connections(0)` removes it.
+    #[test]
+    fn a_server_built_with_new_caps_connections_by_default() {
+        let server = Server::new(Router::new());
+        assert_eq!(
+            server.max_connections,
+            Some(crate::config::providers::DEFAULT_MAX_CONNECTIONS)
+        );
+        assert_eq!(server.max_connections(0).max_connections, None);
+    }
 
     /// HRD-001: once the connection's watch abandons it, the connection's
     /// reads and flushes fail, which is what ends hyper's connection, and

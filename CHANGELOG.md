@@ -2498,6 +2498,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`Queue::reserved_jobs` under `Queue::fake()` answers the fake.** It lists
   the reservations workers made from the fake instead of reading the
   installed driver.
+- **The server caps concurrent connections at 10000 by default.** In 3.2.1
+  an unset or blank `SERVER_MAX_CONNECTIONS` left the number of concurrent
+  connections unbounded, so a crowd of slow clients could use up the
+  process's file descriptors. An unset or blank value now caps them at
+  10000, the new `suprnova::config::providers::DEFAULT_MAX_CONNECTIONS`,
+  and `ServerConfig::builder()` and `Server::new` start from the same cap.
+  Zero or a value
+  that does not parse still falls back to 10000 with a warning, and an
+  explicit positive value is the cap. No value of the variable removes the
+  cap: a server with no cap is a choice made in code, with
+  `ServerConfig::builder().unbounded_connections()`. A deployment that
+  holds more than 10000 connections at once sets `SERVER_MAX_CONNECTIONS`
+  to its figure.
 
 ### Fixed
 

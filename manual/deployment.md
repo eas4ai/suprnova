@@ -73,7 +73,7 @@ Beyond the four required vars, common production knobs:
 | `SERVER_PORT` | `8765` | Match your platform's expected port. |
 | `APP_DEBUG` | env-derived | `false` in production/staging/custom envs. Set explicitly if you want loud errors in staging. |
 | `SERVER_MAX_BODY_SIZE` | per-handler default | Process-wide request body cap. |
-| `SERVER_MAX_CONNECTIONS` | unset (unbounded) | Cap on concurrent active TCP connections. See below. |
+| `SERVER_MAX_CONNECTIONS` | `10000` | Cap on concurrent active TCP connections. See below. |
 | `SERVER_HEALTH_READINESS_TOKEN` | unset (readiness is public) | Shared secret required to reach the readiness probe. See [Health check](#health-check). |
 | `DB_MAX_CONNECTIONS` | `10` | Pool size. |
 | `REDIS_URL` | unset | Required if you've configured the Redis cache/queue/session drivers. |
@@ -685,12 +685,13 @@ not in process memory.
 
 ## Connection cap (`SERVER_MAX_CONNECTIONS`)
 
-By default the server accepts an unbounded number of concurrent TCP
-connections. In most deployments a reverse proxy (nginx, Caddy, Traefik)
-or the platform's load balancer provides the first line of defence. If
-you want a hard backstop inside the process itself - to prevent a single
-misbehaving client pool from exhausting file descriptors - set
-`SERVER_MAX_CONNECTIONS`:
+The server caps concurrent TCP connections at 10000 by default. The
+header and body deadlines bound how long each connection lasts; the cap
+bounds how many there are, so a crowd of slow clients cannot use up the
+process's file descriptors. In most deployments a reverse proxy (nginx,
+Caddy, Traefik) or the platform's load balancer provides the first line
+of defence, and the cap is the backstop inside the process. To change
+it, set `SERVER_MAX_CONNECTIONS`:
 
 ```bash
 # .env.production - cap concurrent connections at 1024
@@ -705,25 +706,36 @@ so slots turn over promptly.
 
 Rules of thumb:
 
-- **Unset (default = unbounded).** Correct if you have a reverse proxy
-  applying its own connection limit, or if you're running behind a PaaS
-  that manages concurrency for you.
-- **Set to a concrete value** if the process runs directly on the
-  internet or you want defence-in-depth regardless of the proxy
-  configuration. A typical starting point is 2 × your expected peak
-  concurrent users, adjusted upward for long-lived connections
-  (WebSocket, SSE).
+- **Unset (default = 10000).** Suits most deployments. Raise it if the
+  process holds more long-lived connections (WebSocket, SSE) than that at
+  peak.
+- **Set to a concrete value** to size the cap to your traffic. A typical
+  starting point is 2 × your expected peak concurrent users, adjusted
+  upward for long-lived connections (WebSocket, SSE).
 - **Pair with `LimitNOFILE`** (systemd) or `ulimit -n` so the OS
   file-descriptor limit doesn't become the surprise cap. Each HTTP
   connection costs one file descriptor; add your database pool size and
-  a few dozen for OS housekeeping.
+  a few dozen for OS housekeeping. Many systems start at 1024, below the
+  default cap, so raise the limit or lower the cap to fit.
 - **This is a backstop, not a replacement for upstream rate limiting.**
   `SERVER_MAX_CONNECTIONS` stops runaway accumulation; your reverse
   proxy or `rate_limit` middleware should handle per-client or per-IP
   throttling.
 
-Blank, unparseable, or zero values are silently treated as unset so a
-typo does not prevent the server from starting.
+A blank value is the same as unset. A zero or unparseable value logs a
+warning and falls back to 10000 rather than removing the cap, so a typo
+neither stops the server from starting nor leaves it without a cap.
+
+No value of `SERVER_MAX_CONNECTIONS` removes the cap. A server with no cap
+is a choice made in code. Make it only when a reverse proxy or the
+platform already limits connections and the file-descriptor limit is set
+to match:
+
+```rust
+use suprnova::{Config, ServerConfig};
+
+Config::register(ServerConfig::builder().unbounded_connections().build());
+```
 
 ## Heap profiling
 
