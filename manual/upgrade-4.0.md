@@ -2570,20 +2570,33 @@ piece with no deadline, so a client that sent complete headers and then
 sent the body a byte at a time, or stopped sending it, held the connection
 for as long as it liked.
 
-**Now:** Every read of a request body the framework performs waits at most
+**Now:** Every read of a request body waits at most
 `SERVER_BODY_READ_TIMEOUT` (default 30 seconds) for the next piece, and at
 most `SERVER_BODY_TOTAL_TIMEOUT` (default 3600 seconds) for the whole body,
-counted from when the server read the request head. A body that misses
-either deadline is abandoned: the read fails with `408 Request Timeout`,
-the response carries `Connection: close`, and the server closes the
-connection. `ServerConfig` has the fields `body_read_timeout` and
-`body_total_timeout`.
+counted from when the server read the request head. That covers the
+framework's reads and a handler that takes the raw stream with
+`Request::into_parts` and reads it itself. A body that misses either
+deadline is abandoned: the read fails with `408 Request Timeout`, the
+response carries `Connection: close`, and the server closes the
+connection. A body nothing reads, such as one a handler keeps while it
+waits on other work, is abandoned at the total deadline and its connection
+closed, without a response. `ServerConfig` has the fields
+`body_read_timeout` and `body_total_timeout`. `BodyState::Streaming` and
+`BodyState::Partial` hold a `suprnova::http::TimedBody`, the body under its
+deadlines, where they held `hyper::body::Incoming`.
 
 **Do:** An application that streams uploads taking longer than an hour
 raises `SERVER_BODY_TOTAL_TIMEOUT`, and one whose clients pause for more
 than 30 seconds in the middle of a body raises `SERVER_BODY_READ_TIMEOUT`.
-Nothing else changes. A struct literal that builds a `ServerConfig` names
-the two fields; `ServerConfig::builder()` fills them. For details, see
+A struct literal that builds a `ServerConfig` names the two fields;
+`ServerConfig::builder()` fills them. A handler that matches
+`BodyState::Streaming` or `BodyState::Partial` and names the body's type
+names `suprnova::http::TimedBody` in place of `hyper::body::Incoming`. It
+reads the same frames through `http_body_util::BodyExt`; a frame's error is
+a `FrameworkError` instead of a `hyper::Error`, so `?` returns it from a
+handler, and `collect_body_with_cap` collects it as before. A handler that
+does other work before it reads the body finishes reading it within the
+total deadline. For details, see
 [Body read deadlines](requests.md#body-read-deadlines).
 
 ### New projects install the timeout middleware.

@@ -21,7 +21,7 @@ mod trusted_proxies;
 pub mod upload;
 
 pub use abort::{abort as abort_with, abort_if, abort_unless};
-pub use body::{collect_body, parse_form, parse_json};
+pub use body::{TimedBody, collect_body, parse_form, parse_json};
 pub use cookie::{Cookie, CookieOptions, CookiePrefix, SameSite, parse_cookies};
 pub use extract::{FromParam, FromRequest};
 pub use file_response::ContentDisposition;

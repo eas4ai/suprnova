@@ -302,8 +302,8 @@ pub use ::sea_orm;
 
 // hyper type aliasing - same principle as the SeaORM block above:
 // `Request::method() -> &Method`, `Request::uri() -> &Uri`,
-// `Request::headers() -> &HeaderMap`, and the streaming body type all
-// surface hyper-owned types. Re-exporting them at the crate root lets
+// `Request::headers() -> &HeaderMap`, and the body type `Request::new` and
+// `handle_request` take all surface hyper-owned types. Re-exporting them at the crate root lets
 // consumers name those types without adding `hyper` to their
 // Cargo.toml. The full `hyper` module is also re-exported as the
 // documented escape hatch for anything we haven't aliased.

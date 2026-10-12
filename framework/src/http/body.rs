@@ -8,20 +8,29 @@
 //! [`set_global_max_request_body_bytes`], and
 //! [`crate::http::FormRequest::max_body_bytes`].
 //!
-//! Body collection is also bounded in time: every read waits under the
-//! request's body deadlines, `SERVER_BODY_READ_TIMEOUT` for each frame and
-//! `SERVER_BODY_TOTAL_TIMEOUT` for the whole body (see
-//! [`crate::config::ServerConfig::body_read_timeout`]).
+//! A request body is also bounded in time (HRD-001). The body a
+//! [`crate::http::Request`] holds is a [`TimedBody`], which waits for each
+//! frame under the request's body deadlines, `SERVER_BODY_READ_TIMEOUT` for
+//! each frame and `SERVER_BODY_TOTAL_TIMEOUT` for the whole body (see
+//! [`crate::config::ServerConfig::body_read_timeout`]), whoever reads it.
+//! The server also watches each connection, so a body nothing reads is
+//! abandoned with its connection at the total deadline.
 
 use crate::config::providers::{DEFAULT_BODY_READ_TIMEOUT_SECS, DEFAULT_BODY_TOTAL_TIMEOUT_SECS};
 use crate::error::FrameworkError;
 use bytes::Bytes;
+use futures::task::AtomicWaker;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use serde::de::DeserializeOwned;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-use tokio::time::Instant;
+use tokio::task::AbortHandle;
+use tokio::time::{Instant, Sleep};
 
 /// Default cap on generic (JSON / form-urlencoded / raw) request body size,
 /// in bytes.
@@ -77,11 +86,12 @@ pub fn global_max_request_body_bytes() -> usize {
 /// hyper bounds nothing after it, so without this a client could send
 /// complete headers and then hold the connection by sending the body a
 /// byte at a time, or not at all. `Server::run` starts one for each
-/// request as the head arrives and hands it to the request, and every read
-/// of the body the framework performs waits under it: [`collect_after`],
-/// the request's partial read, and the multipart parsers. A read that
-/// misses it fails with [`timed_out`] and drops the stream; hyper then
-/// stops reading the connection and closes it after the response.
+/// request as the head arrives and hands it to the request, which reads
+/// its body through a [`TimedBody`] that waits under it on every poll,
+/// whoever polls. A wait that misses it fails with [`timed_out`] and drops
+/// the stream; hyper then stops reading the connection and closes it after
+/// the response. The connection's [`ConnectionWatch`] holds the whole-body
+/// instant too, for the body nothing polls.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BodyDeadline {
     /// The longest wait for the next frame.
@@ -120,15 +130,264 @@ impl BodyDeadline {
         after(Instant::now(), self.frame).min(self.whole)
     }
 
-    /// The next frame of `body`, or [`timed_out`] when it does not arrive by
-    /// [`Self::next_frame`].
-    pub(crate) async fn frame(
-        &self,
-        body: &mut Incoming,
-    ) -> Result<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>, FrameworkError> {
-        tokio::time::timeout_at(self.next_frame(), body.frame())
-            .await
-            .map_err(|_| timed_out())
+    /// Whether the instant the whole body had to arrive by has passed.
+    pub(crate) fn passed(&self) -> bool {
+        Instant::now() >= self.whole
+    }
+}
+
+/// A request body that waits for each frame under the request's body
+/// deadlines (HRD-001), whoever reads it.
+///
+/// [`BodyState::Streaming`](crate::http::BodyState::Streaming) holds one,
+/// so a handler that takes the body with
+/// [`Request::into_parts`](crate::http::Request::into_parts) and polls it
+/// itself reads under the deadlines that `body_bytes`, `json` and the
+/// multipart parsers read under: at most `SERVER_BODY_READ_TIMEOUT` for each
+/// frame, and the whole body by `SERVER_BODY_TOTAL_TIMEOUT` after the server
+/// read the request head. A frame that misses either ends the body with the
+/// `408 Request Timeout` error, after which the body yields nothing more.
+/// The stream underneath is dropped with it, so the server stops reading
+/// the connection and closes it after the response.
+///
+/// It is a [`hyper::body::Body`] whose error is a [`FrameworkError`], so
+/// `http_body_util::BodyExt` reads it as it reads any body, and `?` returns
+/// a failed frame from a handler: the `408` for a late one, or, for a
+/// stream that fails, the error [`Request::body_bytes`](crate::http::Request::body_bytes)
+/// returns. A body that `Server::run` serves is watched from its connection
+/// as well: one that has not arrived whole by the total deadline, read or
+/// not, loses its connection.
+pub struct TimedBody {
+    /// The stream, until it ends, fails or misses a deadline.
+    stream: Option<Incoming>,
+    /// The deadlines each wait for a frame runs under.
+    deadline: BodyDeadline,
+    /// The timer of the wait for a frame, kept between waits so that a
+    /// body of many frames allocates it once.
+    wait: Option<Pin<Box<Sleep>>>,
+    /// Whether `wait` is set for the frame being waited for.
+    waiting: bool,
+    /// The connection's watch on this body, told when the body arrives.
+    arrival: Option<BodyArrival>,
+}
+
+impl TimedBody {
+    /// `stream` under `deadline`, with `arrival` to tell the connection's
+    /// watch when it has arrived whole.
+    pub(crate) fn new(
+        stream: Incoming,
+        deadline: BodyDeadline,
+        arrival: Option<BodyArrival>,
+    ) -> Self {
+        let mut body = Self {
+            stream: Some(stream),
+            deadline,
+            wait: None,
+            waiting: false,
+            arrival,
+        };
+        // A body with nothing to send, as most requests have, has arrived.
+        if body.stream.as_ref().is_some_and(Incoming::is_end_stream) {
+            body.arrived();
+        }
+        body
+    }
+
+    /// The body has arrived whole: the connection's watch stands down.
+    fn arrived(&mut self) {
+        if let Some(arrival) = self.arrival.take() {
+            arrival.stand_down();
+        }
+    }
+
+    /// Stop reading: drop the stream, after which the body yields nothing.
+    fn abandon(&mut self) {
+        self.stream = None;
+        self.waiting = false;
+    }
+}
+
+impl From<Incoming> for TimedBody {
+    /// The body of a request no `Server::run` served, such as one an
+    /// embedder's own hyper loop hands over, under the deadlines the
+    /// registered [`ServerConfig`](crate::config::ServerConfig) sets, or the
+    /// defaults, starting now.
+    fn from(stream: Incoming) -> Self {
+        Self::new(stream, BodyDeadline::configured(), None)
+    }
+}
+
+impl Body for TimedBody {
+    type Data = Bytes;
+    type Error = FrameworkError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, FrameworkError>>> {
+        let this = self.get_mut();
+        let Some(stream) = this.stream.as_mut() else {
+            return Poll::Ready(None);
+        };
+        // The stream first: a frame that has arrived is read, however late
+        // the reader is to ask for it.
+        match Pin::new(&mut *stream).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                this.waiting = false;
+                // A body of declared length has arrived with its last byte,
+                // whether or not the reader asks for the end after it.
+                if stream.is_end_stream() {
+                    this.arrived();
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(None) => {
+                this.abandon();
+                this.arrived();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.abandon();
+                // The connection's watch cuts the stream off at the total
+                // deadline, so a stream that fails past it failed because
+                // it was late.
+                let error = if this.deadline.passed() {
+                    timed_out()
+                } else {
+                    read_failure(error)
+                };
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Pending => {
+                let deadline = this.deadline;
+                let wait = this.wait.get_or_insert_with(|| {
+                    Box::pin(tokio::time::sleep_until(deadline.next_frame()))
+                });
+                // The wait for this frame starts with the first poll that
+                // finds it missing.
+                if !this.waiting {
+                    wait.as_mut().reset(deadline.next_frame());
+                    this.waiting = true;
+                }
+                if wait.as_mut().poll(cx).is_ready() {
+                    this.abandon();
+                    return Poll::Ready(Some(Err(timed_out())));
+                }
+                Poll::Pending
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.stream.as_ref().is_none_or(Incoming::is_end_stream)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.stream
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Incoming::size_hint)
+    }
+}
+
+/// The watch a connection [`Server::run`](crate::Server::run) serves keeps
+/// on its request bodies (HRD-001): the timer that abandons the connection
+/// when a body has not arrived whole by its total deadline, whether or not
+/// anything reads it.
+///
+/// The deadlines of a [`TimedBody`] act only while something polls it. A
+/// handler that keeps the request and never reads the body, or reads it
+/// only after other work, polls neither, and hyper reads the connection
+/// only for a body that is polled. So each request head arms a timer for
+/// that request's whole-body instant, and a body that arrives whole stands
+/// it down. A timer that fires marks the connection abandoned and wakes
+/// it; the connection's IO then fails its reads and flushes, which ends
+/// hyper's connection and closes the socket.
+#[derive(Default)]
+pub(crate) struct ConnectionWatch {
+    /// Set when a body missed its total deadline; never cleared.
+    abandoned: AtomicBool,
+    /// The task driving the connection, woken when it is abandoned.
+    waker: AtomicWaker,
+    /// The timer of the request whose body the connection is reading.
+    timer: std::sync::Mutex<Option<AbortHandle>>,
+}
+
+impl ConnectionWatch {
+    /// A request head arrived. The previous request's timer stands down,
+    /// since hyper reads a head only once the body before it is read or
+    /// abandoned, and unless the new body is empty a timer starts that
+    /// abandons the connection at `deadline`'s whole-body instant. The
+    /// returned [`BodyArrival`] stands that timer down once the body has
+    /// arrived.
+    pub(crate) fn arm(
+        self: &Arc<Self>,
+        deadline: BodyDeadline,
+        empty: bool,
+    ) -> Option<BodyArrival> {
+        let mut timer = crate::lock::recover(&self.timer);
+        if let Some(previous) = timer.take() {
+            previous.abort();
+        }
+        if empty {
+            return None;
+        }
+        // Weak, so a timer never keeps a closed connection's watch alive.
+        let watch = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep_until(deadline.whole).await;
+            if let Some(watch) = watch.upgrade() {
+                watch.abandon();
+            }
+        });
+        *timer = Some(task.abort_handle());
+        Some(BodyArrival(Arc::new(task.abort_handle())))
+    }
+
+    /// Mark the connection abandoned and wake the task that drives it, for
+    /// its IO to fail.
+    fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+        self.waker.wake();
+    }
+
+    /// Whether a body on this connection missed its total deadline.
+    pub(crate) fn is_abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
+    }
+
+    /// Remember the task polling the connection's IO, to wake when the
+    /// connection is abandoned.
+    pub(crate) fn register(&self, waker: &Waker) {
+        self.waker.register(waker);
+    }
+}
+
+impl Drop for ConnectionWatch {
+    /// A closed connection's timer stands down rather than sleep out the
+    /// total deadline, an hour by default.
+    fn drop(&mut self) {
+        let timer = match self.timer.get_mut() {
+            Ok(timer) => timer.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(timer) = timer {
+            timer.abort();
+        }
+    }
+}
+
+/// What a request's [`TimedBody`] tells its connection's
+/// [`ConnectionWatch`]: that the body arrived whole, so the timer that
+/// would abandon the connection stands down. `Server::run` puts it in the
+/// request's extensions for [`crate::http::Request::new`] to hand to the
+/// body.
+#[derive(Clone)]
+pub(crate) struct BodyArrival(Arc<AbortHandle>);
+
+impl BodyArrival {
+    /// Stand the request's timer down.
+    fn stand_down(self) {
+        self.0.abort();
     }
 }
 
@@ -148,7 +407,14 @@ pub(crate) fn timed_out() -> FrameworkError {
     FrameworkError::domain("the request body did not arrive in time", 408)
 }
 
-/// Collect the full body from an [`Incoming`] stream into [`Bytes`],
+/// Whether `error` is the one a [`TimedBody`] fails with when a frame
+/// misses its deadline, for a reader that passes the body's errors through
+/// a layer that hides them, as multer does.
+pub(crate) fn is_timed_out(error: &FrameworkError) -> bool {
+    error.status_code() == 408
+}
+
+/// Collect the full body from a request body stream into [`Bytes`],
 /// enforcing a cap on total size.
 ///
 /// Enforcement is two-layered:
@@ -168,27 +434,25 @@ pub(crate) fn timed_out() -> FrameworkError {
 /// `Err(FrameworkError::Domain { status_code: 413, .. })` so the framework's
 /// standard error → response mapping renders the right status.
 ///
-/// The read waits under the configured body deadlines, started when this
-/// is called; a body that misses one returns
-/// `Err(FrameworkError::Domain { status_code: 408, .. })`. A
-/// [`Request`](crate::http::Request) read through its own methods counts
-/// the whole-body deadline from when the server read the request head.
+/// The read waits under the body deadlines; a body that misses one returns
+/// `Err(FrameworkError::Domain { status_code: 408, .. })`. A [`TimedBody`],
+/// the body `Request::into_parts` hands over, keeps the deadlines the
+/// server started as it read the request head. A hyper `Incoming` starts
+/// the configured ones when this is called.
 pub async fn collect_body_with_cap(
-    body: Incoming,
+    body: impl Into<TimedBody>,
     content_length: Option<u64>,
     max_bytes: usize,
 ) -> Result<Bytes, FrameworkError> {
-    collect_body_until(body, content_length, max_bytes, BodyDeadline::configured()).await
+    collect_body_until(body.into(), content_length, max_bytes).await
 }
 
-/// [`collect_body_with_cap`] under the deadlines `deadline` sets: the form
-/// a request's own reads use, so the whole-body deadline counts from when
-/// the server read the request head.
+/// [`collect_body_with_cap`] for the body a request holds, whose deadlines
+/// count from when the server read the request head.
 pub(crate) async fn collect_body_until(
-    body: Incoming,
+    body: TimedBody,
     content_length: Option<u64>,
     max_bytes: usize,
-    deadline: BodyDeadline,
 ) -> Result<Bytes, FrameworkError> {
     // Pre-reject when Content-Length is declared and exceeds the cap. This
     // avoids buffering even a single frame for an attacker's giant POST.
@@ -197,26 +461,25 @@ pub(crate) async fn collect_body_until(
     {
         return Err(over_limit(max_bytes));
     }
-    collect_after(Bytes::new(), body, max_bytes, deadline).await
+    collect_after(Bytes::new(), body, max_bytes).await
 }
 
 /// Collect `rest`, the stream after the bytes `read` a middleware already
 /// read, onto them, the whole capped at `max_bytes` as
-/// [`collect_body_with_cap`] caps it and each frame waited for under
-/// `deadline`. For a body a middleware stopped reading at its own limit
-/// ([`BodyState::Partial`](crate::http::BodyState::Partial)), and the read
-/// behind every other collection of a body.
+/// [`collect_body_with_cap`] caps it, each frame waited for under the
+/// body's deadlines. For a body a middleware stopped reading at its own
+/// limit ([`BodyState::Partial`](crate::http::BodyState::Partial)), and the
+/// read behind every other collection of a body.
 pub(crate) async fn collect_after(
     read: Bytes,
-    rest: Incoming,
+    rest: TimedBody,
     max_bytes: usize,
-    deadline: BodyDeadline,
 ) -> Result<Bytes, FrameworkError> {
     if read.len() > max_bytes {
         return Err(over_limit(max_bytes));
     }
-    // `Incoming: Unpin`, so `body.frame()` is callable on `&mut body` without
-    // pinning.
+    // `TimedBody: Unpin`, so `body.frame()` is callable on `&mut body`
+    // without pinning.
     let mut body = rest;
     // Each frame is copied as it arrives and dropped, so what the body
     // holds tracks its bytes, whatever number of frames the client chose to
@@ -226,8 +489,10 @@ pub(crate) async fn collect_after(
     // left over is released once, so the body is held at its length for as
     // long as the handler keeps it.
     let mut buf: Vec<u8> = read.to_vec();
-    while let Some(frame) = deadline.frame(&mut body).await? {
-        let frame = frame.map_err(read_failure)?;
+    while let Some(frame) = body.frame().await {
+        // A late frame fails with the `408`, a failed stream with the
+        // error `read_failure` words.
+        let frame = frame?;
         // Frames may carry data OR trailers; we only count + buffer data.
         // `into_data` returns `Ok(Bytes)` for data frames and `Err(Frame)`
         // for trailer frames (which we ignore).
@@ -271,9 +536,10 @@ pub(crate) fn parse_content_length(headers: &hyper::http::HeaderMap) -> Option<u
         .and_then(|s| s.parse::<u64>().ok())
 }
 
-/// Collect the full body from an [`Incoming`] stream, capped at the
+/// Collect the full body from a request body stream, capped at the
 /// process-global request-body limit (see
-/// [`global_max_request_body_bytes`]). For callers that don't have the
+/// [`global_max_request_body_bytes`]), under the body deadlines as
+/// [`collect_body_with_cap`] reads. For callers that don't have the
 /// `Content-Length` header handy, no pre-check is performed; the
 /// progressive cap still enforces during read.
 ///
@@ -281,7 +547,7 @@ pub(crate) fn parse_content_length(headers: &hyper::http::HeaderMap) -> Option<u
 /// `Request::body_bytes`) should prefer [`collect_body_with_cap`] directly
 /// and pass the parsed length so oversized requests are rejected before
 /// any read.
-pub async fn collect_body(body: Incoming) -> Result<Bytes, FrameworkError> {
+pub async fn collect_body(body: impl Into<TimedBody>) -> Result<Bytes, FrameworkError> {
     collect_body_with_cap(body, None, global_max_request_body_bytes()).await
 }
 
@@ -434,5 +700,71 @@ mod tests {
     #[test]
     fn hardening_a_late_body_answers_408() {
         assert_eq!(timed_out().status_code(), 408);
+        assert!(is_timed_out(&timed_out()));
+        assert!(!is_timed_out(&FrameworkError::internal(
+            "Failed to read request body: connection reset"
+        )));
+    }
+
+    /// A body that has not arrived by its whole-body instant abandons the
+    /// connection, whether or not anything reads it.
+    #[tokio::test(start_paused = true)]
+    async fn hardening_an_armed_watch_abandons_the_connection_at_the_total_deadline() {
+        let watch = Arc::new(ConnectionWatch::default());
+        let deadline = BodyDeadline::start(Duration::from_secs(30), Duration::from_secs(60));
+        let _arrival = watch.arm(deadline, false).expect("a body to watch");
+
+        tokio::time::sleep(Duration::from_secs(59)).await;
+        assert!(!watch.is_abandoned(), "not before the total deadline");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(watch.is_abandoned(), "at the total deadline");
+    }
+
+    /// A body that arrives whole stands its connection's watch down.
+    #[tokio::test(start_paused = true)]
+    async fn hardening_a_body_that_arrives_stands_the_watch_down() {
+        let watch = Arc::new(ConnectionWatch::default());
+        let deadline = BodyDeadline::start(Duration::from_secs(30), Duration::from_secs(60));
+        let arrival = watch.arm(deadline, false).expect("a body to watch");
+
+        arrival.stand_down();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(!watch.is_abandoned());
+    }
+
+    /// The next request's head stands the previous request's watch down:
+    /// hyper reads a head only once the body before it is done with, so
+    /// a body a handler dropped unread, which hyper drained, does not
+    /// close the keep-alive connection under the next request. A request
+    /// with no body, as a `GET` has, arms nothing.
+    #[tokio::test(start_paused = true)]
+    async fn hardening_the_next_request_stands_the_previous_watch_down() {
+        let watch = Arc::new(ConnectionWatch::default());
+        let first = BodyDeadline::start(Duration::from_secs(30), Duration::from_secs(60));
+        let _unread = watch.arm(first, false).expect("a body to watch");
+
+        let next = BodyDeadline::start(Duration::from_secs(30), Duration::from_secs(60));
+        assert!(
+            watch.arm(next, true).is_none(),
+            "an empty body arms nothing"
+        );
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(!watch.is_abandoned());
+    }
+
+    /// A closed connection's timer does not outlive it, and a timer that
+    /// fires after the watch is gone does nothing.
+    #[tokio::test(start_paused = true)]
+    async fn hardening_a_closed_connection_takes_its_timer_with_it() {
+        let watch = Arc::new(ConnectionWatch::default());
+        let deadline = BodyDeadline::start(Duration::from_secs(30), Duration::from_secs(60));
+        let arrival = watch.arm(deadline, false).expect("a body to watch");
+
+        drop(watch);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(
+            arrival.0.is_finished(),
+            "dropping the connection's watch aborts its timer"
+        );
     }
 }

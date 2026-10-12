@@ -113,11 +113,13 @@ pub struct ServerConfig {
     ///
     /// Defaults to [`DEFAULT_BODY_READ_TIMEOUT_SECS`] (30s). Override via
     /// `SERVER_BODY_READ_TIMEOUT` (seconds) in the environment. Every read
-    /// of a request body the framework performs - `body_bytes`, `json`,
-    /// `form`, `input`, the form request extractors, the multipart parsers
-    /// and the middleware that read a body first - waits at most this long
-    /// for each piece. A body that misses it is abandoned: the request
-    /// answers `408 Request Timeout` and the connection closes (HRD-001).
+    /// of a request body - `body_bytes`, `json`, `form`, `input`, the form
+    /// request extractors, the multipart parsers, the middleware that read
+    /// a body first, and a handler's own read of the
+    /// [`TimedBody`](crate::http::TimedBody) `Request::into_parts` hands
+    /// over - waits at most this long for each piece. A body that misses
+    /// it is abandoned: the read fails with `408 Request Timeout` and the
+    /// connection closes (HRD-001).
     pub body_read_timeout: std::time::Duration,
     /// Deadline for a whole request body to arrive, counted from the
     /// moment the server read the request head.
@@ -126,7 +128,9 @@ pub struct ServerConfig {
     /// `SERVER_BODY_TOTAL_TIMEOUT` (seconds) in the environment. Bounds the
     /// body that keeps arriving inside [`Self::body_read_timeout`] a byte
     /// at a time. A body that misses it is abandoned as one that misses
-    /// the per-frame deadline is.
+    /// the per-frame deadline is. The server also holds it for a body
+    /// nothing reads: a connection whose request body has not arrived
+    /// whole by this deadline is closed, whether or not a handler reads it.
     pub body_total_timeout: std::time::Duration,
     /// Optional shared secret required to reach the *readiness* half of
     /// the built-in health endpoint.
