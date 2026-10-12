@@ -226,6 +226,79 @@ mod backend {
         });
     }
 
+    /// HRD-001: every bootstrap `suprnova new` writes installs
+    /// `TimeoutMiddleware::default()`, so a slow handler, or a body read
+    /// inside the middleware chain, cannot hold a connection open past its
+    /// deadline. The full-stack bootstraps, the Inertia kits' and the Live
+    /// kit's, install it after the session middleware and the error page,
+    /// so its `503` renders as the error page in the visitor's session and
+    /// locale, and before CSRF, so it bounds the CSRF body read. The API
+    /// bootstrap, which has no session and no error page, installs it first.
+    #[test]
+    fn hardening_every_bootstrap_installs_the_timeout_middleware() {
+        const TIMEOUT: &str = "global_middleware!(suprnova::TimeoutMiddleware::default());";
+        // The offset of `needle` in `source` once both lose their
+        // whitespace, as `contains` compares them.
+        let position = |source: &str, needle: &str, kit: &str| {
+            let squashed = source.split_whitespace().collect::<String>();
+            let needle = needle.split_whitespace().collect::<String>();
+            squashed
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{kit}: no `{needle}` in src/bootstrap.rs:\n{source}"))
+        };
+
+        for (kit, error_page) in [
+            ("svelte", "Inertia::install("),
+            ("live", "global_middleware!(ErrorPage);"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let bootstrap = scaffold_bootstrap(dir.path(), &["--frontend", kit]);
+            let stack = function(&bootstrap, "register_http_stack");
+            let session = position(stack, "global_middleware!(SessionMiddleware::new(", kit);
+            let error_page = position(stack, error_page, kit);
+            let timeout = position(stack, TIMEOUT, kit);
+            let csrf = position(stack, "global_middleware!(CsrfMiddleware::new()", kit);
+            assert!(
+                session < error_page && error_page < timeout && timeout < csrf,
+                "{kit}: the timeout sits after the session and the error page and before CSRF; \
+                 got:\n{stack}"
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bootstrap = scaffold_bootstrap(dir.path(), &["--api"]);
+        let timeout = position(&bootstrap, TIMEOUT, "api");
+        let bearer = position(
+            &bootstrap,
+            "global_middleware!(BearerTokenMiddleware);",
+            "api",
+        );
+        assert!(
+            timeout < bearer,
+            "api: the timeout is the first global middleware; got:\n{bootstrap}"
+        );
+    }
+
+    /// The `src/bootstrap.rs` of a project `suprnova new` writes into `dir`
+    /// with `flags`.
+    fn scaffold_bootstrap(dir: &Path, flags: &[&str]) -> String {
+        let output = Command::new(BIN)
+            .args(["new", "timeout_app", "--no-interaction", "--no-git"])
+            .args(flags)
+            .current_dir(dir)
+            .output()
+            .expect("spawn suprnova");
+        assert!(
+            output.status.success(),
+            "`suprnova new timeout_app {}` failed:\n{}{}",
+            flags.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(dir.join("timeout_app/src/bootstrap.rs"))
+            .expect("the scaffold writes src/bootstrap.rs")
+    }
+
     #[test]
     fn kit_notes_migration_leaves_an_existing_table_as_it_is() {
         each_kit(|app| {

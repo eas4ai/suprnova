@@ -113,9 +113,10 @@ suprnova new my-api --api
 The API starter is significantly smaller: no `frontend/` directory, no
 Inertia, no auth views, and a single-crate `src/main.rs` layout. It initializes
 Magnetar against the shared SeaORM connection, creates the canonical
-`app_users` model, installs `BearerTokenMiddleware`, and uses
-`Auth::password()` for registration and login. `PASSKEY_RP_ID` and
-`PASSKEY_RP_ORIGIN` are read by the generated bootstrap with local defaults.
+`app_users` model, installs `TimeoutMiddleware` and
+`BearerTokenMiddleware`, and uses `Auth::password()` for registration and
+login. `PASSKEY_RP_ID` and `PASSKEY_RP_ORIGIN` are read by the generated
+bootstrap with local defaults.
 The starter also includes a sample users controller and `UserResource` JSON
 serializer and binds to port 8765 in `.env`.
 
@@ -147,7 +148,8 @@ the short version is:
 - `src/` - controllers, actions, commands, config, middleware,
   models, migrations, plus `bootstrap.rs` and `routes.rs`. The
   generated `bootstrap.rs` wires the global middleware chain -
-  logging, session, locale, CSRF, include parsing - and calls
+  logging, session, locale, the request timeout, CSRF, include
+  parsing - and calls
   [`Inertia::install`](frontend-inertia-responses.md), which adds the
   Inertia protocol middlewares (asset-version `409`, `302 → 303` on
   `PUT`, `PATCH` and `DELETE` redirects). The asset version it advertises defaults to a

@@ -2543,6 +2543,51 @@ first, because it is then the only barrier again:
 IMAGE_MAGICK_AUTODETECT=true
 ```
 
+### A request body that stops arriving is abandoned.
+
+**Before:** The server bounded only the request head
+(`SERVER_HEADER_READ_TIMEOUT`). A read of the request body waited for each
+piece with no deadline, so a client that sent complete headers and then
+sent the body a byte at a time, or stopped sending it, held the connection
+for as long as it liked.
+
+**Now:** Every read of a request body the framework performs waits at most
+`SERVER_BODY_READ_TIMEOUT` (default 30 seconds) for the next piece, and at
+most `SERVER_BODY_TOTAL_TIMEOUT` (default 3600 seconds) for the whole body,
+counted from when the server read the request head. A body that misses
+either deadline is abandoned: the read fails with `408 Request Timeout`,
+the response carries `Connection: close`, and the server closes the
+connection. `ServerConfig` has the fields `body_read_timeout` and
+`body_total_timeout`.
+
+**Do:** An application that streams uploads taking longer than an hour
+raises `SERVER_BODY_TOTAL_TIMEOUT`, and one whose clients pause for more
+than 30 seconds in the middle of a body raises `SERVER_BODY_READ_TIMEOUT`.
+Nothing else changes. A struct literal that builds a `ServerConfig` names
+the two fields; `ServerConfig::builder()` fills them. For details, see
+[Body read deadlines](requests.md#body-read-deadlines).
+
+### New projects install the timeout middleware.
+
+**Before:** No bootstrap `suprnova new` wrote installed `TimeoutMiddleware`,
+so in a new project a slow handler or a hung query held its connection
+until the client gave up.
+
+**Now:** Every bootstrap installs `TimeoutMiddleware::default()`, a
+30-second ceiling on the time to a response that answers `503`.
+
+**Do:** A project created with 3.2.1 keeps its bootstrap. To get the same
+ceiling, add the line to `register_http_stack` in `src/bootstrap.rs`, after
+`Inertia::install` and before `CsrfMiddleware`:
+
+```rust
+global_middleware!(suprnova::TimeoutMiddleware::default());
+```
+
+An API project adds it to `register`, before `BearerTokenMiddleware`. A
+route that takes uploads longer than 30 seconds needs a longer value; see
+[Request Timeouts](timeout.md#global-is-a-ceiling-per-route-can-only-tighten).
+
 ## Fixes with no upgrade step
 
 These `### Fixed` entries change nothing an application upgrading from 3.2.1

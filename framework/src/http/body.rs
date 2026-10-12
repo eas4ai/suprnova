@@ -7,13 +7,21 @@
 //! is layered in three places - see [`DEFAULT_MAX_REQUEST_BODY_BYTES`],
 //! [`set_global_max_request_body_bytes`], and
 //! [`crate::http::FormRequest::max_body_bytes`].
+//!
+//! Body collection is also bounded in time: every read waits under the
+//! request's body deadlines, `SERVER_BODY_READ_TIMEOUT` for each frame and
+//! `SERVER_BODY_TOTAL_TIMEOUT` for the whole body (see
+//! [`crate::config::ServerConfig::body_read_timeout`]).
 
+use crate::config::providers::{DEFAULT_BODY_READ_TIMEOUT_SECS, DEFAULT_BODY_TOTAL_TIMEOUT_SECS};
 use crate::error::FrameworkError;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use serde::de::DeserializeOwned;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Default cap on generic (JSON / form-urlencoded / raw) request body size,
 /// in bytes.
@@ -61,6 +69,85 @@ pub fn global_max_request_body_bytes() -> usize {
     }
 }
 
+/// How long a request body may take to arrive (HRD-001): the longest
+/// wait for its next frame, and the instant by which all of it must have
+/// arrived.
+///
+/// The header-read deadline ends once the request head is complete, and
+/// hyper bounds nothing after it, so without this a client could send
+/// complete headers and then hold the connection by sending the body a
+/// byte at a time, or not at all. `Server::run` starts one for each
+/// request as the head arrives and hands it to the request, and every read
+/// of the body the framework performs waits under it: [`collect_after`],
+/// the request's partial read, and the multipart parsers. A read that
+/// misses it fails with [`timed_out`] and drops the stream; hyper then
+/// stops reading the connection and closes it after the response.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BodyDeadline {
+    /// The longest wait for the next frame.
+    frame: Duration,
+    /// When the whole body must have arrived.
+    whole: Instant,
+}
+
+impl BodyDeadline {
+    /// Deadlines that start now: at most `frame` between frames, and all of
+    /// the body within `total`.
+    pub(crate) fn start(frame: Duration, total: Duration) -> Self {
+        Self {
+            frame,
+            whole: after(Instant::now(), total),
+        }
+    }
+
+    /// Deadlines that start now, from the registered
+    /// [`ServerConfig`](crate::config::ServerConfig), or the defaults when
+    /// none is registered. For a request no `Server::run` served: an
+    /// embedder's own hyper loop, or a request a test built.
+    pub(crate) fn configured() -> Self {
+        match crate::config::Config::get::<crate::config::ServerConfig>() {
+            Some(config) => Self::start(config.body_read_timeout, config.body_total_timeout),
+            None => Self::start(
+                Duration::from_secs(DEFAULT_BODY_READ_TIMEOUT_SECS),
+                Duration::from_secs(DEFAULT_BODY_TOTAL_TIMEOUT_SECS),
+            ),
+        }
+    }
+
+    /// The instant the next frame must arrive by, if it is waited for from
+    /// now: the per-frame deadline, or the whole-body one if that is sooner.
+    pub(crate) fn next_frame(&self) -> Instant {
+        after(Instant::now(), self.frame).min(self.whole)
+    }
+
+    /// The next frame of `body`, or [`timed_out`] when it does not arrive by
+    /// [`Self::next_frame`].
+    pub(crate) async fn frame(
+        &self,
+        body: &mut Incoming,
+    ) -> Result<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>, FrameworkError> {
+        tokio::time::timeout_at(self.next_frame(), body.frame())
+            .await
+            .map_err(|_| timed_out())
+    }
+}
+
+/// `wait` after `now`, or thirty years after it when `now + wait` does not
+/// fit an [`Instant`]: a configured deadline of `u64::MAX` seconds is a
+/// very long deadline, not an overflow.
+fn after(now: Instant, wait: Duration) -> Instant {
+    now.checked_add(wait)
+        .unwrap_or_else(|| now + Duration::from_secs(30 * 365 * 24 * 60 * 60))
+}
+
+/// The error a read of the body answers when the body misses its deadline:
+/// `408 Request Timeout`, the status a server sends when it stops waiting
+/// for a request (RFC 9110 15.5.9). The server marks every `408` response
+/// `Connection: close`.
+pub(crate) fn timed_out() -> FrameworkError {
+    FrameworkError::domain("the request body did not arrive in time", 408)
+}
+
 /// Collect the full body from an [`Incoming`] stream into [`Bytes`],
 /// enforcing a cap on total size.
 ///
@@ -80,10 +167,28 @@ pub fn global_max_request_body_bytes() -> usize {
 /// Overflow always returns
 /// `Err(FrameworkError::Domain { status_code: 413, .. })` so the framework's
 /// standard error → response mapping renders the right status.
+///
+/// The read waits under the configured body deadlines, started when this
+/// is called; a body that misses one returns
+/// `Err(FrameworkError::Domain { status_code: 408, .. })`. A
+/// [`Request`](crate::http::Request) read through its own methods counts
+/// the whole-body deadline from when the server read the request head.
 pub async fn collect_body_with_cap(
     body: Incoming,
     content_length: Option<u64>,
     max_bytes: usize,
+) -> Result<Bytes, FrameworkError> {
+    collect_body_until(body, content_length, max_bytes, BodyDeadline::configured()).await
+}
+
+/// [`collect_body_with_cap`] under the deadlines `deadline` sets: the form
+/// a request's own reads use, so the whole-body deadline counts from when
+/// the server read the request head.
+pub(crate) async fn collect_body_until(
+    body: Incoming,
+    content_length: Option<u64>,
+    max_bytes: usize,
+    deadline: BodyDeadline,
 ) -> Result<Bytes, FrameworkError> {
     // Pre-reject when Content-Length is declared and exceeds the cap. This
     // avoids buffering even a single frame for an attacker's giant POST.
@@ -92,17 +197,20 @@ pub async fn collect_body_with_cap(
     {
         return Err(over_limit(max_bytes));
     }
-    collect_after(Bytes::new(), body, max_bytes).await
+    collect_after(Bytes::new(), body, max_bytes, deadline).await
 }
 
 /// Collect `rest`, the stream after the bytes `read` a middleware already
 /// read, onto them, the whole capped at `max_bytes` as
-/// [`collect_body_with_cap`] caps it. For a body a middleware stopped
-/// reading at its own limit ([`BodyState::Partial`](crate::http::BodyState::Partial)).
+/// [`collect_body_with_cap`] caps it and each frame waited for under
+/// `deadline`. For a body a middleware stopped reading at its own limit
+/// ([`BodyState::Partial`](crate::http::BodyState::Partial)), and the read
+/// behind every other collection of a body.
 pub(crate) async fn collect_after(
     read: Bytes,
     rest: Incoming,
     max_bytes: usize,
+    deadline: BodyDeadline,
 ) -> Result<Bytes, FrameworkError> {
     if read.len() > max_bytes {
         return Err(over_limit(max_bytes));
@@ -118,7 +226,7 @@ pub(crate) async fn collect_after(
     // left over is released once, so the body is held at its length for as
     // long as the handler keeps it.
     let mut buf: Vec<u8> = read.to_vec();
-    while let Some(frame) = body.frame().await {
+    while let Some(frame) = deadline.frame(&mut body).await? {
         let frame = frame.map_err(read_failure)?;
         // Frames may carry data OR trailers; we only count + buffer data.
         // `into_data` returns `Ok(Bytes)` for data frames and `Err(Frame)`
@@ -294,4 +402,37 @@ pub(crate) async fn parse_multipart_with_route_inputs<T: DeserializeOwned>(
         crate::http::input::parse_multipart_with_route_inputs(payload, route_inputs)
     };
     parsed.map_err(|error| error.into_framework_error("Failed to parse multipart body"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HRD-001: the per-frame wait never runs past the whole-body deadline,
+    /// so a body that keeps arriving inside the per-frame deadline still
+    /// ends at the total one.
+    #[tokio::test]
+    async fn hardening_the_next_frame_waits_no_later_than_the_whole_body() {
+        let deadline = BodyDeadline::start(Duration::from_secs(30), Duration::from_millis(50));
+        assert_eq!(deadline.next_frame(), deadline.whole);
+
+        let deadline = BodyDeadline::start(Duration::from_millis(50), Duration::from_secs(30));
+        assert!(deadline.next_frame() < deadline.whole);
+    }
+
+    /// A configured deadline too long to add to the clock is a very long
+    /// deadline, not a panic.
+    #[tokio::test]
+    async fn hardening_a_deadline_past_the_clock_does_not_overflow() {
+        let deadline = BodyDeadline::start(Duration::MAX, Duration::MAX);
+        let now = Instant::now();
+        assert!(deadline.whole > now);
+        assert!(deadline.next_frame() > now);
+    }
+
+    /// The error a late body answers is a `408`.
+    #[test]
+    fn hardening_a_late_body_answers_408() {
+        assert_eq!(timed_out().status_code(), 408);
+    }
 }

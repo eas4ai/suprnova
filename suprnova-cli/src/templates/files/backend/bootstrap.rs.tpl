@@ -102,7 +102,8 @@ pub async fn register() {
 ///
 /// Order matters and mirrors the comments below: session before Inertia
 /// (the version middleware re-flashes the session before it bounces a
-/// stale client), locale and CSRF after the session they both depend on.
+/// stale client), locale and CSRF after the session they both depend on,
+/// and the request timeout between the Inertia layer and CSRF.
 pub fn register_http_stack() {
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
@@ -208,6 +209,18 @@ pub fn register_http_stack() {
             .error_page("Error"),
     )
     .expect("Inertia install failed (production needs a built frontend manifest)");
+
+    // Request timeout - a 30-second ceiling on the time to a response, so a
+    // slow handler or a hung query cannot hold a connection open
+    // indefinitely; past it the request answers `503`. Here, after
+    // `Inertia::install`, so the `503` renders as the error page inside the
+    // visitor's session and locale, as CSRF's `419` does; and ahead of CSRF
+    // and the handlers, so it bounds their work, the CSRF check's read of a
+    // form body included. Streaming responses (SSE) and WebSocket upgrades
+    // are exempt by design - see `suprnova::timeout`. A per-route
+    // `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint; a
+    // route that takes long uploads needs a longer value here.
+    global_middleware!(suprnova::TimeoutMiddleware::default());
 
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE). Live
     // requests verify the browser's `Sec-Fetch-Site` proof on their own, so

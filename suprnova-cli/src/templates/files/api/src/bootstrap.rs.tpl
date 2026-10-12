@@ -5,7 +5,7 @@
 //! Middleware order matters. Requests flow through the stack top-to-bottom;
 //! responses travel back bottom-to-top:
 //!
-//!   BearerTokenMiddleware -> IncludeMiddleware -> handlers
+//!   TimeoutMiddleware -> BearerTokenMiddleware -> IncludeMiddleware -> handlers
 //!
 //! # Switching databases
 //!
@@ -52,6 +52,16 @@ pub async fn register() {
     init_magnetar(magnetar)
         .await
         .expect("Failed to initialize Magnetar");
+
+    // Request timeout - a 30-second ceiling on the time to a response, so a
+    // slow handler or a hung query cannot hold a connection open
+    // indefinitely; past it the request answers `503`. First, so it bounds
+    // the token lookup and every handler, a handler's read of the request
+    // body included. Streaming responses (SSE) and WebSocket upgrades are
+    // exempt by design - see `suprnova::timeout`. A per-route
+    // `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint; a
+    // route that takes long uploads needs a longer value here.
+    global_middleware!(suprnova::TimeoutMiddleware::default());
 
     // Bearer-token authentication -- reads Authorization: Bearer <token> and
     // populates the authenticated user in request context.

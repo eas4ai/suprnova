@@ -438,6 +438,60 @@ HTTP 413 *before* a body byte is read when the declared size exceeds
 the cap; clients that lie about `Content-Length` still trip the
 streaming byte counter during read.
 
+### Body read deadlines
+
+The server bounds how long a request body takes to arrive, as it bounds
+how long the request head takes. Every read of the body the framework
+performs follows two deadlines: `body_bytes`, `json`, `form`, `input`, the
+form request and multipart extractors, the multipart parsers, and the
+middleware that read a body before the handler, such as CSRF.
+
+- The per-frame deadline, `SERVER_BODY_READ_TIMEOUT` (default 30 seconds),
+  is the longest the server waits for the next piece of the body.
+- The total deadline, `SERVER_BODY_TOTAL_TIMEOUT` (default 3600 seconds,
+  one hour), is the longest the whole body may take, counted from when the
+  server read the request head. It is a backstop that ends a body that
+  keeps arriving a byte at a time inside every per-frame wait, and is long
+  enough for a large upload over a slow link.
+
+A body that misses either deadline is abandoned: the read fails with an
+HTTP `408 Request Timeout` error, which the request answers like any other
+error, and the server closes the connection after the response. A `408`
+response always carries `Connection: close`. Zero or a value that doesn't
+parse falls back to the default, so neither deadline can be turned off. A
+handler that takes the raw stream with `Request::into_parts` and reads it
+itself reads it without the deadlines.
+
+A streamed upload stays within the per-frame deadline as long as the
+client keeps sending; a client that sends nothing for 30 seconds is cut
+off. To accept uploads from clients that pause longer, or uploads that
+take more than an hour, raise the deadlines in the environment:
+
+```bash
+SERVER_BODY_READ_TIMEOUT=60
+SERVER_BODY_TOTAL_TIMEOUT=7200
+```
+
+Or set them on the server configuration, which is how a test sets short
+ones:
+
+```rust
+use std::time::Duration;
+use suprnova::{Config, ServerConfig};
+
+Config::register(
+    ServerConfig::builder()
+        .body_read_timeout(Duration::from_secs(60))
+        .body_total_timeout(Duration::from_secs(7200))
+        .build(),
+);
+```
+
+A global [`TimeoutMiddleware`](timeout.md) also bounds a body read inside
+the middleware chain, since the read is part of the handler's work. For a
+route that takes long uploads, raise that timeout as well as the body
+deadlines.
+
 ## Content type detection
 
 `FormRequest::extract` looks only at the `Content-Type` header:
