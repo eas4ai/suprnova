@@ -1,0 +1,22 @@
+[package]
+name = "inertia-lookup-angular"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+suprnova.workspace = true
+
+# The layout from issue #129: an Angular frontend whose pages are
+# lowercase `*.page.ts` files under `resources/angular/pages`.
+[package.metadata.suprnova.inertia]
+pages_dir = "resources/angular/pages"
+page_file = "{dir}/{name|lower}.page.ts"
+
+[[bin]]
+name = "missing-page"
+path = "compile-fail/missing_page.rs"
+
+[[bin]]
+name = "starter-location"
+path = "compile-fail/starter_location.rs"
