@@ -1,0 +1,14 @@
+[package]
+name = "model-settings-unknown-schema-key"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata.suprnova.schema]
+unsigned_id = true
+
+[dependencies]
+suprnova.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+tokio.workspace = true

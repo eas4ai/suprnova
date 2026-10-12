@@ -1,0 +1,10 @@
+{#
+  suprnova.fieldset - a form section with a legend; the caller renders the
+  fields. disabled disables every control inside natively.
+#}
+{% macro fieldset(legend, disabled=false) %}
+<fieldset class="sn-fieldset"{% if disabled %} disabled{% endif %}>
+<legend>{{ legend }}</legend>
+{{ caller() }}
+</fieldset>
+{% endmacro %}

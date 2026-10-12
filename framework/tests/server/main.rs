@@ -2,7 +2,6 @@
 //! one former top-level test file per submodule (folded 2026-09-05).
 
 pub mod body_read_deadline;
-pub mod connection_cap;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 #[path = "../support/env_snapshot.rs"]
