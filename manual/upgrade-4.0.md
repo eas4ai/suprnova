@@ -2429,6 +2429,27 @@ tag when you move to a release:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.0" }
 ```
 
+### Static files and Live UI assets are read through the directory they were checked in.
+
+**Before:** 3.2.1's `StaticFiles` checked a request's canonical path against
+its root and then opened the file by name, and the routes of
+`try_live_ui_assets()` and `try_live_ui_assets_for()` compared canonical
+paths and then read the file's size and bytes by name. A
+directory swapped for a symbolic link between the check and the open made
+either one send a file from outside its root.
+
+**Now:** Both walk the path one directory at a time through held directory
+handles, with `O_NOFOLLOW` on every entry, and take the type, the length
+and the 1 MiB bound from the handle they read. `StaticFiles` still follows
+a link that stays inside its root, and either root may itself be a link,
+since the root is resolved once per request. A link whose relative target
+climbs above the root is refused even when it leads back in, and
+`StaticFiles` answers 404 for a FIFO instead of holding the request open.
+
+**Do:** Nothing to do, unless a symbolic link under your public directory
+reaches its target through `..` above the root: point it at the target by
+a path that stays inside the root.
+
 ## Fixes with no upgrade step
 
 These `### Fixed` entries change nothing an application upgrading from 3.2.1

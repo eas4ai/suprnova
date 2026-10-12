@@ -20,6 +20,9 @@ mod magnetar_auth;
 mod own_process;
 #[path = "../support/own_process_async.rs"]
 mod own_process_async;
+#[cfg(unix)]
+#[path = "../support/tree_racer.rs"]
+mod tree_racer;
 
 pub mod async_routes;
 pub mod async_security;

@@ -1,4 +1,5 @@
-//! Path resolution for local disks that cannot be redirected out of the root.
+//! Storage operations for local disks that cannot be redirected out of the
+//! root.
 //!
 //! [`super::path_guard`] checks a path before an operation runs, but a check
 //! followed by a syscall by pathname is a race. An actor who can rename
@@ -7,63 +8,30 @@
 //! path the window was the whole upload: the path was checked at the first
 //! chunk and published by pathname at close.
 //!
-//! Every operation here resolves its path one component at a time. It holds
-//! each directory open and names the next component relative to that
-//! directory, so the directory the final syscall acts in is the one the walk
-//! reached, whatever happens to the pathnames afterwards. Symlinks are still
-//! followed, but by this walk and never by the kernel: a relative target is
-//! resolved from the directory holding the link, an absolute target is
-//! translated into the root, and a target that leaves the root - through `..`
-//! or an absolute path outside it - is refused. Every directory and every
-//! final entry is opened with `O_NOFOLLOW`, so a symlink swapped in after the
-//! walk looked at a component fails the operation instead of redirecting it.
+//! Every operation here resolves its path through `crate::confined_walk`,
+//! which holds each directory open, follows a symlink only while it stays
+//! inside the root and opens every entry with `O_NOFOLLOW`, and then acts
+//! relative to the directory that walk reached.
 //!
 //! All functions here block; callers run them on the blocking pool.
 
-use std::collections::VecDeque;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStrExt;
 use std::time::{Duration, SystemTime};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 
-/// The most symlinks one resolution follows, the same limit Linux applies.
-const MAX_SYMLINKS: usize = 40;
+pub(crate) use crate::confined_walk::ConfinedRoot;
+use crate::confined_walk::{DIR_MODE, Last, nofollow_error};
 
-/// The mode new files and directories are created with, before the umask.
-/// It is what `std::fs` uses, so a confined disk creates exactly what an
-/// unconfined one did.
+/// The mode new files are created with, before the umask. It is what
+/// `std::fs` uses, so a confined disk creates exactly what an unconfined
+/// one did.
 const FILE_MODE: u32 = 0o666;
-const DIR_MODE: u32 = 0o777;
-
-/// A local disk's root, by its canonical path.
-#[derive(Debug, Clone)]
-pub(crate) struct ConfinedRoot {
-    root: PathBuf,
-}
-
-/// A directory held open, and the name of one entry in it. The name is `.`
-/// when the path named the directory itself.
-pub(crate) struct Entry {
-    pub(crate) dir: OwnedFd,
-    pub(crate) name: OsString,
-}
-
-/// Whether resolution follows a symlink in the final component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Last {
-    /// Follow it, for operations that act on what the path leads to: read,
-    /// stat, append, list.
-    Follow,
-    /// Keep it, for operations that act on the entry itself: publish by
-    /// rename or link, delete, rename, create a directory.
-    Keep,
-}
 
 /// What [`ConfinedRoot::stat`] found.
 pub(crate) struct Node {
@@ -80,183 +48,12 @@ pub(crate) enum NodeKind {
     Other,
 }
 
-/// The error for a path whose resolution leaves the root.
-fn escape(path: &OsStr) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!(
-            "'{}' resolves outside the local disk root",
-            path.to_string_lossy()
-        ),
-    )
-}
-
-/// Map the error of an `O_NOFOLLOW` open. `ELOOP` (and `EMLINK` on the BSDs)
-/// means the entry became a symlink after the walk looked at it - the swap
-/// this module exists to defeat - so it is reported as a refusal.
-fn nofollow_error(e: Errno, path: &str) -> io::Error {
-    if e == Errno::LOOP || e == Errno::MLINK {
-        return io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("'{path}' changed into a symlink while it was in use"),
-        );
-    }
-    e.into()
-}
-
-/// Split a storage path into the components a walk visits. Empty and `.`
-/// components are dropped; `..` is kept for the walk to apply.
-fn components(path: &OsStr) -> VecDeque<OsString> {
-    path.as_bytes()
-        .split(|byte| *byte == b'/')
-        .filter(|part| !part.is_empty() && *part != b".")
-        .map(|part| OsString::from_vec(part.to_vec()))
-        .collect()
-}
-
 /// Convert whatever integer width a platform's `stat` uses.
 fn widen<T: TryInto<i64>>(value: T) -> i64 {
     value.try_into().unwrap_or(0)
 }
 
 impl ConfinedRoot {
-    /// The root at `root`, which must exist. It is canonicalized here, so an
-    /// absolute symlink inside the disk can be recognized as pointing back
-    /// into it.
-    pub(crate) fn new(root: impl AsRef<Path>) -> io::Result<Self> {
-        Ok(Self {
-            root: std::fs::canonicalize(root)?,
-        })
-    }
-
-    /// The canonical root path.
-    pub(crate) fn path(&self) -> &Path {
-        &self.root
-    }
-
-    fn open_root(&self) -> io::Result<OwnedFd> {
-        Ok(rustix::fs::open(
-            &self.root,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?)
-    }
-
-    /// The part of the absolute `target` below the root.
-    ///
-    /// A link can name the root by a path that is not its canonical one, so a
-    /// target outside the canonical prefix is canonicalized once to translate
-    /// it. That probe follows links by pathname, but only to find a name: the
-    /// walk that uses the result is the confined one, and a symlink swapped in
-    /// meanwhile is met there.
-    fn inside(&self, target: &Path) -> io::Result<PathBuf> {
-        if let Ok(rest) = target.strip_prefix(&self.root) {
-            return Ok(rest.to_path_buf());
-        }
-        let canonical = std::fs::canonicalize(target)?;
-        canonical
-            .strip_prefix(&self.root)
-            .map(Path::to_path_buf)
-            .map_err(|_| escape(target.as_os_str()))
-    }
-
-    /// Resolve `path` beneath the root.
-    ///
-    /// Intermediate components must be directories, reached without leaving
-    /// the root. With `create`, missing intermediate directories are created.
-    /// The final component is returned unresolved with [`Last::Keep`], and
-    /// with [`Last::Follow`] is resolved until it is not a symlink; it need
-    /// not exist either way.
-    pub(crate) fn resolve(&self, path: &str, last: Last, create: bool) -> io::Result<Entry> {
-        let root = self.open_root()?;
-        let mut stack: Vec<OwnedFd> = Vec::new();
-        let mut pending = components(OsStr::new(path));
-        let mut followed = 0usize;
-
-        loop {
-            let Some(name) = pending.pop_front() else {
-                // The path named a directory: the root, or one reached by `..`.
-                let dir = match stack.pop() {
-                    Some(dir) => dir,
-                    None => root,
-                };
-                return Ok(Entry {
-                    dir,
-                    name: OsString::from("."),
-                });
-            };
-            if name == ".." {
-                if stack.pop().is_none() {
-                    return Err(escape(OsStr::new(path)));
-                }
-                continue;
-            }
-
-            let is_last = pending.is_empty();
-            let current = stack.last().unwrap_or(&root);
-            if is_last && last == Last::Keep {
-                return Ok(Entry {
-                    dir: current.try_clone()?,
-                    name,
-                });
-            }
-
-            match rustix::fs::readlinkat(current, name.as_os_str(), Vec::new()) {
-                Ok(target) => {
-                    followed += 1;
-                    if followed > MAX_SYMLINKS {
-                        return Err(Errno::LOOP.into());
-                    }
-                    let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
-                    let mut next = if target.is_absolute() {
-                        let inside = self.inside(&target)?;
-                        stack.clear();
-                        components(inside.as_os_str())
-                    } else {
-                        components(target.as_os_str())
-                    };
-                    next.extend(pending.drain(..));
-                    pending = next;
-                    continue;
-                }
-                // Not a symlink: an ordinary entry.
-                Err(Errno::INVAL) => {}
-                Err(Errno::NOENT) if is_last => {
-                    return Ok(Entry {
-                        dir: current.try_clone()?,
-                        name,
-                    });
-                }
-                Err(Errno::NOENT) if create => {
-                    match rustix::fs::mkdirat(
-                        current,
-                        name.as_os_str(),
-                        Mode::from_raw_mode(DIR_MODE as _),
-                    ) {
-                        Ok(()) | Err(Errno::EXIST) => {}
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                Err(e) => return Err(e.into()),
-            }
-
-            if is_last {
-                return Ok(Entry {
-                    dir: current.try_clone()?,
-                    name,
-                });
-            }
-            let next = rustix::fs::openat(
-                current,
-                name.as_os_str(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|e| nofollow_error(e, path))?;
-            stack.push(next);
-        }
-    }
-
     /// Open (creating it if missing) the directory `name` directly inside the
     /// root, without following a symlink there.
     pub(crate) fn root_dir(&self, name: &str) -> io::Result<OwnedFd> {

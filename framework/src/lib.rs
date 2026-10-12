@@ -51,6 +51,10 @@ pub mod cache;
 pub mod clock;
 pub mod concurrency;
 pub mod config;
+// The directory-handle walk that keeps a path inside its root: the local
+// disks, `StaticFiles` and the Live UI asset server resolve paths through it.
+#[cfg(unix)]
+pub(crate) mod confined_walk;
 pub mod console;
 pub mod container;
 pub mod content;
