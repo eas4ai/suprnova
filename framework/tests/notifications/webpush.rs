@@ -12,7 +12,8 @@
 //! 3. A stored route that is no subscription: a non-fatal warn, like a
 //!    subscription that is gone, and nothing of the route in the log.
 //! 4. 5xx from the push service: propagates as a `FrameworkError` whose
-//!    message surfaces the upstream status so operators can triage.
+//!    message surfaces the upstream status so operators can triage, and
+//!    never the body the push service sent.
 
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
@@ -307,6 +308,12 @@ async fn webpush_channel_propagates_push_service_5xx() {
     assert!(
         msg.contains("500"),
         "expected upstream status in error: {msg}"
+    );
+    // The error carries the status alone: the remote body never reaches
+    // the dispatcher's log or a `NotificationFailed` listener.
+    assert!(
+        !msg.contains("internal push error"),
+        "the push service's body must not appear in the error: {msg}"
     );
 }
 

@@ -21,6 +21,6 @@
 //! channel registration and queued delivery.
 
 pub use suprnova_web_push::{
-    ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
-    VapidSigner, WebPushClient, WebPushError,
+    AddressClass, ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims,
+    VapidKey, VapidSigner, WebPushClient, WebPushError,
 };
