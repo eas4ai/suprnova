@@ -707,9 +707,7 @@ failure and makes the revocation durable instead:
   nothing and succeeds, so running the job again is always safe. It revokes
   every session and remember-me token of the user, those opened after the
   reset too, so a retry that succeeds later signs the user out once more;
-  the error answer already told them to sign in again on every device. The
-  job tries 24 times over about half a day, then lands in `failed_jobs`,
-  where `queue:retry` runs it again.
+  the error answer already told them to sign in again on every device.
 - Until the job succeeds, the stale credentials still don't work. Each sign-in
   records the user's authentication epoch, which a password change moves. On
   every request, the framework compares the recorded epoch with the current
