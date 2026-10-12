@@ -2448,7 +2448,11 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.0" }
 endpoint: `https`, a host name in place of an IP address, and a list of
 local and cloud metadata names. It did not check where the name resolved,
 so an endpoint whose name resolved to `127.0.0.1` or `10.0.0.5` was sent
-to, and the transport looked the name up again when it connected.
+to, and the transport looked the name up again when it connected. The
+transport `WebPushClient::new` and `WebPushClient::with_client_builder`
+built sent through a proxy set on the builder or named by `HTTPS_PROXY`,
+and a client passed to `WebPushClient::with_client` sent under `Strict`
+once `allow_unconfined_redirects` was called.
 `WebPushError::PushServiceRejected` carried up to 8 KiB of the push
 service's response body in its `body` field, and `WebPushChannel` put
 that text in its error.
@@ -2460,7 +2464,15 @@ reserved or cloud metadata address. A failed lookup returns
 `WebPushError::Lookup`, which is retryable. The transport that
 `WebPushClient::new` and `WebPushClient::with_client_builder` build
 connects to an address that was checked, without a second lookup, and
-`with_client_builder` replaces the builder's DNS resolver to do it.
+`with_client_builder` replaces the builder's DNS resolver to do it. That
+transport sends through no proxy: a proxy set on the builder is dropped,
+and `HTTPS_PROXY` and the other proxy variables are not read. A strict
+send over a client passed to `with_client`, which resolves the name
+itself, returns `WebPushError::UnpinnedTransport` before anything is sent
+until you call `allow_unpinned_destinations`; the endpoint and the
+addresses its name resolves to are still checked, and the connection
+goes where your client sends it. A name you map with
+`ClientBuilder::resolve` connects to the address you mapped.
 `PushServiceRejected` has no `body` field: the first 200 bytes of the body
 go to the debug log. `WebPushChannel` logs a refused destination as a
 subscription that cannot be used, and the dispatch succeeds; its error for
@@ -2469,12 +2481,19 @@ a rejection names the status alone.
 **Do:** If your push service runs on a private network, give its client
 `with_endpoint_policy(EndpointPolicy::AllowAny)`. Endpoints at public push
 services need nothing. In code that matches on `WebPushError`, drop `body`
-from a `PushServiceRejected` pattern, add arms for `RefusedDestination`
-and `Lookup` to an exhaustive `match`, and remove a subscription that
-returns `RefusedDestination`, as you remove one that returns
-`InvalidSubscription`. If you set a DNS resolver on the builder you pass
-to `with_client_builder`, it is replaced; map a fixed address with
-`ClientBuilder::resolve` instead.
+from a `PushServiceRejected` pattern, add arms for `RefusedDestination`,
+`Lookup` and `UnpinnedTransport` to an exhaustive `match`, and remove a
+subscription that returns `RefusedDestination`, as you remove one that
+returns `InvalidSubscription`. If you set a DNS resolver on the builder
+you pass to `with_client_builder`, it is replaced; map a fixed address
+with `ClientBuilder::resolve` instead. If you pass a client to
+`with_client` under `Strict`, move to `with_client_builder`, or add
+`.allow_unpinned_destinations()` to keep that client. If your push
+service is reachable only through a proxy, a proxy on the builder or in
+`HTTPS_PROXY` no longer reaches it: build a client with the proxy, pass
+it to `with_client`, and add `.allow_unconfined_redirects()` and
+`.allow_unpinned_destinations()`, or use `EndpointPolicy::AllowAny` when
+your application cannot resolve the push service's name.
 ### The same-origin WebSocket policy compares the scheme.
 
 **Before:** `OriginPolicy::SameOrigin` compared the `Origin` host and port
