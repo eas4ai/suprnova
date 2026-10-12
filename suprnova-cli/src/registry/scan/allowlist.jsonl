@@ -5851,6 +5851,7 @@
 {"path":"suprnova::WebPushChannel::new","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::notifications::channels::webpush::WebPushChannel::new"],"implements":[],"returns":"suprnova::WebPushChannel"}
 {"path":"suprnova::WebPushClient","kind":"struct","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient"],"implements":[]}
 {"path":"suprnova::WebPushClient::allow_unconfined_redirects","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient::allow_unconfined_redirects"],"implements":[],"returns":"suprnova::WebPushClient"}
+{"path":"suprnova::WebPushClient::allow_unpinned_destinations","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient::allow_unpinned_destinations"],"implements":[],"returns":"suprnova::WebPushClient"}
 {"path":"suprnova::WebPushClient::new","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient::new"],"implements":[],"returns":"core::result::Result<suprnova::WebPushClient,suprnova::WebPushError>"}
 {"path":"suprnova::WebPushClient::send","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient::send"],"implements":[],"returns":"core::result::Result<suprnova::PushResponse,suprnova::WebPushError>"}
 {"path":"suprnova::WebPushClient::with_client","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushClient::with_client"],"implements":[],"returns":"core::result::Result<suprnova::WebPushClient,suprnova::WebPushError>"}
@@ -5868,6 +5869,7 @@
 {"path":"suprnova::WebPushError::RefusedDestination","kind":"variant","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::RefusedDestination"],"implements":[]}
 {"path":"suprnova::WebPushError::SubscriptionGone","kind":"variant","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::SubscriptionGone"],"implements":[]}
 {"path":"suprnova::WebPushError::UnconfinedRedirects","kind":"variant","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::UnconfinedRedirects"],"implements":[]}
+{"path":"suprnova::WebPushError::UnpinnedTransport","kind":"variant","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::UnpinnedTransport"],"implements":[]}
 {"path":"suprnova::WebPushError::Vapid","kind":"variant","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::Vapid"],"implements":[]}
 {"path":"suprnova::WebPushError::is_retryable","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::is_retryable"],"implements":[],"returns":"bool"}
 {"path":"suprnova::WebPushError::retry_after","kind":"fn","capability":"network","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::web_push::WebPushError::retry_after"],"implements":[],"returns":"core::option::Option<core::time::Duration>"}
@@ -7000,6 +7002,7 @@
 {"path":"suprnova::http::ProxyNetwork::new","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<suprnova::http::ProxyNetwork,suprnova::FrameworkError>"}
 {"path":"suprnova::http::ProxyNetwork::prefix","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"u8"}
 {"path":"suprnova::http::RequestParts","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
+{"path":"suprnova::http::TimedBody","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::http::body::TimedBody"],"implements":[]}
 {"path":"suprnova::http::TrustedProxiesConfig","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::http::TrustedProxiesConfig::and_networks","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::http::TrustedProxiesConfig"}
 {"path":"suprnova::http::TrustedProxiesConfig::empty","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"suprnova::http::TrustedProxiesConfig"}
