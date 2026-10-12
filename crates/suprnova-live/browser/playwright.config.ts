@@ -38,16 +38,19 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 60_000,
     },
+    // The two hosts below boot the framework, which reads an unset APP_ENV as
+    // production and refuses to start without an APP_KEY; a test host runs
+    // in development, where Server::run installs a transient key.
     {
       command:
-        "SUPRNOVA_LIVE_BOOTSTRAP_PORT=4177 cargo run --manifest-path ../Cargo.toml -p suprnova --example live_bootstrap_host",
+        "APP_ENV=development SUPRNOVA_LIVE_BOOTSTRAP_PORT=4177 cargo run --manifest-path ../Cargo.toml -p suprnova --example live_bootstrap_host",
       url: "http://127.0.0.1:4177/health",
       reuseExistingServer: false,
       timeout: 600_000,
     },
     {
       command:
-        "SUPRNOVA_LIVE_DOGFOOD_PORT=4178 SESSION_SECURE=false cargo run --manifest-path ../Cargo.toml -p app --example live_dogfood_host",
+        "APP_ENV=development SUPRNOVA_LIVE_DOGFOOD_PORT=4178 SESSION_SECURE=false cargo run --manifest-path ../Cargo.toml -p app --example live_dogfood_host",
       url: "http://127.0.0.1:4178/health",
       reuseExistingServer: false,
       timeout: 600_000,

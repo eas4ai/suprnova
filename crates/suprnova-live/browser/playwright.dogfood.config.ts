@@ -14,8 +14,10 @@ export default defineConfig({
   },
   webServer: [
     {
+      // The host boots the framework, which reads an unset APP_ENV as production
+      // and refuses to start without an APP_KEY; a test host runs in development.
       command:
-        "SUPRNOVA_LIVE_DOGFOOD_PORT=4178 SESSION_SECURE=false cargo run --manifest-path ../Cargo.toml -p app --example live_dogfood_host",
+        "APP_ENV=development SUPRNOVA_LIVE_DOGFOOD_PORT=4178 SESSION_SECURE=false cargo run --manifest-path ../Cargo.toml -p app --example live_dogfood_host",
       url: "http://127.0.0.1:4178/health",
       reuseExistingServer: false,
       timeout: 600_000,
