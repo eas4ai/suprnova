@@ -2720,24 +2720,35 @@ matches, and reads its own configuration directory and the user's after
 that path, so before the first run of each process the driver reads the
 policy in effect with `magick -list policy`, then runs one MVG probe that
 ImageMagick's policy must refuse, since the listing leaves out an entry
-marked `stealth="true"`. When a host entry grants one of those denials
-back, every run is refused with a 5xx `FrameworkError` that names the
-coder and the file that granted it. A listing that is missing a denial,
-cannot be read, or cannot be had refuses the run too. So do a probe the
-policy does not refuse, a policy directory the driver cannot make, and a
-policy it cannot write and check.
+marked `stealth="true"`. The check fails when a host entry grants one of
+those denials back, when the listing is missing a denial or cannot be
+read, and when the probe is not refused. What a failed check does depends
+on `IMAGE_MAGICK_AUTODETECT`. With it on, ImageMagick chooses the coder
+from an upload's bytes, so the policy in effect is the only barrier: every
+run is refused with a 5xx `FrameworkError` that names the coder and the
+file that granted it, until the grant is removed and the process restarts.
+A listing or probe that cannot be had refuses the run too. With it off,
+the default, the driver names the coder for every input, so the grant is
+not reachable through the driver: the driver logs the failed check once
+per process at `warn`, naming the coder and the file, and runs proceed. In
+both modes, a policy directory the driver cannot make, or a policy file it
+cannot write and check, refuses the run.
 
-**Do:** Nothing, in most applications. Run `magick -list policy` on the
-host: if your ImageMagick policy grants one of those coders, a delegate,
-or an `@` read, for example `rights="read|write" pattern="*"`, remove the
-grant, or the driver refuses every run. A grant of MVG marked
+**Do:** If you set `IMAGE_MAGICK_AUTODETECT`, check the host's ImageMagick
+policy before you upgrade. Look in each `policy.xml` for `rights="read"`
+or `rights="write"` (or both, `read|write`) on PDF, PS, EPS, MVG, MSL, a
+delegate, or a pattern that matches them, such as `pattern="*"`;
+`magick -list policy` shows these rights as `Read` and `Write`. Remove
+any such grant, or the driver refuses every run. A grant of MVG marked
 `stealth="true"` is missing from that listing, but the driver's probe
-finds it and refuses every run as well, so remove it too. If your
-application reads PostScript, EPS, PDF, XPS, or another of those formats
-through the `magick` driver under `IMAGE_MAGICK_AUTODETECT`, those reads
-now fail with a security policy error, and nothing reopens them: convert
-such files before they reach the driver. The process must be able to make
-a directory in its temporary directory: in a container with a read-only
+finds it and refuses every run as well, so remove it too. Without
+`IMAGE_MAGICK_AUTODETECT`, a grant needs no change: it shows as one
+`warn` line per process, and runs proceed. If your application reads
+PostScript, EPS, PDF, XPS, or another of those formats through the
+`magick` driver under `IMAGE_MAGICK_AUTODETECT`, those reads now fail
+with a security policy error, and nothing reopens them: convert such
+files before they reach the driver. The process must be able to make a
+directory in its temporary directory: in a container with a read-only
 root file system, mount a writable `/tmp` or set `TMPDIR` to a writable
 path. For details, see [Policy](images.md#policy).
 
