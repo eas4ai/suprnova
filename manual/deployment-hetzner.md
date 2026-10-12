@@ -140,6 +140,11 @@ APP_KEY=paste-the-generated-key-here
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8765
 
+# Caddy terminates TLS in front of the application and sends
+# X-Forwarded-Proto. Trust it, so the application knows a request arrived
+# over https: the same-origin check of a WebSocket route needs that.
+APP_TRUSTED_PROXIES=127.0.0.1
+
 # Database - bind to localhost when DB is on the same box
 DATABASE_URL=postgres://myapp:your_secure_password@localhost:5432/myapp_production
 DB_MAX_CONNECTIONS=10
@@ -324,6 +329,11 @@ myapp.com {
     }
 }
 ```
+
+Caddy sends `X-Forwarded-Proto` and `X-Forwarded-For` on every proxied
+request. `APP_TRUSTED_PROXIES=127.0.0.1` in the env file above lets the
+application believe them, which the same-origin check of a WebSocket route
+relies on; see [WebSockets](websockets.md#same-origin-behind-a-proxy).
 
 Replace `myapp.com` with your actual domain.
 

@@ -572,12 +572,20 @@ PasswordReset::send_link(&email, "https://app.example.com/reset").await?;
 let valid: bool = PasswordReset::check(&token).await?;
 
 // The click-through handler, after the user submits a new password:
-// consume the token + rotate the password, returning the user id.
-let user_id: String = PasswordReset::complete(&token, &new_password).await?;
+// consume the token, rotate the password, and revoke the user's other
+// sessions and remember-me tokens. Report success only when both
+// revocations succeeded: a stolen session still works until they do.
+let outcome = PasswordReset::complete_with_outcome(&token, &new_password).await?;
+outcome.sessions_revoked?;
+outcome.remember_tokens_revoked?;
+let user_id: String = outcome.user_id;
 ```
 
-`complete` passes the plaintext password through `SecretString`; Magnetar hashes
-it inside the credential engine. Do not pre-hash it. An empty or whitespace-only
+`complete` returns the user id alone and discards the two revocation
+outcomes, so a handler that calls it reports success while a stolen session
+may still work; prefer `complete_with_outcome`. Both pass the plaintext
+password through `SecretString`; Magnetar hashes it inside the credential
+engine. Do not pre-hash it. An empty or whitespace-only
 password returns HTTP 400 before the engine is called.
 
 ### Sending your own reset message
