@@ -511,7 +511,7 @@ impl HttpResponse {
     /// replaces. A middleware that rebuilds an error response - an
     /// Inertia error page, a validation redirect - calls this so the
     /// report survives the rebuild.
-    pub(crate) fn with_error_report_of(mut self, original: HttpResponse) -> Self {
+    pub fn with_error_report_of(mut self, original: HttpResponse) -> Self {
         if original.error_report.is_some() {
             self.error_report = original.error_report;
         }

@@ -9,6 +9,12 @@
 //! JSON body it always had, and the Live runtime's own requests under
 //! `/__live/` keep their protocol responses.
 //!
+//! The page replaces the body alone. The response's other headers come
+//! along (`Allow` on a `405`, `Retry-After` on a `429`), except the ones
+//! that described the body being replaced or how it could be stored, and
+//! the error report the framework attached stays on the page's response,
+//! so the log and the exception handler still see what went wrong.
+//!
 //! The page is not a Live document: an error can come from a path no route
 //! matched, so there is no document route to mount on, and the page has
 //! nothing to make live.
@@ -39,7 +45,22 @@ impl Middleware for ErrorPage {
         };
         let page = if renders(&response) {
             match page(&response).await {
-                Ok(page) => page,
+                Ok(html) => {
+                    let status = response.status_code();
+                    let carried: Vec<(String, String)> = response
+                        .headers()
+                        .filter(|(name, _)| header_survives(name))
+                        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                        .collect();
+                    HttpResponse::html(html)
+                        .status(status)
+                        .with_headers(carried)
+                        // The page is per viewer where the body it replaced
+                        // may not have been.
+                        .header("Cache-Control", "no-cache, private")
+                        // The page replaces the body, not what went wrong.
+                        .with_error_report_of(response)
+                }
                 Err(error) => {
                     // The original error response still answers the request.
                     tracing::error!(error = %error, "rendering the error page failed");
@@ -51,6 +72,19 @@ impl Middleware for ErrorPage {
         };
         if failed { Err(page) } else { Ok(page) }
     }
+}
+
+/// Whether a header of the replaced response belongs on the page too: every
+/// header except the ones that described the body being replaced
+/// (`Content-*`, other than the security policy) or how it could be stored.
+fn header_survives(name: &str) -> bool {
+    let content = name.len() >= 8 && name[..8].eq_ignore_ascii_case("Content-");
+    let security_policy = name.eq_ignore_ascii_case("Content-Security-Policy")
+        || name.eq_ignore_ascii_case("Content-Security-Policy-Report-Only");
+    let storage = ["Cache-Control", "Expires", "Age", "ETag", "Last-Modified"]
+        .iter()
+        .any(|field| name.eq_ignore_ascii_case(field));
+    !((content && !security_policy) || storage || name.eq_ignore_ascii_case("Transfer-Encoding"))
 }
 
 /// Whether `response` is a framework error response the page replaces: an
@@ -67,9 +101,9 @@ fn renders(response: &HttpResponse) -> bool {
         && !(status >= 500 && Config::is_debug())
 }
 
-/// The error page for `response`, with its status. The message is the
-/// error body's own `message`, except for a `404`, a `419` and a `5xx`.
-async fn page(response: &HttpResponse) -> Result<HttpResponse, FrameworkError> {
+/// The error page's HTML for `response`. The message is the error body's
+/// own `message`, except for a `404`, a `419` and a `5xx`.
+async fn page(response: &HttpResponse) -> Result<String, FrameworkError> {
     let status = response.status_code();
     let body: Option<Value> = suprnova::serde_json::from_slice(response.body()).ok();
     let field = |name: &str| {
@@ -97,7 +131,7 @@ async fn page(response: &HttpResponse) -> Result<HttpResponse, FrameworkError> {
     let mut html = String::new();
     view.render_view(&mut html)
         .map_err(|error| FrameworkError::internal(format!("the error page: {error:?}")))?;
-    Ok(HttpResponse::html(html).status(status))
+    Ok(html)
 }
 
 /// What the page says for `status` when the response named nothing.

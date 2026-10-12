@@ -165,6 +165,7 @@ mod no_node {
         assert!(!env.contains("VITE_PORT"), "{env}");
         assert!(!env.contains("InertiaConfig"), "{env}");
         assert!(env.contains("SERVER_PORT=8765"), "{env}");
+        assert!(env.contains("SESSION_BLOCK=true"), "{env}");
     }
 
     #[test]
@@ -367,7 +368,9 @@ mod documents {
             "impl Middleware for ErrorPage",
             "!request.expects_json() && !request.path().starts_with(\"/__live/\")",
             "!(status >= 500 && Config::is_debug())",
-            "HttpResponse::html(html).status(status)",
+            "HttpResponse::html(html).status(status).with_headers(carried)",
+            ".with_error_report_of(response)",
+            "fn header_survives(name: &str) -> bool",
         ] {
             assert!(contains(&errors, part), "{part} in:\n{errors}");
         }
@@ -608,6 +611,7 @@ mod routes {
             r#"get!("/notes", controllers::notes::index).name("notes.index")"#,
             r#"get!("/notes/{id}", controllers::notes::show).name("notes.show")"#,
             r#"post!("/logout", controllers::auth::logout).name("logout")"#,
+            r#"post!("/profile/name", controllers::profile::update_name).name("profile.name")"#,
             r#"get!("/verify-email", controllers::email_verification::notice).name("verification.notice")"#,
             r#"get!("/verify-email/verify", controllers::email_verification::verify).name("verification.verify")"#,
         ] {

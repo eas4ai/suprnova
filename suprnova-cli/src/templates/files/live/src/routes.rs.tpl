@@ -38,6 +38,9 @@ routes! {
         get!("/notes", controllers::notes::index).name("notes.index"),
         get!("/notes/{id}", controllers::notes::show).name("notes.show"),
         post!("/logout", controllers::auth::logout).name("logout"),
+        // The display name over JSON, the endpoint the Inertia kits ship;
+        // the dashboard's island saves it through Live.
+        post!("/profile/name", controllers::profile::update_name).name("profile.name"),
         // Email verification: the notice and the mailed link's landing. The
         // framework only consumes a token for the account that is signed
         // in, so the link itself lives behind `auth()`.

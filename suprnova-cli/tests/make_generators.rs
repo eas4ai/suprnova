@@ -730,6 +730,55 @@ fn a_name_that_clashes_with_the_stub_imports_is_refused() {
     assert!(!tmp.path().join("src/rules").exists());
 }
 
+/// The suffixed generators, whose type is the name plus the suffix:
+/// `make:seeder Option` writes `OptionSeeder`, which shadows nothing.
+const SUFFIXED: &[&str] = &[
+    "make:factory",
+    "make:seeder",
+    "make:observer",
+    "make:policy",
+    "make:resource",
+    "make:scope",
+];
+
+#[test]
+fn every_generator_refuses_a_name_of_the_prelude() {
+    // A type named `Option` or `Result` shadows the prelude item the stub
+    // uses in its own signatures, and `E` shadows the listener's type
+    // parameter, so the file would not compile. The suffixed generators
+    // name their type after the suffix; `make:factory`, `make:observer`
+    // and `make:policy` still refuse, since the bare name becomes the
+    // model, and `make:seeder`, `make:resource` and `make:scope` write
+    // `OptionSeeder`, `OptionResource` and `OptionScope`.
+    for (command, _, _) in GENERATORS {
+        for bad in ["Option", "Result", "String", "E"] {
+            let tmp = project();
+            let before = files(tmp.path());
+            let output = run(tmp.path(), &[command, bad]);
+            let text = combined(&output);
+            let names_the_model =
+                matches!(*command, "make:factory" | "make:observer" | "make:policy");
+            if SUFFIXED.contains(command) && !names_the_model {
+                assert!(
+                    output.status.success(),
+                    "`{command} {bad}` writes `{bad}<Suffix>`:\n{text}"
+                );
+                continue;
+            }
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "`{command} {bad}` must exit 1:\n{text}"
+            );
+            assert!(
+                text.contains("Rust's prelude"),
+                "`{command} {bad}` names the problem:\n{text}"
+            );
+            assert_eq!(files(tmp.path()), before, "`{command} {bad}` wrote nothing");
+        }
+    }
+}
+
 #[test]
 fn a_model_the_project_lacks_is_named_in_a_warning() {
     let tmp = project();
@@ -891,6 +940,11 @@ fn generators_compile_in_a_fresh_scaffold() {
         "OrderShipped",
     ]);
     runs.push(vec!["make:policy", "User"]);
+    // The suffixed forms of prelude names: `OptionSeeder`, `ResultResource`
+    // and `StringScope` shadow nothing and must compile.
+    runs.push(vec!["make:seeder", "Option"]);
+    runs.push(vec!["make:resource", "Result"]);
+    runs.push(vec!["make:scope", "String"]);
     for args in &runs {
         succeeds(&project, args);
     }
