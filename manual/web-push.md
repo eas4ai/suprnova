@@ -145,18 +145,21 @@ address itself. A lookup that fails, or a name that resolves to no
 address, returns `WebPushError::Lookup`, which `is_retryable()` reports as
 retryable.
 
-The connection goes to the checked address when the client builds its
-own transport, with `WebPushClient::new` or
-`WebPushClient::with_client_builder`. In two cases the name is resolved
-again when the request connects:
+The connection goes to a checked address when the client builds its own
+transport, with `WebPushClient::new` or
+`WebPushClient::with_client_builder`. That transport sends through no
+proxy. A proxy set on the builder is dropped, and `HTTPS_PROXY` and the
+other proxy variables are not read: a proxy receives the name and
+resolves it again, where the check cannot follow.
 
-- Through an HTTP proxy, including one set by the `HTTPS_PROXY`
-  environment variable, the proxy opens the connection to the push
-  service and resolves the name itself. The client still refuses a name
-  that resolves, where the client runs, to a refused address.
-- A client you pass to `WebPushClient::with_client` resolves the name
-  itself when it connects. The client checks the answers its own lookup
-  got, but cannot pin the connection to them.
+A client you pass to `WebPushClient::with_client` resolves the name
+itself when it connects, so the check cannot hold the connection to the
+addresses it checked. Under `Strict`, a send over such a client returns
+`WebPushError::UnpinnedTransport` before anything is sent, until you
+call `.allow_unpinned_destinations()` on the `WebPushClient`. After that
+call, the endpoint and every address the name resolves to where your
+application runs are still checked, and the connection goes wherever
+your client sends it. See [Custom transport](#custom-transport).
 
 For local integration tests against a `wiremock` mock server you have
 to opt out:
@@ -179,16 +182,29 @@ your application, not a browser, decides which endpoints are stored.
 ### Custom transport
 
 `WebPushClient::new` applies a 30-second per-request timeout. If you
-need a different transport policy - corporate proxy, pinned TLS,
-shorter timeout - pass a `reqwest::ClientBuilder` to
-`WebPushClient::with_client_builder`. Every builder option is
-honoured, but the redirect policy is forcibly disabled: a validated
-endpoint that answers 3xx must not bounce the POST to an unvalidated
-URL, so the library does not accept the caller's redirect setting. The
-builder's DNS resolver is replaced too, by the one that connects a
-checked name to its checked addresses and looks any other name, such as
-a proxy's, up as usual. A name you map with
-`ClientBuilder::resolve` still connects where you mapped it.
+need a different transport policy, such as pinned TLS or a shorter
+timeout, pass a `reqwest::ClientBuilder` to
+`WebPushClient::with_client_builder`. Your builder options are honoured,
+but three settings are replaced after yours, because each would let a
+send reach an address the strict policy did not check:
+
+- Redirects are disabled. A validated endpoint that answers 3xx must not
+  bounce the POST to an unvalidated URL.
+- The DNS resolver is replaced by the one that connects a checked name
+  to its checked addresses, and looks any other name up as usual.
+- No proxy is used, whether you set one on the builder or the
+  environment names one.
+
+A name you map with `ClientBuilder::resolve` or
+`ClientBuilder::resolve_to_addrs` still connects where you mapped it,
+not to the checked address. reqwest applies a mapping only to a host
+name equal to the name you mapped, compared without case, so a stored
+endpoint reaches your address only at a name you chose, and cannot add
+a mapping of its own. Map only a name whose address you want every
+endpoint at that name to reach. `ClientBuilder::unix_socket` and
+`ClientBuilder::connector_layer` also decide where a connection goes,
+and the library cannot see them, so use them only to reach an address
+you chose.
 
 ```rust
 use reqwest::Client;
@@ -203,11 +219,37 @@ let client = WebPushClient::with_client_builder(
 ```
 
 `WebPushClient::with_client` takes an already-built client whose
-redirect policy the library cannot inspect. Sends under the default
-`Strict` policy are refused for such a transport before any I/O -
-switch to `with_client_builder`, or explicitly accept the risk with
-`.allow_unconfined_redirects()` when the client is known to not
-follow redirects.
+redirect policy and name resolution the library cannot inspect. Under
+the default `Strict` policy, a send over such a client is refused before
+any I/O until you accept both by name:
+
+- `.allow_unconfined_redirects()`, when the client does not follow
+  redirects. Without it, the send returns
+  `WebPushError::UnconfinedRedirects`.
+- `.allow_unpinned_destinations()`, when you accept that the client
+  connects wherever it resolves the name. Without it, the send returns
+  `WebPushError::UnpinnedTransport`.
+
+A push service you can reach only through a proxy needs such a client:
+
+```rust
+use std::time::Duration;
+use suprnova::WebPushClient;
+
+let http = reqwest::Client::builder()
+    .proxy(reqwest::Proxy::https("http://proxy.internal:3128")?)
+    .redirect(reqwest::redirect::Policy::none())
+    .timeout(Duration::from_secs(30))
+    .build()?;
+let client = WebPushClient::with_client(http, signer, "mailto:ops@example.org")?
+    .allow_unconfined_redirects()
+    .allow_unpinned_destinations();
+```
+
+The strict checks still run on the answers your application gets for the
+name. When your application cannot resolve the name at all, every send
+returns `WebPushError::Lookup`, and the only policy that sends is
+`AllowAny`, which turns off every check.
 
 ## Wire WebPushChannel into notifications
 

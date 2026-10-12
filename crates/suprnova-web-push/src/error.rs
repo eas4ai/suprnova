@@ -118,6 +118,19 @@ pub enum WebPushError {
          use WebPushClient::with_client_builder or allow_unconfined_redirects"
     )]
     UnconfinedRedirects,
+    /// Refused before any I/O: a caller-supplied HTTP client resolves the
+    /// endpoint's host name itself when it connects, so the `Strict`
+    /// endpoint policy cannot hold the connection to the address it
+    /// checked. Build the transport with `WebPushClient::new` or
+    /// `WebPushClient::with_client_builder`, whose connection goes to a
+    /// checked address, or accept by name that it may go elsewhere with
+    /// `WebPushClient::allow_unpinned_destinations`.
+    #[error(
+        "refusing Strict send over a caller-supplied HTTP client, which resolves the \
+         host name itself and may connect to an address that was not checked; \
+         use WebPushClient::new or with_client_builder, or allow_unpinned_destinations"
+    )]
+    UnpinnedTransport,
     /// The `Strict` endpoint policy refused the subscription because its
     /// host name resolves to an address of this class, and nothing was
     /// sent. A refusal names the class, not the address.
@@ -146,7 +159,7 @@ impl WebPushError {
     /// other 4xx (authn/authz/protocol errors), and for the local errors
     /// that fired before any HTTP I/O (`InvalidSubscription`,
     /// `RefusedDestination`, `Vapid`, `Encryption`, `Base64`, `Json`,
-    /// `Internal`, `UnconfinedRedirects`).
+    /// `Internal`, `UnconfinedRedirects`, `UnpinnedTransport`).
     ///
     /// When `Some`, [`Self::retry_after`] gives the push-service-suggested
     /// minimum delay.
@@ -164,7 +177,8 @@ impl WebPushError {
             | Self::Base64(_)
             | Self::Json(_)
             | Self::Internal(_)
-            | Self::UnconfinedRedirects => false,
+            | Self::UnconfinedRedirects
+            | Self::UnpinnedTransport => false,
         }
     }
 

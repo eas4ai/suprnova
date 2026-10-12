@@ -161,8 +161,10 @@ impl Lookup {
 ///
 /// A host name a strict send checked and pinned answers with the addresses
 /// that were checked, and is never looked up again while the send holds
-/// its pin. Any other name, such as a proxy's, is looked up as reqwest's
-/// own resolver would.
+/// its pin. Any other name, such as an endpoint's under the `AllowAny`
+/// policy, is looked up as reqwest's own resolver would. The transport
+/// sends through no proxy, so every name it connects to is resolved here,
+/// and none by a proxy.
 #[derive(Debug, Default)]
 pub(crate) struct PinnedResolver {
     pins: Mutex<HashMap<String, PinEntry>>,
@@ -446,8 +448,9 @@ mod tests {
         assert_eq!(response.status(), 201);
     }
 
-    /// A name nothing pinned, such as a proxy's, is looked up as reqwest
-    /// would, so a transport behind a proxy keeps working.
+    /// A name nothing pinned, such as an endpoint's under `AllowAny`, is
+    /// looked up as reqwest would, so a send that checks nothing still
+    /// reaches its endpoint.
     #[tokio::test]
     async fn hardening_an_unpinned_name_is_looked_up() {
         let server = MockServer::start().await;
