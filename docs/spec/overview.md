@@ -111,7 +111,7 @@ rather than duplicates.
 | Running on a Laravel database (the whole database Laravel 13 created: Laravel's layouts for the framework's tables, the application's data, and sharing the database with a Laravel application; issue #141) | LDB | laravel-database.md | Agreed |
 | Data cache (the developer's original design: query results keyed by hash, deleted by writes to their tables, triggered by the route; apart from any rendering) | QCACHE | data-cache.md | Draft |
 | Runtime contention (one limit for hash work, one blocking task per streamed file, the in-memory rate limiter's sweep, the WebSocket task registry; issues #146 to #149) | RTC | runtime-contention.md | Agreed 2026-10-07 |
-| Hardening (the Daybreak audit's findings: body-read deadlines, the Magick coder boundary, Web Push destination validation, reset revocation reporting, descriptor-relative asset serving, full-origin WebSocket checks) | HRD | hardening.md | Agreed 2026-10-11 |
+| Hardening (the Daybreak audit's findings and their remaining remedies: body-read deadlines and a finite connection cap, the Magick coder boundary under a framework-owned policy, Web Push destination validation and an endpoint allowlist, reset revocation reporting, the authentication epoch and the durable revocation retry, descriptor-relative asset serving, full-origin WebSocket checks) | HRD | hardening.md | Agreed 2026-10-11 |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
 
 Domains with no spec file yet, and the manual chapters that are their

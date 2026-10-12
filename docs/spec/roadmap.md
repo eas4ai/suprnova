@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: daybreak-defects-round
+Current: daybreak-remedies-complete
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1126,6 +1126,32 @@ Requirements: HRD-001, HRD-002, HRD-003, HRD-004, HRD-005, HRD-006, PAR-080
    `par-starter-kits`. Done when every requirement has a current pass on
    a committed tree and the review is recorded; the tag v4.0.0 then
    follows through `scripts/release.sh` on a pushed main.
+
+## daybreak-remedies-complete
+
+Requirements: HRD-007, HRD-008, HRD-009, HRD-010, HRD-011
+
+55. daybreak-remedies-complete - the remedies of the Daybreak audit of
+   2026-10-11 that the defect round did not build, ruled in by the
+   developer on 2026-10-12 ("I want all defects identified by Daybreak to
+   be remediaited for 4.0.0"), before the 4.0.0 tag:
+   - the authentication epoch on every provider-backed session and
+     remember credential, checked on every request (HRD-007, DBK-04)
+   - the durable revocation retry a failed reset queues (HRD-008, DBK-04)
+   - a finite connection cap by default (HRD-009, DBK-01)
+   - a framework-owned ImageMagick policy under the Magick driver
+     (HRD-010, DBK-02)
+   - a Web Push endpoint allowlist (HRD-011, DBK-03)
+   Delivery: one lane per requirement in its module with the test that
+   failed before it, merged under a lease on the requirement; the manual
+   passages they touch (authentication, session, env-vars, images,
+   web-push); changelog entries under 4.0.0 with their upgrade-chapter
+   sections. Mechanism: `hardening`, re-declared to run the auth,
+   auth_flows and notifications binaries' `hardening_` tests as well, with
+   a violating example bound before the start. Done when every requirement
+   has a current pass on a committed tree and the review is recorded; the
+   tag v4.0.0 then follows through `scripts/release.sh --resume` on a
+   pushed main, whose gate repeats only the steps these changes touch.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

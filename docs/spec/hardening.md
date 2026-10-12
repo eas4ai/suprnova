@@ -107,3 +107,64 @@ Falsifier: `Origin: http://victim.example` opens a WebSocket on a request whose 
 Mechanism: `hardening`.
 Rationale: Daybreak DBK-06 (Medium, conditional); Live's transport already compares the exact origin, general routes under the default policy did not.
 Status: Agreed 2026-10-11
+
+[HRD-007] Every sign-in the framework issues through a provider MUST record
+the user's authentication epoch: the value `Authenticatable::auth_epoch`
+returns, or, when the model exposes none, a digest of the password hash
+`get_auth_password` returns. The session MUST carry the epoch of each
+guard's sign-in and every remember credential MUST be bound to the epoch at
+issue (stored with it, or mixed into the hash its verifier is checked
+against). On every request that resolves a signed-in user from the session
+or from a remember credential the framework MUST compare the recorded epoch
+with the user's current one and, on a mismatch, end that sign-in (the
+guard's identity leaves the session, the remember row is deleted) and
+answer as for a guest, before the user reaches the application. A user
+whose provider exposes neither an epoch nor a password hash records no
+epoch and is not checked.
+Falsifier: a session signed in before a password change answers an authenticated route `200` after the change although the eager revocation failed; a remember cookie issued before the change signs the user in after it.
+Mechanism: `hardening`.
+Rationale: Daybreak DBK-04's first remedy, ruled in by the developer on 2026-10-12 ("I want all defects identified by Daybreak to be remediaited for 4.0.0"); eager revocation alone (HRD-004) leaves a stolen session usable when the store refuses, since nothing re-checks a session against the password on later requests. The digest of the password hash advances with every password write, so no table changes.
+Status: Agreed 2026-10-12
+
+[HRD-008] When a password reset's revocation of the user's other sessions
+or remember credentials fails, the framework MUST have queued an
+idempotent job that retries both revocations until both stores confirm
+them, before the reset answers; the dogfood application's reset MUST queue
+it (with the error HRD-004 requires) and a framework job type MUST exist
+for applications to queue themselves.
+Falsifier: with a session store whose revoke fails, completing a reset queues no revocation job; or the job reports done while the store still holds the user's sessions.
+Mechanism: `hardening`.
+Rationale: Daybreak DBK-04's third remedy (the developer's ruling of 2026-10-12): an error after the password has changed is not enough on its own, since the reset token is already consumed; the retry makes the revocation durable while HRD-007 keeps the stale credentials from working meanwhile.
+Status: Agreed 2026-10-12
+
+[HRD-009] The server MUST cap concurrent connections finitely by default:
+with `SERVER_MAX_CONNECTIONS` unset or blank the cap is
+`DEFAULT_MAX_CONNECTIONS` (10000); zero or an unparseable value keeps the
+finite misconfiguration fallback; an explicit positive value sets the cap.
+Falsifier: with `SERVER_MAX_CONNECTIONS` unset, `ServerConfig::from_env` reports no cap, or the server accepts the ten-thousand-and-first concurrent connection without a queue.
+Mechanism: `hardening`.
+Rationale: Daybreak DBK-01's third remedy (the developer's ruling of 2026-10-12); the deadlines of HRD-001 bound each connection in time, the cap bounds their number, and an unbounded default let a slow client population exhaust file descriptors before any deadline fired.
+Status: Agreed 2026-10-12
+
+[HRD-010] The Magick driver MUST run ImageMagick under a framework-owned
+policy whether or not autodetection is on: a `policy.xml` the framework
+writes and verifies before each run, reached through
+`MAGICK_CONFIGURE_PATH`, that denies the URL, HTTP, HTTPS, FTP, MVG, MSL,
+TEXT, LABEL, CAPTION, PANGO, SCREENSHOT, X, EPHEMERAL, PS, PS2, PS3, EPS,
+PDF and XPS coders, every delegate, and `@file` path reads; a run whose
+policy cannot be written or verified MUST refuse before ImageMagick starts.
+Falsifier: the child process starts with `MAGICK_CONFIGURE_PATH` unset or naming a directory whose `policy.xml` differs from the framework's; or an MVG, MSL or `url:` input under `IMAGE_MAGICK_AUTODETECT` reaches a coder the policy names.
+Mechanism: `hardening`.
+Rationale: Daybreak DBK-02's third remedy (the developer's ruling of 2026-10-12): the opt-in exists (HRD-002) but ran under the host's policy; ImageMagick merges every `policy.xml` on its configure path and a policy only removes rights, so the framework's tightens whatever the host allows.
+Status: Agreed 2026-10-12
+
+[HRD-011] `EndpointPolicy` MUST offer an allowlist: a policy that admits a
+subscription endpoint only when its origin (scheme, host and port) is one
+of the configured push-service origins, after `Strict`'s checks; the
+framework's Web Push channel MUST use it when `WEB_PUSH_ENDPOINT_ORIGINS`
+names one or more origins, and the manual MUST list the known browser
+push services' origins.
+Falsifier: with the allowlist set to one origin, an endpoint at another public host is sent to.
+Mechanism: `hardening`.
+Rationale: Daybreak DBK-03's fourth remedy (the developer's ruling of 2026-10-12): the strict checks of HRD-003 refuse private destinations; the allowlist refuses every destination that is not a push service, for deployments that can name theirs.
+Status: Agreed 2026-10-12
