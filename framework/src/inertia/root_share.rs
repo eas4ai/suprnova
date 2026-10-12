@@ -22,9 +22,11 @@ use crate::error::FrameworkError;
 /// the host root, `/billing` under a trusted `X-Forwarded-Prefix: /billing`.
 ///
 /// An application registers one shared-data provider, so `RootShare` can
-/// carry another and share its props too:
+/// carry another and share its props too (the example compiles with the
+/// `localization` feature, which `LocaleShare` needs):
 ///
-/// ```rust,no_run
+#[cfg_attr(feature = "localization", doc = "```rust,no_run")]
+#[cfg_attr(not(feature = "localization"), doc = "```rust,ignore")]
 /// # use std::sync::Arc;
 /// # use suprnova::{App, LocaleShare, RootShare};
 /// # fn ex() {

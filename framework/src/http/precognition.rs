@@ -162,8 +162,11 @@ impl Precognition {
     /// a marked handler, so a pre-check that must run belongs in middleware.
     /// On an ordinary route the raw header is only an attempt; you can inspect
     /// [`Request::is_attempting_precognition`] without enabling the protocol.
+    /// The example's check runs with the `testing` feature, which builds its
+    /// request.
     ///
-    /// ```rust
+    #[cfg_attr(feature = "testing", doc = "```rust")]
+    #[cfg_attr(not(feature = "testing"), doc = "```rust,ignore")]
     /// use suprnova::{Bail, HttpResponse, Precognition, Request, Response};
     ///
     /// async fn check(request: &Request) -> Response {
