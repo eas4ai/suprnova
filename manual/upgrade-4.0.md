@@ -1976,10 +1976,16 @@ when `error_page` was set.
 
 **Now:** It defaults to `true`, with the worker at `http://127.0.0.1:13714`,
 and a first visit goes to the worker only when a bundle is found at
-`ssr_bundle_path` or one of six conventional paths.
+`ssr_bundle_path` or one of six conventional paths, such as
+`frontend/bootstrap/ssr/ssr.js`. When none is found, the visit renders on
+the client and nothing is logged.
 
-**Do:** Nothing to do. To keep SSR off when a bundle exists, call
-`.ssr_disabled()` on your `InertiaConfig`.
+**Do:** If you run SSR and your bundle is built anywhere else, name it with
+`.ssr_bundle_path(...)` on your `InertiaConfig`, or call
+`.ssr_ensure_bundle_exists(false)` when the worker's bundle isn't on this
+process's disk. Without one of them, SSR stops after the upgrade and every
+first visit renders on the client. To keep SSR off when a bundle exists,
+call `.ssr_disabled()`.
 
 ### A missing SSR bundle is no longer logged.
 
