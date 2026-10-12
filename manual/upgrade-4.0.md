@@ -2429,6 +2429,30 @@ tag when you move to a release:
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.0" }
 ```
 
+### The `magick` driver names the coder it hands ImageMagick.
+
+**Before:** The `magick` driver named the coder for PNG, JPEG, WebP, GIF
+and BMP, and handed any other input to ImageMagick on a bare `-`.
+ImageMagick then chose the coder from the bytes, so an MVG or MSL
+document ran as a script, and the host's `policy.xml` was the only
+barrier.
+
+**Now:** The driver also names HEIC and the other HEIF images, AVIF,
+TIFF and BigTIFF, PSD and PSB, and reads each with its own coder. It
+refuses any other input before ImageMagick starts, with a 4xx
+`FrameworkError` that says the format is not one Suprnova names.
+`ImageConfig` has a `magick_autodetect` field, off by default, that
+`IMAGE_MAGICK_AUTODETECT` sets.
+
+**Do:** Nothing to do unless your application reads, through
+ImageMagick, a format outside that list, such as PPM or JPEG XL. To keep
+reading it, opt into autodetection, and harden the host's `policy.xml`
+first, because it is then the only barrier again:
+
+```env
+IMAGE_MAGICK_AUTODETECT=true
+```
+
 ## Fixes with no upgrade step
 
 These `### Fixed` entries change nothing an application upgrading from 3.2.1

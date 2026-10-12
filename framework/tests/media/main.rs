@@ -9,5 +9,6 @@ pub mod image_processing;
 pub mod images;
 pub mod interop;
 pub mod laravel_infra_gaps;
+pub mod magick_coder;
 #[path = "../support/own_process.rs"]
 mod own_process;
