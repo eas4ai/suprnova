@@ -92,6 +92,31 @@ development, use `local`, as the scaffold's `.env` does:
 APP_ENV=local
 ```
 
+### The server caps concurrent connections at 10000 by default.
+
+**Before:** An unset or blank `SERVER_MAX_CONNECTIONS` meant no cap: the
+server accepted every concurrent connection the operating system handed
+it.
+
+**Now:** An unset or blank `SERVER_MAX_CONNECTIONS` caps concurrent
+connections at 10000 (`DEFAULT_MAX_CONNECTIONS`), and
+`ServerConfig::builder()` and `Server::new` start from the same cap. Once
+10000 connections
+are open, the server accepts the next one only when another closes; until
+then it waits in the kernel's accept backlog. Zero or a value that does not
+parse still falls back to 10000 with a warning.
+
+**Do:** Set `SERVER_MAX_CONNECTIONS` explicitly where a deployment holds
+more than 10000 connections at once, such as many WebSocket or SSE
+clients, and raise the file-descriptor limit to match. For no cap, register
+the server configuration with the builder's opt-out:
+
+```rust
+use suprnova::{Config, ServerConfig};
+
+Config::register(ServerConfig::builder().unbounded_connections().build());
+```
+
 ## The service container
 
 ### `#[service(impl = ...)]` parses.

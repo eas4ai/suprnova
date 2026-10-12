@@ -47,6 +47,19 @@ pub const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 30;
 /// 2 MB/s takes 150 seconds, which a two-minute default would cut off.
 pub const DEFAULT_BODY_TOTAL_TIMEOUT_SECS: u64 = 3600;
 
+/// Default cap on concurrently active connections when
+/// `SERVER_MAX_CONNECTIONS` is unset or blank.
+///
+/// The header and body deadlines bound how long each connection may last;
+/// this cap bounds how many there may be (HRD-009). Without it, a crowd of
+/// slow clients could use up the process's file descriptors before any
+/// deadline fired. Each connection costs one file descriptor, so the
+/// figure is high enough for a busy deployment behind a reverse proxy and
+/// low enough to stay under a typical raised `LimitNOFILE`. A deployment
+/// that needs more sets `SERVER_MAX_CONNECTIONS`; one that wants no cap
+/// asks for it with [`ServerConfigBuilder::unbounded_connections`].
+pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
+
 /// Finite fallback for `SERVER_MAX_CONNECTIONS` when the env var is set
 /// but invalid (unparseable) or zero.
 ///
@@ -57,6 +70,13 @@ pub const DEFAULT_BODY_TOTAL_TIMEOUT_SECS: u64 = 3600;
 /// believes a cap is in effect. Chosen high enough not to bite a
 /// legitimate high-traffic deployment that meant to type a larger
 /// number, low enough to still bound resource usage as a backstop.
+///
+/// It equals [`DEFAULT_MAX_CONNECTIONS`] today, but the two answer
+/// different cases. [`DEFAULT_MAX_CONNECTIONS`] is the cap for an operator
+/// who set nothing. This one is the cap for an operator who asked for a
+/// cap and wrote a value that is not one, and it comes with a warning.
+/// Keeping two names lets either figure change without the other, and
+/// keeps code that already names this constant compiling.
 pub const DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION: usize = 10_000;
 
 /// Server configuration.
@@ -80,22 +100,23 @@ pub struct ServerConfig {
     /// per-FormRequest `max_body_bytes` overrides still apply on
     /// individual endpoints.
     pub max_body_size: usize,
-    /// Optional cap on the number of concurrently active TCP connections.
+    /// Cap on the number of concurrently active TCP connections.
     ///
     /// When `Some(n)`, the server acquires a semaphore permit for each
     /// accepted connection and holds it until the connection closes;
     /// once all `n` permits are taken the accept loop blocks until an
-    /// existing connection ends. When `None` (the default), behaviour is
-    /// unchanged - connections are unbounded.
+    /// existing connection ends. When `None`, connections are unbounded.
     ///
     /// Set via `SERVER_MAX_CONNECTIONS` in the environment. Blank or unset
-    /// is treated as `None` (unbounded) - that's an intentional choice, not
-    /// a misconfiguration. An unparseable or zero value, by contrast, means
-    /// the operator DID ask for a cap and got it wrong; that falls back to
-    /// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] (with a
-    /// `tracing::warn!`) rather than silently reverting to unbounded. This
-    /// is a backstop against runaway connection accumulation; pair it with
-    /// a reverse proxy and an appropriate `LimitNOFILE` for full protection.
+    /// gives [`DEFAULT_MAX_CONNECTIONS`] (10000), so the server is capped
+    /// unless someone decides otherwise (HRD-009). An unparseable or zero
+    /// value means the operator asked for a cap and got it wrong; that
+    /// falls back to [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] (with
+    /// a `tracing::warn!`) rather than reverting to unbounded. The
+    /// environment never yields `None`: no cap is a deliberate choice made
+    /// in code with [`ServerConfigBuilder::unbounded_connections`]. This is
+    /// a backstop against runaway connection accumulation; pair it with a
+    /// reverse proxy and an appropriate `LimitNOFILE` for full protection.
     pub max_connections: Option<usize>,
     /// Deadline for reading a client's complete request head (start line +
     /// headers) before the connection is closed.
@@ -175,9 +196,9 @@ impl ServerConfig {
             host: env("SERVER_HOST", "127.0.0.1".to_string()),
             port: resolve_port_lenient(),
             max_body_size: env("SERVER_MAX_BODY_SIZE", DEFAULT_MAX_REQUEST_BODY_BYTES),
-            max_connections: parse_max_connections(
+            max_connections: Some(parse_max_connections(
                 std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref(),
-            ),
+            )),
             header_read_timeout: resolve_header_read_timeout(
                 std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
             ),
@@ -212,8 +233,9 @@ impl ServerConfig {
         // `SERVER_MAX_CONNECTIONS` is intentionally lenient even in the
         // strict path: a typo here should not abort boot, just log and
         // fall back to a finite safe default via parse_max_connections.
-        let max_connections =
-            parse_max_connections(std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref());
+        let max_connections = Some(parse_max_connections(
+            std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref(),
+        ));
         // `SERVER_HEADER_READ_TIMEOUT` is likewise lenient: it's an
         // optional hardening knob, and an invalid value already degrades
         // to the SAFE default (30s) rather than to "no timeout" - there is
@@ -273,22 +295,26 @@ fn resolve_port_lenient() -> u16 {
         .unwrap_or(DEFAULT_SERVER_PORT)
 }
 
-/// Parse the optional `SERVER_MAX_CONNECTIONS` cap from a raw env-var
-/// string.
+/// Parse the `SERVER_MAX_CONNECTIONS` cap from a raw env-var string.
 ///
-/// A blank or absent value is treated as unset (`None` = unbounded) -
-/// that is the intentional, documented default; nobody asked for a cap.
-/// An unparseable or zero value is different: the operator DID set this
-/// knob and got it wrong, so falling back to `None` would silently
-/// discard the cap they asked for. That case instead falls back to
+/// A blank or absent value means nobody chose a cap, so it gets the
+/// finite [`DEFAULT_MAX_CONNECTIONS`] (HRD-009); a server with no cap is
+/// a choice made in code, never the result of leaving a variable out. An
+/// unparseable or zero value is different: the operator DID set this
+/// knob and got it wrong. That case falls back to
 /// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] with a
-/// `tracing::warn!`, rather than a boot error - it remains an optional
-/// hardening knob, so a typo still doesn't prevent the server from
-/// starting, it just doesn't silently disappear either.
-pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
-    let trimmed = raw.map(str::trim).filter(|s| !s.is_empty())?;
+/// `tracing::warn!`, rather than a boot error - it remains a lenient
+/// knob, so a typo still doesn't prevent the server from starting, it
+/// just doesn't silently disappear either.
+///
+/// Returns a count, not an `Option`, so the environment cannot produce
+/// an unbounded server.
+pub(crate) fn parse_max_connections(raw: Option<&str>) -> usize {
+    let Some(trimmed) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return DEFAULT_MAX_CONNECTIONS;
+    };
     match trimmed.parse::<usize>() {
-        Ok(n) if n > 0 => Some(n),
+        Ok(n) if n > 0 => n,
         Ok(_) | Err(_) => {
             tracing::warn!(
                 raw_value = trimmed,
@@ -297,7 +323,7 @@ pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
                  safe default instead of leaving connections unbounded - unbounded is not a \
                  safe interpretation of a misconfigured limit."
             );
-            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+            DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION
         }
     }
 }
@@ -305,8 +331,8 @@ pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
 /// Resolve `SERVER_HEADER_READ_TIMEOUT` (seconds) from a raw env-var
 /// string into a [`Duration`](std::time::Duration).
 ///
-/// Unlike `SERVER_MAX_CONNECTIONS`, there is no "unset" special case to
-/// preserve here: a blank/absent value falls back to
+/// Unlike `SERVER_MAX_CONNECTIONS`, there is no separate fallback for a
+/// botched value here: a blank/absent value falls back to
 /// [`DEFAULT_HEADER_READ_TIMEOUT_SECS`], and so does an unparseable or
 /// zero value - zero would mean "no timeout," which is exactly the
 /// SEC-07 hole this knob exists to close, so it is treated the same as
@@ -389,13 +415,26 @@ pub(crate) fn parse_health_readiness_token(raw: Option<&str>) -> Option<String> 
         .map(str::to_string)
 }
 
+/// What a [`ServerConfigBuilder`] was told about the connection cap.
+///
+/// Three states, not an `Option<usize>`: the builder must tell "not set,
+/// take the environment's cap" apart from "no cap, on purpose".
+#[derive(Debug, Clone, Copy)]
+enum ConnectionCap {
+    /// Cap concurrent connections at this count.
+    Limit(usize),
+    /// No cap. Reached only through
+    /// [`ServerConfigBuilder::unbounded_connections`].
+    Unbounded,
+}
+
 /// Builder for ServerConfig
 #[derive(Default)]
 pub struct ServerConfigBuilder {
     host: Option<String>,
     port: Option<u16>,
     max_body_size: Option<usize>,
-    max_connections: Option<usize>,
+    max_connections: Option<ConnectionCap>,
     header_read_timeout: Option<std::time::Duration>,
     body_read_timeout: Option<std::time::Duration>,
     body_total_timeout: Option<std::time::Duration>,
@@ -423,11 +462,35 @@ impl ServerConfigBuilder {
 
     /// Cap the number of concurrently active connections.
     ///
-    /// When set, the server will not accept new connections once this
-    /// many are active; the accept loop blocks until an existing
-    /// connection closes. When unset, connections are unbounded.
+    /// The server will not accept new connections once this many are
+    /// active; the accept loop blocks until an existing connection closes.
+    /// Without this call the cap is the one `SERVER_MAX_CONNECTIONS` gives,
+    /// [`DEFAULT_MAX_CONNECTIONS`] (10000) when it is unset. Replaces an
+    /// earlier [`Self::unbounded_connections`] call. Zero means no cap, as
+    /// it does on [`crate::Server::max_connections`]: a cap of zero would
+    /// accept no connection at all.
     pub fn max_connections(mut self, n: usize) -> Self {
-        self.max_connections = Some(n);
+        // Zero would build a semaphore with no permits, a server that accepts
+        // nothing; as on `Server::max_connections`, zero means no cap.
+        self.max_connections = Some(if n > 0 {
+            ConnectionCap::Limit(n)
+        } else {
+            ConnectionCap::Unbounded
+        });
+        self
+    }
+
+    /// Remove the connection cap: the server accepts every connection the
+    /// operating system hands it.
+    ///
+    /// This is a deliberate choice, and the only way to get a server with
+    /// no cap: the environment always yields a finite one (HRD-009). It
+    /// suits a process whose reverse proxy or platform already limits
+    /// connections and whose file-descriptor limit is set to match. It
+    /// wins over `SERVER_MAX_CONNECTIONS`. A later [`Self::max_connections`]
+    /// call replaces it.
+    pub fn unbounded_connections(mut self) -> Self {
+        self.max_connections = Some(ConnectionCap::Unbounded);
         self
     }
 
@@ -473,7 +536,11 @@ impl ServerConfigBuilder {
             host: self.host.unwrap_or(default.host),
             port: self.port.unwrap_or(default.port),
             max_body_size: self.max_body_size.unwrap_or(default.max_body_size),
-            max_connections: self.max_connections.or(default.max_connections),
+            max_connections: match self.max_connections {
+                Some(ConnectionCap::Limit(n)) => Some(n),
+                Some(ConnectionCap::Unbounded) => None,
+                None => default.max_connections,
+            },
             header_read_timeout: self
                 .header_read_timeout
                 .unwrap_or(default.header_read_timeout),
@@ -503,25 +570,26 @@ mod tests {
 
     #[test]
     fn parses_max_connections_from_env() {
-        // unset / blank → None (unbounded - the intentional default; no
-        // cap was requested, so there's nothing to fall back "safely" from).
-        assert_eq!(parse_max_connections(None), None);
-        assert_eq!(parse_max_connections(Some("")), None);
-        // set → Some(n)
-        assert_eq!(parse_max_connections(Some("1024")), Some(1024));
+        // unset / blank → the finite default (HRD-009); no cap is a choice
+        // made in code, never the result of leaving the variable out.
+        assert_eq!(parse_max_connections(None), DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(parse_max_connections(Some("")), DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(parse_max_connections(Some("   ")), DEFAULT_MAX_CONNECTIONS);
+        // set → n
+        assert_eq!(parse_max_connections(Some("1024")), 1024);
         // unparseable / zero → an explicit cap was requested and botched,
         // so fall back to the finite safe default (SEC-07) instead of
         // silently reverting to unbounded.
         assert_eq!(
             parse_max_connections(Some("abc")),
-            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+            DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION
         );
         assert_eq!(
             parse_max_connections(Some("0")),
-            Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
+            DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION
         );
         // whitespace-padded value is accepted
-        assert_eq!(parse_max_connections(Some("  512  ")), Some(512));
+        assert_eq!(parse_max_connections(Some("  512  ")), 512);
     }
 
     #[test]
