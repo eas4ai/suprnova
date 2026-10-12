@@ -85,18 +85,6 @@ impl SessionGuard {
         self
     }
 
-    /// Log `user` in, issuing its Magnetar session, when the engine is
-    /// installed, at `recorded_epoch`: the auth epoch read with the user's
-    /// password. A login with no password read passes `None` and is issued
-    /// at the epoch current now.
-    ///
-    /// The engine is asked first, before anything changes or any event
-    /// fires: it refuses an account whose second factor this login did not
-    /// prove, and reports the current epoch. A current epoch past the
-    /// recorded one means a password reset or "sign out everywhere"
-    /// committed after the password was read, so the login is refused with
-    /// `401`. The recorded epoch, never one read later, is what the session
-    /// is issued at.
     /// The Magnetar engine's admission of a sign-in through this guard:
     /// the default guard's sign-ins are refused for an account whose
     /// second factor they did not prove. Other guards are not the engine's
@@ -135,6 +123,18 @@ impl SessionGuard {
             .and_then(super::epoch::credential_epoch))
     }
 
+    /// Log `user` in, issuing its Magnetar session, when the engine is
+    /// installed, at `recorded_epoch`: the auth epoch read with the user's
+    /// password. A login with no password read passes `None` and is issued
+    /// at the epoch current now.
+    ///
+    /// The engine is asked first, before anything changes or any event
+    /// fires: it refuses an account whose second factor this login did not
+    /// prove, and reports the current epoch. A current epoch past the
+    /// recorded one means a password reset or "sign out everywhere"
+    /// committed after the password was read, so the login is refused with
+    /// `401`. The recorded epoch, never one read later, is what the session
+    /// is issued at.
     async fn login_at_epoch(
         &self,
         user: Arc<dyn Authenticatable>,
@@ -176,18 +176,26 @@ impl SessionGuard {
         if let Some(auth_epoch) = host_auth_epoch {
             crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
         }
+        // The remember credential is bound to the epoch this guard's own
+        // provider just read for the sign-in (HRD-007). A guard the
+        // AuthManager does not know cannot issue one bound to an epoch: its
+        // verification finds the provider by the guard name and would never
+        // read that epoch back.
         let remembered = if remember {
             match Auth::issue_remember_cookie_for_guard(
                 &self.name,
                 &user_id,
                 self.remember_ttl_minutes,
+                sign_in_epoch,
             )
             .await
             {
                 Ok(()) => true,
-                Err(_) => {
+                Err(error) => {
                     tracing::warn!(
                         target: "suprnova::auth",
+                        guard = %self.name,
+                        %error,
                         "remember-me issuance failed; completing login without a remembered session"
                     );
                     false

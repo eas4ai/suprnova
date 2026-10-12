@@ -137,8 +137,14 @@ impl Auth {
     ///
     /// The sign-in carries the user's authentication epoch like every other
     /// (see [`Authenticatable::auth_epoch`]). This method asks no provider,
-    /// so the first request that resolves the user records the epoch, and a
-    /// password change after that ends the sign-in.
+    /// so it marks the epoch unread, and the mark lives for the rest of this
+    /// request: [`SessionMiddleware`](crate::SessionMiddleware) reads the
+    /// epoch through the default guard's provider before it stores the
+    /// session, unless the request resolved the user first. A password change
+    /// at any time after this request therefore ends the sign-in. When the
+    /// provider fails that read, the sign-in is not stored and a warning is
+    /// logged; when it does not know the id, the user's first resolution
+    /// records the epoch.
     ///
     /// # With Magnetar installed
     ///
@@ -247,10 +253,11 @@ impl Auth {
         };
         // HRD-007: the sign-in records the user's authentication epoch,
         // read through the guard's provider before anything changes, so a
-        // provider error fails the login with nothing committed. Without a
+        // provider error fails the login with nothing committed. The
+        // remember credential is bound to the same epoch. Without a
         // provider to read it from (an application that signs in by id
         // alone), the sign-in keeps the `Unread` mark `login_guard_id`
-        // writes, and the first request that resolves the user records it.
+        // writes, and the credential is bound to none.
         let sign_in_epoch = match super::epoch::guard_provider(guard_name) {
             Some(provider) if !super::epoch::magnetar_fences(guard_name) => Some(
                 provider
@@ -281,7 +288,13 @@ impl Auth {
             crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
         }
         // Issue the row + queue the cookie.
-        Self::issue_remember_cookie_for_guard(guard_name, &user_id, ttl_minutes).await
+        Self::issue_remember_cookie_for_guard(
+            guard_name,
+            &user_id,
+            ttl_minutes,
+            sign_in_epoch.flatten(),
+        )
+        .await
     }
 
     /// Issue the remember-me row + queue the remember-me cookie for the
@@ -306,24 +319,57 @@ impl Auth {
     /// remember credential, and Magnetar treats a remembered sign-in as
     /// having proved every factor. Issue one only for a user who proved
     /// every factor the account has: this method does not check.
+    ///
+    /// Without the engine, the credential is bound to the authentication
+    /// epoch the default guard's provider reports for `user_id` now
+    /// (HRD-007), read before anything changes: a provider error fails the
+    /// call with nothing revoked or issued.
     pub async fn issue_remember_cookie(
         user_id: &str,
         ttl_minutes: i64,
     ) -> Result<(), crate::error::FrameworkError> {
         Self::ensure_remember_issue_scopes()?;
-        Self::flush_pending_remember_revocations().await?;
+        // A lifetime no date can hold is reported before the provider is
+        // asked.
+        super::remember::remember_expiry(ttl_minutes)?;
         let guard_name = Self::default_guard_name();
+        let epoch = Self::remember_epoch_by_guard_name(&guard_name, user_id).await?;
+        Self::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(&guard_name);
         if let Some((previous_user_id, selector)) = remember_to_revoke {
             Self::revoke_remember_selector(&guard_name, &previous_user_id, &selector).await?;
         }
-        Self::issue_remember_cookie_for_guard(&guard_name, user_id, ttl_minutes).await
+        Self::issue_remember_cookie_for_guard(&guard_name, user_id, ttl_minutes, epoch).await
     }
 
+    /// The authentication epoch a remember credential of the guard
+    /// `guard_name` for `user_id` is bound to when the caller holds none:
+    /// the epoch the guard's provider, found by name, reports now (HRD-007).
+    ///
+    /// `None` under the Magnetar engine without asking a provider: its
+    /// credential is Magnetar's own, bound to Magnetar's epoch, and never
+    /// reads this one.
+    async fn remember_epoch_by_guard_name(
+        guard_name: &str,
+        user_id: &str,
+    ) -> Result<Option<u64>, FrameworkError> {
+        if crate::magnetar_integration::optional_password_engine().is_some() {
+            return Ok(None);
+        }
+        super::epoch::guard_user_epoch(guard_name, user_id).await
+    }
+
+    /// Issue the remember credential of the guard `guard_name` for
+    /// `user_id` and queue its cookie. Without the Magnetar engine, the
+    /// `remember_tokens` row is bound to `epoch`, the authentication epoch
+    /// the caller read for the user through the guard's provider (HRD-007);
+    /// a guard the [`AuthManager`] does not know cannot issue one bound to
+    /// an epoch (see [`super::remember::issue_for_guard`]).
     pub(crate) async fn issue_remember_cookie_for_guard(
         guard_name: &str,
         user_id: &str,
         ttl_minutes: i64,
+        epoch: Option<u64>,
     ) -> Result<(), crate::error::FrameworkError> {
         // Pre-flight: refuse to insert the DB row when no pending-cookies
         // scope is installed. Otherwise `push_pending_cookie` below would
@@ -349,14 +395,15 @@ impl Auth {
                     .expose_once();
                 credential.expose_secret().to_owned()
             } else {
-                // Boxed: the table's issue future (a provider read for the
-                // epoch, a hash and an insert) is large, and inline it would
-                // enlarge every caller's future and stack frames, including
-                // under the engine, where this branch never runs.
+                // Boxed: the table's issue future (a hash and an insert) is
+                // large, and inline it would enlarge every caller's future
+                // and stack frames, including under the engine, where this
+                // branch never runs.
                 Box::pin(super::remember::issue_for_guard(
                     guard_name,
                     user_id,
                     ttl_minutes,
+                    epoch,
                 ))
                 .await?
             };

@@ -1010,6 +1010,108 @@ async fn retire_superseded_opaque_sessions(
     .await;
 }
 
+/// Record the authentication epoch of every sign-in in the session in
+/// `slot` that still carries the [`GuardSignInEpoch::Unread`] mark
+/// (HRD-007). Runs after the handler, before the session is stored.
+///
+/// A sign-in that has no user at hand writes the mark: `Auth::login_id`,
+/// `set_auth_user`, `TwoFactor::complete_challenge`, and a remember-me
+/// hydration whose verification read no epoch. The mark lives for the rest
+/// of the request that made it. A resolution of the user in the handler
+/// records the epoch then; this step records it otherwise, so the stored
+/// sign-in carries the epoch it was issued at, and a password change before
+/// the user's first authenticated request still ends it.
+///
+/// For each marked guard that Magnetar does not fence, the user is read
+/// through the provider found by the guard name
+/// ([`crate::auth::epoch::guard_provider`]):
+///
+/// - The user is found: its epoch is recorded, or, for a user that exposes
+///   none, the mark is removed and the sign-in is not checked.
+/// - The provider does not know the id: the mark stays. No later request
+///   can resolve that user either, and one that can records the epoch then.
+/// - The provider fails: the sign-in is not kept. The guard's identity
+///   (and, for the default guard, the generic user mirror) leaves the
+///   session, the CSRF token rotates, and a warning names the guard and the
+///   user id. Kept, it would carry no epoch and never be checked.
+///
+/// Without a provider for the guard name, the mark stays: a `SessionGuard`
+/// built by hand under a name the `AuthManager` does not know records the
+/// epoch at its first resolution, through its own provider.
+///
+/// It runs outside the request's task-local scopes, so it reads and writes
+/// the session in `slot` directly, and it never holds the slot's lock
+/// across a provider read.
+async fn record_unread_sign_in_epochs(slot: &Arc<Mutex<Option<SessionData>>>) {
+    // A poisoned slot is never stored (`persist_and_rotate` fails closed).
+    if slot.is_poisoned() {
+        return;
+    }
+    let unread: Vec<(String, String)> = {
+        let slot = crate::lock::recover(slot);
+        let Some(session) = slot.as_ref() else {
+            return;
+        };
+        session
+            .auth_guard_names()
+            .into_iter()
+            .filter(|guard| session.auth_guard_epoch(guard) == Some(GuardSignInEpoch::Unread))
+            .filter_map(|guard| {
+                session
+                    .auth_guard_id(&guard)
+                    .map(|user_id| (guard, user_id))
+            })
+            .collect()
+    };
+    if unread.is_empty() {
+        return;
+    }
+    let default_guard = crate::auth::Auth::default_guard_name();
+    for (guard, user_id) in unread {
+        if crate::auth::epoch::magnetar_fences(&guard) {
+            continue;
+        }
+        let Some(provider) = crate::auth::epoch::guard_provider(&guard) else {
+            continue;
+        };
+        let read = provider.retrieve_by_id(&user_id).await;
+        let mut slot = crate::lock::recover(slot);
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
+        // The epoch belongs to the identity it was read for: write nothing
+        // when the guard no longer holds that identity with the mark.
+        if session.auth_guard_id(&guard).as_deref() != Some(user_id.as_str())
+            || session.auth_guard_epoch(&guard) != Some(GuardSignInEpoch::Unread)
+        {
+            continue;
+        }
+        match read {
+            Ok(Some(user)) => match crate::auth::epoch::credential_epoch(&*user) {
+                Some(epoch) => session.set_auth_guard_epoch(&guard, epoch),
+                None => session.clear_auth_guard_epoch(&guard),
+            },
+            Ok(None) => {}
+            Err(error) => {
+                session.remove_auth_guard(&guard);
+                if guard == default_guard {
+                    session.user_id = None;
+                }
+                session.csrf_token = generate_csrf_token();
+                session.dirty = true;
+                tracing::warn!(
+                    target: "suprnova::auth",
+                    guard = %guard,
+                    user_id = %user_id,
+                    %error,
+                    "the authentication epoch of a sign-in could not be read; \
+                     the sign-in is not kept"
+                );
+            }
+        }
+    }
+}
+
 fn decode_remember_carrier(plaintext: &str) -> DecodedRememberCarrier {
     let Some(encoded) = plaintext.strip_prefix(REMEMBER_GUARD_CARRIER_PREFIX) else {
         return if plaintext.starts_with(REMEMBER_GUARD_CARRIER_VERSION_PREFIX) {
@@ -1487,6 +1589,10 @@ impl SessionMiddleware {
         {
             return response;
         }
+
+        // HRD-007: a sign-in this request made without a user at hand
+        // records its epoch now, before the session is stored.
+        record_unread_sign_in_epochs(&slot).await;
 
         self.persist_and_rotate(PersistInput {
             response,
@@ -2028,9 +2134,10 @@ impl SessionMiddleware {
                                 // credential just verified at, like any other
                                 // sign-in. Without one (no provider resolves
                                 // the guard by name, or the user exposes none),
-                                // it is marked unread, and the first request
-                                // that resolves the user through the guard
-                                // records whatever epoch that guard reads.
+                                // it is marked unread: the end of this request
+                                // reads it through the provider found by the
+                                // guard name, and without one the guard's
+                                // first resolution records what it reads.
                                 match epoch {
                                     Some(epoch) => session.set_auth_guard_epoch(&guard_name, epoch),
                                     None => session.mark_auth_guard_epoch_unread(&guard_name),
@@ -2967,10 +3074,15 @@ pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
 /// starts carrying an authentication epoch (HRD-007). It marks the epoch
 /// [`GuardSignInEpoch::Unread`]: this function is synchronous and has no
 /// user to read one from. A caller that has the user replaces the mark with
-/// the epoch at once through [`record_guard_sign_in_epoch`]; for
-/// `Auth::login_id`, which has none, the first request that resolves the
-/// user records it. The mark keeps that sign-in apart from a session signed
-/// in before 4.0.0, which records nothing and is not checked.
+/// the epoch at once through [`record_guard_sign_in_epoch`]. For a caller
+/// that has none (`Auth::login_id`, [`set_auth_user`],
+/// `TwoFactor::complete_challenge`), the mark lives for the rest of the
+/// request that made it: a resolution of the user in that request records
+/// the epoch, and otherwise the session middleware reads it through the
+/// guard's provider before it stores the session, so the stored sign-in
+/// carries the epoch of its issue. The mark also keeps that sign-in apart
+/// from a session signed in before 4.0.0, which records nothing and is not
+/// checked.
 ///
 /// A sign-in that Magnetar fences (the default guard with the engine's
 /// host sign-in authority installed) gets no mark: its Magnetar session is
@@ -3062,8 +3174,10 @@ pub(crate) fn record_guard_sign_in_epoch(guard_name: &str, user_id: &str, epoch:
 
 /// Helper to set the authenticated user
 ///
-/// The sign-in carries the user's authentication epoch: the first request
-/// that resolves the user records it, as for `Auth::login_id`.
+/// The sign-in carries the user's authentication epoch, as for
+/// `Auth::login_id`: the session middleware reads it through the default
+/// guard's provider before it stores the session, unless the request
+/// resolved the user first.
 pub fn set_auth_user(user_id: impl Into<String>) {
     set_guard_auth_user(&crate::auth::Auth::default_guard_name(), user_id);
 }

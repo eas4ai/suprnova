@@ -95,12 +95,18 @@ pub(crate) fn magnetar_fences(guard_name: &str) -> bool {
 /// default guard, the globally bound [`UserProvider`] when the manager names
 /// none (the order [`super::active_user_provider`] uses).
 ///
-/// Remember-me issuance and verification both resolve the provider this
-/// way, by the guard name the cookie carries, so a credential is bound at
+/// Remember-me verification resolves the provider this way, by the guard
+/// name the cookie carries, and issuance binds a credential to an epoch
+/// only for a guard name this lookup finds, so a credential is bound at
 /// issue to exactly the epoch its verification reads back. `None` when no
-/// provider resolves, such as a `SessionGuard` built by hand outside the
-/// manager: neither side then has an epoch, and the credential is bound to
-/// none.
+/// provider resolves, such as for a `SessionGuard` built by hand under a
+/// name the manager does not know: that guard records its own provider's
+/// epoch in the session, and it cannot issue a remember credential (see
+/// `remember::issue_for_guard`).
+///
+/// The session middleware also resolves the provider this way to record
+/// the epoch of a sign-in that had no user at hand (`Auth::login_id`)
+/// before it stores the session.
 pub(crate) fn guard_provider(guard_name: &str) -> Option<Arc<dyn UserProvider>> {
     if let Some(manager) = App::get::<AuthManager>()
         && let Ok(provider) = manager.guard_provider(guard_name)
@@ -157,8 +163,14 @@ pub(crate) enum SessionSignInCheck {
 ///   no epoch; neither is checked, as HRD-007 states. A 3.2.1 session is
 ///   checked from the user's next sign-in.
 /// - [`GuardSignInEpoch::Unread`]: the sign-in had no user at hand
-///   (`Auth::login_id`), so this first resolution records the user's
-///   current epoch and the sign-in stands.
+///   (`Auth::login_id`). The mark lives for the rest of the request that
+///   made it: a resolution in that request records the user's current
+///   epoch here and the sign-in stands, and otherwise the session
+///   middleware records it before it stores the session. A mark found in a
+///   later request is one the middleware could not resolve (no provider is
+///   known by the guard name, such as for a `SessionGuard` built by hand,
+///   or the provider did not know the user), and the guard's own provider
+///   records it here.
 /// - A recorded epoch: `Current` when the user's epoch is that value,
 ///   [`SessionSignInCheck::Stale`] otherwise, including when the user no
 ///   longer exposes one (the credential the sign-in was bound to is gone).

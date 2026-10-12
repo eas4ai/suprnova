@@ -3244,8 +3244,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   page; the framework logs the user id and dispatches no `Logout` event.
   Each `remember_tokens` row is bound to the epoch inside its hash, with no
   column added. A user whose model returns neither records no epoch and is
-  not checked. `Auth::login_id` asks no provider, so the first request that
-  resolves the user records its epoch. A remember-me cookie issued by 3.2.1
+  not checked. `Auth::login_id`, `session::set_auth_user` and
+  `TwoFactor::complete_challenge` ask no provider themselves, so the request
+  that signs in reads the epoch through the default guard's provider before
+  `SessionMiddleware` stores the session; when the provider fails that read,
+  the sign-in is not stored and a warning is logged.
+  `BasicAuthMiddleware::new()`, which in 3.2.1 let a session pass on its
+  stored identity alone, now lets it pass only after the guard has resolved
+  the user and compared the epoch, so a session from before the change gets
+  the `401` challenge unless the request carries valid credentials. Each
+  remember-me credential is bound to the epoch the guard's provider read for
+  the sign-in, and a `SessionGuard` built by hand under a name the
+  `AuthManager` does not know, which in 3.2.1 issued remember-me
+  credentials, issues none: its login completes without a remembered session
+  and logs a warning that names the guard. A remember-me cookie issued by 3.2.1
   carries no epoch: once its user has one, it fails verification once, its
   row is deleted and the cookie cleared. A session signed in by 3.2.1 is
   checked from the user's next sign-in. `Auth::logout_other_devices` binds

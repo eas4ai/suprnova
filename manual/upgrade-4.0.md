@@ -2715,6 +2715,18 @@ again one time after the upgrade, and no data change is needed. A session
 signed in before the upgrade carries no epoch, so it is not checked until
 that user signs in again. A user whose model returns `None` from both
 `auth_epoch` and `get_auth_password` records no epoch and is not checked.
+A sign-in through `Auth::login_id`, `session::set_auth_user`, or
+`TwoFactor::complete_challenge` reads the epoch through the default guard's
+provider in the request that signs in, before the session is stored; when
+the provider fails that read, the sign-in is not stored and a warning is
+logged. `BasicAuthMiddleware::new()` lets a signed-in session pass without
+an `Authorization` header only after the guard has resolved the user and
+compared the epoch, so a session from before a password change gets the
+`401` challenge. Each remember-me credential is bound to the epoch the
+guard's provider read for the sign-in. A `SessionGuard` that you build
+yourself under a name the `AuthManager` doesn't know issues none: its login
+completes without a remembered session and logs a warning that names the
+guard.
 
 **Do:** Nothing to run, for most applications: no migration and no
 configuration. Expect each remembered device to sign in once after the
@@ -2722,8 +2734,13 @@ deploy. If your user model exposes no password hash and no epoch, its
 sessions stay unchecked; return the hash from `get_auth_password`, or a
 counter from `auth_epoch`, to have them checked. A custom user provider
 whose model keeps a counter that advances without a password change
-implements `auth_epoch` to have that counter checked. See
-[Auth epochs](authentication.md#auth-epochs).
+implements `auth_epoch` to have that counter checked. If you build a
+`SessionGuard` yourself under a name the `AuthManager` doesn't know and
+sign users in with remember-me through it, register the guard with the
+`AuthManager` (`AuthConfig::guard` with `GuardConfig::session`, and its
+provider with `Auth::register_provider`), or sign in through the manager's
+guard; otherwise its logins complete without a remembered session and log
+a warning. See [Auth epochs](authentication.md#auth-epochs).
 
 ### The `magick` driver runs ImageMagick under the framework's own policy.
 
