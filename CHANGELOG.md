@@ -3272,40 +3272,36 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   host with ImageMagick's default policy, which denies nothing, the script,
   network, text and Ghostscript coders and every delegate stayed open:
   PostScript or PDF on a bare `-` started Ghostscript. In 4.0.0 the driver
-  writes a `policy.xml` of its own before each run, into a directory it
-  makes once per process under the system's temporary directory, open to its
-  owner alone; it checks the file byte for byte and writes it again when it
-  differs. The policy denies the URL, HTTP, HTTPS, FTP, MVG, MSL, TEXT,
-  LABEL, CAPTION, PANGO, SCREENSHOT, X, EPHEMERAL, PS, PS2, PS3, EPS, PDF
-  and XPS coders, every delegate, and `@file` path reads, whether or not
-  `IMAGE_MAGICK_AUTODETECT` is on; `MagickCliDriver::POLICY` holds its text.
-  ImageMagick reads every `policy.xml` it finds and applies the last entry
-  that matches, so the driver starts it with `MAGICK_CONFIGURE_PATH` naming
-  the framework's directory first and last, with any `MAGICK_CONFIGURE_PATH`
-  the operator set between them, and then checks the result: before the
-  first run of each process, for each binary and operator
-  `MAGICK_CONFIGURE_PATH`, it reads the policy in effect with
-  `magick -list policy` under the same environment, and, because that
-  listing leaves out an entry marked `stealth="true"`, runs one MVG probe, a
-  one-line MVG script read as `mvg:-`, that ImageMagick's security policy
-  must refuse. A host policy can fail that check by granting back a denied
-  coder, delegate or `@` read, for example in ImageMagick's own
-  configuration directory or the user's, which ImageMagick reads last; so
-  can a listing that is missing a denial or cannot be read, and a probe that
-  ImageMagick's policy does not refuse. What a failed check does depends on
-  `IMAGE_MAGICK_AUTODETECT`. With it on, ImageMagick chooses the coder from
-  an upload's bytes and the policy in effect is the only barrier, so every
-  run is refused with a 5xx `FrameworkError` that names the coder and the
-  file that granted it, until the grant is removed and the process
-  restarts; a listing or probe that cannot be had refuses the run too.
-  Without it, the driver names the coder for every input and refuses bytes
-  it cannot name, so the grant is not reachable through the driver: the
-  driver logs the failed check once per process at `warn`, naming the coder
-  and the file, and runs proceed. A listing or probe that cannot be had is
-  logged at `warn` and tried again at the next run. A directory the driver
+  writes a `policy.xml` of its own before each run, at
+  `.config/ImageMagick/policy.xml` in a directory it makes once per process
+  under the system's temporary directory, open to its owner alone; it checks
+  the file byte for byte and writes it again when it differs. The policy
+  denies the URL, HTTP, HTTPS, FTP, MVG, MSL, TEXT, LABEL, CAPTION, PANGO,
+  SCREENSHOT, X, EPHEMERAL, PS, PS2, PS3, EPS, PDF and XPS coders, every
+  delegate, and `@file` path reads, whether or not `IMAGE_MAGICK_AUTODETECT`
+  is on; `MagickCliDriver::POLICY` holds its text. ImageMagick reads every
+  `policy.xml` it finds and applies the last entry that matches, and it reads
+  `$HOME/.config/ImageMagick` after `MAGICK_CONFIGURE_PATH`, its own
+  configuration directory and `$XDG_CONFIG_HOME/ImageMagick`. So the driver
+  starts it with `HOME` naming the policy directory, and with
+  `MAGICK_CONFIGURE_PATH` naming the directory that holds the file first and
+  last, around any `MAGICK_CONFIGURE_PATH` the operator set. The framework's
+  policy is then the last ImageMagick reads, and it outranks every other
+  policy on the host, the system, XDG and user files and an entry marked
+  `stealth="true"` included, while the host's denials still apply. A
+  `policy.xml` in the service account's own `~/.config/ImageMagick` no longer
+  applies to the driver's runs. Before the first run of each process, for
+  each binary and operator `MAGICK_CONFIGURE_PATH`, the driver checks that
+  order under the same environment: `magick -list policy` must show the last
+  entry that matches each denial denying and the framework's file as the
+  last one read, and one MVG probe, a one-line MVG script read as `mvg:-`,
+  must be refused by ImageMagick's security policy. A check that fails
+  refuses every run, with or without `IMAGE_MAGICK_AUTODETECT`, with a 5xx
+  `FrameworkError` that names the cause and the file, until the host is
+  fixed and the process restarts. A listing or probe that cannot be had
+  refuses the run, and the next run asks again. A directory the driver
   cannot make, or a policy file it cannot write and check byte for byte,
-  refuses the run before ImageMagick starts in both modes, naming the path
-  and the cause.
+  refuses the run before ImageMagick starts, naming the path and the cause.
 
 ## 3.2.1 - 2026-10-05
 
