@@ -27,6 +27,8 @@ pub mod login_throttle_backend_error;
 pub mod password_reset;
 pub mod password_reset_provider;
 #[cfg(feature = "testing")]
+pub mod revoke_user_credentials;
+#[cfg(feature = "testing")]
 pub mod scaffold_token_table;
 #[cfg(feature = "testing")]
 pub mod two_factor;

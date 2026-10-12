@@ -2646,6 +2646,31 @@ An API project adds it to `register`, before `BearerTokenMiddleware`. A
 route that takes uploads longer than 30 seconds needs a longer value; see
 [Request Timeouts](timeout.md#global-is-a-ceiling-per-route-can-only-tighten).
 
+### A password reset whose revocation fails queues a retry.
+
+**Before:** When the provider path of `PasswordReset::complete` or
+`complete_with_outcome` could not revoke the user's other sessions or
+remember-me tokens, it logged a warning, reported the error in the outcome,
+and nothing tried again. A stolen session or remember-me cookie kept working
+after the reset.
+
+**Now:** Both push a `RevokeUserCredentials` job for the user with
+`Queue::push` before they return, and a queue worker retries both
+revocations until both stores confirm them. The framework registers the
+job with the worker. `PasswordResetOutcome` has a `revocation_retry` field
+of type `RevocationRetry`: `Queued`, `NotNeeded` when both revocations
+succeeded, or `PushFailed(error)` when the push failed. A failed push is
+logged and the reset still returns its outcome.
+
+**Do:** Run `queue:work` on a driver that keeps jobs, such as `database` or
+`redis`, so the retry runs: the `memory` driver loses the job on a restart,
+and the `sync` driver runs it once inside the push. If your handler reads
+the outcome, log `revocation_retry` with the user's id, and after
+`PushFailed` queue `RevokeUserCredentials::new(user_id)` yourself once the
+queue works again. A `PasswordResetOutcome` you build yourself, for example
+in a test, needs the new field. For details, see
+[When a revocation fails](auth-flows.md#when-a-revocation-fails).
+
 ## Fixes with no upgrade step
 
 These `### Fixed` entries change nothing an application upgrading from 3.2.1

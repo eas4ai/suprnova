@@ -97,14 +97,17 @@ static REGISTRY: LazyLock<RwLock<HashMap<String, Registration>>> =
 /// `Mail::queue` and `Mail::later` push [`SendMailJob`](crate::mail::SendMailJob),
 /// `Notify::queue` pushes
 /// [`SendNotificationJob`](crate::notifications::notify_job::SendNotificationJob),
-/// and the broadcast notification channel pushes
+/// the broadcast notification channel pushes
 /// [`BroadcastNotificationJob`](crate::notifications::channels::broadcast::BroadcastNotificationJob)
-/// for a message that names a queue or a connection. An application never
-/// writes any of these types, so it cannot be expected to register them.
-/// Without these entries a worker would dead-letter every queued mail,
-/// notification and broadcast as `unknown job`, and the `sync` driver would
-/// fail the push itself.
+/// for a message that names a queue or a connection, and a password reset
+/// whose revocation failed pushes
+/// [`RevokeUserCredentials`](crate::auth_flows::RevokeUserCredentials). An
+/// application never writes any of these types, so it cannot be expected to
+/// register them. Without these entries a worker would dead-letter every
+/// queued mail, notification, broadcast and revocation retry as
+/// `unknown job`, and the `sync` driver would fail the push itself.
 fn framework_jobs() -> HashMap<String, Registration> {
+    use crate::auth_flows::RevokeUserCredentials;
     use crate::mail::SendMailJob;
     use crate::notifications::channels::broadcast::BroadcastNotificationJob;
     use crate::notifications::notify_job::SendNotificationJob;
@@ -120,6 +123,10 @@ fn framework_jobs() -> HashMap<String, Registration> {
         (
             BroadcastNotificationJob::job_name().to_string(),
             registration_for::<BroadcastNotificationJob>(),
+        ),
+        (
+            RevokeUserCredentials::job_name().to_string(),
+            registration_for::<RevokeUserCredentials>(),
         ),
     ])
 }
@@ -2156,6 +2163,7 @@ mod tests {
             "Suprnova::SendMail",
             "Suprnova::SendNotification",
             "Suprnova::BroadcastNotification",
+            "Suprnova::RevokeUserCredentials",
         ] {
             assert!(names.iter().any(|n| n == job), "{job} missing: {names:?}");
             assert!(middleware_for(job).is_empty(), "{job} has no middleware");
