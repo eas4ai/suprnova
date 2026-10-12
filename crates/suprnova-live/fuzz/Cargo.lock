@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live"
-version = "3.2.1"
+version = "4.0.0"
 dependencies = [
  "askama",
  "askama_parser",
