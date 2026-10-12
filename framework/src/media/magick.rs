@@ -40,12 +40,18 @@
 //! process under the system's temporary directory, checks the file before
 //! each run and writes it again when it differs, and starts ImageMagick
 //! with `MAGICK_CONFIGURE_PATH` naming that directory first and last. It is
-//! the one file the driver writes. Because ImageMagick applies the last
-//! entry that matches, and reads its own configuration directory and the
-//! user's after that path, the driver also checks the policy in effect with
-//! `magick -list policy`, once a process. A run whose policy cannot be put
-//! in place, or whose policy in effect reopens a denial, is refused before
-//! ImageMagick starts for it.
+//! the one file the driver writes. A run whose policy cannot be put in
+//! place is refused before ImageMagick starts for it, with or without
+//! autodetection.
+//!
+//! Because ImageMagick applies the last entry that matches, and reads its
+//! own configuration directory and the user's after that path, the driver
+//! also checks the policy in effect with `magick -list policy`, once a
+//! process. Under autodetection the policy in effect is the only barrier
+//! between an upload and the coders it denies, so a policy in effect that
+//! reopens a denial refuses every run. Without autodetection the driver
+//! names the coder for every input, so no input can reach such a grant: the
+//! driver logs it once and the runs proceed.
 //!
 //! # Two-tier limits
 //!
@@ -127,8 +133,10 @@ const MIN_OUTPUT_READ: usize = 8 * 1024;
 /// Every run reads the framework's ImageMagick policy, [`Self::POLICY`],
 /// which denies the network, script, text and Ghostscript coders, every
 /// delegate, and indirect `@file` reads. The host's own policy still
-/// applies beside it, and the driver refuses to run when the policy in
-/// effect reopens any of those denials.
+/// applies beside it. When the policy in effect reopens any of those
+/// denials, the driver refuses every run under `IMAGE_MAGICK_AUTODETECT`,
+/// and otherwise logs it once and runs, because it then names the coder
+/// for every input itself.
 ///
 /// Output formats are whatever the host's delegates can write. WebP goes
 /// through libwebp, and [`OutputFormat::WebP`] hands it the pipeline's
@@ -220,10 +228,26 @@ impl MagickCliDriver {
     /// there, such as `rights="read|write" pattern="MVG"` or a grant on
     /// `pattern="*"`, would outrank it. So the driver checks the result:
     /// before the first run of a process it reads the policy in effect with
-    /// `magick -list policy`, and refuses every run when any of these
-    /// denials is reopened or missing. The listing leaves out an entry
-    /// marked `stealth="true"`, so the check also runs one MVG probe that
-    /// the policy in effect must refuse.
+    /// `magick -list policy`, and the check fails when any of these denials
+    /// is reopened or missing. The listing leaves out an entry marked
+    /// `stealth="true"`, so the check also runs one MVG probe that the
+    /// policy in effect must refuse.
+    ///
+    /// What a failed check does depends on `IMAGE_MAGICK_AUTODETECT`,
+    /// because this policy carries a different weight in each mode. Under
+    /// autodetection ImageMagick chooses the coder from the bytes of an
+    /// upload, and this policy is the only barrier between an MVG script or
+    /// a PDF and its coder, so a failed check refuses every run until the
+    /// host's policy is fixed and the process restarts. Without it the
+    /// driver names the coder for every input and refuses bytes it cannot
+    /// name before ImageMagick starts, so no input reaches a coder this
+    /// policy denies, whatever the host grants. Refusing every run there
+    /// would take image processing away from a host whose own policy grants
+    /// PDF or PS to another program, and buy nothing, so the driver logs the
+    /// failed check once a process at `warn` and the runs proceed. The file
+    /// itself is written and checked before every run in both modes: a
+    /// policy that cannot be put in place refuses the run either way, since
+    /// where nothing on the host reopens a denial, the file is what holds it.
     pub const POLICY: &'static str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!--
   Suprnova's magick image driver writes this file and checks it before
@@ -298,10 +322,11 @@ impl MagickCliDriver {
         config: &ImageConfig,
         room: usize,
     ) -> Result<Vec<u8>, FrameworkError> {
-        // HRD-010: the policy goes in place and the policy in effect is
-        // checked first, so a run that cannot have it is refused before
-        // ImageMagick is started for it. Every ImageMagick run passes
-        // through here, the probes included.
+        // HRD-010: the policy goes in place first, so a run that cannot
+        // have it is refused before ImageMagick is started for it, in both
+        // modes. Then the policy in effect is checked, which refuses the run
+        // under autodetection when the check fails. Every ImageMagick run
+        // passes through here, the probes included.
         let operator = operator_configure_path();
         let configure_path = prepare_policy(operator.as_deref())?;
         self.verify_policy(&configure_path, operator, config)?;
@@ -862,24 +887,69 @@ struct PolicyVerdict {
     operator: Option<OsString>,
     /// Why the policy in effect fails the check, or `None` when it passes.
     refusal: Option<String>,
+    /// Whether a run without autodetection has logged `refusal` yet. The
+    /// verdict holds for the life of the process, so one warning says all
+    /// there is to say; a warning on every run would bury it in the log.
+    warned: bool,
 }
+
+/// Why a run without `IMAGE_MAGICK_AUTODETECT` proceeds past a failed
+/// check of the policy in effect, as the warning says it.
+const NAMED_CODERS_HOLD: &str = "The driver names the coder for every input while \
+     IMAGE_MAGICK_AUTODETECT is off, so a grant of a coder the framework's policy denies is \
+     not reachable through it, and the run proceeds";
 
 impl MagickCliDriver {
     /// Check that the policy ImageMagick applies under `configure_path`
     /// denies everything the framework's policy denies, asking it once a
-    /// process for this binary and `operator` value.
+    /// process for this binary and `operator` value, and decide from the
+    /// verdict whether this run, under `config`, may start.
     ///
-    /// The check reads `<binary> -list policy`, started under the same
-    /// environment as the runs, and when the listing passes, runs one MVG
-    /// probe ([`Self::probe_mvg`]) under it too. A listing that shows any of
-    /// the framework's denials reopened, or missing, or that the driver
-    /// cannot read, and a probe that ImageMagick does not refuse by its
-    /// policy, refuse the run and every later one with this binary and
-    /// operator value. A listing or probe that could not be had at all (the
-    /// binary is missing, or the listing failed or either timed out)
-    /// refuses the run but is not kept: that is a fault of the moment, such
-    /// as ImageMagick installed after the process started, and the next run
-    /// asks again.
+    /// The check ([`Self::ask_policy_in_effect`]) reads `<binary> -list
+    /// policy`, started under the same environment as the runs, and when
+    /// the listing passes, runs one MVG probe ([`Self::probe_mvg`]) under it
+    /// too. It fails when the listing shows any of the framework's denials
+    /// reopened or missing, or the driver cannot read it, or ImageMagick does
+    /// not refuse the probe by its policy, and that verdict is kept for
+    /// every later run with this binary and operator value. A listing or
+    /// probe that could not be had at all (the binary is missing, or the
+    /// listing failed, or either timed out) is not kept: that is a fault of
+    /// the moment, such as ImageMagick installed after the process started,
+    /// and the next run asks again.
+    ///
+    /// What a failed check does depends on the run's own
+    /// `config.magick_autodetect`, read against the kept verdict at every
+    /// run, so one verdict serves runs under either setting:
+    ///
+    /// - With autodetection on, ImageMagick chooses the coder from the bytes
+    ///   of an upload the framework cannot name ([`input_spec`] hands those
+    ///   over on a bare `-`), and the policy in effect is the only barrier
+    ///   between an MVG script or a PDF and the coder the host reopened. So
+    ///   a failed check refuses this run and every later one, and so does a
+    ///   check that could not be had: an unverifiable policy is not a
+    ///   verified one. The refusal covers a run on a named format too, so a
+    ///   process that opted in learns of the grant at its first run, not at
+    ///   the first upload the framework cannot name.
+    /// - With autodetection off, the driver names the coder for every input
+    ///   ([`input_spec`]) and refuses bytes it cannot name before
+    ///   ImageMagick starts ([`Self::guard`], HRD-002), and every other
+    ///   argument is a fixed string, none starting with `@`. No input
+    ///   reaches a coder the framework's policy denies, and Ghostscript, the
+    ///   delegate the policy most needs to keep away, starts only for the
+    ///   PostScript and PDF coders it denies. So a grant the check finds is
+    ///   not reachable through the driver, and refusing every run would only
+    ///   take image processing away from a host whose own policy grants PDF
+    ///   or PS to another program, such as one that makes PDF thumbnails.
+    ///   The failed check is logged once a process at `warn`, with the cause
+    ///   a refusal would carry, which names the coder and the file, and the
+    ///   run proceeds. A check that could not be had is logged at `warn` by
+    ///   each run that asked, since each run asks again, and the run
+    ///   proceeds; a binary that is missing then fails the run itself, with
+    ///   the error that names `IMAGE_MAGICK_BINARY`.
+    ///
+    /// The policy file is not part of this decision: [`prepare_policy`]
+    /// refuses a run whose policy cannot be written and read back byte for
+    /// byte, in both modes, before this check runs.
     fn verify_policy(
         &self,
         configure_path: &OsStr,
@@ -889,39 +959,80 @@ impl MagickCliDriver {
         let mut verdicts = POLICY_VERDICTS
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(found) = verdicts
+        let found = verdicts
             .iter()
-            .find(|verdict| verdict.binary == self.binary && verdict.operator == operator)
-        {
-            return match &found.refusal {
-                None => Ok(()),
-                Some(cause) => Err(policy_refusal(cause)),
-            };
+            .position(|verdict| verdict.binary == self.binary && verdict.operator == operator);
+        let at = match found {
+            Some(at) => at,
+            None => match self.ask_policy_in_effect(configure_path, config) {
+                Ok(refusal) => {
+                    verdicts.push(PolicyVerdict {
+                        binary: self.binary.clone(),
+                        operator,
+                        refusal,
+                        warned: false,
+                    });
+                    verdicts.len() - 1
+                }
+                Err(fault) if config.magick_autodetect => return Err(policy_refusal(&fault)),
+                Err(fault) => {
+                    tracing::warn!(
+                        binary = %self.binary,
+                        "image: the magick driver could not check the ImageMagick policy in \
+                         effect: {fault}. {NAMED_CODERS_HOLD}. The next run checks again."
+                    );
+                    return Ok(());
+                }
+            },
+        };
+        let verdict = &mut verdicts[at];
+        let Some(cause) = &verdict.refusal else {
+            return Ok(());
+        };
+        if config.magick_autodetect {
+            return Err(policy_refusal(cause));
         }
+        if !verdict.warned {
+            tracing::warn!(
+                binary = %self.binary,
+                "image: the ImageMagick policy in effect fails the magick driver's check: \
+                 {cause}. {NAMED_CODERS_HOLD}. With IMAGE_MAGICK_AUTODETECT on, the driver \
+                 refuses every run until the host's policy is fixed and the process restarts. \
+                 This is logged once a process."
+            );
+            verdict.warned = true;
+        }
+        Ok(())
+    }
+
+    /// Ask ImageMagick for the policy it applies under `configure_path`, and
+    /// judge it against the framework's.
+    ///
+    /// Returns `Ok(None)` when the policy in effect passes, `Ok(Some(cause))`
+    /// when it fails, which is a verdict the caller keeps, and `Err(cause)`
+    /// when the listing or the probe could not be had at all, which is not.
+    /// Each cause names what failed and, for a grant, the entry and the file
+    /// it came from, never the bytes of a policy.
+    fn ask_policy_in_effect(
+        &self,
+        configure_path: &OsStr,
+        config: &ImageConfig,
+    ) -> Result<Option<String>, String> {
         let args = ["-list".to_string(), "policy".to_string()];
         let listing = self
             .execute(&args, b"", config, 0, configure_path)
             .map_err(|e| {
-                policy_refusal(&format!(
+                format!(
                     "`{} -list policy` failed, so the policy in effect cannot be verified: {}",
                     self.binary,
                     e.message()
-                ))
+                )
             })?;
-        let mut refusal = parse_listing(&String::from_utf8_lossy(&listing))
-            .and_then(|entries| judge_listing(&entries))
-            .err();
-        if refusal.is_none() {
-            refusal = self.probe_mvg(configure_path, config)?;
-        }
-        verdicts.push(PolicyVerdict {
-            binary: self.binary.clone(),
-            operator,
-            refusal: refusal.clone(),
-        });
-        match refusal {
-            None => Ok(()),
-            Some(cause) => Err(policy_refusal(&cause)),
+        let judged = parse_listing(&String::from_utf8_lossy(&listing))
+            .and_then(|entries| judge_listing(&entries));
+        match judged {
+            Ok(()) => self.probe_mvg(configure_path, config),
+            Err(cause) => Ok(Some(cause)),
         }
     }
 }
@@ -945,24 +1056,24 @@ impl MagickCliDriver {
     /// coder. The refusal counts only as a failed exit whose stderr names the
     /// security policy and `MVG`: ImageMagick 7.1 writes "not authorized by
     /// the security policy", and earlier releases "not allowed". A probe
-    /// that cannot be run at all is an error, which the caller does not
-    /// keep. The error never repeats what the probe wrote.
+    /// that cannot be run at all returns the cause as an error, which the
+    /// caller does not keep. Neither cause repeats what the probe wrote.
     fn probe_mvg(
         &self,
         configure_path: &OsStr,
         config: &ImageConfig,
-    ) -> Result<Option<String>, FrameworkError> {
+    ) -> Result<Option<String>, String> {
         let mut args = limit_args(config);
         args.extend(["-format", "%w", "mvg:-", "info:"].map(String::from));
         let finished = self
             .finish(&args, MVG_PROBE, config, 0, configure_path)
             .map_err(|e| {
-                policy_refusal(&format!(
+                format!(
                     "the MVG probe of `{}` could not be run, so the policy in effect cannot be \
                      verified: {}",
                     self.binary,
                     e.message()
-                ))
+                )
             })?;
         let stderr = String::from_utf8_lossy(&finished.stderr);
         let refused = !finished.status.success()
@@ -2158,7 +2269,9 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
 /// refuses them before ImageMagick starts. Only an application that opts
 /// into autodetection hands them over on a bare `-`, and then the
 /// framework's policy ([`MagickCliDriver::POLICY`]), with the host's beside
-/// it, is what keeps them from the script and network coders.
+/// it, is what keeps them from the script and network coders. That is why a
+/// failed check of the policy in effect refuses every run under the opt-in,
+/// and only logs a warning without it.
 fn input_spec(source: Source) -> String {
     match source {
         Source::Read(format) => format!("{}:-", format.magick_coder()),

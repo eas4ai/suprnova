@@ -713,7 +713,9 @@ Input the framework cannot name then goes to ImageMagick on a bare `-`,
 and ImageMagick chooses the coder from its bytes, MVG and MSL included.
 The framework's [policy](#policy) is then what keeps such an upload away
 from the script, network, and Ghostscript coders, so turn autodetection
-on only when you need it. The formats in the table keep their named
+on only when you need it. Before you turn it on, check that your host's
+ImageMagick policy grants none of those coders back: under autodetection
+such a grant refuses every run. The formats in the table keep their named
 coder either way. Any value other than `true`, `1`, `yes`, or `on` leaves
 autodetection off. `ImageConfig` carries the setting as its
 `magick_autodetect` field, and `ImageConfig::magick_autodetect(true)`
@@ -751,10 +753,11 @@ The directory is `suprnova-magick-policy-<pid>-<random>` under the
 system's temporary directory (`TMPDIR`, or `/tmp`). Each process makes
 one, open to its owner alone. When the driver can't make the directory,
 or can't write and check the file, it refuses the run before ImageMagick
-starts, with a 5xx `FrameworkError` that names the path and the cause. A
-directory removed while the process runs, as a temporary-file cleaner
-removes old ones, is made again at the next run. The directory stays
-after the process exits; it holds one small file.
+starts, with a 5xx `FrameworkError` that names the path and the cause,
+whether or not autodetection is on. A directory removed while the
+process runs, as a temporary-file cleaner removes old ones, is made again
+at the next run. The directory stays after the process exits; it holds
+one small file.
 
 Your host's policy still applies. ImageMagick reads every `policy.xml` it
 finds: the directories in `MAGICK_CONFIGURE_PATH` in order, then its own
@@ -767,27 +770,43 @@ the user's come after, though, so the framework checks the result.
 
 Before the first run of each process, the driver starts the same binary
 as `magick -list policy`, with the same environment its runs get, and
-reads the policy in effect from the listing. It refuses every run, with a
-5xx `FrameworkError`, when any of the following is true:
+reads the policy in effect from the listing. ImageMagick leaves an entry
+marked `stealth="true"` out of the listing, so the driver also runs one
+MVG probe, a one-line MVG script read as `mvg:-` that the policy in
+effect must refuse. The probe covers MVG alone, so keep stealth entries
+out of the host's policy. The check fails when any of the following is
+true:
 
 - A host entry grants back a coder, a delegate, or an `@` read that
   Suprnova denies, such as `rights="read|write" pattern="MVG"` or a grant
-  on `pattern="*"`. The error names the coder and the file that granted
-  it. Remove the grant.
+  on `pattern="*"`.
 - A denied coder is missing from the listing, which means ImageMagick
   did not apply Suprnova's policy.
 - The listing can't be read.
-- `magick -list policy` fails.
-- ImageMagick's security policy doesn't refuse the MVG probe described
-  below.
+- ImageMagick's security policy doesn't refuse the MVG probe.
 
-The driver checks once for each binary and `MAGICK_CONFIGURE_PATH`
-value, and keeps the verdict for the life of the process; a listing or
-probe it could not run at all is tried again at the next run. ImageMagick
-leaves an entry marked `stealth="true"` out of the listing, so the check
-also runs one MVG probe, a one-line MVG script read as `mvg:-` that the
-policy in effect must refuse; the probe covers MVG alone, so keep stealth
-entries out of the host's policy.
+What a failed check does depends on `IMAGE_MAGICK_AUTODETECT`:
+
+- **With autodetection on**, ImageMagick chooses the coder from an
+  upload's bytes, so the policy in effect is the only barrier between an
+  upload and a coder the host reopened. The driver refuses every run with
+  a 5xx `FrameworkError` that names the coder and the file that granted
+  it. Remove the grant, then restart the process.
+- **With autodetection off**, the default, the driver names the coder for
+  every input and refuses bytes it can't name before ImageMagick starts,
+  so a grant of a coder Suprnova denies is not reachable through the
+  driver. The driver logs the failed check once per process at `warn`,
+  naming the coder and the file, and runs proceed. This is the common
+  case of a host whose system policy grants PDF or PS so that ImageMagick
+  can make PDF thumbnails for another program.
+
+The driver checks once for each binary and `MAGICK_CONFIGURE_PATH` value,
+and keeps the verdict for the life of the process, so the driver sees a
+change to the host's policy only after the process restarts. When
+`magick -list policy` fails, or the listing or the probe can't be run at
+all, nothing is kept: with autodetection on the run is refused, without
+it the failure is logged at `warn` and the run proceeds, and the next run
+checks again.
 
 Decode limits are enforced twice under this driver. For the five formats
 the framework can parse, the header check above runs before the process

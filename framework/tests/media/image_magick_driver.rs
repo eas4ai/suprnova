@@ -390,9 +390,12 @@ fn hardening_autodetected_input_meets_the_framework_policy_in_the_real_binary() 
 fn hardening_the_installed_policy_in_effect_passes_the_check() {
     // The driver reads `magick -list policy` before its first run, then
     // runs an MVG probe that the installed ImageMagick's policy must
-    // refuse, and refuses every run unless both pass, so a run that
-    // succeeds is the listing passing and the probe refused.
-    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    // refuse. Under the autodetection opt-in it refuses every run unless
+    // both pass, so a run that succeeds is the listing passing and the
+    // probe refused.
+    let _config = crate::image_processing::ConfigGuard::set(
+        suprnova::ImageConfig::default().magick_autodetect(true),
+    );
     assert_eq!(
         driver()
             .dimensions(RED_PNG_1X1)
@@ -450,14 +453,17 @@ fn hardening_a_host_grant_is_refused_in_the_real_binary() {
 }
 
 /// Runs only in the child process the grant test starts, under a host
-/// policy that grants the MVG coder.
+/// policy that grants the MVG coder, with autodetection on: the policy in
+/// effect is then the only barrier, so a grant refuses every run.
 #[test]
 #[ignore = "requires a host ImageMagick 7 binary"]
 fn hardening_a_host_grant_is_refused_in_the_real_binary_child() {
     if !crate::own_process::is_child() {
         return;
     }
-    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    let _config = crate::image_processing::ConfigGuard::set(
+        suprnova::ImageConfig::default().magick_autodetect(true),
+    );
     let result = driver().dimensions(RED_PNG_1X1);
     match std::env::var("HARDENING_MAGICK_GRANT").as_deref() {
         // The framework's directory comes last on the configure path, so
@@ -487,6 +493,90 @@ fn hardening_a_host_grant_is_refused_in_the_real_binary_child() {
         }
         other => panic!("unknown case {other:?}"),
     }
+}
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary() {
+    let scratch =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-user-grant-named");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let user = scratch.join("ImageMagick");
+    std::fs::create_dir_all(&user).expect("create the policy directory");
+    std::fs::write(
+        user.join("policy.xml"),
+        "<policymap>\n  <policy domain=\"coder\" rights=\"read|write\" pattern=\"MVG\" />\n</policymap>\n",
+    )
+    .expect("write the grant");
+    // A child of its own, so the verdict on the policy in effect is made
+    // under this grant and no other test's.
+    let output = {
+        let _env = crate::env_lock::lock_env();
+        crate::own_process::child_command(
+            "image_magick_driver::hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary_child",
+        )
+        .env("XDG_CONFIG_HOME", &scratch)
+        .output()
+        .expect("the child runs")
+    };
+    crate::own_process::assert_child_passed(&output);
+}
+
+/// Runs only in the child process the test above starts, under a user
+/// policy that grants the MVG coder, with autodetection off: the driver
+/// names the coder for every input, so the grant is logged and the runs
+/// proceed, and an MVG script is still refused before ImageMagick starts.
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_without_autodetection_a_user_grant_lets_named_runs_proceed_in_the_real_binary_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    assert_eq!(
+        driver()
+            .dimensions(RED_PNG_1X1)
+            .expect("a `png:-` run proceeds under the grant"),
+        (1, 1)
+    );
+    if supports_format("heic") {
+        let heic = Command::new(driver().binary())
+            .args(["-size", "8x4", "xc:red", "heic:-"])
+            .output()
+            .expect("magick must run");
+        assert!(
+            heic.status.success() && !heic.stdout.is_empty(),
+            "could not build a HEIC fixture: {}",
+            String::from_utf8_lossy(&heic.stderr)
+        );
+        let png = driver()
+            .process(&heic.stdout, &pipeline(Vec::new(), OutputFormat::Png))
+            .expect("a `heic:-` run proceeds under the grant");
+        assert!(png.starts_with(b"\x89PNG"));
+    } else {
+        eprintln!("skipping the HEIC run: no host delegate");
+    }
+    let mvg = include_bytes!("fixtures/magick-script.mvg");
+    let err = driver()
+        .process(mvg, &pipeline(Vec::new(), OutputFormat::Png))
+        .expect_err("an MVG script is refused");
+    assert!(
+        err.to_string().contains("not one Suprnova names"),
+        "the driver's own guard refuses it, before ImageMagick starts: {err}"
+    );
+    drop(_config);
+
+    // The same process under the opt-in: the kept verdict refuses, so the
+    // runs above proceeded past a check that found the grant.
+    let _config = crate::image_processing::ConfigGuard::set(
+        suprnova::ImageConfig::default().magick_autodetect(true),
+    );
+    let err = driver()
+        .dimensions(RED_PNG_1X1)
+        .expect_err("the opt-in refuses the run under the grant")
+        .to_string();
+    assert!(err.contains("the MVG coder"), "{err}");
+    assert!(err.contains("ImageMagick/policy.xml"), "{err}");
 }
 
 /// Runs alone in a child process (see `own_process`). The facade's default

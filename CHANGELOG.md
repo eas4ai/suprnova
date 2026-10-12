@@ -3260,14 +3260,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `magick -list policy` under the same environment, and, because that
   listing leaves out an entry marked `stealth="true"`, runs one MVG probe, a
   one-line MVG script read as `mvg:-`, that ImageMagick's security policy
-  must refuse. A host policy that grants back a denied coder, delegate or
-  `@` read, such as one in ImageMagick's own configuration directory or the
-  user's, which ImageMagick reads last, refuses every run with a 5xx
-  `FrameworkError` that names the coder and the file that granted it; so
-  does a listing that is missing a denial, cannot be read, or cannot be had,
-  and a probe that ImageMagick's policy does not refuse. A directory the
-  driver cannot make, or a policy it cannot write or check, also refuses the
-  run before ImageMagick starts, naming the path and the cause.
+  must refuse. A host policy can fail that check by granting back a denied
+  coder, delegate or `@` read, for example in ImageMagick's own
+  configuration directory or the user's, which ImageMagick reads last; so
+  can a listing that is missing a denial or cannot be read, and a probe that
+  ImageMagick's policy does not refuse. What a failed check does depends on
+  `IMAGE_MAGICK_AUTODETECT`. With it on, ImageMagick chooses the coder from
+  an upload's bytes and the policy in effect is the only barrier, so every
+  run is refused with a 5xx `FrameworkError` that names the coder and the
+  file that granted it, until the grant is removed and the process
+  restarts; a listing or probe that cannot be had refuses the run too.
+  Without it, the driver names the coder for every input and refuses bytes
+  it cannot name, so the grant is not reachable through the driver: the
+  driver logs the failed check once per process at `warn`, naming the coder
+  and the file, and runs proceed. A listing or probe that cannot be had is
+  logged at `warn` and tried again at the next run. A directory the driver
+  cannot make, or a policy file it cannot write and check byte for byte,
+  refuses the run before ImageMagick starts in both modes, naming the path
+  and the cause.
 
 ## 3.2.1 - 2026-10-05
 
