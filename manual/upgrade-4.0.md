@@ -2620,6 +2620,36 @@ An API project adds it to `register`, before `BearerTokenMiddleware`. A
 route that takes uploads longer than 30 seconds needs a longer value; see
 [Request Timeouts](timeout.md#global-is-a-ceiling-per-route-can-only-tighten).
 
+### A session or remember-me cookie from before a password change stops working.
+
+**Before:** A password reset ended the user's other sessions and revoked
+their remember-me tokens at once. Nothing checked a session or a remember-me
+cookie against the password afterwards, so when the session store or the
+`remember_tokens` table refused the revocation, a stolen session or cookie
+kept working until it expired.
+
+**Now:** Every sign-in issued through a user provider records the user's
+auth epoch: the value `Authenticatable::auth_epoch` returns, or a digest of
+the password hash `get_auth_password` returns. Every request that resolves
+the user compares it with the current one, and on a mismatch ends that
+guard's sign-in and continues as a guest's. Two consequences follow for a
+3.2.1 deployment. A remember-me cookie issued before 4.0.0 was hashed
+without an epoch, so under the new check it fails verification once, its
+row is deleted, and the cookie is cleared: every remembered device signs in
+again one time after the upgrade, and no data change is needed. A session
+signed in before the upgrade carries no epoch, so it is not checked until
+that user signs in again. A user whose model returns `None` from both
+`auth_epoch` and `get_auth_password` records no epoch and is not checked.
+
+**Do:** Nothing to run, for most applications: no migration and no
+configuration. Expect each remembered device to sign in once after the
+deploy. If your user model exposes no password hash and no epoch, its
+sessions stay unchecked; return the hash from `get_auth_password`, or a
+counter from `auth_epoch`, to have them checked. A custom user provider
+whose model keeps a counter that advances without a password change
+implements `auth_epoch` to have that counter checked. See
+[Auth epochs](authentication.md#auth-epochs).
+
 ## Fixes with no upgrade step
 
 These `### Fixed` entries change nothing an application upgrading from 3.2.1

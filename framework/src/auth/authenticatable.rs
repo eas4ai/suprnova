@@ -94,6 +94,13 @@ pub trait Authenticatable: Send + Sync + 'static {
     ///
     /// Returning `Some` lets the built-in user providers verify a password via
     /// [`crate::hashing`] without the app implementing a custom provider.
+    ///
+    /// It also gives the user an authentication epoch when
+    /// [`auth_epoch`](Self::auth_epoch) returns `None`: a digest of this
+    /// hash, which every password write changes. Each session sign-in and
+    /// remember-me credential records that epoch, and a later request
+    /// refuses one recorded under an earlier password. A model that returns
+    /// `None` here and from `auth_epoch` is not checked.
     fn get_auth_password(&self) -> Option<&str> {
         None
     }
@@ -101,6 +108,17 @@ pub trait Authenticatable: Send + Sync + 'static {
     /// The account's auth epoch, read in the same row read as
     /// [`Self::get_auth_password`], or `None` when the provider did not
     /// read it.
+    ///
+    /// Every session sign-in and remember-me credential the framework
+    /// issues through a provider records the user's epoch, and every request
+    /// that resolves the user from the session or a remember-me cookie
+    /// compares it with the current one: a different value ends that
+    /// sign-in, and the request continues as a guest's. The epoch is the
+    /// value returned here when it is `Some`; otherwise it is a digest of the
+    /// password hash [`Self::get_auth_password`] returns. Return a counter
+    /// here when your table keeps one that also advances without a password
+    /// change, such as on "sign out everywhere". Starting to return one ends
+    /// the sessions signed in under the digest once.
     ///
     /// With the Magnetar engine installed, a framework sign-in is issued at
     /// the epoch read with the password: a password reset or "sign out

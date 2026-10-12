@@ -212,9 +212,13 @@ guard's destroy is an error.
 Laravel has no call that destroys a user's sessions. A password change ends
 them lazily: `AuthenticateSession` compares the password hash it stored in
 each session with the default guard's user's current one, and flushes the
-session on a mismatch. `destroy_all_for_user` keeps that scope, the default
-guard's user and the whole session, but ends the sessions at once, so a
-stolen session does not survive until its next request.
+session on a mismatch. Suprnova does both. `destroy_all_for_user` keeps
+Laravel's scope, the default guard's user and the whole session, but ends
+the sessions at once, so a stolen session does not survive until its next
+request. And every request that resolves a user compares the
+[auth epoch](authentication.md#auth-epochs) its sign-in recorded with the
+user's current one, so a session or remember-me credential issued under an
+earlier password is refused even when the eager revocation failed.
 
 ## Authentication helpers
 

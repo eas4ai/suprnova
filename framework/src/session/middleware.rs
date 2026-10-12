@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::config::SessionConfig;
-use super::store::{SessionData, SessionMigrationError, SessionStore};
+use super::store::{GuardSignInEpoch, SessionData, SessionMigrationError, SessionStore};
 
 pub(crate) type PendingRememberRevocation = (String, String, String);
 
@@ -1984,10 +1984,23 @@ impl SessionMiddleware {
                         let ttl_minutes =
                             i64::try_from(self.config.remember_lifetime.as_secs() / 60)
                                 .unwrap_or(i64::MAX);
-                        match crate::auth::remember::verify_and_rotate(&credential, ttl_minutes)
-                            .await
+                        // Verified against the user's current epoch through
+                        // the provider of the guard the cookie names, the
+                        // one the credential was bound with at issue
+                        // (HRD-007). A credential issued before a password
+                        // change fails here and its row is deleted.
+                        match crate::auth::remember::verify_and_rotate_for_guard(
+                            &credential,
+                            ttl_minutes,
+                            &guard_name,
+                        )
+                        .await
                         {
-                            Ok(Some((user_id, new_credential))) => {
+                            Ok(Some(crate::auth::remember::RotatedRemember {
+                                user_id,
+                                credential: new_credential,
+                                epoch,
+                            })) => {
                                 let selector = remember_selector(&new_credential);
                                 let selector = match selector {
                                     Ok(selector) => selector,
@@ -2011,6 +2024,17 @@ impl SessionMiddleware {
                                 session.rotate_id(generate_session_id());
                                 session.csrf_token = generate_csrf_token();
                                 session.replace_auth_guard_id(&guard_name, user_id.clone());
+                                // The remembered sign-in records the epoch the
+                                // credential just verified at, like any other
+                                // sign-in. Without one (no provider resolves
+                                // the guard by name, or the user exposes none),
+                                // it is marked unread, and the first request
+                                // that resolves the user through the guard
+                                // records whatever epoch that guard reads.
+                                match epoch {
+                                    Some(epoch) => session.set_auth_guard_epoch(&guard_name, epoch),
+                                    None => session.mark_auth_guard_epoch_unread(&guard_name),
+                                }
                                 crate::auth::request_state::set_active_remember_carrier(
                                     &guard_name,
                                     &selector,
@@ -2935,14 +2959,35 @@ pub(crate) fn persisted_guard_auth_user_id(guard_name: &str) -> Option<String> {
 }
 
 /// Persist one session guard's identifier and mirror the default guard.
+///
+/// This is the store call of every framework sign-in that names a user by
+/// id (`Auth::login_id`, the session guards' `login`, `attempt` and
+/// `login_using_id`, `Auth::login_remember` and
+/// `TwoFactor::complete_challenge`), so it is where the guard's sign-in
+/// starts carrying an authentication epoch (HRD-007). It marks the epoch
+/// [`GuardSignInEpoch::Unread`]: this function is synchronous and has no
+/// user to read one from. A caller that has the user replaces the mark with
+/// the epoch at once through [`record_guard_sign_in_epoch`]; for
+/// `Auth::login_id`, which has none, the first request that resolves the
+/// user records it. The mark keeps that sign-in apart from a session signed
+/// in before 4.0.0, which records nothing and is not checked.
+///
+/// A sign-in that Magnetar fences (the default guard with the engine's
+/// host sign-in authority installed) gets no mark: its Magnetar session is
+/// issued at Magnetar's epoch and validated on every request, and a second
+/// comparison against another value could only disagree with it.
 pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) {
     let user_id = user_id.into();
     let is_default = guard_name == crate::auth::Auth::default_guard_name();
+    let mark_epoch_unread = !crate::auth::epoch::magnetar_fences(guard_name);
     session_mut(|session| {
         if is_default {
             retire_default_binding(session);
         }
         session.replace_auth_guard_id(guard_name, user_id.clone());
+        if mark_epoch_unread {
+            session.mark_auth_guard_epoch_unread(guard_name);
+        }
         if is_default {
             session.clear_magnetar_web_binding();
             session.user_id = Some(user_id.clone());
@@ -2962,7 +3007,63 @@ pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) 
     crate::auth::request_state::set_guard_user_id(guard_name, user_id);
 }
 
+/// The authentication epoch the session recorded for the sign-in of the
+/// guard `guard_name` as `user_id`, or `None` when it recorded none or the
+/// session's persisted identity for that guard is not `user_id`.
+///
+/// The identity check matters: the epoch belongs to the identity stored
+/// beside it, and a request-only identity (`once`, `set_user`) is not the
+/// sign-in it was recorded for.
+///
+/// Reads the session slot directly instead of through [`session`], which
+/// would mark the render `Uncacheable`. This read is part of resolving the
+/// principal, the same exception [`session_identity`] makes: its only
+/// outcome is whether the principal stays signed in, and the principal is
+/// what a cached representation is already keyed by. Every request that
+/// resolves its user reads it, so marking it would make every
+/// authenticated route uncacheable.
+pub(crate) fn persisted_guard_sign_in_epoch(
+    guard_name: &str,
+    user_id: &str,
+) -> Option<GuardSignInEpoch> {
+    SESSION_CONTEXT
+        .try_with(|slot| {
+            let slot = crate::lock::recover(slot);
+            let session = slot.as_ref()?;
+            if session.auth_guard_id(guard_name).as_deref() != Some(user_id) {
+                return None;
+            }
+            session.auth_guard_epoch(guard_name)
+        })
+        .ok()
+        .flatten()
+}
+
+/// Record `epoch` as the authentication epoch of the guard `guard_name`'s
+/// sign-in as `user_id`, replacing the [`GuardSignInEpoch::Unread`] mark of
+/// [`set_guard_auth_user`]. `None`, a user that exposes no epoch, removes
+/// the mark, so the sign-in is not checked (HRD-007's exception).
+///
+/// Writes nothing when the session's identity for the guard is no longer
+/// `user_id`: a later sign-in or logout in the same request replaced it,
+/// and the epoch of a user it no longer holds must not attach to whoever
+/// holds the guard now.
+pub(crate) fn record_guard_sign_in_epoch(guard_name: &str, user_id: &str, epoch: Option<u64>) {
+    session_mut(|session| {
+        if session.auth_guard_id(guard_name).as_deref() != Some(user_id) {
+            return;
+        }
+        match epoch {
+            Some(epoch) => session.set_auth_guard_epoch(guard_name, epoch),
+            None => session.clear_auth_guard_epoch(guard_name),
+        }
+    });
+}
+
 /// Helper to set the authenticated user
+///
+/// The sign-in carries the user's authentication epoch: the first request
+/// that resolves the user records it, as for `Auth::login_id`.
 pub fn set_auth_user(user_id: impl Into<String>) {
     set_guard_auth_user(&crate::auth::Auth::default_guard_name(), user_id);
 }

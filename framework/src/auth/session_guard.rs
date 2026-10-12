@@ -108,6 +108,33 @@ impl SessionGuard {
         Ok(())
     }
 
+    /// The authentication epoch this guard's sign-in of `user_id` records
+    /// (HRD-007), read through the guard's own provider: `None` when
+    /// Magnetar fences the guard (Magnetar's epoch is then the one compared,
+    /// see [`super::epoch`]), when the provider does not know the user, or
+    /// when the user exposes no epoch.
+    ///
+    /// Read from the provider rather than from the user the caller holds,
+    /// for two reasons. Every later request compares against what this
+    /// provider returns, so the value recorded is exactly the value read
+    /// back. And `attempt` rehashes the password before it signs the user
+    /// in: the user it holds carries the hash the rehash replaced, and an
+    /// epoch read from it would end the sign-in on its next request.
+    ///
+    /// It costs one lookup by id per sign-in, which already paid a password
+    /// verification or the lookup that found the user.
+    async fn sign_in_epoch(&self, user_id: &str) -> Result<Option<u64>, FrameworkError> {
+        if super::epoch::magnetar_fences(&self.name) {
+            return Ok(None);
+        }
+        Ok(self
+            .provider
+            .retrieve_by_id(user_id)
+            .await?
+            .as_deref()
+            .and_then(super::epoch::credential_epoch))
+    }
+
     async fn login_at_epoch(
         &self,
         user: Arc<dyn Authenticatable>,
@@ -115,6 +142,10 @@ impl SessionGuard {
         recorded_epoch: Option<u64>,
     ) -> Result<(), FrameworkError> {
         let user_id = user.get_auth_identifier();
+        // Read before anything changes: a provider error fails the login
+        // with nothing committed, rather than committing a sign-in whose
+        // epoch could not be read and would then go unchecked.
+        let sign_in_epoch = self.sign_in_epoch(&user_id).await?;
         let host_auth_epoch = if self.name == Auth::default_guard_name() {
             let current = crate::magnetar_integration::admit_host_sign_in(&user_id).await?;
             match (recorded_epoch, current) {
@@ -141,6 +172,7 @@ impl SessionGuard {
         // committed identity transition into a reported failure. Final store
         // persistence remains SessionMiddleware's fail-closed responsibility.
         Auth::login_guard_id(&self.name, user_id.clone())?;
+        crate::session::middleware::record_guard_sign_in_epoch(&self.name, &user_id, sign_in_epoch);
         if let Some(auth_epoch) = host_auth_epoch {
             crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
         }
@@ -211,11 +243,25 @@ impl Guard for SessionGuard {
             None => return Ok(None),
         };
 
-        let user = self.provider.retrieve_by_id(&id).await?;
-        if let Some(user) = &user {
-            request_state::set_guard_user(&self.name, user.clone());
+        let Some(user) = self.provider.retrieve_by_id(&id).await? else {
+            return Ok(None);
+        };
+        // HRD-007: the session's sign-in carries the user's authentication
+        // epoch at sign-in. A different one now means the password changed
+        // (or the model's own counter advanced) after this session signed
+        // in, so the session is one the change was meant to end, whether or
+        // not the eager revocation reached it. It ends here, before the user
+        // reaches the application, and the request continues as a guest.
+        if super::epoch::check_session_sign_in(&self.name, &id, &*user)
+            == super::epoch::SessionSignInCheck::Stale
+        {
+            // Boxed: the rare stale path must not enlarge the future of
+            // every resolution.
+            Box::pin(Auth::end_stale_guard_sign_in(&self.name, &id)).await;
+            return Ok(None);
         }
-        Ok(user)
+        request_state::set_guard_user(&self.name, user.clone());
+        Ok(Some(user))
     }
 
     async fn id(&self) -> Result<Option<String>, FrameworkError> {

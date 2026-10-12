@@ -2517,3 +2517,407 @@ fn session_guard_remember_login_replaces_malformed_carrier_clear_cookie() {
         assert!(!credential.is_empty());
     });
 }
+
+// HRD-007: remember-me credentials are bound to the user's authentication
+// epoch at issue, and one issued before a password change stops signing the
+// user in after it.
+
+/// The plaintext the HRD-007 remember tests sign in with.
+#[cfg(feature = "testing")]
+const EPOCH_PASSWORD: &str = "correct horse battery staple";
+
+/// The stored form of the password at `generation`: the provider checks a
+/// password by rebuilding it, so the tests pay no hashing cost; the epoch
+/// only reads the string the model returns.
+#[cfg(feature = "testing")]
+fn epoch_hash(generation: u32) -> String {
+    format!("test-hash:{generation}:{EPOCH_PASSWORD}")
+}
+
+#[cfg(feature = "testing")]
+#[derive(Clone)]
+struct EpochRememberUser {
+    id: String,
+    password_hash: String,
+}
+
+#[cfg(feature = "testing")]
+impl Authenticatable for EpochRememberUser {
+    fn get_auth_identifier(&self) -> String {
+        self.id.clone()
+    }
+
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password_hash)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// One user with an email and a password hash that the tests rewrite.
+/// With `rehash_on_sign_in`, every proven password gets a new hash, as a
+/// provider that rewrites hashes for a shared Laravel database does.
+#[cfg(feature = "testing")]
+struct EpochRememberProvider {
+    user: std::sync::Mutex<EpochRememberUser>,
+    email: &'static str,
+    generation: std::sync::Mutex<u32>,
+    rehash_on_sign_in: bool,
+}
+
+#[cfg(feature = "testing")]
+impl EpochRememberProvider {
+    fn new(id: &str, email: &'static str, rehash_on_sign_in: bool) -> Arc<Self> {
+        Arc::new(Self {
+            user: std::sync::Mutex::new(EpochRememberUser {
+                id: id.to_owned(),
+                password_hash: epoch_hash(0),
+            }),
+            email,
+            generation: std::sync::Mutex::new(0),
+            rehash_on_sign_in,
+        })
+    }
+
+    /// Store a new hash of the same password, as a reset or a rehash does.
+    fn rewrite_password(&self) {
+        let mut generation = self.generation.lock().unwrap();
+        *generation += 1;
+        self.user.lock().unwrap().password_hash = epoch_hash(*generation);
+    }
+}
+
+#[cfg(feature = "testing")]
+#[async_trait::async_trait]
+impl UserProvider for EpochRememberProvider {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let user = self.user.lock().unwrap().clone();
+        Ok((user.id == id).then(|| Arc::new(user) as Arc<dyn Authenticatable>))
+    }
+
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &serde_json::Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let email = credentials.get("email").and_then(serde_json::Value::as_str);
+        let user = self.user.lock().unwrap().clone();
+        Ok((email == Some(self.email)).then(|| Arc::new(user) as Arc<dyn Authenticatable>))
+    }
+
+    async fn validate_credentials(
+        &self,
+        _user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+    ) -> Result<bool, FrameworkError> {
+        let generation = *self.generation.lock().unwrap();
+        Ok(credentials
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|password| {
+                format!("test-hash:{generation}:{password}")
+                    == self.user.lock().unwrap().password_hash
+            }))
+    }
+
+    async fn rehash_password_if_required(
+        &self,
+        _user: &dyn Authenticatable,
+        _credentials: &serde_json::Value,
+    ) -> Result<(), FrameworkError> {
+        if self.rehash_on_sign_in {
+            self.rewrite_password();
+        }
+        Ok(())
+    }
+}
+
+/// Bind the default auth manager with `provider` as `"users"` in the
+/// test's container scope.
+#[cfg(feature = "testing")]
+fn bind_epoch_provider(provider: Arc<EpochRememberProvider>) {
+    TestContainer::singleton(suprnova::AuthManager::new(suprnova::AuthConfig::default()));
+    Auth::register_provider("users", provider).expect("register the users provider");
+}
+
+/// What one request through the session middleware answered.
+#[cfg(feature = "testing")]
+struct EpochAnswer {
+    status: u16,
+    session_cookie: Option<String>,
+    /// The remember cookie the response installed, if it installed one.
+    remember_cookie: Option<String>,
+    /// Whether the response cleared the remember cookie.
+    remember_cleared: bool,
+    /// The response body, which names the error of a failed request.
+    body: String,
+}
+
+/// Serve one request carrying `cookies` through `SessionMiddleware`, with
+/// `handler` behind it, inside the request's auth scope.
+#[cfg(feature = "testing")]
+async fn serve_epoch_request(
+    cookies: &[(&str, &str)],
+    handler: suprnova::middleware::Next,
+) -> EpochAnswer {
+    use suprnova::middleware::Middleware;
+
+    let request = request_with_cookies(cookies).await;
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    config.remember_lifetime = std::time::Duration::from_secs(60 * 60 * 24);
+    let session_cookie_name = config.cookie_name.clone();
+    let response = request_state::request_state_scope_for_test(
+        suprnova::SessionMiddleware::new(config).handle(request, handler),
+    )
+    .await;
+    let response = match response {
+        Ok(response) | Err(response) => response,
+    };
+    let status = response.status_code();
+    let response = response.into_hyper();
+    let (parts, body) = response.into_parts();
+    let body = http_body_util::BodyExt::collect(body)
+        .await
+        .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
+        .unwrap_or_default();
+    let headers = parts
+        .headers
+        .get_all("Set-Cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let value_of = |header: &str, name: &str| {
+        header
+            .strip_prefix(&format!("{name}="))
+            .and_then(|rest| rest.split(';').next())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let remember = headers
+        .iter()
+        .filter(|header| header.starts_with("remember_me="))
+        .collect::<Vec<_>>();
+    EpochAnswer {
+        status,
+        session_cookie: headers
+            .iter()
+            .find_map(|header| value_of(header, &session_cookie_name)),
+        remember_cookie: remember
+            .iter()
+            .filter(|header| !header.contains("Max-Age=0"))
+            .find_map(|header| value_of(header, "remember_me")),
+        remember_cleared: remember.iter().any(|header| header.contains("Max-Age=0")),
+        body,
+    }
+}
+
+/// A route behind `AuthMiddleware::new()`: `200` for a signed-in user,
+/// the middleware's `401` for a guest.
+#[cfg(feature = "testing")]
+fn epoch_authenticated_route() -> suprnova::middleware::Next {
+    use suprnova::middleware::Middleware;
+
+    let route: suprnova::middleware::Next =
+        Arc::new(|_request| Box::pin(async { Ok(suprnova::HttpResponse::text("dashboard")) }));
+    Arc::new(move |request| {
+        let route = route.clone();
+        Box::pin(async move { suprnova::AuthMiddleware::new().handle(request, route).await })
+    })
+}
+
+/// A handler that signs `email` in through `Auth::attempt` with
+/// remember-me.
+#[cfg(feature = "testing")]
+fn epoch_remembered_sign_in(email: &'static str) -> suprnova::middleware::Next {
+    Arc::new(move |_request| {
+        Box::pin(async move {
+            match Auth::attempt(&Credentials::password(email, EPOCH_PASSWORD), true).await {
+                Ok(Some(_)) => Ok(suprnova::HttpResponse::text("signed in")),
+                Ok(None) => Err(suprnova::HttpResponse::text("wrong password").status(422)),
+                Err(error) => Err(suprnova::HttpResponse::text(error.to_string()).status(500)),
+            }
+        })
+    })
+}
+
+/// HRD-007's remember falsifier: a remember cookie issued before a password
+/// change must not sign the user in after it, and its row must be gone.
+#[cfg(feature = "testing")]
+#[test]
+fn hardening_remember_cookie_issued_before_a_password_change_stops_signing_in() {
+    in_database(async {
+        let user_id = "hrd007-remember-stale";
+        let provider = EpochRememberProvider::new(user_id, "stale@example.test", false);
+        bind_epoch_provider(provider.clone());
+
+        let signed_in =
+            serve_epoch_request(&[], epoch_remembered_sign_in("stale@example.test")).await;
+        assert_eq!(signed_in.status, 200, "the remembered sign-in succeeds");
+        let remember = signed_in
+            .remember_cookie
+            .expect("the sign-in installs a remember cookie");
+        assert_eq!(count_tokens_for(user_id).await, 1);
+
+        // With the password unchanged, the remember cookie alone signs the
+        // user in and rotates.
+        let remembered =
+            serve_epoch_request(&[("remember_me", &remember)], epoch_authenticated_route()).await;
+        assert_eq!(remembered.status, 200, "the cookie signs the user in");
+        let rotated = remembered
+            .remember_cookie
+            .expect("the remembered sign-in rotates the cookie");
+        assert_eq!(count_tokens_for(user_id).await, 1);
+
+        // A password reset rewrites the hash; its revocation of the remember
+        // rows is taken to have failed, so the row is still stored.
+        provider.rewrite_password();
+        assert_eq!(count_tokens_for(user_id).await, 1);
+
+        let after =
+            serve_epoch_request(&[("remember_me", &rotated)], epoch_authenticated_route()).await;
+        assert_eq!(
+            after.status, 401,
+            "a remember cookie from before the change does not sign the user in"
+        );
+        assert!(after.remember_cleared, "the stale cookie is cleared");
+        assert_eq!(after.remember_cookie, None);
+        assert_eq!(count_tokens_for(user_id).await, 0, "the stale row is gone");
+    });
+}
+
+/// A remember row hashed without an epoch, as every row from before 4.0.0
+/// is, fails verification once its user has one: the row is deleted and the
+/// cookie cleared, so the device signs in again one time.
+#[cfg(feature = "testing")]
+#[test]
+fn hardening_remember_row_hashed_without_an_epoch_is_refused_and_deleted() {
+    in_database(async {
+        let user_id = "hrd007-remember-unbound";
+        let provider = EpochRememberProvider::new(user_id, "unbound@example.test", false);
+        bind_epoch_provider(provider);
+
+        let (selector, verifier, bare_hash) = suprnova::auth::remember::generate_token()
+            .await
+            .expect("generate a token");
+        insert_raw_token(
+            user_id,
+            &selector,
+            &bare_hash,
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await;
+        let cookie = Cookie::encrypted(
+            suprnova::auth::remember::COOKIE_NAME,
+            format!("{selector}.{verifier}"),
+        )
+        .expect("encrypt the cookie");
+
+        let answer = serve_epoch_request(
+            &[("remember_me", cookie.value())],
+            epoch_authenticated_route(),
+        )
+        .await;
+        assert_eq!(answer.status, 401, "the unbound row does not sign in");
+        assert!(answer.remember_cleared, "the cookie is cleared");
+        assert_eq!(count_tokens_for(user_id).await, 0, "the row is deleted");
+    });
+}
+
+/// A provider that rewrites the hash of every proven password, as one over
+/// a database shared with Laravel does: `Auth::attempt` rehashes before it
+/// signs the user in, and `Auth::logout_other_devices` after its password
+/// check. The sign-in records the epoch of the hash it leaves behind, and
+/// the device that signs the others out keeps its session and its
+/// remember-me credential, both bound again to the new epoch.
+#[cfg(feature = "testing")]
+#[test]
+fn hardening_rehash_on_sign_in_and_logout_other_devices_keeps_this_device_signed_in() {
+    in_database(async {
+        let user_id = "hrd007-other-devices";
+        let provider = EpochRememberProvider::new(user_id, "devices@example.test", true);
+        bind_epoch_provider(provider.clone());
+        // `logout_other_devices` destroys the other sessions through the
+        // store the container resolves. Bind the database store here, so a
+        // store another file of this binary left in the process container
+        // is not the one asked.
+        TestContainer::bind::<dyn suprnova::session::SessionStore>(Arc::new(
+            suprnova::session::driver::database::DatabaseSessionDriver::new(
+                SessionConfig::default().lifetime,
+            ),
+        ));
+
+        let signed_in =
+            serve_epoch_request(&[], epoch_remembered_sign_in("devices@example.test")).await;
+        assert_eq!(signed_in.status, 200);
+        assert_eq!(
+            provider.user.lock().unwrap().password_hash,
+            epoch_hash(1),
+            "the sign-in rehashed the password"
+        );
+        let session = signed_in.session_cookie.expect("a session cookie");
+        let remember = signed_in.remember_cookie.expect("a remember cookie");
+        let session_cookie_name = SessionConfig::default().cookie_name;
+
+        let after_sign_in = serve_epoch_request(
+            &[(&session_cookie_name, &session)],
+            epoch_authenticated_route(),
+        )
+        .await;
+        assert_eq!(
+            after_sign_in.status, 200,
+            "the session is bound to the hash the sign-in left behind"
+        );
+
+        let logout_others: suprnova::middleware::Next = Arc::new(|_request| {
+            Box::pin(async {
+                Auth::logout_other_devices(EPOCH_PASSWORD)
+                    .await
+                    .map(|()| suprnova::HttpResponse::text("others signed out"))
+                    .map_err(|error| suprnova::HttpResponse::text(error.to_string()).status(500))
+            })
+        });
+        let logged_out = serve_epoch_request(
+            &[(&session_cookie_name, &session), ("remember_me", &remember)],
+            logout_others,
+        )
+        .await;
+        assert_eq!(
+            logged_out.status, 200,
+            "logout_other_devices succeeds: {}",
+            logged_out.body
+        );
+        assert_eq!(
+            provider.user.lock().unwrap().password_hash,
+            epoch_hash(2),
+            "logout_other_devices rehashed the proven password"
+        );
+        let session = logged_out.session_cookie.unwrap_or(session);
+        let remember = logged_out
+            .remember_cookie
+            .expect("this device's remember cookie is bound to the new hash");
+
+        let this_session = serve_epoch_request(
+            &[(&session_cookie_name, &session)],
+            epoch_authenticated_route(),
+        )
+        .await;
+        assert_eq!(this_session.status, 200, "this device's session stands");
+
+        let this_remember =
+            serve_epoch_request(&[("remember_me", &remember)], epoch_authenticated_route()).await;
+        assert_eq!(
+            this_remember.status, 200,
+            "this device's remember cookie still signs in"
+        );
+    });
+}

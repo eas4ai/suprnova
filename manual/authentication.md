@@ -220,9 +220,13 @@ framework's word for who signed in, and no Magnetar plugin can reach it.
   account that has both anyway, from before that check or from an import, is
   refused by every path until an administrator disables one of them; see
   [One second factor per account](auth-flows.md#one-second-factor-per-account).
-- **Auth epochs.** `Auth::attempt` issues the session at the auth epoch read
-  with the password, and carries that epoch into `TwoFactor::start_challenge`
-  rather than reading it again. A password reset or "sign out everywhere"
+- **Auth epochs.** Every framework sign-in carries the user's auth epoch, as
+  [Auth epochs](#auth-epochs) describes. Under the engine, the default guard's
+  epoch is Magnetar's own, and the session middleware checks it on every
+  request by validating the Magnetar session, so the framework compares no
+  second value for that guard. `Auth::attempt` issues the session at the auth
+  epoch read with the password, and carries that epoch into
+  `TwoFactor::start_challenge` rather than reading it again. A password reset or "sign out everywhere"
   that commits after the password was read therefore cancels the sign-in
   with `401`, and one between `start_challenge` and `complete_challenge`
   cancels the challenge with `401` before its code is read. The epoch comes
@@ -446,6 +450,13 @@ you revoke the user's other sessions and remember credentials while keeping
 the current session ID, CSRF token, session data, and remember selector. With
 an incorrect password, you receive `FrameworkError::Validation` on `password`
 and keep every credential unchanged.
+
+When the provider rewrites the password hash after the password check, as
+`EloquentUserProvider` and `DatabaseUserProvider` do for a database shared
+with Laravel, the hash is a new [auth epoch](#auth-epochs). The current
+session is bound to the new epoch, and without Magnetar the current
+remember-me cookie is replaced with one bound to it, so this browser stays
+signed in.
 
 With Magnetar installed, you also revoke its other sessions and remember
 credentials while keeping the current web binding. You keep the current
@@ -1086,7 +1097,107 @@ browser drops its credential even when the storage operation fails.
 
 When no Magnetar engine is installed, the framework retains the legacy
 `remember_tokens` fallback for compatibility. New applications should
-initialize Magnetar rather than relying on that fallback.
+initialize Magnetar rather than relying on that fallback. Each row of the
+fallback is bound to the user's [auth epoch](#auth-epochs) at issue: its
+hash covers the verifier and the epoch together, so a cookie issued before
+a password change fails verification after it, its row is deleted, and its
+cookie is cleared.
+
+## Auth epochs
+
+Every sign-in that the framework issues through a user provider records the
+user's *auth epoch*, and every request that resolves the user compares it
+with the user's current one. A password change therefore ends every older
+sign-in on its next request, even when the password reset's revocation of
+the user's other sessions failed.
+
+The epoch of a user is the value `Authenticatable::auth_epoch` returns. When
+the model returns `None`, the epoch is a digest of the password hash that
+`Authenticatable::get_auth_password` returns. Every password write stores a
+new hash, with a new salt even for the same password, so the digest changes
+with every reset, change, and rehash, and no table needs a new column.
+
+The framework records and compares the epoch in these places:
+
+- **Session sign-ins.** `Auth::attempt`, `Auth::login`,
+  `Auth::login_using_id`, `Auth::login_remember`, and the same methods of a
+  named session guard read the epoch through the guard's provider and record
+  it beside the guard's identity in the session. `Auth::login_id` asks no
+  provider, so the first request that resolves the user records it.
+- **Remember-me credentials.** Without the Magnetar engine, each
+  `remember_tokens` row is bound to the epoch at issue, and the cookie
+  verifies only against the user's current epoch.
+- **Requests.** `Auth::user`, a guard's `user` method, and `AuthMiddleware`
+  resolve the user and compare. `Auth::id` and `Auth::check` read the
+  session without resolving the user, so they don't compare.
+
+When the epochs differ, the framework ends that sign-in before the request
+reaches your handler. The guard's identity leaves the session, the
+remember-me credential this session holds for the guard is deleted and its
+cookie cleared, and the request continues as a guest's: `AuthMiddleware`
+answers `401` or redirects to your login page. The framework logs the user
+id at `info` level. It dispatches no `Logout` event, because the user didn't
+sign out, and it leaves the other guards of the session signed in.
+
+A user whose model returns `None` from both `auth_epoch` and
+`get_auth_password`, such as an OAuth-only account, records no epoch and
+isn't checked. A session signed in before 4.0.0 carries no epoch either; it
+is checked from the user's next sign-in.
+
+If your table keeps a counter that also advances without a password change,
+for example on a "sign out everywhere" action, return it from `auth_epoch`:
+
+```rust
+use std::any::Any;
+use std::sync::Arc;
+use suprnova::Authenticatable;
+
+struct User {
+    id: i64,
+    password: String,
+    session_version: u64,
+}
+
+impl Authenticatable for User {
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password)
+    }
+
+    // Takes the place of the password digest: bump it to end every session.
+    fn auth_epoch(&self) -> Option<u64> {
+        Some(self.session_version)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+```
+
+The first time a model returns a counter, the sessions it recorded under the
+digest end once.
+
+With the Magnetar engine installed, the default guard's sign-ins carry
+Magnetar's own epoch instead; see
+[Framework logins under the engine](#framework-logins-under-the-engine).
+
+### Why Suprnova diverges
+
+Laravel compares a session with the user's password hash only on routes
+that run the `AuthenticateSession` middleware, and flushes the whole session
+on a mismatch. Suprnova compares on every request that resolves a user, for
+every session guard and for remember-me cookies, so a stolen credential
+stops working after a password change whatever middleware the route runs. A
+mismatch ends only that guard's sign-in, so another guard signed in on the
+same session keeps its sign-in.
 
 ## Security guarantees
 
@@ -1104,6 +1215,11 @@ A short list of invariants the auth stack establishes:
   clear cookie is queued *before* the DB delete, so the browser drops
   the cookie even when the row delete fails (the prune sweep cleans up
   later).
+- **A password change ends older sign-ins.** Every session sign-in and
+  remember-me credential records the user's [auth epoch](#auth-epochs), and
+  a request that resolves the user refuses one recorded under an earlier
+  password, so a session that a failed revocation left behind stops working
+  on its next request.
 - **Credential allowlists block injection.** Both built-in providers
   filter `retrieve_by_credentials` against `credential_columns`, so
   extra keys in an attacker-influenced credential map cannot become

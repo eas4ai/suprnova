@@ -20,6 +20,10 @@ pub mod custom_guard;
 pub mod database_provider;
 pub mod dummy_verify_timing;
 pub mod eloquent_provider;
+/// HRD-007: the authentication epoch of every provider-backed sign-in,
+/// observed by the `hardening` mechanism with the `hardening_` tests of
+/// `remember_me`.
+pub mod hardening;
 pub mod http_middleware;
 #[cfg(feature = "testing")]
 mod models;
