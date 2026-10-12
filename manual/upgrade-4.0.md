@@ -63,6 +63,18 @@ entry of the release is either a section here or listed under
 
 ## Configuration and environment
 
+### Runtime threads have an 8 MiB stack.
+
+**Before:** 3.2.1's `#[suprnova::main]` built the Tokio runtime with Tokio's
+default stack, 2 MiB for each worker and blocking thread.
+
+**Now:** Each runtime thread has an 8 MiB stack, the size Linux gives the
+main thread. The size is reserved address space; a thread uses memory only
+as its stack is touched.
+
+**Do:** Nothing to do. An application that set `RUST_MIN_STACK` to keep a
+debug build from overflowing under a Live action can drop it.
+
 ### An unset `APP_ENV` is production.
 
 **Before:** An unset `APP_ENV` was `local`: `.env.local` loaded and none of

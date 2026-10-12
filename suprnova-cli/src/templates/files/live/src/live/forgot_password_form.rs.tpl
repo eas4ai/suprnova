@@ -10,7 +10,7 @@ use suprnova::auth_flows::PasswordReset;
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
 use suprnova::{Validate, url};
 
-use super::{FieldErrors, on_own_task, redirect};
+use super::{FieldErrors, redirect};
 use crate::flash::Toast;
 
 /// Where the mailed link lands: the form that takes the new password.
@@ -51,11 +51,7 @@ impl ForgotPasswordForm {
             self.errors = FieldErrors::from_rules(&errors);
             return Ok(ActionResult::render());
         }
-        let email = input.email;
-        let sent = on_own_task("sending a password reset link", async move {
-            PasswordReset::send_link(&email, &url::to(RESET_PATH)).await
-        })
-        .await?;
+        let sent = PasswordReset::send_link(&input.email, &url::to(RESET_PATH)).await;
         let toast = match sent {
             Ok(_) => Toast::info("If that address is registered, a reset link is on its way."),
             Err(error) => {

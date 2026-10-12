@@ -5,4 +5,5 @@ pub mod env_after_runtime;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
 pub mod main_bootstrap_boundaries;
+pub mod thread_stack;
 pub mod wiring;
