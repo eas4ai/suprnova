@@ -91,6 +91,12 @@ and last on the way out, so the request id is in scope while the timeout
 fires its `503`. Putting the timeout before logging would hide slow
 requests that did eventually complete from the access log.
 
+A project that `suprnova new` creates installs the default timeout for
+you. The Inertia and Live kits install it after the session middleware and
+the error page, so its `503` renders as the error page in the visitor's
+session and locale, and before CSRF, so it bounds the CSRF check. The API
+kit installs it first.
+
 ## Tightening per route
 
 A 30-second global ceiling is generous on purpose - it's there to catch
@@ -168,6 +174,11 @@ the body finishes streaming. That distinction is load-bearing:
   under a 30-second timeout, by design - see
   [Server-Sent Events](sse.md) for the streaming model.
 - **WebSocket upgrades** are skipped explicitly. See the next section.
+- **Request bodies** that a handler, or a middleware inside the timeout,
+  reads are part of the work the deadline bounds. A slow upload can reach
+  the timeout's `503` before the server's own body deadlines answer `408`;
+  see [Body read deadlines](requests.md#body-read-deadlines). For a route
+  that takes long uploads, raise both.
 
 This is the behaviour you almost certainly want. If you wrapped a
 long-lived SSE stream in a 30-second timeout, the framework would tear

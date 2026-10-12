@@ -1,7 +1,8 @@
 use super::ParamError;
 use super::body::{
-    collect_after, collect_body_with_cap, global_max_request_body_bytes, is_form_urlencoded,
-    is_multipart_form_data, parse_form, parse_json, parse_multipart, read_failure,
+    BodyDeadline, collect_after, collect_body_until, global_max_request_body_bytes,
+    is_form_urlencoded, is_multipart_form_data, parse_form, parse_json, parse_multipart,
+    read_failure,
 };
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
@@ -10,7 +11,6 @@ use crate::live::attestation::{
     LiveOperation, LiveRequestIdentity, LiveSecurityAttestation, SecurityCheck,
 };
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
@@ -310,8 +310,15 @@ impl Request {
     /// Wrap a hyper request, splitting off the streaming body. Used by
     /// the server's request pipeline; in-process tests construct via
     /// [`crate::testing`] helpers instead.
+    ///
+    /// The body deadlines (HRD-001) are the ones the server started as it
+    /// read the request head; a request no `Server::run` served starts the
+    /// configured ones here.
     pub fn new(inner: hyper::Request<hyper::body::Incoming>) -> Self {
-        let (parts, body) = inner.into_parts();
+        let (mut parts, body) = inner.into_parts();
+        if parts.extensions.get::<BodyDeadline>().is_none() {
+            parts.extensions.insert(BodyDeadline::configured());
+        }
         Self {
             parts,
             body: BodyState::Streaming(body),
@@ -1804,10 +1811,11 @@ impl Request {
         let content_length = super::body::parse_content_length(&self.parts.headers);
 
         let params = self.params;
+        let deadline = deadline_of(&self.parts);
 
         let bytes = match self.body {
             BodyState::Streaming(incoming) => {
-                collect_body_with_cap(incoming, content_length, max_bytes).await?
+                collect_body_until(incoming, content_length, max_bytes, deadline).await?
             }
             // Middleware buffered the body upstream (typically the CSRF
             // middleware). Return the cached bytes without touching the
@@ -1834,7 +1842,9 @@ impl Request {
                 ));
             }
             BodyState::Failed(error) => return Err(error),
-            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
+            BodyState::Partial { read, rest } => {
+                collect_after(read, rest, max_bytes, deadline).await?
+            }
         };
 
         Ok((
@@ -1863,11 +1873,12 @@ impl Request {
     /// already buffered).
     pub async fn buffer_body(mut self, max_bytes: usize) -> Result<Self, FrameworkError> {
         let content_length = super::body::parse_content_length(&self.parts.headers);
+        let deadline = deadline_of(&self.parts);
 
         let body = std::mem::replace(&mut self.body, BodyState::Consumed);
         let bytes = match body {
             BodyState::Streaming(incoming) => {
-                collect_body_with_cap(incoming, content_length, max_bytes).await?
+                collect_body_until(incoming, content_length, max_bytes, deadline).await?
             }
             BodyState::Buffered(b) => b,
             BodyState::Consumed => {
@@ -1876,7 +1887,9 @@ impl Request {
                 ));
             }
             BodyState::Failed(error) => return Err(error),
-            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
+            BodyState::Partial { read, rest } => {
+                collect_after(read, rest, max_bytes, deadline).await?
+            }
         };
         self.body = BodyState::Buffered(bytes);
         Ok(self)
@@ -1894,10 +1907,12 @@ impl Request {
     /// still reads all of it. A read that fails leaves the body
     /// [`BodyState::Failed`] with the error
     /// [`body_bytes`](Self::body_bytes) would return, so the handler's own
-    /// read returns it too. A body a middleware consumed before stays
-    /// consumed.
+    /// read returns it too; a body that misses its deadline fails the same
+    /// way, with the `408` the handler's read would have met. A body a
+    /// middleware consumed before stays consumed.
     pub(crate) async fn read_body_up_to(&mut self, max_bytes: usize) -> BodyRead {
         let content_length = super::body::parse_content_length(&self.parts.headers);
+        let deadline = deadline_of(&self.parts);
         match std::mem::replace(&mut self.body, BodyState::Consumed) {
             BodyState::Buffered(bytes) => {
                 self.body = BodyState::Buffered(bytes.clone());
@@ -1911,11 +1926,16 @@ impl Request {
             }
             BodyState::Streaming(mut incoming) => {
                 let mut buf: Vec<u8> = Vec::new();
-                while let Some(frame) = incoming.frame().await {
-                    let frame = match frame {
-                        Ok(frame) => frame,
-                        Err(error) => {
+                loop {
+                    let frame = match deadline.frame(&mut incoming).await {
+                        Ok(Some(Ok(frame))) => frame,
+                        Ok(None) => break,
+                        Ok(Some(Err(error))) => {
                             self.body = BodyState::Failed(read_failure(error));
+                            return BodyRead::Failed;
+                        }
+                        Err(late) => {
+                            self.body = BodyState::Failed(late);
                             return BodyRead::Failed;
                         }
                     };
@@ -1946,6 +1966,13 @@ impl Request {
                 BodyRead::Failed
             }
         }
+    }
+
+    /// The deadlines a read of this request's body waits under (HRD-001):
+    /// for a parser that reads the stream itself, as the multipart parsers
+    /// do.
+    pub(crate) fn body_deadline(&self) -> BodyDeadline {
+        deadline_of(&self.parts)
     }
 
     /// Read the cached body bytes set by [`Request::buffer_body`].
@@ -2086,6 +2113,17 @@ impl Request {
             self.body,
         )
     }
+}
+
+/// The body deadlines of the request whose head is `parts`: the ones
+/// [`Request::new`] kept, or, for a request built another way, the
+/// configured ones, starting now.
+fn deadline_of(parts: &hyper::http::request::Parts) -> BodyDeadline {
+    parts
+        .extensions
+        .get::<BodyDeadline>()
+        .copied()
+        .unwrap_or_else(BodyDeadline::configured)
 }
 
 /// Request parts after body has been separated
@@ -2694,5 +2732,67 @@ mod url_helper_tests {
         // falls through to the authoritative TCP peer instead of echoing junk.
         assert_eq!(req.ip().as_deref(), Some("10.0.0.9"));
         assert_eq!(req.ips(), vec!["10.0.0.9".to_string()]);
+    }
+
+    /// HRD-001: the partial read a middleware that only observes the
+    /// request performs (CSRF reading a JSON `_token`, DevTools) waits
+    /// under the body deadline too, and a body that misses it keeps the
+    /// `408` for the handler's own read.
+    #[tokio::test]
+    async fn hardening_a_partial_read_keeps_a_late_body_408() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let outcome_tx = std::sync::Mutex::new(Some(outcome_tx));
+            let service = hyper::service::service_fn(
+                move |mut req: hyper::Request<hyper::body::Incoming>| {
+                    // The deadline `Server::run` would start, kept short.
+                    req.extensions_mut().insert(BodyDeadline::start(
+                        std::time::Duration::from_millis(150),
+                        std::time::Duration::from_secs(60),
+                    ));
+                    let outcome_tx = outcome_tx.lock().expect("lock").take();
+                    async move {
+                        let mut request = Request::new(req);
+                        let failed =
+                            matches!(request.read_body_up_to(1024).await, BodyRead::Failed);
+                        let status = request.body_bytes().await.err().map(|e| e.status_code());
+                        if let Some(outcome_tx) = outcome_tx {
+                            let _ = outcome_tx.send((failed, status));
+                        }
+                        Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                            http_body_util::Empty::<Bytes>::new(),
+                        ))
+                    }
+                },
+            );
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        // Complete headers and one byte of a five-byte JSON body, then
+        // silence.
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+                  Content-Length: 5\r\n\r\n{",
+            )
+            .await
+            .expect("write");
+
+        let (failed, status) = tokio::time::timeout(std::time::Duration::from_secs(10), outcome_rx)
+            .await
+            .expect("the partial read ends at the body deadline, not never")
+            .expect("the service reports its outcome");
+        assert!(failed, "a late body leaves the partial read failed");
+        assert_eq!(status, Some(408), "the handler's read meets the 408");
     }
 }

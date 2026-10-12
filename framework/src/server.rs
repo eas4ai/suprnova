@@ -106,6 +106,15 @@ pub struct Server {
     /// `hyper_util::rt::TokioTimer` so the deadline actually arms - see
     /// [`ServerConfig::header_read_timeout`] for the SEC-07 background.
     header_read_timeout: std::time::Duration,
+    /// Longest wait for the next frame of a request body. Set via
+    /// `SERVER_BODY_READ_TIMEOUT` (or programmatically via
+    /// [`Server::body_read_timeout`]); see
+    /// [`ServerConfig::body_read_timeout`] for HRD-001.
+    body_read_timeout: std::time::Duration,
+    /// Longest a whole request body may take, from the request head. Set
+    /// via `SERVER_BODY_TOTAL_TIMEOUT` (or programmatically via
+    /// [`Server::body_total_timeout`]).
+    body_total_timeout: std::time::Duration,
     /// Whether fallible framework preparation completed before construction.
     prepared: bool,
 }
@@ -128,6 +137,12 @@ impl Server {
             max_connections: None,
             header_read_timeout: std::time::Duration::from_secs(
                 crate::config::providers::DEFAULT_HEADER_READ_TIMEOUT_SECS,
+            ),
+            body_read_timeout: std::time::Duration::from_secs(
+                crate::config::providers::DEFAULT_BODY_READ_TIMEOUT_SECS,
+            ),
+            body_total_timeout: std::time::Duration::from_secs(
+                crate::config::providers::DEFAULT_BODY_TOTAL_TIMEOUT_SECS,
             ),
             prepared: false,
         }
@@ -287,6 +302,8 @@ impl Server {
             port: config.port,
             max_connections: config.max_connections,
             header_read_timeout: config.header_read_timeout,
+            body_read_timeout: config.body_read_timeout,
+            body_total_timeout: config.body_total_timeout,
             prepared: true,
         }
     }
@@ -359,6 +376,23 @@ impl Server {
     /// in tests that need to assert the deadline fires quickly.
     pub fn header_read_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Override the longest wait for the next frame of a request body.
+    /// Default: 30s (see
+    /// [`ServerConfig::body_read_timeout`](crate::config::ServerConfig::body_read_timeout)).
+    /// A body that misses it answers `408` and its connection closes.
+    pub fn body_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.body_read_timeout = timeout;
+        self
+    }
+
+    /// Override the longest a whole request body may take to arrive,
+    /// counted from the request head. Default: 3600s (see
+    /// [`ServerConfig::body_total_timeout`](crate::config::ServerConfig::body_total_timeout)).
+    pub fn body_total_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.body_total_timeout = timeout;
         self
     }
 
@@ -468,6 +502,10 @@ impl Server {
         // connection below. `Duration` is `Copy`, so each spawned
         // connection task gets its own value with no `Arc` needed.
         let header_read_timeout = self.header_read_timeout;
+        // HRD-001: the body deadlines every request starts as its head
+        // arrives, for the reads of its body to wait under.
+        let body_read_timeout = self.body_read_timeout;
+        let body_total_timeout = self.body_total_timeout;
 
         // Initialize the WS handler-task registry so handle_ws_upgrade
         // can spawn into it instead of detaching via bare tokio::spawn.
@@ -576,9 +614,15 @@ impl Server {
                     let middleware = middleware.clone();
 
                     connections.spawn(async move {
-                        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let service = service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                             let router = router.clone();
                             let middleware = middleware.clone();
+                            // hyper calls the service once the head is
+                            // read, so the body deadlines start here.
+                            req.extensions_mut().insert(crate::http::body::BodyDeadline::start(
+                                body_read_timeout,
+                                body_total_timeout,
+                            ));
                             async move {
                                 Ok::<_, Infallible>(handle_request_with_peer(router, middleware, req, peer_ip).await)
                             }
@@ -744,11 +788,29 @@ pub async fn handle_request_with_peer(
         req,
         peer_ip,
     )));
-    crate::container::scope::run_in_new_scope(crate::routing::root::scope(
+    let response = crate::container::scope::run_in_new_scope(crate::routing::root::scope(
         root,
         file_request.serve(request),
     ))
-    .await
+    .await;
+    close_after_timeout(response)
+}
+
+/// Mark a `408 Request Timeout` response `Connection: close`.
+///
+/// A `408` says the server stopped waiting for the request (RFC 9110
+/// 15.5.9), most often because its body missed a deadline (HRD-001). The
+/// rest of that body may still be on its way, so the connection cannot
+/// carry another request: hyper closes it after this response, and the
+/// client learns so from the header rather than from a reset.
+fn close_after_timeout(mut response: hyper::Response<ServerBody>) -> hyper::Response<ServerBody> {
+    if response.status() == hyper::StatusCode::REQUEST_TIMEOUT {
+        response.headers_mut().insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
+    }
+    response
 }
 
 /// The public root of `req` (PFX-001, PFX-002): a valid

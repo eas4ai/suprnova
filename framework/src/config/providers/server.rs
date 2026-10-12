@@ -26,6 +26,27 @@ pub const DEFAULT_SERVER_PORT: u16 = 8765;
 /// of leaving it as an implicit - and previously inactive - default.
 pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
+/// Default per-frame body deadline (seconds) when `SERVER_BODY_READ_TIMEOUT`
+/// is unset, blank, zero, or unparseable.
+///
+/// The longest the server waits for the next piece of a request body
+/// (HRD-001). The header-read deadline ends once the head is complete, so
+/// without this one a client could send complete headers and then hold
+/// the connection by sending the body slowly, or not at all. It matches
+/// the header-read default, the same kind of wait one step later.
+pub const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 30;
+
+/// Default total body deadline (seconds) when `SERVER_BODY_TOTAL_TIMEOUT`
+/// is unset, blank, zero, or unparseable.
+///
+/// The longest a whole request body may take to arrive, counted from the
+/// moment its head was read (HRD-001). The per-frame deadline is the
+/// defence against a trickled body; this one is the backstop that ends a
+/// body that keeps sending a byte inside every per-frame wait. An hour
+/// leaves room for a legitimate large upload over a slow link: 300 MB at
+/// 2 MB/s takes 150 seconds, which a two-minute default would cut off.
+pub const DEFAULT_BODY_TOTAL_TIMEOUT_SECS: u64 = 3600;
+
 /// Finite fallback for `SERVER_MAX_CONNECTIONS` when the env var is set
 /// but invalid (unparseable) or zero.
 ///
@@ -88,6 +109,25 @@ pub struct ServerConfig {
     /// of held indefinitely. Only bounds header parsing - it does not
     /// apply to already-established WebSocket/SSE connections.
     pub header_read_timeout: std::time::Duration,
+    /// Deadline for the next frame of a request body to arrive.
+    ///
+    /// Defaults to [`DEFAULT_BODY_READ_TIMEOUT_SECS`] (30s). Override via
+    /// `SERVER_BODY_READ_TIMEOUT` (seconds) in the environment. Every read
+    /// of a request body the framework performs - `body_bytes`, `json`,
+    /// `form`, `input`, the form request extractors, the multipart parsers
+    /// and the middleware that read a body first - waits at most this long
+    /// for each piece. A body that misses it is abandoned: the request
+    /// answers `408 Request Timeout` and the connection closes (HRD-001).
+    pub body_read_timeout: std::time::Duration,
+    /// Deadline for a whole request body to arrive, counted from the
+    /// moment the server read the request head.
+    ///
+    /// Defaults to [`DEFAULT_BODY_TOTAL_TIMEOUT_SECS`] (3600s). Override via
+    /// `SERVER_BODY_TOTAL_TIMEOUT` (seconds) in the environment. Bounds the
+    /// body that keeps arriving inside [`Self::body_read_timeout`] a byte
+    /// at a time. A body that misses it is abandoned as one that misses
+    /// the per-frame deadline is.
+    pub body_total_timeout: std::time::Duration,
     /// Optional shared secret required to reach the *readiness* half of
     /// the built-in health endpoint.
     ///
@@ -137,6 +177,12 @@ impl ServerConfig {
             header_read_timeout: resolve_header_read_timeout(
                 std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
             ),
+            body_read_timeout: resolve_body_read_timeout(
+                std::env::var("SERVER_BODY_READ_TIMEOUT").ok().as_deref(),
+            ),
+            body_total_timeout: resolve_body_total_timeout(
+                std::env::var("SERVER_BODY_TOTAL_TIMEOUT").ok().as_deref(),
+            ),
             health_readiness_token: parse_health_readiness_token(
                 std::env::var("SERVER_HEALTH_READINESS_TOKEN")
                     .ok()
@@ -172,6 +218,13 @@ impl ServerConfig {
         let header_read_timeout = resolve_header_read_timeout(
             std::env::var("SERVER_HEADER_READ_TIMEOUT").ok().as_deref(),
         );
+        // The two body deadlines are lenient for the same reason: an
+        // invalid value degrades to the finite default, never to "no
+        // deadline".
+        let body_read_timeout =
+            resolve_body_read_timeout(std::env::var("SERVER_BODY_READ_TIMEOUT").ok().as_deref());
+        let body_total_timeout =
+            resolve_body_total_timeout(std::env::var("SERVER_BODY_TOTAL_TIMEOUT").ok().as_deref());
         // Likewise lenient, and for the same reason as the two above: a
         // blank or absent secret means "readiness is public", which is the
         // documented default, not a misconfiguration to abort boot over.
@@ -186,6 +239,8 @@ impl ServerConfig {
             max_body_size,
             max_connections,
             header_read_timeout,
+            body_read_timeout,
+            body_total_timeout,
             health_readiness_token,
         })
     }
@@ -253,26 +308,60 @@ pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
 /// SEC-07 hole this knob exists to close, so it is treated the same as
 /// any other invalid input rather than honored as "disable."
 pub(crate) fn resolve_header_read_timeout(raw: Option<&str>) -> std::time::Duration {
+    resolve_deadline_secs(
+        "SERVER_HEADER_READ_TIMEOUT",
+        raw,
+        DEFAULT_HEADER_READ_TIMEOUT_SECS,
+    )
+}
+
+/// Resolve `SERVER_BODY_READ_TIMEOUT` (seconds), the per-frame body
+/// deadline, as [`resolve_header_read_timeout`] resolves its variable: a
+/// blank, absent, unparseable or zero value is
+/// [`DEFAULT_BODY_READ_TIMEOUT_SECS`], since zero would mean "no
+/// deadline", the HRD-001 hole the variable exists to close.
+pub(crate) fn resolve_body_read_timeout(raw: Option<&str>) -> std::time::Duration {
+    resolve_deadline_secs(
+        "SERVER_BODY_READ_TIMEOUT",
+        raw,
+        DEFAULT_BODY_READ_TIMEOUT_SECS,
+    )
+}
+
+/// Resolve `SERVER_BODY_TOTAL_TIMEOUT` (seconds), the whole-body deadline,
+/// as [`resolve_body_read_timeout`] resolves its variable, falling back to
+/// [`DEFAULT_BODY_TOTAL_TIMEOUT_SECS`].
+pub(crate) fn resolve_body_total_timeout(raw: Option<&str>) -> std::time::Duration {
+    resolve_deadline_secs(
+        "SERVER_BODY_TOTAL_TIMEOUT",
+        raw,
+        DEFAULT_BODY_TOTAL_TIMEOUT_SECS,
+    )
+}
+
+/// Resolve the deadline variable `name`, read as `raw`, in whole seconds:
+/// `default` when it is blank or absent, and, with a warning, when it is
+/// zero or does not parse. A deadline variable never resolves to "no
+/// deadline".
+fn resolve_deadline_secs(name: &str, raw: Option<&str>, default: u64) -> std::time::Duration {
     let trimmed = raw.map(str::trim).filter(|s| !s.is_empty());
     let secs = match trimmed {
-        None => DEFAULT_HEADER_READ_TIMEOUT_SECS,
+        None => default,
         Some(s) => match s.parse::<u64>() {
             Ok(n) if n > 0 => n,
             Ok(_) => {
                 tracing::warn!(
-                    "SERVER_HEADER_READ_TIMEOUT=0 would disable the SEC-07 header-read \
-                     deadline entirely; falling back to the {DEFAULT_HEADER_READ_TIMEOUT_SECS}s \
-                     default."
+                    "{name}=0 would disable the deadline entirely; falling back to the \
+                     {default}s default."
                 );
-                DEFAULT_HEADER_READ_TIMEOUT_SECS
+                default
             }
             Err(_) => {
                 tracing::warn!(
                     raw_value = s,
-                    "SERVER_HEADER_READ_TIMEOUT is set but failed to parse; falling back to \
-                     the {DEFAULT_HEADER_READ_TIMEOUT_SECS}s default."
+                    "{name} is set but failed to parse; falling back to the {default}s default."
                 );
-                DEFAULT_HEADER_READ_TIMEOUT_SECS
+                default
             }
         },
     };
@@ -304,6 +393,8 @@ pub struct ServerConfigBuilder {
     max_body_size: Option<usize>,
     max_connections: Option<usize>,
     header_read_timeout: Option<std::time::Duration>,
+    body_read_timeout: Option<std::time::Duration>,
+    body_total_timeout: Option<std::time::Duration>,
     health_readiness_token: Option<String>,
 }
 
@@ -344,6 +435,22 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Override the per-frame request-body deadline (see
+    /// [`ServerConfig::body_read_timeout`]). Default:
+    /// [`DEFAULT_BODY_READ_TIMEOUT_SECS`] (30s).
+    pub fn body_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.body_read_timeout = Some(timeout);
+        self
+    }
+
+    /// Override the whole-body request deadline (see
+    /// [`ServerConfig::body_total_timeout`]). Default:
+    /// [`DEFAULT_BODY_TOTAL_TIMEOUT_SECS`] (3600s).
+    pub fn body_total_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.body_total_timeout = Some(timeout);
+        self
+    }
+
     /// Require a shared secret on the readiness half of the built-in
     /// health endpoint (see [`ServerConfig::health_readiness_token`]).
     ///
@@ -366,6 +473,10 @@ impl ServerConfigBuilder {
             header_read_timeout: self
                 .header_read_timeout
                 .unwrap_or(default.header_read_timeout),
+            body_read_timeout: self.body_read_timeout.unwrap_or(default.body_read_timeout),
+            body_total_timeout: self
+                .body_total_timeout
+                .unwrap_or(default.body_total_timeout),
             health_readiness_token: self
                 .health_readiness_token
                 .or(default.health_readiness_token),
@@ -462,6 +573,78 @@ mod tests {
             resolve_header_read_timeout(Some("  7  ")),
             std::time::Duration::from_secs(7)
         );
+    }
+
+    /// HRD-001: both body deadlines resolve as the header-read deadline
+    /// does, and neither ever resolves to "no deadline".
+    #[test]
+    fn hardening_resolves_body_deadlines_from_env() {
+        let read = std::time::Duration::from_secs(DEFAULT_BODY_READ_TIMEOUT_SECS);
+        let total = std::time::Duration::from_secs(DEFAULT_BODY_TOTAL_TIMEOUT_SECS);
+        assert_eq!(read, std::time::Duration::from_secs(30));
+        assert_eq!(total, std::time::Duration::from_secs(3600));
+        // unset / blank / unparseable / zero -> the finite default.
+        for raw in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("abc"),
+            Some("-5"),
+            Some("0"),
+        ] {
+            assert_eq!(resolve_body_read_timeout(raw), read, "{raw:?}");
+            assert_eq!(resolve_body_total_timeout(raw), total, "{raw:?}");
+        }
+        // set, whitespace-padded or not -> the configured value.
+        assert_eq!(
+            resolve_body_read_timeout(Some(" 5 ")),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            resolve_body_total_timeout(Some("7200")),
+            std::time::Duration::from_secs(7200)
+        );
+    }
+
+    /// The builder sets both body deadlines, and a builder that sets
+    /// neither leaves the defaults in place.
+    #[test]
+    #[serial_test::serial(server_config_env)]
+    fn hardening_builder_sets_the_body_deadlines() {
+        let prior_read = std::env::var("SERVER_BODY_READ_TIMEOUT").ok();
+        let prior_total = std::env::var("SERVER_BODY_TOTAL_TIMEOUT").ok();
+        // SAFETY: single-threaded scope (no await across the mutation),
+        // restored at the end - same pattern as the sibling env tests.
+        unsafe {
+            std::env::remove_var("SERVER_BODY_READ_TIMEOUT");
+            std::env::remove_var("SERVER_BODY_TOTAL_TIMEOUT");
+        }
+        let config = ServerConfig::builder()
+            .body_read_timeout(std::time::Duration::from_millis(250))
+            .body_total_timeout(std::time::Duration::from_secs(9))
+            .build();
+        assert_eq!(
+            config.body_read_timeout,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(config.body_total_timeout, std::time::Duration::from_secs(9));
+        let defaults = ServerConfig::builder().build();
+        assert_eq!(
+            defaults.body_read_timeout,
+            std::time::Duration::from_secs(DEFAULT_BODY_READ_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            defaults.body_total_timeout,
+            std::time::Duration::from_secs(DEFAULT_BODY_TOTAL_TIMEOUT_SECS)
+        );
+        unsafe {
+            if let Some(v) = prior_read {
+                std::env::set_var("SERVER_BODY_READ_TIMEOUT", v);
+            }
+            if let Some(v) = prior_total {
+                std::env::set_var("SERVER_BODY_TOTAL_TIMEOUT", v);
+            }
+        }
     }
 
     #[test]
