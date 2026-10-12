@@ -3085,6 +3085,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   failed revocation is logged at error level with the user's id and answered
   with a `500` through the framework's error path; the password stays
   changed.
+- **Static files and Live UI assets are read through the directory they
+  were checked in.** In 3.2.1, `StaticFiles` checked a request's canonical
+  path against its root and then opened the file by name, and opened an
+  extensionless file a second time to sniff its type; the Live UI asset
+  routes of `try_live_ui_assets()` and `try_live_ui_assets_for()` compared
+  canonical paths and then read the file's size and its bytes by name. Someone able to rename entries under the
+  served directory could swap a directory for a symbolic link between the
+  check and the open, and the server sent a file from outside the root, or
+  a script past the 1 MiB bound. Both now walk the path one directory at a
+  time through held directory handles, opening every entry with
+  `O_NOFOLLOW` as a local disk does, and take the type, the length and the
+  bound from the handle they read the bytes from. `StaticFiles` still
+  follows a symbolic link that stays inside its root, and either root may
+  itself be a link. A link whose relative target climbs above the root is
+  refused even when it leads back in, and `StaticFiles` answers 404 for a
+  FIFO instead of holding the request open. On Windows, which has no
+  `openat`, the path is still checked and then opened by name.
 
 ## 3.2.1 - 2026-10-05
 

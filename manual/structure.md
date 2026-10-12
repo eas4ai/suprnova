@@ -358,7 +358,10 @@ Where Vite drops the production build (`npm run build`). The generated
 `routes.rs` ends with `fallback!(StaticFiles::public().handler())`, so the
 Suprnova server serves this directory as static assets at `/assets/*` in
 production. Dotfiles under `public/`, such as `.vite/manifest.json`, are
-never served.
+never served. A symbolic link under `public/` is followed only while it
+stays inside `public/`, and the server opens each file through the
+directories it checked, so a directory replaced by a link while a request
+is in flight cannot redirect the request. `public/` itself may be a link.
 
 ## Directories you'll add as the app grows
 

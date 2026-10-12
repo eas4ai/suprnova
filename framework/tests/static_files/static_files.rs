@@ -10,6 +10,9 @@ use hyper_util::rt::TokioIo;
 
 use suprnova::{MiddlewareRegistry, Router, fallback, handle_request};
 
+#[cfg(unix)]
+use crate::tree_racer::Racer;
+
 #[tokio::test]
 async fn static_files_serves_public_asset_and_blocks_traversal() {
     let dir = tempfile::tempdir().unwrap();
@@ -286,4 +289,225 @@ async fn body_bytes(response: hyper::Response<Incoming>) -> Bytes {
         .await
         .expect("collect body bytes")
         .to_bytes()
+}
+
+/// How many requests a race test sends while the tree changes under it.
+#[cfg(unix)]
+const RACE_REQUESTS: usize = 2000;
+
+#[cfg(unix)]
+fn static_client(root: &std::path::Path) -> suprnova::testing::TestClient {
+    suprnova::testing::TestClient::new(
+        fallback!(suprnova::StaticFiles::from_dir(root).handler()).register(Router::new()),
+        MiddlewareRegistry::new(),
+    )
+}
+
+/// HRD-005: a directory under the served root that is swapped for a
+/// symlink after the path was checked cannot make the server send a file
+/// from outside the root. The handler used to check the canonical path and
+/// then open it again by name, so a swap between the two opened whatever
+/// the symlink pointed at.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hardening_a_directory_swapped_for_a_symlink_after_the_check_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("public");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("dir")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("dir/data.txt"), "inside").unwrap();
+    std::fs::write(outside.join("data.txt"), "SECRET").unwrap();
+    let client = static_client(&root);
+
+    let swapped = root.clone();
+    let racer = Racer::start(move || {
+        let _ = std::fs::rename(swapped.join("dir"), swapped.join("dir.real"));
+        let _ = std::os::unix::fs::symlink(&outside, swapped.join("dir"));
+        std::thread::yield_now();
+        let _ = std::fs::remove_file(swapped.join("dir"));
+        let _ = std::fs::rename(swapped.join("dir.real"), swapped.join("dir"));
+    });
+
+    let mut served = 0usize;
+    let mut leaked = Vec::new();
+    for _ in 0..RACE_REQUESTS {
+        let response = client.get("/dir/data.txt").send().await;
+        match response.status() {
+            200 if response.body_text() == "inside" => served += 1,
+            404 => {}
+            status => leaked.push((status, response.body_text())),
+        }
+    }
+    let swaps = racer.finish();
+
+    assert!(
+        leaked.is_empty(),
+        "{} of {RACE_REQUESTS} responses were not the file inside the root: {:?}",
+        leaked.len(),
+        &leaked[..leaked.len().min(5)]
+    );
+    assert!(swaps > 0, "the racer never swapped the directory");
+    assert!(served > 0, "no request was served the file inside the root");
+}
+
+/// HRD-005: the length and the content type a response declares come from
+/// the file it sends. Two versions of an extensionless asset are swapped in
+/// by rename while requests run; every response must carry one version
+/// whole, with that version's length and sniffed type. The handler used to
+/// sniff the type by opening the path a second time, so a swap between the
+/// two opens labelled one file's bytes with the other's type.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hardening_the_size_and_type_come_from_the_opened_handle() {
+    const GIF: &str = "GIF89a, padded so the two versions differ in length";
+    const JSON: &str = r#"{"ok":true}"#;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("public");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("version-gif"), GIF).unwrap();
+    std::fs::write(root.join("version-json"), JSON).unwrap();
+    std::fs::write(root.join("asset"), GIF).unwrap();
+    let client = static_client(&root);
+
+    let swapped = root.clone();
+    let racer = Racer::start(move || {
+        for version in ["version-json", "version-gif"] {
+            let _ = std::fs::remove_file(swapped.join("staged"));
+            let _ = std::fs::hard_link(swapped.join(version), swapped.join("staged"));
+            let _ = std::fs::rename(swapped.join("staged"), swapped.join("asset"));
+        }
+    });
+
+    let mut served = 0usize;
+    let mut mismatched = Vec::new();
+    for _ in 0..RACE_REQUESTS {
+        let response = client.get("/asset").send().await;
+        if response.status() == 404 {
+            continue;
+        }
+        let body = response.body_text();
+        let content_type = response.header("content-type").unwrap_or("").to_owned();
+        let length = response.header("content-length").unwrap_or("").to_owned();
+        let expected_type = match body.as_str() {
+            GIF => "image/gif",
+            JSON => "application/json; charset=utf-8",
+            _ => "a whole version",
+        };
+        if response.status() == 200
+            && content_type == expected_type
+            && length == body.len().to_string()
+        {
+            served += 1;
+        } else {
+            mismatched.push((response.status(), content_type, length, body));
+        }
+    }
+    let swaps = racer.finish();
+
+    assert!(
+        mismatched.is_empty(),
+        "{} of {RACE_REQUESTS} responses declared a type or length that is not the body's: {:?}",
+        mismatched.len(),
+        &mismatched[..mismatched.len().min(5)]
+    );
+    assert!(swaps > 0, "the racer never swapped the asset");
+    assert!(served > 0, "no request was served the asset");
+}
+
+/// HRD-005 keeps what the handler served before: a symbolic link that
+/// stays inside the root is followed, and one that leads out of it, by an
+/// absolute or a relative target, a directory or a file, is a 404. A
+/// relative target that climbs above the root is a 404 even when it leads
+/// back in, as on a local disk: the walk holds no directory above the root.
+#[cfg(unix)]
+#[tokio::test]
+async fn hardening_a_symlink_that_leaves_the_root_is_refused_and_one_inside_is_served() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("public");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("app.css"), "body{color:red}").unwrap();
+    std::fs::write(root.join("sub/real.txt"), "inside").unwrap();
+    std::fs::write(outside.join("data.txt"), "SECRET").unwrap();
+    symlink(&outside, root.join("out")).unwrap();
+    symlink("../outside", root.join("up")).unwrap();
+    symlink(outside.join("data.txt"), root.join("secret.txt")).unwrap();
+    symlink("app.css", root.join("alias.css")).unwrap();
+    symlink(root.join("app.css"), root.join("absolute.css")).unwrap();
+    symlink("sub", root.join("linked")).unwrap();
+    symlink("../public/app.css", root.join("around.css")).unwrap();
+    let client = static_client(&root);
+
+    for escaping in [
+        "/out/data.txt",
+        "/up/data.txt",
+        "/secret.txt",
+        "/around.css",
+    ] {
+        let response = client.get(escaping).send().await;
+        assert_eq!(
+            response.status(),
+            404,
+            "{escaping} followed a link out of the root"
+        );
+        assert!(
+            !response.body_text().contains("SECRET"),
+            "{escaping} leaked the outside file"
+        );
+    }
+
+    for (inside, body, content_type) in [
+        ("/alias.css", "body{color:red}", "text/css; charset=utf-8"),
+        (
+            "/absolute.css",
+            "body{color:red}",
+            "text/css; charset=utf-8",
+        ),
+        ("/linked/real.txt", "inside", "text/plain; charset=utf-8"),
+    ] {
+        let response = client.get(inside).send().await;
+        assert_eq!(response.status(), 200, "{inside} is a link inside the root");
+        assert_eq!(response.body_text(), body, "{inside}");
+        assert_eq!(
+            response.header("content-type"),
+            Some(content_type),
+            "{inside}"
+        );
+    }
+}
+
+/// HRD-005: the file is opened without waiting, and its type is checked on
+/// that handle. An ordinary open of a FIFO waits until a writer appears, so
+/// a FIFO under the root used to hold the request, and a blocking thread,
+/// open until one did.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardening_a_fifo_is_a_404_without_waiting_for_a_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pipe = tmp.path().join("pipe.txt");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &pipe,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+    let client = static_client(tmp.path());
+
+    let answered =
+        tokio::time::timeout(Duration::from_secs(5), client.get("/pipe.txt").send()).await;
+    if answered.is_err() {
+        // A server still waiting on the FIFO is released by a writer, so a
+        // failing run ends instead of hanging the runtime's shutdown.
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe);
+    }
+    let response = answered.expect("the request answered without waiting for a writer");
+    assert_eq!(response.status(), 404);
 }
