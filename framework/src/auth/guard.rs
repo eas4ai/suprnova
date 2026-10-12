@@ -135,6 +135,11 @@ impl Auth {
     /// Regenerates the session ID to prevent session fixation, and rotates the
     /// CSRF token.
     ///
+    /// The sign-in carries the user's authentication epoch like every other
+    /// (see [`Authenticatable::auth_epoch`]). This method asks no provider,
+    /// so the first request that resolves the user records the epoch, and a
+    /// password change after that ends the sign-in.
+    ///
     /// # With Magnetar installed
     ///
     /// Every web login then needs a Magnetar session, so revocation and auth
@@ -240,6 +245,22 @@ impl Auth {
         } else {
             None
         };
+        // HRD-007: the sign-in records the user's authentication epoch,
+        // read through the guard's provider before anything changes, so a
+        // provider error fails the login with nothing committed. Without a
+        // provider to read it from (an application that signs in by id
+        // alone), the sign-in keeps the `Unread` mark `login_guard_id`
+        // writes, and the first request that resolves the user records it.
+        let sign_in_epoch = match super::epoch::guard_provider(guard_name) {
+            Some(provider) if !super::epoch::magnetar_fences(guard_name) => Some(
+                provider
+                    .retrieve_by_id(&user_id)
+                    .await?
+                    .as_deref()
+                    .and_then(super::epoch::credential_epoch),
+            ),
+            _ => None,
+        };
         Self::flush_pending_remember_revocations().await?;
         let remember_to_revoke = Self::prepare_guard_remember_identity_replacement(guard_name);
         if let Some((previous_user_id, selector)) = remember_to_revoke {
@@ -249,6 +270,13 @@ impl Auth {
         // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
         Self::login_guard_id(guard_name, user_id.clone())?;
+        if let Some(sign_in_epoch) = sign_in_epoch {
+            crate::session::middleware::record_guard_sign_in_epoch(
+                guard_name,
+                &user_id,
+                sign_in_epoch,
+            );
+        }
         if let Some(auth_epoch) = host_auth_epoch {
             crate::session::middleware::record_host_sign_in_epoch(&user_id, auth_epoch);
         }
@@ -321,7 +349,16 @@ impl Auth {
                     .expose_once();
                 credential.expose_secret().to_owned()
             } else {
-                super::remember::issue(user_id, ttl_minutes).await?
+                // Boxed: the table's issue future (a provider read for the
+                // epoch, a hash and an insert) is large, and inline it would
+                // enlarge every caller's future and stack frames, including
+                // under the engine, where this branch never runs.
+                Box::pin(super::remember::issue_for_guard(
+                    guard_name,
+                    user_id,
+                    ttl_minutes,
+                ))
+                .await?
             };
         let selector = crate::session::middleware::remember_selector(&plaintext)?;
         let carrier = crate::session::middleware::encode_remember_carrier(guard_name, &plaintext)?;
@@ -678,6 +715,86 @@ impl Auth {
         Ok(())
     }
 
+    /// End the sign-in of the guard `guard_name` as `user_id` because the
+    /// user's authentication epoch moved after the session recorded it
+    /// (HRD-007): the password changed, or the model's own counter advanced,
+    /// after this session signed in.
+    ///
+    /// It removes what a logout of the guard removes from the session: the
+    /// guard's identity with its epoch (and, for the default guard, the
+    /// generic user mirror and any pending two-factor state), the request's
+    /// cached user, and the CSRF token; it ends the Live memberships the
+    /// session opened for that user (LIVE-021) and revokes this session's
+    /// own remember-me credential for the guard, clearing its cookie.
+    ///
+    /// It deliberately differs from a logout in two ways:
+    ///
+    /// - It dispatches no [`Logout`](crate::auth::events::Logout) event. That
+    ///   event means the user signed out, and the user did not; the
+    ///   framework has no event for a session it ended, so none is sent.
+    /// - It revokes only the remember credential this session holds, never
+    ///   every credential of the user as the default guard's logout does.
+    ///   The request may come from a stolen session, and the remember
+    ///   credentials the user issued since the password change are theirs:
+    ///   a stale session must not be a way to revoke them.
+    ///
+    /// It never fails. The identity is gone before anything that can fail
+    /// runs, so the request already answers as a guest; a remember
+    /// revocation that fails is logged, its cookie is still cleared, and
+    /// the row it leaves is bound to the earlier epoch, so it can never
+    /// sign the user in again.
+    pub(crate) async fn end_stale_guard_sign_in(guard_name: &str, user_id: &str) {
+        let current = session();
+        let live_session_id = current.as_ref().map(|session| session.id.clone());
+        let mut selectors = current
+            .and_then(|session| session.auth_guard_remember_selector(guard_name))
+            .into_iter()
+            .chain(request_state::active_remember_selector_for_guard(
+                guard_name,
+            ))
+            .collect::<Vec<_>>();
+        selectors.sort_unstable();
+        selectors.dedup();
+
+        clear_guard_auth_user(guard_name);
+        if guard_name == Self::default_guard_name() {
+            request_state::clear_current_user();
+            crate::session::middleware::clear_two_factor_pending();
+            crate::session::middleware::clear_two_factor_pending_remember();
+        }
+        session_mut(|session| {
+            session.csrf_token = generate_csrf_token();
+            session.dirty = true;
+        });
+        if let Some(session_id) = live_session_id {
+            crate::live::revocation::session_deauthenticated(
+                session_id.as_bytes(),
+                &Self::guard_principal(guard_name, user_id),
+            )
+            .await;
+        }
+        for selector in selectors {
+            if let Err(error) = Self::revoke_remember_selector(guard_name, user_id, &selector).await
+            {
+                tracing::warn!(
+                    target: "suprnova::auth",
+                    guard = guard_name,
+                    user_id,
+                    %error,
+                    "the remember-me credential of a stale sign-in could not be revoked; \
+                     its cookie is cleared and its row can no longer verify"
+                );
+            }
+        }
+        tracing::info!(
+            target: "suprnova::auth",
+            guard = guard_name,
+            user_id,
+            "ended a sign-in whose authentication epoch is no longer the user's: \
+             the password changed after the session signed in"
+        );
+    }
+
     /// Log out the current user.
     ///
     /// Clears the session user and the request-scoped current user, revokes
@@ -747,6 +864,8 @@ impl Auth {
         provider
             .rehash_password_if_required(user.as_ref(), &credentials)
             .await?;
+        let rebound =
+            Self::rebind_sign_in_after_rehash(&guard, provider.as_ref(), user.as_ref()).await?;
         let selector = current.auth_guard_remember_selector(&guard);
         let engine = crate::magnetar_integration::optional_password_engine();
         let binding = current
@@ -803,8 +922,71 @@ impl Auth {
         }
         if engine.is_none() {
             super::remember::revoke_other_for_user(&user_id, selector.as_deref()).await?;
+            // This device's remember credential was bound to the epoch the
+            // rehash replaced, so it would fail its next verification:
+            // replace it with one bound to the new epoch. It is issued last,
+            // after the other credentials were revoked by the old selector.
+            if rebound && selector.is_some() {
+                Self::reissue_remember_after_rehash(&user_id).await?;
+            }
         }
         Ok(())
+    }
+
+    /// After `logout_other_devices` rehashed the password, bind this
+    /// session's sign-in again to the epoch the provider now reports, and
+    /// report whether the epoch moved (HRD-007).
+    ///
+    /// A rehash stores a new hash, which is a new authentication epoch, and
+    /// this session was bound to the old one. It belongs to the device that
+    /// just proved the password and asked to stay signed in, so it is bound
+    /// again rather than ended on its next request. Without a rehash the
+    /// epoch is unchanged and nothing is rewritten. A guard that Magnetar
+    /// fences carries Magnetar's epoch, which a rehash does not move.
+    ///
+    /// A function of its own, not inline: its locals then occupy a stack
+    /// frame only while it runs, and `logout_other_devices` already sits
+    /// close to a test thread's stack limit in a debug build.
+    async fn rebind_sign_in_after_rehash(
+        guard: &str,
+        provider: &dyn UserProvider,
+        user: &dyn Authenticatable,
+    ) -> Result<bool, FrameworkError> {
+        if super::epoch::magnetar_fences(guard) {
+            return Ok(false);
+        }
+        let user_id = user.get_auth_identifier();
+        let before = super::epoch::credential_epoch(user);
+        let after = provider
+            .retrieve_by_id(&user_id)
+            .await?
+            .as_deref()
+            .and_then(super::epoch::credential_epoch);
+        if after == before {
+            return Ok(false);
+        }
+        crate::session::middleware::record_guard_sign_in_epoch(guard, &user_id, after);
+        Ok(true)
+    }
+
+    /// Replace this device's remember-me credential after a rehash moved the
+    /// user's epoch, as Laravel's `logoutOtherDevices` re-queues the current
+    /// device's remember cookie: the old one was bound to the hash the
+    /// rehash replaced and would fail its next verification.
+    ///
+    /// Boxed for the reason [`Self::rebind_sign_in_after_rehash`] is a
+    /// function of its own: the issue future is large and runs only after a
+    /// rehash.
+    async fn reissue_remember_after_rehash(user_id: &str) -> Result<(), FrameworkError> {
+        let lifetime = crate::session::middleware::current_session_config()
+            .remember_lifetime
+            .as_secs()
+            / 60;
+        Box::pin(Self::issue_remember_cookie(
+            user_id,
+            i64::try_from(lifetime).unwrap_or(i64::MAX),
+        ))
+        .await
     }
 
     /// Log out and invalidate the entire session.
@@ -966,11 +1148,22 @@ impl Auth {
                     .to_string(),
             )
         })?;
-        let user = provider.retrieve_by_id(&user_id).await?;
-        if let Some(ref u) = user {
-            request_state::set_current_user(u.clone());
+        let Some(user) = provider.retrieve_by_id(&user_id).await? else {
+            return Ok(None);
+        };
+        // HRD-007, as `SessionGuard::user` checks it: a sign-in whose epoch
+        // is no longer the user's ends here and the request is a guest's.
+        let guard_name = Self::default_guard_name();
+        if super::epoch::check_session_sign_in(&guard_name, &user_id, &*user)
+            == super::epoch::SessionSignInCheck::Stale
+        {
+            // Boxed: the rare stale path must not enlarge the future of
+            // every `Auth::user` call.
+            Box::pin(Self::end_stale_guard_sign_in(&guard_name, &user_id)).await;
+            return Ok(None);
         }
-        Ok(user)
+        request_state::set_current_user(user.clone());
+        Ok(Some(user))
     }
 
     /// Whether `err` is the "no user provider configured" error from the
