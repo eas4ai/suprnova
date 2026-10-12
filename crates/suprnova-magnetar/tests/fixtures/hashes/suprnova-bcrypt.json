@@ -1,0 +1,13 @@
+{
+  "source": "eas4ai/suprnova",
+  "revision": "27f7ddf4bb6c523c4ffa42fa12e4a568a7990f88",
+  "source_path": "framework/src/hashing/mod.rs",
+  "algorithm": {"name": "bcrypt", "cost": 12},
+  "records": [
+    {"bytes": 32, "status": "generated", "hash": "$2b$12$KrSvnZRLgQnMhcRnIitq7OGxKlF/RxkyvsbzFV/.qY5ebeDEYENoC"},
+    {"bytes": 71, "status": "generated", "hash": "$2b$12$uf5cJe7Lc4zWUyWv6u7Qd.cBgVQvWWO8ILcQGhWwdAeQUdPs2giBC"},
+    {"bytes": 72, "status": "rejected", "reason": "password exceeds 71-byte bcrypt usable limit"},
+    {"bytes": 73, "status": "rejected", "reason": "password exceeds 71-byte bcrypt usable limit"},
+    {"bytes": 128, "status": "rejected", "reason": "password exceeds 71-byte bcrypt usable limit"}
+  ]
+}
