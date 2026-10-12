@@ -92,15 +92,18 @@ async fn client_maps_4xx_5xx_to_push_service_rejected() {
         WebPushError::PushServiceRejected {
             status,
             retry_after,
-            body,
         } => {
             assert_eq!(*status, 429);
-            assert!(body.contains("too many"), "got body: {body}");
             // No Retry-After header was set in the response → None.
             assert!(retry_after.is_none(), "got retry_after: {retry_after:?}");
         }
         other => panic!("expected PushServiceRejected, got {other:?}"),
     }
+    // The push service's body is remote data and stays out of the error.
+    assert!(
+        !format!("{err} {err:?}").contains("too many"),
+        "got: {err:?}"
+    );
     // 429 is canonically retryable.
     assert!(err.is_retryable(), "429 must be retryable");
 }
@@ -191,16 +194,16 @@ async fn client_is_retryable_returns_false_for_4xx_other_than_408_429() {
 }
 
 #[tokio::test]
-async fn client_caps_rejection_body_at_a_few_kib() {
-    // A hostile push service streams a giant rejection body. The client must
-    // accumulate at most a few KiB and drop the rest - the returned body
-    // length must be bounded regardless of how large the response is.
+async fn client_keeps_a_huge_rejection_body_out_of_the_error() {
+    // A hostile push service streams a giant rejection body. The client
+    // reads only the head of it, for the debug log, and the error carries
+    // the status alone, whatever the size of the response.
     let server = MockServer::start().await;
-    // 1 MiB of 'A' bytes - far larger than the 8 KiB internal cap.
+    // 1 MiB of 'A' bytes - far larger than the 200 bytes the client reads.
     let huge_body = "A".repeat(1024 * 1024);
     Mock::given(method("POST"))
         .and(path("/push"))
-        .respond_with(ResponseTemplate::new(500).set_body_string(huge_body.clone()))
+        .respond_with(ResponseTemplate::new(500).set_body_string(huge_body))
         .mount(&server)
         .await;
 
@@ -213,21 +216,14 @@ async fn client_caps_rejection_body_at_a_few_kib() {
         .send(&sub_for(&server), b"hi", ContentEncoding::Aes128Gcm, 60)
         .await
         .unwrap_err();
-    match err {
-        WebPushError::PushServiceRejected { status, body, .. } => {
-            assert_eq!(status, 500);
-            // Body must be bounded - never anywhere close to the 1 MiB sent.
-            assert!(
-                body.len() <= 16 * 1024,
-                "rejection body must be capped, got {} bytes",
-                body.len()
-            );
-            // And the bytes we did capture are the start of the response,
-            // not random middle/end - first chars must be the 'A's we sent.
-            assert!(body.starts_with('A'), "captured prefix wrong");
-        }
-        other => panic!("expected PushServiceRejected, got {other:?}"),
-    }
+    assert!(
+        matches!(err, WebPushError::PushServiceRejected { status: 500, .. }),
+        "expected PushServiceRejected, got {err:?}"
+    );
+    assert!(
+        !format!("{err} {err:?}").contains("AAAA"),
+        "no part of the body may ride in the error: {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

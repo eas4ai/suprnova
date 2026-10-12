@@ -3035,6 +3035,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   OAuth ceremony, error and verified identity types, the broker error and
   Apple's ID token claims. The Live engine exports `ValidationBagError`,
   which `ErrorBag::from_issues` and `ValidationMessageId::parse` return.
+- **Web Push refuses endpoints that resolve to private or local
+  addresses.** In 3.2.1, `EndpointPolicy::Strict` checked the shape of a
+  subscription endpoint (`https`, a host name in place of an IP address,
+  and a list of local and cloud metadata names) but not where the name
+  resolved, so an endpoint whose name resolved to `127.0.0.1`, a private
+  network or a metadata service was sent to, and the transport looked the
+  name up again when it connected. A `PushServiceRejected` also kept up to
+  8 KiB of the push service's response body, which `WebPushChannel` put in
+  the error a `NotificationFailed` listener received. The strict policy now
+  resolves the name and refuses the send with
+  `WebPushError::RefusedDestination` when any answer is a loopback,
+  private, link-local, multicast, unspecified, documentation, reserved or
+  cloud metadata address; the error names the class (`AddressClass`), never
+  the address, and a failed lookup returns the retryable
+  `WebPushError::Lookup`. The transport `WebPushClient::new` and
+  `WebPushClient::with_client_builder` build connects to an address that
+  was checked, keeping the name for TLS and the `Host` header, and does not
+  look the name up again. `PushServiceRejected` carries the status and the
+  `Retry-After` hint and no part of the body, whose first 200 bytes go to
+  the debug log, and `WebPushChannel` names the status alone and logs a
+  refused destination as a subscription that cannot be used.
 
 ## 3.2.1 - 2026-10-05
 

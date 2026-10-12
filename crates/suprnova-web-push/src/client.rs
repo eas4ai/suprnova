@@ -1,6 +1,7 @@
 //! Web Push HTTP client. POSTs an encrypted payload + VAPID
 //! authorization to the subscription's endpoint via reqwest 0.13.
 
+use crate::destination::{Lookup, PinGuard, PinnedResolver, refuse_unsafe};
 use crate::error::WebPushError;
 use crate::payload::{ContentEncoding, Payload};
 use crate::vapid::VapidSigner;
@@ -10,6 +11,7 @@ use reqwest::header::{
     HeaderValue,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -19,14 +21,15 @@ use url::Url;
 /// build their own [`Client`] and pass it to [`WebPushClient::with_client`].
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Cap on the rejection-body bytes buffered from a push-service error
-/// response. Real push services return small, human-readable rejection
-/// messages (`"too many requests"`, `"invalid registration token"`); a
-/// hostile or buggy endpoint streaming gigabytes of body must not be able
-/// to drive the sender's memory growth. Bodies are streamed and read
-/// stops once the cap is reached - the underlying connection is dropped
-/// without consuming the remainder.
-pub(crate) const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+/// How much of a push service's rejection body is read, for the debug log
+/// alone. The body is remote data: it never rides in an error, where a
+/// caller would log it, store it or show it. Real push services answer
+/// with a short message (`"too many requests"`, `"invalid registration
+/// token"`), so the first 200 bytes say what went wrong, and a hostile or
+/// buggy endpoint streaming gigabytes cannot grow the sender's memory:
+/// reading stops at the bound and the connection is dropped without
+/// consuming the rest.
+const LOGGED_BODY_BYTES: usize = 200;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionInfo {
@@ -54,7 +57,9 @@ pub struct PushResponse {
 /// anywhere reachable, turning the push sender into an SSRF gadget.
 ///
 /// [`EndpointPolicy::Strict`] is the production default: HTTPS-only, named
-/// hosts only, common SSRF targets rejected. [`EndpointPolicy::AllowAny`]
+/// hosts only, common SSRF targets rejected, and a host name refused when
+/// it resolves to an address that is not on the public internet.
+/// [`EndpointPolicy::AllowAny`]
 /// disables validation and exists for tests that hit a local mock server
 /// (wiremock, http loopback). Do not use [`EndpointPolicy::AllowAny`] in
 /// production code.
@@ -62,7 +67,14 @@ pub struct PushResponse {
 pub enum EndpointPolicy {
     /// HTTPS-only, named hosts only, IP literals + common SSRF targets
     /// (localhost, `.local`/`.internal`/`.test`/`.example`/`.invalid` TLDs,
-    /// cloud metadata hosts) rejected. The production default.
+    /// cloud metadata hosts) rejected. The host name is then resolved, and
+    /// the send is refused with [`WebPushError::RefusedDestination`] when
+    /// any answer is a loopback, private, link-local, multicast,
+    /// unspecified, documentation, reserved or cloud metadata address
+    /// ([`crate::AddressClass`]). A transport this crate builds connects to
+    /// one of the checked answers, keeping the host name for TLS and the
+    /// `Host` header, so the name is not looked up a second time. The
+    /// production default.
     #[default]
     Strict,
     /// Accept any URL the underlying [`Client`] accepts. Intended for tests
@@ -99,6 +111,12 @@ pub struct WebPushClient {
     subject: String,
     endpoint_policy: EndpointPolicy,
     redirects: RedirectConfinement,
+    /// The name resolver of a transport this crate built, where a strict
+    /// send pins the addresses it checked. `None` for a caller's
+    /// [`Client`], which resolves names itself.
+    pins: Option<Arc<PinnedResolver>>,
+    /// Where a strict send looks the endpoint's host name up.
+    lookup: Lookup,
 }
 
 impl WebPushClient {
@@ -114,17 +132,11 @@ impl WebPushClient {
     /// Returns an error if `subject` is not a VAPID-conformant contact
     /// URI - see [`Self::with_client`] for the validation rules.
     pub fn new(signer: VapidSigner, subject: impl Into<String>) -> Result<Self, WebPushError> {
-        let http = Client::builder()
-            .timeout(DEFAULT_REQUEST_TIMEOUT)
-            // Web Push (RFC 8030) services answer 2xx/4xx/5xx, never 3xx.
-            // Following redirects would let a subscription endpoint that
-            // passes `validate_strict_endpoint` bounce the request to an
-            // internal host / cloud metadata (the initial URL is the only
-            // one validated). Disabling redirects closes that SSRF.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("default reqwest Client builds without TLS/proxy config");
-        Self::from_client(http, signer, subject, RedirectConfinement::Confined)
+        Self::with_client_builder(
+            Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT),
+            signer,
+            subject,
+        )
     }
 
     /// Build a client from a caller-supplied [`reqwest::ClientBuilder`].
@@ -136,16 +148,37 @@ impl WebPushClient {
     /// would let a validated endpoint bounce the POST to an unvalidated
     /// URL, so the library does not accept the caller's redirect setting.
     ///
+    /// The builder's name resolver is replaced too, by one that answers a
+    /// host name the [`EndpointPolicy::Strict`] policy checked with the
+    /// addresses it checked, so the connection goes to a checked address
+    /// and the name is not looked up a second time. Any other name, such
+    /// as a proxy's, is looked up as reqwest's own resolver would. A name
+    /// you map with [`reqwest::ClientBuilder::resolve`] still connects
+    /// where you mapped it.
+    ///
     /// `subject` validation matches [`Self::with_client`].
     pub fn with_client_builder(
         builder: reqwest::ClientBuilder,
         signer: VapidSigner,
         subject: impl Into<String>,
     ) -> Result<Self, WebPushError> {
+        let pins = Arc::new(PinnedResolver::default());
         let http = builder
+            // Web Push (RFC 8030) services answer 2xx/4xx/5xx, never 3xx.
+            // Following redirects would let a subscription endpoint that
+            // passes `validate_strict_endpoint` bounce the request to an
+            // internal host / cloud metadata (the initial URL is the only
+            // one validated). Disabling redirects closes that SSRF.
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::clone(&pins))
             .build()?;
-        Self::from_client(http, signer, subject, RedirectConfinement::Confined)
+        Self::from_client(
+            http,
+            signer,
+            subject,
+            RedirectConfinement::Confined,
+            Some(pins),
+        )
     }
 
     /// Build a client wrapping a caller-supplied [`Client`].
@@ -172,7 +205,7 @@ impl WebPushClient {
         signer: VapidSigner,
         subject: impl Into<String>,
     ) -> Result<Self, WebPushError> {
-        Self::from_client(http, signer, subject, RedirectConfinement::Unknown)
+        Self::from_client(http, signer, subject, RedirectConfinement::Unknown, None)
     }
 
     /// Explicitly accept a redirect-following transport under `Strict`.
@@ -180,8 +213,10 @@ impl WebPushClient {
     /// Call this only when the supplied [`Client`] is known to not follow
     /// redirects (or when following them is acceptable): unlike
     /// [`Self::with_client_builder`], the library cannot verify that.
-    /// [`EndpointPolicy::Strict`] then validates the initial endpoint URL
-    /// only, exactly as before.
+    /// [`EndpointPolicy::Strict`] then checks the initial endpoint URL and
+    /// the addresses its host name resolves to, but the supplied client
+    /// resolves the name again when it connects, so the address it reaches
+    /// is not pinned to the one checked.
     pub fn allow_unconfined_redirects(mut self) -> Self {
         if self.redirects == RedirectConfinement::Unknown {
             self.redirects = RedirectConfinement::Unchecked;
@@ -194,6 +229,7 @@ impl WebPushClient {
         signer: VapidSigner,
         subject: impl Into<String>,
         redirects: RedirectConfinement,
+        pins: Option<Arc<PinnedResolver>>,
     ) -> Result<Self, WebPushError> {
         let subject = subject.into();
         validate_vapid_subject(&subject)?;
@@ -203,15 +239,26 @@ impl WebPushClient {
             subject,
             endpoint_policy: EndpointPolicy::default(),
             redirects,
+            pins,
+            lookup: Lookup::default(),
         })
+    }
+
+    /// Answer every strict lookup with `ips`, so a test can make a name
+    /// resolve to any address.
+    #[cfg(test)]
+    fn with_fixed_lookup(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.lookup = Lookup::Fixed(ips);
+        self
     }
 
     /// Override the subscription-endpoint validation policy.
     ///
     /// Defaults to [`EndpointPolicy::Strict`]. Switching to
     /// [`EndpointPolicy::AllowAny`] disables the HTTPS / named-host / blocked-
-    /// TLD checks and is intended only for test code that targets a controlled
-    /// mock endpoint. Production code must not call this with `AllowAny`.
+    /// TLD checks and the checks of the addresses a host name resolves to,
+    /// and is intended only for test code that targets a controlled mock
+    /// endpoint. Production code must not call this with `AllowAny`.
     pub fn with_endpoint_policy(mut self, policy: EndpointPolicy) -> Self {
         self.endpoint_policy = policy;
         self
@@ -245,9 +292,17 @@ impl WebPushClient {
         // host is a named, non-SSRF-target hostname. AllowAny still parses the
         // URL so a malformed string fails fast.
         let endpoint_url = parse_endpoint(&subscription.endpoint)?;
-        if self.endpoint_policy == EndpointPolicy::Strict {
+        // Strict also resolves the host name and refuses it when an answer
+        // is not a public address. The guard keeps the checked answers
+        // pinned for this crate's transport until the send ends, so the
+        // connection goes to one of them and the name is not looked up
+        // again.
+        let _pin = if self.endpoint_policy == EndpointPolicy::Strict {
             validate_strict_endpoint(&endpoint_url)?;
-        }
+            self.check_destination(&endpoint_url).await?
+        } else {
+            None
+        };
 
         let audience = audience_of_url(&endpoint_url);
         let jwt = self.signer.sign(&audience, &self.subject, 12 * 3600)?;
@@ -292,22 +347,42 @@ impl WebPushClient {
             _ => {
                 let retry_after =
                     parse_retry_after_secs(resp.headers().get(reqwest::header::RETRY_AFTER));
-                let body = read_capped_body(resp, MAX_ERROR_BODY_BYTES).await;
+                let head = read_body_head(resp, LOGGED_BODY_BYTES).await;
+                // Escaped, so a line break or a control character in the
+                // remote text cannot forge another log line.
+                tracing::debug!(
+                    status,
+                    body = %head.escape_debug(),
+                    "push service rejected the message; its body stays out of the error"
+                );
                 Err(WebPushError::PushServiceRejected {
                     status,
                     retry_after,
-                    body,
                 })
             }
         }
+    }
+
+    /// Look the endpoint's host name up, refuse it when any answer is not
+    /// a public address, and pin the answers for this crate's transport.
+    /// A caller's [`Client`] has no pin table and resolves the name itself.
+    async fn check_destination(&self, url: &Url) -> Result<Option<PinGuard<'_>>, WebPushError> {
+        // `validate_strict_endpoint` refused an address in place of a name.
+        let Some(url::Host::Domain(host)) = url.host() else {
+            return Ok(None);
+        };
+        let port = url.port_or_known_default().unwrap_or(0);
+        let addrs = self.lookup.resolve(host, port).await?;
+        refuse_unsafe(&addrs)?;
+        Ok(self.pins.as_deref().map(|pins| pins.pin(host, addrs)))
     }
 }
 
 /// Stream and accumulate up to `cap` bytes of an HTTP response body, then
 /// drop the response so the remainder of the body is not buffered. The
 /// returned string is UTF-8-lossy - push services may include arbitrary
-/// bytes, but the snippet is intended for diagnostic surfacing only.
-async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> String {
+/// bytes, but the head is only ever written to the debug log.
+async fn read_body_head(mut resp: reqwest::Response, cap: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
     while buf.len() < cap {
         match resp.chunk().await {
@@ -419,12 +494,9 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, WebPushError> {
 ///   `localhost`, RFC-2606 reserved TLDs: `.localhost`, `.local`, `.internal`,
 ///   `.test`, `.example`, `.invalid`)
 ///
-/// What this does NOT do: resolve the hostname and check the resolved IP
-/// against a private-CIDR blocklist. That requires a DNS resolver and runtime
-/// IP-range matching to be effective against DNS-rebinding-style attacks; it
-/// is a sensible follow-on layer for stricter threat models. Callers needing
-/// that can apply it via [`WebPushClient::with_client`] using a hardened
-/// [`Client`] (custom resolver, etc.).
+/// These are the checks of the URL's shape. Where the host name resolves is
+/// checked next, by `WebPushClient::check_destination`, which also pins the
+/// checked answers for the connection.
 fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
     if url.scheme() != "https" {
         return Err(WebPushError::InvalidSubscription(format!(
@@ -717,5 +789,203 @@ mod tests {
     #[test]
     fn retry_after_returns_none_when_absent() {
         assert_eq!(parse_retry_after_secs(None), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // HRD-003: the strict policy checks where the host name resolves,
+    // connects to the address it checked, and keeps the remote body out of
+    // every error.
+    // ---------------------------------------------------------------------
+
+    use crate::error::AddressClass;
+    use crate::vapid::VapidKey;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const RECEIVER_P256DH: &str =
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+    const RECEIVER_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+
+    fn subscription(endpoint: &str) -> SubscriptionInfo {
+        SubscriptionInfo {
+            endpoint: endpoint.into(),
+            keys: SubscriptionKeys {
+                p256dh: RECEIVER_P256DH.into(),
+                auth: RECEIVER_AUTH.into(),
+            },
+        }
+    }
+
+    fn addresses(ips: &[&str]) -> Vec<std::net::IpAddr> {
+        ips.iter()
+            .map(|ip| ip.parse().expect("test address parses"))
+            .collect()
+    }
+
+    /// A client under the default `Strict` policy whose lookups answer `ips`.
+    fn strict_client(ips: &[&str]) -> WebPushClient {
+        WebPushClient::new(
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI")
+        .with_fixed_lookup(addresses(ips))
+    }
+
+    async fn send_to(client: &WebPushClient, endpoint: &str) -> Result<PushResponse, WebPushError> {
+        client
+            .send(
+                &subscription(endpoint),
+                b"hi",
+                ContentEncoding::Aes128Gcm,
+                60,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn hardening_strict_refuses_a_name_that_resolves_to_loopback() {
+        let client = strict_client(&["127.0.0.1"]);
+        let err = send_to(&client, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WebPushError::RefusedDestination(AddressClass::Loopback)
+            ),
+            "{err:?}"
+        );
+        assert!(!err.is_retryable(), "a retry changes nothing");
+        assert!(!err.to_string().contains("127.0.0.1"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hardening_strict_refuses_a_name_that_resolves_to_a_private_address() {
+        // One public answer does not save the name: the connector could
+        // try the private one.
+        let client = strict_client(&["8.8.8.8", "10.1.2.3"]);
+        let err = send_to(&client, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WebPushError::RefusedDestination(AddressClass::Private)),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "subscription cannot be used: its host name resolves to a private address"
+        );
+    }
+
+    /// A caller's client resolves names itself, so nothing is pinned, but
+    /// the strict check of the answers still runs before any I/O.
+    #[tokio::test]
+    async fn hardening_strict_checks_the_answers_for_a_caller_supplied_client() {
+        let http = Client::builder().build().expect("stock client builds");
+        let client = WebPushClient::with_client(
+            http,
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI")
+        .allow_unconfined_redirects()
+        .with_fixed_lookup(addresses(&["169.254.169.254"]));
+        let err = send_to(&client, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WebPushError::RefusedDestination(AddressClass::Metadata)
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Public answers pass, and the transport this crate built holds them
+    /// pinned under the endpoint's host name for as long as the send runs.
+    #[tokio::test]
+    async fn hardening_strict_pins_the_checked_public_answers_for_the_transport() {
+        let client = strict_client(&["8.8.8.8", "2001:4860:4860::8888"]);
+        let url = Url::parse("https://Push.Example.com/push/token").expect("test url parses");
+        validate_strict_endpoint(&url).expect("a named https host passes the shape checks");
+        let pin = client
+            .check_destination(&url)
+            .await
+            .expect("public answers pass");
+        assert!(pin.is_some(), "this crate's transport pins the answers");
+        let pins = client
+            .pins
+            .as_deref()
+            .expect("new() builds a pinning transport");
+        let expected: Vec<std::net::SocketAddr> = vec![
+            "8.8.8.8:443".parse().expect("test address parses"),
+            "[2001:4860:4860::8888]:443"
+                .parse()
+                .expect("test address parses"),
+        ];
+        assert_eq!(pins.pinned("push.example.com"), Some(expected));
+        drop(pin);
+        assert_eq!(
+            pins.pinned("push.example.com"),
+            None,
+            "the send's end releases the pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardening_a_rejection_carries_the_status_and_not_the_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/push"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("the-remote-body-marker"))
+            .mount(&server)
+            .await;
+        let client = WebPushClient::new(
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI")
+        .with_endpoint_policy(EndpointPolicy::AllowAny);
+
+        let err = send_to(&client, &format!("{}/push", server.uri()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WebPushError::PushServiceRejected { status: 500, .. }),
+            "{err:?}"
+        );
+        assert!(err.is_retryable(), "a 5xx stays retryable");
+        assert_eq!(err.to_string(), "push service rejected: status 500");
+        assert!(
+            !format!("{err:?}").contains("the-remote-body-marker"),
+            "the remote body must not reach the caller: {err:?}"
+        );
+    }
+
+    /// The rejection body goes to the debug log only, and only its first
+    /// 200 bytes are read, however much the push service sends.
+    #[tokio::test]
+    async fn hardening_the_logged_rejection_body_is_bounded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("A".repeat(1024 * 1024)))
+            .mount(&server)
+            .await;
+        let response = Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client builds")
+            .get(server.uri())
+            .send()
+            .await
+            .expect("the mock answers");
+        let head = read_body_head(response, LOGGED_BODY_BYTES).await;
+        assert_eq!(head.len(), 200);
+        assert!(
+            head.chars().all(|c| c == 'A'),
+            "the head is the start of the body"
+        );
     }
 }

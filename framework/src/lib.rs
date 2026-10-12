@@ -623,8 +623,8 @@ pub use vector::{
 };
 #[cfg(feature = "web-push")]
 pub use web_push::{
-    ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims, VapidKey,
-    VapidSigner, WebPushClient, WebPushError,
+    AddressClass, ContentEncoding, EndpointPolicy, PushResponse, SubscriptionInfo, VapidClaims,
+    VapidKey, VapidSigner, WebPushClient, WebPushError,
 };
 pub use workflow::{
     StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus, WorkflowWorker,
