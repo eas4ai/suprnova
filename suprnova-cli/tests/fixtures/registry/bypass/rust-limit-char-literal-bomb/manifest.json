@@ -1,0 +1,8 @@
+{
+  "name": "evil.rust-limit-char-literal-bomb",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": []
+}
