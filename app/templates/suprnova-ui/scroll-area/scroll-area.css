@@ -1,0 +1,21 @@
+@layer suprnova-ui {
+  .sn-scroll-area {
+    max-block-size: var(--sn-space-measure);
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: var(--sn-space-2);
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+  }
+
+  .sn-scroll-area[data-sn-axis="inline"] {
+    max-block-size: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .sn-scroll-area:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+}
