@@ -16,6 +16,41 @@ const AUTH_GUARDS_KEY: &str = "_auth_guards";
 const AUTH_GUARD_ID_KEY: &str = "id";
 const AUTH_GUARD_REMEMBER_SELECTOR_KEY: &str = "remember_selector";
 const AUTH_GUARD_MAGNETAR_BINDING_KEY: &str = "magnetar_web_binding";
+/// The authentication epoch a guard's sign-in recorded (HRD-007). See
+/// [`GuardSignInEpoch`].
+const AUTH_GUARD_EPOCH_KEY: &str = "auth_epoch";
+/// The stored form of [`GuardSignInEpoch::Unread`].
+const AUTH_GUARD_EPOCH_UNREAD: &str = "unread";
+
+/// The authentication epoch a guard's sign-in recorded in the session, the
+/// value every later request that resolves the guard's user compares with
+/// the user's current one (HRD-007, `crate::auth::epoch`).
+///
+/// It lives in the guard's own entry beside its id, so a sign-in that
+/// replaces the guard's identity (which removes the whole entry) never
+/// inherits the epoch of the identity it replaced, and a logout of the
+/// guard takes it with the id.
+///
+/// The epoch is stored as a decimal string, not a JSON number. A digest
+/// epoch uses all 64 bits, and a custom [`SessionStore`] that carries JSON
+/// numbers as `f64` would round it to another value: every session would
+/// then fail its check on every request. A string survives any store
+/// unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuardSignInEpoch {
+    /// The epoch read when the guard signed the user in.
+    Recorded(u64),
+    /// The guard signed the user in without the user at hand
+    /// (`Auth::login_id` is synchronous and asks no provider), so the epoch
+    /// is read by the first request that resolves the user and recorded
+    /// then.
+    Unread,
+    /// A stored value that is neither form. Nothing the framework writes
+    /// reads back this way, so the value was altered or written by other
+    /// code; the check treats it as a mismatch rather than as no epoch, so
+    /// a damaged value never turns the check off.
+    Unreadable,
+}
 
 /// Session data container
 ///
@@ -175,6 +210,57 @@ impl SessionData {
             AUTH_GUARD_REMEMBER_SELECTOR_KEY,
             serde_json::Value::String(selector.into()),
         );
+    }
+
+    /// The authentication epoch the guard `guard`'s sign-in recorded, or
+    /// `None` when it recorded none: a session signed in before 4.0.0, a
+    /// user whose provider exposes no epoch, or a sign-in Magnetar fences
+    /// itself.
+    pub(crate) fn auth_guard_epoch(&self, guard: &str) -> Option<GuardSignInEpoch> {
+        let value = self.auth_guard_field(guard, AUTH_GUARD_EPOCH_KEY)?;
+        Some(match value.as_str() {
+            Some(AUTH_GUARD_EPOCH_UNREAD) => GuardSignInEpoch::Unread,
+            Some(text) => text
+                .parse()
+                .map_or(GuardSignInEpoch::Unreadable, GuardSignInEpoch::Recorded),
+            None => GuardSignInEpoch::Unreadable,
+        })
+    }
+
+    /// Record `epoch` as the authentication epoch of the guard `guard`'s
+    /// sign-in.
+    pub(crate) fn set_auth_guard_epoch(&mut self, guard: &str, epoch: u64) {
+        self.set_auth_guard_field(
+            guard,
+            AUTH_GUARD_EPOCH_KEY,
+            serde_json::Value::String(epoch.to_string()),
+        );
+    }
+
+    /// Mark the guard `guard`'s sign-in as carrying an epoch not read yet
+    /// ([`GuardSignInEpoch::Unread`]): the first request that resolves the
+    /// user records it.
+    pub(crate) fn mark_auth_guard_epoch_unread(&mut self, guard: &str) {
+        self.set_auth_guard_field(
+            guard,
+            AUTH_GUARD_EPOCH_KEY,
+            serde_json::Value::String(AUTH_GUARD_EPOCH_UNREAD.to_owned()),
+        );
+    }
+
+    /// Remove the authentication epoch of the guard `guard`'s sign-in, so
+    /// no later request checks it: the user exposes no epoch.
+    pub(crate) fn clear_auth_guard_epoch(&mut self, guard: &str) {
+        let removed = self
+            .data
+            .get_mut(AUTH_GUARDS_KEY)
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|guards| guards.get_mut(guard))
+            .and_then(serde_json::Value::as_object_mut)
+            .is_some_and(|state| state.remove(AUTH_GUARD_EPOCH_KEY).is_some());
+        if removed {
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn set_auth_guard_magnetar_binding(
@@ -995,5 +1081,65 @@ mod dirty_tracking_tests {
             !session.is_dirty(),
             "an unchanged guard identity must not force a session-store write"
         );
+    }
+}
+
+#[cfg(test)]
+mod guard_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn hardening_guard_epoch_round_trips_every_bit() {
+        let mut session = SessionData::new("sid".into(), "tok".into());
+        session.set_auth_guard_id("web", "7");
+        assert_eq!(session.auth_guard_epoch("web"), None);
+
+        session.mark_auth_guard_epoch_unread("web");
+        assert_eq!(
+            session.auth_guard_epoch("web"),
+            Some(GuardSignInEpoch::Unread)
+        );
+
+        // A digest epoch uses all 64 bits; the string form keeps them.
+        session.set_auth_guard_epoch("web", u64::MAX);
+        assert_eq!(
+            session.auth_guard_epoch("web"),
+            Some(GuardSignInEpoch::Recorded(u64::MAX))
+        );
+
+        session.clear_auth_guard_epoch("web");
+        assert_eq!(session.auth_guard_epoch("web"), None);
+        assert_eq!(session.auth_guard_id("web").as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn hardening_guard_epoch_leaves_with_a_replaced_identity() {
+        let mut session = SessionData::new("sid".into(), "tok".into());
+        session.set_auth_guard_id("web", "7");
+        session.set_auth_guard_epoch("web", 41);
+        session.replace_auth_guard_id("web", "9");
+        assert_eq!(
+            session.auth_guard_epoch("web"),
+            None,
+            "a new identity never inherits the epoch of the one it replaced"
+        );
+    }
+
+    #[test]
+    fn hardening_damaged_guard_epoch_reads_as_unreadable() {
+        let mut session = SessionData::new("sid".into(), "tok".into());
+        session.set_auth_guard_id("web", "7");
+        for damaged in [
+            serde_json::json!(41),
+            serde_json::json!("not a number"),
+            serde_json::json!(null),
+        ] {
+            session.set_auth_guard_field("web", AUTH_GUARD_EPOCH_KEY, damaged.clone());
+            assert_eq!(
+                session.auth_guard_epoch("web"),
+                Some(GuardSignInEpoch::Unreadable),
+                "{damaged} must not read as no epoch"
+            );
+        }
     }
 }

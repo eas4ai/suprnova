@@ -48,20 +48,32 @@
 //! # Lifecycle
 //!
 //! - **Issuance**: random selector + random verifier → bcrypt-hash
-//!   the verifier → INSERT row → encrypt `"{selector}.{verifier}"`
+//!   the verifier bound to the user's epoch (see "Epoch binding" below)
+//!   → INSERT row → encrypt `"{selector}.{verifier}"`
 //!   inside a versioned, guard-named carrier under `Crypt` → place the
 //!   encrypted blob in the `remember_me` cookie.
 //!
 //! - **Verification**: decrypt cookie → split into
 //!   `(selector, verifier)` → `SELECT row WHERE selector = ? AND
-//!   expires_at > now LIMIT 1` → `bcrypt::verify(verifier,
-//!   row.token_hash)`. On match, atomic conditional DELETE keyed on
-//!   `(id, selector)`; the loser of a race sees `rows_affected == 0`
-//!   and returns `None` (replay defeated).
+//!   expires_at > now LIMIT 1` → read the user's current epoch →
+//!   `bcrypt::verify("{verifier}.{epoch}", row.token_hash)`. On match,
+//!   atomic conditional DELETE keyed on `(id, selector)`; the loser of a
+//!   race sees `rows_affected == 0` and returns `None` (replay defeated).
+//!   On mismatch, the row is deleted and the token fails.
 //!
 //! - **Rotation**: a successful verify DELETEs the matched row and
 //!   issues a fresh selector+verifier pair. The middleware re-sets the
 //!   cookie with the new composite plaintext.
+//!
+//! - **Epoch binding (HRD-007)**: a row is bound to the user's
+//!   authentication epoch at issue (`crate::auth::epoch`): the hash stored
+//!   is the hash of `"{verifier}.{epoch}"`, not of the verifier alone.
+//!   Verification reads the user's current epoch through the guard's
+//!   provider and checks the verifier mixed with *that* epoch, so a row
+//!   issued before a password change fails verification after it, is
+//!   deleted, and its cookie is cleared, whether or not the reset's
+//!   revocation of the user's rows succeeded. A user without an epoch mixes
+//!   nothing in. No column changes: the epoch lives only inside the hash.
 //!
 //! - **Revocation**: [`revoke_all_for_user`] wipes every row for a user
 //!   in one DELETE. `Auth::logout` chains this so a real logout
@@ -101,6 +113,16 @@ const SELECTOR_BYTES: usize = 16;
 /// Width of the verifier plaintext. 32 bytes = 256 bits of entropy.
 /// URL-safe base64 encodes to 43 chars (no padding).
 const VERIFIER_BYTES: usize = 32;
+
+/// The length of the encoded verifier: URL-safe base64 without padding.
+const VERIFIER_ENCODED_LEN: usize = (VERIFIER_BYTES * 4).div_ceil(3);
+
+/// bcrypt hashes only the first 72 bytes of its input and ignores the rest
+/// without a word. An epoch past that limit would be cut off, and a row
+/// would verify under any epoch: the binding would be silently void. The
+/// longest bound input is the verifier, a `.` and the 20 digits of
+/// `u64::MAX`, so it is checked here, at compile time, that it fits.
+const _: () = assert!(VERIFIER_ENCODED_LEN + 1 + 20 <= 72);
 
 /// Cookie name carrying the encrypted plaintext token.
 ///
@@ -152,6 +174,30 @@ fn token_rows(select: Select<entity::Entity>) -> sea_orm::Selector<sea_orm::Sele
 /// hash matches a known verifier (used for the expired-token test).
 #[doc(hidden)]
 pub async fn generate_token() -> Result<(String, String, String), FrameworkError> {
+    let (selector, verifier_plaintext) = generate_parts()?;
+    // Audit HIGH `hashing` #1 - bcrypt is CPU-bound (~250ms @ cost 12).
+    // Use the async variant so the Tokio worker thread isn't blocked
+    // while the framework issues a token under request load.
+    let verifier_hash = hashing::hash_async(&verifier_plaintext).await?;
+    Ok((selector, verifier_plaintext, verifier_hash))
+}
+
+/// The input a row's hash is computed over: the verifier, bound to the
+/// user's authentication epoch when the user has one (HRD-007).
+///
+/// The verifier is URL-safe base64 and never holds a `.`, so
+/// `"{verifier}.{epoch}"` is unambiguous: no verifier of another row and no
+/// other epoch spells the same input. A user without an epoch mixes nothing
+/// in, so such a row verifies exactly as a row did before epochs existed.
+fn bound_verifier(verifier: &str, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(epoch) => format!("{verifier}.{epoch}"),
+        None => verifier.to_owned(),
+    }
+}
+
+/// A fresh `(selector, verifier_plaintext)` pair from the OS RNG.
+fn generate_parts() -> Result<(String, String), FrameworkError> {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     // High-entropy OS randomness for both halves. `getrandom::fill`
@@ -167,12 +213,7 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
     getrandom::fill(&mut verifier_bytes)
         .map_err(|e| FrameworkError::internal(format!("OS RNG failure (verifier): {e}")))?;
     let verifier_plaintext = URL_SAFE_NO_PAD.encode(verifier_bytes);
-
-    // Audit HIGH `hashing` #1 - bcrypt is CPU-bound (~250ms @ cost 12).
-    // Use the async variant so the Tokio worker thread isn't blocked
-    // while the framework issues a token under request load.
-    let verifier_hash = hashing::hash_async(&verifier_plaintext).await?;
-    Ok((selector, verifier_plaintext, verifier_hash))
+    Ok((selector, verifier_plaintext))
 }
 
 /// `ttl_minutes` as a lifetime, and the moment a token issued now with it
@@ -201,20 +242,65 @@ pub(crate) fn remember_expiry(
         })
 }
 
-/// Issue a new remember token for `user_id`. Inserts a row keyed on a
-/// random selector and storing the bcrypt hash of the verifier;
-/// returns the composite plaintext `"{selector}.{verifier}"` to the
-/// caller. The caller is responsible for shipping the plaintext to the
-/// client (via the session middleware's pending-cookies slot, set by
+/// Issue a new remember token for `user_id` of the default guard. Inserts
+/// a row keyed on a random selector and storing the bcrypt hash of the
+/// verifier bound to the user's authentication epoch; returns the
+/// composite plaintext `"{selector}.{verifier}"` to the caller. The caller
+/// is responsible for shipping the plaintext to the client (via the
+/// session middleware's pending-cookies slot, set by
 /// `Auth::login_remember`).
+///
+/// The epoch is the one the default guard's provider reports for the user
+/// (HRD-007), so a password change after the issue makes the token fail
+/// [`verify_and_rotate`]. Without a registered provider, or for a user that
+/// exposes no epoch, the token is bound to none.
 ///
 /// # Errors
 ///
 /// Returns [`FrameworkError`] when `ttl_minutes` puts the expiry outside
-/// the dates the clock can hold, or when hashing or the database fails.
+/// the dates the clock can hold, or when the provider, hashing or the
+/// database fails.
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
+    issue_for_guard(
+        &crate::auth::Auth::default_guard_name(),
+        user_id,
+        ttl_minutes,
+    )
+    .await
+}
+
+/// Issue a remember token for `user_id` of the guard `guard_name`, bound to
+/// the epoch that guard's provider reports for the user, the one
+/// [`verify_and_rotate_for_guard`] reads back for the same guard name.
+///
+/// # Errors
+///
+/// As [`issue`]. A provider error fails the issue rather than binding the
+/// token to no epoch: a token that skipped the binding would survive the
+/// next password change.
+pub(crate) async fn issue_for_guard(
+    guard_name: &str,
+    user_id: &str,
+    ttl_minutes: i64,
+) -> Result<String, FrameworkError> {
+    // A lifetime no date can hold is reported before the provider is asked.
+    remember_expiry(ttl_minutes)?;
+    let epoch = crate::auth::epoch::guard_user_epoch(guard_name, user_id).await?;
+    issue_at_epoch(user_id, ttl_minutes, epoch).await
+}
+
+/// Insert a row for `user_id` whose hash binds a fresh verifier to `epoch`,
+/// and return the composite plaintext.
+async fn issue_at_epoch(
+    user_id: &str,
+    ttl_minutes: i64,
+    epoch: Option<u64>,
+) -> Result<String, FrameworkError> {
     let (_, expires_at) = remember_expiry(ttl_minutes)?;
-    let (selector, verifier_plaintext, verifier_hash) = generate_token().await?;
+    let (selector, verifier_plaintext) = generate_parts()?;
+    // Audit HIGH `hashing` #1: the async variant keeps the CPU-bound hash
+    // off the request worker thread.
+    let verifier_hash = hashing::hash_async(&bound_verifier(&verifier_plaintext, epoch)).await?;
     let now = crate::clock::now();
 
     let conn = DB::connection()?;
@@ -237,7 +323,19 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
     Ok(format!("{selector}.{verifier_plaintext}"))
 }
 
-/// Verify a plaintext remember-me token. On success:
+/// A remember token that verified and was rotated: the user it signs in,
+/// the replacement composite plaintext, and the authentication epoch the
+/// replacement is bound to, which the session records for the sign-in.
+pub(crate) struct RotatedRemember {
+    /// The user the token signs in.
+    pub(crate) user_id: String,
+    /// The replacement `"{selector}.{verifier}"` for the cookie.
+    pub(crate) credential: String,
+    /// The user's epoch at verification, `None` when the user has none.
+    pub(crate) epoch: Option<u64>,
+}
+
+/// Verify a plaintext remember-me token of the default guard. On success:
 ///
 /// 1. Atomic conditional DELETE of the matched row keyed on
 ///    `(id, selector)`. Race-loser sees `rows_affected == 0` and bails.
@@ -250,16 +348,57 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
 /// should then be cleared so the client stops sending a token that can
 /// never authenticate.
 ///
+/// The verifier is checked bound to the user's current authentication
+/// epoch, read through the default guard's provider (HRD-007). A token
+/// issued before a password change, or before 4.0.0 when tokens were bound
+/// to no epoch, fails here once its user has an epoch, and its row is
+/// deleted: a row whose verifier does not verify is never kept.
+///
 /// # Verification cost
 ///
-/// Exactly one indexed SELECT + at most one `bcrypt::verify` per
-/// request - independent of how many active tokens the table holds.
-/// Forged cookies cost only the SELECT (the verifier never matches
-/// because the selector did not, or `expires_at` already passed).
+/// Exactly one indexed SELECT, one lookup of the row's user by id, and at
+/// most one `bcrypt::verify` per request - independent of how many active
+/// tokens the table holds. Forged cookies cost only the SELECT when the
+/// selector matches no row or `expires_at` already passed.
 pub async fn verify_and_rotate(
     token: &str,
     ttl_minutes: i64,
 ) -> Result<Option<(String, String)>, FrameworkError> {
+    Ok(
+        verify_and_rotate_for_guard(token, ttl_minutes, &crate::auth::Auth::default_guard_name())
+            .await?
+            .map(|rotated| (rotated.user_id, rotated.credential)),
+    )
+}
+
+/// [`verify_and_rotate`] for a token the guard `guard_name` issued: the
+/// user's epoch is read through that guard's provider, the one
+/// [`issue_for_guard`] bound the token with, so the session middleware
+/// verifies a named guard's cookie against the same epoch it was issued
+/// at.
+///
+/// # A row that fails verification is deleted
+///
+/// The epoch is not stored beside the hash, so a verifier that does not
+/// verify cannot be told apart from one bound to an earlier epoch. The row
+/// is deleted either way, and it is safe to: the selector reaches this
+/// function only inside the authenticated, encrypted remember cookie the
+/// framework issued (or from server code), so a request that presents an
+/// existing selector holds the whole credential, and a credential that no
+/// longer verifies must not survive. A delete that fails is logged and the
+/// token still fails: the row can never verify again, because a password
+/// hash once replaced never comes back.
+///
+/// # Errors
+///
+/// A database error, or the provider's error while reading the user's
+/// epoch. The middleware then continues without remember-me: an epoch that
+/// could not be read never counts as "no epoch".
+pub(crate) async fn verify_and_rotate_for_guard(
+    token: &str,
+    ttl_minutes: i64,
+    guard_name: &str,
+) -> Result<Option<RotatedRemember>, FrameworkError> {
     // Parse the composite token. Malformed → no auth (and no DB hit).
     let (selector, verifier) = match token.split_once('.') {
         Some(pair) => pair,
@@ -291,11 +430,29 @@ pub async fn verify_and_rotate(
         ));
     }
 
+    // The epoch the row must be bound to: the user's current one, read
+    // through the provider of the guard the cookie names.
+    let epoch = crate::auth::epoch::guard_user_epoch(guard_name, &row.user_id).await?;
+
     // Exactly one `bcrypt::verify` per request - constant-time
     // comparison, no scanning. Audit HIGH `hashing` #1: the async
     // variant runs the CPU-bound bcrypt verification on
     // `spawn_blocking` so the request worker thread stays free.
-    if !hashing::verify_async(verifier, &row.token_hash).await? {
+    if !hashing::verify_async(&bound_verifier(verifier, epoch), &row.token_hash).await? {
+        let deleted = entity::Entity::delete_many()
+            .filter(entity::Column::Id.eq(row.id))
+            .filter(entity::Column::Selector.eq(&row.selector))
+            .exec(conn.inner())
+            .await;
+        if let Err(error) = deleted {
+            tracing::warn!(
+                target: "suprnova::auth",
+                user_id = %row.user_id,
+                %error,
+                "a remember-me row that failed verification could not be deleted; \
+                 it can no longer verify"
+            );
+        }
         return Ok(None);
     }
 
@@ -319,8 +476,14 @@ pub async fn verify_and_rotate(
         return Ok(None);
     }
 
-    let new_composite = issue(&row.user_id, ttl_minutes).await?;
-    Ok(Some((row.user_id, new_composite)))
+    // The replacement is bound to the epoch just verified, so the rotation
+    // reads the provider once.
+    let credential = issue_at_epoch(&row.user_id, ttl_minutes, epoch).await?;
+    Ok(Some(RotatedRemember {
+        user_id: row.user_id,
+        credential,
+        epoch,
+    }))
 }
 
 /// Revoke every remember token for `user_id` in one DELETE.

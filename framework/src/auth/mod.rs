@@ -57,6 +57,7 @@ pub mod config;
 pub mod contract;
 pub mod database_provider;
 pub mod eloquent_provider;
+pub(crate) mod epoch;
 pub mod events;
 pub mod generic_user;
 pub mod guard;

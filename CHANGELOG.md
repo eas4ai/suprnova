@@ -3212,6 +3212,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `CsrfMiddleware`, so the `503` renders as the error page in the visitor's
   session and locale and the deadline bounds the CSRF body read. The API
   kit installs it first.
+- **A session or remember-me cookie from before a password change stops
+  working.** In 3.2.1, a password reset ended the user's other sessions and
+  revoked their remember-me tokens at once, and nothing checked a session or
+  a remember-me cookie against the password again: when the session store
+  or the token table refused the revocation, a stolen session or cookie kept
+  working until it expired. In 4.0.0, every sign-in issued through a user
+  provider records the user's auth epoch: `Authenticatable::auth_epoch`, or,
+  when the model returns none, a digest of the password hash
+  `get_auth_password` returns. Every request that resolves the user from the
+  session or a remember-me cookie compares it with the user's current one.
+  On a mismatch, that guard's identity leaves the session, the remember-me
+  row it holds is deleted and its cookie cleared, and the request continues
+  as a guest's, so `AuthMiddleware` answers `401` or redirects to the login
+  page; the framework logs the user id and dispatches no `Logout` event.
+  Each `remember_tokens` row is bound to the epoch inside its hash, with no
+  column added. A user whose model returns neither records no epoch and is
+  not checked. `Auth::login_id` asks no provider, so the first request that
+  resolves the user records its epoch. A remember-me cookie issued by 3.2.1
+  carries no epoch: once its user has one, it fails verification once, its
+  row is deleted and the cookie cleared. A session signed in by 3.2.1 is
+  checked from the user's next sign-in. `Auth::logout_other_devices` binds
+  the current session and remember-me cookie again when it rehashes the
+  password. With the Magnetar engine installed, the default guard keeps
+  Magnetar's own epoch check. No signature changed;
+  `suprnova::auth::remember::issue` and `verify_and_rotate` now bind and
+  check the default guard's epoch, and `verify_and_rotate` deletes a row
+  whose verifier fails.
 
 ## 3.2.1 - 2026-10-05
 
