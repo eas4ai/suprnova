@@ -5,6 +5,7 @@ pub mod e2e;
 pub mod global_middleware;
 pub mod halves;
 pub mod handshake;
+pub mod hardening;
 pub mod heartbeat;
 pub mod origin_policy;
 pub mod per_route_config;

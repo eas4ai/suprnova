@@ -1581,20 +1581,6 @@ async fn handle_ws_upgrade(
     let heartbeat_interval = config.ping_interval;
     let tungstenite_config = config.to_tungstenite_config();
 
-    // Enforce the configured `OriginPolicy` BEFORE the protocol upgrade. The
-    // upgrade response is a 101 that the browser commits to; rejecting after
-    // upgrade leaves the peer holding a stillborn socket. Rejecting before
-    // keeps the response a clean HTTP 403 with no upgrade. SameOrigin is the
-    // default - a browser WS request without a matching `Origin` lands here.
-    if let Err(reason) = check_origin_policy(&config.origin_policy, req.headers()) {
-        tracing::warn!(
-            route = %pattern,
-            reason = reason,
-            "websocket upgrade rejected by Origin policy"
-        );
-        return forbidden_text(&format!("websocket upgrade rejected: {reason}"));
-    }
-
     // Pick the negotiated subprotocol (if any) BEFORE hyper_tungstenite
     // consumes the request. `accepted_protocols` empty (the default)
     // skips negotiation entirely; an empty `Sec-WebSocket-Protocol`
@@ -1657,6 +1643,23 @@ async fn handle_ws_upgrade(
     if let Some(cfg) = crate::config::Config::get::<crate::config::AppConfig>() {
         initial_request = initial_request.with_trusted_proxies(cfg.trusted_proxies);
     }
+
+    // Enforce the configured `OriginPolicy` on the request the handler would
+    // receive, so its public scheme, host and port are read with the peer
+    // and the trusted proxies above. The check runs before the 101 is
+    // answered and before the middleware chain: a refusal is a clean HTTP
+    // 403, and the upgrade prepared above is dropped unanswered, as it is
+    // when a middleware refuses. SameOrigin is the default - a browser WS
+    // request without a matching `Origin` lands here.
+    if let Err(reason) = check_origin_policy(&config.origin_policy, &initial_request) {
+        tracing::warn!(
+            route = %pattern,
+            reason = reason,
+            "websocket upgrade rejected by Origin policy"
+        );
+        return forbidden_text(&format!("websocket upgrade rejected: {reason}"));
+    }
+
     if let Some(metadata) = live_metadata {
         let runtime = match crate::live::LiveRuntime::bind() {
             Ok(runtime) => runtime,
@@ -2180,8 +2183,8 @@ fn forbidden_text(msg: &str) -> hyper::Response<ServerBody> {
 }
 
 /// Enforce the configured [`OriginPolicy`](crate::ws::OriginPolicy) against
-/// the upgrade request's headers. Called by [`handle_ws_upgrade`] before
-/// [`hyper_tungstenite::upgrade`] commits to the protocol switch.
+/// the upgrade `request`. Called by [`handle_ws_upgrade`] before the 101 is
+/// answered and before the middleware chain runs.
 ///
 /// Browser WebSocket requests always carry an `Origin` header; this is the
 /// only readily-available CSRF defense for the upgrade path (no
@@ -2189,52 +2192,55 @@ fn forbidden_text(msg: &str) -> hyper::Response<ServerBody> {
 /// for `SameOrigin` - routes that serve them use `AllowAny` or a curated
 /// `AllowList`.
 ///
+/// `SameOrigin` compares the complete origin (HRD-006): the `Origin`
+/// scheme, host and effective port against the request's public scheme,
+/// its validated host ([`Request::host`]) and its effective port
+/// ([`Request::port`], or the scheme's default). A page served over plain
+/// HTTP is another origin than the HTTPS application on the same host and
+/// port, so comparing the host and port alone would let it open the
+/// socket. When the public scheme cannot be determined (see
+/// [`public_scheme`]), the upgrade is refused.
+///
 /// On rejection, returns a short `Err(&str)` reason suitable for logging.
 fn check_origin_policy(
     policy: &crate::ws::OriginPolicy,
-    headers: &hyper::HeaderMap,
+    request: &Request,
 ) -> Result<(), &'static str> {
     use crate::ws::OriginPolicy;
     match policy {
         OriginPolicy::AllowAny => Ok(()),
         OriginPolicy::SameOrigin => {
-            let origin = headers
-                .get(hyper::header::ORIGIN)
-                .and_then(|v| v.to_str().ok())
-                .ok_or("missing Origin header")?;
+            let origin = request.header("Origin").ok_or("missing Origin header")?;
             let origin_url = url::Url::parse(origin).map_err(|_| "malformed Origin")?;
             let origin_host = origin_url.host_str().ok_or("Origin has no host")?;
-            let origin_scheme = origin_url.scheme();
-            let origin_port = origin_url.port();
-            let host_header = headers
-                .get(hyper::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .ok_or("missing Host header")?;
-            let (host_name, host_port_opt) = split_host_header(host_header);
-            // Host names are case-insensitive (DNS). Port comparison
-            // is exact-or-default: `url::Url::port()` returns `None`
-            // when the URL omitted port OR when it explicitly carried
-            // the scheme's default, but `Host:` headers commonly send
-            // either form (`example.com` or `example.com:443`) and
-            // browsers don't normalize one to the other. Normalize
-            // both sides to the same effective port keyed by the
-            // Origin's scheme so `https://example.com` matches
-            // `example.com:443` and vice versa.
-            if !origin_host.eq_ignore_ascii_case(host_name) {
-                return Err("Origin host does not match Host header");
+            let scheme = public_scheme(request).ok_or("public scheme of the request is unknown")?;
+            // `url::Url` lowercases the scheme, and `public_scheme` answers
+            // `http` or `https`.
+            if origin_url.scheme() != scheme {
+                return Err("Origin scheme does not match the request scheme");
             }
-            if effective_port(origin_scheme, origin_port)
-                != effective_port(origin_scheme, host_port_opt)
+            // Host names are case-insensitive (DNS); `Request::host` is
+            // already lowercased and checked.
+            let host = request.host().ok_or("missing or invalid Host header")?;
+            if !origin_host.eq_ignore_ascii_case(&host) {
+                return Err("Origin host does not match the request host");
+            }
+            // Port comparison is exact-or-default: `url::Url::port()` is
+            // `None` when the URL omitted the port OR carried the scheme's
+            // default, and a `Host` header may send either form
+            // (`example.com` or `example.com:443`). Both sides resolve to
+            // an effective port under the one scheme they now share, so
+            // `https://example.com` matches `example.com:443` and the
+            // reverse.
+            if effective_port(origin_url.scheme(), origin_url.port())
+                != effective_port(scheme, request.port())
             {
-                return Err("Origin port does not match Host header");
+                return Err("Origin port does not match the request port");
             }
             Ok(())
         }
         OriginPolicy::AllowList(list) => {
-            let origin = headers
-                .get(hyper::header::ORIGIN)
-                .and_then(|v| v.to_str().ok())
-                .ok_or("missing Origin header")?;
+            let origin = request.header("Origin").ok_or("missing Origin header")?;
             if list
                 .iter()
                 .any(|allowed| allowed.eq_ignore_ascii_case(origin))
@@ -2244,6 +2250,42 @@ fn check_origin_policy(
                 Err("Origin not in AllowList")
             }
         }
+    }
+}
+
+/// The scheme the browser used to reach the application, or `None` when the
+/// request cannot tell.
+///
+/// [`Request::scheme`] answers `http` whenever nothing proves `https`. That
+/// is the right default for building a URL, and the wrong one for an origin
+/// check: behind a TLS-terminating proxy that says nothing, it would match
+/// an `http://` page against an HTTPS application. So the scheme counts as
+/// known only when something states it:
+///
+/// - When the TCP peer is a trusted proxy, the proxy states the scheme:
+///   `X-Forwarded-Proto` with `http` or `https` as its first value, or
+///   `X-Forwarded-Ssl`. The answer is then [`Request::scheme`]. A trusted
+///   proxy that sends neither, or names another scheme, leaves it unknown.
+/// - When the peer is not a trusted proxy, the connection is the public hop,
+///   and the server speaks plain HTTP, so the answer is
+///   [`Request::scheme`]. A request that carries `X-Forwarded-Proto` or
+///   `X-Forwarded-Ssl` from such a peer came through a proxy the
+///   application does not trust, so the scheme the browser used is
+///   unknown.
+fn public_scheme(request: &Request) -> Option<&'static str> {
+    let forwarded_proto = request.header("X-Forwarded-Proto");
+    let forwarded_ssl = request.header("X-Forwarded-Ssl");
+    if !request.peer_is_trusted_proxy() {
+        return (forwarded_proto.is_none() && forwarded_ssl.is_none()).then(|| request.scheme());
+    }
+    match forwarded_proto.map(|value| value.split(',').next().unwrap_or("").trim()) {
+        Some(first)
+            if first.eq_ignore_ascii_case("http") || first.eq_ignore_ascii_case("https") =>
+        {
+            Some(request.scheme())
+        }
+        Some(_) => None,
+        None => forwarded_ssl.map(|_| request.scheme()),
     }
 }
 
@@ -2261,32 +2303,6 @@ fn effective_port(scheme: &str, port: Option<u16>) -> Option<u16> {
         "http" | "ws" => Some(80),
         "https" | "wss" => Some(443),
         _ => None,
-    }
-}
-
-/// Split a `Host:` header value into `(host, port)`. Handles bracketed IPv6
-/// literals (`"[::1]:8080"` → `("[::1]", Some(8080))`) and bare names
-/// (`"example.com"` → `("example.com", None)`).
-fn split_host_header(host_header: &str) -> (&str, Option<u16>) {
-    if let Some(rest) = host_header.strip_prefix('[') {
-        // IPv6 literal: "[host]:port" or "[host]".
-        if let Some(end) = rest.find(']') {
-            let host = &host_header[..=end + 1]; // include the closing ']'
-            let after = &rest[end + 1..]; // starts with ":port" or ""
-            if let Some(port_str) = after.strip_prefix(':') {
-                let port = port_str.parse().ok();
-                return (host, port);
-            }
-            return (host, None);
-        }
-        // Malformed - fall through to the colon split.
-    }
-    match host_header.rsplit_once(':') {
-        Some((host, port_str)) => {
-            let port = port_str.parse().ok();
-            (host, port)
-        }
-        None => (host_header, None),
     }
 }
 
@@ -2909,13 +2925,23 @@ mod tests {
         );
     }
 
-    fn ws_headers(origin: &str, host: &str) -> hyper::HeaderMap {
-        let mut h = hyper::HeaderMap::new();
-        h.insert(hyper::header::ORIGIN, origin.parse().unwrap());
-        h.insert(hyper::header::HOST, host.parse().unwrap());
-        h
+    /// An upgrade request carrying `headers` from a direct, untrusted peer.
+    #[cfg(feature = "testing")]
+    fn direct_upgrade(headers: &[(&str, &str)]) -> Request {
+        Request::for_test_with_headers("GET", "/ws", headers.iter().copied())
     }
 
+    /// An upgrade request carrying `headers` as a trusted proxy at the
+    /// loopback address forwards it.
+    #[cfg(feature = "testing")]
+    fn proxied_upgrade(headers: &[(&str, &str)]) -> Request {
+        let loopback = std::net::IpAddr::from([127, 0, 0, 1]);
+        direct_upgrade(headers)
+            .with_peer_addr(loopback)
+            .with_trusted_proxies(crate::http::TrustedProxiesConfig::with_ips([loopback]))
+    }
+
+    #[cfg(feature = "testing")]
     #[test]
     fn same_origin_normalizes_https_default_port_443() {
         // The browser elides :443 on https Origin; the Host header
@@ -2927,41 +2953,97 @@ mod tests {
         let policy = crate::ws::OriginPolicy::SameOrigin;
 
         // Origin elides 443, Host carries 443 explicit.
-        let h = ws_headers("https://example.com", "example.com:443");
+        let request = proxied_upgrade(&[
+            ("origin", "https://example.com"),
+            ("host", "example.com:443"),
+            ("x-forwarded-proto", "https"),
+        ]);
         assert!(
-            check_origin_policy(&policy, &h).is_ok(),
+            check_origin_policy(&policy, &request).is_ok(),
             "https://example.com must equal example.com:443"
         );
 
         // Origin carries 443 explicit, Host elides.
-        let h = ws_headers("https://example.com:443", "example.com");
+        let request = proxied_upgrade(&[
+            ("origin", "https://example.com:443"),
+            ("host", "example.com"),
+            ("x-forwarded-proto", "https"),
+        ]);
         assert!(
-            check_origin_policy(&policy, &h).is_ok(),
+            check_origin_policy(&policy, &request).is_ok(),
             "https://example.com:443 must equal example.com"
         );
     }
 
+    #[cfg(feature = "testing")]
     #[test]
     fn same_origin_normalizes_http_default_port_80() {
         let policy = crate::ws::OriginPolicy::SameOrigin;
 
-        let h = ws_headers("http://example.com", "example.com:80");
-        assert!(check_origin_policy(&policy, &h).is_ok());
+        let request =
+            direct_upgrade(&[("origin", "http://example.com"), ("host", "example.com:80")]);
+        assert!(check_origin_policy(&policy, &request).is_ok());
 
-        let h = ws_headers("http://example.com:80", "example.com");
-        assert!(check_origin_policy(&policy, &h).is_ok());
+        let request =
+            direct_upgrade(&[("origin", "http://example.com:80"), ("host", "example.com")]);
+        assert!(check_origin_policy(&policy, &request).is_ok());
     }
 
+    #[cfg(feature = "testing")]
     #[test]
     fn same_origin_still_rejects_genuine_port_mismatch() {
         // Default-port normalization must NOT let a legitimately
         // different port slip through. https on default 443 vs
         // explicit 8443 are different origins.
         let policy = crate::ws::OriginPolicy::SameOrigin;
-        let h = ws_headers("https://example.com", "example.com:8443");
+        let request = proxied_upgrade(&[
+            ("origin", "https://example.com"),
+            ("host", "example.com:8443"),
+            ("x-forwarded-proto", "https"),
+        ]);
         assert_eq!(
-            check_origin_policy(&policy, &h),
-            Err("Origin port does not match Host header"),
+            check_origin_policy(&policy, &request),
+            Err("Origin port does not match the request port"),
+        );
+    }
+
+    /// HRD-006: the public scheme is known only when the connection is the
+    /// public hop, or a trusted proxy names it.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn hardening_public_scheme_is_known_only_when_stated() {
+        assert_eq!(public_scheme(&direct_upgrade(&[])), Some("http"));
+        assert_eq!(
+            public_scheme(&direct_upgrade(&[("x-forwarded-proto", "https")])),
+            None,
+            "a forwarded scheme from an untrusted peer is not believed"
+        );
+        assert_eq!(
+            public_scheme(&direct_upgrade(&[("x-forwarded-ssl", "on")])),
+            None,
+            "a forwarded TLS flag from an untrusted peer is not believed"
+        );
+        assert_eq!(
+            public_scheme(&proxied_upgrade(&[])),
+            None,
+            "a trusted proxy that names no scheme may have terminated TLS"
+        );
+        assert_eq!(
+            public_scheme(&proxied_upgrade(&[("x-forwarded-proto", "https")])),
+            Some("https")
+        );
+        assert_eq!(
+            public_scheme(&proxied_upgrade(&[("x-forwarded-proto", "HTTP, https")])),
+            Some("http"),
+            "the first value of the list is the scheme the client used"
+        );
+        assert_eq!(
+            public_scheme(&proxied_upgrade(&[("x-forwarded-proto", "ftp")])),
+            None
+        );
+        assert_eq!(
+            public_scheme(&proxied_upgrade(&[("x-forwarded-ssl", "on")])),
+            Some("https")
         );
     }
 
