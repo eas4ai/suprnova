@@ -16,11 +16,16 @@ identical to upstream - only the transport changed.
 - `SubscriptionInfo` - the browser-side subscription envelope
 - `WebPushError` - typed error surface; `AddressClass` names the class of a
   refused address, never the address itself
-- `EndpointPolicy` - `Strict`, the default, refuses a subscription endpoint
-  that is not `https`, that names an IP address or a local or cloud metadata
-  name, or whose name resolves to a loopback, private, link-local, multicast,
-  reserved or metadata address, and the transport the client builds connects
-  only to an address it checked; `AllowAny` sends to any endpoint
+- `EndpointPolicy` - three policies. `Strict`, the default, refuses a
+  subscription endpoint that is not `https`, that names an IP address or a
+  local or cloud metadata name, or whose name resolves to a loopback,
+  private, link-local, multicast, reserved or metadata address, and the
+  transport the client builds connects only to an address it checked.
+  `Allowlist` runs every check of `Strict` and also refuses an endpoint
+  whose origin is not in an `EndpointAllowlist`, such as
+  `https://fcm.googleapis.com` or `https://*.notify.windows.com`, before
+  its host name is looked up. `AllowAny` sends to any endpoint, for tests
+  against a local mock server
 
 ## Install
 
@@ -60,9 +65,10 @@ println!("the push service answered {}", response.status);
 `WebPushClient::new` builds a transport that follows no redirect and uses
 no proxy. To change timeouts or TLS, pass a `reqwest::ClientBuilder` to
 `WebPushClient::with_client_builder`; a `reqwest::Client` you built
-yourself goes to `WebPushClient::with_client`, which under `Strict` sends
-only after `allow_unconfined_redirects` and `allow_unpinned_destinations`
-accept, by name, what the library cannot see in a finished client.
+yourself goes to `WebPushClient::with_client`, which under `Strict` or
+`Allowlist` sends only after `allow_unconfined_redirects` and
+`allow_unpinned_destinations` accept, by name, what the library cannot see
+in a finished client.
 
 ## License
 

@@ -1541,6 +1541,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `seed_root` the root seeder before the test body.
 - **`#[suprnova_test]` database keys.** `refresh` runs the test through
   `TestDatabase::refresh`, and `seed` or `seed = Path` seeds before the body.
+- **A Web Push endpoint allowlist.** In 3.2.1, `EndpointPolicy` offered
+  `Strict`, which refuses local and private destinations but passes any
+  public host, and `AllowAny`, so a tampered subscription could still make
+  the server POST to a public host of the attacker's choice.
+  `EndpointPolicy::Allowlist` takes an `EndpointAllowlist` of push-service
+  origins, `https://host` or `https://host:port`, where a leading `*.`
+  label matches exactly one label, as `https://*.notify.windows.com` needs.
+  It runs every `Strict` check and refuses an endpoint at any other origin
+  before the host name is looked up, with the new
+  `WebPushError::OriginNotAllowed`, which carries the origin and never the
+  path of the endpoint and is not retryable. `WebPushChannel` sends under
+  that policy, in place of its client's own, when `WEB_PUSH_ENDPOINT_ORIGINS`
+  names one or more origins, and logs a refused endpoint as a subscription
+  that cannot be used. `WebPushChannel::new` reads the variable and returns
+  a `Result`: an entry that is not an origin fails it with an error that
+  names the variable. `WebPushClient::send_with_policy` sends under a policy
+  other than the client's own, and `EndpointPolicy` is no longer `Copy`.
+  The Web Push chapter lists the origins of the Firefox, Chrome, Safari and
+  Edge push services.
 
 ### Changed
 

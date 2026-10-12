@@ -1,6 +1,7 @@
 //! Web Push HTTP client. POSTs an encrypted payload + VAPID
 //! authorization to the subscription's endpoint via reqwest 0.13.
 
+use crate::allowlist::EndpointAllowlist;
 use crate::destination::{Lookup, PinGuard, PinnedResolver, refuse_unsafe};
 use crate::error::WebPushError;
 use crate::payload::{ContentEncoding, Payload};
@@ -59,11 +60,14 @@ pub struct PushResponse {
 /// [`EndpointPolicy::Strict`] is the production default: HTTPS-only, named
 /// hosts only, common SSRF targets rejected, and a host name refused when
 /// it resolves to an address that is not on the public internet.
+/// [`EndpointPolicy::Allowlist`] adds one more check to those: the
+/// endpoint's origin must be one of a list of push services, for a
+/// deployment that can name the push services its users subscribe through.
 /// [`EndpointPolicy::AllowAny`]
 /// disables validation and exists for tests that hit a local mock server
 /// (wiremock, http loopback). Do not use [`EndpointPolicy::AllowAny`] in
 /// production code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EndpointPolicy {
     /// HTTPS-only, named hosts only, IP literals + common SSRF targets
     /// (localhost, `.local`/`.internal`/`.test`/`.example`/`.invalid` TLDs,
@@ -80,9 +84,32 @@ pub enum EndpointPolicy {
     /// production default.
     #[default]
     Strict,
+    /// Every check of [`EndpointPolicy::Strict`], with the same errors, and
+    /// one more: the endpoint's origin, its scheme, host and port, must be
+    /// one the [`EndpointAllowlist`] names. An endpoint at any other origin
+    /// is refused with [`WebPushError::OriginNotAllowed`] after the checks
+    /// of the endpoint's shape and before its host name is looked up, so
+    /// nothing, not even a DNS query, goes to a host outside the list. The
+    /// address check and the pinned connection of `Strict` then follow for
+    /// an endpoint the list admits.
+    ///
+    /// The known browser push services are at
+    /// `https://updates.push.services.mozilla.com` (Firefox),
+    /// `https://fcm.googleapis.com` (Chrome and most other Chromium
+    /// browsers), `https://web.push.apple.com` (Safari) and
+    /// `https://*.notify.windows.com` (Microsoft Edge).
+    Allowlist(EndpointAllowlist),
     /// Accept any URL the underlying [`Client`] accepts. Intended for tests
     /// against controlled mock servers - DO NOT use in production.
     AllowAny,
+}
+
+impl EndpointPolicy {
+    /// Whether the policy runs the checks of [`EndpointPolicy::Strict`]:
+    /// `Strict` itself and `Allowlist` do.
+    fn runs_strict_checks(&self) -> bool {
+        !matches!(self, Self::AllowAny)
+    }
 }
 
 /// Whether the HTTP transport is proven to not follow redirects.
@@ -98,9 +125,9 @@ enum RedirectConfinement {
     /// ([`WebPushClient::new`] / [`WebPushClient::with_client_builder`]).
     Confined,
     /// Caller-supplied [`Client`] whose redirect policy is unknown.
-    /// [`EndpointPolicy::Strict`] sends are refused until the caller
-    /// either switches to a confined transport or explicitly accepts
-    /// the risk via
+    /// [`EndpointPolicy::Strict`] and [`EndpointPolicy::Allowlist`] sends
+    /// are refused until the caller either switches to a confined
+    /// transport or explicitly accepts the risk via
     /// [`WebPushClient::allow_unconfined_redirects`].
     Unknown,
     /// Caller explicitly accepted redirect-following under `Strict`.
@@ -226,7 +253,8 @@ impl WebPushClient {
     /// transport, such as a push service reached through a proxy. An
     /// already-built client carries its redirect policy and its name
     /// resolution opaquely, so under the default
-    /// [`EndpointPolicy::Strict`] a send is refused before any I/O until
+    /// [`EndpointPolicy::Strict`], and under [`EndpointPolicy::Allowlist`],
+    /// which runs the same checks, a send is refused before any I/O until
     /// you accept both by name:
     ///
     /// - A redirect-following client (reqwest's default) would validate
@@ -325,7 +353,9 @@ impl WebPushClient {
 
     /// Override the subscription-endpoint validation policy.
     ///
-    /// Defaults to [`EndpointPolicy::Strict`]. Switching to
+    /// Defaults to [`EndpointPolicy::Strict`].
+    /// [`EndpointPolicy::Allowlist`] keeps every strict check and admits
+    /// only the origins it names. Switching to
     /// [`EndpointPolicy::AllowAny`] disables the HTTPS / named-host / blocked-
     /// TLD checks and the checks of the addresses a host name resolves to,
     /// and is intended only for test code that targets a controlled mock
@@ -335,6 +365,8 @@ impl WebPushClient {
         self
     }
 
+    /// Encrypt `plaintext` for `subscription` and POST it to the
+    /// subscription's endpoint, under the policy the client was built with.
     pub async fn send(
         &self,
         subscription: &SubscriptionInfo,
@@ -342,22 +374,47 @@ impl WebPushClient {
         encoding: ContentEncoding,
         ttl_secs: u32,
     ) -> Result<PushResponse, WebPushError> {
+        self.send_with_policy(
+            &self.endpoint_policy,
+            subscription,
+            plaintext,
+            encoding,
+            ttl_secs,
+        )
+        .await
+    }
+
+    /// Send as [`Self::send`] does, under `policy` in place of the policy
+    /// the client was built with.
+    ///
+    /// One client usually sits behind an `Arc`, shared by every sender of
+    /// an application, so its own policy cannot change for one of them. A
+    /// sender that chooses its policy itself passes it here: the Suprnova
+    /// framework's Web Push channel sends under the allowlist that
+    /// `WEB_PUSH_ENDPOINT_ORIGINS` names this way. The transport, the
+    /// redirect and pinning settings, and the opt-ins of
+    /// [`Self::allow_unconfined_redirects`] and
+    /// [`Self::allow_unpinned_destinations`] are the client's, whichever
+    /// policy applies.
+    pub async fn send_with_policy(
+        &self,
+        policy: &EndpointPolicy,
+        subscription: &SubscriptionInfo,
+        plaintext: &[u8],
+        encoding: ContentEncoding,
+        ttl_secs: u32,
+    ) -> Result<PushResponse, WebPushError> {
         // A caller-supplied transport with an unknown redirect policy
-        // must not send under `Strict`: validation covers only the
-        // initial URL, so a 3xx could move the POST to an unvalidated
+        // must not send under the strict checks: validation covers only
+        // the initial URL, so a 3xx could move the POST to an unvalidated
         // destination. Refused before any work, including encryption.
-        if self.endpoint_policy == EndpointPolicy::Strict
-            && self.redirects == RedirectConfinement::Unknown
-        {
+        if policy.runs_strict_checks() && self.redirects == RedirectConfinement::Unknown {
             return Err(WebPushError::UnconfinedRedirects);
         }
         // A caller-supplied transport resolves the name itself, so the
         // connection could go to an address the strict check never saw.
         // Refused before any work too, unless the caller accepted that.
-        if self.endpoint_policy == EndpointPolicy::Strict
-            && self.pins.is_none()
-            && !self.unpinned_accepted
-        {
+        if policy.runs_strict_checks() && self.pins.is_none() && !self.unpinned_accepted {
             return Err(WebPushError::UnpinnedTransport);
         }
         let payload = Payload::encrypt(
@@ -367,22 +424,13 @@ impl WebPushClient {
             encoding,
         )?;
 
-        // Parse + validate the endpoint under the active policy. Strict (the
-        // production default) rejects anything other than an HTTPS URL whose
-        // host is a named, non-SSRF-target hostname. AllowAny still parses the
-        // URL so a malformed string fails fast.
+        // Every policy parses the URL, AllowAny included, so a malformed
+        // string fails fast.
         let endpoint_url = parse_endpoint(&subscription.endpoint)?;
-        // Strict also resolves the host name and refuses it when an answer
-        // is not a public address. The guard keeps the checked answers
-        // pinned for this crate's transport until the send ends, so the
-        // connection goes to one of them and the name is not looked up
-        // again.
-        let _pin = if self.endpoint_policy == EndpointPolicy::Strict {
-            validate_strict_endpoint(&endpoint_url)?;
-            self.check_destination(&endpoint_url).await?
-        } else {
-            None
-        };
+        // The guard keeps the checked answers pinned for this crate's
+        // transport until the send ends, so the connection goes to one of
+        // them and the name is not looked up again.
+        let _pin = self.admit(policy, &endpoint_url).await?;
 
         let audience = audience_of_url(&endpoint_url);
         let jwt = self.signer.sign(&audience, &self.subject, 12 * 3600)?;
@@ -439,6 +487,32 @@ impl WebPushClient {
                     status,
                     retry_after,
                 })
+            }
+        }
+    }
+
+    /// Run `policy`'s checks on the endpoint, and return the pin of the
+    /// checked addresses when the policy looked the host name up.
+    ///
+    /// `Strict` checks the URL's shape, then looks the host name up and
+    /// refuses it when an answer is not a public address. `Allowlist` runs
+    /// the same checks and, between the two, refuses an origin outside its
+    /// list, so a host the list does not name is never looked up.
+    async fn admit(
+        &self,
+        policy: &EndpointPolicy,
+        url: &Url,
+    ) -> Result<Option<PinGuard<'_>>, WebPushError> {
+        match policy {
+            EndpointPolicy::AllowAny => Ok(None),
+            EndpointPolicy::Strict => {
+                validate_strict_endpoint(url)?;
+                self.check_destination(url).await
+            }
+            EndpointPolicy::Allowlist(allowlist) => {
+                validate_strict_endpoint(url)?;
+                refuse_unlisted(allowlist, url)?;
+                self.check_destination(url).await
             }
         }
     }
@@ -638,6 +712,19 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
         )));
     }
     Ok(())
+}
+
+/// Refuse an endpoint whose origin the allowlist does not name. The error
+/// carries the origin, never the path, which is the token that reaches the
+/// browser.
+fn refuse_unlisted(allowlist: &EndpointAllowlist, url: &Url) -> Result<(), WebPushError> {
+    if allowlist.admits(url) {
+        Ok(())
+    } else {
+        Err(WebPushError::OriginNotAllowed(
+            url.origin().ascii_serialization(),
+        ))
+    }
 }
 
 fn audience_of_url(url: &Url) -> String {
@@ -1354,5 +1441,237 @@ mod tests {
             reached.is_some(),
             "the developer's mapping holds for its name"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // HRD-011: the allowlist policy admits only the push-service origins it
+    // names, after the strict checks of the endpoint's shape and before the
+    // host name is looked up, and keeps every strict check.
+    // ---------------------------------------------------------------------
+
+    use crate::allowlist::EndpointAllowlist;
+
+    fn allowlist(origins: &[&str]) -> EndpointPolicy {
+        EndpointPolicy::Allowlist(EndpointAllowlist::new(origins).expect("the test origins parse"))
+    }
+
+    /// An endpoint at a listed origin passes the policy: the host name is
+    /// looked up and its checked answers are pinned for this crate's
+    /// transport, which is where the send then connects.
+    #[tokio::test]
+    async fn hardening_allowlist_admits_an_endpoint_at_a_listed_origin() {
+        let client = strict_client(&["8.8.8.8"]);
+        let policy = allowlist(&["https://fcm.googleapis.com", "https://web.push.apple.com"]);
+        let url = Url::parse("https://FCM.googleapis.com/fcm/send/token").expect("test url parses");
+        let pin = client
+            .admit(&policy, &url)
+            .await
+            .expect("a listed origin with a public answer passes");
+        assert!(pin.is_some(), "the checked answers are pinned");
+        let pins = client
+            .pins
+            .as_deref()
+            .expect("new() builds a pinning transport");
+        assert_eq!(
+            pins.pinned("fcm.googleapis.com"),
+            Some(vec!["8.8.8.8:443".parse().expect("test address parses")])
+        );
+    }
+
+    /// An endpoint at a public host the list does not name is refused,
+    /// and before its host name is looked up: the lookup here answers a
+    /// loopback address, which the address check would have reported.
+    #[tokio::test]
+    async fn hardening_allowlist_refuses_another_public_host_before_any_io() {
+        let client = strict_client(&["127.0.0.1"])
+            .with_endpoint_policy(allowlist(&["https://fcm.googleapis.com"]));
+        let err = send_to(
+            &client,
+            "https://push.example.net/push/the-token-of-the-browser",
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            WebPushError::OriginNotAllowed(origin) => {
+                assert_eq!(origin, "https://push.example.net");
+            }
+            other => panic!("expected OriginNotAllowed, got {other:?}"),
+        }
+        assert!(!err.is_retryable(), "a retry changes nothing");
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "subscription cannot be used: its origin https://push.example.net is not in the endpoint allowlist"
+        );
+        assert!(!format!("{err:?}").contains("the-token"), "{err:?}");
+        let pins = client
+            .pins
+            .as_deref()
+            .expect("new() builds a pinning transport");
+        assert_eq!(pins.pinned("push.example.net"), None, "nothing was pinned");
+
+        // A listed host on another port is another origin.
+        let err = send_to(&client, "https://fcm.googleapis.com:8443/fcm/send/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, WebPushError::OriginNotAllowed(origin) if origin == "https://fcm.googleapis.com:8443"),
+            "{err:?}"
+        );
+
+        // The policy given to a send replaces the client's own, here
+        // `AllowAny`.
+        let open = strict_client(&["127.0.0.1"]).with_endpoint_policy(EndpointPolicy::AllowAny);
+        let err = open
+            .send_with_policy(
+                &allowlist(&["https://fcm.googleapis.com"]),
+                &subscription("https://push.example.net/push/token"),
+                b"hi",
+                ContentEncoding::Aes128Gcm,
+                60,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebPushError::OriginNotAllowed(_)), "{err:?}");
+    }
+
+    /// `*.` stands for exactly one label: one label passes, two do not,
+    /// and neither does the name under the wildcard by itself.
+    #[test]
+    fn hardening_allowlist_wildcard_matches_one_label_and_not_two() {
+        let list = EndpointAllowlist::new(["https://*.notify.windows.com"])
+            .expect("a leading wildcard label parses");
+        for admitted in [
+            "https://wns2-par02p.notify.windows.com/w/?token=abc",
+            "https://DB5P.Notify.Windows.com/w/",
+            "https://db5p.notify.windows.com./w/",
+            "https://db5p.notify.windows.com:443/w/",
+        ] {
+            assert!(
+                list.contains(admitted),
+                "{admitted} is one label under the name"
+            );
+        }
+        for refused in [
+            "https://a.b.notify.windows.com/w/",
+            "https://notify.windows.com/w/",
+            "https://.notify.windows.com/w/",
+            "https://evilnotify.windows.com/w/",
+            "https://db5p.notify.windows.com.example.org/w/",
+            "https://db5p.notify.windows.com:8443/w/",
+            "http://db5p.notify.windows.com/w/",
+        ] {
+            assert!(!list.contains(refused), "{refused} must not match");
+        }
+    }
+
+    /// The comparison is the origin: the scheme, the host without regard
+    /// to case and the port, 443 when the URL names none.
+    #[test]
+    fn hardening_allowlist_compares_scheme_host_and_effective_port() {
+        let list = EndpointAllowlist::new([
+            "https://fcm.googleapis.com",
+            "HTTPS://Push.Example.org:8443",
+        ])
+        .expect("the origins parse");
+        for admitted in [
+            "https://fcm.googleapis.com/fcm/send/token",
+            "https://FCM.GoogleAPIs.com:443/fcm/send/token",
+            "https://push.example.org:8443/token",
+        ] {
+            assert!(list.contains(admitted), "{admitted}");
+        }
+        for refused in [
+            "http://fcm.googleapis.com/fcm/send/token",
+            "https://fcm.googleapis.com:8443/fcm/send/token",
+            "https://push.example.org/token",
+            "https://fcm.googleapis.com.example.org/token",
+            "https://sub.fcm.googleapis.com/token",
+            "not a url",
+        ] {
+            assert!(!list.contains(refused), "{refused}");
+        }
+    }
+
+    /// The constructor takes `https://host` or `https://host:port`, with an
+    /// optional leading `*.` label, and refuses every other form.
+    #[test]
+    fn hardening_allowlist_refuses_a_malformed_origin() {
+        for bad in [
+            "",
+            "fcm.googleapis.com",
+            "http://fcm.googleapis.com",
+            "wss://fcm.googleapis.com",
+            "https://",
+            "https://fcm.googleapis.com/",
+            "https://fcm.googleapis.com/fcm/send",
+            "https://fcm.googleapis.com?x=1",
+            "https://fcm.googleapis.com#top",
+            "https://user@fcm.googleapis.com",
+            "https://fcm.googleapis.com:",
+            "https://fcm.googleapis.com:99999",
+            "https://fcm.googleapis.com:port",
+            " https://fcm.googleapis.com",
+            "https://fcm.goog\tleapis.com",
+            "https://8.8.8.8",
+            "https://[2001:4860:4860::8888]",
+            "https://*",
+            "https://*.",
+            "https://*.com",
+            "https://*foo.windows.com",
+            "https://a.*.windows.com",
+            "https://*.*.windows.com",
+        ] {
+            let err = EndpointAllowlist::new([bad]).expect_err(bad);
+            assert!(
+                err.to_string().contains("is not a push service origin"),
+                "{bad}: {err}"
+            );
+        }
+        let err = EndpointAllowlist::new(Vec::<String>::new()).expect_err("an empty list");
+        assert_eq!(err.to_string(), "the endpoint allowlist names no origin");
+
+        // One bad entry refuses the whole list, and the text quotes it.
+        let err = EndpointAllowlist::new(["https://fcm.googleapis.com", "http://push.example.net"])
+            .expect_err("the second entry is http");
+        assert!(
+            err.to_string().contains("\"http://push.example.net\""),
+            "{err}"
+        );
+    }
+
+    /// The allowlist runs every strict check: a listed name that resolves
+    /// to a private address, a listed origin over `http`, and a send over a
+    /// caller's client that resolves names itself are refused as `Strict`
+    /// refuses them.
+    #[tokio::test]
+    async fn hardening_allowlist_keeps_the_strict_checks() {
+        let policy = allowlist(&["https://push.example.com"]);
+        let client = strict_client(&["8.8.8.8", "10.1.2.3"]).with_endpoint_policy(policy.clone());
+        let err = send_to(&client, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WebPushError::RefusedDestination(AddressClass::Private)),
+            "{err:?}"
+        );
+
+        let err = send_to(&client, "http://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WebPushError::InvalidSubscription(_)),
+            "{err:?}"
+        );
+
+        let destination = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the destination");
+        let caller = caller_client(destination.local_addr().expect("destination address"))
+            .with_fixed_lookup(addresses(&["8.8.8.8"]))
+            .with_endpoint_policy(policy);
+        let err = send_to(&caller, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebPushError::UnpinnedTransport), "{err:?}");
+        assert!(!was_reached(&destination), "nothing was sent");
     }
 }

@@ -2482,9 +2482,10 @@ a rejection names the status alone.
 `with_endpoint_policy(EndpointPolicy::AllowAny)`. Endpoints at public push
 services need nothing. In code that matches on `WebPushError`, drop `body`
 from a `PushServiceRejected` pattern, add arms for `RefusedDestination`,
-`Lookup` and `UnpinnedTransport` to an exhaustive `match`, and remove a
-subscription that returns `RefusedDestination`, as you remove one that
-returns `InvalidSubscription`. If you set a DNS resolver on the builder
+`Lookup`, `UnpinnedTransport` and `OriginNotAllowed` to an exhaustive
+`match`, and remove a subscription that returns `RefusedDestination`, as
+you remove one that returns `InvalidSubscription`. An exhaustive `match`
+on `EndpointPolicy` adds an arm for `Allowlist`. If you set a DNS resolver on the builder
 you pass to `with_client_builder`, it is replaced; map a fixed address
 with `ClientBuilder::resolve` instead. If you pass a client to
 `with_client` under `Strict`, move to `with_client_builder`, or add
@@ -2739,6 +2740,29 @@ the starter kits' `t()` encodes keys the same way.
 
 **Do:** Nothing to do. To read namespaced keys in a 3.2.1
 kit frontend, copy the key encoding from a new kit's `t()`.
+
+### A Web Push endpoint allowlist.
+
+**Before:** `WebPushChannel::new` returned the channel, which sent under
+the policy its client was built with. `EndpointPolicy` had the variants
+`Strict` and `AllowAny` and was `Copy`.
+
+**Now:** `WebPushChannel::new` reads `WEB_PUSH_ENDPOINT_ORIGINS` and
+returns `Result<WebPushChannel, FrameworkError>`. When the variable names
+one or more origins, the channel sends under
+`EndpointPolicy::Allowlist` with them, in place of its client's policy, and
+logs an endpoint at any other origin as a subscription that cannot be
+used. An entry that is not an origin makes `new` return an error that
+names the variable. Unset or blank, the channel behaves as on 3.2.1.
+`EndpointPolicy` has the `Allowlist` variant and is `Clone` but not `Copy`.
+
+**Do:** Add `?` to each `WebPushChannel::new` call, or handle its error.
+Clone an `EndpointPolicy` you use more than once. To limit sends to the
+push services your users subscribe through, set
+`WEB_PUSH_ENDPOINT_ORIGINS` as
+[Web Push](web-push.md#set-the-allowlist-for-the-notifications-channel)
+describes, and leave it unset in tests that send to a mock server under
+`AllowAny`.
 
 ## Public types with new fields or variants
 
