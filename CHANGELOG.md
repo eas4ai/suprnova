@@ -3239,6 +3239,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `suprnova::auth::remember::issue` and `verify_and_rotate` now bind and
   check the default guard's epoch, and `verify_and_rotate` deletes a row
   whose verifier fails.
+- **The `magick` driver runs ImageMagick under the framework's own policy.**
+  In 3.2.1 every ImageMagick run read the host's `policy.xml` alone, so on a
+  host with ImageMagick's default policy, which denies nothing, the script,
+  network, text and Ghostscript coders and every delegate stayed open:
+  PostScript or PDF on a bare `-` started Ghostscript. In 4.0.0 the driver
+  writes a `policy.xml` of its own before each run, into a directory it
+  makes once per process under the system's temporary directory, open to its
+  owner alone; it checks the file byte for byte and writes it again when it
+  differs. The policy denies the URL, HTTP, HTTPS, FTP, MVG, MSL, TEXT,
+  LABEL, CAPTION, PANGO, SCREENSHOT, X, EPHEMERAL, PS, PS2, PS3, EPS, PDF
+  and XPS coders, every delegate, and `@file` path reads, whether or not
+  `IMAGE_MAGICK_AUTODETECT` is on; `MagickCliDriver::POLICY` holds its text.
+  ImageMagick reads every `policy.xml` it finds and applies the last entry
+  that matches, so the driver starts it with `MAGICK_CONFIGURE_PATH` naming
+  the framework's directory first and last, with any `MAGICK_CONFIGURE_PATH`
+  the operator set between them, and then checks the result: before the
+  first run of each process, for each binary and operator
+  `MAGICK_CONFIGURE_PATH`, it reads the policy in effect with
+  `magick -list policy` under the same environment, and, because that
+  listing leaves out an entry marked `stealth="true"`, runs one MVG probe, a
+  one-line MVG script read as `mvg:-`, that ImageMagick's security policy
+  must refuse. A host policy that grants back a denied coder, delegate or
+  `@` read, such as one in ImageMagick's own configuration directory or the
+  user's, which ImageMagick reads last, refuses every run with a 5xx
+  `FrameworkError` that names the coder and the file that granted it; so
+  does a listing that is missing a denial, cannot be read, or cannot be had,
+  and a probe that ImageMagick's policy does not refuse. A directory the
+  driver cannot make, or a policy it cannot write or check, also refuses the
+  run before ImageMagick starts, naming the path and the cause.
 
 ## 3.2.1 - 2026-10-05
 
